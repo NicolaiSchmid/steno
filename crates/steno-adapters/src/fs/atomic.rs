@@ -70,7 +70,7 @@ impl AtomicFileWriter {
     /// run, so the export must not count as done before it is on the disk.
     /// The file is reopened for the flush; a sharing violation (a sync or
     /// antivirus client that opened the new file) is retried every 10 ms,
-    /// 49 times at most, as the pipeline's durable writes retry it.
+    /// 49 times at most.
     #[cfg(not(unix))]
     fn make_rename_durable(target: &Path) -> Result<(), WriteFailure> {
         /// `ERROR_SHARING_VIOLATION`.

@@ -6,13 +6,18 @@
 //! `tempfile`'s `persist` does the same. [`rename_written_through`] adds
 //! `MOVEFILE_WRITE_THROUGH`, with which `MoveFileExW` returns only once the
 //! rename is on the disk. Where that call fails (a target another handle
-//! holds open, which only std's fallback to POSIX rename semantics
-//! replaces), the caller renames with std. Either way the caller then
-//! flushes the renamed file. On NTFS that flush commits the volume's
-//! journal, which holds the rename and, written in order, the folders
-//! created before it. On FAT32 it also flushes every folder above the file
-//! (Windows' FAT driver flushes a file's parent folders with it), which a
-//! written-through rename leaves in the cache.
+//! holds open; std's fallback to POSIX rename semantics replaces it when
+//! that handle shares deletion), the caller renames with std. Either way
+//! the caller then flushes the renamed file. On NTFS that flush commits the
+//! volume's journal, which holds the rename and, written in order, the
+//! folders created before it. On FAT32 it also flushes every folder above
+//! the file (Windows' FAT driver flushes a file's parent folders with it),
+//! which a written-through rename leaves in the cache.
+//!
+//! [`is_busy`] names the errors of a file another handle holds for a
+//! moment, which the caller tries again, and [`lock_path`] makes this
+//! process's writers of one path (spelled the same) rename and flush one
+//! after the other.
 //!
 //! [`flush_directory`] flushes a folder's entries: on NTFS the ones
 //! `create_dir_all_durably` and `create_new_dir_durably` made; the FAT
@@ -31,15 +36,17 @@
 //! rename.
 
 use std::fs::OpenOptions;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Component, Path, Prefix};
+use std::sync::{Mutex, MutexGuard};
 
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
-    ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION, MAX_PATH,
+    ERROR_LOCK_VIOLATION, ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION, MAX_PATH,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_APPEND_DATA, FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_DATA, GetDriveTypeW,
@@ -121,11 +128,71 @@ fn refuses_folder_flush(error: &io::Error) -> bool {
     })
 }
 
-/// Whether `error` is a sharing violation: another process (a sync or
-/// antivirus client) holds the file open without sharing the access asked
-/// for, usually for a moment.
-pub(super) fn is_sharing_violation(error: &io::Error) -> bool {
-    win32_code(error) == Some(ERROR_SHARING_VIOLATION)
+/// Whether `error` is Windows refusing a file another handle holds, usually
+/// for a moment: a sharing violation (a sync or antivirus client opened it
+/// without sharing the access asked for) or a lock violation (it locked a
+/// range of it), or "access denied" (a replace of a file such a handle
+/// holds open, or an open of a file being deleted or replaced that
+/// instant).
+pub(super) fn is_busy(error: &io::Error) -> bool {
+    win32_code(error).is_some_and(|code| {
+        matches!(
+            code,
+            ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_ACCESS_DENIED
+        )
+    })
+}
+
+/// The locks [`lock_path`] hands out, 64 shared out by a path's hash; two
+/// paths that share one only wait for each other while the holder renames
+/// and flushes (its retries of a busy file alone can take about 1.8 s).
+static PATH_LOCKS: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
+
+/// A writer's hold on the lock of a path ([`lock_path`]), let go when
+/// dropped.
+#[must_use = "the lock is let go when this is dropped"]
+pub(super) struct PathLock {
+    _guard: MutexGuard<'static, ()>,
+}
+
+/// Holds the lock of `path` in this process, so two writers of one path
+/// (spelled the same) rename and flush one after the other.
+pub(super) fn lock_path(path: &Path) -> PathLock {
+    let index = path_lock_index(path);
+    let guard = PATH_LOCKS[index]
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(test)]
+    HELD_HERE.set(Some(index));
+    PathLock { _guard: guard }
+}
+
+#[cfg(test)]
+impl Drop for PathLock {
+    fn drop(&mut self) {
+        HELD_HERE.set(None);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The index in [`PATH_LOCKS`] of the lock this thread holds, so a
+    /// test asks about its own writer, not another test's on a path that
+    /// shares the lock.
+    static HELD_HERE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// The index in [`PATH_LOCKS`] of `path`'s lock.
+fn path_lock_index(path: &Path) -> usize {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    usize::from(hasher.finish().to_le_bytes()[0]) % PATH_LOCKS.len()
+}
+
+/// Whether this thread holds the lock of `path`.
+#[cfg(test)]
+pub(super) fn holds_path_lock(path: &Path) -> bool {
+    HELD_HERE.get() == Some(path_lock_index(path))
 }
 
 /// The Win32 error code of `error`, if it came from the OS.
@@ -388,8 +455,27 @@ mod tests {
             assert!(!refuses_folder_flush(&error(failed)), "{failed}");
         }
         assert!(!refuses_folder_flush(&io::Error::other("not from the OS")));
-        assert!(is_sharing_violation(&error(ERROR_SHARING_VIOLATION)));
-        assert!(!is_sharing_violation(&error(ERROR_ACCESS_DENIED)));
+    }
+
+    /// A file another handle holds is busy and tried again; a missing file,
+    /// a full disk or an error not from the OS is not.
+    #[test]
+    fn only_a_file_another_handle_holds_is_busy() {
+        let error = |code: u32| io::Error::from_raw_os_error(i32::try_from(code).unwrap());
+        for busy in [
+            ERROR_SHARING_VIOLATION,
+            ERROR_LOCK_VIOLATION,
+            ERROR_ACCESS_DENIED,
+        ] {
+            assert!(is_busy(&error(busy)), "{busy}");
+        }
+        for not_busy in [
+            windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND,
+            windows_sys::Win32::Foundation::ERROR_DISK_FULL,
+        ] {
+            assert!(!is_busy(&error(not_busy)), "{not_busy}");
+        }
+        assert!(!is_busy(&io::Error::other("not from the OS")));
     }
 
     /// A share is a network drive from its path alone, with or without a

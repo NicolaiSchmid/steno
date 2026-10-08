@@ -27,8 +27,9 @@ use std::time::{Duration, SystemTime};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// The syncs a durable write makes; the disk in the product, a recorder in
-/// the tests, which check what is synced and when.
+/// The syncs a durable write makes, and its waits before it tries a busy
+/// file again ([`retried`]); the disk and the clock in the product, a
+/// recorder in the tests, which check what is synced and when.
 trait Syncs {
     /// Flushes `file`, written at `path`, to the disk.
     fn file(&self, file: &File, path: &Path) -> std::io::Result<()>;
@@ -39,6 +40,10 @@ trait Syncs {
     /// copy; a drive that refuses to flush a folder is logged and passed
     /// over, since the flush of the renamed file carries the entries there.
     fn directory(&self, directory: &Path) -> std::io::Result<()>;
+    /// Waits `delay` before [`retried`] tries again.
+    fn wait(&self, delay: Duration) {
+        std::thread::sleep(delay);
+    }
 }
 
 /// The product's syncs.
@@ -247,55 +252,87 @@ enum Renamed {
 /// rename on every drive, the rename is written through and the renamed
 /// file then flushed through `syncs`, with std's rename before the same
 /// flush where the written-through one fails ([`windows`]). The renamed
-/// file is reopened for the flush, and a sharing violation (a sync or
-/// antivirus client that opened the new file) is retried ([`retried`]). A
-/// flush that fails after the rename is an error with the new file already
-/// in place: the phone intake answers 500 and removes the meeting folder
-/// it made, and [`replace_file`] reports a write that happened.
+/// file is reopened for the flush. Windows refuses a file another handle
+/// holds for a moment ([`is_busy`]), so std's rename and the reopen are
+/// retried ([`retried`]). Two writers of `to` (spelled the same; the
+/// retries cover other spellings) in this process rename and flush one
+/// after the other (`windows::lock_path`): on Windows one writer's flush
+/// holds the file the other replaces, which sends that rename to std's,
+/// and the reopen of a file another writer is replacing that instant fails
+/// with "access denied"; the retries ride that out, the lock keeps it from
+/// happening. A flush that fails after the rename is an error with the new
+/// file already in place: the phone intake answers 500 and removes the
+/// meeting folder it made, and [`replace_file`] reports a write that
+/// happened.
 fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Renamed> {
     #[cfg(windows)]
     {
+        let _writing = windows::lock_path(to);
         let renamed = if windows::rename_written_through(from, to).is_ok() {
             Renamed::WrittenThrough
         } else {
-            rename_with_std(from, to)?;
+            rename_with_std(syncs, from, to)?;
             Renamed::WithStd
         };
-        let renamed_file = retried(windows::is_sharing_violation, || {
-            OpenOptions::new().write(true).open(to)
-        })?;
+        let renamed_file = retried(syncs, is_busy, || OpenOptions::new().write(true).open(to))?;
         syncs.file(&renamed_file, to)?;
         Ok(renamed)
     }
     #[cfg(not(windows))]
     {
-        let _ = syncs;
-        rename_with_std(from, to)?;
+        rename_with_std(syncs, from, to)?;
         Ok(Renamed::WithStd)
     }
 }
 
-/// `std::fs::rename`. Windows refuses to replace a file another writer is
-/// replacing at the same instant ("access denied"), so there a refusal is
-/// retried ([`retried`]); elsewhere the rename is tried once.
-fn rename_with_std(from: &Path, to: &Path) -> std::io::Result<()> {
-    retried(
-        |error| error.kind() == std::io::ErrorKind::PermissionDenied,
-        || std::fs::rename(from, to),
-    )
+/// `std::fs::rename`, retried on Windows while the file is busy
+/// ([`retried`]); elsewhere tried once.
+fn rename_with_std(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<()> {
+    retried(syncs, is_busy, || std::fs::rename(from, to))
 }
 
-/// Runs `attempt`. On Windows, where another process may hold a file for a
-/// moment, an error `busy` accepts is retried every 10 ms, 49 times at most
-/// (about half a second); elsewhere `attempt` runs once.
+/// Whether `error` is Windows refusing a file another handle holds for a
+/// moment (`windows::is_busy`): never elsewhere, where nothing is
+/// retried.
+fn is_busy(error: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        windows::is_busy(error)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// How often [`retried`] tries again on Windows.
+const RETRIES: u32 = 9;
+
+/// [`retried`]'s first wait, which doubles with each retry up to
+/// [`LONGEST_WAIT`]: about 0.9 s over the nine retries.
+const FIRST_WAIT: Duration = Duration::from_millis(5);
+
+/// [`retried`]'s longest wait.
+const LONGEST_WAIT: Duration = Duration::from_millis(200);
+
+/// Runs `attempt`. On Windows, where another process (a sync or antivirus
+/// client) or another writer may hold a file for a moment, an error `busy`
+/// accepts is tried again [`RETRIES`] times, after waits of 5 ms doubling
+/// to 200 ms, about 0.9 s in all; elsewhere `attempt` runs once.
 fn retried<T>(
+    syncs: &dyn Syncs,
     busy: impl Fn(&std::io::Error) -> bool,
     mut attempt: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    let retries = if cfg!(windows) { 49 } else { 0 };
+    let retries = if cfg!(windows) { RETRIES } else { 0 };
+    let mut delay = FIRST_WAIT;
     for _ in 0..retries {
         match attempt() {
-            Err(error) if busy(&error) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) if busy(&error) => {
+                syncs.wait(delay);
+                delay = (delay * 2).min(LONGEST_WAIT);
+            }
             outcome => return outcome,
         }
     }
@@ -495,7 +532,10 @@ mod tests {
     /// Writers into one folder, two files, all at once: every write lands,
     /// each file holds one writer's whole payload, and no temporary is
     /// left. With one shared temporary name this lost writes and tore a
-    /// file.
+    /// file. On Windows, without the path lock, a writer's reopen of the
+    /// file for its flush could land on the file another writer was
+    /// replacing that instant and fail with "access denied" after its
+    /// rename had landed (about one write in 8,000 on CI's runner).
     #[test]
     fn parallel_writers_into_one_folder_never_lose_or_tear_a_file() {
         const WRITERS: usize = 8;
@@ -588,10 +628,14 @@ mod tests {
     }
 
     /// What a test's syncs saw, in order: `file`, with whether the
-    /// destination existed yet, and `directory`, with the same.
+    /// destination existed yet, and `directory`, with the same; and the
+    /// waits before a retry, which do not wait but run `on_first_wait`
+    /// once.
     struct Recorded {
         destination: std::path::PathBuf,
         events: std::sync::Mutex<Vec<(String, bool)>>,
+        waits: std::sync::Mutex<Vec<Duration>>,
+        on_first_wait: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
         fail_file_sync: bool,
         fail_directory_sync: bool,
     }
@@ -601,6 +645,8 @@ mod tests {
             Recorded {
                 destination: destination.to_path_buf(),
                 events: std::sync::Mutex::new(Vec::new()),
+                waits: std::sync::Mutex::new(Vec::new()),
+                on_first_wait: std::sync::Mutex::new(None),
                 fail_file_sync: false,
                 fail_directory_sync: false,
             }
@@ -608,6 +654,10 @@ mod tests {
 
         fn events(&self) -> Vec<(String, bool)> {
             self.events.lock().unwrap().clone()
+        }
+
+        fn waits(&self) -> Vec<Duration> {
+            self.waits.lock().unwrap().clone()
         }
     }
 
@@ -637,6 +687,13 @@ mod tests {
                 return Err(std::io::Error::other("the drive cannot flush a folder"));
             }
             Ok(())
+        }
+
+        fn wait(&self, delay: Duration) {
+            self.waits.lock().unwrap().push(delay);
+            if let Some(first) = self.on_first_wait.lock().unwrap().take() {
+                first();
+            }
         }
     }
 
@@ -791,12 +848,15 @@ mod tests {
         assert_eq!(std::fs::read(&earlier).unwrap(), b"an earlier recording");
     }
 
-    /// An error `busy` accepts is retried 49 times on Windows and not at
+    /// An error `busy` accepts is retried nine times on Windows, after
+    /// waits of 5 ms doubling to 200 ms, under a second in all, and not at
     /// all elsewhere; any other error, or a success, ends the attempts.
     #[test]
-    fn retried_tries_fifty_times_on_windows_and_once_elsewhere() {
+    fn retried_tries_ten_times_within_a_second_on_windows_and_once_elsewhere() {
+        let syncs = Recorded::new(Path::new("unused"));
         let attempts = std::cell::Cell::new(0);
         let outcome: std::io::Result<()> = retried(
+            &syncs,
             |_| true,
             || {
                 attempts.set(attempts.get() + 1);
@@ -804,9 +864,24 @@ mod tests {
             },
         );
         assert!(outcome.is_err());
-        assert_eq!(attempts.get(), if cfg!(windows) { 50 } else { 1 });
+        let (expected_attempts, expected_waits) = if cfg!(windows) {
+            (10, vec![5, 10, 20, 40, 80, 160, 200, 200, 200])
+        } else {
+            (1, Vec::new())
+        };
+        assert_eq!(attempts.get(), expected_attempts);
+        let waits = syncs.waits();
+        assert_eq!(
+            waits,
+            expected_waits
+                .into_iter()
+                .map(Duration::from_millis)
+                .collect::<Vec<_>>()
+        );
+        assert!(waits.iter().sum::<Duration>() < Duration::from_secs(1));
         attempts.set(0);
         let outcome: std::io::Result<()> = retried(
+            &syncs,
             |_| false,
             || {
                 attempts.set(attempts.get() + 1);
@@ -880,6 +955,66 @@ mod tests {
         assert_eq!(rename_over(&syncs, &from, &to).unwrap(), Renamed::WithStd);
         assert_eq!(syncs.events(), [("file".to_owned(), true)]);
         drop(reader);
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+    }
+
+    /// On Windows a target another handle holds without sharing its
+    /// deletion (a sync or antivirus client) refuses both renames; the
+    /// replace waits and tries again, and lands once the handle lets go
+    /// (here at the first wait).
+    #[cfg(windows)]
+    #[test]
+    fn a_target_another_handle_holds_is_replaced_once_it_lets_go() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let dir = tempfile::tempdir().unwrap();
+        let to = dir.path().join("preferences.json");
+        std::fs::write(&to, b"old").unwrap();
+        let holder = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&to)
+            .unwrap();
+        let syncs = Recorded::new(&to);
+        *syncs.on_first_wait.lock().unwrap() = Some(Box::new(move || drop(holder)));
+        write_durably(&syncs, &to, Access::Default, |file| file.write_all(b"new")).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+        assert_eq!(
+            syncs.waits().first(),
+            Some(&FIRST_WAIT),
+            "refused at least once, then replaced"
+        );
+        assert_eq!(temporaries(dir.path()), Vec::<String>::new());
+    }
+
+    /// On Windows the renamed file is flushed under its path's lock, so a
+    /// second writer of the path cannot replace it between the rename and
+    /// the reopen for the flush.
+    #[cfg(windows)]
+    #[test]
+    fn a_rename_and_its_flush_hold_the_path_lock() {
+        struct LockSeen(std::sync::Mutex<Vec<bool>>);
+        impl Syncs for LockSeen {
+            fn file(&self, _file: &File, path: &Path) -> std::io::Result<()> {
+                self.0.lock().unwrap().push(windows::holds_path_lock(path));
+                Ok(())
+            }
+            fn directory(&self, _directory: &Path) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let to = dir.path().join("preferences.json");
+        std::fs::write(&to, b"old").unwrap();
+        let seen = LockSeen(std::sync::Mutex::new(Vec::new()));
+        write_durably(&seen, &to, Access::Default, |file| file.write_all(b"new")).unwrap();
+        let seen = seen.0.into_inner().unwrap();
+        assert_eq!(
+            seen.len(),
+            2,
+            "the temporary's sync, then the renamed file's"
+        );
+        assert!(seen[1], "the renamed file is flushed under the lock");
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
     }
 
