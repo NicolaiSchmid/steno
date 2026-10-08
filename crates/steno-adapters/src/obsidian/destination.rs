@@ -471,22 +471,19 @@ impl ObsidianFolderDestination {
         path: &str,
         data: &[u8],
     ) -> Result<(), ObsidianError> {
-        let Some(delivered) = ledger.delivered_hash(path).map(<[u8]>::to_vec) else {
-            return self.write_owned(ledger, path, data);
-        };
-        let Some(on_disk) = self.reading(path, || self.sink.read(path))? else {
-            return self.write_owned(ledger, path, data);
-        };
-        if sha256(&on_disk) == delivered {
-            return self.write_owned(ledger, path, data);
+        if let Some(delivered) = ledger.delivered_hash(path)
+            && let Some(on_disk) = self.reading(path, || self.sink.read(path))?
+            && sha256(&on_disk) != delivered
+        {
+            let beside = self.copy_beside(ledger, path)?;
+            self.writing(&beside, || self.sink.write(data, &beside))?;
+            ledger.record(&beside, FileOwnership::Owned, data);
+            ledger.warn(format!(
+                "{path} was edited in the vault, so it was kept; the new version is {beside}."
+            ));
+            return Ok(());
         }
-        let beside = self.copy_beside(ledger, path)?;
-        self.writing(&beside, || self.sink.write(data, &beside))?;
-        ledger.record(&beside, FileOwnership::Owned, data);
-        ledger.warn(format!(
-            "{path} was edited in the vault, so it was kept; the new version is {beside}."
-        ));
-        Ok(())
+        self.write_owned(ledger, path, data)
     }
 
     /// Where the new render of the edited note at `path` goes: the copy an
@@ -503,8 +500,9 @@ impl ObsidianFolderDestination {
         }
         let date = (self.now)()
             .with_timezone(&self.time_zone)
-            .format("%Y-%m-%d");
-        let mut candidate = DeliveryLedger::new_copy_beside(path, &date.to_string());
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut candidate = DeliveryLedger::new_copy_beside(path, &date);
         let mut number = 2;
         while self.sink.exists(&candidate) {
             candidate = DeliveryLedger::new_copy_beside(path, &format!("{date} {number}"));
