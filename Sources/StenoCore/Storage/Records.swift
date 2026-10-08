@@ -565,6 +565,16 @@ struct HandoverAdmissionRow: StenoRecord {
     static let byteCount = Column(CodingKeys.byteCount)
     static let sha256 = Column(CodingKeys.sha256)
   }
+
+  /// The row of the recording `recordingID` of `byteCount` bytes hashing to
+  /// `sha256`, if those bytes were admitted.
+  static func of(recordingID: UUID, byteCount: Int64, sha256: Data)
+    -> QueryInterfaceRequest<Self>
+  {
+    filter(Columns.recordingID == recordingID.uuidString)
+      .filter(Columns.byteCount == byteCount)
+      .filter(Columns.sha256 == sha256)
+  }
 }
 
 struct HandoverReceiptRow: StenoRecord {

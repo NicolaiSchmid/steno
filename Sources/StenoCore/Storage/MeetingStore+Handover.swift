@@ -115,13 +115,9 @@ extension MeetingStore {
       {
         throw MeetingStoreError.receiptOfAnotherUpload(receipt.recordingID)
       }
-      let earlier = try HandoverAdmissionRow
-        .filter(HandoverAdmissionRow.Columns.recordingID == receipt.recordingID.uuidString)
-        .filter(HandoverAdmissionRow.Columns.byteCount == receipt.byteCount)
-        .filter(HandoverAdmissionRow.Columns.sha256 == receipt.sha256)
-        .fetchOne(db)?
-        .meetingID
-      if let earlier,
+      if let earlier = try HandoverAdmissionRow.of(
+        recordingID: receipt.recordingID, byteCount: receipt.byteCount, sha256: receipt.sha256
+      ).fetchOne(db)?.meetingID,
         try MeetingRow.filter(MeetingRow.Columns.id == earlier.uuidString).fetchCount(db) > 0
       {
         var completed = receipt
@@ -153,12 +149,8 @@ extension MeetingStore {
     -> UUID?
   {
     try await writer.read { db in
-      try HandoverAdmissionRow
-        .filter(HandoverAdmissionRow.Columns.recordingID == recordingID.uuidString)
-        .filter(HandoverAdmissionRow.Columns.byteCount == byteCount)
-        .filter(HandoverAdmissionRow.Columns.sha256 == sha256)
-        .fetchOne(db)?
-        .meetingID
+      try HandoverAdmissionRow.of(recordingID: recordingID, byteCount: byteCount, sha256: sha256)
+        .fetchOne(db)?.meetingID
     }
   }
 
