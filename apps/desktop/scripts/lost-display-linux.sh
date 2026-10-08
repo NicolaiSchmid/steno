@@ -5,8 +5,8 @@
 # server by the PID this script recorded. GDK ends the process when its X
 # server goes; the shell's log writer (`display_lost.rs`) must save the
 # recording first. Exits 0 when the app logged its save ("the display
-# closed; saving") and the store holds the meeting `queued` with a duration above
-# zero, 1 otherwise, 2 on a usage error or a missing tool.
+# closed; saving") and the store holds the meeting `queued` with a
+# duration above zero, 1 otherwise, 2 on a usage error or a missing tool.
 #
 #   scripts/pipewire-headless.sh \
 #     apps/desktop/scripts/lost-display-linux.sh [path/to/steno-desktop] [seconds]
