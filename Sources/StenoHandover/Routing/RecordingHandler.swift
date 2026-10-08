@@ -9,11 +9,14 @@ import StenoCore
 /// established; a recording belongs to the device that announced it.
 extension HandoverEngine {
   /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
-  /// recording, 200 for a known one, both with `RecordingStatus`; 409 when
-  /// another device owns it, its size or SHA-256 changed, or its chunk size
-  /// changed before it is `.complete`; a `.complete` one in other chunks of
-  /// the same bytes is 200 with every chunk of the announced split; 500 with
-  /// nothing opened when the store cannot read the receipt.
+  /// recording (no receipt, or other bytes than the receipt's), 200 for a
+  /// known one, both with `RecordingStatus`; 200 `.complete` with every chunk
+  /// listed for bytes the admission ledger shows admitted; 409 only for
+  /// admitted bytes over another device's unfinished upload of other bytes;
+  /// 500 with nothing opened when the store cannot read the ledger or the
+  /// receipt. The decision table is in
+  /// `.plans/2026-10-08-handover-admission-ledger.md`. Rust:
+  /// `Engine::announce`.
   func announce(_ recordingID: UUID, device: PairedDevice, body: Data) async -> HandoverResponse {
     let metadata: RecordingMetadata
     do {
@@ -28,99 +31,185 @@ extension HandoverEngine {
       return .problem(.badRequest, problem)
     }
 
-    let known: HandoverReceipt?
+    var known: HandoverReceipt?
     do {
       known = try await readReceipt(recordingID)
     } catch {
       return .internalError("reading the receipt", error)
     }
-    if let existing = known {
-      guard existing.deviceID == device.id else {
-        return .problem(.conflict, "another device owns this recording")
-      }
-      // Also for a `.complete` receipt: a phone told `complete` posts
-      // `complete`, and the 200 to that deletes its copy. A different file
-      // under an admitted id is refused instead, and stays on the phone.
-      let complete = existing.state.kind == .complete
-      guard existing.byteCount == metadata.byteCount, existing.sha256 == metadata.sha256,
-        complete || existing.chunkSize == metadata.chunkSize
-      else {
-        return .problem(.conflict, "metadata differs from the first announcement")
-      }
-      // The chunk size matters only until the receipt is `.complete`: the
-      // same bytes split otherwise are the file the computer holds. The
-      // answer lists every chunk of the phone's split, so it posts
-      // `complete`; the copy it is built from is never saved.
-      if complete {
-        var resplit = existing
-        resplit.chunkSize = metadata.chunkSize
-        return .json(.ok, Self.status(of: resplit))
-      }
-      var receipt = existing
-      var receivedChunks: [Int]?
-      if !inbox.hasVerified(recordingID, format: metadata.format),
-        !inbox.hasPartial(recordingID) || inbox.loadMetadata(recordingID) == nil
-      {
-        // The partial is gone (a sweep, a crash before the first chunk):
-        // start over with the same receipt. A verified file waiting for a
-        // second intake attempt keeps its chunk set instead, so the phone's
-        // retry (announce, then complete) sends no chunk twice.
-        do {
-          try inbox.begin(metadata)
-        } catch {
-          return .internalError("opening the partial file", error)
-        }
-        receivedChunks = []
-      }
+    // The ledger is read only where it decides something: no receipt, or
+    // one of other bytes. Its rows are never deleted, so a row read stays
+    // true. The read suspends, so memory may hold another receipt by then
+    // (a first announce of the same recording, a chunk, an admission): the
+    // announce then decides again with that one.
+    var admitted: UUID?
+    while known.map({ $0.byteCount != metadata.byteCount || $0.sha256 != metadata.sha256 })
+      ?? true
+    {
       do {
-        try await transition(&receipt, to: .receiving, receivedChunks: receivedChunks)
+        admitted = try await store.admittedMeeting(
+          recordingID: recordingID, byteCount: metadata.byteCount, sha256: metadata.sha256)
       } catch {
-        return .internalError("saving the receipt", error)
+        return .internalError("reading the admissions", error)
       }
-      return .json(.ok, Self.status(of: receipt))
+      guard let held = activeReceipts[recordingID], held != known else { break }
+      known = held
     }
-
-    // No receipt in memory or the store, so every file of the recording id
-    // goes before `begin`. This runs in the same actor step as the read's
-    // last look at memory and the `remember` in `persist`, so no request
-    // lands in between. Whatever is there belongs to no receipt (a
-    // verified file left by an intake failure whose receipt a revoke
-    // deleted after a restart, the files a revoked phone's re-announce
-    // opened before the revoke's delete committed). Kept, `begin` would add
-    // this upload's chunks to an old partial, and `complete` would hand an
-    // old verified file to the intake unhashed.
-    //
-    // No live upload of another device can be in them. A device's
-    // recording routes read its receipt into memory before they touch a
-    // file, and memory drops it only when that device is revoked, so only
-    // a revoked device's request can still be at work on them. Such a
-    // request answers a refusal, an error or a re-announce's status, and
-    // the phone deletes its copy only on a 200 from `complete`, so it keeps
-    // its recording; or it answers the 200 of an admission whose intake
-    // opened the verified file before the discard and copies it whole.
-    inbox.discard(recordingID)
+    // From here to the first suspension (the save in `persist`, or
+    // `transition`) is one actor step with the last look at memory.
+    guard let existing = known else {
+      if let admitted {
+        // Admitted before: the phone posts `complete`, takes the meeting id
+        // and deletes its copy.
+        return await replace(
+          with: freshReceipt(metadata, device: device, state: .complete(meetingID: admitted)),
+          opening: nil, status: .ok)
+      }
+      return await replace(
+        with: freshReceipt(metadata, device: device, state: .receiving), opening: metadata,
+        status: .created)
+    }
+    let complete = existing.state.kind == .complete
+    guard existing.byteCount == metadata.byteCount, existing.sha256 == metadata.sha256 else {
+      // Another file under the id.
+      if let admitted {
+        // Answered `complete` over another device's unfinished upload, that
+        // phone's `complete` would get this meeting and delete its copy.
+        guard complete || existing.deviceID == device.id else {
+          return .problem(.conflict, "another device owns this recording")
+        }
+        return await replace(
+          with: freshReceipt(metadata, device: device, state: .complete(meetingID: admitted)),
+          opening: nil, status: .ok)
+      }
+      // A new recording under the same recording id; its own `complete`
+      // admits a meeting of its own.
+      return await replace(
+        with: freshReceipt(metadata, device: device, state: .receiving), opening: metadata,
+        status: .created)
+    }
+    var receipt = existing
+    if existing.deviceID != device.id {
+      // Another device announces the same bytes: they are the same
+      // recording, so it takes the receipt over with its chunks and files.
+      // Whichever device's `complete` admits them, the other phone's next
+      // announce takes the `.complete` receipt back and is answered
+      // delivered. The older device's requests then find no receipt of
+      // theirs, and its late writes leave this one alone (`transition`).
+      receipt.deviceID = device.id
+      receipt.updatedAt = now()
+      remember(receipt)
+      if complete {
+        do {
+          try await persist(receipt)
+        } catch {
+          return .internalError("saving the receipt", error)
+        }
+      }
+    }
+    // The chunk size matters only until the receipt is `.complete`: the
+    // same bytes split otherwise are the file the computer holds. The
+    // answer lists every chunk of the phone's split, so it posts
+    // `complete`; the copy it is built from is never saved.
+    if complete {
+      var resplit = receipt
+      resplit.chunkSize = metadata.chunkSize
+      return .json(.ok, Self.status(of: resplit))
+    }
+    if receipt.chunkSize != metadata.chunkSize {
+      // The partial starts over under the announced split.
+      receipt.state = .receiving
+      receipt.chunkSize = metadata.chunkSize
+      receipt.receivedChunks = []
+      receipt.updatedAt = now()
+      return await replace(with: receipt, opening: metadata, status: .ok)
+    }
+    var receivedChunks: [Int]?
+    if !inbox.hasVerified(recordingID, format: metadata.format),
+      !inbox.hasPartial(recordingID) || inbox.loadMetadata(recordingID) == nil
+    {
+      // The partial is gone (a sweep, a crash before the first chunk):
+      // start over with the same receipt. A verified file waiting for a
+      // second intake attempt keeps its chunk set instead, so the phone's
+      // retry (announce, then complete) sends no chunk twice.
+      do {
+        try inbox.begin(metadata)
+      } catch {
+        return .internalError("opening the partial file", error)
+      }
+      receivedChunks = []
+    }
     do {
-      try inbox.begin(metadata)
+      try await transition(&receipt, to: .receiving, receivedChunks: receivedChunks)
     } catch {
-      return .internalError("opening the partial file", error)
+      return .internalError("saving the receipt", error)
     }
+    return .json(.ok, Self.status(of: receipt))
+  }
+
+  /// A receipt of `metadata`'s bytes for `device` in `state`, no chunk
+  /// received, made now.
+  private func freshReceipt(
+    _ metadata: RecordingMetadata, device: PairedDevice, state: HandoverState
+  ) -> HandoverReceipt {
     let timestamp = now()
-    let receipt = HandoverReceipt(
-      recordingID: recordingID, deviceID: device.id, state: .receiving,
+    return HandoverReceipt(
+      recordingID: metadata.recordingID, deviceID: device.id, state: state,
       byteCount: metadata.byteCount, sha256: metadata.sha256, chunkSize: metadata.chunkSize,
       receivedChunks: [], createdAt: timestamp, updatedAt: timestamp)
+  }
+
+  /// Makes `receipt` the receipt of its recording id in place of whatever
+  /// the announce read (none, or one it decided to replace), opens its files
+  /// (`opening`; none for a receipt answered `.complete`) and answers
+  /// `status` with it.
+  ///
+  /// Every file of the recording id goes before `begin`. The discard runs in
+  /// the same actor step as the read's last look at memory and the
+  /// `remember` in `persist`, so no request lands in between. After a first
+  /// announce whatever is there belongs to no receipt (a verified file left
+  /// by an intake failure whose receipt a revoke deleted after a restart,
+  /// the files a revoked phone's re-announce opened before the revoke's
+  /// delete committed). Kept, `begin` would add this upload's chunks to an
+  /// old partial, and `complete` would hand an old verified file to the
+  /// intake unhashed. After a replacement they are the replaced upload's: of
+  /// other bytes, of the same bytes in another split, or of bytes the ledger
+  /// shows admitted.
+  ///
+  /// No live upload of another device the computer could still admit is in
+  /// them. A device's recording routes read its receipt into memory before
+  /// they touch a file, and memory drops it only when that device is
+  /// revoked, so only a revoked device's request, or one of the replaced
+  /// upload, can still be at work on them. Such a request answers a refusal,
+  /// an error, a 404 or a re-announce's status, and the phone deletes its
+  /// copy only on a 200 from `complete`, so it keeps its recording; or it
+  /// answers the 200 of an admission whose intake opened the verified file
+  /// before the discard and copies it whole. Rust: `Engine::replace`.
+  private func replace(
+    with receipt: HandoverReceipt, opening metadata: RecordingMetadata?,
+    status: HTTPResponseStatus
+  ) async -> HandoverResponse {
+    let recordingID = receipt.recordingID
+    inbox.discard(recordingID)
+    if let metadata {
+      do {
+        try inbox.begin(metadata)
+      } catch {
+        return .internalError("opening the partial file", error)
+      }
+    }
     do {
       try await persist(receipt)
     } catch {
       // A revoke while the save waited lets another phone announce the same
       // recording id; its files and receipt stay. Checked after the save,
       // in the same actor step as the discard.
-      if !ownedByAnotherDevice(recordingID, device: device) {
+      if !ownedByAnotherDevice(recordingID, deviceID: receipt.deviceID) {
         inbox.discard(recordingID)
       }
       return .internalError("saving the receipt", error)
     }
-    return .json(.created, Self.status(of: receipt))
+    return .json(status, Self.status(of: receipt))
   }
 
   /// `GET /v1/recordings/{id}`: the resume point, 404 for an unknown id.
@@ -180,7 +269,12 @@ extension HandoverEngine {
     // again). Fold this chunk into the receipt as it stands now, never into
     // the copy from before the write; a `.complete` one stays as it is
     // (`transition`) and the chunk counts as received.
-    guard var current = activeReceipts[recordingID], current.deviceID == device.id else {
+    // The upload this chunk was written for, in its split: not another
+    // device's receipt, not one of other bytes, not one restarted under
+    // another chunk size (`sameUpload`).
+    guard var current = activeReceipts[recordingID], Self.sameUpload(current, receipt),
+      current.chunkSize == receipt.chunkSize
+    else {
       return .problem(.notFound, "no such recording")
     }
     do {
@@ -276,8 +370,12 @@ extension HandoverEngine {
   /// actor step, with no suspension in between, so no announce lands between
   /// the two.
   private func ownedByAnotherDevice(_ recordingID: UUID, device: PairedDevice) -> Bool {
+    ownedByAnotherDevice(recordingID, deviceID: device.id)
+  }
+
+  private func ownedByAnotherDevice(_ recordingID: UUID, deviceID: UUID) -> Bool {
     guard let held = activeReceipts[recordingID] else { return false }
-    return held.deviceID != device.id
+    return held.deviceID != deviceID
   }
 
   private enum Verification {
@@ -364,7 +462,7 @@ extension HandoverEngine {
   /// mark. A replayed complete returns the same id through the early
   /// `.complete` check. On failure the verified file stays for the phone's
   /// retry and the reason is fixed text, because the error may name the
-  /// file's path.
+  /// file's path; unless memory holds a receipt of other bytes by then.
   private func admit(
     _ file: URL, metadata: RecordingMetadata, device: PairedDevice,
     receipt: inout HandoverReceipt
@@ -375,6 +473,14 @@ extension HandoverEngine {
       meetingID = try await intake.admit(file: file, metadata: metadata, device: device)
     } catch {
       try? await transition(&receipt, to: .failed(Self.intakeRefused))
+      // The phone announced another file under the id during the intake:
+      // that upload's `complete` would hand this file to the intake unhashed
+      // (`verifiedFile`), so it goes.
+      if let held = activeReceipts[recordingID],
+        held.byteCount != receipt.byteCount || held.sha256 != receipt.sha256
+      {
+        try? FileManager.default.removeItem(at: file)
+      }
       return .internalError("the intake", error)
     }
     try? await transition(&receipt, to: .complete(meetingID: meetingID))
