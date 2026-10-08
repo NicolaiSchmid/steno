@@ -957,9 +957,9 @@ still has to draw the window side. `[ ]` is not ported yet.
     again while a file is busy (`steno_core::busy_file`). A move that fails after earlier
     ones landed leaves those speakers with the new clips, so a kept speaker can then play
     another run's voice; per-run clip names committed with the merge are a follow-up (see
-    "Open after the port"). Rust only: Swift writes each clip in place. Once the app quits,
-    such a failure ends the run unpersisted, so the meeting is processed again at the
-    next launch (`a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_launch`).
+    "Open after the port"). Once the app quits, a diarizer failure ends the run
+    unpersisted, so the meeting is processed again at the next launch
+    (`a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_launch`).
     Swift fails the meeting.
   - Re-run transcript: the merge's `replace_transcript` keeps a stored confirmation
     and the model's name suggestion for a speaker id that comes back, and recomputes
@@ -2751,7 +2751,8 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
 - **`fix/per-run-speaker-clips`.** Speaker clips written all or none: a move that fails
   partway through `write_sample_clips` leaves a kept speaker playing another run's
   voice, with its earlier clip replaced. Per-run clip names, written before the merge
-  and switched to in the merge's transaction, close it. Rust only: Swift writes each
+  and switched to in the merge's transaction, with the old files removed after the
+  commit and a sweep of orphaned clips, close it. Rust only: Swift writes each
   clip in place. Where: `write_sample_clips` (`crates/steno-pipeline/src/pipeline.rs`);
   the "Speakers" note under "Pipeline and services (WP6b)". Found: #256.
 
