@@ -297,17 +297,13 @@ impl Shared {
         };
         let keyring = match Keyring::open(bus, ask).await {
             Ok(keyring) => keyring,
-            Err(error @ ServiceError::Bus(_)) => {
-                tracing::warn!(
-                    "secrets: no Secret Service ({error}), keeping secrets with the file"
-                );
-                return Backend::File;
-            }
             Err(error) => {
-                tracing::warn!(
-                    "secrets: the Secret Service could not be opened ({error}), keeping \
-                     secrets with the file"
-                );
+                let what = if matches!(error, ServiceError::Bus(_)) {
+                    "no Secret Service"
+                } else {
+                    "the Secret Service could not be opened"
+                };
+                tracing::warn!("secrets: {what} ({error}), keeping secrets with the file");
                 return Backend::File;
             }
         };
