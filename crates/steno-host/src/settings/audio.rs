@@ -49,8 +49,8 @@ pub struct AudioSettingsViewModel {
     pub audio_folder: PathBuf,
     pub folder_usage: FolderUsageState,
     /// Whether a power cut may lose recent recordings in the folder (a
-    /// Windows drive that is neither NTFS nor `ReFS`, or a network drive);
-    /// Settings warns.
+    /// Windows drive that is neither NTFS nor `ReFS`, or a network drive or
+    /// mount); Settings warns.
     pub folder_may_lose_recent_writes: bool,
     pub retention_mode: RetentionMode,
     pub retention_days: i64,

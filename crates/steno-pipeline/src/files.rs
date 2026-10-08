@@ -9,9 +9,12 @@
 //! flush alone does not make a rename durable (the FAT driver treats a
 //! flush of a folder other than the drive's root as a no-op), so the
 //! renames are written through and the renamed file is flushed as well as
-//! the folders (`windows`); [`may_lose_recent_writes`] tells Settings about
-//! a drive where that may not be enough.
+//! the folders (`windows`). [`may_lose_recent_writes`] tells Settings about
+//! a folder whose writes may still be lost: a Windows drive where that is
+//! not enough, or a network drive or mount (`windows`, `mount`).
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+mod mount;
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
@@ -64,9 +67,10 @@ impl Syncs for Disk {
 /// Whether a power cut may lose a recording just written into `folder`, for
 /// the warning in Settings: true on Windows for a folder on a drive that is
 /// neither NTFS nor `ReFS` (FAT32, exFAT), whose folder entries the durable
-/// writes cannot be sure to flush, and for one on a network drive, whose
-/// server may acknowledge a flush without writing it (`windows`); false
-/// elsewhere, and where the drive cannot be read.
+/// writes cannot be sure to flush, and on Windows, Linux and macOS for one
+/// on a network drive or mount, whose server may acknowledge a flush
+/// without writing it (`windows`, `mount`); false elsewhere, and where its
+/// file system cannot be read.
 pub fn may_lose_recent_writes(folder: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -74,7 +78,11 @@ pub fn may_lose_recent_writes(folder: &Path) -> bool {
             || windows::file_system_name(folder)
                 .is_ok_and(|name| !matches!(name.as_str(), "NTFS" | "ReFS"))
     }
-    #[cfg(not(windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        mount::is_on_a_network_mount(folder)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = folder;
         false
@@ -827,8 +835,9 @@ mod tests {
         assert_eq!(temporaries(&meeting), Vec::<String>::new());
     }
 
-    /// Only a Windows drive that is neither NTFS nor `ReFS` warns; the test
-    /// folders of every CI runner are on a drive that does not warn.
+    /// Only a Windows drive that is neither NTFS nor `ReFS`, or a network
+    /// drive or mount, warns; the test folders of every CI runner are on a
+    /// local drive that does not warn.
     #[test]
     fn a_test_folder_is_not_on_a_drive_that_may_lose_recent_writes() {
         let dir = tempfile::tempdir().unwrap();

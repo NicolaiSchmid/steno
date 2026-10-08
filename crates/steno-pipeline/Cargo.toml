@@ -38,6 +38,15 @@ uuid.workspace = true
 # `GetDriveTypeW` for a network drive.
 windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_WindowsProgramming"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# `statfs` for the file system of the audio folder, whose network mounts
+# Settings warns about (`files::mount`).
+rustix.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Pins the Linux magic numbers `files::mount` names to libc's values.
+libc.workspace = true
+
 [dev-dependencies]
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-pipeline = { path = ".", features = ["testing"] }

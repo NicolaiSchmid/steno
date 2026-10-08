@@ -4969,6 +4969,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
+ "libc",
+ "rustix",
  "serde",
  "serde_json",
  "steno-core",
