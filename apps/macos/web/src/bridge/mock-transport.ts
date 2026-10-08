@@ -391,20 +391,20 @@ function applyOnboardingScenario(
 ) {
 	const onboarding = snapshots.onboarding as OnboardingSnapshot | undefined;
 	const setup = snapshots["onboarding.setup"] as OnboardingSnapshot | undefined;
-	const importing = snapshots["onboarding.import"] as
+	const importStep = snapshots["onboarding.import"] as
 		| OnboardingSnapshot
 		| undefined;
 	if (!onboarding || !setup) {
 		return;
 	}
 
-	if (scenario === "onboarding-import-waiting" && importing) {
-		result.onboarding = importing;
+	if (scenario === "onboarding-import-waiting" && importStep) {
+		result.onboarding = importStep;
 	}
 
-	if (scenario === "onboarding-import" && importing) {
+	if (scenario === "onboarding-import" && importStep) {
 		result.onboarding = {
-			...importing,
+			...importStep,
 			swiftImport: { state: "pending", prompts: 2 },
 		} satisfies OnboardingSnapshot;
 	}

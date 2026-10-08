@@ -345,10 +345,11 @@ meetings, audio and models stay in the same support directory.
   Swift app's handover certificate (labelled `Steno handover identity`),
   onboarding opens on an import step first, and until it ran the app reads
   no API key and starts no handover listener. The step says how many times
-  macOS may ask for the login password, once for each item it found: the
-  API key, the pairing, and the key or pairing entry a beta build under
-  `uno.schmid.steno.desktop` left behind (found by attributes, which asks
-  nothing). Always Allow is the answer. It reads the key, which stays
+  macOS may ask for the login password, at most three: the API key (one
+  item, whether the Swift app or a beta build under
+  `uno.schmid.steno.desktop` stored it), the pairing, and the pairing entry
+  such a beta left behind (found by attributes, which asks nothing). Always
+  Allow is the answer. It reads the key, which stays
   shared with the Swift app, and exports the handover identity as PKCS#12
   into the `handover-identity` entry, replacing the one a beta build
   stored. Paired phones keep uploading without pairing again.
@@ -357,15 +358,21 @@ meetings, audio and models stay in the same support directory.
   A denied or failed export never creates a new identity and never
   replaces the stored one: phone handover waits, the step offers Try
   again (which repeats only the write when the export got through), and
-  it comes back at the next launch. Not now on the step, and closing the
-  onboarding window over it, count as both denied and bring up no prompt.
+  it comes back at the next launch. Not now, or closing the window over
+  the step, brings up no prompt: what the step has not read yet stays
+  unread for this launch, and the step comes back with the same prompts at
+  the next launch. Closing the window while a prompt is up leaves that
+  prompt to the user; its answer still counts.
 
 `preferences.json` keeps the import's progress in flags:
 `steno.swiftImportRan` marks the import as over (the identity is in place,
 or there was none), after which it never runs again;
 `steno.swiftImportKeyRead` says the step read the key or was refused, so a
 later step asks for the pairing alone; `steno.swiftImportKeyDenied` says
-it was refused, until a key is saved. A smoke run (`STENO_SMOKE_SECONDS`)
+it was refused, until a key is saved in this app. That flag survives a
+rollback: a key saved in the Swift app, or in an older build, does not
+clear it, so after the next update the key stays hidden until it is saved
+in Settings once more. A smoke run (`STENO_SMOKE_SECONDS`)
 and a launch whose `HOME` is not the account's home directory skip the
 import, so neither touches the user's keychain.
 `STENO_KEYCHAIN_TESTS=1 cargo test -p steno-services --test swift_keychain`

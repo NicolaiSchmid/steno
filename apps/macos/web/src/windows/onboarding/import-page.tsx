@@ -5,9 +5,10 @@ import { Button, Callout } from "@/components/ui";
 import { OnboardingPage } from "./onboarding-page";
 
 /**
- * What the step brings over and the prompts that come with it: one per
- * keychain item the host counted (the API key, the phone pairing, and an
- * older copy of either that a beta left behind).
+ * What the step brings over and the prompts that come with it, at most
+ * three: one per keychain item the host counted (the API key, whichever
+ * version stored it, the phone pairing, and the pairing a beta left
+ * behind, which the import replaces).
  */
 function importIntro(prompts: number): string {
 	const what =
@@ -15,13 +16,14 @@ function importIntro(prompts: number): string {
 	if (prompts < 1) {
 		return what;
 	}
-	const count =
-		prompts === 2
-			? "twice"
-			: prompts === 3
-				? "three times"
-				: `${prompts} times`;
-	const times = prompts === 1 ? "once" : `up to ${count}, once for each item`;
+	const times =
+		prompts === 1
+			? "once"
+			: prompts === 2
+				? "up to two times"
+				: prompts === 3
+					? "up to three times"
+					: `up to ${prompts} times`;
 	return `${what} macOS asks for your login password ${times}.`;
 }
 
@@ -76,7 +78,11 @@ export function ImportPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 		>
 			<Callout
 				data-testid="import-always-allow"
-				description="Then Steno reads what the previous version stored without asking again. Your meetings and settings are already here. Not now leaves phone uploads waiting, and summaries without the API key, until this step comes back at the next launch."
+				description={`Then Steno reads what the previous version stored without asking again. Your meetings and settings are already here. ${
+					waiting
+						? "Continue for now leaves phone uploads waiting until this step comes back at the next launch."
+						: "Not now leaves phone uploads waiting, and summaries without the API key, until this step comes back at the next launch."
+				}`}
 				icon={<KeyRoundIcon aria-hidden="true" />}
 				title="Choose Always Allow in each prompt."
 				variant="info"

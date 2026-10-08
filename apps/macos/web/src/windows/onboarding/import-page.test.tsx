@@ -14,7 +14,7 @@ describe("ImportPage", () => {
 		expect(screen.getByTestId("onboarding-import")).toBeInTheDocument();
 		expect(screen.queryByTestId("onboarding-step")).not.toBeInTheDocument();
 		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
-			"macOS asks for your login password up to twice, once for each item.",
+			"macOS asks for your login password up to two times.",
 		);
 		expect(screen.getByTestId("import-always-allow")).toHaveTextContent(
 			"Choose Always Allow in each prompt.",
@@ -29,12 +29,12 @@ describe("ImportPage", () => {
 	it("waits for the prompts with both buttons off", async () => {
 		const harness = await createBridgeHarness("scenario=onboarding-import");
 		renderWithBridge(<OnboardingWindow />, harness);
-		const importing = (await loadFixtureSnapshots())[
+		const importStep = (await loadFixtureSnapshots())[
 			"onboarding.import"
 		] as OnboardingSnapshot;
 		act(() => {
 			harness.transport.emit("onboarding", {
-				...importing,
+				...importStep,
 				swiftImport: { state: "importing", prompts: 2 },
 			} satisfies OnboardingSnapshot);
 		});
@@ -48,17 +48,17 @@ describe("ImportPage", () => {
 	it("counts a beta's leftover items as prompts", async () => {
 		const harness = await createBridgeHarness("scenario=onboarding-import");
 		renderWithBridge(<OnboardingWindow />, harness);
-		const importing = (await loadFixtureSnapshots())[
+		const importStep = (await loadFixtureSnapshots())[
 			"onboarding.import"
 		] as OnboardingSnapshot;
 		act(() => {
 			harness.transport.emit("onboarding", {
-				...importing,
+				...importStep,
 				swiftImport: { state: "pending", prompts: 3 },
 			} satisfies OnboardingSnapshot);
 		});
 		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
-			"macOS asks for your login password up to three times, once for each item.",
+			"macOS asks for your login password up to three times.",
 		);
 	});
 
@@ -76,6 +76,12 @@ describe("ImportPage", () => {
 		);
 		expect(screen.getByTestId("import-skip")).toHaveTextContent(
 			"Continue for now",
+		);
+		expect(screen.getByTestId("import-always-allow")).toHaveTextContent(
+			"Continue for now leaves phone uploads waiting until this step comes back at the next launch.",
+		);
+		expect(screen.getByTestId("import-always-allow")).not.toHaveTextContent(
+			"summaries",
 		);
 		await user.click(screen.getByTestId("import-run"));
 		expect(screen.getByTestId("import-run")).toHaveTextContent("Try again");
