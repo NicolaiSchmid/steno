@@ -2964,10 +2964,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   play). Where: the fake in `build` (`crates/steno-services/src/app.rs`), the tray
   (`apps/desktop/src-tauri/src/tray.rs`); the WP9 paragraph and seam (4) under
   "Pipeline and services (WP6b)". Found: #173, #185.
-- **WP9b.** The diarizer's manifest still gives WeSpeaker ResNet34-LM the licence
-  Apache-2.0, where its VoxCeleb training data makes it CC-BY-4.0; Settings already
-  shows CC-BY-4.0 with the attribution. Where: `WESPEAKER_RESNET34_LM` in
-  `crates/steno-diarize/src/models.rs`, which #229 rewrites. Found: #164, #183.
 - **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
   Swift defects (each ported to Swift if it ships another release, otherwise closed by
   the cutover), the fixtures the Swift side owes, and the audio choices to settle at

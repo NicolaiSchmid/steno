@@ -1531,13 +1531,13 @@ impl ProcessingPipeline {
         let count = RunCount::of(asset);
         // A run that goes alone is counted when its turn comes.
         let counted = match &turn {
-            Turn::Now(_) => match CountedRun::start(&latch, count.clone()) {
-                Some(counted) => Some(counted),
-                None => {
+            Turn::Now(_) => {
+                let Some(counted) = CountedRun::start(&latch, count.clone()) else {
                     not_started(asset_id);
                     return;
-                }
-            },
+                };
+                Some(counted)
+            }
             Turn::Alone(_) => None,
         };
         let pipeline = self.clone();

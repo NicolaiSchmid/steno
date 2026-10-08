@@ -1403,7 +1403,6 @@ mod tests {
             .expect("the first job is transcribing");
         current.reload().unwrap();
         current.resume_unfinished();
-        let twice = current.current().in_flight().contains(&held);
         children.open.notify_one();
         eventually("the meeting is ready and every run is done", || {
             meeting_state(&store, held) == MeetingState::Ready
@@ -1418,11 +1417,312 @@ mod tests {
         current.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, control), MeetingState::Ready);
         let one_run = engine.inner.transcriptions.count() - after_held;
-        assert!(
-            !twice && after_held == one_run,
-            "the in-flight meeting started again on the new pipeline: twice={twice}, \
-             transcriptions {after_held} for it vs {one_run} for one run"
+        assert_eq!(
+            after_held, one_run,
+            "the in-flight meeting started again on the new pipeline"
         );
+    }
+
+    /// A meeting a run left waiting for models, which the pipeline a
+    /// reload retired processes again on its own (`process`, holding the
+    /// meeting in the shared in-flight set) when an install's resume runs
+    /// on the current pipeline: the resume finds the meeting held through
+    /// the set every pipeline of the `CurrentPipeline` shares and skips
+    /// it, so the meeting is processed once more, not twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resume_after_a_reload_skips_a_waiting_meeting_the_retired_pipeline_holds() {
+        let (dir, store) = temp_store();
+        let children = Arc::new(Children::default());
+        let installed = Arc::new(AtomicBool::new(false));
+        let engine = Arc::new(FakeSidecar {
+            inner: FakeSpeechEngine::default(),
+            children: children.clone(),
+            child: AtomicBool::new(false),
+        });
+        let shared = steno_pipeline::SharedSpeechEngine::new(Arc::new(
+            crate::model_gate::GatedSpeechEngine::new(engine.clone(), {
+                let installed = installed.clone();
+                Arc::new(move || installed.load(Ordering::SeqCst))
+            }),
+        ));
+        let make: MakeDependencies = {
+            let store = store.clone();
+            Arc::new(move || {
+                Ok(BuiltPipeline {
+                    dependencies: fake_dependencies(&store, "fake-engine")
+                        .with_speech_engine(shared.clone()),
+                    engine: BuiltEngine {
+                        engine_id: "parakeet-v3".to_owned(),
+                        runtime: SpeechRuntime::OnnxSidecar,
+                    },
+                })
+            })
+        };
+        let current =
+            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+        let waiting = enqueue_call(dir.path(), &current.current());
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
+        assert_eq!(
+            current.current().dependencies().model_waits.waiting(),
+            vec![waiting]
+        );
+
+        installed.store(true, Ordering::SeqCst);
+        let retired = current.current();
+        current.reload().unwrap();
+        let asset_id = store.asset(waiting).unwrap().unwrap().id;
+        let held = tokio::spawn({
+            let retired = retired.clone();
+            async move { retired.process(asset_id).await }
+        });
+        tokio::time::timeout(PATIENCE, children.entered.notified())
+            .await
+            .expect("the retired pipeline is transcribing the meeting");
+        let before = engine.inner.transcriptions.count();
+        current.resume_unfinished();
+        children.open.notify_one();
+        held.await.unwrap().unwrap();
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
+        let after_held = engine.inner.transcriptions.count() - before;
+        let control = enqueue_call(dir.path(), &current.current());
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, control), MeetingState::Ready);
+        let one_run = engine.inner.transcriptions.count() - before - after_held;
+        assert_eq!(
+            after_held, one_run,
+            "the waiting meeting the retired pipeline held ran again on the new one"
+        );
+    }
+
+    /// Which model a Settings Remove takes away during a run.
+    #[derive(Clone, Copy, Debug)]
+    enum Removed {
+        Speech,
+        Diarizer,
+    }
+
+    /// A boundary behind the app's gate whose first load waits at a gate
+    /// (`checked`, then `go`) after the gate's check let it through, then
+    /// loads as the app's loaders do: refused with the store's or the
+    /// diarizer's `NotInstalled` while `installed` does not hold.
+    struct LoadsAfterAGate {
+        installed: crate::model_gate::InstalledCheck,
+        not_installed: fn() -> steno_core::protocols::BoxError,
+        gate_used: AtomicBool,
+        checked: tokio::sync::Notify,
+        go: tokio::sync::Notify,
+        speech: FakeSpeechEngine,
+        diarizer: steno_core::testing::FakeDiarizer,
+    }
+
+    impl LoadsAfterAGate {
+        /// The boundary `removed` names, refusing as its loader does.
+        fn new(removed: Removed, installed: crate::model_gate::InstalledCheck) -> Self {
+            LoadsAfterAGate {
+                installed,
+                not_installed: match removed {
+                    Removed::Speech => || {
+                        Box::new(steno_speech::SpeechError::NotInstalled {
+                            asset: "parakeet".to_owned(),
+                            directory: "/m".into(),
+                            missing: vec!["encoder".to_owned()],
+                        })
+                    },
+                    Removed::Diarizer => || {
+                        Box::new(steno_diarize::DiarizeError::NotInstalled {
+                            asset: steno_diarize::models::ASSET_ID.to_owned(),
+                            directory: "/m".into(),
+                            missing: vec![steno_diarize::models::EMBEDDING_FILE.to_owned()],
+                        })
+                    },
+                },
+                gate_used: AtomicBool::new(false),
+                checked: tokio::sync::Notify::new(),
+                go: tokio::sync::Notify::new(),
+                speech: FakeSpeechEngine::default(),
+                diarizer: steno_core::testing::FakeDiarizer::default(),
+            }
+        }
+
+        async fn load(&self) -> BoundaryResult<()> {
+            if !self.gate_used.swap(true, Ordering::SeqCst) {
+                self.checked.notify_one();
+                self.go.notified().await;
+            }
+            if (self.installed)() {
+                Ok(())
+            } else {
+                Err((self.not_installed)())
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SpeechEngine for LoadsAfterAGate {
+        fn id(&self) -> &str {
+            self.speech.id()
+        }
+
+        fn supported_languages(&self) -> &std::collections::BTreeSet<LanguageTag> {
+            self.speech.supported_languages()
+        }
+
+        async fn prepare(&self) -> BoundaryResult<()> {
+            self.load().await
+        }
+
+        async fn transcribe(
+            &self,
+            audio: &AudioBuffer16k,
+            hint: Option<&LanguageTag>,
+        ) -> BoundaryResult<Vec<RawSegment>> {
+            self.load().await?;
+            self.speech.transcribe(audio, hint).await
+        }
+    }
+
+    #[async_trait]
+    impl steno_core::Diarizer for LoadsAfterAGate {
+        async fn prepare(&self) -> BoundaryResult<()> {
+            self.load().await
+        }
+
+        async fn diarize(
+            &self,
+            audio: &AudioBuffer16k,
+        ) -> BoundaryResult<steno_core::DiarizationResult> {
+            self.load().await?;
+            self.diarizer.diarize(audio).await
+        }
+    }
+
+    /// Pipelines whose speech engine or diarizer (`removed`'s) is
+    /// `boundary` behind the app's gate over `installed`.
+    fn behind_the_gate(
+        store: &Arc<Store>,
+        boundary: &Arc<LoadsAfterAGate>,
+        installed: &crate::model_gate::InstalledCheck,
+        removed: Removed,
+    ) -> MakeDependencies {
+        let (store, boundary, installed) = (store.clone(), boundary.clone(), installed.clone());
+        Arc::new(move || {
+            let mut dependencies = fake_dependencies(&store, "fake-engine");
+            match removed {
+                Removed::Speech => {
+                    dependencies =
+                        dependencies.with_speech_engine(steno_pipeline::SharedSpeechEngine::new(
+                            Arc::new(crate::model_gate::GatedSpeechEngine::new(
+                                boundary.clone(),
+                                installed.clone(),
+                            )),
+                        ));
+                }
+                Removed::Diarizer => {
+                    dependencies.diarizer = Arc::new(crate::model_gate::GatedDiarizer::new(
+                        boundary.clone(),
+                        installed.clone(),
+                    ));
+                }
+            }
+            Ok(BuiltPipeline {
+                dependencies,
+                engine: BuiltEngine {
+                    engine_id: "parakeet-v3".to_owned(),
+                    runtime: SpeechRuntime::OnnxSidecar,
+                },
+            })
+        })
+    }
+
+    /// A Settings Remove of `removed`'s files while a run of a meeting
+    /// with "delete after processing" is past the gate's check and before
+    /// the load: the run is refused for missing models, the meeting stays
+    /// `queued` with no failure reason and waits, its audio is kept (no
+    /// retention stamp, the sweep takes nothing), and a reinstall's resume
+    /// processes it.
+    async fn a_remove_during_a_run_leaves_the_meeting_waiting_with_its_audio(removed: Removed) {
+        use steno_host::services::SpeechModels as _;
+        use steno_host::speech::ModelAsset;
+        let (dir, store) = temp_store();
+        let models_directory = dir.path().join("models");
+        let models = Arc::new(crate::speech::testing::models_in(&models_directory));
+        let install = |models: &crate::speech::ModelStoreSpeechModels| {
+            crate::speech::testing::install_coreml_parakeet(models);
+            for asset in steno_speech::ModelAsset::onnx() {
+                crate::speech::testing::install_speech_asset(models, &asset);
+            }
+            crate::speech::testing::install_onnx_diarizer(models);
+        };
+        install(&models);
+        let (asset, installed): (ModelAsset, crate::model_gate::InstalledCheck) = match removed {
+            Removed::Speech => (ModelAsset::ParakeetV3, {
+                let models = models.clone();
+                Arc::new(move || models.is_installed(ModelAsset::ParakeetV3))
+            }),
+            Removed::Diarizer => (ModelAsset::OfflineDiarizer, {
+                let store = models.speech.clone();
+                Arc::new(move || steno_diarize::models::installed(&store).is_ok())
+            }),
+        };
+        let boundary = Arc::new(LoadsAfterAGate::new(removed, installed.clone()));
+        let make = behind_the_gate(&store, &boundary, &installed, removed);
+        let current = Arc::new(CurrentPipeline::new(
+            make().unwrap(),
+            make,
+            tokio::runtime::Handle::current(),
+        ));
+        let settings_models = crate::model_gate::ResumingSpeechModels::resuming(
+            crate::speech::testing::models_in(&models_directory),
+            current.clone(),
+        );
+
+        let mut meeting = sample_data::meeting();
+        meeting.id = Uuid::new_v4();
+        let audio = steno_pipeline::fixtures::two_lane_call(
+            dir.path(),
+            meeting.id,
+            AudioRetention::DeleteAfterProcessing,
+        )
+        .unwrap();
+        current.current().enqueue(&meeting, &audio).unwrap();
+        tokio::time::timeout(PATIENCE, boundary.checked.notified())
+            .await
+            .expect("the run is past the gate's check");
+        settings_models.remove(asset).unwrap();
+        assert!(!settings_models.is_installed(asset), "{removed:?} removed");
+        boundary.go.notify_one();
+        current.current().wait_until_idle().await;
+
+        let master = steno_core::paths::file_url_path(&audio.url).unwrap();
+        let stored = store.meeting(meeting.id).unwrap().unwrap();
+        assert_eq!(stored.state, MeetingState::Queued, "{removed:?}");
+        assert_eq!(
+            current.current().dependencies().model_waits.waiting(),
+            vec![meeting.id]
+        );
+        assert_eq!(store.asset(meeting.id).unwrap().unwrap().expires_at, None);
+        let swept = steno_pipeline::RetentionSweep::new(store.clone())
+            .run(Utc::now() + chrono::Duration::days(365))
+            .unwrap();
+        assert!(swept.is_empty(), "{swept:?}");
+        assert!(master.is_file(), "the recording is kept");
+
+        install(&models);
+        current.resume_unfinished();
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, meeting.id), MeetingState::Ready);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_remove_of_the_speech_model_during_a_run_leaves_the_meeting_waiting() {
+        a_remove_during_a_run_leaves_the_meeting_waiting_with_its_audio(Removed::Speech).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_remove_of_the_diarizer_during_a_run_leaves_the_meeting_waiting() {
+        a_remove_during_a_run_leaves_the_meeting_waiting_with_its_audio(Removed::Diarizer).await;
     }
 
     /// A meeting a run left waiting for models before a reload is started
