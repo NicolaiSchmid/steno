@@ -253,10 +253,9 @@ fn copy_into_new_folder(
 ) -> std::io::Result<std::path::PathBuf> {
     crate::files::create_new_dir_durably(&layout.directory)?;
     let destination = layout.master(format);
-    if let Err(error) = crate::files::copy_durably(file, &destination) {
+    crate::files::copy_durably(file, &destination).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&layout.directory);
-        return Err(error);
-    }
+    })?;
     Ok(destination)
 }
 
