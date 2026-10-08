@@ -320,7 +320,8 @@ mod tests {
 
     /// A FUSE mount warns only when its type is a remote one or it is a bare
     /// `fuse` mount of an `http://` or `https://` source, and not when the
-    /// mount cannot be read.
+    /// mount cannot be read. Only a bare `fuse` mount is read by its source:
+    /// a type outside the list stays local whatever its source.
     #[test]
     fn a_linux_fuse_mount_warns_only_when_its_type_or_source_is_remote() {
         for name in [
@@ -355,6 +356,7 @@ mod tests {
             ("fuse.portal", "portal"),
             ("fuse.appimage", "/home/me/App.AppImage"),
             ("fuse", "/dev/sdb1"),
+            ("fuse.unlisted", "https://cloud.example.com/dav/"),
         ] {
             assert!(
                 !is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || Some(mount(name, source))),
