@@ -88,7 +88,7 @@ impl Engine {
         // stays, and this announce decides again as if the read had found it.
         loop {
             let announced = match existing {
-                None => self.first_announce(device, &metadata).await,
+                None => self.new_bytes(None, device, &metadata).await,
                 Some(existing) => self.reannounce(existing, device, &metadata).await,
             };
             match announced {
@@ -98,50 +98,64 @@ impl Engine {
         }
     }
 
-    /// The meeting the admission ledger holds for `metadata`'s recording
-    /// id, size and SHA-256 ([`steno_core::Store::admitted_meeting`]), or
-    /// the 500 of a failed read. Read only where it decides something: no
-    /// receipt, or one of other bytes. Its rows are never deleted, so a row
-    /// read stays true; an admission that commits after the read belongs to
-    /// a receipt memory then holds, which the replacement's check in
+    /// An announce of bytes the receipt it read does not hold: it read none,
+    /// or `read`, a receipt of other bytes. The admission ledger decides
+    /// ([`steno_core::Store::admitted_meeting`]), read only here, so a
+    /// re-announce of the receipt's own bytes reaches its save without
+    /// another read. Its rows are never deleted, so a row read stays true;
+    /// an admission that commits after the read belongs to a receipt memory
+    /// then holds, which the replacement's check in
     /// [`Engine::make_and_open`] finds.
-    async fn admitted(&self, metadata: &RecordingMetadata) -> Result<Option<Uuid>, Announced> {
+    ///
+    /// Bytes the ledger holds get a `complete` receipt with its meeting id
+    /// (200, every chunk listed, nothing opened: the phone posts
+    /// `complete`, takes the meeting id and deletes its copy), unless `read`
+    /// is another device's unfinished upload, which that answer would end
+    /// with that phone deleting its copy (409). Other bytes are a new
+    /// recording under the recording id (201), whose own `complete` admits
+    /// a meeting of its own.
+    async fn new_bytes(
+        &self,
+        read: Option<&HandoverReceipt>,
+        device: &PairedDevice,
+        metadata: &RecordingMetadata,
+    ) -> Announced {
         let (recording_id, byte_count, sha256) = (
             metadata.recording_id,
             metadata.byte_count,
             metadata.sha256.clone(),
         );
-        self.with_store(move |store| store.admitted_meeting(recording_id, byte_count, &sha256))
+        let admitted = match self
+            .with_store(move |store| store.admitted_meeting(recording_id, byte_count, &sha256))
             .await
-            .map_err(|error| {
-                Announced::Answered(HandoverResponse::internal_error(
+        {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                return Announced::Answered(HandoverResponse::internal_error(
                     "reading the admissions",
                     &error,
-                ))
-            })
-    }
-
-    /// An announce whose read found no receipt in memory or the store: a
-    /// `complete` receipt with the ledger's meeting id when the ledger
-    /// holds these bytes (200, every chunk listed, nothing opened: the
-    /// phone posts `complete`, takes the meeting id and deletes its copy),
-    /// else a new recording (201).
-    async fn first_announce(
-        &self,
-        device: &PairedDevice,
-        metadata: &RecordingMetadata,
-    ) -> Announced {
-        let admitted = match self.admitted(metadata).await {
-            Ok(admitted) => admitted,
-            Err(failed) => return failed,
+                ));
+            }
         };
-        if let Some(meeting_id) = admitted {
-            let delivered = self.fresh(device, metadata, HandoverState::Complete { meeting_id });
-            return self.replace(None, delivered, None, StatusCode::OK).await;
+        let delivers = read.is_none_or(|read| {
+            read.state.kind() == HandoverStateKind::Complete || read.device_id == device.id
+        });
+        match admitted {
+            Some(meeting_id) if delivers => {
+                let delivered =
+                    self.fresh(device, metadata, HandoverState::Complete { meeting_id });
+                self.replace(read, delivered, None, StatusCode::OK).await
+            }
+            Some(_) => Announced::Answered(HandoverResponse::problem(
+                StatusCode::CONFLICT,
+                "another device owns this recording",
+            )),
+            None => {
+                let fresh = self.fresh(device, metadata, HandoverState::Receiving);
+                self.replace(read, fresh, Some(metadata), StatusCode::CREATED)
+                    .await
+            }
         }
-        let fresh = self.fresh(device, metadata, HandoverState::Receiving);
-        self.replace(None, fresh, Some(metadata), StatusCode::CREATED)
-            .await
     }
 
     /// A receipt of `metadata`'s bytes for `device` in `state`, no chunk
@@ -252,17 +266,12 @@ impl Engine {
     }
 
     /// A known recording announced again; the rows of the decision table
-    /// with a receipt. Other bytes than the receipt's: a `complete` receipt
-    /// with the ledger's meeting id when the ledger holds them (as for no
-    /// receipt) and the receipt is `complete` or this device's; 409 over
-    /// another device's unfinished upload, which a `complete` answer would
-    /// end with that phone deleting its copy; else a new recording under
-    /// the same recording id (201), whose own `complete` admits a meeting
-    /// of its own. The same bytes from another device take the receipt over
-    /// ([`Engine::take_over`]). Then, as the owner: a `complete` receipt
-    /// answers 200 with every chunk of the announced split; one in another
-    /// split starts its partial over under the announced one (200, no chunk
-    /// listed); else [`Engine::resume`].
+    /// with a receipt. Other bytes than the receipt's go to the ledger
+    /// ([`Engine::new_bytes`]). The same bytes from another device take the
+    /// receipt over ([`Engine::take_over`]). Then, as the owner: a
+    /// `complete` receipt answers 200 with every chunk of the announced
+    /// split; one in another split starts its partial over under the
+    /// announced one (200, no chunk listed); else [`Engine::resume`].
     async fn reannounce(
         &self,
         receipt: HandoverReceipt,
@@ -271,27 +280,7 @@ impl Engine {
     ) -> Announced {
         let complete = receipt.state.kind() == HandoverStateKind::Complete;
         if receipt.byte_count != metadata.byte_count || receipt.sha256 != metadata.sha256 {
-            let admitted = match self.admitted(metadata).await {
-                Ok(admitted) => admitted,
-                Err(failed) => return failed,
-            };
-            return match admitted {
-                Some(meeting_id) if complete || receipt.device_id == device.id => {
-                    let delivered =
-                        self.fresh(device, metadata, HandoverState::Complete { meeting_id });
-                    self.replace(Some(&receipt), delivered, None, StatusCode::OK)
-                        .await
-                }
-                Some(_) => Announced::Answered(HandoverResponse::problem(
-                    StatusCode::CONFLICT,
-                    "another device owns this recording",
-                )),
-                None => {
-                    let fresh = self.fresh(device, metadata, HandoverState::Receiving);
-                    self.replace(Some(&receipt), fresh, Some(metadata), StatusCode::CREATED)
-                        .await
-                }
-            };
+            return self.new_bytes(Some(&receipt), device, metadata).await;
         }
         let receipt = if receipt.device_id == device.id {
             receipt
