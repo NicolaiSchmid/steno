@@ -303,7 +303,8 @@ const MEETING_NOT_STORED: &str = "Recording could not be saved: Steno could not 
 /// What a stop says when the meeting could not be stored. A meeting
 /// another process moved on is not this recorder's to keep; otherwise the
 /// recording stays on disk and the meeting `recording`, and the next
-/// launch recovers it.
+/// launch recovers it. Rust only: Swift's `complete` marked the meeting
+/// failed without its asset.
 fn not_saved(meeting_id: Uuid, error: &LocalRecordingIntakeError) -> &'static str {
     log_not_saved(meeting_id, intake_kind(error));
     if matches!(
@@ -716,7 +717,7 @@ impl CaptureRecorder {
     /// before its row is written, and among the known folders
     /// ([`crate::audio_folders`]). A failure is logged and the recording
     /// goes on: recovery still looks in the settings' folder and every
-    /// asset's.
+    /// asset's. Rust only: Swift had no recovery.
     fn record_audio_folder(&self, meeting_id: Uuid, folder: &Path) {
         self.remember_audio_folder(folder);
         if let Err(error) =
@@ -1095,7 +1096,8 @@ impl CaptureRecorder {
     /// A stop whose session failed and took the asset with it
     /// ([`CaptureSession::stop`]): what the writer wrote may still be on
     /// disk, and is recovered as an interrupted recording is at launch;
-    /// else the meeting fails. The error is the status line.
+    /// else the meeting fails. The error is the status line. Rust only:
+    /// Swift's `stop` failed the meeting.
     fn recover_failed_stop(
         &self,
         intake: &LocalRecordingIntake,

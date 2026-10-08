@@ -9,7 +9,7 @@
 //! | File | What it holds | Written by | Read by |
 //! |------|---------------|------------|---------|
 //! | [`RECORDED_FILE`] | The audio folder of each recording, by meeting id, from before its row is written until the meeting completes, fails or is deleted | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first ([`crate::recovery`]) |
-//! | [`KNOWN_FILE`] | Every audio folder a recording was written to or the setting left, oldest first | [`remember`] | [`known`]: a best-effort list of folders to scan |
+//! | [`KNOWN_FILE`] | Every audio folder a recording was written to or the setting left, oldest first | [`remember`] | [`known`]: crash recovery looks in these folders after the two that decide a meeting ([`crate::recovery`]), public so that the launch's adoption of a master with no meeting row, still to come, reads the same list |
 //!
 //! A reader returns the error of a file that cannot be read or does not
 //! parse; a missing file is empty. A writer sets a file that does not parse

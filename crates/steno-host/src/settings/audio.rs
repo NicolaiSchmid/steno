@@ -154,7 +154,8 @@ impl AudioSettingsViewModel {
     /// stored settings name it, is remembered first
     /// ([`Recorder::remember_audio_folder`](crate::services::Recorder::remember_audio_folder)):
     /// a recording started there goes on there, and crash recovery must
-    /// look for it there. Nothing is moved.
+    /// look for it there (Rust only: Swift had no recovery). Nothing is
+    /// moved. Swift: `AudioSettingsViewModel.setAudioFolder`.
     pub fn set_audio_folder(&mut self, folder: &Path, store: &Store, services: &Services) {
         let leaving = store
             .settings()

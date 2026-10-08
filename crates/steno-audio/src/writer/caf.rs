@@ -511,8 +511,9 @@ mod tests {
     use super::*;
 
     /// Every `sync` is one full sync of the data, through `durable`'s
-    /// fallback, and `finish` one of everything (P21: a frame synced is on
-    /// the disk, not in the page cache a kill keeps); nothing syncs after
+    /// fallback, and `finish` one of everything (P21 of
+    /// `.plans/2026-10-07-stable-promotion.md`: a frame synced is on the
+    /// disk, not in the page cache a kill keeps); nothing syncs after
     /// `finish`.
     #[test]
     fn each_sync_is_one_full_sync_and_the_finish_one_more() {
