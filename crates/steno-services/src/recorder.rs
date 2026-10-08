@@ -472,6 +472,10 @@ struct Inner {
     /// The [`Recorder::hold_starts`] holds alive: while there is one, a
     /// start is refused with [`INSTALLING_UPDATE`].
     start_holds: usize,
+    /// What the launch has to say ([`CaptureRecorder::note_adopted`]):
+    /// shown after the status's own warning whenever the recorder is idle,
+    /// until the user dismisses the messages. Rust only.
+    launch_note: Option<String>,
 }
 
 /// [`CaptureRecorder`]'s [`StartHold`]: the last one dropped clears the
@@ -667,6 +671,7 @@ impl CaptureRecorder {
                 active: None,
                 quitting: false,
                 start_holds: 0,
+                launch_note: None,
             }),
             changes: Condvar::new(),
             changed: Mutex::new(None),
@@ -688,6 +693,25 @@ impl CaptureRecorder {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Tells the user under the Record control that the launch adopted
+    /// `count` recordings it found in the audio folder with no meeting
+    /// ([`crate::recovery::adopt_orphans`]): "Recovered a recording.", or
+    /// the count. Shown while the recorder is idle until the user
+    /// dismisses the messages; a recording started meanwhile hides it
+    /// until it stops. Rust only.
+    pub(crate) fn note_adopted(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let note = if count == 1 {
+            "Recovered a recording.".to_owned()
+        } else {
+            format!("Recovered {count} recordings.")
+        };
+        self.inner().launch_note = Some(note);
+        self.notify();
     }
 
     /// The hook the app wires to `Host::recorder_changed`.
@@ -1315,6 +1339,13 @@ impl Recorder for CaptureRecorder {
                 .into_iter()
                 .flatten()
                 .reduce(|warning, next| format!("{warning} {next}"));
+        } else if status.state == RecordingState::Idle
+            && let Some(note) = &inner.launch_note
+        {
+            status.warning = Some(match status.warning.take() {
+                Some(warning) => format!("{warning} {note}"),
+                None => note.clone(),
+            });
         }
         status
     }
@@ -1385,6 +1416,7 @@ impl Recorder for CaptureRecorder {
         let mut inner = self.inner();
         inner.status.warning = None;
         inner.status.error = None;
+        inner.launch_note = None;
         // The fallback's warning and note until the next rebuild says
         // otherwise, the disk's until less room is left ([`DiskWarning`]).
         if let Some(active) = inner.active.as_mut() {

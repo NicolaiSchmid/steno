@@ -31,7 +31,7 @@ use crate::pipeline::{
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::qr::PngQrEncoder;
 use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
-use crate::recovery::{Interrupted, LiveRecordingCheck, reconcile_interrupted};
+use crate::recovery::{Interrupted, LiveRecordingCheck, adopt_orphans, reconcile_interrupted};
 use crate::secrets::{KeepsApiKey, KeyringUnavailable, SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 use crate::updates::{InstallGate, NeverIdle, ScheduleParts, UpdateSchedule, UpdateSource};
@@ -573,8 +573,10 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
 /// cannot be read, or failed ([`reconcile_interrupted`]). It comes last, so
 /// a folder that is slow to answer (a network volume) or a fresh master it
 /// watches delays nothing else. A panic in it is caught and logged, and the
-/// rows it had not reached stay `recording` for the next launch. Blocks, so
-/// [`App::launch`] runs it on a blocking task.
+/// rows it had not reached stay `recording` for the next launch. Then the
+/// recordings in the audio folders that have no meeting at all are adopted
+/// ([`adopt_orphans`]), also after such a panic; their ids are returned.
+/// Blocks, so [`App::launch`] runs it on a blocking task.
 pub(crate) fn reconcile_at_launch(
     store: &Arc<Store>,
     pipeline: &CurrentPipeline,
@@ -582,9 +584,9 @@ pub(crate) fn reconcile_at_launch(
     check: &LiveRecordingCheck,
     zone: FixedOffset,
     runtime: &tokio::runtime::Handle,
-) {
-    let intake =
-        steno_pipeline::LocalRecordingIntake::over(store.clone(), pipeline.current(), zone);
+) -> Vec<uuid::Uuid> {
+    let current = pipeline.current();
+    let intake = steno_pipeline::LocalRecordingIntake::over(store.clone(), current.clone(), zone);
     let reconciled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         reconcile_interrupted(store, &intake, interrupted, check, runtime)
     }));
@@ -593,6 +595,15 @@ pub(crate) fn reconcile_at_launch(
             "the recovery of interrupted recordings panicked; the next launch tries again"
         );
     }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        adopt_orphans(store, &current, interrupted, check, zone, runtime)
+    }))
+    .unwrap_or_else(|_| {
+        tracing::warn!(
+            "the recovery of recordings with no meeting panicked; the next launch tries again"
+        );
+        Vec::new()
+    })
 }
 
 /// How long an exit waits for [`App::shutdown`] before the process ends
@@ -829,7 +840,10 @@ impl App {
     ///    and the retention sweep runs.
     /// 4. On a blocking task (`reconcile_at_launch`, which may wait up to
     ///    10 s for a master that is still written): those recordings are
-    ///    recovered, left alone or failed, and the list is refreshed.
+    ///    recovered, left alone or failed; a master in an audio folder with
+    ///    no meeting at all is adopted as one, and the main window says
+    ///    "Recovered a recording." under the Record control
+    ///    (`CaptureRecorder::note_adopted`); the list is refreshed.
     /// 5. Meanwhile the login item is registered the first time, the
     ///    handover listener starts when a phone is already paired, and the
     ///    update schedule starts with its launch tick
@@ -919,9 +933,11 @@ impl App {
                 self.zone,
                 self.runtime.clone(),
             );
-            let host = host.clone();
+            let (host, recorder) = (host.clone(), self.recorder.clone());
             move || {
-                reconcile_at_launch(&store, &pipeline, &interrupted, &check, zone, &runtime);
+                let adopted =
+                    reconcile_at_launch(&store, &pipeline, &interrupted, &check, zone, &runtime);
+                recorder.note_adopted(adopted.len());
                 host.store_changed();
             }
         };
@@ -1374,6 +1390,40 @@ mod tests {
         );
         assert_eq!(recovered.duration, 1.0);
         assert_eq!(store.asset(meeting.id).unwrap().unwrap().lanes, lanes);
+    }
+
+    /// `App::launch` itself: a call master in the audio folder with no
+    /// meeting (a row lost with the database) is adopted on the launch's
+    /// blocking task and processed, and the main window says "Recovered a
+    /// recording." under the Record control until the user dismisses it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_adopts_a_recording_with_no_meeting_and_says_so() {
+        use steno_host::services::Recorder as _;
+
+        let (dir, store) = crate::testing::temp_store();
+        let mut app = recording_app(&dir, &store);
+        app.live_recording_check = crate::testing::an_hour_later();
+        let meeting_id = uuid::Uuid::new_v4();
+        let layout = steno_core::RecordingLayout::new(&dir.path().join("audio"), meeting_id);
+        let lanes = [steno_core::AudioLane::Mic, steno_core::AudioLane::System];
+        let mut writer = steno_audio::RecordingWriter::new(&layout, &lanes, false).unwrap();
+        crate::testing::write_frames(&mut writer, 100);
+        drop(writer);
+
+        let host = Arc::new(app.host().unwrap());
+        app.launch(&host);
+        app.launch_finished().await;
+        app.pipeline.current().wait_until_idle().await;
+        let adopted = store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(adopted.state, steno_core::MeetingState::Ready);
+        assert_eq!(adopted.source, steno_core::MeetingSource::MacCall);
+        assert_eq!(adopted.duration, 1.0);
+        assert_eq!(
+            app.recorder.status().warning.as_deref(),
+            Some("Recovered a recording.")
+        );
+        app.recorder.clear_messages();
+        assert_eq!(app.recorder.status().warning, None);
     }
 
     /// The models directory is decided once, when the app is built: a
