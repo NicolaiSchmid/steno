@@ -64,7 +64,9 @@ Windows and Linux never fail here. WASAPI opens both streams with
    headset delivers. The one changed text is the error for a rate outside the
    range: "the audio devices run at N Hz, which Steno cannot record" replaces "the
    audio devices run at N Hz, not 48000 Hz". An aggregate that is gone reads as
-   0 Hz there.
+   0 Hz there. The desktop app's status line says the same in its own words:
+   "Recording could not start: the audio devices run at N Hz, which Steno
+   cannot record."
 
 ## Quality bar
 

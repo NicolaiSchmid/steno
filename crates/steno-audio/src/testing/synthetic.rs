@@ -307,6 +307,18 @@ impl SyntheticCaptureBackend {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    /// What a start reports, and the rate it delivers at: `stream` or, on a
+    /// restart, `stream_after_restart`; `SYNTHETIC` when unset.
+    fn stream_for(&self, is_restart: bool) -> CaptureStream {
+        if is_restart {
+            &self.options.stream_after_restart
+        } else {
+            &self.options.stream
+        }
+        .clone()
+        .unwrap_or(CaptureStream::SYNTHETIC)
+    }
 }
 
 impl CaptureBackend for SyntheticCaptureBackend {
@@ -335,13 +347,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
         }
         self.stop_requested.store(false, Ordering::Release);
         self.completion.reset();
-        let stream = if is_restart {
-            &self.options.stream_after_restart
-        } else {
-            &self.options.stream
-        }
-        .clone()
-        .unwrap_or(CaptureStream::SYNTHETIC);
+        let stream = self.stream_for(is_restart);
         let rate = stream.sample_rate;
         let mut generator = Generator::new(
             lanes,
