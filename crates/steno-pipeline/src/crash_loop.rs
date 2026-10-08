@@ -10,14 +10,19 @@
 //!   ([`QuitLatch::set`]) takes each open run back off, one each, on every
 //!   pipeline that shares the latch, so earlier crashes still count. What
 //!   is left is the runs that ended with the app: an abort, an
-//!   out-of-memory kill, a power loss. A panic the app survives is the
-//!   pipeline's to report, and counting it too would cap it twice.
+//!   out-of-memory kill, a power loss. A panic the app survives already
+//!   fails the meeting through the pipeline's panic wrap, so it is not
+//!   counted as well.
 //! - **Who is charged.** Every run alive at a crash. So launch recovery
 //!   runs a meeting with a count alone, after the meetings without one
 //!   and oldest first, and counts it only when its turn comes: a meeting
 //!   that takes the app down is charged for its own crashes, and another
 //!   meeting at most once, for a run it shared with one before it had a
-//!   count.
+//!   count. The price: a run started at once that never ends (a
+//!   destination on a share that does not answer, say; the language model
+//!   has a timeout) holds every meeting with a count back for the rest of
+//!   the session. Nothing is lost: those runs were never counted, so the
+//!   next launch resumes them.
 //! - **When it gives up.** Launch recovery resumes a meeting while fewer
 //!   than [`MAX_CRASHED_RUNS`] of its runs ended with the app, and after
 //!   that marks it failed with [`TOO_MANY_CRASHED_RUNS`], so a meeting
@@ -32,12 +37,13 @@
 //! processed, the Swift app (which shares the database until the Mac
 //! cutover) never sees it, and it needs no migration. Every write goes
 //! through [`replace_file`], so a crash leaves the old count or the new
-//! one. A folder that cannot be written leaves the meeting unguarded, as
-//! before.
+//! one. A folder that cannot be written, or a master outside a folder
+//! named after its meeting, leaves the meeting unguarded, as before.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use steno_core::json::uuid_string;
 use steno_core::{AudioAsset, RecordingLayout};
 
 use crate::QuitLatch;
@@ -60,14 +66,26 @@ pub const TOO_MANY_CRASHED_RUNS: &str = "Steno closed unexpectedly 3 times while
 /// One meeting's count; see the module doc.
 #[derive(Debug, Clone)]
 pub(crate) struct RunCount {
-    /// `None` when the asset has no folder on disk.
+    /// `None` when the master is not in a folder of its own.
     path: Option<PathBuf>,
 }
 
 impl RunCount {
+    /// The count in the master's folder when that folder is named after
+    /// the meeting's id, as the recording layout names it, so two meetings
+    /// never share one count. Any other folder (`files_to_remove` makes the
+    /// same check) leaves the meeting unguarded.
     pub(crate) fn of(asset: &AudioAsset) -> Self {
+        let folder = uuid_string(asset.meeting_id);
         Self {
-            path: RecordingLayout::from_asset(asset).map(|layout| layout.processing_runs()),
+            path: RecordingLayout::from_asset(asset)
+                .filter(|layout| {
+                    layout
+                        .directory
+                        .file_name()
+                        .is_some_and(|name| name == folder.as_str())
+                })
+                .map(|layout| layout.processing_runs()),
         }
     }
 
@@ -134,10 +152,11 @@ impl OpenRuns {
         key
     }
 
-    /// Ends the run under `key`, counted under `count`. Still open, it
-    /// failed or panicked before the exit, which the pipeline reports, and
-    /// the count goes. Taken back by the exit, earlier runs that ended with
-    /// the app still count, unless the run made the meeting ready.
+    /// Ends the run under `key`, counted under `count`. If the run is still
+    /// open, it failed or panicked before the exit, which the pipeline
+    /// reports, and the count goes. If the exit took it back, the count
+    /// stays, so earlier crashes still count, unless the run made the
+    /// meeting ready.
     pub(crate) fn close(&mut self, key: u64, count: &RunCount, succeeded: bool) {
         if self.runs.remove(&key).is_some() || succeeded {
             count.clear();
@@ -186,5 +205,58 @@ impl CountedRun {
 impl Drop for CountedRun {
     fn drop(&mut self) {
         self.latch.close_run(self.key, &self.count, self.succeeded);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use steno_core::paths::file_url;
+    use steno_core::{AudioFormat, AudioLane, AudioRetention};
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn asset_in(folder: &Path, meeting_id: Uuid) -> AudioAsset {
+        AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id,
+            url: file_url(&folder.join("recording.caf"), false),
+            format: AudioFormat::Caf48kFloat32,
+            lanes: vec![AudioLane::Mixed],
+            sidecars_16k: BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepForever,
+            expires_at: None,
+        }
+    }
+
+    /// The count lives only in a folder named after the meeting's id, so
+    /// two meetings whose masters share a folder share no count.
+    #[test]
+    fn a_master_outside_its_meetings_folder_is_not_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let meeting_id = Uuid::new_v4();
+        let own = RecordingLayout::new(dir.path(), meeting_id);
+        own.create_directories(false).unwrap();
+        let counted = RunCount::of(&asset_in(&own.directory, meeting_id));
+        counted.started();
+        assert_eq!(counted.read(), 1);
+        assert!(own.processing_runs().exists());
+
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        for _ in 0..2 {
+            let count = RunCount::of(&asset_in(&shared, Uuid::new_v4()));
+            count.started();
+            assert_eq!(count.read(), 0);
+        }
+        assert!(
+            !RecordingLayout::from_directory(&shared)
+                .processing_runs()
+                .exists()
+        );
     }
 }
