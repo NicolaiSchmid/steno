@@ -313,7 +313,7 @@ impl GatedHandover {
     /// the listener is open, or when the gate is gone.
     pub async fn follow(self: Arc<Self>, changed: impl FnOnce() + Send + 'static) {
         let mut gate = self.gate.clone();
-        loop {
+        let listener = loop {
             // `wait_for` marks the value it accepted as seen, so the
             // `changed` below waits for the next one.
             if gate.wait_for(|gate| gate.opens_listener()).await.is_err() {
@@ -321,20 +321,8 @@ impl GatedHandover {
             }
             let this = self.clone();
             let built = tokio::task::spawn_blocking(move || (this.make)()).await;
-            match built
-                .map_err(|error| error.to_string())
-                .and_then(|made| made)
-            {
-                Ok(listener) => {
-                    self.failure.send_replace(None);
-                    let service = listener.listener().cloned();
-                    let _ = self.listener.set(listener);
-                    if let Some(service) = service {
-                        start_if_paired(&service).await;
-                    }
-                    changed();
-                    return;
-                }
+            match built.unwrap_or_else(|error| Err(error.to_string())) {
+                Ok(listener) => break listener,
                 Err(error) => {
                     tracing::warn!(%error, "phone handover is unavailable");
                     self.failure.send_replace(Some(error));
@@ -343,7 +331,14 @@ impl GatedHandover {
                     }
                 }
             }
+        };
+        self.failure.send_replace(None);
+        let service = listener.listener().cloned();
+        let _ = self.listener.set(listener);
+        if let Some(service) = service {
+            start_if_paired(&service).await;
         }
+        changed();
     }
 
     /// The listener's service, once open.
