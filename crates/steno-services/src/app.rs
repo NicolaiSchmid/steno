@@ -29,7 +29,7 @@ use crate::pipeline::{
     BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
 };
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
-use crate::recorder::{CaptureRecorder, MakeCaptureSession};
+use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
 use crate::secrets::secret_store;
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 
@@ -312,6 +312,7 @@ fn handover_listener(
 /// for each): permissions (all granted), updater, clip player, QR encoder;
 /// the audio device list is empty off the Mac until the `PipeWire` and
 /// WASAPI backends enumerate devices.
+#[allow(clippy::too_many_lines)]
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let mut warnings = Vec::new();
     let paths = options.paths;
@@ -352,7 +353,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
 
     let permissions = Arc::new(FakePermissions::all_granted());
     let speech_models = Arc::new(ModelStoreSpeechModels::new(speech));
-    let recorder = Arc::new(CaptureRecorder::new(
+    let recorder = CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
         options.make_capture_session,
@@ -360,7 +361,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         speech_models.clone(),
         zone,
         runtime.clone(),
-    ));
+    );
+    // The save writes to the database's volume too.
+    recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
 
     let handover = match handover_listener(&store, &pipeline, &secrets, zone, &runtime) {
         Ok(pair) => Some(pair),
@@ -879,6 +882,19 @@ mod tests {
         assert_eq!(listed, expected);
     }
 
+    /// The recorder's disk watch reads the volume of the database's folder
+    /// beside the recordings folder's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_recorder_watches_the_database_folder_s_volume_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("elsewhere").join("steno.sqlite");
+        let mut options = options_under(&dir.path().join("support"));
+        options.database_path = Some(database.clone());
+        let app = build(options).unwrap();
+        let disk = app.recorder.disk();
+        assert_eq!(disk.database_folder.as_deref(), database.parent());
+    }
+
     /// What `App::launch` does to a meeting a previous process left
     /// recording: it fails with Swift's reason.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1064,7 +1080,7 @@ mod tests {
         let pipeline = crate::testing::current_pipeline(fake_dependencies(store, "fake-engine"));
         let zone = FixedOffset::east_opt(0).unwrap();
         let fakes = steno_host::fakes::FakeServices::new(Utc::now());
-        let recorder = Arc::new(CaptureRecorder::new(
+        let recorder = CaptureRecorder::new(
             store.clone(),
             pipeline.clone(),
             make_session,
@@ -1072,7 +1088,7 @@ mod tests {
             fakes.speech_models.clone(),
             zone,
             tokio::runtime::Handle::current(),
-        ));
+        );
         let mut services = fakes.services();
         services.recorder = recorder.clone();
         App {
@@ -1137,7 +1153,8 @@ mod tests {
         );
         let host = wired_host(&app);
         let start = serde_json::json!({ "mode": "inPerson" });
-        let failed = Some("Recording could not start: no capture device".to_owned());
+        let failed =
+            Some("Recording could not start: Steno could not open the audio devices.".to_owned());
         for (method, params, error) in [
             (BridgeMethod::RecordingStart, Some(start), failed.clone()),
             (BridgeMethod::RecordingToggle, None, failed.clone()),

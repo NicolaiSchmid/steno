@@ -20,22 +20,22 @@
 //! a processing thread built for the new latencies, and keeps the sink, the
 //! relay, the writer thread, the writer and the files. The state stays
 //! `Recording`; `notices` carries `DeviceChanged` and `DeviceResumed`.
-//! Only when every restart fails does the recording end in
-//! `Failed(DeviceLost)`. A chosen microphone that is gone fails no restart:
-//! the live backends then record the default input and say so in
-//! [`CaptureStream::input`], which [`CaptureSession::stream`] hands out
-//! (see [`CaptureBackend::start`]). One that is connected but does not open
-//! is the session's to replace: when the start, or a rebuild's last
-//! restart, fails on it, the session starts the backend once more without
-//! a UID and marks that input as the fallback, so the recording ends only
-//! when the default input cannot be opened either (Rust only: Swift fails
-//! the start, and ends the recording after its restarts). A rebuild tries
-//! the default already after its first failed restart when the stream it
-//! replaces was on the fallback, or after the first restart on which the
-//! graph did not run on the chosen microphone
+//! Only when every restart fails, or the rebuild panics, does the
+//! recording end in `Failed(DeviceLost)`. A chosen microphone that is gone
+//! fails no restart: the live backends then record the default input and
+//! say so in [`CaptureStream::input`], which [`CaptureSession::stream`]
+//! hands out (see [`CaptureBackend::start`]). One that is connected but
+//! does not open is the session's to replace: when the start, or a
+//! rebuild's last restart, fails on it, the session starts the backend once
+//! more without a UID and marks that input as the fallback, so the
+//! recording ends only when the default input cannot be opened either (Rust
+//! only: Swift fails the start, and ends the recording after its restarts).
+//! A rebuild tries the default already after its first failed restart when
+//! the stream it replaces was on the fallback, or after the first restart
+//! on which the graph did not run on the chosen microphone
 //! ([`CaptureError::DidNotRun`]), not after the last: the gap then stays
-//! under [`CaptureSession::MAXIMUM_GAP`] when that is the first restart,
-//! so the restarts take nothing from the master.
+//! under [`CaptureSession::MAXIMUM_GAP`] when that is the first restart, so
+//! the restarts take nothing from the master.
 //!
 //! A recording cut short (device loss, a failed write) is finalised and
 //! travels in the state: `Failed { error, recording }`. So does the whole
@@ -106,6 +106,8 @@
 //! hangs there freezes the session's callers with it.
 
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
@@ -168,6 +170,9 @@ struct Core {
     /// Notified on every state change; `stop()` waits on it while another
     /// thread's finalise holds `Stopping`.
     state_changed: Condvar,
+    /// For tests ([`CaptureSession::refuse_the_writer_failure_thread`]):
+    /// a failed write finds no thread to end the recording on.
+    refuse_writer_failure_thread: AtomicBool,
 }
 
 struct Inner {
@@ -342,6 +347,7 @@ impl CaptureSession {
                     before_stop_waits: None,
                 }),
                 state_changed: Condvar::new(),
+                refuse_writer_failure_thread: AtomicBool::new(false),
             }),
         })
     }
@@ -403,6 +409,34 @@ impl CaptureSession {
             .active
             .as_ref()
             .map(|active| active.stream.clone())
+    }
+
+    /// Whether a write failed in the recording in progress, which still
+    /// shows `Recording`: every frame is dropped from that write on. The
+    /// session ends such a recording itself, in `Failed`, on a thread of its
+    /// own; when that thread could not be spawned the state stays
+    /// `Recording`, and a caller that polls this stops the recording
+    /// instead (`stop()` returns it with the write's failure in it). Rust
+    /// only: Swift's writer-failure `Task` always ran.
+    #[must_use]
+    pub fn write_failed(&self) -> bool {
+        let inner = self.core.lock();
+        matches!(inner.state, CaptureState::Recording { .. })
+            && inner
+                .active
+                .as_ref()
+                .and_then(|active| active.writer_thread.as_ref())
+                .is_some_and(WriterThread::has_failed)
+    }
+
+    /// For tests: a write that fails from now on finds no thread to end
+    /// the recording on, as when the system cannot spawn one, so the state
+    /// stays `Recording` and only [`Self::write_failed`] tells.
+    #[doc(hidden)]
+    pub fn refuse_the_writer_failure_thread(&self) {
+        self.core
+            .refuse_writer_failure_thread
+            .store(true, Ordering::SeqCst);
     }
 
     /// Starts a recording for `meeting_id` in its own folder of the configured
@@ -533,8 +567,21 @@ impl Core {
         ProcessingThread::new(Arc::clone(sink), Arc::clone(relay), configuration, levels)
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// [`Self::start_recording`] under a guard: a panic on the way (a
+    /// writer or a processing thread the system cannot spawn) leaves
+    /// `Failed` with no recording and the backend stopped, instead of
+    /// `Starting` for good, which no `start()` or `stop()` leaves. The body
+    /// holds the lock throughout and drops it as it unwinds, before the
+    /// guard takes it.
     fn start(self: &Arc<Self>, meeting_id: Uuid) -> Result<(), CaptureError> {
+        let unwinding = Unwinding::starting(self);
+        let started = self.start_recording(meeting_id);
+        unwinding.disarm();
+        started
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn start_recording(self: &Arc<Self>, meeting_id: Uuid) -> Result<(), CaptureError> {
         let mut inner = self.lock();
         match inner.state {
             CaptureState::Idle | CaptureState::Failed { .. } => {}
@@ -634,10 +681,22 @@ impl Core {
                 // The writer thread reports this; finalising joins that
                 // thread, so it runs on its own, as Swift's `Task` did.
                 if let Some(core) = on_error.upgrade() {
-                    std::thread::Builder::new()
-                        .name("steno-wfail".into())
-                        .spawn(move || core.writer_failed(&error, recording))
-                        .expect("spawn writer failure thread");
+                    let spawned = if core.refuse_writer_failure_thread.load(Ordering::SeqCst) {
+                        Err(std::io::Error::other("refused for a test"))
+                    } else {
+                        std::thread::Builder::new()
+                            .name("steno-wfail".into())
+                            .spawn(move || core.writer_failed(&error, recording))
+                            .map(drop)
+                    };
+                    // No thread to finalise on: the state stays
+                    // `Recording` with nothing written, which
+                    // `CaptureSession::write_failed` tells a watcher, and
+                    // `stop()` returns the recording with the write's
+                    // failure in it.
+                    if let Err(spawn) = spawned {
+                        tracing::error!(%spawn, "a write failed and the recording could not be ended");
+                    }
                 }
             }),
         );
@@ -723,13 +782,15 @@ impl Core {
         );
         let finished = self.finish();
         // Closing the files can fail on a full disk; the master is still
-        // readable to its last frame, so the result comes back and the
-        // state carries the failure instead of `stop()` throwing it away.
+        // readable to its last frame, so the result comes back with the
+        // failure in it and the state carries it too.
         let state = match &finished {
-            Ok((_, None)) => CaptureState::Idle,
-            Ok((result, Some(error))) => CaptureState::Failed {
-                error: error.clone(),
-                recording: Some(Box::new(result.clone())),
+            Ok(result) => match &result.failure {
+                None => CaptureState::Idle,
+                Some(error) => CaptureState::Failed {
+                    error: error.clone(),
+                    recording: Some(Box::new(result.clone())),
+                },
             },
             Err(error) => CaptureState::Failed {
                 error: error.clone(),
@@ -738,22 +799,22 @@ impl Core {
         };
         self.set_state(&mut self.lock(), &state);
         unwinding.disarm();
-        finished.map(|(result, _)| result)
+        finished
     }
 
     /// Rebuild abandoned and joined, backend off, rings drained, relay
     /// drained, files closed, asset built. The asset is built even when
-    /// closing the files fails (its paths are fixed at start and the
-    /// duration is what the master holds); the failure comes back beside
-    /// it: a failed write or close, else the device loss that ended the
-    /// recording, else a sync that failed while recording.
-    /// `WriterFailed` with no asset when there is nothing to hand out:
-    /// the writer thread died and took the writer with it, or the master is
-    /// gone from disk (its folder deleted while recording; an unlinked file
-    /// still writes and closes without an error). The caller has set the
-    /// state to `Stopping`; the threads are stopped with the lock released
-    /// (see the module doc).
-    fn finish(&self) -> Result<(CaptureResult, Option<CaptureError>), CaptureError> {
+    /// a write or closing the files failed (its paths are fixed at start
+    /// and the duration is what the master holds); the failure comes back
+    /// in [`CaptureResult::failure`]: a failed write or close, else the
+    /// device loss that ended the recording, else a sync that failed while
+    /// recording. `WriterFailed` with no asset when there is nothing to
+    /// hand out: the writer thread died and took the writer with it, or
+    /// the master is gone from disk (its folder deleted while recording; an
+    /// unlinked file still writes and closes without an error). The caller
+    /// has set the state to `Stopping`; the threads are stopped with the
+    /// lock released (see the module doc).
+    fn finish(&self) -> Result<CaptureResult, CaptureError> {
         let mut active = self
             .lock()
             .active
@@ -853,7 +914,11 @@ impl Core {
             retention: AudioRetention::KeepForever,
             expires_at: None,
         };
-        Ok((CaptureResult { asset, statistics }, failure))
+        Ok(CaptureResult {
+            asset,
+            statistics,
+            failure,
+        })
     }
 
     // Device changes
@@ -879,6 +944,7 @@ impl Core {
             return;
         }
         let generation = inner.rebuild_generation + 1;
+        let recording = inner.recordings_started;
         let Some(active) = inner.active.as_mut() else {
             return;
         };
@@ -892,10 +958,25 @@ impl Core {
         // Spawned under the lock so the handle is in place before any
         // `finish()` can look for it; the thread's first step waits for
         // the lock.
-        let thread = std::thread::Builder::new()
+        let thread = match std::thread::Builder::new()
             .name("steno-rebuild".into())
-            .spawn(move || core.rebuild(generation, &token))
-            .expect("spawn rebuild thread");
+            .spawn(move || core.rebuild(generation, recording, &token))
+        {
+            Ok(thread) => thread,
+            // Never a panic here: this runs on the backend's thread (the
+            // PipeWire loop's on Linux), which a panic would end without a
+            // word. The recording goes on with the devices it had, and the
+            // latch opens again (only a rebuild opens it otherwise), so the
+            // backend's next report tries again. Not tested: the spawn
+            // cannot be made to fail here without a seam on the backend's
+            // thread; a lane that stops delivering after it is the stall
+            // watchdog's to catch.
+            Err(spawn) => {
+                tracing::error!(%spawn, ?reason, "a device change could not be followed");
+                active.sink.rearm_device_change();
+                return;
+            }
+        };
         active.rebuild = Some(Rebuild { cancel, thread });
         inner.rebuild_generation = generation;
         Self::emit(inner, CaptureNotice::DeviceChanged(reason));
@@ -907,6 +988,33 @@ impl Core {
             && inner.rebuild_generation == generation
     }
 
+    /// [`Self::rebuild_steps`], and a panic in them ends the recording as
+    /// a device that stayed lost does: saved, in `Failed(DeviceLost)`, so
+    /// the recorder hears of it rather than showing `Recording` over a
+    /// session that no longer writes anything. `recording` is the start
+    /// the rebuild belongs to.
+    fn rebuild(
+        self: &Arc<Self>,
+        generation: usize,
+        recording: usize,
+        cancel: &Cancel,
+    ) -> (usize, f32) {
+        // `AssertUnwindSafe` holds: every step changes `Inner` under the
+        // lock in whole assignments (a poisoned lock is read as is), so
+        // a panic leaves it as the last completed step did. What a panic
+        // can leave half done is outside it: the old backend stopped, the
+        // processing thread taken out and not replaced, a new stream not
+        // handed over. `finish()` copes with each, as it does when a stop
+        // cuts a rebuild short: it stops the backend again, stops a
+        // processing thread only when there is one, and drains the rings.
+        let steps = AssertUnwindSafe(|| self.rebuild_steps(generation, recording, cancel));
+        std::panic::catch_unwind(steps).unwrap_or_else(|_| {
+            tracing::error!("following a device change panicked; the recording ends");
+            self.device_lost(recording, generation);
+            (0, 0.0)
+        })
+    }
+
     /// Old backend and processing thread off, then `start` again with
     /// backoff; the gap from the moment the old backend was told to stop
     /// is written as silence before the new processing thread starts. The
@@ -915,7 +1023,12 @@ impl Core {
     /// `resume` did not account because a stop came first, and the old
     /// processing thread's system-lane peak for a `finish()` that took the
     /// recording before this thread could fold it in.
-    fn rebuild(self: &Arc<Self>, generation: usize, cancel: &Cancel) -> (usize, f32) {
+    fn rebuild_steps(
+        self: &Arc<Self>,
+        generation: usize,
+        recording: usize,
+        cancel: &Cancel,
+    ) -> (usize, f32) {
         // The stopwatch runs from before the teardown: the HAL calls in
         // `stop()` take tens to hundreds of milliseconds during a device
         // transition, and that is dead time in the master too.
@@ -988,7 +1101,7 @@ impl Core {
             }
             Restart::Abandoned => 0,
             Restart::Exhausted => {
-                self.device_lost();
+                self.device_lost(recording, generation);
                 0
             }
         };
@@ -1205,12 +1318,23 @@ impl Core {
         true
     }
 
-    /// Every restart failed: the recording ends, finalised and carried in
-    /// `Failed(DeviceLost)`.
-    fn device_lost(&self) {
+    /// Every restart failed, or the rebuild panicked: the recording ends,
+    /// finalised and carried in `Failed(DeviceLost)`. Only when the
+    /// rebuild numbered `generation` of the start numbered `recording` is
+    /// still the newest, checked under the same lock as the change: an
+    /// older one's recording, or its place, belongs to another thread now.
+    /// The generation decides only for a panic after `resume` began the
+    /// next rebuild: before that no newer one can begin (`begin_rebuild`
+    /// keeps a report for later while this one holds `active.rebuild`),
+    /// and a stop leaves `Recording`. No test reaches it; it stays as the
+    /// guard for that case.
+    fn device_lost(&self, recording: usize, generation: usize) {
         {
             let mut inner = self.lock();
-            if !matches!(inner.state, CaptureState::Recording { .. }) {
+            if !matches!(inner.state, CaptureState::Recording { .. })
+                || inner.recordings_started != recording
+                || inner.rebuild_generation != generation
+            {
                 return;
             }
             let Some(active) = inner.active.as_mut() else {
@@ -1224,8 +1348,11 @@ impl Core {
         }
         let unwinding = Unwinding::arm(self, CaptureError::DeviceLost);
         let state = match self.finish() {
-            Ok((result, failure)) => CaptureState::Failed {
-                error: failure.unwrap_or(CaptureError::DeviceLost),
+            Ok(mut result) => CaptureState::Failed {
+                error: result
+                    .failure
+                    .get_or_insert(CaptureError::DeviceLost)
+                    .clone(),
                 recording: Some(Box::new(result)),
             },
             Err(error) => CaptureState::Failed {
@@ -1251,7 +1378,10 @@ impl Core {
         }
         let failure = as_writer_failure(error.clone());
         let unwinding = Unwinding::arm(self, failure.clone());
-        let result = self.finish().ok().map(|(result, _)| Box::new(result));
+        let result = self.finish().ok().map(|mut result| {
+            result.failure = Some(failure.clone());
+            Box::new(result)
+        });
         let mut inner = self.lock();
         self.set_state(
             &mut inner,
@@ -1273,13 +1403,16 @@ fn as_writer_failure(error: CaptureError) -> CaptureError {
     }
 }
 
-/// Armed while a finalise holds `Stopping`. If the finalise panics, the
-/// drop during the unwind sets `Failed { error, recording: None }` and
-/// wakes the waiting `stop()`s, which would otherwise wait for good; the
-/// next `start()` then works. A finalise that returns disarms it.
+/// Armed while a finalise holds `Stopping`, or a start `Starting`. If it
+/// panics, the drop during the unwind sets `Failed { error, recording:
+/// None }` and wakes the waiting `stop()`s, which would otherwise wait for
+/// good; the next `start()` then works. A start's also stops the backend
+/// it may have started. A step that returns disarms it.
 struct Unwinding<'a> {
     core: &'a Core,
     error: Option<CaptureError>,
+    /// A start's, which holds `Starting`; a finalise's holds `Stopping`.
+    starting: bool,
 }
 
 impl<'a> Unwinding<'a> {
@@ -1287,6 +1420,17 @@ impl<'a> Unwinding<'a> {
         Self {
             core,
             error: Some(error),
+            starting: false,
+        }
+    }
+
+    fn starting(core: &'a Core) -> Self {
+        Self {
+            core,
+            error: Some(CaptureError::BackendFailed(
+                "starting the recording panicked".into(),
+            )),
+            starting: true,
         }
     }
 
@@ -1298,16 +1442,26 @@ impl<'a> Unwinding<'a> {
 impl Drop for Unwinding<'_> {
     fn drop(&mut self) {
         if let Some(error) = self.error.take() {
-            let mut inner = self.core.lock();
-            if matches!(inner.state, CaptureState::Stopping) {
-                self.core.set_state(
-                    &mut inner,
-                    &CaptureState::Failed {
-                        error,
-                        recording: None,
-                    },
-                );
+            // The state is the guarded step's until the drop leaves it, so
+            // the backend stops with the lock released, as everywhere.
+            let holds = if self.starting {
+                CaptureState::Starting
+            } else {
+                CaptureState::Stopping
+            };
+            if self.core.lock().state != holds {
+                return;
             }
+            if self.starting {
+                self.core.backend.stop();
+            }
+            self.core.set_state(
+                &mut self.core.lock(),
+                &CaptureState::Failed {
+                    error,
+                    recording: None,
+                },
+            );
         }
     }
 }

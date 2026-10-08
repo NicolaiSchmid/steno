@@ -82,6 +82,10 @@ pub struct SidecarConfig {
     pub transcribe_timeout_ratio: f64,
     /// For [`Request::Health`] and the wait for [`Reply::Bye`].
     pub control_timeout: Duration,
+    /// Where the child writes a crash log when it panics
+    /// (`steno_core::crash_log`, through its environment variable); the
+    /// app passes its support directory, `None` writes none.
+    pub crash_log_directory: Option<PathBuf>,
 }
 
 impl SidecarConfig {
@@ -99,6 +103,7 @@ impl SidecarConfig {
             transcribe_timeout_floor: Duration::from_secs(120),
             transcribe_timeout_ratio: 1.0,
             control_timeout: Duration::from_secs(5),
+            crash_log_directory: None,
         }
     }
 
@@ -206,6 +211,9 @@ fn command(config: &SidecarConfig) -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(directory) = &config.crash_log_directory {
+        command.env(steno_core::crash_log::DIRECTORY_VARIABLE, directory);
+    }
     // The child is a console program: started from the windowed app
     // without this flag, Windows opens a console window for it on every
     // job, and closing that window kills the child mid-request.

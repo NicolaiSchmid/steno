@@ -140,6 +140,7 @@ impl SpeechSetup {
         let mut sidecar = sidecar_config();
         // The client asks for it on Windows only.
         sidecar.options.directml = speech_settings.directml_on_windows;
+        sidecar.crash_log_directory = Some(paths.support_directory.clone());
         SpeechSetup {
             models_directory,
             speech_settings,
@@ -1354,6 +1355,21 @@ mod tests {
             assert_eq!(setup.speech_settings.directml_on_windows, directml);
             assert_eq!(setup.sidecar.options.directml, directml);
         }
+    }
+
+    /// The sidecar leaves its crash logs beside the app's, in the support
+    /// directory.
+    #[test]
+    fn the_sidecar_writes_its_crash_logs_into_the_support_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let setup = SpeechSetup::in_models_directory(
+            dir.path().join("Models"),
+            &StenoPaths::new(dir.path()),
+        );
+        assert_eq!(
+            setup.sidecar.crash_log_directory.as_deref(),
+            Some(dir.path())
+        );
     }
 
     #[test]

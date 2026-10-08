@@ -391,6 +391,36 @@ async fn a_panic_or_an_exit_is_a_crash_with_the_child_s_last_words() {
     .await;
 }
 
+/// A panicking child named a crash log folder writes its own crash log
+/// there, beside what its stderr gives the parent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_child_leaves_a_crash_log_in_the_folder_it_was_given() {
+    let logs = tempfile::tempdir().unwrap();
+    let folder = logs.path().to_path_buf();
+    let (engine, _dir) = engine_with_fault("panic", |config| {
+        config.crash_log_directory = Some(folder);
+    });
+    assert_recovers(&engine, |error| {
+        assert!(matches!(error, SidecarError::Crashed { .. }), "{error}");
+    })
+    .await;
+    let written: Vec<_> = std::fs::read_dir(logs.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(written.len(), 1, "{written:?}");
+    let name = written[0].file_name().unwrap().to_str().unwrap().to_owned();
+    assert!(
+        name.starts_with("crash-") && name.ends_with("-sidecar.log"),
+        "{name}"
+    );
+    let text = std::fs::read_to_string(&written[0]).unwrap();
+    assert!(
+        text.contains("simulated panic in the speech engine"),
+        "{text}"
+    );
+}
+
 /// A crash report waits for the end of stderr, not only for the exit: a
 /// process the child left behind holds stderr and writes a line 300 ms
 /// after the child exited, and the report still holds it.

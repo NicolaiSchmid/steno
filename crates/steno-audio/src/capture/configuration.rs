@@ -160,14 +160,19 @@ pub(crate) fn four_char_code(status: i32) -> String {
 }
 
 /// What `stop()` returns: the finished master with its sidecars (retention
-/// `KeepForever` until the caller sets it from `Settings`) and the
-/// session's statistics.
+/// `KeepForever` until the caller sets it from `Settings`), the session's
+/// statistics, and what cut the recording short.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureResult {
     /// The master with its sidecars.
     pub asset: AudioAsset,
     /// Duration, drops, silence and device changes.
     pub statistics: CaptureStatistics,
+    /// What ended the recording early or failed its close, the recording
+    /// up to it kept: a device that stayed lost, a write or a close that
+    /// failed (a full disk). `None` when it ended as asked and closed
+    /// cleanly. Rust only: Swift's `stop()` threw the close's failure away.
+    pub failure: Option<CaptureError>,
 }
 
 /// The session's state machine; see the `session` module doc.

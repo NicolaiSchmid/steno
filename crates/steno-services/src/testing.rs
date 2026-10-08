@@ -73,13 +73,7 @@ pub fn current_pipeline(dependencies: PipelineDependencies) -> Arc<CurrentPipeli
 /// microphone lane in real time, for up to ten minutes.
 pub fn synthetic_capture() -> MakeCaptureSession {
     Arc::new(|configuration: steno_audio::CaptureConfiguration| {
-        let lanes = configuration.lanes();
-        let mut options = steno_audio::testing::synthetic::SyntheticOptions::tones(
-            &lanes,
-            &[(steno_core::AudioLane::Mic, 440.0)],
-            600.0,
-        );
-        options.real_time = true;
+        let options = synthetic_tone(&configuration);
         steno_audio::CaptureSession::with_backend(
             configuration,
             Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
@@ -89,6 +83,20 @@ pub fn synthetic_capture() -> MakeCaptureSession {
         )
         .map_err(|error| error.to_string())
     })
+}
+
+/// What [`synthetic_capture`] plays for `configuration`: a tone on the
+/// microphone lane in real time, for up to ten minutes.
+pub fn synthetic_tone(
+    configuration: &steno_audio::CaptureConfiguration,
+) -> steno_audio::testing::synthetic::SyntheticOptions {
+    let mut options = steno_audio::testing::synthetic::SyntheticOptions::tones(
+        &configuration.lanes(),
+        &[(steno_core::AudioLane::Mic, 440.0)],
+        600.0,
+    );
+    options.real_time = true;
+    options
 }
 
 /// Waits until `done` holds, failing the test with `what` after
