@@ -8,9 +8,11 @@
 //! order they were asked for (`Engine::in_order`). A second lock, `files`,
 //! serialises the creation of a recording's inbox files with the check and
 //! discard that leave another device's upload alone (`Engine::discard_own`),
-//! so no announce opens its files between the two. It is held across those
-//! synchronous file calls only, never across a yield, and taken before the
-//! state lock, never inside it. The recording routes live in `recording.rs`.
+//! so no announce opens its files between the two. A first announce holds
+//! it from its `change` through its own discard and opening
+//! (`Engine::open_files`). It is held across synchronous calls only, never
+//! across a yield, and taken before the state lock, never inside it. The
+//! recording routes live in `recording.rs`.
 //! Swift: `Routing/HandoverEngine.swift`, `Routing/HTTPMessages.swift`.
 
 mod recording;
@@ -294,8 +296,9 @@ pub struct Engine {
     receipts: watch::Sender<Vec<HandoverReceipt>>,
     state: Mutex<State>,
     /// Held while a recording's inbox files are created
-    /// ([`Engine::open_files`], [`Engine::reopen_missing_files`]) and while
-    /// [`Engine::discard_own`], [`Engine::discard_own_while_revoked`] and
+    /// ([`Engine::open_files`], from a first announce's `change`;
+    /// [`Engine::reopen_missing_files`]) and while [`Engine::discard_own`],
+    /// [`Engine::discard_own_while_revoked`] and
     /// [`Engine::discard_and_forget_own`] check memory and discard; see
     /// there. Swift: none; the actor runs the check, `begin` and the
     /// receipt in one step.
@@ -673,36 +676,27 @@ impl Engine {
     /// upload. Every discard of the engine goes through here,
     /// [`Engine::discard_own_while_revoked`] or
     /// [`Engine::discard_and_forget_own`], except the sweep before the
-    /// listener starts.
+    /// listener starts and the first announce's ([`Engine::open_files`]).
     ///
     /// The check and the discard are one step under the files lock. Files
-    /// are created only under the same lock, for a device that `revoked`
-    /// does not hold ([`Engine::files_for`]): by the announce whose change
-    /// made the receipt, or by a re-announce of the receipt's owner. So
-    /// another phone's announce that opened its files made its receipt
-    /// before the check, and its files stay, or opens them once the
-    /// discard is over. Three stretches with no yield in them, on other
-    /// threads, leave files whose receipt memory does not hold at the
-    /// check:
+    /// are created only under the same lock: by a first announce, whose
+    /// `change` and opening are one step under it and which opens only
+    /// while memory holds its receipt ([`Engine::open_files`]), or by a
+    /// re-announce of the receipt's owner, for a device that `revoked` does
+    /// not hold ([`Engine::files_for`]). So another phone's announce that
+    /// opened its files made its receipt before the check, and its files
+    /// stay, or opens them once the discard is over. Two stretches with no
+    /// yield in them, on other threads, leave files whose receipt memory
+    /// does not hold at the check:
     ///
-    /// - A pairing again after the read of a re-announce, or after the
-    ///   `change` of a first announce, and before the opening. The
-    ///   re-announce's write puts the receipt in memory right after; the
-    ///   first announce's stays in the store only, so another phone's
-    ///   announce is answered 409.
-    /// - Another phone's receipt in memory before the check, its files not
-    ///   open yet. The check skips, this device's files stay, and that
-    ///   phone's `begin` keeps the old partial.
+    /// - A pairing again after the read of a re-announce and before its
+    ///   opening. The re-announce's write puts the receipt in memory right
+    ///   after.
     /// - A second revoke between [`Engine::reopen_missing_files`] and the
     ///   re-announce's write, which then keeps the receipt out of memory:
     ///   the reopened partial and sidecar belong to no receipt in memory or
-    ///   the store until the next start's sweep, and a later first announce
-    ///   of the recording id keeps that partial.
-    ///
-    /// A first announce that finds no receipt and discards every file of
-    /// its recording id before `begin` closes the last two; the plan's
-    /// "Open after the port" item owned by
-    /// `fix/handover-first-announce-discard` tracks it.
+    ///   the store until the next start's sweep, or until a first announce
+    ///   of the recording id discards them ([`Engine::open_files`]).
     ///
     /// Swift: `inbox.discard` in `RecordingHandler`, by the recording id
     /// alone; the "Files by recording id" parity note in
@@ -762,18 +756,53 @@ impl Engine {
         (!revoked).then_some(files)
     }
 
-    /// Opens the files of a recording whose receipt this request just made
-    /// for `device_id`: an empty partial (or the one there, never
-    /// truncated) and the metadata sidecar, under the files lock
-    /// ([`Engine::discard_own`]). `None`, with nothing opened, when the
-    /// device was revoked since its receipt read ([`Engine::files_for`]).
-    /// Swift: `inbox.begin` in `RecordingHandler.announce`.
+    /// Opens the files of the receipt a first announce (one whose read found
+    /// no receipt in memory or the store) just made for `device_id`: an
+    /// empty partial and the metadata sidecar. `_files` is the caller's
+    /// guard of the files lock, passed so the signature proves the lock is
+    /// held; the caller holds it from before that `change` until this
+    /// returns, so no file is created or discarded in between
+    /// ([`Engine::discard_own`]). `None`, with nothing opened, when memory
+    /// no longer holds this device's receipt: the device was revoked since
+    /// its receipt read, and memory holds none or, once it paired again,
+    /// another device's receipt.
+    ///
+    /// Every file of the recording id goes first. Whatever is there belongs
+    /// to no receipt: a verified file left by an intake failure whose
+    /// receipt a revoke deleted after a restart, or a partial a refusal or
+    /// a second revoke left. Kept, `begin` would add this upload's chunks
+    /// to an old partial, and `complete` would hand an old verified file to
+    /// the intake without hashing it.
+    ///
+    /// No live upload of another device can be in those files. A device's
+    /// recording routes read its receipt into memory before they touch a
+    /// file, and memory drops it only when that device is revoked. `change`
+    /// made this receipt only because memory held none, so only a revoked
+    /// device's request can still be at work on them. Such a request
+    /// answers a refusal, an error or a re-announce's status, and the phone
+    /// deletes its copy only on a 200 from `complete`, so it keeps its
+    /// recording; or it answers the 200 of an admission whose intake opened
+    /// the verified file before the discard and copies it whole (the open
+    /// file outlives its name).
+    ///
+    /// Swift: `inbox.discard` and `inbox.begin` in
+    /// `RecordingHandler.announce`.
     pub(crate) fn open_files(
         &self,
+        _files: &MutexGuard<'_, ()>,
         metadata: &RecordingMetadata,
         device_id: Uuid,
     ) -> Option<std::io::Result<()>> {
-        let _files = self.files_for(device_id)?;
+        let recording_id = metadata.recording_id;
+        let ours = self
+            .state()
+            .active_receipts
+            .get(&recording_id)
+            .is_some_and(|held| held.device_id == device_id);
+        if !ours {
+            return None;
+        }
+        self.inbox.discard(recording_id);
         Some(self.inbox.begin(metadata))
     }
 
@@ -903,8 +932,8 @@ impl Engine {
     /// no place is taken and its `Err` comes back. If the read and the
     /// write were two steps, two requests on two threads could start from
     /// the same copy, and the later one would drop the other's change in
-    /// memory and in the store. The clock is read before the guard, so a
-    /// slow clock never holds the lock.
+    /// memory and in the store. The clock is read before the state guard,
+    /// so a slow clock never holds the state lock.
     fn change<Declined>(
         &self,
         recording_id: Uuid,

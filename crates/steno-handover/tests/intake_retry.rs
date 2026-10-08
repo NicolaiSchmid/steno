@@ -1,7 +1,8 @@
 //! The recovery paths after the computer verified a file: the intake
 //! failing once, the phone retrying by `complete` or by announcing again,
 //! and a restart resuming from the stored receipt while the sweep removes
-//! only what no receipt accounts for.
+//! only what no receipt accounts for; after a restart and a revoke, another
+//! phone's first announce of the same recording id starts from no file.
 
 #![allow(
     clippy::assert_is_empty,
@@ -16,7 +17,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{Phone, ScriptedIntake, TestService, chunks, fake_intake, seeded_bytes};
+use common::{EngineDevice, Phone, ScriptedIntake, TestService, chunks, fake_intake, seeded_bytes};
 use steno_core::{
     AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, RecordingMetadata,
 };
@@ -313,4 +314,72 @@ async fn a_restarted_computer_resumes_from_the_stored_receipt_and_sweeps_only_or
     assert_eq!(admissions.len(), 1);
     assert_eq!(std::fs::read(&admissions[0].file).unwrap(), bytes);
     second.stop().await;
+}
+
+#[tokio::test]
+async fn another_phones_first_announce_after_a_restart_and_a_revoke_admits_its_own_bytes() {
+    // The intake refuses the verified file once, and the computer restarts:
+    // the receipt is only in the store, and the verified file waits for the
+    // phone's retry. The phone is revoked, which finds no receipt in memory
+    // to discard and deletes the row with the device. Another phone then
+    // announces the same recording id: its first announce discards the
+    // waiting file, so its `complete` hashes and admits its own bytes,
+    // never the old file unhashed.
+    const SIZE: i64 = 64 * 1024;
+    let first = TestService::with(common::Options {
+        chunk_size: SIZE,
+        intake: Some(ScriptedIntake::new(meeting_id(), 1)),
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let before = EngineDevice::paired(&first, "Old iPhone").await;
+    let old_bytes = seeded_bytes(2 * SIZE as usize, 80);
+    let old = before.metadata(&old_bytes, SIZE);
+    let id = old.recording_id;
+    before.upload_all(&old, &old_bytes).await;
+    assert_eq!(before.complete(id).await.status.as_u16(), 500);
+    let inbox = first.inbox();
+    assert!(
+        inbox.has_verified(id, old.format),
+        "the verified file waits"
+    );
+
+    let intake = fake_intake(meeting_id());
+    let second = Arc::new(HandoverService::new(
+        first.service.configuration.clone(),
+        first.store.clone(),
+        common::taking(intake.clone()),
+        first.service.identity.clone(),
+        first.clock.clock(),
+    ));
+    second.engine.sweep_orphans().await;
+    assert!(inbox.has_verified(id, old.format), "the sweep keeps it");
+    second.revoke(before.device.id).await.unwrap();
+    assert_eq!(first.store.handover_receipt(id).unwrap(), None);
+    assert!(
+        inbox.has_verified(id, old.format),
+        "the revoke found no receipt in memory and left the file"
+    );
+
+    let other = EngineDevice::paired_on(&second, &first.store, "Other iPhone").await;
+    let bytes = seeded_bytes(SIZE as usize + 99, 81);
+    let metadata = common::metadata_for(&bytes, "Other iPhone", id, SIZE, old.format, None);
+    let announced = other.announce(&metadata).await;
+    assert_eq!(announced.status.as_u16(), 201);
+    assert!(
+        !inbox.has_verified(id, old.format),
+        "the first announce discarded the waiting file"
+    );
+    assert_eq!(inbox.load_metadata(id), Some(metadata.clone()));
+    other.upload_all(&metadata, &bytes).await;
+    let completed = other.complete(id).await;
+    assert_eq!(completed.status.as_u16(), 200);
+    let admissions = intake.admissions.entries();
+    assert_eq!(admissions.len(), 1);
+    assert_eq!(
+        std::fs::read(&admissions[0].file).unwrap(),
+        bytes,
+        "the other phone's own bytes, hashed"
+    );
 }

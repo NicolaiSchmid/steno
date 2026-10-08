@@ -27,6 +27,10 @@ enum Verification {
     Answered(HandoverResponse),
 }
 
+/// The receipt a first announce made, the save's place in line, and what
+/// [`Engine::open_files`] returned.
+type MadeAndOpened = (HandoverReceipt, super::InOrder, Option<std::io::Result<()>>);
+
 pub(super) fn no_such_recording() -> HandoverResponse {
     HandoverResponse::problem(StatusCode::NOT_FOUND, "no such recording")
 }
@@ -84,24 +88,20 @@ impl Engine {
         // made its receipt since the read above, and a chunk may have landed
         // in it. That receipt stays, and this announce is answered as if the
         // read had found it, without touching the files the other one opens.
-        let picked = self.change(
-            recording_id,
-            |held| held.map_or(Ok(fresh), |held| Err(Box::new(held.clone()))),
-            |_| {},
-        );
-        let (receipt, place) = match picked {
-            Ok(picked) => picked,
+        //
+        // Otherwise the place in line goes to the save whatever the opening
+        // did: nothing between `change` and the save yields. A failed
+        // opening leaves the receipt saved without files, so the phone's
+        // retried announce reopens them as a re-announce. A device revoked
+        // since its receipt read opens none and is answered 401: its
+        // receipt stayed out of memory, or left it. That receipt is still
+        // saved, so a device revoked and paired again since leaves a row
+        // without files, and its retried announce reopens them as a
+        // re-announce.
+        let (receipt, place, opened) = match self.make_and_open(fresh, &metadata) {
+            Ok(made) => made,
             Err(held) => return self.reannounce(*held, device, &metadata).await,
         };
-        // Only the announce that made the receipt opens the files, so the
-        // sidecar is the metadata of the receipt memory holds. The place in
-        // line goes to the save whatever `open_files` did, and nothing
-        // between `change` and the save yields. A failed opening leaves the
-        // receipt saved without files, so the phone's retried announce
-        // reopens them as a re-announce. A device revoked since its receipt
-        // read opens none and is answered 401: its receipt stayed out of
-        // memory.
-        let opened = self.open_files(&metadata, device.id);
         let saved = self.save(receipt.clone(), place).await;
         let Some(opened) = opened else {
             return Self::unauthorized();
@@ -114,6 +114,39 @@ impl Engine {
             return HandoverResponse::internal_error("opening the partial file", &error);
         }
         HandoverResponse::json(StatusCode::CREATED, &Self::status_of(&receipt))
+    }
+
+    /// A first announce's step under the files lock: [`Engine::change`]
+    /// makes `fresh` the receipt memory holds, or declines with the one
+    /// memory holds by then, and [`Engine::open_files`] opens the files of
+    /// the receipt it made. One hold of the lock covers both, so no other
+    /// request creates or discards a file of the recording in between, and
+    /// the sidecar is the metadata of the receipt memory holds. Nothing in
+    /// it yields, and the lock is released before the save. The unit tests
+    /// check the lock is held at `change` and run their in-between step
+    /// where requests on other threads that take no files lock could.
+    fn make_and_open(
+        &self,
+        fresh: HandoverReceipt,
+        metadata: &RecordingMetadata,
+    ) -> Result<MadeAndOpened, Box<HandoverReceipt>> {
+        let files = self.files();
+        let (receipt, place) = self.change(
+            fresh.recording_id,
+            |held| {
+                #[cfg(test)]
+                assert!(
+                    self.files.try_lock().is_err(),
+                    "a first announce makes its receipt under the files lock"
+                );
+                held.map_or(Ok(fresh), |held| Err(Box::new(held.clone())))
+            },
+            |_| {},
+        )?;
+        #[cfg(test)]
+        tests::meanwhile(self, receipt.recording_id);
+        let opened = self.open_files(&files, metadata, receipt.device_id);
+        Ok((receipt, place, opened))
     }
 
     /// A known recording announced again: 200 with the status, 409 when another
@@ -596,13 +629,15 @@ mod tests {
     //! White-box checks of what a request on another worker thread can
     //! leave in the synchronous stretches no gate of the integration tests
     //! can stop: the state is built by hand, and the step after the
-    //! stretch is called as its route calls it.
+    //! stretch is called as its route calls it, or the route runs with the
+    //! test's edit inside the stretch ([`first_announce`]).
 
+    use std::cell::RefCell;
     use std::sync::Arc;
 
-    use chrono::{TimeZone as _, Utc};
+    use chrono::{DateTime, TimeZone as _, Utc};
     use steno_core::testing::FakeHandoverIntake;
-    use steno_core::{AudioFormat, PairedDevice, RecordingMetadata, Store};
+    use steno_core::{AudioFormat, HandoverReceipt, PairedDevice, RecordingMetadata, Store};
     use tokio::sync::watch;
     use uuid::Uuid;
 
@@ -619,6 +654,36 @@ mod tests {
         }
     }
 
+    fn engine(directory: &std::path::Path, store: Arc<Store>, now: DateTime<Utc>) -> Engine {
+        let configuration = HandoverConfiguration {
+            service_name: "Test".to_owned(),
+            advertise: false,
+            inbox_directory: directory.join("inbox"),
+            ..HandoverConfiguration::default()
+        };
+        Engine::new(
+            configuration,
+            Arc::new(HandoverIdentity::mint("Test", now).unwrap()),
+            store,
+            Arc::new(FakeHandoverIntake::default()),
+            watch::channel(Vec::new()).0,
+            Arc::new(move || now),
+        )
+    }
+
+    fn metadata(recording_id: Uuid, byte_count: i64, device_name: &str) -> RecordingMetadata {
+        RecordingMetadata {
+            recording_id,
+            started_at: Utc.timestamp_opt(1_789_990_000, 0).unwrap(),
+            duration_seconds: 1.0,
+            byte_count,
+            sha256: vec![7; 32],
+            chunk_size: 64 * 1024,
+            format: AudioFormat::M4aAac,
+            device_name: device_name.to_owned(),
+        }
+    }
+
     #[tokio::test]
     async fn a_refusal_leaves_another_devices_receipt_and_files_alone() {
         // X's revoke landed during the store read of phone X's `complete`
@@ -627,41 +692,22 @@ mod tests {
         // recording id on another thread, which made its receipt and opened
         // its files. The refusal then leaves Y's upload alone.
         let directory = tempfile::tempdir().unwrap();
-        let now = Utc.timestamp_opt(1_790_000_000, 0).unwrap();
-        let configuration = HandoverConfiguration {
-            service_name: "Test".to_owned(),
-            advertise: false,
-            inbox_directory: directory.path().join("inbox"),
-            ..HandoverConfiguration::default()
-        };
         let store = Arc::new(Store::in_memory().unwrap());
         let x = device("X");
         let y = device("Y");
         store.save_paired_device(&x, &[1; 32]).unwrap();
         store.save_paired_device(&y, &[2; 32]).unwrap();
-        let engine = Engine::new(
-            configuration,
-            Arc::new(HandoverIdentity::mint("Test", now).unwrap()),
+        let engine = engine(
+            directory.path(),
             store,
-            Arc::new(FakeHandoverIntake::default()),
-            watch::channel(Vec::new()).0,
-            Arc::new(move || now),
+            Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
         );
 
         // The count X's `complete` takes before its receipt read.
         let revocation = engine.state().revocation_count(x.id);
         engine.revoke(x.id).await.unwrap();
         let recording_id = Uuid::new_v4();
-        let metadata = RecordingMetadata {
-            recording_id,
-            started_at: Utc.timestamp_opt(1_789_990_000, 0).unwrap(),
-            duration_seconds: 1.0,
-            byte_count: 3,
-            sha256: vec![7; 32],
-            chunk_size: 64 * 1024,
-            format: AudioFormat::M4aAac,
-            device_name: "Y".to_owned(),
-        };
+        let metadata = metadata(recording_id, 3, "Y");
         let announced = engine
             .announce(recording_id, &y, &serde_json::to_vec(&metadata).unwrap())
             .await;
@@ -684,5 +730,194 @@ mod tests {
             Some(metadata),
             "and so does its sidecar"
         );
+    }
+
+    /// An edit of the receipt memory holds, as a request on another thread
+    /// makes it.
+    type Edit = Box<dyn FnOnce(&mut HandoverReceipt)>;
+
+    thread_local! {
+        /// The edit the next first announce on this thread runs between
+        /// its `change` and its opening.
+        static MEANWHILE: RefCell<Option<Edit>> = const { RefCell::new(None) };
+    }
+
+    /// Runs the edit [`first_announce`] set for this thread, if any; called
+    /// by `Engine::make_and_open` between its `change` and its opening.
+    pub(super) fn meanwhile(engine: &Engine, recording_id: Uuid) {
+        if let Some(edit) = MEANWHILE.take() {
+            edit(
+                engine
+                    .state()
+                    .active_receipts
+                    .get_mut(&recording_id)
+                    .unwrap(),
+            );
+        }
+    }
+
+    /// Phone Y's announce of `ours`, which must find no receipt, with
+    /// `meanwhile` editing the receipt memory holds between its `change`
+    /// and its opening, as requests on other threads that take no files
+    /// lock would.
+    async fn first_announce(
+        engine: &Engine,
+        ours: &RecordingMetadata,
+        y: &PairedDevice,
+        meanwhile: impl FnOnce(&mut HandoverReceipt) + 'static,
+    ) -> super::HandoverResponse {
+        MEANWHILE.set(Some(Box::new(meanwhile)));
+        let answered = engine
+            .announce(ours.recording_id, y, &serde_json::to_vec(ours).unwrap())
+            .await;
+        assert!(
+            MEANWHILE.take().is_none(),
+            "the announce made its receipt and ran the edit"
+        );
+        answered
+    }
+
+    #[tokio::test]
+    async fn a_first_announce_discards_the_partial_a_revoked_phone_left() {
+        // Phone X's partial is on disk and memory holds no receipt of it
+        // (a restart). X's revoke finds nothing in memory to discard, and
+        // its delete takes the row. Phone Y then announces the same
+        // recording id: its read finds nothing, and its announce discards
+        // X's partial before `begin`, so Y's chunks never land in X's
+        // bytes. X's `complete` from before the revoke is then refused and
+        // leaves Y's files alone.
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::in_memory().unwrap());
+        let x = device("X");
+        let y = device("Y");
+        store.save_paired_device(&x, &[1; 32]).unwrap();
+        store.save_paired_device(&y, &[2; 32]).unwrap();
+        let engine = engine(
+            directory.path(),
+            store,
+            Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
+        );
+        let recording_id = Uuid::new_v4();
+        engine
+            .inbox
+            .begin(&metadata(recording_id, 10, "X"))
+            .unwrap();
+        std::fs::write(engine.inbox.partial(recording_id), [9; 10]).unwrap();
+
+        // The count X's `complete` takes before its receipt read.
+        let revocation = engine.state().revocation_count(x.id);
+        engine.revoke(x.id).await.unwrap();
+        assert_eq!(
+            std::fs::read(engine.inbox.partial(recording_id)).unwrap(),
+            [9; 10],
+            "the revoke found no receipt in memory and left X's partial"
+        );
+        let ours = metadata(recording_id, 3, "Y");
+        let announced = engine
+            .announce(recording_id, &y, &serde_json::to_vec(&ours).unwrap())
+            .await;
+        assert_eq!(announced.status, http::StatusCode::CREATED);
+        assert_eq!(
+            std::fs::read(engine.inbox.partial(recording_id)).unwrap(),
+            Vec::<u8>::new(),
+            "Y's partial starts empty"
+        );
+        assert_eq!(engine.inbox.load_metadata(recording_id), Some(ours.clone()));
+
+        let refused = engine.refusal(recording_id, &x, revocation);
+        assert_eq!(
+            refused.map(|response| response.status),
+            Some(http::StatusCode::UNAUTHORIZED)
+        );
+        assert!(engine.inbox.has_partial(recording_id), "Y's partial stays");
+        assert_eq!(engine.inbox.load_metadata(recording_id), Some(ours));
+    }
+
+    #[tokio::test]
+    async fn a_first_announce_whose_receipt_left_memory_before_its_opening_opens_nothing() {
+        // Phone X's upload of the recording id is under way after its
+        // revoke and pairing again: its partial and sidecar are on disk.
+        // Phone Y's first announce read nothing (X's receipt was out of
+        // memory and the store), took the files lock and made its receipt
+        // at its `change`. Before its opening, on other threads that take
+        // no files lock: Y is revoked, which drops Y's receipt from memory,
+        // and pairs again, and a request of X's writes X's receipt back.
+        // Y's opening then neither discards X's files nor writes Y's
+        // sidecar over X's.
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::in_memory().unwrap());
+        let x = device("X");
+        let y = device("Y");
+        store.save_paired_device(&x, &[1; 32]).unwrap();
+        store.save_paired_device(&y, &[2; 32]).unwrap();
+        let now = Utc.timestamp_opt(1_790_000_000, 0).unwrap();
+        let engine = engine(directory.path(), store, now);
+        let recording_id = Uuid::new_v4();
+        let theirs = metadata(recording_id, 10, "X");
+        engine.inbox.begin(&theirs).unwrap();
+        std::fs::write(engine.inbox.partial(recording_id), [9; 4]).unwrap();
+
+        let answered = first_announce(&engine, &metadata(recording_id, 3, "Y"), &y, move |held| {
+            *held = HandoverReceipt {
+                device_id: x.id,
+                byte_count: theirs.byte_count,
+                ..held.clone()
+            };
+        })
+        .await;
+
+        assert_eq!(
+            answered.status,
+            http::StatusCode::UNAUTHORIZED,
+            "Y's announce is answered 401"
+        );
+        assert_eq!(
+            std::fs::read(engine.inbox.partial(recording_id)).unwrap(),
+            [9; 4],
+            "X's partial stays"
+        );
+        assert_eq!(
+            engine.inbox.load_metadata(recording_id),
+            Some(theirs),
+            "and so does X's sidecar"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_first_announce_discards_a_waiting_verified_file_though_a_chunk_landed_first() {
+        // A verified file waits after an intake failure whose receipt a
+        // revoke deleted after a restart. Phone Y's first announce read
+        // nothing, took the files lock and made its receipt at its
+        // `change`. Before its opening, a chunk request of Y's from before
+        // an earlier revoke and pairing again folds its chunk into that
+        // receipt; it takes no files lock. Y's opening still discards the
+        // verified file: kept, Y's `complete` would admit it unhashed and
+        // Y's phone would delete its own recording. The chunk listed in
+        // the receipt but missing from the empty partial fails the hash, so
+        // Y's phone starts over.
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::in_memory().unwrap());
+        let y = device("Y");
+        store.save_paired_device(&y, &[2; 32]).unwrap();
+        let now = Utc.timestamp_opt(1_790_000_000, 0).unwrap();
+        let engine = engine(directory.path(), store, now);
+        let recording_id = Uuid::new_v4();
+        let ours = metadata(recording_id, 3, "Y");
+        engine.inbox.prepare().unwrap();
+        std::fs::write(engine.inbox.verified(recording_id, ours.format), [5; 8]).unwrap();
+
+        let answered =
+            first_announce(&engine, &ours, &y, |held| held.received_chunks.push(0)).await;
+        assert_eq!(answered.status, http::StatusCode::CREATED);
+        assert!(
+            !engine.inbox.has_verified(recording_id, ours.format),
+            "the waiting verified file is gone"
+        );
+        assert_eq!(
+            std::fs::read(engine.inbox.partial(recording_id)).unwrap(),
+            Vec::<u8>::new(),
+            "Y's partial starts empty"
+        );
+        assert_eq!(engine.inbox.load_metadata(recording_id), Some(ours));
     }
 }

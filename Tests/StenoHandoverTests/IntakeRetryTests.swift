@@ -56,7 +56,9 @@ final class ScriptedIntake: HandoverIntake, Sendable {
 /// The recovery paths after the Mac verified a file: the intake failing once,
 /// the phone retrying by `complete` or by announcing again, and a Mac restart
 /// resuming from the stored receipt while the sweep removes only what no
-/// receipt accounts for.
+/// receipt accounts for; after a restart and a revoke, another phone's first
+/// announce of the same recording id starts from no file, and after a
+/// restart a failed receipt read keeps the files.
 @Suite struct IntakeRetryTests {
   static let chunkSize = 256 * 1024
   static let meetingID = UUID(uuidString: "1ABE1000-0000-4000-8000-0000000000AD")!
@@ -220,5 +222,99 @@ final class ScriptedIntake: HandoverIntake, Sendable {
       #expect(try Data(contentsOf: try #require(admissions.first?.file)) == bytes)
       await second.stop()
     }
+  }
+
+  /// The intake refuses the verified file once and the Mac restarts, so the
+  /// receipt is only in the store and the verified file waits for the
+  /// phone's retry. The phone is revoked: the revoke finds no receipt in
+  /// memory to discard, and its delete takes the row with the device.
+  /// Another phone then announces the same recording id. Its first announce
+  /// discards the waiting file, so its `complete` hashes and admits its own
+  /// bytes, never the old file unhashed.
+  @Test func anotherPhonesFirstAnnounceAfterARestartAndARevokeAdmitsItsOwnBytes() async throws {
+    let size = 64 * 1024
+    let first = try TestService.prepare(
+      chunkSize: size, customIntake: ScriptedIntake(meetingID: Self.meetingID, failures: 1))
+    defer { try? FileManager.default.removeItem(at: first.directory) }
+    let before = try await EngineClient.paired(first, deviceName: "Old iPhone")
+    let oldBytes = Phone.seededBytes(count: 2 * size, seed: 80)
+    let old = before.metadata(for: oldBytes, chunkSize: size)
+    let id = old.recordingID
+    try await before.uploadAll(old, oldBytes)
+    #expect(await before.complete(id).code == 500)
+    let inbox = first.service.engine.inbox
+    #expect(inbox.hasVerified(id, format: old.format), "the verified file waits")
+
+    // The Mac comes back over the same store and inbox.
+    let intake = FakeHandoverIntake(meetingID: Self.meetingID)
+    let now = first.now
+    let second = HandoverService(
+      configuration: first.service.configuration, store: first.store,
+      intake: first.moving(intake), identity: first.service.identity, now: { now })
+    await second.engine.sweepOrphans()
+    #expect(inbox.hasVerified(id, format: old.format), "the sweep keeps it")
+    try await second.revoke(before.device.id)
+    #expect(try await first.store.handoverReceipt(recordingID: id) == nil)
+    #expect(
+      inbox.hasVerified(id, format: old.format),
+      "the revoke found no receipt in memory and left the file")
+
+    let other = try await EngineClient.paired(
+      first, engine: second.engine, deviceName: "Other iPhone")
+    let bytes = Phone.seededBytes(count: size + 99, seed: 81)
+    let metadata = Phone.metadata(
+      for: bytes, deviceName: "Other iPhone", recordingID: id, chunkSize: size)
+    #expect(try await other.announce(metadata).code == 201)
+    #expect(
+      !inbox.hasVerified(id, format: old.format), "the first announce discarded the waiting file")
+    #expect(inbox.loadMetadata(id) == metadata)
+    try await other.uploadAll(metadata, bytes)
+    #expect(await other.complete(id).code == 200)
+    let admissions = await intake.admissions.entries
+    #expect(admissions.count == 1)
+    #expect(
+      try Data(contentsOf: try #require(admissions.first?.file)) == bytes,
+      "the other phone's own bytes, hashed")
+  }
+
+  /// After a restart the store cannot read the receipts. An announce answers
+  /// 500 and opens nothing, so the verified file of a receipt only in the
+  /// store waits for the phone's retry, and no new receipt is saved over it.
+  @Test func aFailedReceiptReadAnswersTheAnnounce500AndKeepsTheFiles() async throws {
+    let size = 64 * 1024
+    let first = try TestService.prepare(
+      chunkSize: size, customIntake: ScriptedIntake(meetingID: Self.meetingID, failures: 1))
+    defer { try? FileManager.default.removeItem(at: first.directory) }
+    let phone = try await EngineClient.paired(first)
+    let bytes = Phone.seededBytes(count: 2 * size, seed: 82)
+    let metadata = phone.metadata(for: bytes, chunkSize: size)
+    let id = metadata.recordingID
+    try await phone.uploadAll(metadata, bytes)
+    #expect(await phone.complete(id).code == 500)
+
+    // The Mac comes back over the same store and inbox, with nothing in
+    // memory, and a temporary table of the same name shadows the receipts.
+    let intake = FakeHandoverIntake(meetingID: Self.meetingID)
+    let now = first.now
+    let second = HandoverService(
+      configuration: first.service.configuration, store: first.store,
+      intake: first.moving(intake), identity: first.service.identity, now: { now })
+    let resumed = EngineDevice(engine: second.engine, device: phone.device)
+    try await first.store.writer.write { db in
+      try db.execute(sql: "CREATE TEMP TABLE handoverReceipt (unreadable INTEGER)")
+    }
+    #expect(try await resumed.announce(metadata).code == 500)
+    let inbox = second.engine.inbox
+    #expect(inbox.hasVerified(id, format: metadata.format), "the verified file waits")
+    #expect(inbox.loadMetadata(id) == metadata, "and so does its sidecar")
+
+    // Once the store reads again, the phone's retry admits that file.
+    try await first.store.writer.write { db in
+      try db.execute(sql: "DROP TABLE temp.handoverReceipt")
+    }
+    #expect(try await resumed.announce(metadata).code == 200)
+    #expect(await resumed.complete(id).code == 200)
+    let admissions = await intake.admissions.entries
+    #expect(try Data(contentsOf: try #require(admissions.first?.file)) == bytes)
   }
 }
