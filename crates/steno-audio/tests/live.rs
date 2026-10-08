@@ -177,19 +177,80 @@ fn in_person_capture_starts_and_stops_within_bounds() {
     }
 }
 
-/// Plays nothing itself: with no other client on the output device the
-/// IOProc does not run, and the test says so instead of passing as if it
-/// had captured silence. Play something during the run (`afplay`) to see
-/// callbacks.
+/// The bound on the first callback after `start` returns, for a call
+/// capture with nothing playing.
+const FIRST_CALLBACK: Duration = Duration::from_millis(100);
+
+/// How long the call capture records.
+const CALL_SECONDS: u64 = 4;
+
+/// Plays nothing itself, and nothing else may play during the run: call
+/// mode's IOProc zero-fills the aggregate's output, so the capture is the
+/// output device's client and runs from its start. The first callback
+/// comes within [`FIRST_CALLBACK`] of `start` returning, and four seconds
+/// of capture hold about four seconds of frames on every lane (drained
+/// every 10 ms, so the rings never fill).
 #[test]
 #[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
-fn call_capture_starts_and_stops_within_bounds() {
-    if start_capture_stop(&[AudioLane::Mic, AudioLane::System]) == Some(0) {
+fn call_capture_runs_from_its_start_with_nothing_playing() {
+    let lanes: &'static [AudioLane] = &[AudioLane::Mic, AudioLane::System];
+    let measured = within(Duration::from_secs(30), "start, capture, stop", move || {
+        let backend = LiveCaptureBackend::new();
+        let sink = Arc::new(LaneFrameSink::new(lanes));
+        let starting = Instant::now();
+        let stream = match backend.start(lanes, None, Arc::clone(&sink)) {
+            Ok(stream) => stream,
+            Err(error) => {
+                println!("SKIPPED call capture: start failed after {:?}: {error}", starting.elapsed());
+                return None;
+            }
+        };
+        let started = Instant::now();
+        println!("started {lanes:?} in {:?}: {stream:?}", started - starting);
+        let mut first = None;
+        let mut callbacks = 0usize;
+        let mut frames = 0usize;
+        let mut scratch = vec![0.0f32; 4_800];
+        while started.elapsed() < Duration::from_secs(CALL_SECONDS) {
+            if sink.wake().wait(Duration::from_millis(10)) {
+                callbacks += 1;
+                first.get_or_insert_with(|| started.elapsed());
+            }
+            // The lanes move together, so the first ring counts the frames.
+            loop {
+                let available = sink.available_to_read().min(scratch.len());
+                if available == 0 {
+                    break;
+                }
+                for lane in 0..lanes.len() {
+                    sink.ring(lane).read(&mut scratch[..available]);
+                }
+                frames += available;
+            }
+        }
+        let elapsed = started.elapsed();
+        let stopping = Instant::now();
+        backend.stop();
         println!(
-            "SKIPPED call capture: the IOProc never ran in 500 ms. The tap aggregate runs only \
-             while another client has the output device open; play something during the test \
-             to exercise it (`afplay <any audio file>`); see \
-             .plans/spikes/2026-10-01-spike-rust-capture.md."
+            "first callback {first:?} after start returned, {callbacks} callbacks, {frames} frames \
+             ({:.2} s at {} Hz) in {elapsed:?}, dropped {:?}; stopped in {:?}",
+            frames as f64 / stream.sample_rate,
+            stream.sample_rate,
+            sink.dropped_samples(),
+            stopping.elapsed()
         );
-    }
+        Some((first, frames as f64 / stream.sample_rate, elapsed))
+    });
+    let Some((first, seconds, elapsed)) = measured else {
+        return;
+    };
+    let first = first.expect("call mode's IOProc never ran with nothing playing");
+    assert!(
+        first <= FIRST_CALLBACK,
+        "the first callback came {first:?} after the start, more than {FIRST_CALLBACK:?}"
+    );
+    assert!(
+        seconds >= elapsed.as_secs_f64() - 0.2,
+        "{seconds:.2} s of frames in {elapsed:?}"
+    );
 }
