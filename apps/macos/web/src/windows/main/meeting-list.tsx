@@ -42,10 +42,11 @@ import { SOURCE } from "./source";
 export const QUERY_DEBOUNCE_MS = 200;
 
 /**
- * The third line of a row when the host sent no preview. `live`: the row is
- * the recording in progress; a row still `recording` that is not is one
- * whose save failed, or that an earlier run left, and Steno recovers it at
- * its next start.
+ * The third line of a row when the host sent no preview. `live`: a row
+ * still `recording` may be the recording in progress, which it is unless
+ * the recorder is idle; one left `recording` while the recorder is idle is
+ * one whose save failed, or that an earlier run left, and Steno recovers it
+ * at its next start.
  */
 export function rowPreview(
 	row: MeetingRow,
@@ -146,6 +147,10 @@ export function MeetingList() {
 	const list = useSnapshot("meetings.list");
 	const progress = useSnapshot("progress");
 	const recording = useSnapshot("recording");
+	// Only an idle recorder proves a `recording` row is not live: the list
+	// and the recording snapshot publish apart, so a row's own id can lag
+	// the recorder's in either direction around a start or a stop.
+	const live = recording?.state !== "idle";
 	const [query, setQuery] = useState("");
 	const pending = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 	const search = useRef<HTMLInputElement>(null);
@@ -271,7 +276,7 @@ export function MeetingList() {
 								<MeetingRowView
 									active={meeting.id === list.selection}
 									key={meeting.id}
-									live={meeting.id === recording?.meetingID}
+									live={live}
 									meeting={meeting}
 									progress={entries.get(meeting.id)}
 								/>
@@ -303,7 +308,7 @@ const LABEL: Record<RowState, string> = {
 /**
  * Line 1's trailing slot: the start time, led by the row's state word while
  * it is not simply done. A `recording` row that is not `live` carries no
- * live dot and says it is not saved.
+ * live dot and says it is not processed.
  */
 function RowStatus({ meeting, live }: { meeting: MeetingRow; live: boolean }) {
 	const time = (
@@ -332,7 +337,7 @@ function RowStatus({ meeting, live }: { meeting: MeetingRow; live: boolean }) {
 						className="size-1.5 animate-status-pulse rounded-full bg-live"
 					/>
 				) : null}
-				{unsaved ? "Not saved" : LABEL[meeting.state]}
+				{unsaved ? "Not processed" : LABEL[meeting.state]}
 			</span>
 			{time}
 		</span>

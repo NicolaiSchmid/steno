@@ -1,7 +1,10 @@
 import { act, fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { MeetingsListSnapshot } from "@/bridge/contract";
+import type {
+	MeetingsListSnapshot,
+	RecordingSnapshot,
+} from "@/bridge/contract";
 import { loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { MeetingList, QUERY_DEBOUNCE_MS } from "./meeting-list";
@@ -284,18 +287,41 @@ describe("MeetingList rows", () => {
 		expect(element).not.toHaveTextContent("No summary");
 	});
 
-	it("says a recording row that is not the live one is not saved yet", async () => {
+	it("says a recording row is not processed while the recorder is idle", async () => {
 		const harness = await createBridgeHarness("", {
 			"meetings.list": await recordingList(),
 		});
 		renderWithBridge(<MeetingList />, harness);
 		const element = screen.getByTestId(`meeting-${FIRST}`);
-		expect(element).toHaveTextContent(/^CallNot saved\d{1,2}:\d{2}/);
+		expect(element).toHaveTextContent(/^CallNot processed\d{1,2}:\d{2}/);
 		expect(element).toHaveTextContent(
 			"Not saved yet. Steno will process it the next time it starts.",
 		);
 		expect(element).not.toHaveTextContent("Recording now.");
 		expect(element.querySelector(".animate-status-pulse")).toBeNull();
+	});
+
+	/**
+	 * Around a start or a stop the list and the recording snapshot publish
+	 * apart: while the recorder is not idle, a `recording` row whose id is
+	 * not (yet, or any longer) the recorder's is still shown live.
+	 */
+	it("keeps a recording row live while the recorder starts or stops", async () => {
+		for (const state of ["starting", "stopping"] as const) {
+			const harness = await createBridgeHarness("", {
+				"meetings.list": await recordingList(),
+				recording: {
+					state,
+					deniedPermissions: [],
+				} satisfies RecordingSnapshot,
+			});
+			const { unmount } = renderWithBridge(<MeetingList />, harness);
+			const element = screen.getByTestId(`meeting-${FIRST}`);
+			expect(element).toHaveTextContent(/^CallLive\d{1,2}:\d{2}/);
+			expect(element).toHaveTextContent("Recording now.");
+			expect(element).not.toHaveTextContent("Not processed");
+			unmount();
+		}
 	});
 
 	it("labels each day group with its date after the hairline", async () => {
