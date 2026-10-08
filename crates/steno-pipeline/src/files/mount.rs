@@ -126,7 +126,7 @@ fn type_name(name: &[std::ffi::c_char]) -> String {
     let bytes: Vec<u8> = name
         .iter()
         .take_while(|&&unit| unit != 0)
-        .map(|&unit| u8::from_ne_bytes(unit.to_ne_bytes()))
+        .map(|&unit| unit.cast_unsigned())
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -223,7 +223,7 @@ mod tests {
     fn the_type_name_ends_at_the_nul() {
         let mut buffer = [0 as std::ffi::c_char; 16];
         for (unit, byte) in buffer.iter_mut().zip(b"smbfs") {
-            *unit = std::ffi::c_char::from_ne_bytes(byte.to_ne_bytes());
+            *unit = byte.cast_signed();
         }
         assert_eq!(type_name(&buffer), "smbfs");
     }
