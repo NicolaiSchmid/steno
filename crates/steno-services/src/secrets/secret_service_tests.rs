@@ -635,9 +635,12 @@ async fn while_the_keyring_asks_calls_fail_at_once_and_the_store_opens_after_the
 
     setup.state().hold = false;
     answer_held(setup.fake.as_ref().unwrap(), &setup.state, true).await;
-    tokio::time::timeout(Duration::from_secs(5), unlocked)
-        .await
-        .expect("the store says it opened");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), unlocked)
+            .await
+            .expect("the store says it opened"),
+        "and to read again"
+    );
     assert!(chose_service(&store));
     assert_eq!(
         store.secret(&key).await.unwrap().as_deref(),
@@ -646,17 +649,13 @@ async fn while_the_keyring_asks_calls_fail_at_once_and_the_store_opens_after_the
 }
 
 #[tokio::test]
-async fn the_store_opening_without_asking_never_says_it_unlocked() {
+async fn the_store_opening_without_asking_never_says_to_read_again() {
     let Some(setup) = Setup::new(true, State::default()).await else {
         return;
     };
     let store = setup.launch().await;
     let unlocked = store.unlocked_after_prompt();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), unlocked)
-            .await
-            .is_err()
-    );
+    assert!(!unlocked.await);
 }
 
 /// A prompt that turned no call away leaves nothing to read again.
@@ -674,11 +673,7 @@ async fn a_choice_that_asked_but_turned_no_call_away_never_says_to_read_again() 
     store.chosen().await;
     assert!(chose_service(&store));
     assert_eq!(setup.state().prompts, 1);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), unlocked)
-            .await
-            .is_err()
-    );
+    assert!(!unlocked.await);
 }
 
 /// The prompt closed after the timeout and the file chosen: a read turned
@@ -705,9 +700,12 @@ async fn an_unanswered_prompt_is_dismissed_and_the_file_answers_the_read_it_turn
     store.chosen().await;
     assert!(chose_file(&store));
     assert_eq!(setup.state().dismissals, 1, "the prompt was closed");
-    tokio::time::timeout(Duration::from_secs(2), unlocked)
-        .await
-        .expect("the store says to read again");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), unlocked)
+            .await
+            .expect("the store says it chose"),
+        "and to read again"
+    );
     assert_eq!(
         store.secret(&key).await.unwrap().as_deref(),
         Some("sk-file")

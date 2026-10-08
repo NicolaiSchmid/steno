@@ -70,16 +70,22 @@ impl FingerprintRecord for FingerprintFile {
 
 /// The listener over the store and the recording intake.
 pub fn service(
+    configuration: HandoverConfiguration,
     store: Arc<Store>,
     intake: Arc<dyn HandoverIntake>,
     identity: HandoverIdentity,
 ) -> HandoverService {
-    HandoverService::with_wall_clock(
-        HandoverConfiguration::default(),
-        store,
-        intake,
-        Arc::new(identity),
-    )
+    HandoverService::with_wall_clock(configuration, store, intake, Arc::new(identity))
+}
+
+/// Starts `handover`'s listener when a phone is paired.
+pub(crate) async fn start_if_paired(handover: &HandoverService) {
+    let paired = handover.paired_devices().await.unwrap_or_default();
+    if !paired.is_empty()
+        && let Err(error) = handover.start().await
+    {
+        tracing::warn!(%error, "handover listener did not start");
+    }
 }
 
 /// The host's `Handover` over the listener; blocks on the runtime for the
@@ -91,13 +97,20 @@ pub fn service(
 /// the keyring answers (`App::launch`) and hands the listener over with
 /// [`ListenerHandover::set`]. Until then the handover reads as failed with
 /// the reason, the paired phones come from the database, and every other
-/// call that needs the listener fails or does nothing.
+/// call that needs the listener fails or does nothing. Once the app shuts
+/// down ([`ListenerHandover::close`]) no listener is handed over.
 pub struct ListenerHandover {
     listener: OnceLock<(Arc<HandoverService>, Uuid)>,
-    /// Why there is no listener yet.
-    waiting: Mutex<String>,
+    /// Why there is no listener yet, and whether the app shut down; `set`
+    /// and `close` hold it throughout.
+    waiting: Mutex<Waiting>,
     store: Arc<Store>,
     runtime: tokio::runtime::Handle,
+}
+
+struct Waiting {
+    reason: String,
+    closed: bool,
 }
 
 impl ListenerHandover {
@@ -120,7 +133,10 @@ impl ListenerHandover {
     pub fn waiting(reason: String, store: Arc<Store>, runtime: tokio::runtime::Handle) -> Self {
         ListenerHandover {
             listener: OnceLock::new(),
-            waiting: Mutex::new(reason),
+            waiting: Mutex::new(Waiting {
+                reason,
+                closed: false,
+            }),
             store,
             runtime,
         }
@@ -132,23 +148,40 @@ impl ListenerHandover {
         self.listener.get().map(|(service, _)| service)
     }
 
-    /// Hands over the listener a waiting handover lacked; false (and
-    /// `service` unused) when it has one.
+    /// Hands over the listener a waiting handover lacked and starts it
+    /// when a phone is paired; false (and `service` unused) when it has one
+    /// or the app shut down. The start runs under the lock `close` takes,
+    /// so a shutdown either stops the started listener or comes first and
+    /// keeps it from starting.
     pub fn set(&self, service: Arc<HandoverService>, mac_id: Uuid) -> bool {
-        self.listener.set((service, mac_id)).is_ok()
+        let waiting = self.lock();
+        if waiting.closed || self.listener.set((service, mac_id)).is_err() {
+            return false;
+        }
+        if let Some(service) = self.listener() {
+            block_on(&self.runtime, start_if_paired(service));
+        }
+        true
+    }
+
+    /// The app shuts down: no listener is handed over from now on; the one
+    /// there, to stop.
+    pub fn close(&self) -> Option<&Arc<HandoverService>> {
+        self.lock().closed = true;
+        self.listener()
     }
 
     /// Why a waiting handover still has no listener.
     pub fn still_waiting(&self, reason: String) {
-        *self.reason() = reason;
+        self.lock().reason = reason;
     }
 
-    fn reason(&self) -> MutexGuard<'_, String> {
+    fn lock(&self) -> MutexGuard<'_, Waiting> {
         self.waiting.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn unavailable(&self) -> String {
-        format!("Phone handover is unavailable: {}", self.reason())
+        format!("Phone handover is unavailable: {}", self.lock().reason)
     }
 }
 

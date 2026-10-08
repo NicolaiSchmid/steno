@@ -47,9 +47,9 @@ pub fn secret_store(keyring: bool, paths: &StenoPaths) -> Arc<dyn SecretStore> {
 }
 
 /// [`secret_store`], and on Linux what resolves once the Secret Service
-/// store made its choice after a read failed with
-/// [`KeyringUnavailable::Unlocking`] while the keyring asked the user: the
-/// app reads its secrets again then. `None` where no store asks.
+/// store made its choice, true when a read failed with
+/// [`KeyringUnavailable::Unlocking`] on the way while the keyring asked the
+/// user: the app reads its secrets again then. `None` where no store asks.
 #[must_use]
 pub fn secret_store_with_unlock(
     keyring: bool,
@@ -73,15 +73,16 @@ pub fn secret_store_with_unlock(
     }
 }
 
-/// Resolves once the secret store chose where the secrets are after it
-/// turned a read away while the keyring asked the user; never when it
-/// turned none away.
-pub type SecretsUnlocked = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+/// Resolves once the secret store chose where the secrets are: true when
+/// it turned a read away while the keyring asked the user, so the caller
+/// reads again.
+pub type SecretsUnlocked = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
 
 /// A secret Steno cannot reach because the keyring that holds it is
 /// locked, still waiting for the user to answer its prompt, or was not
 /// open when the app started. Never a reason to treat the secret as
 /// absent: a caller that would mint or delete on `None` stops instead.
+/// No Swift counterpart (the Keychain store reported its `OSStatus`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyringUnavailable {
     /// The keyring is waiting for the user to answer its prompt.

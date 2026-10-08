@@ -207,9 +207,9 @@ impl SecretServiceStore {
         SecretServiceStore { shared }
     }
 
-    /// Resolves once the choice is made, the service or the file, if a
-    /// call failed with [`KeyringUnavailable::Unlocking`] on the way: the
-    /// moment to make it again. Never when no call was turned away.
+    /// Resolves once the choice is made, the service or the file: true
+    /// when a call failed with [`KeyringUnavailable::Unlocking`] on the way,
+    /// so now is the moment to make it again.
     ///
     /// Every prompt of the choice counts, whether the provider shows a
     /// window or not (`KeePassXC` answers every `CreateItem` with a prompt
@@ -218,16 +218,13 @@ impl SecretServiceStore {
     pub fn unlocked_after_prompt(&self) -> SecretsUnlocked {
         let mut phase = self.shared.phase.subscribe();
         Box::pin(async move {
-            let reread = matches!(
+            matches!(
                 phase
                     .wait_for(|phase| matches!(phase, Phase::Chosen { .. }))
                     .await
                     .as_deref(),
                 Ok(Phase::Chosen { reread: true })
-            );
-            if !reread {
-                std::future::pending::<()>().await;
-            }
+            )
         })
     }
 
