@@ -16,10 +16,10 @@
 //! an hour is left and, on Linux and Windows, does not start without room
 //! and stops and is saved before the disk fills. On the Mac a low reading
 //! only warns, since `statvfs` leaves out the space APFS would purge for
-//! the user, and a disk that is truly full can fail the save. A volume that reports no size, or more space free than it
-//! holds (some network and FUSE file systems), counts as unreadable and
-//! never warns, stops or refuses a recording. Rust only: Swift had no disk
-//! check.
+//! the user, and a disk that is truly full can fail the save. A volume
+//! that reports no size, or more space free than it holds (some network
+//! and FUSE file systems), counts as unreadable and never warns, stops or
+//! refuses a recording. Rust only: Swift had no disk check.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -859,11 +859,11 @@ impl CaptureRecorder {
             }
         };
         drop(active.session);
-        if let Some(level_thread) = active.level_thread {
-            let _ = level_thread.join();
-        }
-        if let Some(notice_thread) = active.notice_thread {
-            let _ = notice_thread.join();
+        for thread in [active.level_thread, active.notice_thread]
+            .into_iter()
+            .flatten()
+        {
+            let _ = thread.join();
         }
         // Read once the notice thread is gone, so its last rebuild counts.
         let outcome = outcome.map(|(warning, ended)| {
@@ -971,7 +971,6 @@ impl Drop for BegunMeeting<'_> {
         };
         // An error here is the session's state after its own guard.
         let _ = session.stop();
-        drop(session);
         let _ = std::fs::remove_dir_all(&self.folder);
         let _ = self.intake.fail(self.meeting_id, START_PANICKED);
     }
@@ -1001,8 +1000,9 @@ impl Recorder for CaptureRecorder {
                 .current
                 .as_deref()
                 .map(fallback_warning);
-            // Every warning that applies, the disk's first.
-            status.warning = [status.warning.take(), active.disk_warning.clone(), fallback]
+            // Every warning that applies, the disk's first; the status's
+            // own is `None` while recording.
+            status.warning = [active.disk_warning.clone(), fallback]
                 .into_iter()
                 .flatten()
                 .reduce(|warning, next| format!("{warning} {next}"));
