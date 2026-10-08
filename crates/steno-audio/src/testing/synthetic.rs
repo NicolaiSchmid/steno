@@ -450,9 +450,6 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         sink.report_device_change(DeviceChangeReason::DefaultInputChanged);
                         break;
                     }
-                    // The callback before a change is clipped to it, so the
-                    // change lands on the exact frame and a test can count
-                    // what each start delivered.
                     if stall_frame == Some(delivered) {
                         stall_frame = None;
                         completion.finish();
@@ -461,6 +458,9 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         }
                         continue;
                     }
+                    // The callback before a change or a stall is clipped to
+                    // it, so it lands on the exact frame and a test can
+                    // count what each start delivered.
                     let mut frames = callback_frames.min(total_frames - delivered);
                     if let Some(change) = change_frame {
                         frames = frames.min(change - delivered);
