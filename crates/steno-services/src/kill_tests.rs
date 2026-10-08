@@ -11,9 +11,11 @@
 //! test reads, so the test knows what reached the files before the kill.
 //! A kill keeps the page cache, so these tests show what a crash leaves,
 //! not what a power loss does; that each sync is a full sync of the data
-//! is the writers' own test (`each_sync_is_one_full_sync_and_the_finish_one_more`
-//! in `steno_audio::writer`). A child dies with its test: the test kills it when its guard drops, and
-//! the child ends itself once its parent is gone or its own time is up.
+//! is the writers' own test
+//! (`each_sync_is_one_full_sync_and_the_finish_one_more` in
+//! `steno_audio::writer`). A child dies with its test: the test kills it
+//! when its guard drops, and the child ends itself once its parent is gone
+//! or its own time is up.
 //! Rust only: Swift had no recovery.
 
 use std::io::Write as _;
@@ -439,7 +441,6 @@ async fn a_kill_mid_recording_recovers_what_was_written_and_synced() {
     kill_when(&mut child, dir.path(), "the first sync", || {
         reports.sync_count() >= 1
     });
-    assert!(reports.sync_count() >= 1);
     let written = reports.written();
     let recovered = assert_recovered(&relaunch(dir.path()).await, written);
     let synced = steno_audio::writer::writer_thread::SYNC_INTERVAL_FRAMES as u64
