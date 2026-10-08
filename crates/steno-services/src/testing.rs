@@ -85,21 +85,28 @@ pub fn synthetic_capture_through(
     + Sync
     + 'static,
 ) -> MakeCaptureSession {
-    let wrap = Arc::new(wrap);
+    synthetic_capture_writing(Arc::new(move |layout, lanes, keep_raw| {
+        Ok(wrap(steno_audio::RecordingWriter::new(
+            layout, lanes, keep_raw,
+        )?))
+    }))
+}
+
+/// [`synthetic_capture`] whose sessions make their writer with
+/// `make_writer` when they start: a writer that cannot be created fails
+/// the start.
+pub fn synthetic_capture_writing(
+    make_writer: steno_audio::capture::RecordingWriterFactory,
+) -> MakeCaptureSession {
     Arc::new(move |configuration: steno_audio::CaptureConfiguration| {
         let options = synthetic_tone(&configuration);
-        let wrap = wrap.clone();
         steno_audio::CaptureSession::with_writer_factory(
             configuration,
             Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
             None,
             steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
             Arc::new(steno_audio::SystemClock::new()),
-            Arc::new(move |layout, lanes, keep_raw| {
-                Ok(wrap(steno_audio::RecordingWriter::new(
-                    layout, lanes, keep_raw,
-                )?))
-            }),
+            make_writer.clone(),
         )
         .map_err(|error| error.to_string())
     })

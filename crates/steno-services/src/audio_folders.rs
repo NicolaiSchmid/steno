@@ -1,86 +1,214 @@
-//! The audio folders recordings were written to, in
-//! `<support>/audio-folders.json` beside the database and outside its
-//! schema, which the Swift app shares: crash recovery looks for an
-//! interrupted recording's master in each of them, so a recording is found
-//! in the folder it started in after the user picked another while it ran.
-//! The recorder adds its folder before it writes a recording's row
-//! ([`remember`]), and a change of the setting adds the folder it leaves.
-//! A list that is missing or cannot be read is empty ([`known`]), never an
-//! error: recovery also looks in the settings' folder and in the folder of
-//! every stored asset. Rust only: Swift had no recovery.
+//! Where recordings were written, in two files under the support directory,
+//! beside the database and outside its schema, which the Swift app shares.
+//! Each write replaces its file in one durable write
+//! ([`files::replace_file`]), so a crash leaves the old file or the new one.
+//!
+//! | File | What it holds | Written by | Read by |
+//! |------|---------------|------------|---------|
+//! | [`RECORDED_FILE`] | The audio folder of each recording, by meeting id, from before its row is written until the meeting completes, fails or is deleted | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first ([`crate::recovery`]) |
+//! | [`KNOWN_FILE`] | Every audio folder a recording was written to or the setting left, oldest first | [`remember`] | [`known`]: a best-effort list of folders to scan |
+//!
+//! A reader returns the error of a file that cannot be read or does not
+//! parse; a missing file is empty. A writer sets a file that does not parse
+//! aside ([`files::set_aside`]) and keeps what can still be read of it.
+//! Rust only: Swift had no recovery.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use uuid::Uuid;
+
 use crate::files;
 
-/// The list's name in the support directory.
-pub const FILE_NAME: &str = "audio-folders.json";
+/// The name of the per-meeting record in the support directory.
+pub const RECORDED_FILE: &str = "recording-folders.json";
 
-/// Held from the read to the write of [`remember`], so two threads of this
-/// process (a start and a change of the setting) cannot each drop the
-/// other's folder. Another process does not write the list: the database
-/// lock lets one Rust app run at a time, and the Swift app never writes it.
+/// The name of the list of known folders in the support directory.
+pub const KNOWN_FILE: &str = "audio-folders.json";
+
+/// Held from the read to the write of every change, so two threads of this
+/// process (a start, a stop, a change of the setting) cannot each drop the
+/// other's entry. Another process does not write the files: the database
+/// lock lets one Rust app run at a time, and the Swift app never writes
+/// them.
 static WRITES: Mutex<()> = Mutex::new(());
 
-fn path(support_directory: &Path) -> PathBuf {
-    support_directory.join(FILE_NAME)
+/// The folder each recording under `support_directory` was recorded into,
+/// by meeting id.
+pub(crate) fn recorded(support_directory: &Path) -> std::io::Result<BTreeMap<Uuid, PathBuf>> {
+    read(&support_directory.join(RECORDED_FILE))
 }
 
-/// The folders in the list under `support_directory`, oldest first; empty
-/// when there is no list or it cannot be read or parsed (logged at debug).
-#[must_use]
-pub fn known(support_directory: &Path) -> Vec<PathBuf> {
-    match read(&path(support_directory)) {
-        Ok(folders) => folders,
-        Err(error) => {
-            tracing::debug!(%error, "the known audio folders could not be read");
-            Vec::new()
-        }
-    }
+/// Records `folder` as the one the recording of meeting `meeting_id` is
+/// written to. The recorder calls it before it writes the meeting's row,
+/// and logs a failure and goes on: a recording is not refused for it.
+pub(crate) fn record(
+    support_directory: &Path,
+    meeting_id: Uuid,
+    folder: &Path,
+) -> std::io::Result<()> {
+    change(
+        support_directory,
+        RECORDED_FILE,
+        salvage_recorded,
+        |recorded: &mut BTreeMap<Uuid, PathBuf>| {
+            recorded.insert(meeting_id, folder.to_path_buf()).as_deref() != Some(folder)
+        },
+    )
 }
 
-/// The list at `path`; no file is an empty list, and one that does not
-/// parse is `InvalidData`.
-fn read(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+/// Drops the entries of `meeting_ids`: their meetings completed, failed or
+/// went.
+pub(crate) fn forget(support_directory: &Path, meeting_ids: &[Uuid]) -> std::io::Result<()> {
+    change(
+        support_directory,
+        RECORDED_FILE,
+        salvage_recorded,
+        |recorded: &mut BTreeMap<Uuid, PathBuf>| {
+            let before = recorded.len();
+            recorded.retain(|id, _| !meeting_ids.contains(id));
+            recorded.len() != before
+        },
+    )
+}
+
+/// The known folders under `support_directory`, oldest first.
+pub fn known(support_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
+    read(&support_directory.join(KNOWN_FILE))
+}
+
+/// Adds `folder` to the known folders under `support_directory` unless it
+/// is there. The caller logs a failure and goes on.
+pub fn remember(support_directory: &Path, folder: &Path) -> std::io::Result<()> {
+    change(
+        support_directory,
+        KNOWN_FILE,
+        salvage_known,
+        |folders: &mut Vec<PathBuf>| {
+            let new = !folders.iter().any(|known| known == folder);
+            if new {
+                folders.push(folder.to_path_buf());
+            }
+            new
+        },
+    )
+}
+
+/// The file at `path`; no file is empty, and one that does not parse is
+/// `InvalidData`.
+fn read<T: Default + DeserializeOwned>(path: &Path) -> std::io::Result<T> {
     match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Ok(bytes) => parse(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(error) => Err(error),
     }
 }
 
-/// Adds `folder` to the list under `support_directory` unless it is there,
-/// in one durable replace ([`files::replace_file`]), so a crash leaves the
-/// old list or the new one. A list that does not parse is set aside
-/// ([`files::set_aside`]) and started afresh with `folder`. The caller
-/// logs a failure and goes on: a recording is not refused for it.
-pub fn remember(support_directory: &Path, folder: &Path) -> std::io::Result<()> {
+fn parse<T: DeserializeOwned>(bytes: &[u8]) -> std::io::Result<T> {
+    serde_json::from_slice(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+/// Applies `edit` to the file `name` under `support_directory` and writes
+/// it back when `edit` says it changed. A file that does not parse is set
+/// aside, and `salvage` keeps what can still be read of it.
+fn change<T: Default + Serialize + DeserializeOwned>(
+    support_directory: &Path,
+    name: &str,
+    salvage: fn(&[u8]) -> T,
+    edit: impl FnOnce(&mut T) -> bool,
+) -> std::io::Result<()> {
     let _writing = WRITES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let path = path(support_directory);
-    let mut folders = match read(&path) {
-        Ok(folders) => folders,
-        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-            files::set_aside(&path)?;
-            Vec::new()
+    let path = support_directory.join(name);
+    let mut value = match std::fs::read(&path) {
+        Ok(bytes) => {
+            if let Ok(value) = parse(&bytes) {
+                value
+            } else {
+                files::set_aside(&path)?;
+                salvage(&bytes)
+            }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => T::default(),
         Err(error) => return Err(error),
     };
-    if folders.iter().any(|known| known == folder) {
+    if !edit(&mut value) {
         return Ok(());
     }
-    folders.push(folder.to_path_buf());
-    let data = serde_json::to_vec_pretty(&folders)?;
+    let data = serde_json::to_vec_pretty(&value)?;
     files::create_dir_all_durably(support_directory)?;
     files::replace_file(&path, &data, files::Access::Default)
+}
+
+/// Every JSON string a file that does not parse still holds whole, in
+/// order.
+fn strings(bytes: &[u8]) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(quote) = bytes[at..].iter().position(|&byte| byte == b'"') {
+        let start = at + quote;
+        let mut stream =
+            serde_json::Deserializer::from_slice(&bytes[start..]).into_iter::<String>();
+        match stream.next() {
+            Some(Ok(string)) => {
+                found.push(string);
+                at = start + stream.byte_offset();
+            }
+            _ => at = start + 1,
+        }
+    }
+    found
+}
+
+/// The absolute paths among `strings`.
+fn folders(strings: impl IntoIterator<Item = String>) -> impl Iterator<Item = PathBuf> {
+    strings
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+/// The known folders a list that does not parse still names.
+fn salvage_known(bytes: &[u8]) -> Vec<PathBuf> {
+    let mut known: Vec<PathBuf> = Vec::new();
+    for folder in folders(strings(bytes)) {
+        if !known.contains(&folder) {
+            known.push(folder);
+        }
+    }
+    known
+}
+
+/// The entries a record that does not parse still holds: each meeting id
+/// followed by an absolute path.
+fn salvage_recorded(bytes: &[u8]) -> BTreeMap<Uuid, PathBuf> {
+    let strings = strings(bytes);
+    strings
+        .windows(2)
+        .filter_map(|pair| {
+            let id = Uuid::parse_str(&pair[0]).ok()?;
+            let folder = folders([pair[1].clone()]).next()?;
+            Some((id, folder))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set_aside_count(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+            .count()
+    }
 
     /// Each folder is listed once, in the order it was first remembered,
     /// and a missing list is empty.
@@ -88,27 +216,75 @@ mod tests {
     fn a_folder_is_remembered_once() {
         let dir = tempfile::tempdir().unwrap();
         let support = dir.path().join("support");
-        assert_eq!(known(&support), Vec::<PathBuf>::new());
+        assert_eq!(known(&support).unwrap(), Vec::<PathBuf>::new());
         for folder in ["/a", "/b", "/a"] {
             remember(&support, Path::new(folder)).unwrap();
         }
-        assert_eq!(known(&support), [PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(
+            known(&support).unwrap(),
+            [PathBuf::from("/a"), PathBuf::from("/b")]
+        );
     }
 
-    /// A list that does not parse reads as empty; the next folder starts a
-    /// new list, and the old bytes are kept beside it.
+    /// A list that does not parse is an error to its reader. The next
+    /// folder sets it aside and keeps every folder it still names whole,
+    /// here the two before the cut.
     #[test]
-    fn a_list_that_does_not_parse_is_set_aside() {
+    fn a_list_that_does_not_parse_is_set_aside_and_its_folders_kept() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(FILE_NAME), b"{not json").unwrap();
-        assert_eq!(known(dir.path()), Vec::<PathBuf>::new());
-        remember(dir.path(), Path::new("/a")).unwrap();
-        assert_eq!(known(dir.path()), [PathBuf::from("/a")]);
-        let set_aside = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
-            .count();
-        assert_eq!(set_aside, 1);
+        std::fs::write(dir.path().join(KNOWN_FILE), b"[\"/a\", \"/b\", \"/c").unwrap();
+        assert_eq!(
+            known(dir.path()).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        remember(dir.path(), Path::new("/d")).unwrap();
+        assert_eq!(
+            known(dir.path()).unwrap(),
+            [
+                PathBuf::from("/a"),
+                PathBuf::from("/b"),
+                PathBuf::from("/d")
+            ]
+        );
+        assert_eq!(set_aside_count(dir.path()), 1);
+    }
+
+    /// A recording's folder is recorded until its meeting is forgotten;
+    /// forgetting one leaves the others.
+    #[test]
+    fn a_recordings_folder_is_kept_until_it_is_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(recorded(dir.path()).unwrap().is_empty());
+        record(dir.path(), first, Path::new("/a")).unwrap();
+        record(dir.path(), second, Path::new("/b")).unwrap();
+        forget(dir.path(), &[first]).unwrap();
+        assert_eq!(
+            recorded(dir.path()).unwrap(),
+            BTreeMap::from([(second, PathBuf::from("/b"))])
+        );
+    }
+
+    /// A record that does not parse is an error to its reader; the next
+    /// write sets it aside and keeps every whole entry.
+    #[test]
+    fn a_record_that_does_not_parse_is_set_aside_and_its_entries_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kept, cut, new) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        std::fs::write(
+            dir.path().join(RECORDED_FILE),
+            format!("{{\"{kept}\": \"/a\", \"{cut}\": \"/b"),
+        )
+        .unwrap();
+        assert_eq!(
+            recorded(dir.path()).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        record(dir.path(), new, Path::new("/c")).unwrap();
+        assert_eq!(
+            recorded(dir.path()).unwrap(),
+            BTreeMap::from([(kept, PathBuf::from("/a")), (new, PathBuf::from("/c"))])
+        );
+        assert_eq!(set_aside_count(dir.path()), 1);
     }
 }

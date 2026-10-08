@@ -437,19 +437,18 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     })
 }
 
-/// The launch's work on the meetings a previous process left unfinished,
-/// in order: the interrupted recordings in `interrupted` are recovered,
-/// left alone while another process still writes them or while a folder
-/// they may be in cannot be read, or failed ([`reconcile_interrupted`]);
-/// meetings left queued or processing are processed again; the retention
-/// sweep runs. A panic in the recovery is caught, so the resume and the
-/// sweep run regardless, and the rows it had not reached stay `recording`
-/// for the next launch. Blocks while a fresh master is watched, so
+/// The launch's last step on the meetings a previous process left
+/// unfinished, after the resume, the re-exports and the sweep: the
+/// interrupted recordings in `interrupted` are recovered, left alone while
+/// another process still writes them or while a folder they may be in
+/// cannot be read, or failed ([`reconcile_interrupted`]). It comes last, so
+/// a folder that is slow to answer (a network volume) or a fresh master it
+/// watches delays nothing else. A panic in it is caught and logged, and the
+/// rows it had not reached stay `recording` for the next launch. Blocks, so
 /// [`App::launch`] runs it on a blocking task.
 pub(crate) fn reconcile_at_launch(
     store: &Arc<Store>,
     pipeline: &CurrentPipeline,
-    sweep: &RetentionSweep,
     interrupted: &Interrupted,
     check: &LiveRecordingCheck,
     zone: FixedOffset,
@@ -465,14 +464,6 @@ pub(crate) fn reconcile_at_launch(
             "the recovery of interrupted recordings panicked; the next launch tries again"
         );
     }
-    match pipeline.current().resume_unfinished() {
-        Ok(resumed) if !resumed.is_empty() => {
-            tracing::info!(count = resumed.len(), "resumed unfinished meetings");
-        }
-        Ok(_) => {}
-        Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
-    }
-    run_sweep(sweep);
 }
 
 /// How long an exit waits for [`App::shutdown`] before the process ends
@@ -692,18 +683,22 @@ impl App {
         }
     }
 
-    /// Everything that happens once at launch, in order: the pipeline's
-    /// events are subscribed and routed into the host; the meetings left
-    /// `recording` and the known audio folders ([`crate::audio_folders`])
-    /// are listed, before anything here can start a recording; on a
-    /// blocking task, since it may wait up to 10 s for a master that
-    /// is still written (`reconcile_at_launch`), those recordings are
-    /// recovered, left alone or failed, meetings left queued or processing are
-    /// processed again, exports left unfinished are re-exported
-    /// ([`ProcessingPipeline::redeliver_unfinished`](steno_pipeline::ProcessingPipeline::redeliver_unfinished)),
-    /// the retention sweep runs, and the list is
-    /// refreshed; meanwhile the login item is registered the first time,
-    /// and the handover listener starts when a phone is already paired.
+    /// Everything that happens once at launch, in order:
+    ///
+    /// 1. The pipeline's events are subscribed and routed into the host.
+    /// 2. The meetings left `recording`, the folder each was recorded into
+    ///    and the known audio folders ([`crate::audio_folders`]) are
+    ///    listed, before anything here can start a recording.
+    /// 3. Meetings left queued or processing are processed again, exports
+    ///    left unfinished are re-exported
+    ///    ([`ProcessingPipeline::redeliver_unfinished`](steno_pipeline::ProcessingPipeline::redeliver_unfinished)),
+    ///    and the retention sweep runs.
+    /// 4. On a blocking task (`reconcile_at_launch`, which may wait up to
+    ///    10 s for a master that is still written): those recordings are
+    ///    recovered, left alone or failed, and the list is refreshed.
+    /// 5. Meanwhile the login item is registered the first time, and the
+    ///    handover listener starts when a phone is already paired.
+    ///
     /// Swift: `AppController.launch`, which failed every interrupted
     /// recording instead of recovering it.
     pub fn launch(&self, host: &Arc<Host>) {
@@ -757,31 +752,27 @@ impl App {
             }
         });
 
-        let interrupted = Interrupted {
-            meetings: self
-                .store
-                .meetings_in_states(&[steno_core::MeetingStateKind::Recording])
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "interrupted recordings could not be listed");
-                    Vec::new()
-                }),
-            known_folders: crate::audio_folders::known(&self.paths.support_directory),
-        };
-        // Exports left unfinished go out again; a meeting the launch's work
-        // resumes exports itself.
-        match self.pipeline.current().redeliver_unfinished(&self.export_retries) {
+        let interrupted = Interrupted::list(&self.store, &self.paths.support_directory);
+        let pipeline = self.pipeline.current();
+        match pipeline.resume_unfinished() {
+            Ok(resumed) if !resumed.is_empty() => {
+                tracing::info!(count = resumed.len(), "resumed unfinished meetings");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
+        }
+        // After `resume_unfinished`, so a meeting it resumed is skipped:
+        // its run exports it.
+        match pipeline.redeliver_unfinished(&self.export_retries) {
             Ok(owed) if !owed.is_empty() => {
                 tracing::info!(count = owed.len(), "re-exporting unfinished exports");
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "unfinished exports could not be re-exported"),
         }
+        run_sweep(&self.sweep);
         let work = {
-            let (store, pipeline, sweep) = (
-                self.store.clone(),
-                self.pipeline.clone(),
-                self.sweep.clone(),
-            );
+            let (store, pipeline) = (self.store.clone(), self.pipeline.clone());
             let (check, zone, runtime) = (
                 self.live_recording_check.clone(),
                 self.zone,
@@ -789,15 +780,7 @@ impl App {
             );
             let host = host.clone();
             tokio::task::spawn_blocking(move || {
-                reconcile_at_launch(
-                    &store,
-                    &pipeline,
-                    &sweep,
-                    &interrupted,
-                    &check,
-                    zone,
-                    &runtime,
-                );
+                reconcile_at_launch(&store, &pipeline, &interrupted, &check, zone, &runtime);
                 host.store_changed();
             })
         };
@@ -1066,6 +1049,7 @@ mod tests {
             app.zone,
         )
         .begin(
+            uuid::Uuid::new_v4(),
             steno_core::MeetingSource::MacCall,
             None,
             None,

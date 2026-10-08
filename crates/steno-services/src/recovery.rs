@@ -8,14 +8,18 @@
 //! so far was kept"). The recorder does the same for a stop whose capture
 //! failed. Rust only: Swift had no recovery.
 //!
-//! A row is failed only when its master is provably not there: the launch
-//! looks in every folder a recording may have been written to
-//! (`audio_folders`): the settings' audio folder, the folders the recorder
-//! and the setting listed ([`crate::audio_folders`]), so a recording is
-//! found in the folder it started in after the user picked another while
-//! it ran, and the folder of every stored asset. A folder that is missing
-//! or cannot be read (an unmounted volume, a permission not granted yet, an
-//! I/O error) keeps the row `recording` for the next launch.
+//! A row is failed only when its master is provably not there. The launch
+//! looks first in the two folders that decide it: the one the recorder
+//! recorded the meeting into before it wrote the row (the record in
+//! [`crate::audio_folders`]), so a recording is found where it started
+//! after the user picked another folder while it ran, and the settings'
+//! audio folder. Either one missing or unreadable (an unmounted
+//! volume, a permission not granted yet, an I/O error) keeps the row
+//! `recording` for the next launch, and so does a record that cannot be
+//! read. Then it looks in the known folders
+//! ([`crate::audio_folders::known`]) and the folder of every stored asset
+//! (`other_folders`), skipping one that is missing or unreadable, so a
+//! folder retired for good does not keep a row forever.
 //!
 //! The launch also leaves a recording alone while its master is still
 //! written: the Swift app and an older Rust build share the database and
@@ -29,14 +33,16 @@
 //!
 //! | Item | What it does |
 //! |------|--------------|
-//! | `reconcile_interrupted` | The launch's pass over the rows left `recording`, with what it found in `Reconciled` |
+//! | `Interrupted` | What the launch lists before anything can record: the rows left `recording`, the recorded and the known folders |
+//! | `reconcile_interrupted` | The launch's pass over those rows, with what it found in `Reconciled` |
 //! | `recover` | Finds, salvages and queues one meeting; the recorder calls it after a failed stop |
-//! | `audio_folders`, `find_master` | Where a master may be, and which folder holds it (`Lookup`) |
+//! | `other_folders`, `find_master` | Where else a master may be, and which folder holds it (`Lookup`) |
 //! | `salvage` | The asset a master's header and sidecars give, as its capture would have handed it over |
-//! | [`LiveRecordingCheck`] | When a master counts as still written; the app's field, so tests inject the clock |
+//! | [`LiveRecordingCheck`] | When a master counts as still written; the app's field, so tests inject the clock, and the recorder's check before a delete |
 //!
 //! All but [`LiveRecordingCheck`] are this crate's own.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -98,33 +104,33 @@ fn lanes(source: MeetingSource) -> Result<Vec<AudioLane>, Unrecoverable> {
 }
 
 /// Where the master of `meeting_id` lives in `audio_folder`.
-fn master_path(audio_folder: &Path, meeting_id: Uuid) -> PathBuf {
+pub(crate) fn master_path(audio_folder: &Path, meeting_id: Uuid) -> PathBuf {
     RecordingLayout::new(audio_folder, meeting_id).master(AudioFormat::Caf48kFloat32)
 }
 
-/// Every audio folder a master may be in, each once: `current`, the one
-/// the settings name (`None` when it is not a file URL), then the `known`
-/// folders ([`crate::audio_folders::known`]), then the folder of each
-/// stored asset (the folder above its meeting's folder).
-pub(crate) fn audio_folders(
-    store: &Store,
-    current: Option<PathBuf>,
-    known: &[PathBuf],
-) -> Result<Vec<PathBuf>, StoreError> {
-    let mut folders: Vec<PathBuf> = Vec::new();
+/// `folders` each once, in order, without those in `except`.
+pub(crate) fn distinct(
+    folders: impl IntoIterator<Item = PathBuf>,
+    except: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut distinct: Vec<PathBuf> = Vec::new();
+    for folder in folders {
+        if !except.contains(&folder) && !distinct.contains(&folder) {
+            distinct.push(folder);
+        }
+    }
+    distinct
+}
+
+/// The folders a master may be in besides the two that decide a meeting
+/// (the recorded one and the settings'), each once: the `known` folders
+/// ([`crate::audio_folders::known`]), then the folder of each stored asset
+/// (the folder above its meeting's folder).
+pub(crate) fn other_folders(store: &Store, known: &[PathBuf]) -> Result<Vec<PathBuf>, StoreError> {
     let assets = store.asset_urls()?.into_iter().filter_map(|url| {
         file_url_path(&url).and_then(|master| master.parent()?.parent().map(Path::to_path_buf))
     });
-    for folder in current
-        .into_iter()
-        .chain(known.iter().cloned())
-        .chain(assets)
-    {
-        if !folders.contains(&folder) {
-            folders.push(folder);
-        }
-    }
-    Ok(folders)
+    Ok(distinct(known.iter().cloned().chain(assets), &[]))
 }
 
 /// Where a meeting's master was looked for, and what was found.
@@ -132,29 +138,32 @@ pub(crate) fn audio_folders(
 pub(crate) enum Lookup {
     /// The audio folder that holds the master.
     Found(PathBuf),
-    /// Every folder was read and none holds it.
+    /// No folder holds it, and each deciding folder was read.
     Absent,
-    /// None holds it, but a folder is missing or could not be read, so
-    /// the master may be there.
+    /// No folder holds it, but a deciding folder is missing or could not
+    /// be read, so the master may be there.
     Unreachable,
 }
 
-/// Looks for the master of `meeting_id` in each of `folders`, in order.
-/// A folder that is missing counts as unreadable: an unmounted volume
-/// is missing until it is mounted again.
+/// Looks for the master of `meeting_id` in each of `deciding`, then in
+/// each of `others`. A deciding folder that is missing or cannot be read
+/// makes a miss [`Lookup::Unreachable`]: an unmounted volume is missing
+/// until it is mounted again. Any other such folder is skipped.
 #[must_use]
-pub(crate) fn find_master(folders: &[PathBuf], meeting_id: Uuid) -> Lookup {
-    let mut unreachable = folders.is_empty();
-    for folder in folders {
+pub(crate) fn find_master(deciding: &[PathBuf], others: &[PathBuf], meeting_id: Uuid) -> Lookup {
+    let mut unreachable = false;
+    let searched = deciding
+        .iter()
+        .map(|folder| (folder, true))
+        .chain(others.iter().map(|folder| (folder, false)));
+    for (folder, decides) in searched {
         match std::fs::metadata(master_path(folder, meeting_id)) {
             Ok(metadata) if metadata.is_file() => return Lookup::Found(folder.clone()),
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if std::fs::read_dir(folder).is_err() {
-                    unreachable = true;
-                }
-            }
-            Err(_) => unreachable = true,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::read_dir(folder).is_ok() => {}
+            Err(_) => unreachable |= decides,
         }
     }
     if unreachable {
@@ -230,16 +239,16 @@ pub(crate) fn salvage(
     })
 }
 
-/// Looks for the master of meeting `meeting_id` in `folders`
-/// ([`find_master`]), [salvages](salvage) it and queues the meeting
-/// through `intake`, under the settings' default retention.
+/// Looks for the master of meeting `meeting_id` in `folders`, each one
+/// deciding ([`find_master`]), [salvages](salvage) it and queues the
+/// meeting through `intake`, under the settings' default retention.
 pub(crate) async fn recover(
     intake: &LocalRecordingIntake,
     folders: &[PathBuf],
     meeting_id: Uuid,
     source: MeetingSource,
 ) -> Result<Meeting, RecoveryError> {
-    match find_master(folders, meeting_id) {
+    match find_master(folders, &[], meeting_id) {
         Lookup::Found(folder) => queue(intake, &folder, meeting_id, source).await,
         Lookup::Unreachable => Err(RecoveryError::Unreachable),
         Lookup::Absent => Err(Unrecoverable::NoMaster.into()),
@@ -277,7 +286,10 @@ pub struct LiveRecordingCheck {
 }
 
 impl Default for LiveRecordingCheck {
-    /// Ten seconds: the writer appends a frame every 10 ms.
+    /// Ten seconds, with the product's clock and sleep: past a writer's
+    /// stall in a device rebuild (its backoff of 1.75 s and the backend's
+    /// start, longer over Bluetooth) and a network volume's cached file
+    /// attributes; a writer that runs appends a frame every 10 ms.
     fn default() -> Self {
         LiveRecordingCheck {
             fresh_within: Duration::from_secs(10),
@@ -294,6 +306,13 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
 }
 
 impl LiveRecordingCheck {
+    /// Whether the master at `path` was modified within
+    /// [`Self::fresh_within`], or after the clock's now, without waiting;
+    /// `false` when it is not there.
+    pub(crate) fn is_fresh(&self, path: &Path) -> bool {
+        stamp(path).is_some_and(|(modified, _)| self.left(modified) > Duration::ZERO)
+    }
+
     /// How much younger than [`Self::fresh_within`] a master modified at
     /// `modified` is; zero once it is that old. A time ahead of the clock
     /// counts as just modified.
@@ -347,12 +366,52 @@ impl LiveRecordingCheck {
 }
 
 /// What the launch lists before anything in this process can start a
-/// recording: the meetings a process left `recording`, and the known audio
-/// folders ([`crate::audio_folders::known`]).
-#[derive(Debug, Default, Clone)]
+/// recording: the meetings a process left `recording`, the folder each was
+/// recorded into and the known audio folders ([`crate::audio_folders`]).
+#[derive(Debug, Clone)]
 pub(crate) struct Interrupted {
     pub(crate) meetings: Vec<Meeting>,
+    /// `None` when the record cannot be read: a meeting may then be
+    /// anywhere, and one whose master is not found is kept.
+    pub(crate) recorded: Option<BTreeMap<Uuid, PathBuf>>,
     pub(crate) known_folders: Vec<PathBuf>,
+    /// Where the record is, so the entries of the meetings settled here
+    /// are forgotten.
+    pub(crate) support_directory: PathBuf,
+}
+
+impl Interrupted {
+    /// Lists them from `store` and `support_directory`; whatever cannot be
+    /// read is logged and left out (a meeting list that cannot be read is
+    /// empty, so nothing is recovered or failed).
+    pub(crate) fn list(store: &Store, support_directory: &Path) -> Self {
+        let meetings = store
+            .meetings_in_states(&[steno_core::MeetingStateKind::Recording])
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "interrupted recordings could not be listed");
+                Vec::new()
+            });
+        // The error can name the user's folder: debug alone.
+        let recorded = crate::audio_folders::recorded(support_directory)
+            .inspect_err(|error| {
+                tracing::warn!(
+                    "the recording folders could not be read; recordings not found are kept"
+                );
+                tracing::debug!(%error, "recording folders not read");
+            })
+            .ok();
+        let known_folders =
+            crate::audio_folders::known(support_directory).unwrap_or_else(|error| {
+                tracing::debug!(%error, "the known audio folders could not be read");
+                Vec::new()
+            });
+        Interrupted {
+            meetings,
+            recorded,
+            known_folders,
+            support_directory: support_directory.to_path_buf(),
+        }
+    }
 }
 
 /// What the launch did with the meetings a process left `recording`.
@@ -365,9 +424,10 @@ pub(crate) struct Reconciled {
     /// A folder their master may be in could not be read: left
     /// `recording` for the next launch.
     pub(crate) unreachable: Vec<Uuid>,
-    /// Left `recording` for the next launch: recovered but not saved, or,
-    /// every meeting, when the settings or the assets could not be read,
-    /// so no folder could be told apart.
+    /// Left `recording` for the next launch: recovered but not saved,
+    /// unrecovered but not marked failed, or, every meeting, when the
+    /// settings or the assets could not be read, so no folder could be
+    /// told apart.
     pub(crate) kept: Vec<Uuid>,
     /// Nothing to recover: failed with Swift's reason.
     pub(crate) failed: Vec<Uuid>,
@@ -375,12 +435,13 @@ pub(crate) struct Reconciled {
 
 /// The launch's reconciliation of `interrupted`, listed by the caller
 /// before anything could start a recording here. Each master is looked for
-/// in `audio_folders`. A meeting whose master is still written, or that may
-/// be in a folder that cannot be read now, is left alone; one with a master
-/// is recovered and queued through `intake`; the rest are failed with
-/// [`Store::INTERRUPTED_RECORDING_REASON`] through
-/// [`Store::fail_recordings`], which skips a row another process has
-/// moved on meanwhile. Blocks for up to
+/// as the module doc says ([`find_master`]). A meeting whose master is
+/// still written, or that may be in a folder that cannot be read now, is
+/// left alone; one with a master is recovered and queued through `intake`;
+/// the rest are failed with [`Store::INTERRUPTED_RECORDING_REASON`] through
+/// [`Store::fail_recordings`], which skips a row another process has moved
+/// on meanwhile. The record forgets every listed entry whose meeting is no
+/// longer left `recording`. Blocks for up to
 /// [`LiveRecordingCheck::fresh_within`] when a master is fresh, so the
 /// caller runs it off the main thread. Swift:
 /// `MeetingStore.failInterruptedRecordings` in `AppController.launch`, the
@@ -399,10 +460,9 @@ pub(crate) fn reconcile_interrupted(
     }
     let folders = store.settings().and_then(|settings| {
         let current = file_url_path(&settings.audio_folder);
-        let named = current.is_some();
-        audio_folders(store, current, &interrupted.known_folders).map(|folders| (folders, named))
+        Ok((current, other_folders(store, &interrupted.known_folders)?))
     });
-    let (folders, named) = match folders {
+    let (current, others) = match folders {
         Ok(folders) => folders,
         Err(error) => {
             // Nothing can be told apart without the folders; the next
@@ -412,13 +472,24 @@ pub(crate) fn reconcile_interrupted(
             return reconciled;
         }
     };
-    // Settings whose audio folder this build cannot read may name the one
-    // a master is in: only a master found elsewhere is recovered.
     let lookups: Vec<Lookup> = meetings
         .iter()
-        .map(|meeting| match find_master(&folders, meeting.id) {
-            Lookup::Absent if !named => Lookup::Unreachable,
-            lookup => lookup,
+        .map(|meeting| {
+            let recorded = interrupted
+                .recorded
+                .as_ref()
+                .and_then(|recorded| recorded.get(&meeting.id).cloned());
+            let deciding = distinct(recorded.into_iter().chain(current.clone()), &[]);
+            let others = distinct(others.iter().cloned(), &deciding);
+            match find_master(&deciding, &others, meeting.id) {
+                // Settings whose audio folder this build cannot read, or a
+                // record that cannot be read, may name the folder a master
+                // is in: only a master found is recovered.
+                Lookup::Absent if current.is_none() || interrupted.recorded.is_none() => {
+                    Lookup::Unreachable
+                }
+                lookup => lookup,
+            }
         })
         .collect();
     let masters: Vec<Option<PathBuf>> = meetings
@@ -468,18 +539,43 @@ pub(crate) fn reconcile_interrupted(
             }
         }
     }
-    if unrecovered.is_empty() {
-        return reconciled;
+    if !unrecovered.is_empty() {
+        match store.fail_recordings(
+            &unrecovered,
+            Store::INTERRUPTED_RECORDING_REASON,
+            Utc::now(),
+        ) {
+            Ok(failed) => reconciled.failed = failed,
+            Err(error) => {
+                tracing::warn!(%error, "interrupted recordings could not be marked");
+                reconciled.kept.append(&mut unrecovered);
+            }
+        }
     }
-    match store.fail_recordings(
-        &unrecovered,
-        Store::INTERRUPTED_RECORDING_REASON,
-        Utc::now(),
-    ) {
-        Ok(failed) => reconciled.failed = failed,
-        Err(error) => tracing::warn!(%error, "interrupted recordings could not be marked"),
-    }
+    forget_settled(interrupted, &reconciled);
     reconciled
+}
+
+/// Forgets the recorded folder of every meeting in `interrupted`'s record
+/// that `reconciled` did not leave `recording`: recovered, failed, or
+/// moved on before the launch. An entry recorded since the launch listed
+/// the record stays.
+fn forget_settled(interrupted: &Interrupted, reconciled: &Reconciled) {
+    let Some(recorded) = &interrupted.recorded else {
+        return;
+    };
+    let left = [&reconciled.live, &reconciled.unreachable, &reconciled.kept];
+    let settled: Vec<Uuid> = recorded
+        .keys()
+        .copied()
+        .filter(|id| !left.iter().any(|ids| ids.contains(id)))
+        .collect();
+    if settled.is_empty() {
+        return;
+    }
+    if let Err(error) = crate::audio_folders::forget(&interrupted.support_directory, &settled) {
+        tracing::debug!(%error, "settled recording folders not forgotten");
+    }
 }
 
 #[cfg(test)]
@@ -490,7 +586,6 @@ mod tests {
     use steno_audio::{FRAME_SIZE, SAMPLE_RATE};
     use steno_core::testing::WriteLockHold;
     use steno_core::{MeetingState, MeetingStateKind};
-    use steno_pipeline::RetentionSweep;
 
     use super::*;
     use crate::pipeline::CurrentPipeline;
@@ -533,7 +628,7 @@ mod tests {
         /// A `recording` row as the recorder's `begin` writes it.
         fn begin(&self, source: MeetingSource) -> Meeting {
             self.intake()
-                .begin(source, None, None, &[], Utc::now())
+                .begin(Uuid::new_v4(), source, None, None, &[], Utc::now())
                 .unwrap()
         }
 
@@ -548,12 +643,25 @@ mod tests {
             self.dir.path().join("support")
         }
 
-        /// `meetings` as the launch lists them, with the known folders.
+        /// `meetings` as the launch lists them, with the recorded and the
+        /// known folders.
         fn interrupted(&self, meetings: &[Meeting]) -> Interrupted {
             Interrupted {
                 meetings: meetings.to_vec(),
-                known_folders: crate::audio_folders::known(&self.support_directory()),
+                ..Interrupted::list(&self.store, &self.support_directory())
             }
+        }
+
+        /// Records `meeting`'s folder as the recorder does before its row.
+        fn record(&self, meeting: &Meeting, folder: &Path) {
+            crate::audio_folders::record(&self.support_directory(), meeting.id, folder).unwrap();
+        }
+
+        /// The folder recorded for `meeting`, if any.
+        fn recorded(&self, meeting: &Meeting) -> Option<PathBuf> {
+            crate::audio_folders::recorded(&self.support_directory())
+                .unwrap()
+                .remove(&meeting.id)
         }
 
         fn reconcile(&self, meetings: &[Meeting], check: &LiveRecordingCheck) -> Reconciled {
@@ -654,7 +762,6 @@ mod tests {
         crate::app::reconcile_at_launch(
             &harness.store,
             &harness.pipeline,
-            &RetentionSweep::new(harness.store.clone()),
             &harness.interrupted(meetings),
             check,
             chrono::FixedOffset::east_opt(0).unwrap(),
@@ -915,15 +1022,15 @@ mod tests {
 
     /// The first recording in a folder the user just chose, which no asset
     /// names yet, then a change of the folder while it ran: the recorder
-    /// listed the folder before the row ([`crate::audio_folders`]), so the
-    /// launch finds the master there, though the settings name another
-    /// folder that is there and empty.
+    /// recorded the folder before the row ([`crate::audio_folders`]), so
+    /// the launch finds the master there, though the settings name another
+    /// folder that is there and empty, and forgets the entry once the
+    /// meeting is queued.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_master_in_a_folder_the_recorder_listed_is_found_after_the_folder_changed() {
+    async fn a_master_in_the_folder_the_recorder_recorded_is_found_after_the_folder_changed() {
         let harness = Harness::new();
-        crate::audio_folders::remember(&harness.support_directory(), &harness.audio_folder())
-            .unwrap();
         let meeting = harness.begin(MeetingSource::MacCall);
+        harness.record(&meeting, &harness.audio_folder());
         let mut writer = harness.writer(&meeting);
         write_frames(&mut writer, 100);
         drop(writer);
@@ -937,7 +1044,34 @@ mod tests {
             harness.store.asset(meeting.id).unwrap().unwrap().url,
             file_url(&master_path(&harness.audio_folder(), meeting.id), false)
         );
+        assert_eq!(harness.recorded(&meeting), None);
         harness.pipeline.current().wait_until_idle().await;
+    }
+
+    /// A folder that is gone for good keeps a row only when it decides the
+    /// meeting: a recording whose recorded folder is missing (an unmounted
+    /// volume) stays `recording`, with its entry, while a known folder
+    /// retired since does not keep a row with no master anywhere, which
+    /// fails as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_deciding_folder_that_is_gone_keeps_the_row() {
+        let harness = Harness::new();
+        std::fs::create_dir_all(harness.audio_folder()).unwrap();
+        let retired = harness.dir.path().join("retired");
+        std::fs::create_dir_all(&retired).unwrap();
+        crate::audio_folders::remember(&harness.support_directory(), &retired).unwrap();
+        std::fs::remove_dir_all(&retired).unwrap();
+        let absent = harness.begin(MeetingSource::MacCall);
+        let unmounted = harness.begin(MeetingSource::MacCall);
+        let volume = harness.dir.path().join("volume");
+        harness.record(&unmounted, &volume);
+
+        let meetings = [absent.clone(), unmounted.clone()];
+        let reconciled = harness.reconcile(&meetings, &an_hour_later());
+        assert_eq!(reconciled.failed, [absent.id]);
+        assert_eq!(reconciled.unreachable, [unmounted.id]);
+        assert_eq!(harness.state(&unmounted), MeetingState::Recording);
+        assert_eq!(harness.recorded(&unmounted), Some(volume));
     }
 
     /// Makes `path` unreadable to this user; `false` when it stays
@@ -985,6 +1119,38 @@ mod tests {
         set_mode(&master, 0o644);
         assert_eq!(reconciled.unreachable, [meeting.id]);
         assert_eq!(reconciled.failed, Vec::<Uuid>::new());
+        assert_eq!(harness.state(&meeting), MeetingState::Recording);
+
+        let reconciled = harness.reconcile(std::slice::from_ref(&meeting), &an_hour_later());
+        assert_eq!(reconciled.recovered, [meeting.id]);
+        harness.pipeline.current().wait_until_idle().await;
+    }
+
+    /// A record the launch cannot read may name the folder a master is in:
+    /// a recording whose master is in the folder it started in, after the
+    /// setting moved to another (there and empty), is kept, never failed;
+    /// once the record can be read, a later launch recovers it.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_record_keeps_a_row_whose_master_is_not_found() {
+        let harness = Harness::new();
+        let meeting = harness.begin(MeetingSource::MacCall);
+        harness.record(&meeting, &harness.audio_folder());
+        let mut writer = harness.writer(&meeting);
+        write_frames(&mut writer, 100);
+        drop(writer);
+        let elsewhere = harness.dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        harness.set_folder(&elsewhere);
+        let record = harness
+            .support_directory()
+            .join(crate::audio_folders::RECORDED_FILE);
+        if !lock_out(&record, || std::fs::read(&record).is_ok()) {
+            return;
+        }
+        let reconciled = harness.reconcile(std::slice::from_ref(&meeting), &an_hour_later());
+        set_mode(&record, 0o644);
+        assert_eq!(reconciled.unreachable, [meeting.id]);
         assert_eq!(harness.state(&meeting), MeetingState::Recording);
 
         let reconciled = harness.reconcile(std::slice::from_ref(&meeting), &an_hour_later());
@@ -1046,22 +1212,12 @@ mod tests {
         assert_eq!(harness.state(&meeting), MeetingState::Recording);
     }
 
-    /// A recovery that panics (here the live check's wait) does not take
-    /// the launch's other work with it: the meeting left queued is still
-    /// resumed and processed, and the row the recovery had not finished
-    /// stays `recording`.
+    /// A recovery that panics (here the live check's wait) is caught: the
+    /// launch's task returns, the row it had not finished stays
+    /// `recording`, and the next launch recovers it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_recovery_that_panics_still_resumes_the_queue() {
+    async fn a_recovery_that_panics_leaves_its_rows_for_the_next_launch() {
         let harness = Harness::new();
-        let mut queued = harness.begin(MeetingSource::MacInPerson);
-        let mut writer = harness.writer(&queued);
-        write_frames(&mut writer, 20);
-        let files = writer.finish().unwrap();
-        queued.state = MeetingState::Queued;
-        harness
-            .store
-            .save_meeting_with_asset(&queued, &finished(&queued, &files).asset)
-            .unwrap();
         let fresh = harness.begin(MeetingSource::MacInPerson);
         let mut writer = harness.writer(&fresh);
         write_frames(&mut writer, 10);
@@ -1072,8 +1228,9 @@ mod tests {
         };
 
         reconcile_at_launch(&harness, std::slice::from_ref(&fresh), &panicking);
-        harness.pipeline.current().wait_until_idle().await;
-        assert_eq!(harness.state(&queued), MeetingState::Ready);
         assert_eq!(harness.state(&fresh), MeetingState::Recording);
+        reconcile_at_launch(&harness, std::slice::from_ref(&fresh), &an_hour_later());
+        harness.pipeline.current().wait_until_idle().await;
+        assert_eq!(harness.state(&fresh), MeetingState::Ready);
     }
 }
