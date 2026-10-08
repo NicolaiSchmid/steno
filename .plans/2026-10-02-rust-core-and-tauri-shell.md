@@ -704,8 +704,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   `steno dev models` read the asset. Who may download is the caller's
   `steno_diarize::Install`: under `Never` a missing file is
   `DiarizeError::NotInstalled` with no request (`steno_diarize::models::installed` is
-  the same check without a load). Every diarizer is on `Allowed` for now: the app's
-  `SpeechEngines` and `steno process` move to `Never` together with the pipeline's
+  the same check without a load). Every diarizer is on `Allowed` for now. `steno
+  process` stays on it, since a command run in a terminal may download on first use;
+  the app's `SpeechEngines` moves to `Never` together with the pipeline's
   models-missing gate (S1 in `.plans/2026-10-07-stable-promotion.md`), so a missing
   model never ends in the fallback while "delete after processing" removes the
   audio. Under

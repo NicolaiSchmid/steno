@@ -3,13 +3,15 @@
 //! loopback mirror. The speech engine is core's fake. No network beyond
 //! 127.0.0.1.
 //!
-//! - Under `Install::Allowed` (what `SpeechEngines` and `steno process`
-//!   build until the pipeline gains its models-missing gate), a download cut off mid-file,
-//!   then refused, ends the job `ready` with the one room speaker. The
+//! - Under `Install::Allowed` (what `steno process` builds, and
+//!   `SpeechEngines` until the pipeline gains its models-missing gate), a
+//!   download cut off mid-file, then refused, ends the job `ready` with the
+//!   one room speaker. The
 //!   recording's files stay byte for byte, the cut-off download stays as
 //!   a partial in `onnx/diarization/`, and processing the meeting again
 //!   resumes it rather than repeating a cached failure.
-//! - Under `Install::Never` (what they build once the gate lands) the job
+//! - Under `Install::Never` (what `SpeechEngines` builds once the gate
+//!   lands) the job
 //!   falls back the same way and the mirror sees no request; files of the
 //!   right size in the folder Settings installs that fail to load and fail
 //!   their checksum are deleted, so Settings offers Download.

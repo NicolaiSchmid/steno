@@ -63,8 +63,8 @@ pub const SEGMENTATION_REVISION: &str = "9403a6902bb58e3d5ae8c7e77c3422de279db2e
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Install {
     /// A missing file is downloaded first ([`ensure`]): the CLI's explicit
-    /// commands, and the app's pipeline and `steno process` until the
-    /// pipeline checks for missing models itself.
+    /// commands, `steno process` among them, and the app's pipeline until
+    /// it checks for missing models itself.
     Allowed,
     /// A missing file is [`DiarizeError::NotInstalled`] and no request is
     /// made ([`installed`]): for a pipeline that checks for missing models
