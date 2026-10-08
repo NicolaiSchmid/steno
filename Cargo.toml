@@ -8,7 +8,7 @@ resolver = "3"
 members = ["crates/*", "apps/desktop/src-tauri"]
 
 [workspace.package]
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 edition = "2024"
 # The floor of the dependency tree, checked by the `msrv` job in rust-ci.yml:
 # tauri 2.12 declares 1.90 (edition 2024 alone needs 1.85, let chains 1.88).
