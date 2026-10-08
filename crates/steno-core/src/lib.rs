@@ -26,6 +26,8 @@
 //! - [`platform`]: the OS the app runs on, which is also the OS its
 //!   calls were recorded on.
 //! - [`content_hash`]: the SHA-256 every receipt carries.
+//! - [`busy_file`]: the retries of a file Windows reports another handle
+//!   holds for a moment, which every rename of a file Steno writes shares.
 //! - [`crash_log`]: a file in the support directory for every panic, in
 //!   the app and in the speech sidecar.
 //! - [`database_lock`]: the lock that keeps one process per database.
@@ -41,6 +43,7 @@
 //! little-endian `f32` blobs. A schema change is one PR touching both
 //! sides; `migrations/README.md` has the procedure.
 
+pub mod busy_file;
 pub mod content_hash;
 pub mod crash_log;
 pub mod database_lock;

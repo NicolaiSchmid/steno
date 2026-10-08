@@ -26,6 +26,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use steno_core::busy_file::{self, is_busy};
 
 /// The syncs a durable write makes, and its waits before it tries a busy
 /// file again ([`retried`]); the disk and the clock in the product, a
@@ -291,52 +292,16 @@ fn rename_with_std(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result
     retried(syncs, is_busy, || std::fs::rename(from, to))
 }
 
-/// Whether `error` is Windows refusing a file another handle holds for a
-/// moment (`windows::is_busy`): never elsewhere, where nothing is
-/// retried.
-fn is_busy(error: &std::io::Error) -> bool {
-    #[cfg(windows)]
-    {
-        windows::is_busy(error)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = error;
-        false
-    }
-}
-
-/// How often [`retried`] tries again on Windows.
-const RETRIES: u32 = 9;
-
-/// [`retried`]'s first wait, which doubles with each retry up to
-/// [`LONGEST_WAIT`]: about 0.9 s over the nine retries.
-const FIRST_WAIT: Duration = Duration::from_millis(5);
-
-/// [`retried`]'s longest wait.
-const LONGEST_WAIT: Duration = Duration::from_millis(200);
-
-/// Runs `attempt`. On Windows, where another process (a sync or antivirus
-/// client) or another writer may hold a file for a moment, an error `busy`
-/// accepts is tried again [`RETRIES`] times, after waits of 5 ms doubling
-/// to 200 ms, about 0.9 s in all; elsewhere `attempt` runs once.
+/// Runs `attempt`, tried again on Windows while `busy` accepts its error
+/// (`steno_core::busy_file`: nine retries after waits of 5 ms doubling to
+/// 200 ms, about 0.9 s in all), waiting through `syncs`; elsewhere
+/// `attempt` runs once.
 fn retried<T>(
     syncs: &dyn Syncs,
     busy: impl Fn(&std::io::Error) -> bool,
-    mut attempt: impl FnMut() -> std::io::Result<T>,
+    attempt: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    let retries = if cfg!(windows) { RETRIES } else { 0 };
-    let mut delay = FIRST_WAIT;
-    for _ in 0..retries {
-        match attempt() {
-            Err(error) if busy(&error) => {
-                syncs.wait(delay);
-                delay = (delay * 2).min(LONGEST_WAIT);
-            }
-            outcome => return outcome,
-        }
-    }
-    attempt()
+    busy_file::retried_with(busy_file::RETRIES, busy, |delay| syncs.wait(delay), attempt)
 }
 
 /// Removes this file's temporaries in `directory` that are older than
@@ -981,7 +946,7 @@ mod tests {
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
         assert_eq!(
             syncs.waits().first(),
-            Some(&FIRST_WAIT),
+            Some(&busy_file::FIRST_WAIT),
             "refused at least once, then replaced"
         );
         assert_eq!(temporaries(dir.path()), Vec::<String>::new());
