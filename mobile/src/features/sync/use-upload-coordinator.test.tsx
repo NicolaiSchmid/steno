@@ -102,6 +102,11 @@ const HOSTS: Record<string, string> = {
 	"Mac B": "10.0.0.2",
 };
 
+/** Mac A's endpoint at `host`, as `adopted-origin.ts` keeps it. */
+function macAAt(host: string): MacEndpoint {
+	return { origin: `https://${host}:1`, fingerprint: "FP-mac-a" };
+}
+
 function hostOf(url: string) {
 	return new URL(url).hostname;
 }
@@ -740,10 +745,7 @@ describe("useUploadCoordinator", () => {
 				auth: "Bearer token-a",
 			});
 			expect(h.row("a")?.state).toBe("uploading");
-			expect(fake.adoptedOrigin).toEqual({
-				origin: "https://10.0.0.9:1",
-				fingerprint: "FP-mac-a",
-			});
+			expect(fake.adoptedOrigin).toEqual(macAAt("10.0.0.9"));
 
 			// The file stays on the phone until `complete` answers.
 			expect(fake.deleted).toEqual([]);
@@ -851,10 +853,7 @@ describe("useUploadCoordinator", () => {
 			await h.add("a");
 			expect(fake.cancelled).toEqual([]);
 			expect(h.row("a")?.state).toBe("uploading");
-			expect(fake.adoptedOrigin).toEqual({
-				origin: "https://10.0.0.1:1",
-				fingerprint: "FP-mac-a",
-			});
+			expect(fake.adoptedOrigin).toEqual(macAAt("10.0.0.1"));
 		});
 
 		describe("after a relaunch, with a chunk the last process left out", () => {
@@ -869,10 +868,7 @@ describe("useUploadCoordinator", () => {
 				fake.sent.filter((r) => r.auth && hostOf(r.url) === host);
 
 			it("cancels nothing while the persisted address still answers", async () => {
-				fake.adoptedOrigin = {
-					origin: "https://10.0.0.1:1",
-					fingerprint: "FP-mac-a",
-				};
+				fake.adoptedOrigin = macAAt("10.0.0.1");
 				await mount(uploadingA(), A);
 				await elapse(RERESOLVE_INTERVAL_MS);
 				expect(fake.cancelled).toEqual([]);
@@ -884,17 +880,11 @@ describe("useUploadCoordinator", () => {
 			});
 
 			it("cancels when it does not", async () => {
-				fake.adoptedOrigin = {
-					origin: "https://10.0.0.1:1",
-					fingerprint: "FP-mac-a",
-				};
+				fake.adoptedOrigin = macAAt("10.0.0.1");
 				fake.down.add("10.0.0.1");
 				await mount(uploadingA(), A);
 				expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
-				expect(fake.adoptedOrigin).toEqual({
-					origin: "https://10.0.0.9:1",
-					fingerprint: "FP-mac-a",
-				});
+				expect(fake.adoptedOrigin).toEqual(macAAt("10.0.0.9"));
 				expect(fake.sent).toContainEqual({
 					url: "https://10.0.0.9:1/v1/recordings/a/chunks/1",
 					auth: "Bearer token-a",
