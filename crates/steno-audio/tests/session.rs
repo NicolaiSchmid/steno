@@ -772,6 +772,16 @@ impl ChosenOrDefault {
             is_fallback,
         })
     }
+
+    /// The stream's input on the chosen microphone.
+    fn chosen() -> Option<CaptureInput> {
+        Self::input(Self::CHOSEN, "USB Microphone", false)
+    }
+
+    /// The stream's input on the default input, recorded as the fallback.
+    fn fallback() -> Option<CaptureInput> {
+        Self::input("built-in", "Built-in Microphone", true)
+    }
 }
 
 impl CaptureBackend for ChosenOrDefault {
@@ -796,9 +806,7 @@ impl CaptureBackend for ChosenOrDefault {
         let stream = self.inner.start(lanes, uid, sink)?;
         let input = match uid {
             Some(uid) if on_chosen => Self::input(uid, "USB Microphone", false),
-            None if self.default_is_chosen.load(Ordering::Relaxed) => {
-                Self::input(Self::CHOSEN, "USB Microphone", false)
-            }
+            None if self.default_is_chosen.load(Ordering::Relaxed) => Self::chosen(),
             _ => Self::input("built-in", "Built-in Microphone", uid.is_some()),
         };
         Ok(CaptureStream { input, ..stream })
@@ -822,10 +830,7 @@ fn a_chosen_microphone_that_goes_and_comes_back_keeps_the_recording() {
     let next_notice = || notices.recv_timeout(Duration::from_secs(5)).unwrap();
     let input = || session.stream().and_then(|stream| stream.input);
     session.start(Uuid::new_v4()).unwrap();
-    assert_eq!(
-        input(),
-        ChosenOrDefault::input(ChosenOrDefault::CHOSEN, "USB Microphone", false)
-    );
+    assert_eq!(input(), ChosenOrDefault::chosen());
 
     backend.connected.store(false, Ordering::Relaxed);
     session.device_changed(DeviceChangeReason::InputDeviceGone);
@@ -840,7 +845,7 @@ fn a_chosen_microphone_that_goes_and_comes_back_keeps_the_recording() {
     assert!(matches!(session.state(), CaptureState::Recording { .. }));
     assert_eq!(
         input(),
-        ChosenOrDefault::input("built-in", "Built-in Microphone", true),
+        ChosenOrDefault::fallback(),
         "the default input as the fallback"
     );
 
@@ -856,7 +861,7 @@ fn a_chosen_microphone_that_goes_and_comes_back_keeps_the_recording() {
     ));
     assert_eq!(
         input(),
-        ChosenOrDefault::input(ChosenOrDefault::CHOSEN, "USB Microphone", false),
+        ChosenOrDefault::chosen(),
         "back on the chosen microphone"
     );
 
@@ -884,7 +889,7 @@ fn a_chosen_microphone_that_comes_back_but_does_not_open_keeps_the_recording() {
     let session = backend.session(directory.path(), clock.clone());
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
-    let on_the_fallback = ChosenOrDefault::input("built-in", "Built-in Microphone", true);
+    let on_the_fallback = ChosenOrDefault::fallback();
     assert_eq!(session.stream().and_then(|s| s.input), on_the_fallback);
 
     backend.connected.store(true, Ordering::Relaxed);
@@ -936,7 +941,7 @@ fn a_chosen_microphone_that_stops_opening_is_retried_before_the_default() {
     ));
     assert_eq!(
         session.stream().and_then(|stream| stream.input),
-        ChosenOrDefault::input("built-in", "Built-in Microphone", true),
+        ChosenOrDefault::fallback(),
         "the default input, marked as the fallback"
     );
     assert_eq!(
@@ -1029,7 +1034,7 @@ fn a_chosen_microphone_that_does_not_run_at_a_later_restart_is_replaced_there() 
     assert_eq!(backend.asked(), ChosenOrDefault::chosen_then_default(2));
     assert_eq!(
         session.stream().and_then(|stream| stream.input),
-        ChosenOrDefault::input("built-in", "Built-in Microphone", true),
+        ChosenOrDefault::fallback(),
         "the default input, marked as the fallback"
     );
     let result = session.stop().unwrap();
@@ -1049,7 +1054,7 @@ fn a_chosen_microphone_that_does_not_open_at_the_start_records_the_default() {
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
         session.stream().and_then(|stream| stream.input),
-        ChosenOrDefault::input("built-in", "Built-in Microphone", true)
+        ChosenOrDefault::fallback()
     );
     assert_eq!(backend.asked(), ChosenOrDefault::chosen_then_default(0));
     backend.inner.wait_until_finished();
@@ -1083,7 +1088,7 @@ fn a_chosen_microphone_that_is_the_default_is_not_its_own_fallback() {
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
         session.stream().and_then(|stream| stream.input),
-        ChosenOrDefault::input(ChosenOrDefault::CHOSEN, "USB Microphone", false)
+        ChosenOrDefault::chosen()
     );
     assert_eq!(backend.asked(), ChosenOrDefault::chosen_then_default(0));
     backend.inner.wait_until_finished();
