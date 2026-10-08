@@ -1717,7 +1717,9 @@ mod tests {
         let memory = Arc::new(steno_core::testing::InMemorySecretStore::new());
         let secrets: Arc<dyn SecretStore> = memory.clone();
         let runtime = tokio::runtime::Handle::current();
-        let listener = || handover_listener(&store, &pipeline, &secrets, local_zone(), &runtime);
+        let paths = StenoPaths::new(dir.path().join("support"));
+        let listener =
+            || handover_listener(&store, &pipeline, &secrets, &paths, local_zone(), &runtime);
         store
             .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
             .unwrap();
