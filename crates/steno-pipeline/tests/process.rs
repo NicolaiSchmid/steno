@@ -2323,10 +2323,14 @@ fn runs_file(asset: &AudioAsset) -> PathBuf {
 
 /// A launch whose run of the meeting never ends: the run is left
 /// mid-transcription, as a crash leaves it, and the pipeline is dropped.
+/// Each launch here has a quit latch and an in-flight set of its own, as a
+/// new process has, so the run left held claims nothing in the next.
 async fn launch_that_crashes(world: &World, first: Option<(&Meeting, &AudioAsset)>) -> Vec<Uuid> {
     let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
     let pipeline = ProcessingPipeline::new(
-        with_engine(world, engine.clone()).with_quit_latch(QuitLatch::default()),
+        with_engine(world, engine.clone())
+            .with_quit_latch(QuitLatch::default())
+            .with_in_flight(InFlight::default()),
     );
     let resumed = match first {
         Some((meeting, asset)) => {
@@ -2617,7 +2621,9 @@ async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash
     for launch in 1..=MAX_CRASHED_RUNS {
         let engine = Arc::new(GatedEngine::new(Gate::EveryTranscription));
         let pipeline = ProcessingPipeline::new(
-            with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default()),
+            with_engine(&world, engine.clone())
+                .with_quit_latch(QuitLatch::default())
+                .with_in_flight(InFlight::default()),
         );
         assert_eq!(
             pipeline.resume_unfinished().unwrap(),
@@ -2638,7 +2644,8 @@ async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash
             .pipeline
             .dependencies()
             .clone()
-            .with_quit_latch(QuitLatch::default()),
+            .with_quit_latch(QuitLatch::default())
+            .with_in_flight(InFlight::default()),
     );
     assert_eq!(next_launch.resume_unfinished().unwrap(), [b.id]);
     next_launch.wait_until_idle().await;
@@ -2662,7 +2669,9 @@ async fn a_run_started_at_once_holds_back_a_run_that_goes_alone() {
     let (counted, counted_asset) = processing_with_count(&world, 1);
     let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
     let pipeline = ProcessingPipeline::new(
-        with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default()),
+        with_engine(&world, engine.clone())
+            .with_quit_latch(QuitLatch::default())
+            .with_in_flight(InFlight::default()),
     );
     assert_eq!(
         pipeline.resume_unfinished().unwrap(),
@@ -2694,7 +2703,9 @@ async fn a_quit_while_a_run_waits_its_turn_leaves_its_count() {
     let (counted, counted_asset) = processing_with_count(&world, 1);
     let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
     let pipeline = ProcessingPipeline::new(
-        with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default()),
+        with_engine(&world, engine.clone())
+            .with_quit_latch(QuitLatch::default())
+            .with_in_flight(InFlight::default()),
     );
     assert_eq!(
         pipeline.resume_unfinished().unwrap(),
@@ -2721,7 +2732,8 @@ async fn a_quit_while_a_run_waits_its_turn_leaves_its_count() {
             .pipeline
             .dependencies()
             .clone()
-            .with_quit_latch(QuitLatch::default()),
+            .with_quit_latch(QuitLatch::default())
+            .with_in_flight(InFlight::default()),
     );
     let resumed = next_launch.resume_unfinished().unwrap();
     assert!(resumed.contains(&counted.id), "{resumed:?}");
@@ -2743,7 +2755,9 @@ async fn alone_runs_are_serial_and_oldest_first() {
     three.sort_by_key(|(meeting, _)| meeting.id);
     let engine = Arc::new(GatedEngine::new(Gate::EveryTranscription));
     let pipeline = ProcessingPipeline::new(
-        with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default()),
+        with_engine(&world, engine.clone())
+            .with_quit_latch(QuitLatch::default())
+            .with_in_flight(InFlight::default()),
     );
     let ids: Vec<Uuid> = three.iter().map(|(m, _)| m.id).collect();
     assert_eq!(pipeline.resume_unfinished().unwrap(), ids);
@@ -2815,7 +2829,8 @@ async fn a_quit_takes_back_a_run_held_mid_transcription() {
             .pipeline
             .dependencies()
             .clone()
-            .with_quit_latch(QuitLatch::default()),
+            .with_quit_latch(QuitLatch::default())
+            .with_in_flight(InFlight::default()),
     );
     assert_eq!(next_launch.resume_unfinished().unwrap(), [meeting.id]);
     next_launch.wait_until_idle().await;
@@ -3543,8 +3558,9 @@ async fn a_reprocess_is_refused_while_a_retired_pipeline_runs_the_meeting() {
     let id = asset.meeting_id;
     let in_flight = InFlight::default();
     let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
-    let retired =
-        ProcessingPipeline::new(with_engine(&world, engine.clone()).with_in_flight(in_flight.clone()));
+    let retired = ProcessingPipeline::new(
+        with_engine(&world, engine.clone()).with_in_flight(in_flight.clone()),
+    );
     let replacement = ProcessingPipeline::new(
         world
             .pipeline
