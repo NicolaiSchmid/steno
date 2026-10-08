@@ -963,12 +963,7 @@ impl ProcessingPipeline {
             .claim_start(meeting_id, asset.id)
             .ok_or(ReprocessError::Busy(meeting_id))?;
         asset.expires_at = None;
-        Ok(self.enqueue_claimed(
-            &meeting,
-            &asset,
-            claim,
-            Store::save_meeting_with_asset,
-        )?)
+        Ok(self.enqueue_claimed(&meeting, &asset, claim, Store::save_meeting_with_asset)?)
     }
 
     /// Claims `asset_id` for a background run of `meeting_id` in the

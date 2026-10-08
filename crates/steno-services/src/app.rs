@@ -303,6 +303,25 @@ fn handover_listener(
     Ok((service, mac_id))
 }
 
+/// [`lock_database`], or `None` with a startup warning on a filesystem
+/// without locks.
+fn lock_or_run_without(
+    database_path: &std::path::Path,
+    patience: std::time::Duration,
+    warnings: &mut Vec<String>,
+) -> Result<Option<DatabaseLock>, BuildError> {
+    match lock_database(database_path, patience) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(BuildError::Lock(error @ DatabaseLockError::Unsupported { .. })) => {
+            warnings.push(format!(
+                "Running without the database lock, so a second Steno on this database is not kept out: {error}"
+            ));
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Builds the graph. First the database's lock ([`DatabaseLock`]): while
 /// another process holds it past [`AppOptions::lock_patience`] the build
 /// fails with [`BuildError::Lock`] before the database is opened; on a
@@ -325,16 +344,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let database_path = options
         .database_path
         .unwrap_or_else(|| paths.database_path());
-    let database_lock = match lock_database(&database_path, options.lock_patience) {
-        Ok(lock) => Some(lock),
-        Err(BuildError::Lock(error @ DatabaseLockError::Unsupported { .. })) => {
-            warnings.push(format!(
-                "Running without the database lock, so a second Steno on this database is not kept out: {error}"
-            ));
-            None
-        }
-        Err(error) => return Err(error),
-    };
+    let database_lock = lock_or_run_without(&database_path, options.lock_patience, &mut warnings)?;
     let store = open_store(&database_path)?;
     let secrets = secret_store(options.keyring, &paths);
     let codex = codex_store();
