@@ -929,12 +929,77 @@ async fn a_write_the_keyring_refused_keeps_the_files_copy() {
 
 /// A choice that panics settles on the file instead of leaving every call
 /// waiting for it.
-#[test]
-fn a_choice_that_panics_falls_back_to_the_file() {
-    assert!(matches!(
-        or_file_on_panic(|| panic!("a provider's reply broke the parser")),
-        Backend::File
-    ));
+#[tokio::test]
+async fn a_choice_that_panics_falls_back_to_the_file() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("secrets.json");
+    write_file(&path, &[("llm-api-key", "sk-file")]);
+    let store = SecretServiceStore::start(
+        file_at(&path, &[]),
+        FingerprintFile::in_support_directory(folder.path()),
+        PROMPT_TIMEOUT,
+        |_| panic!("a provider's reply broke the parser"),
+    );
+    let read = tokio::time::timeout(
+        Duration::from_secs(10),
+        store.secret(&SecretKey::llm_api_key()),
+    )
+    .await
+    .expect("the read does not wait for the choice for good");
+    assert_eq!(read.unwrap().as_deref(), Some("sk-file"));
+    assert!(chose_file(&store));
+}
+
+/// A removal the keyring refuses has dropped the file's copy first, so a
+/// crash between the two cannot bring the removed key back at the next
+/// launch.
+#[tokio::test]
+async fn a_removal_drops_the_files_copy_before_the_service_item() {
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    write_file(&setup.path(), &[("llm-api-key", "sk-file")]);
+    let store = setup.launch().await;
+    assert!(chose_service(&store));
+    {
+        let mut state = setup.state();
+        state.locked = true;
+        state.dismiss = true;
+    }
+    let key = SecretKey::llm_api_key();
+    assert!(store.set_secret(&key, None).await.is_err());
+    assert_eq!(setup.values("llm-api-key"), ["sk-file"]);
+    assert_eq!(setup.contents(), moved(&[]));
+}
+
+/// A session bus that is not a local socket would carry the secrets in
+/// clear, so the store keeps them with the file without connecting.
+#[tokio::test]
+async fn a_bus_that_is_not_a_local_socket_keeps_the_secrets_with_the_file() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("secrets.json");
+    write_file(&path, &[("llm-api-key", "sk-file")]);
+    let store = SecretServiceStore::on_bus(
+        file_at(&path, &[]),
+        FingerprintFile::in_support_directory(folder.path()),
+        "tcp:host=127.0.0.1,port=9",
+        PROMPT_TIMEOUT,
+    );
+    store.chosen().await;
+    assert!(chose_file(&store));
+    assert_eq!(
+        store
+            .secret(&SecretKey::llm_api_key())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("sk-file")
+    );
+    assert!(local_bus("unix:path=/run/user/1000/bus"));
+    assert!(local_bus("unix:abstract=/tmp/dbus-x,guid=1;unix:path=/a"));
+    assert!(!local_bus("unix:path=/a;tcp:host=example.org,port=1"));
+    assert!(!local_bus("unixexec:path=ssh"));
+    assert!(!local_bus("nonce-tcp:host=127.0.0.1,port=1"));
 }
 
 /// A run that could not open the keyring after the move says the secrets
@@ -1005,7 +1070,8 @@ async fn a_value_with_line_breaks_is_stored_on_one_line_and_reads_back_whole() {
 #[test]
 fn a_value_with_any_line_break_is_encoded_and_a_damaged_encoding_is_an_error() {
     let key = SecretKey::llm_api_key();
-    for value in ["a\rb", "a\nb", "a\r\nb"] {
+    let prefixed = format!("{ONE_LINE_PREFIX}c2stMQ==");
+    for value in ["a\rb", "a\nb", "a\r\nb", ONE_LINE_PREFIX, &prefixed] {
         let stored = one_line(value);
         assert!(stored.starts_with(ONE_LINE_PREFIX), "{value:?}");
         assert_eq!(from_one_line(&key, stored).unwrap(), value);

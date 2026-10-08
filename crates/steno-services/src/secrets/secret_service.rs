@@ -11,7 +11,9 @@
 //! user, who can read Steno's memory and files anyway, so the `dh-ietf1024`
 //! exchange would add a cipher and a key exchange without keeping the
 //! secret from anyone who could not already read it. The bus is local; no
-//! secret leaves the computer.
+//! secret leaves the computer. A session bus whose address is not a
+//! `unix:` socket (`tcp:` in some remote or container setups would carry
+//! the secret in clear) is not used: every secret then stays with the file.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,7 +152,9 @@ impl SecretServiceStore {
     /// now, on the store's own thread.
     #[must_use]
     pub fn new(file: FileSecretStore, record: FingerprintFile) -> Self {
-        Self::start(file, record, Bus::Session, PROMPT_TIMEOUT)
+        Self::start(file, record, PROMPT_TIMEOUT, |shared| {
+            shared.choose_on_own_runtime(&Bus::Session)
+        })
     }
 
     /// The Secret Service on the bus at `address`, falling back to `file`.
@@ -161,19 +165,19 @@ impl SecretServiceStore {
         address: &str,
         prompt_timeout: Duration,
     ) -> Self {
-        Self::start(
-            file,
-            record,
-            Bus::Address(address.to_owned()),
-            prompt_timeout,
-        )
+        let bus = Bus::Address(address.to_owned());
+        Self::start(file, record, prompt_timeout, move |shared| {
+            shared.choose_on_own_runtime(&bus)
+        })
     }
 
+    /// The store, with `choose` started on the store's own thread; a
+    /// `choose` that panics settles on the file.
     fn start(
         file: FileSecretStore,
         record: FingerprintFile,
-        bus: Bus,
         prompt_timeout: Duration,
+        choose: impl FnOnce(&Shared) -> Backend + Send + 'static,
     ) -> Self {
         let shared = Arc::new(Shared {
             file,
@@ -188,7 +192,7 @@ impl SecretServiceStore {
         let spawned = std::thread::Builder::new()
             .name("steno-secrets".to_owned())
             .spawn(move || {
-                let backend = or_file_on_panic(|| chooser.choose_on_own_runtime(&bus));
+                let backend = chooser.or_file_on_panic(choose);
                 chooser.settle(backend);
             });
         if let Err(error) = spawned {
@@ -253,6 +257,18 @@ impl SecretServiceStore {
         }
     }
 
+    /// Drops `key`'s copy from the file, when it holds one.
+    fn drop_file_copy(&self, key: &SecretKey) -> Result<(), ServiceError> {
+        let file = &self.shared.file;
+        if file.read()?.entries.contains_key(key.as_str()) {
+            file.change(|contents| {
+                contents.entries.remove(key.as_str());
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
     /// Waits until the choice is made, whoever it asks on the way.
     #[cfg(test)]
     async fn chosen(&self) {
@@ -276,6 +292,31 @@ impl Shared {
                 reread: self.turned_away.load(Ordering::Relaxed),
             };
         });
+    }
+
+    /// The backend `choose` gives, or the file when it panics (inside
+    /// `zbus` or `serde`), so the choice still settles and no call waits
+    /// for it for good.
+    fn or_file_on_panic(&self, choose: impl FnOnce(&Self) -> Backend) -> Backend {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| choose(self))).unwrap_or_else(
+            |_| {
+                tracing::warn!(
+                    "secrets: choosing the Secret Service panicked, {}",
+                    self.kept()
+                );
+                Backend::File
+            },
+        )
+    }
+
+    /// Where the secrets are when the choice falls back to the file, for
+    /// the log.
+    fn kept(&self) -> &'static str {
+        if self.file.read().is_ok_and(|contents| contents.moved) {
+            "the secrets stay in the keyring, unavailable this run"
+        } else {
+            "keeping secrets with the file"
+        }
     }
 
     /// [`Self::choose`] on a runtime of the calling thread's own.
@@ -304,17 +345,12 @@ impl Shared {
         let keyring = match Keyring::open(bus, ask).await {
             Ok(keyring) => keyring,
             Err(error) => {
-                let what = if matches!(error, ServiceError::Bus(_)) {
+                let what = if matches!(error, ServiceError::Bus(_) | ServiceError::NotLocal) {
                     "no Secret Service"
                 } else {
                     "the Secret Service could not be opened"
                 };
-                let kept = if self.file.read().is_ok_and(|contents| contents.moved) {
-                    "the secrets stay in the keyring, unavailable this run"
-                } else {
-                    "keeping secrets with the file"
-                };
-                tracing::warn!("secrets: {what} ({error}), {kept}");
+                tracing::warn!("secrets: {what} ({error}), {}", self.kept());
                 return Backend::File;
             }
         };
@@ -389,17 +425,20 @@ impl SecretStore for SecretServiceStore {
     /// A write to the service drops the key's copy the move left in the
     /// file: the service holds the newer value, and a later launch would
     /// otherwise write the old one back over a removal, or read it in a run
-    /// that cannot open the keyring.
+    /// that cannot open the keyring. A removal drops the copy first, so a
+    /// crash between the two cannot bring the key back; a write drops it
+    /// after the service holds the value, as the copy may be the only one
+    /// the provider has saved.
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
         match self.backend().await? {
             Backend::Service(keyring) => {
+                let removal = value.is_none_or(str::is_empty);
+                if removal {
+                    self.drop_file_copy(key)?;
+                }
                 keyring.set_secret(key, value, self.ask()).await?;
-                let file = &self.shared.file;
-                if file.read()?.entries.contains_key(key.as_str()) {
-                    file.change(|contents| {
-                        contents.entries.remove(key.as_str());
-                        Ok(())
-                    })?;
+                if !removal {
+                    self.drop_file_copy(key)?;
                 }
                 Ok(())
             }
@@ -425,18 +464,6 @@ impl SecretStore for SecretServiceStore {
     }
 }
 
-/// The backend `choose` gives, or the file when it panics (inside `zbus`
-/// or `serde`), so the choice still settles and no call waits for it for
-/// good.
-fn or_file_on_panic(choose: impl FnOnce() -> Backend) -> Backend {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(choose)).unwrap_or_else(|_| {
-        tracing::warn!(
-            "secrets: choosing the Secret Service panicked, keeping secrets with the file"
-        );
-        Backend::File
-    })
-}
-
 /// What can go wrong talking to the Secret Service.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ServiceError {
@@ -457,6 +484,8 @@ pub(super) enum ServiceError {
     PromptClosed,
     #[error("the Secret Service did not answer in time")]
     NoAnswer,
+    #[error("the session bus is not a local socket")]
+    NotLocal,
     #[error("the Secret Service holds `{0}` as bytes that are not UTF-8")]
     NotText(String),
     #[error("`{0}` did not read back from the Secret Service as written")]
@@ -497,10 +526,10 @@ struct Keyring {
 const ONE_LINE_PREFIX: &str = "steno-base64:";
 
 /// `value` as it is stored: itself, or base64 behind [`ONE_LINE_PREFIX`]
-/// when it holds a line break.
+/// when it holds a line break or starts with the prefix itself.
 fn one_line(value: &str) -> String {
     use base64::Engine as _;
-    if value.contains(['\n', '\r']) {
+    if value.contains(['\n', '\r']) || value.starts_with(ONE_LINE_PREFIX) {
         format!(
             "{ONE_LINE_PREFIX}{}",
             base64::engine::general_purpose::STANDARD.encode(value)
@@ -533,7 +562,14 @@ impl Keyring {
     /// every Steno item in it (`KeePassXC` locks items one by one).
     async fn open(bus: &Bus, ask: Ask<'_>) -> Result<Self, ServiceError> {
         let builder = match bus {
-            Bus::Session => zbus::connection::Builder::session()?,
+            Bus::Session => {
+                let address = std::env::var("DBUS_SESSION_BUS_ADDRESS");
+                if address.as_deref().is_ok_and(|address| !local_bus(address)) {
+                    return Err(ServiceError::NotLocal);
+                }
+                zbus::connection::Builder::session()?
+            }
+            Bus::Address(address) if !local_bus(address) => return Err(ServiceError::NotLocal),
             Bus::Address(address) => zbus::connection::Builder::address(address.as_str())?,
         };
         let connection = builder.method_timeout(CALL_TIMEOUT).build().await?;
@@ -800,6 +836,17 @@ fn pin_file_identity(record: &FingerprintFile, pem: &str) -> Result<(), ServiceE
     record
         .record(&steno_handover::identity::hex(&identity.fingerprint()))
         .map_err(ServiceError::Record)
+}
+
+/// Whether every address in a D-Bus address list is a `unix:` socket, so
+/// the `plain` session's secrets stay on this computer. Without
+/// `DBUS_SESSION_BUS_ADDRESS`, `zbus` uses the socket in
+/// `XDG_RUNTIME_DIR`.
+fn local_bus(address: &str) -> bool {
+    address
+        .split(';')
+        .filter(|entry| !entry.is_empty())
+        .all(|entry| entry.starts_with("unix:"))
 }
 
 /// The attributes an item for `key` is filed and found under.
