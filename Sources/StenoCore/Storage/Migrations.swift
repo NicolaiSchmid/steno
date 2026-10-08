@@ -247,8 +247,8 @@ public enum Migrations {
   }
 
   /// The handover admission ledger (`MeetingStore+Handover.swift`): one row
-  /// per phone recording the computer admitted, its id, size and SHA-256 and
-  /// the meeting it became. No foreign key, so a revoke and a meeting delete
+  /// per admitted file, its recording id, size and SHA-256 and the meeting it
+  /// became. No foreign key, so a revoke and a meeting delete
   /// leave it. A new table only: an older build that ignores this version
   /// keeps reading and writing every other table. `MeetingStore.init`
   /// backfills it on every open.

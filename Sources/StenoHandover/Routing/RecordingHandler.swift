@@ -50,7 +50,7 @@ extension HandoverEngine {
         admitted = try await store.admittedMeeting(
           recordingID: recordingID, byteCount: metadata.byteCount, sha256: metadata.sha256)
       } catch {
-        return .internalError("reading the admissions", error)
+        return .internalError("reading the admission ledger", error)
       }
       guard let held = activeReceipts[recordingID], held != known else { break }
       known = held
@@ -462,7 +462,10 @@ extension HandoverEngine {
   /// mark. A replayed complete returns the same id through the early
   /// `.complete` check. On failure the verified file stays for the phone's
   /// retry and the reason is fixed text, because the error may name the
-  /// file's path; unless memory holds a receipt of other bytes by then.
+  /// file's path; unless memory holds a receipt of other bytes by then (the
+  /// phone announced another file under the id during the intake): that
+  /// upload's `complete` would hand this file to the intake unhashed, so it
+  /// goes.
   private func admit(
     _ file: URL, metadata: RecordingMetadata, device: PairedDevice,
     receipt: inout HandoverReceipt

@@ -168,8 +168,8 @@ fn a_receipt_needs_its_device() {
     assert!(error.to_string().contains("FOREIGN KEY"), "{error}");
 }
 
-/// The ledger row the admission's transaction wrote, as the column texts
-/// SQLite holds: recording id, meeting id, admitted at.
+/// The ledger rows the admissions' transactions wrote, as SQLite holds
+/// them: recording id, byte count, meeting id, admitted at.
 fn ledger_rows(store: &Store) -> Vec<(String, i64, String, String)> {
     store
         .read(|connection| {
@@ -213,6 +213,7 @@ fn admission(meeting_id: &str, sha256: Vec<u8>) -> (HandoverReceipt, Meeting, Au
 /// new meeting whose admission keeps the first row. Swift:
 /// `anAdmissionWritesItsLedgerRow`.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave() {
     let store = Store::in_memory().unwrap();
     store.save_paired_device(&device(), &[1; 32]).unwrap();

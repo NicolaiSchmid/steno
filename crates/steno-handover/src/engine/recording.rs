@@ -132,7 +132,7 @@ impl Engine {
             Ok(admitted) => admitted,
             Err(error) => {
                 return Announced::Answered(HandoverResponse::internal_error(
-                    "reading the admissions",
+                    "reading the admission ledger",
                     &error,
                 ));
             }
