@@ -805,6 +805,174 @@ import Testing
     #expect(abs(measured - 440) < 2, "\(measured) Hz after the change")
   }
 
+  /// Hands the test the sink it is given and delivers nothing; every start
+  /// after the first reports `streamAfterRestart` when one is set.
+  final class HandsOverTheSink: CaptureBackend, @unchecked Sendable {
+    let stream: CaptureStream
+    let streamAfterRestart: CaptureStream?
+    private let lock = NSLock()
+    private var handed: LaneFrameSink?
+
+    init(stream: CaptureStream, streamAfterRestart: CaptureStream? = nil) {
+      self.stream = stream
+      self.streamAfterRestart = streamAfterRestart
+    }
+
+    var sink: LaneFrameSink? {
+      lock.lock()
+      defer { lock.unlock() }
+      return handed
+    }
+
+    func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
+      -> CaptureStream
+    {
+      lock.lock()
+      let restarted = handed != nil
+      handed = sink
+      lock.unlock()
+      return restarted ? streamAfterRestart ?? stream : stream
+    }
+
+    func stop() {}
+  }
+
+  /// Passes the near end through once the gate opens; until then the
+  /// processing thread is stuck in its first frame.
+  final class GatedCanceller: EchoCanceller, @unchecked Sendable {
+    private let condition = NSCondition()
+    private var isOpen = false
+
+    init(sampleRate: Double, frameSize: Int) throws {}
+
+    func open() {
+      condition.lock()
+      isOpen = true
+      condition.broadcast()
+      condition.unlock()
+    }
+
+    func process(
+      nearEnd: UnsafeBufferPointer<Float>, farEnd: UnsafeBufferPointer<Float>,
+      out: UnsafeMutableBufferPointer<Float>
+    ) {
+      condition.lock()
+      while !isOpen { condition.wait() }
+      condition.unlock()
+      for index in 0..<min(nearEnd.count, out.count) { out[index] = nearEnd[index] }
+    }
+  }
+
+  /// `count` callbacks of 480 samples on both lanes; returns how many the
+  /// rings refused.
+  func overrun(_ sink: LaneFrameSink, callbacks count: Int) -> Int {
+    let buffer = [Float](repeating: 0.25, count: 480)
+    var refused = 0
+    buffer.withUnsafeBufferPointer { samples in
+      for _ in 0..<count {
+        if sink.beginCallback(frameCount: 480) {
+          sink.write(lane: 0, from: samples.baseAddress!)
+          sink.write(lane: 1, from: samples.baseAddress!)
+          sink.endCallback()
+        } else {
+          refused += 1
+        }
+      }
+    }
+    return refused
+  }
+
+  /// Three seconds of callbacks while the processing thread is stuck: the
+  /// two-second rings take what fits (plus what the thread read before it
+  /// stuck), refuse the rest and count it, and those overruns reach
+  /// `droppedFrames`. At 24 kHz a refused 480-sample callback is two 48 kHz
+  /// frames.
+  @Test(arguments: [48_000.0, 24_000.0])
+  func ringOverrunsAreReportedIn48KilohertzFrames(rate: Double) async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = HandsOverTheSink(
+      stream: CaptureStream(
+        sampleRate: rate, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil))
+    let gate = try GatedCanceller(sampleRate: 48_000, frameSize: 480)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend, echoCanceller: gate,
+      writerHeadroomFrames: 2_000)
+    try await session.start(meetingID: UUID())
+    let sink = try #require(backend.sink)
+    let refused = overrun(sink, callbacks: 300)
+    let accepted = 300 - refused
+    gate.open()
+    let result = try await session.stop()
+
+    #expect(refused > 0 && accepted >= 200, "the rings hold two seconds: \(accepted) accepted")
+    // 48 kHz frames per callback; at 24 kHz half a converter window is held
+    // back, one frame less in the master.
+    let frames = Int(StenoAudio.sampleRate / rate)
+    let held = rate == StenoAudio.sampleRate ? 0 : 1
+    #expect(try CAFFile.read(result.asset.url).frameCount == (accepted * frames - held) * 480)
+    let dropped = refused * frames
+    #expect(result.statistics.droppedFrames == [.mic: dropped, .system: dropped])
+  }
+
+  /// Overruns at 48 kHz, then a headset that switches to 16 kHz mid-call:
+  /// the overruns are counted at the rate of the stream they happened on,
+  /// not the rate the recording ends at (which would read them three times
+  /// over).
+  @Test func ringOverrunsBeforeARateChangeKeepTheirRate() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = HandsOverTheSink(
+      stream: .synthetic,
+      streamAfterRestart: CaptureStream(
+        sampleRate: 16_000, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil))
+    let gate = try GatedCanceller(sampleRate: 48_000, frameSize: 480)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend, echoCanceller: gate,
+      writerHeadroomFrames: 2_000)
+    var notices = await session.notices.makeAsyncIterator()
+    try await session.start(meetingID: UUID())
+    let sink = try #require(backend.sink)
+    let refused = overrun(sink, callbacks: 400)
+    #expect(refused > 0, "the rings overran")
+    gate.open()
+    sink.reportDeviceChange(.sampleRateChanged)
+    #expect(await notices.next() == .deviceChanged(.sampleRateChanged))
+    guard case .deviceResumed(attempt: 1, _) = await notices.next() else {
+      Issue.record("the recording did not resume")
+      return
+    }
+    #expect(await session.stream?.sampleRate == 16_000)
+    let result = try await session.stop()
+
+    // One refused 480-sample callback at 48 kHz is one frame.
+    #expect(result.statistics.droppedFrames == [.mic: refused, .system: refused])
+  }
+
+  /// A backend that reports a rate the converter cannot take (the live
+  /// backend refuses one at `start`) is recorded unconverted, sample for
+  /// sample, instead of trapping in `RateConverter.init`. 1.2 s at 4 kHz is
+  /// ten whole frames, so no remainder is left in the rings.
+  @Test func aStreamAtARateTheConverterCannotTakeIsRecordedUnconverted() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 1.2,
+      stream: CaptureStream(
+        sampleRate: 4_000, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil))
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 1_000)
+    try await session.start(meetingID: UUID())
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+
+    #expect(backend.framesDelivered == 4_800)
+    #expect(result.statistics.droppedFrames == [:])
+    #expect(try CAFFile.read(result.asset.url).frameCount == 4_800)
+  }
+
   /// The contiguity claim. A gap longer than the two seconds the sink's
   /// rings hold is written in full as silence through the relay, so the
   /// master runs to wall time with nothing truncated into `droppedFrames`:

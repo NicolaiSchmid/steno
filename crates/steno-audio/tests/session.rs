@@ -1759,6 +1759,18 @@ fn a_folder_deleted_while_recording_ends_writer_failed() {
 struct HandsOverTheSink {
     sink: Mutex<Option<Arc<LaneFrameSink>>>,
     stream: CaptureStream,
+    /// What every start after the first reports, when it should differ.
+    stream_after_restart: Option<CaptureStream>,
+}
+
+impl HandsOverTheSink {
+    fn new(stream: CaptureStream) -> Self {
+        Self {
+            sink: Mutex::new(None),
+            stream,
+            stream_after_restart: None,
+        }
+    }
 }
 
 impl CaptureBackend for HandsOverTheSink {
@@ -1768,8 +1780,11 @@ impl CaptureBackend for HandsOverTheSink {
         _: Option<&str>,
         sink: Arc<LaneFrameSink>,
     ) -> Result<CaptureStream, CaptureError> {
-        *self.sink.lock().unwrap() = Some(sink);
-        Ok(self.stream.clone())
+        let restarted = self.sink.lock().unwrap().replace(sink).is_some();
+        Ok(match &self.stream_after_restart {
+            Some(stream) if restarted => stream.clone(),
+            _ => self.stream.clone(),
+        })
     }
     fn stop(&self) {}
 }
@@ -1811,13 +1826,10 @@ fn ring_overruns_at_24_khz_are_reported_in_48_khz_frames() {
 /// The two tests above, with the rings at `rate`.
 fn ring_overruns_are_reported(rate: f64) {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Arc::new(HandsOverTheSink {
-        sink: Mutex::new(None),
-        stream: CaptureStream {
-            sample_rate: rate,
-            ..CaptureStream::SYNTHETIC
-        },
-    });
+    let backend = Arc::new(HandsOverTheSink::new(CaptureStream {
+        sample_rate: rate,
+        ..CaptureStream::SYNTHETIC
+    }));
     let open = Arc::new((Mutex::new(false), Condvar::new()));
     let session = CaptureSession::with_backend(
         configuration(CaptureMode::Call, directory.path(), false),
@@ -1860,6 +1872,93 @@ fn ring_overruns_are_reported(rate: f64) {
         result.statistics.dropped_frames,
         BTreeMap::from([(AudioLane::Mic, dropped), (AudioLane::System, dropped)])
     );
+}
+
+/// Overruns at 48 kHz, then a headset that switches to 16 kHz mid-call:
+/// the overruns are counted at the rate of the stream they happened on, not
+/// the rate the recording ends at (which would read them three times over).
+#[test]
+fn ring_overruns_before_a_rate_change_keep_their_rate() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(HandsOverTheSink {
+        stream_after_restart: Some(CaptureStream {
+            sample_rate: 16_000.0,
+            ..CaptureStream::SYNTHETIC
+        }),
+        ..HandsOverTheSink::new(CaptureStream::SYNTHETIC)
+    });
+    let open = Arc::new((Mutex::new(false), Condvar::new()));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        Some(Box::new(GatedCanceller { open: open.clone() })),
+        2_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    let sink = backend.sink.lock().unwrap().clone().unwrap();
+    let buffer = [0.25f32; 480];
+    let mut refused = 0;
+    for _ in 0..400 {
+        if sink.begin_callback(480) {
+            sink.write_slice(0, &buffer);
+            sink.write_slice(1, &buffer);
+            sink.end_callback();
+        } else {
+            refused += 1;
+        }
+    }
+    assert!(refused > 0, "the rings overran");
+    *open.0.lock().unwrap() = true;
+    open.1.notify_all();
+    sink.report_device_change(DeviceChangeReason::SampleRateChanged);
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::SampleRateChanged)
+    );
+    assert!(matches!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    assert_eq!(session.stream().unwrap().sample_rate, 16_000.0);
+    let result = session.stop().unwrap();
+    // One refused 480-sample callback at 48 kHz is one frame.
+    assert_eq!(
+        result.statistics.dropped_frames,
+        BTreeMap::from([(AudioLane::Mic, refused), (AudioLane::System, refused)])
+    );
+}
+
+/// A backend that reports a rate the converter cannot take (the live
+/// backends refuse one at `start`) is recorded unconverted, sample for
+/// sample, instead of panicking with the session's lock held. 1.2 s at
+/// 4 kHz is ten whole frames, so no remainder is left in the rings.
+#[test]
+fn a_stream_at_a_rate_the_converter_cannot_take_is_recorded_unconverted() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(&call(), 1.2).stream(
+        CaptureStream {
+            sample_rate: 4_000.0,
+            ..CaptureStream::SYNTHETIC
+        },
+    )));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+
+    assert_eq!(backend.frames_delivered(), 4_800);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert_eq!(master_of(&result).frame_count(), 4_800);
 }
 
 struct Failing;
@@ -2387,10 +2486,7 @@ fn a_device_change_while_idle_or_after_stop_is_ignored() {
 #[test]
 fn a_report_from_an_earlier_recordings_backend_is_ignored() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Arc::new(HandsOverTheSink {
-        sink: Mutex::new(None),
-        stream: CaptureStream::SYNTHETIC,
-    });
+    let backend = Arc::new(HandsOverTheSink::new(CaptureStream::SYNTHETIC));
     let session = CaptureSession::with_backend(
         configuration(CaptureMode::InPerson, directory.path(), false),
         backend.clone(),

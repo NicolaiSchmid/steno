@@ -1647,13 +1647,9 @@ it:
   after the detector stopped, the next notification arrives. A detector
   started and stopped many times holds that many idle threads until then.
 
-Six Swift defects the port does not share; fix them in Swift if it ships
+Five Swift defects the port does not share; fix them in Swift if it ships
 another release, otherwise the cutover closes them:
 
-- `CaptureSession.finish()` should read the sink's ring overrun counts
-  before `sink.clear()`, as the Rust `finish()` does; today `clear()` zeroes
-  them first (`CaptureSession.swift`, the `clear()` before the
-  `droppedSamples` read), so `droppedFrames` never holds a ring overrun.
 - `CaptureSession` should count the silence a stop cut short in
   `gapSeconds`, as the Rust session does; today a stop while the gap waits
   for relay room leaves that silence in the master and reports 0.

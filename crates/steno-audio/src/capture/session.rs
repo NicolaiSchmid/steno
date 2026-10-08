@@ -225,6 +225,32 @@ struct Active {
     /// listeners are live before the gap is written); `resume` starts the
     /// next rebuild from it instead of losing it.
     pending_change: Option<DeviceChangeReason>,
+    /// The ring overruns of the streams a rebuild has stopped, each counted
+    /// at its own rate.
+    ring_drops: RingDrops,
+}
+
+/// Ring overruns in samples at [`SAMPLE_RATE`], per lane. The sink counts
+/// them at the device's rate and keeps counting across a rebuild, so each
+/// stream's share is rescaled at that stream's rate once it has stopped.
+#[derive(Default)]
+struct RingDrops {
+    /// The sink's counts at the last fold.
+    seen: BTreeMap<AudioLane, usize>,
+    /// What every fold so far stands for at [`SAMPLE_RATE`].
+    at_output_rate: BTreeMap<AudioLane, usize>,
+}
+
+impl RingDrops {
+    /// Adds the overruns in `counts` since the last fold, counted at `rate`.
+    fn fold(&mut self, counts: BTreeMap<AudioLane, usize>, rate: f64) {
+        for (lane, count) in counts {
+            let seen = self.seen.entry(lane).or_default();
+            *self.at_output_rate.entry(lane).or_default() +=
+                CaptureStream::rescaled(count.saturating_sub(*seen), rate, SAMPLE_RATE);
+            *seen = count;
+        }
+    }
 }
 
 /// A rebuild thread and the token that abandons it.
@@ -732,6 +758,7 @@ impl Core {
             system_peak_so_far: 0.0,
             rebuild: None,
             pending_change: None,
+            ring_drops: RingDrops::default(),
         });
         self.set_state(
             &mut inner,
@@ -876,7 +903,9 @@ impl Core {
         // backend delivered them after a stop overtook its rebuild, with no
         // processing thread running yet. They count as dropped. The rings
         // hold the device's rate; the counts are 48 kHz frames.
-        let ring_drops = active.sink.dropped_samples();
+        active
+            .ring_drops
+            .fold(active.sink.dropped_samples(), ring_rate);
         let undrained =
             CaptureStream::rescaled(active.sink.available_to_read(), ring_rate, SAMPLE_RATE)
                 / FRAME_SIZE;
@@ -900,9 +929,8 @@ impl Core {
         }
         let lanes = self.configuration.lanes();
         let mut dropped: BTreeMap<AudioLane, usize> = BTreeMap::new();
-        for (lane, samples) in ring_drops {
-            *dropped.entry(lane).or_default() +=
-                CaptureStream::rescaled(samples, ring_rate, SAMPLE_RATE) / FRAME_SIZE;
+        for (lane, samples) in &active.ring_drops.at_output_rate {
+            *dropped.entry(*lane).or_default() += samples / FRAME_SIZE;
         }
         if undrained > 0 {
             for lane in &lanes {
@@ -1095,9 +1123,14 @@ impl Core {
             let mut inner = self.lock();
             inner.echo_canceller = canceller;
             // Gone when `finish()` took the recording meanwhile; the peak
-            // then reaches it through this thread's return value.
+            // then reaches it through this thread's return value. The old
+            // stream delivers no more, so its overruns are counted at its
+            // rate; the restarted one's come at the next fold.
             if let Some(active) = inner.active.as_mut() {
                 active.system_peak_so_far = active.system_peak_so_far.max(peak);
+                active
+                    .ring_drops
+                    .fold(sink.dropped_samples(), active.stream.sample_rate);
             }
         }
         // The old backend's `stop()` lets no new report through, so the
@@ -1280,10 +1313,11 @@ impl Core {
 
     /// Zeros in every written channel for `frames` relay frames, through
     /// the relay the writer thread keeps draining. The rings under the sink
-    /// are not touched: they hold two seconds at 48 kHz (sized before the
-    /// device's rate is known, so less above it: 0.68 s at 192 kHz) and
-    /// nothing drains them while the processing thread is stopped, so a
-    /// longer gap would silently shrink into `dropped_samples`. A full
+    /// are not touched: sized before the device's rate is known, they ask
+    /// for two seconds at 48 kHz, rounded up to 131 072 samples (2.7 s at
+    /// 48 kHz, 0.68 s at 192 kHz), and nothing drains them while the
+    /// processing thread is stopped, so a longer gap would silently shrink
+    /// into `dropped_samples`. A full
     /// relay (a long gap, or a writer still behind the old producer) is
     /// waited out in 5 ms steps on the clock; `has_room` is asked first
     /// because a refused `begin_frame` counts as a dropped frame. Returns
