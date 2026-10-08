@@ -704,12 +704,16 @@ Each lands before `0.11.0-rc.1`.
   Steno's own stream is ignored).
 - **A9 The final choices proven** (#246).
   - The AAC priming offset is trimmed from the container's edit list, or from
-    iTunes' gapless tag where there is none (Apple's writer: the Swift app's
-    mixdowns carry 2 112 samples there and no edit list). Exactly that many
+    iTunes' gapless tag where there is none (`AVAudioFile`: the Swift app's
+    mixdowns carry 2 112 samples there and no edit list), or, when the file
+    declares neither, by the 2 112 samples AVFoundation assumes (the phone's
+    `AVAudioRecorder` writes no edit list and no tag). Exactly that many
     frames go, by packet timestamp; the decode of every other input is bit for
-    bit what it was (`tests/codec_streaming.rs`), and an AAC fixture with an
-    onset at a known sample lands on it (`tests/codec.rs`).
-  - A 44.1 kHz sweep to 22 kHz, resampled, leaves less than −60 dB below
+    bit what it was (`tests/codec_streaming.rs`), and AAC fixtures with an
+    onset at a known sample land on it, mono and stereo, from ffmpeg's encoder
+    and from Apple's in the recorder's layout, where the onset is
+    AVFoundation's (`tests/codec.rs`).
+  - A 44.1 kHz sweep to 22 kHz, resampled, leaves less than -60 dB below
     8 kHz, and speech recorded at 48 kHz and resampled from 44.1 kHz gives the
     48 kHz path's word error rate within 0.1 points.
   - The 2 ms sidecar lag stays pinned by `tests/codec.rs`.
