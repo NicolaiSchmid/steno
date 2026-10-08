@@ -66,12 +66,12 @@ impl AudioDevices for PlatformAudioDevices {
 /// Boolean flags in `preferences.json` under the support directory
 /// (Swift: `UserDefaults`), for the first-launch markers. A write replaces
 /// the file in one durable step ([`write_json`]). A value that is not a
-/// flag (a newer build's) is kept as it is. A file that does not parse is
-/// moved aside ([`read_json`]) and logged before the flags start empty; a
-/// file that cannot be read for another reason, or that cannot be moved
-/// aside, is left alone and never written, and the flags of this run live
-/// in memory only: a first-launch marker shown again is better than a file
-/// replaced unread.
+/// flag (a newer build's) is kept as it is. The file is read with
+/// [`read_json`]: a file that does not parse is moved aside and logged
+/// before the flags start empty; a file that cannot be read for another
+/// reason, or that cannot be moved aside, is left alone and never written,
+/// and the flags of this run live in memory only: a first-launch marker
+/// shown again is better than a file replaced unread.
 #[derive(Debug)]
 pub struct FilePreferences {
     path: PathBuf,
