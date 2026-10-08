@@ -12,12 +12,14 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   case meetingBusy(UUID, MeetingState.Kind)
   /// `resolvePerson(named:)` with nothing but whitespace.
   case blankPersonName
-  /// The phone intake's admission of a recording whose receipt belongs to
-  /// another device, thrown at `RecordingIntake.admit`'s own read and by
-  /// `saveDurably(_:meeting:asset:)`: the admitting phone was revoked and
-  /// another one announced the same recording id. Rust:
-  /// `StoreError::ReceiptOfAnotherDevice`.
-  case receiptOfAnotherDevice(UUID)
+  /// The phone intake's admission of a recording whose receipt is another
+  /// upload's, thrown at `RecordingIntake.admit`'s own read and by
+  /// `saveDurably(_:meeting:asset:)`: it belongs to another device (the
+  /// admitting phone was revoked and another one announced the same
+  /// recording id, or took the receipt over), or it holds other bytes (the
+  /// phone announced another file under the id). Rust:
+  /// `StoreError::ReceiptOfAnotherUpload`.
+  case receiptOfAnotherUpload(UUID)
 
   public var description: String {
     switch self {
@@ -28,7 +30,7 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
     case .speakersInDifferentMeetings(let a, let b):
       "speakers \(a) and \(b) belong to different meetings"
     case .blankPersonName: "a person needs a name"
-    case .receiptOfAnotherDevice(let id): "recording \(id) belongs to another device"
+    case .receiptOfAnotherUpload(let id): "the receipt of recording \(id) belongs to another upload"
     }
   }
 }
@@ -44,11 +46,17 @@ public final class MeetingStore: Sendable {
   public let writer: any DatabaseWriter
   public let events: MeetingEventBus
 
-  /// Runs the migrator on `writer`.
+  /// Runs the migrator on `writer`, then backfills the admission ledger
+  /// (`backfillAdmissions`). GRDB's migrator ignores an applied migration it
+  /// does not know (a newer build's), and this store does not ask
+  /// `hasBeenSuperseded`: every migration only adds tables and columns, so
+  /// this build keeps reading and writing what it knows, as the Rust store
+  /// does.
   public init(writer: any DatabaseWriter, events: MeetingEventBus = MeetingEventBus()) throws {
     self.writer = writer
     self.events = events
     try Migrations.migrator().migrate(writer)
+    try writer.write { db in try db.execute(sql: Self.backfillAdmissions) }
   }
 
   /// A `DatabasePool` in WAL mode with a five-second busy timeout, creating

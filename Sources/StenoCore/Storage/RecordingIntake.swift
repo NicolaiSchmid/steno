@@ -87,11 +87,17 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     -> UUID
   {
     let existing = try await store.handoverReceipt(recordingID: metadata.recordingID)
-    // Another phone's receipt under this id (this one was revoked, and that
-    // one announced the id) is never completed or answered from: that phone
-    // would take this meeting for its own and delete its copy.
-    if let existing, existing.deviceID != device.id {
-      throw MeetingStoreError.receiptOfAnotherDevice(metadata.recordingID)
+    // Another upload's receipt under this id is never completed or answered
+    // from: another phone's (this one was revoked, and that one announced
+    // the id or took the receipt over), which would take this meeting for
+    // its own and delete its copy; or one of other bytes (the phone
+    // announced another file under the id), whose `complete` would get this
+    // meeting and delete a file never admitted.
+    if let existing,
+      existing.deviceID != device.id || existing.byteCount != metadata.byteCount
+        || existing.sha256 != metadata.sha256
+    {
+      throw MeetingStoreError.receiptOfAnotherUpload(metadata.recordingID)
     }
     // A retry of an admitted recording is answered from the store with no
     // write of its own: the launch checkpoint
@@ -166,7 +172,7 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     do {
       try await store.saveDurably(receipt, meeting: meeting, asset: asset)
     } catch {
-      if error as? MeetingStoreError == .receiptOfAnotherDevice(metadata.recordingID) {
+      if error as? MeetingStoreError == .receiptOfAnotherUpload(metadata.recordingID) {
         // The refusal wrote nothing, and another phone's receipt is left as
         // it is.
         try? FileManager.default.removeItem(at: destination)

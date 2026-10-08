@@ -550,6 +550,23 @@ struct PairedDeviceRow: StenoRecord {
   }
 }
 
+/// One admitted phone recording (schema v5); `MeetingStore.admittedMeeting`.
+struct HandoverAdmissionRow: StenoRecord {
+  static let databaseTableName = "handoverAdmission"
+
+  var recordingID: UUID
+  var byteCount: Int64
+  var sha256: Data
+  var meetingID: UUID
+  var admittedAt: Date
+
+  enum Columns {
+    static let recordingID = Column(CodingKeys.recordingID)
+    static let byteCount = Column(CodingKeys.byteCount)
+    static let sha256 = Column(CodingKeys.sha256)
+  }
+}
+
 struct HandoverReceiptRow: StenoRecord {
   static let databaseTableName = "handoverReceipt"
 

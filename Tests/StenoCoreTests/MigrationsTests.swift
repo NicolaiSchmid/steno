@@ -10,13 +10,14 @@ import Testing
     try Migrations.migrator().migrate(queue)
     try queue.read { (db) throws in
       #expect(try Migrations.migrator().appliedIdentifiers(db) == Set(Migrations.identifiers))
-      #expect(Migrations.identifiers == ["v1", "v2", "v3", "v4"])
+      #expect(Migrations.identifiers == ["v1", "v2", "v3", "v4", "v5"])
       let tables = try String.fetchAll(
         db, sql: "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       for expected in [
         "meeting", "participant", "person", "speaker", "transcriptSegment", "meetingTask",
         "decision", "audioAsset", "delivery", "pairedDevice", "handoverReceipt", "setting",
         "transcriptSegment_ft", "meeting_ft", "speakerNameSuggestion", "stageRate",
+        "handoverAdmission",
       ] {
         #expect(tables.contains(expected), "table \(expected)")
       }

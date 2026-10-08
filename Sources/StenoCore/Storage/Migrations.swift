@@ -36,6 +36,7 @@ public enum Migrations {
     Step(identifier: "v2", migrate: v2),
     Step(identifier: "v3", migrate: v3),
     Step(identifier: "v4", migrate: v4),
+    Step(identifier: "v5", migrate: v5),
   ]
 
   /// Every identifier in registration order; tests compare it with what a
@@ -242,6 +243,23 @@ public enum Migrations {
       t.column("secondsPerUnit", .double).notNull()
       t.column("updatedAt", .datetime).notNull()
       t.primaryKey(["stage", "key"])
+    }
+  }
+
+  /// The handover admission ledger (`MeetingStore+Handover.swift`): one row
+  /// per phone recording the computer admitted, its id, size and SHA-256 and
+  /// the meeting it became. No foreign key, so a revoke and a meeting delete
+  /// leave it. A new table only: an older build that ignores this version
+  /// keeps reading and writing every other table. `MeetingStore.init`
+  /// backfills it on every open.
+  static func v5(_ db: Database) throws {
+    try db.create(table: "handoverAdmission") { t in
+      t.column("recordingID", .text).notNull()
+      t.column("byteCount", .integer).notNull()
+      t.column("sha256", .blob).notNull()
+      t.column("meetingID", .text).notNull()
+      t.column("admittedAt", .datetime).notNull()
+      t.primaryKey(["recordingID", "byteCount", "sha256"])
     }
   }
 }

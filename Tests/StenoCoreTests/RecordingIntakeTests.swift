@@ -228,15 +228,20 @@ import Testing
     #expect(try copies.first.map { try Data(contentsOf: $0) } == Data([1]))
   }
 
-  /// A receipt of another phone under the same recording id is never completed.
-  /// The admitting phone was revoked and the other one announced the id, before
-  /// the intake read the receipt or between its read and its commit; either way
-  /// the admitting phone then paired again. The intake refuses, and the other
-  /// phone's receipt stays as it was: completed, it would answer that phone's
-  /// `complete` with this meeting, and that phone would delete a recording
-  /// never admitted. Rust: `a_receipt_of_another_phone_is_never_completed`.
-  @Test(arguments: [false, true])
-  func aReceiptOfAnotherPhoneIsNeverCompleted(afterTheRead: Bool) async throws {
+  /// A receipt of another upload under the same recording id is never
+  /// completed: another phone's (the admitting phone was revoked and the
+  /// other one announced the id; the admitting phone then paired again), or
+  /// the admitting phone's own of other bytes (it announced another file
+  /// under the id), made before the intake read the receipt or between its
+  /// read and its commit. The intake refuses, and that receipt stays as it
+  /// was: completed, it would answer that upload's `complete` with this
+  /// meeting, and the phone would delete a recording never admitted; no
+  /// ledger row says those bytes were admitted. Rust:
+  /// `a_receipt_of_another_upload_is_never_completed`.
+  @Test(arguments: [(false, false), (true, false), (false, true), (true, true)])
+  func aReceiptOfAnotherUploadIsNeverCompleted(afterTheRead: Bool, otherBytes: Bool)
+    async throws
+  {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.inMemory()
@@ -246,14 +251,18 @@ import Testing
       id: SampleData.uuid(92), name: "Other phone", pairedAt: device.pairedAt,
       lastSeenAt: nil)
     var theirs = SampleData.handoverReceipt()
-    theirs.deviceID = other.id
+    theirs.deviceID = otherBytes ? device.id : other.id
+    if otherBytes { theirs.sha256 = Data(repeating: 2, count: 32) }
     theirs.state = .receiving
     // The revoke, the other phone's announce, and this phone pairing again
-    // under the same device id, on the writer's own queue.
+    // under the same device id; or this phone's announce of another file
+    // under the id; on the writer's own queue.
     let takeover: @Sendable () throws -> Void = { [theirs] in
       try store.writer.write { db in
-        _ = try PairedDeviceRow.deleteOne(db, key: device.id.uuidString)
-        try PairedDeviceRow(other, tokenHash: Data(repeating: 2, count: 32)).save(db)
+        if !otherBytes {
+          _ = try PairedDeviceRow.deleteOne(db, key: device.id.uuidString)
+          try PairedDeviceRow(other, tokenHash: Data(repeating: 2, count: 32)).save(db)
+        }
         try HandoverReceiptRow(theirs).save(db)
         try PairedDeviceRow(device, tokenHash: Data(repeating: 1, count: 32)).save(db)
       }
@@ -281,15 +290,20 @@ import Testing
       try takeover()
     }
     let upload = try Self.upload(in: directory)
+    let metadata = SampleData.recordingMetadata()
 
-    await #expect(throws: MeetingStoreError.receiptOfAnotherDevice(SampleData.uuid(91))) {
-      _ = try await intake.admit(
-        file: upload, metadata: SampleData.recordingMetadata(), device: device)
+    await #expect(throws: MeetingStoreError.receiptOfAnotherUpload(SampleData.uuid(91))) {
+      _ = try await intake.admit(file: upload, metadata: metadata, device: device)
     }
     let receipt = try #require(try await store.handoverReceipt(recordingID: SampleData.uuid(91)))
-    #expect(receipt.deviceID == other.id, "the other phone's receipt is untouched")
+    #expect(receipt.deviceID == theirs.deviceID, "the other upload's receipt is untouched")
+    #expect(receipt.sha256 == theirs.sha256)
     #expect(receipt.state == .receiving)
     #expect(try await store.meetings().isEmpty)
+    #expect(
+      try await store.admittedMeeting(
+        recordingID: metadata.recordingID, byteCount: metadata.byteCount,
+        sha256: metadata.sha256) == nil)
     #expect(await enqueued.calls.isEmpty)
     #expect(FileManager.default.fileExists(atPath: upload.path))
   }
