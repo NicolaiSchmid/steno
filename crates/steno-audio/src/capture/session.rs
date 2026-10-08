@@ -429,16 +429,6 @@ enum Restart {
     Exhausted,
 }
 
-/// One start of a rebuild (`try_start`).
-enum Try {
-    /// It started, and delivered when the plan asks for that.
-    Ran { started: Started, at: Duration },
-    /// It failed, or started and delivered nothing (`DidNotRun`).
-    Failed(CaptureError),
-    /// `stop()` came first.
-    Abandoned,
-}
-
 /// How a rebuild's restarts go (`restart_backend`).
 #[derive(Debug, Clone, Copy)]
 struct RestartPlan {
@@ -1693,32 +1683,21 @@ impl Core {
         loop {
             attempt += 1;
             let last = attempt >= CaptureSession::RESTART_ATTEMPTS;
-            let started = |result| match result {
-                Try::Ran { started, at } => Some(Restart::Started {
-                    started,
-                    attempt,
-                    at,
-                }),
-                Try::Abandoned => Some(Restart::Abandoned),
-                Try::Failed(_) => None,
-            };
             if plan.default_first && !default_tried {
                 default_tried = true;
-                let tried = self.try_start(sink, true, plan, generation, cancel);
-                if let Some(restart) = started(tried) {
+                if let Ok(restart) = self.try_start(sink, true, attempt, plan, generation, cancel) {
                     return restart;
                 }
             }
-            let error = match self.try_start(sink, false, plan, generation, cancel) {
-                Try::Failed(error) => error,
-                tried => return started(tried).unwrap_or(Restart::Abandoned),
+            let error = match self.try_start(sink, false, attempt, plan, generation, cancel) {
+                Ok(restart) => return restart,
+                Err(error) => error,
             };
             let early = !default_tried
                 && (plan.on_the_fallback || matches!(error, CaptureError::DidNotRun(_)));
             if (early || last) && self.configuration.input_device_uid.is_some() {
                 default_tried = true;
-                let tried = self.try_start(sink, true, plan, generation, cancel);
-                if let Some(restart) = started(tried) {
+                if let Ok(restart) = self.try_start(sink, true, attempt, plan, generation, cancel) {
                     return restart;
                 }
             }
@@ -1740,7 +1719,7 @@ impl Core {
         }
     }
 
-    /// One start of a rebuild, on the chosen microphone or, with
+    /// One start of a rebuild, `attempt`, on the chosen microphone or, with
     /// `on_the_default`, the default in its place (`start_on_the_default`,
     /// whose own error it logs; the caller keeps the chosen one's). The
     /// start holds the session's mutex; with `plan.awaits_delivery` the
@@ -1749,69 +1728,64 @@ impl Core {
     /// stream that offered none `STALL_TIMEOUT` after its start is stopped
     /// and fails with `DidNotRun`. A stop during that wait leaves the
     /// started stream to the rebuild's next steps, which give up, and to
-    /// `finish()`, which stops it. Rust only.
+    /// `finish()`, which stops it. `Started`, or `Abandoned` when the
+    /// recording is gone; the error when the start failed or delivered
+    /// nothing. Rust only.
     fn try_start(
         &self,
         sink: &Arc<LaneFrameSink>,
         on_the_default: bool,
+        attempt: usize,
         plan: RestartPlan,
         generation: usize,
         cancel: &Cancel,
-    ) -> Try {
-        let (started, at, offered) = {
+    ) -> Result<Restart, CaptureError> {
+        let (stream, at, offered) = {
             let inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
-                return Try::Abandoned;
+                return Ok(Restart::Abandoned);
             }
             // The old stream is stopped, so the count stays until this
             // start delivers.
             let offered = sink.frames_offered();
-            let started = if on_the_default {
+            let stream = if on_the_default {
                 self.start_on_the_default(sink)
-                    .ok_or(CaptureError::InputDeviceUnavailable)
+                    .ok_or(CaptureError::InputDeviceUnavailable)?
             } else {
                 self.backend.start(
                     &self.configuration.lanes(),
                     self.configuration.input_device_uid.as_deref(),
                     Arc::clone(sink),
-                )
+                )?
             };
-            match started {
-                Ok(stream) => (
-                    Started {
-                        stream,
-                        on_the_default,
-                    },
-                    self.clock.now(),
-                    offered,
-                ),
-                Err(error) => return Try::Failed(error),
-            }
+            (stream, self.clock.now(), offered)
         };
-        if plan.awaits_delivery {
-            loop {
-                if sink.frames_offered() != offered {
-                    break;
-                }
-                if self.clock.now().saturating_sub(at) >= CaptureSession::STALL_TIMEOUT {
-                    self.backend.stop();
-                    tracing::warn!(
-                        "the restarted capture delivered nothing within {} ms",
-                        CaptureSession::STALL_TIMEOUT.as_millis()
-                    );
-                    return Try::Failed(CaptureError::DidNotRun(
-                        "the restarted capture delivered nothing".into(),
-                    ));
-                }
-                if !self
-                    .clock
-                    .sleep(CaptureSession::STALL_CHECK_INTERVAL, cancel)
-                {
-                    break;
-                }
+        while plan.awaits_delivery && sink.frames_offered() == offered {
+            if self.clock.now().saturating_sub(at) >= CaptureSession::STALL_TIMEOUT {
+                self.backend.stop();
+                tracing::warn!(
+                    "the restarted capture delivered nothing within {} ms",
+                    CaptureSession::STALL_TIMEOUT.as_millis()
+                );
+                return Err(CaptureError::DidNotRun(
+                    "the restarted capture delivered nothing".into(),
+                ));
+            }
+            if !self
+                .clock
+                .sleep(CaptureSession::STALL_CHECK_INTERVAL, cancel)
+            {
+                break;
             }
         }
-        Try::Ran { started, at }
+        Ok(Restart::Started {
+            started: Started {
+                stream,
+                on_the_default,
+            },
+            attempt,
+            at,
+        })
     }
 
     /// The default input in place of a chosen microphone whose `start`
