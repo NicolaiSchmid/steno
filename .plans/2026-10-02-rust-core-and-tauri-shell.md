@@ -772,17 +772,22 @@ still has to draw the window side. `[ ]` is not ported yet.
   `RecordingController.observe` did (`CaptureResult::failure` carries the failure to
   Stop too, and a Stop or a quit that met a failed write or close says the recording may
   be incomplete); and the free space is read every 5 s on the volumes of the recordings
-  folder and of the database, the smaller counting (`DiskWatch`, `fs4::statvfs`): no
-  start below 512 MiB free, a warning under 30 minutes of recording left, and a stop
-  that saves before the disk fills (Rust only). A volume that reports no size or more
-  free than its size counts as unreadable and never stops a recording. On the Mac
-  `statvfs` leaves out APFS's purgeable space, which
-  `NSURLVolumeAvailableCapacityForImportantUsageKey` counts; reading that key takes
-  `unsafe`, so it waits for `steno-macos` (the stable plan's D10) and the floor is met
-  early there. A panic in the shell leaves `crash-<UTC time>.log` in the support
-  directory, and one in the speech sidecar `crash-<UTC time>-sidecar.log`, the newest
-  20 kept (`steno_core::crash_log::install_crash_log_hook`, P38), since an app opened
-  from the Finder or at login has no stderr anyone reads.
+  folder and of the database, the smaller counting (`DiskWatch`, `fs4::statvfs`): a
+  warning under 30 minutes of recording left and, on Linux and Windows, no start below
+  512 MiB free and a stop that saves before the disk fills (Rust only). A volume that
+  reports no size or more free than its size counts as unreadable and never stops a
+  recording. On the Mac a low reading only warns, never refusing a start or stopping a
+  recording, and its minutes count to a full disk, where a failed write still ends the
+  recording saved: `statvfs` leaves out APFS's purgeable space (tens of GB with local
+  Time Machine snapshots), and a meeting not recorded is lost. The Mac gets the floor
+  once `steno-macos` (#236, the stable plan's D10) reads
+  `NSURLVolumeAvailableCapacityForImportantUsageKey`, which counts that space and takes
+  `unsafe`. A start or a stop that panics leaves the recorder idle with an error, and a
+  capture start that panics leaves the session `Failed`. A panic in the shell leaves
+  `crash-<UTC time>.log` in the support directory, and one in the speech sidecar
+  `crash-<UTC time>-sidecar.log`, the newest 20 kept
+  (`steno_core::crash_log::install_crash_log_hook`, P38), since an app opened from the
+  Finder or at login has no stderr anyone reads.
 - `STENO_MODELS_DIR` names the models directory for the app (without one in its
   settings), the CLI, the `transcribe` example and the FLEURS test alike; the ONNX
   models sit in its `onnx/` (`steno_speech::ModelStore::in_models_directory`).
