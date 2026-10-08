@@ -511,14 +511,14 @@ async fn an_announce_of_another_phone_that_found_no_receipt_takes_the_receipt_ov
         let metadata = metadata.clone();
         async move { other.announce(&metadata).await }
     };
-    let (refused, ()) = held_while(&test, second, async {
+    let (taken, ()) = held_while(&test, second, async {
         assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
         assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
     })
     .await;
-    assert_eq!(refused.status.as_u16(), 200);
+    assert_eq!(taken.status.as_u16(), 200);
     assert_eq!(
-        refused
+        taken
             .decode::<wire::RecordingStatus>()
             .unwrap()
             .received_chunks,
