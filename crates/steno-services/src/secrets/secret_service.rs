@@ -756,31 +756,31 @@ impl Keyring {
     }
 
     /// The default collection's items filed under `key`, lowest path
-    /// first, once it is unlocked.
+    /// first, once it is unlocked. A collection that left the bus since the
+    /// choice (`KeePassXC` removes a locked database's) reads as locked, so
+    /// the user sees the keyring's sentence, not the bus's.
     async fn items(
         &self,
         key: &SecretKey,
         ask: Ask<'_>,
     ) -> Result<Vec<OwnedObjectPath>, ServiceError> {
-        self.unlock_collection(ask).await?;
-        let mut items = self.collection.search_items(attributes(key)).await?;
+        let gone_as_locked = |error: ServiceError| match error {
+            ServiceError::Bus(error) if unknown_object(&error) => KeyringUnavailable::Locked.into(),
+            error => error,
+        };
+        self.unlock_collection(ask).await.map_err(gone_as_locked)?;
+        let mut items = self
+            .collection
+            .search_items(attributes(key))
+            .await
+            .map_err(|error| gone_as_locked(error.into()))?;
         items.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         Ok(items)
     }
 
-    /// Unlocks the default collection. A collection that left the bus
-    /// since the choice (`KeePassXC` removes a locked database's) reads as
-    /// locked, so the user sees the keyring's sentence, not the bus's.
     async fn unlock_collection(&self, ask: Ask<'_>) -> Result<(), ServiceError> {
-        match self
-            .unlock(std::slice::from_ref(self.collection.inner().path()), ask)
+        self.unlock(std::slice::from_ref(self.collection.inner().path()), ask)
             .await
-        {
-            Err(ServiceError::Bus(error)) if unknown_object(&error) => {
-                Err(KeyringUnavailable::Locked.into())
-            }
-            unlocked => unlocked,
-        }
     }
 
     /// Unlocks `objects`, which asks the user when one is locked; a no-op
