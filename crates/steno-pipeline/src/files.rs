@@ -293,9 +293,9 @@ fn rename_with_std(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result
 }
 
 /// `busy_file::retried`, waiting through `syncs`: `attempt` runs, and on
-/// Windows a busy file ([`is_busy`]) is tried again nine times after waits
-/// of 5 ms doubling to 200 ms, about 0.9 s in all; elsewhere `attempt`
-/// runs once.
+/// Windows a busy file ([`is_busy`]) is tried again [`busy_file::RETRIES`]
+/// times after waits of 5 ms doubling to 200 ms, about 0.9 s in all;
+/// elsewhere `attempt` runs once.
 fn retried<T>(
     syncs: &dyn Syncs,
     attempt: impl FnMut() -> std::io::Result<T>,

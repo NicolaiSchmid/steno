@@ -101,8 +101,9 @@ impl Inbox {
     /// removal of a verified file there and the rename are tried again
     /// while another handle (a sync or antivirus client) holds a file for a
     /// moment (`steno_core::busy_file`); on every platform a verified file
-    /// already gone is fine. A failure leaves the partial in place, and
-    /// `complete` answers 500, so the phone keeps its copy and tries again.
+    /// already gone counts as removed. A failure leaves the partial in
+    /// place, and `complete` answers 500, so the phone keeps its copy and
+    /// tries again.
     pub fn promote(&self, recording_id: Uuid, format: AudioFormat) -> std::io::Result<PathBuf> {
         let destination = self.verified(recording_id, format);
         if destination.exists() {

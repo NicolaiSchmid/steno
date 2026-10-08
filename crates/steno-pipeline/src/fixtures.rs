@@ -217,10 +217,11 @@ pub fn write_wav(path: &Path, samples: &[i16]) -> std::io::Result<()> {
     write_atomically(path, &wav_data(samples, 16_000, 1))
 }
 
-/// Writes to `<path>.wav.part`, then renames it over `path`, tried again on
-/// Windows while a file is busy ([`busy_file::rename`]): a freshly written
-/// WAV is what an antivirus client scans first. A failure removes the
-/// temporary and leaves `path` as it was.
+/// Writes beside `path`, its extension replaced by `wav.part`, then renames
+/// that temporary over `path`, tried again on Windows while a file is busy
+/// ([`busy_file::rename`]): a freshly written WAV is what an antivirus
+/// client scans first. A failure removes the temporary and leaves `path` as
+/// it was.
 fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let temporary = path.with_extension("wav.part");
     let written =
@@ -364,7 +365,7 @@ mod tests {
     use super::*;
 
     /// A WAV that cannot be moved over its path (a folder holds the name)
-    /// fails the write and leaves the folder as it was and no temporary
+    /// fails the write, leaves the folder as it was and leaves no temporary
     /// behind. On Windows the refused move is tried again first.
     #[test]
     fn a_failed_write_leaves_no_temporary_behind() {
@@ -379,5 +380,17 @@ mod tests {
             .collect();
         assert_eq!(names, ["speaker.wav"]);
         assert_eq!(std::fs::read(path.join("kept")).unwrap(), b"kept");
+    }
+
+    /// A write that fails before its move (a folder holds the temporary's
+    /// name) leaves the earlier file at `path` as it was.
+    #[test]
+    fn a_failed_write_keeps_the_earlier_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("speaker.wav");
+        std::fs::write(&path, b"earlier").unwrap();
+        std::fs::create_dir(path.with_extension("wav.part")).unwrap();
+        write_wav(&path, &[0, 1, -1]).unwrap_err();
+        assert_eq!(std::fs::read(&path).unwrap(), b"earlier");
     }
 }
