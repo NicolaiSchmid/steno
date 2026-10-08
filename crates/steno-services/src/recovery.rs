@@ -372,7 +372,9 @@ impl LiveRecordingCheck {
 pub(crate) struct Interrupted {
     pub(crate) meetings: Vec<Meeting>,
     /// `None` when the record cannot be read: a meeting may then be
-    /// anywhere, and one whose master is not found is kept.
+    /// anywhere, and one whose master is not found is kept. Also `None`
+    /// when the meetings cannot be listed, so no entry is forgotten as
+    /// settled ([`reconcile_interrupted`]).
     pub(crate) recorded: Option<BTreeMap<Uuid, PathBuf>>,
     pub(crate) known_folders: Vec<PathBuf>,
     /// Where the record is, so the entries of the meetings settled here
@@ -385,21 +387,24 @@ impl Interrupted {
     /// read is logged and left out (a meeting list that cannot be read is
     /// empty, so nothing is recovered or failed).
     pub(crate) fn list(store: &Store, support_directory: &Path) -> Self {
-        let meetings = store
-            .meetings_in_states(&[steno_core::MeetingStateKind::Recording])
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "interrupted recordings could not be listed");
-                Vec::new()
-            });
+        let listed = store.meetings_in_states(&[steno_core::MeetingStateKind::Recording]);
         // The error can name the user's folder: debug alone.
-        let recorded = crate::audio_folders::recorded(support_directory)
-            .inspect_err(|error| {
-                tracing::warn!(
-                    "the recording folders could not be read; recordings not found are kept"
-                );
-                tracing::debug!(%error, "recording folders not read");
-            })
-            .ok();
+        let recorded = match &listed {
+            Ok(_) => crate::audio_folders::recorded(support_directory)
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        "the recording folders could not be read; recordings not found are kept"
+                    );
+                    tracing::debug!(%error, "recording folders not read");
+                })
+                .ok(),
+            // Without the rows, no entry can be told settled.
+            Err(_) => None,
+        };
+        let meetings = listed.unwrap_or_else(|error| {
+            tracing::warn!(%error, "interrupted recordings could not be listed");
+            Vec::new()
+        });
         let known_folders =
             crate::audio_folders::known(support_directory).unwrap_or_else(|error| {
                 tracing::debug!(%error, "the known audio folders could not be read");
@@ -441,12 +446,26 @@ pub(crate) struct Reconciled {
 /// the rest are failed with [`Store::INTERRUPTED_RECORDING_REASON`] through
 /// [`Store::fail_recordings`], which skips a row another process has moved
 /// on meanwhile. The record forgets every listed entry whose meeting is no
-/// longer left `recording`. Blocks for up to
+/// longer left `recording`, also when no row was left `recording`. Blocks
+/// for up to
 /// [`LiveRecordingCheck::fresh_within`] when a master is fresh, so the
 /// caller runs it off the main thread. Swift:
 /// `MeetingStore.failInterruptedRecordings` in `AppController.launch`, the
 /// failing part alone.
 pub(crate) fn reconcile_interrupted(
+    store: &Store,
+    intake: &LocalRecordingIntake,
+    interrupted: &Interrupted,
+    check: &LiveRecordingCheck,
+    runtime: &tokio::runtime::Handle,
+) -> Reconciled {
+    let reconciled = reconcile_listed(store, intake, interrupted, check, runtime);
+    forget_settled(interrupted, &reconciled);
+    reconciled
+}
+
+/// [`reconcile_interrupted`] but the forgetting.
+fn reconcile_listed(
     store: &Store,
     intake: &LocalRecordingIntake,
     interrupted: &Interrupted,
@@ -552,7 +571,6 @@ pub(crate) fn reconcile_interrupted(
             }
         }
     }
-    forget_settled(interrupted, &reconciled);
     reconciled
 }
 
@@ -1046,6 +1064,29 @@ mod tests {
         );
         assert_eq!(harness.recorded(&meeting), None);
         harness.pipeline.current().wait_until_idle().await;
+    }
+
+    /// A launch with no row left `recording` still forgets the entries of
+    /// meetings that moved on: one failed since, and one that is gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_launch_with_no_row_left_recording_forgets_the_settled_entries() {
+        let harness = Harness::new();
+        let failed = harness.begin(MeetingSource::MacCall);
+        harness.record(&failed, &harness.audio_folder());
+        harness.intake().fail(failed.id, "refused").unwrap();
+        let gone = Uuid::new_v4();
+        crate::audio_folders::record(&harness.support_directory(), gone, &harness.audio_folder())
+            .unwrap();
+
+        assert_eq!(
+            harness.reconcile(&[], &an_hour_later()),
+            Reconciled::default()
+        );
+        assert!(
+            crate::audio_folders::recorded(&harness.support_directory())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A folder that is gone for good keeps a row only when it decides the
