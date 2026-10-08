@@ -1,19 +1,19 @@
 //! The two model files the ONNX backend loads, described as one
 //! [`steno_speech::ModelAsset`] with the id [`ASSET_ID`], so they install
 //! through `steno-speech`'s [`ModelStore`] like the speech models: into
-//! `<store root>/diarization/`, which in Steno's store root (the models
-//! directory's `onnx/` folder) is `<models directory>/onnx/diarization/`,
-//! with the store's download lock, resume, 64 MiB ranges, progress and
-//! mirror (`<mirror>/diarization/<file name>`). Nothing is committed. How
-//! a download runs and what may be deleted: `steno_speech::model_store`.
+//! `<store root>/diarization/` (in Steno,
+//! `<models directory>/onnx/diarization/`), with the store's download
+//! lock, resume, 64 MiB ranges, progress and mirror
+//! (`<mirror>/diarization/<file name>`). Nothing is committed. How a
+//! download runs and what may be deleted: `steno_speech::model_store`.
 //! Rust-only: Swift's `ModelAsset.offlineDiarizer`
 //! (`Sources/StenoSpeech/Models/ModelAsset.swift`) installs `FluidAudio`'s
 //! `CoreML` models instead.
 //!
 //! Who may download them is the caller's [`Install`]: [`ensure`] installs
 //! what is missing ([`Install::Allowed`]), [`installed`] only finds an
-//! installed folder ([`Install::Never`]) and is the check a gate that asks
-//! whether a job can diarize calls too, so the two never disagree.
+//! installed folder ([`Install::Never`]). A gate that asks whether a job
+//! can diarize calls the same function, so the two never disagree.
 //!
 //! [`DISPLAY_NAME`], [`LICENCE`] and [`ATTRIBUTION`] are the asset's name
 //! and the credit its licences require, for the notices the stable
@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use steno_speech::model_store::sha256_of;
-use steno_speech::{DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore, SpeechError};
+use steno_speech::{DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore};
 
 use crate::error::DiarizeError;
 
@@ -49,8 +49,9 @@ pub const DISPLAY_NAME: &str =
 /// CC-BY-4.0 for the `WeSpeaker` embeddings trained on `VoxCeleb`.
 pub const LICENCE: &str = "MIT AND CC-BY-4.0";
 
-/// The credit both licences ask for: creator, source, licence and change.
-pub const ATTRIBUTION: &str = "pyannote segmentation 3.0 by pyannote.audio (https://github.com/pyannote/pyannote-audio), MIT, converted to ONNX by sherpa-onnx; WeSpeaker ResNet34-LM by WeSpeaker (https://github.com/wenet-e2e/wespeaker), trained on VoxCeleb, CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/), converted to ONNX by sherpa-onnx";
+/// The credit both licences ask for: creator (with pyannote's copyright
+/// notice, which MIT asks for), source, licence and change.
+pub const ATTRIBUTION: &str = "pyannote segmentation 3.0 by pyannote.audio, Copyright (c) 2020 CNRS (https://github.com/pyannote/pyannote-audio), MIT, converted to ONNX by sherpa-onnx; WeSpeaker ResNet34-LM by WeSpeaker (https://github.com/wenet-e2e/wespeaker), trained on VoxCeleb, CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/), converted to ONNX by sherpa-onnx";
 
 /// The sherpa-onnx export of the segmentation model on Hugging Face.
 pub const SEGMENTATION_REPO: &str = "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0";
@@ -137,7 +138,7 @@ impl ModelPaths {
 /// [`Install::Allowed`], [`installed`] when it is [`Install::Never`].
 pub fn paths(store: &ModelStore, install: Install) -> Result<ModelPaths, DiarizeError> {
     match install {
-        Install::Allowed => Ok(ensure(store)?),
+        Install::Allowed => ensure(store),
         Install::Never => installed(store),
     }
 }
@@ -162,20 +163,20 @@ pub fn installed(store: &ModelStore) -> Result<ModelPaths, DiarizeError> {
 /// Installs the asset into `store` when a file is missing
 /// ([`ModelStore::ensure`]; the download's progress goes to the debug log)
 /// and returns the paths of the two files. An installed folder is used as
-/// it is, without a request. The `<file name>*.part` files the diarizer's
-/// earlier store left, which nothing resumes, are deleted first.
+/// it is, without a request. The earlier store's partial files are
+/// deleted first ([`remove_old_parts`]). A failed download is
+/// [`DiarizeError::Model`].
 ///
 /// ```no_run
 /// use steno_speech::ModelStore;
 ///
 /// let paths = steno_diarize::models::ensure(&ModelStore::from_environment())?;
 /// assert!(paths.segmentation.is_file() && paths.embedding.is_file());
-/// # Ok::<(), steno_speech::SpeechError>(())
+/// # Ok::<(), steno_diarize::DiarizeError>(())
 /// ```
-pub fn ensure(store: &ModelStore) -> Result<ModelPaths, SpeechError> {
-    let asset = asset();
-    remove_old_parts(&store.directory(&asset), &asset);
-    let directory = store.ensure(&asset, &mut log_download)?;
+pub fn ensure(store: &ModelStore) -> Result<ModelPaths, DiarizeError> {
+    remove_old_parts(store);
+    let directory = store.ensure(&asset(), &mut log_download)?;
     Ok(ModelPaths::in_directory(&directory))
 }
 
@@ -183,12 +184,16 @@ pub fn ensure(store: &ModelStore) -> Result<ModelPaths, SpeechError> {
 /// file against the manifest and deletes those that fail, so the store,
 /// Settings and a gate report the asset not installed and a download
 /// replaces them; the result is then [`DiarizeError::NotInstalled`]
-/// naming them. When every file is intact, or cannot be hashed, it is
-/// `error`. The hash runs only after a failure, never on a load that
-/// works.
+/// naming them. A file that is gone by then (a Settings Remove during the
+/// load) is reported the same way, without a hash. When every file is
+/// intact, or cannot be hashed, it is `error`. The hash runs only after a
+/// failure, never on a load that works.
 pub(crate) fn after_failed_load(store: &ModelStore, error: DiarizeError) -> DiarizeError {
     let asset = asset();
-    let directory = store.directory(&asset);
+    let directory = match store.installed_directory(&asset) {
+        Ok(directory) => directory,
+        Err(gone) => return gone.into(),
+    };
     let mut missing = Vec::new();
     for file in &asset.files {
         let path = directory.join(&file.name);
@@ -216,11 +221,14 @@ pub(crate) fn after_failed_load(store: &ModelStore, error: DiarizeError) -> Diar
     }
 }
 
-/// Deletes `<file name>*.part` in `directory` for each file of `asset`:
-/// the temporary files of the diarizer's earlier store, which the
-/// installed size would otherwise count. Best effort.
-fn remove_old_parts(directory: &Path, asset: &ModelAsset) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
+/// Deletes `<file name>*.part` in the asset's folder in `store`: the
+/// temporary files of the diarizer's earlier store, which nothing resumes
+/// and the installed size would otherwise count. [`ensure`] and Settings'
+/// Download call it. Best effort: a file that cannot be deleted is logged
+/// and left.
+pub fn remove_old_parts(store: &ModelStore) {
+    let asset = asset();
+    let Ok(entries) = std::fs::read_dir(store.directory(&asset)) else {
         return;
     };
     for entry in entries.flatten() {
@@ -243,4 +251,33 @@ fn log_download(progress: DownloadProgress<'_>) {
         total = progress.total,
         "diarization model download"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file removed between the check and the load (a Settings Remove)
+    /// makes the failed load [`DiarizeError::NotInstalled`] naming it, not
+    /// the backend's error, and the file still there is kept.
+    #[test]
+    fn a_file_gone_by_the_failed_load_is_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::in_models_directory(dir.path());
+        let asset = asset();
+        let folder = store.directory(&asset);
+        std::fs::create_dir_all(&folder).unwrap();
+        let segmentation = &asset.files[0];
+        std::fs::File::create(folder.join(&segmentation.name))
+            .unwrap()
+            .set_len(segmentation.size)
+            .unwrap();
+
+        let error = after_failed_load(&store, DiarizeError::metadata("the load failed"));
+        let DiarizeError::NotInstalled { missing, .. } = &error else {
+            panic!("not installed: {error:?}");
+        };
+        assert_eq!(missing, &[EMBEDDING_FILE.to_owned()]);
+        assert!(folder.join(SEGMENTATION_FILE).exists(), "not hashed, kept");
+    }
 }

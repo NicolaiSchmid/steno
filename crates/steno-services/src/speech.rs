@@ -343,7 +343,8 @@ impl SpeechEngines {
     /// Engines from `build` instead, for the tests.
     pub(crate) fn with_builder(setup: SpeechSetup, build: BuildEngine) -> Self {
         SpeechEngines {
-            // #237 flips this to `Install::Never` together with its models-missing gate.
+            // S1 (`.plans/2026-10-07-stable-promotion.md`) flips this to
+            // `Install::Never` together with the pipeline's models-missing gate.
             diarizer: diarizer(&setup, Install::Allowed),
             setup,
             build,
@@ -665,7 +666,10 @@ impl SpeechModels for ModelStoreSpeechModels {
         progress: &mut dyn FnMut(f64, &str),
     ) -> BoundaryResult<()> {
         match asset {
-            ModelAsset::OfflineDiarizer => self.install(&[steno_diarize::models::asset()], progress),
+            ModelAsset::OfflineDiarizer => {
+                steno_diarize::models::remove_old_parts(&self.speech);
+                self.install(&[steno_diarize::models::asset()], progress)
+            }
             ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Err(
                 "This build cannot download the CoreML Parakeet v3 model; install it from the Steno Mac app."
                     .into(),
@@ -1032,7 +1036,8 @@ mod tests {
     /// The diarizer's download in Settings goes through the ONNX store
     /// with the speech settings' mirror, reporting the file under way: here
     /// a mirror that serves junk of the first file's size, which fails its
-    /// checksum and installs nothing.
+    /// checksum and installs nothing. The earlier store's `.part` files are
+    /// deleted first.
     #[test]
     fn the_diarizer_download_goes_through_the_mirror() {
         let dir = tempfile::tempdir().unwrap();
@@ -1045,6 +1050,10 @@ mod tests {
                 ..SpeechSettings::default()
             },
         ));
+        let folder = models.speech.directory(&asset);
+        std::fs::create_dir_all(&folder).unwrap();
+        let old_part = folder.join(format!("{}a1B2c3.part", first.name));
+        std::fs::write(&old_part, b"old").unwrap();
         let mut reports = Vec::new();
         let error = models
             .download(ModelAsset::OfflineDiarizer, &mut |fraction, file| {
@@ -1064,16 +1073,44 @@ mod tests {
             "{reports:?}"
         );
         assert!(!models.is_installed(ModelAsset::OfflineDiarizer));
+        assert!(!old_part.exists(), "the earlier store's partial is deleted");
+    }
+
+    /// Until the pipeline checks for missing models itself, the diarizer
+    /// every pipeline runs may download them: over an empty models
+    /// directory its `prepare` asks the mirror. S1 inverts this together
+    /// with its models-missing gate.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_apps_diarizer_may_download_its_models_until_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mirror, requests) = counting_junk_mirror(0);
+        let engines = SpeechEngines::new(testing::setup(
+            dir.path(),
+            SpeechSettings {
+                models_mirror: Some(mirror),
+                ..SpeechSettings::default()
+            },
+        ));
+        assert!(engines.diarizer().prepare().await.is_err());
+        assert!(requests.load(std::sync::atomic::Ordering::SeqCst) > 0);
     }
 
     /// A mirror on 127.0.0.1 that answers every request with `len` bytes
     /// of junk, which fail any checksum.
     fn junk_mirror(len: usize) -> String {
+        counting_junk_mirror(len).0
+    }
+
+    /// [`junk_mirror`] and the number of requests it has answered.
+    fn counting_junk_mirror(len: usize) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&requests);
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // Read the request head, so closing does not reset it.
                 let mut reader = BufReader::new(&stream);
                 let mut line = String::new();
@@ -1086,7 +1123,7 @@ mod tests {
                 let _ = stream.write_all(&[head.as_bytes(), &vec![b'x'; len]].concat());
             }
         });
-        format!("http://{address}")
+        (format!("http://{address}"), requests)
     }
 
     /// On the ONNX export, the Parakeet v3 download fetches Silero VAD too,

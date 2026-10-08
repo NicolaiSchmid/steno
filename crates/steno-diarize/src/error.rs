@@ -5,25 +5,26 @@
 //! `BoundaryResult`.
 
 use std::fmt;
-use std::path::PathBuf;
 
 use crate::backend::BackendError;
 
 /// What the diarizer reports when it cannot run.
 #[derive(Debug, thiserror::Error)]
 pub enum DiarizeError {
-    /// The ONNX models are not installed and this diarizer may not
-    /// download them ([`crate::Install::Never`]): a file is missing, has
-    /// the wrong size, or failed its checksum after a failed load and was
-    /// deleted. The fields and message are `steno_speech`'s
-    /// `SpeechError::NotInstalled`, which converts into this variant. The
-    /// variant survives boxing into core's `BoxError`, so a caller tells
-    /// it from a failed load with `downcast_ref::<DiarizeError>()`.
+    /// The ONNX models are not installed: a file is missing or has the
+    /// wrong size and this diarizer may not download it
+    /// ([`crate::Install::Never`]), or, under either `Install`, a file
+    /// failed its checksum after a failed load and was deleted. The fields
+    /// and message are `steno_speech`'s `SpeechError::NotInstalled`, which
+    /// converts into this variant. The variant survives boxing into core's
+    /// `BoxError`, so a caller tells it from a failed load with
+    /// `downcast_ref::<DiarizeError>()`.
+    #[cfg(feature = "onnx")]
     #[error("model {asset} is not installed: {} missing in {}", missing.join(", "), directory.display())]
     NotInstalled {
         asset: String,
         /// `<root>/<asset id>`, where the files belong.
-        directory: PathBuf,
+        directory: std::path::PathBuf,
         missing: Vec<String>,
     },
     /// The ONNX models could not be installed: a download that failed or
