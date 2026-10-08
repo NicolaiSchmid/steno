@@ -186,6 +186,27 @@ fn the_receipt_carries_unwritten_files_and_records_new_ones() {
 }
 
 #[test]
+fn a_forgotten_file_leaves_the_receipt() {
+    let previous = receipt(
+        ROOT,
+        &[(NOTE, FileOwnership::Owned), (AUDIO, FileOwnership::Owned)],
+    );
+    let mut ledger = DeliveryLedger::new(Some(&previous), ROOT);
+    ledger.forget(AUDIO);
+    ledger.forget("Meetings/2026-09-24-sync/never-listed.md");
+    let receipt = ledger.receipt(LEDGER_FOLDER, ArtifactRenderer::VERSION);
+    assert_eq!(
+        receipt
+            .files
+            .iter()
+            .map(|f| f.relative_path.as_str())
+            .collect::<Vec<_>>(),
+        [NOTE],
+        "a path never listed is no change"
+    );
+}
+
+#[test]
 fn the_collision_rule_suffixes_taken_folders_and_reuses_a_crashed_attempt() {
     let ours = uuid(1);
     let theirs = uuid(2);

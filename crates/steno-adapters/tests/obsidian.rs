@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
@@ -19,8 +20,8 @@ use steno_core::content_hash::sha256;
 use steno_core::json::uuid_string;
 use steno_core::paths::{file_url, file_url_path};
 use steno_core::{
-    DeliveryReceipt, FileOwnership, MeetingExport, ObsidianSettings, Person, Platform,
-    SpeakerAssignment,
+    AudioFormat, AudioLane, DeliveryReceipt, FileOwnership, MeetingExport, ObsidianSettings,
+    Person, Platform, SpeakerAssignment,
 };
 
 struct Vault {
@@ -1011,6 +1012,132 @@ fn a_users_audio_file_counts_when_the_mixdown_is_gone() {
     assert_eq!(vault.text(&format!("{FOLDER}/audio.m4a")), "user audio\n");
     assert!(!paths(&second).iter().any(|p| p.ends_with("audio.m4a")));
     assert_eq!(second.files.len(), first.files.len());
+    assert_eq!(second.warnings, Vec::<String>::new());
+}
+
+/// A handover meeting as `persist` leaves it: one AAC file at the asset's
+/// own URL and no mixdown.
+fn phone_export(vault: &Vault) -> MeetingExport {
+    let mut export = export();
+    let recording = vault.directory.path().join("recording.m4a");
+    fs::write(&recording, mixdown_bytes()).unwrap();
+    let audio = export.audio.as_mut().unwrap();
+    audio.url = file_url(&recording, false);
+    audio.format = AudioFormat::M4aAac;
+    audio.lanes = vec![AudioLane::Mic];
+    audio.sidecars_16k = BTreeMap::new();
+    audio.mixdown_url = None;
+    export
+}
+
+#[test]
+fn a_phone_meeting_without_a_mixdown_copies_its_recording() {
+    let vault = Vault::new();
+    let receipt = deliver(&vault.destination(), &phone_export(&vault), None);
+    assert_eq!(receipt.warnings, Vec::<String>::new());
+    assert_eq!(vault.list(FOLDER), meeting_files(FOLDER_SLUG));
+    assert_eq!(vault.read(&format!("{FOLDER}/audio.m4a")), mixdown_bytes());
+    assert!(paths(&receipt).contains(&format!("{FOLDER}/audio.m4a")));
+}
+
+#[test]
+fn a_phone_meeting_whose_recording_was_swept_warns() {
+    let vault = Vault::new();
+    let export = phone_export(&vault);
+    fs::remove_file(vault.directory.path().join("recording.m4a")).unwrap();
+    let receipt = deliver(&vault.destination(), &export, None);
+    assert_eq!(
+        receipt.warnings,
+        [ObsidianFolderDestination::NO_AUDIO_WARNING]
+    );
+    assert_eq!(
+        vault.list(FOLDER),
+        without_audio(meeting_files(FOLDER_SLUG))
+    );
+}
+
+/// The meeting folder, with its audio copy, is deleted, the sweep removes
+/// the mixdown, and a redelivery creates the pinned folder again.
+fn gone_pin_with_the_mixdown_swept(vault: &Vault) -> (DeliveryReceipt, DeliveryReceipt) {
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    assert!(paths(&first).contains(&format!("{FOLDER}/audio.m4a")));
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+    let again = deliver(&destination, &ours, Some(&first));
+    (first, again)
+}
+
+#[test]
+fn a_gone_pinned_folder_with_the_mixdown_swept_warns() {
+    let vault = Vault::new();
+    let (_, again) = gone_pin_with_the_mixdown_swept(&vault);
+    assert_eq!(again.folder, FOLDER);
+    assert_eq!(
+        vault.list(FOLDER),
+        without_audio(meeting_files(FOLDER_SLUG))
+    );
+    assert_eq!(
+        again.warnings,
+        [ObsidianFolderDestination::NO_AUDIO_WARNING]
+    );
+}
+
+#[test]
+fn a_deleted_audio_copy_with_the_mixdown_swept_warns() {
+    let vault = Vault::new();
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    fs::remove_file(vault.path(&format!("{FOLDER}/audio.m4a"))).unwrap();
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+    let again = deliver(&destination, &ours, Some(&first));
+    assert_eq!(again.folder, FOLDER);
+    assert_eq!(
+        again.warnings,
+        [ObsidianFolderDestination::NO_AUDIO_WARNING]
+    );
+    assert!(!paths(&again).contains(&format!("{FOLDER}/audio.m4a")));
+}
+
+#[test]
+fn the_receipt_drops_an_audio_copy_that_is_gone() {
+    let vault = Vault::new();
+    let (first, again) = gone_pin_with_the_mixdown_swept(&vault);
+    let audio = format!("{FOLDER}/audio.m4a");
+    assert_eq!(
+        paths(&again),
+        paths(&first)
+            .into_iter()
+            .filter(|path| *path != audio)
+            .collect::<Vec<_>>(),
+        "every other file is listed again"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_mixdown_that_cannot_be_checked_is_a_read_failure_not_missing_audio() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let vault = Vault::new();
+    let locked = vault.directory.path().join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    let mixdown = locked.join("audio.m4a");
+    fs::write(&mixdown, mixdown_bytes()).unwrap();
+    let mut export = export();
+    export.audio.as_mut().unwrap().mixdown_url = Some(file_url(&mixdown, false));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::metadata(&mixdown).is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        return; // root
+    }
+    let delivered = vault.destination().deliver_meeting(&export, None);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    match delivered {
+        Err(ObsidianError::ReadFailed { path, .. }) => assert_eq!(Path::new(&path), mixdown),
+        other => panic!("expected ReadFailed, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1740,7 +1867,15 @@ fn a_gone_pinned_folder_another_writer_takes_first_is_never_written() {
 #[test]
 fn a_dangling_symlink_at_the_pinned_folder_gets_a_folder_of_its_own() {
     let vault = Vault::new();
-    let destination = vault.destination_with(false, Some("People"));
+    let claims = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&claims);
+    let destination = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if let DeliveryStep::ClaimingFolder(folder) = step {
+                seen.lock().unwrap().push(folder.to_owned());
+            }
+        });
     let ours = export();
     let first = deliver(&destination, &ours, None);
     fs::remove_dir_all(vault.path(FOLDER)).unwrap();
@@ -1759,6 +1894,11 @@ fn a_dangling_symlink_at_the_pinned_folder_gets_a_folder_of_its_own() {
     );
     assert!(!nowhere.exists(), "the link target is not created");
     assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
+    assert_eq!(
+        *claims.lock().unwrap(),
+        [FOLDER.to_owned(), FOLDER.to_owned(), format!("{FOLDER}-2")],
+        "the link is not created over: one claim of the pinned name, then the suffix"
+    );
 }
 
 #[cfg(unix)]

@@ -39,9 +39,9 @@ impl DeliveryLedger {
             .filter(|receipt| Self::same_root(&receipt.root, root))
             .filter(|receipt| Self::stays_inside_root(receipt))
             .cloned();
-        // Files from the previous receipt stay listed unless rewritten, so
-        // an opted-out audio copy or a disabled people folder keeps its
-        // entry.
+        // Files from the previous receipt stay listed unless rewritten or
+        // forgotten ([`DeliveryLedger::forget`]), so an opted-out audio copy
+        // or a disabled people folder keeps its entry.
         let files: BTreeMap<String, DeliveredFile> = previous
             .iter()
             .flat_map(|receipt| receipt.files.iter())
@@ -113,6 +113,13 @@ impl DeliveryLedger {
         let prefix = format!("{}/", from.trim_end_matches('/'));
         self.files.retain(|path, _| !path.starts_with(&prefix));
         self.claimed = Some(to.to_owned());
+    }
+
+    /// Drops `path` from the receipt: a file of ours that is gone from
+    /// disk and that this delivery did not write again.
+    /// Swift: none.
+    pub fn forget(&mut self, path: &str) {
+        self.files.remove(path);
     }
 
     pub fn record(&mut self, path: &str, ownership: FileOwnership, data: &[u8]) {

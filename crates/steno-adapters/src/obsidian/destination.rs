@@ -10,8 +10,8 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError, TryLockError};
 use chrono_tz::Tz;
 use steno_core::paths::file_url_path;
 use steno_core::{
-    BoundaryResult, DeliveryReceipt, Destination, FileOwnership, MeetingExport, ObsidianSettings,
-    Platform, async_trait,
+    AudioFormat, BoundaryResult, DeliveryReceipt, Destination, FileOwnership, MeetingExport,
+    ObsidianSettings, Platform, async_trait,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -82,6 +82,18 @@ fn folder_slug(folder: &str) -> String {
     )
 }
 
+/// An audio copy's file name: `audio` or `audio.<ext>`.
+fn is_audio(name: &str) -> bool {
+    name == "audio" || name.starts_with("audio.")
+}
+
+/// Whether `path` is an audio copy directly in `folder`.
+fn is_audio_in(path: &str, folder: &str) -> bool {
+    path.strip_prefix(folder)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|name| !name.contains('/') && is_audio(name))
+}
+
 /// The lock every delivery into the vault at `vault_path` holds from start
 /// to end, one per vault in the process, so two deliveries merge a shared
 /// person page, claim meeting folders and sweep temp files one after the
@@ -131,10 +143,11 @@ pub struct ObsidianFolderDestination {
 impl ObsidianFolderDestination {
     pub const DESTINATION_ID: &'static str = "obsidian-folder";
 
-    /// The receipt's warning when the audio copy is on but the mixdown is
-    /// gone (the retention sweep removed it) and the meeting folder holds
-    /// no copy: the notes are delivered without it. Swift fails the
-    /// delivery with `audioUnavailable` instead (parity note in the plan).
+    /// The receipt's warning when the audio copy is on, the file it copies
+    /// is gone (the retention sweep removes it with the master) and the
+    /// meeting folder holds no audio file: the notes are delivered without
+    /// it. Swift fails with `audioUnavailable` instead (parity note in the
+    /// plan).
     pub const NO_AUDIO_WARNING: &'static str =
         "The audio was already removed, so the export has no audio file";
 
@@ -389,29 +402,44 @@ impl ObsidianFolderDestination {
         self.remove_meeting_line(&rendered, meeting_id, ledger)
     }
 
-    /// Copies the mixdown into the meeting folder while it exists; after the
-    /// retention sweep the copy already in the vault (in the receipt or on
-    /// disk) is the audio. `Ok(false)` when neither is there: the meeting
-    /// has no audio to deliver.
+    /// Copies the mixdown into the meeting folder, or for a phone recording
+    /// (`M4aAac`) without one its AAC file. When that file is gone, an
+    /// audio file already in the folder is the audio, and a receipt entry
+    /// for one that is gone is dropped. `Ok(false)` when there is no audio;
+    /// a file that cannot be checked is [`ObsidianError::ReadFailed`].
     fn copy_audio(
         &self,
         meeting: &MeetingExport,
         folder: &str,
         ledger: &mut DeliveryLedger,
     ) -> Result<bool, ObsidianError> {
-        let mixdown = meeting
+        let source = meeting
             .audio
             .as_ref()
-            .and_then(|audio| audio.mixdown_url.as_deref())
-            .and_then(file_url_path)
-            .filter(|path| path.exists());
-        let Some(mixdown) = mixdown else {
-            return Ok(self.audio_is_in_the_vault(folder, ledger));
+            .and_then(|audio| match &audio.mixdown_url {
+                Some(mixdown) => file_url_path(mixdown),
+                None if audio.format == AudioFormat::M4aAac => file_url_path(&audio.url),
+                None => None,
+            });
+        let source = match source {
+            Some(path) if self.reading(&path.to_string_lossy(), || path.try_exists())? => path,
+            _ => {
+                let gone: Vec<String> = ledger
+                    .files()
+                    .keys()
+                    .filter(|path| is_audio_in(path, folder) && !self.sink.exists(path))
+                    .cloned()
+                    .collect();
+                for path in &gone {
+                    ledger.forget(path);
+                }
+                return Ok(self.audio_is_in_the_vault(folder));
+            }
         };
         let data = self
-            .reading(&mixdown.to_string_lossy(), || fs::read(&mixdown).map(Some))?
+            .reading(&source.to_string_lossy(), || fs::read(&source).map(Some))?
             .unwrap_or_default();
-        let extension = mixdown
+        let extension = source
             .extension()
             .map(|extension| extension.to_string_lossy().into_owned())
             .unwrap_or_default();
@@ -589,18 +617,13 @@ impl ObsidianFolderDestination {
         Ok(probe.and_then(|probe| probe.pointer("/meeting/id")?.as_str()?.parse().ok()))
     }
 
-    /// An `audio` or `audio.<ext>` file in the meeting folder, listed in the
-    /// receipt or present on disk.
-    fn audio_is_in_the_vault(&self, folder: &str, ledger: &DeliveryLedger) -> bool {
-        fn is_audio(name: &str) -> bool {
-            name == "audio" || name.starts_with("audio.")
-        }
-        ledger.lists(folder, is_audio)
-            || self
-                .sink
-                .file_names(folder)
-                .iter()
-                .any(|name| is_audio(name))
+    /// Whether an `audio` or `audio.<ext>` file is in the meeting folder on
+    /// disk.
+    fn audio_is_in_the_vault(&self, folder: &str) -> bool {
+        self.sink
+            .file_names(folder)
+            .iter()
+            .any(|name| is_audio(name))
     }
 
     /// The vault exists and the people folder, if any, passes
