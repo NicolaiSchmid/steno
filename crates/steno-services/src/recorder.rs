@@ -28,12 +28,19 @@
 //! reports no size, or more space free than it holds (some network and
 //! FUSE file systems), counts as unreadable and never warns, stops or
 //! refuses a recording. Rust only: Swift had no disk check.
+//!
+//! The session's notices are followed too: while its restarts of a device
+//! that stopped delivering go on past `CaptureSession::RESTART_ATTEMPTS`
+//! the status warns "No audio from `<device>`. Still trying.", and after
+//! the stop a note says about how many seconds of the recording are
+//! missing, the gaps filled with silence and the wall time the master
+//! does not hold, once that is more than about a second. Rust only.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{FixedOffset, Utc};
 use steno_audio::{
@@ -398,6 +405,12 @@ struct Active {
     /// so a rebuild can set and clear it; written at the start and by
     /// `notice_thread`, cleared by `clear_messages`.
     fallback: Arc<Mutex<Fallback>>,
+    /// A device that stopped delivering, as the notices tell it; written
+    /// by `notice_thread`. Rust only.
+    outage: Arc<Mutex<Outage>>,
+    /// When the session began recording, for the audio missing from the
+    /// master against wall time after the stop ([`missing_audio_note`]).
+    recording_since: Instant,
     /// Re-reads the microphone after each rebuild, joined once the session
     /// is dropped; none when it could not be spawned, and the fallback
     /// warning stays as the start left it.
@@ -468,6 +481,19 @@ impl Fallback {
     }
 }
 
+/// A device that stopped delivering in a recording, as the session's
+/// notices tell it. Rust only.
+#[derive(Default)]
+struct Outage {
+    /// The device named while the session's restarts go on past
+    /// `CaptureSession::RESTART_ATTEMPTS` ([`no_audio_warning`]); `None`
+    /// once one ran, and once dismissed.
+    still_trying: Option<String>,
+    /// The device the latest rebuild replaced, named in the note after the
+    /// stop ([`missing_audio_note`]).
+    device: Option<String>,
+}
+
 struct Inner {
     status: RecorderStatus,
     active: Option<Active>,
@@ -535,6 +561,40 @@ fn fallback_input(stream: Option<&CaptureStream>) -> Option<String> {
     )
 }
 
+/// The device `stream` records, as the warnings about missing audio name
+/// it: its microphone's name, else "the microphone".
+fn device_name(stream: Option<&CaptureStream>) -> String {
+    stream
+        .and_then(|stream| stream.input.as_ref()?.name.clone())
+        .unwrap_or_else(|| "the microphone".to_owned())
+}
+
+/// The warning while no audio arrives from `device` and the session keeps
+/// restarting the capture. Rust only.
+fn no_audio_warning(device: &str) -> String {
+    format!("No audio from {device}. Still trying.")
+}
+
+/// The note after a recording whose master holds `missing` seconds of
+/// silence written for gaps, or of wall time it does not hold at all,
+/// when that is more than about a second; `device` is the one the latest
+/// gap was from. Rust only.
+fn missing_audio_note(missing: f64, device: &str) -> Option<String> {
+    if missing.is_nan() || missing <= 1.0 {
+        return None;
+    }
+    // Rounded to the nearest second.
+    let seconds = Duration::try_from_secs_f64(missing + 0.5).ok()?.as_secs();
+    Some(if seconds == 1 {
+        format!("About 1 second of the recording is missing: no audio arrived from {device}.")
+    } else {
+        format!(
+            "About {seconds} seconds of the recording are missing: no audio arrived from \
+             {device}."
+        )
+    })
+}
+
 /// The warning while the recording is on the fallback `input`.
 fn fallback_warning(input: &str) -> String {
     format!("Recording from {input}. The microphone chosen in Settings is not available.")
@@ -577,15 +637,17 @@ fn forward_levels(
         .ok()
 }
 
-/// The thread that re-reads the microphone into `fallback` after each
-/// rebuild ([`CaptureNotice::DeviceResumed`] on `notices`), since a rebuild
-/// may record another one, and calls `hook`. It holds `session` weakly, so
+/// The thread that follows the session's notices and calls `hook`: a
+/// rebuild's start notes the device it replaces into `outage`, restarts
+/// that go on past `RESTART_ATTEMPTS` name it there as still trying, and
+/// the resume clears that and re-reads the microphone into `fallback`,
+/// since a rebuild may record another one. It holds `session` weakly, so
 /// dropping the session ends the notices and the thread. None when it
-/// could not be spawned, and the fallback warning stays as the start left
-/// it.
+/// could not be spawned, and the warnings stay as the start left them.
 fn follow_the_microphone(
     notices: Receiver<CaptureNotice>,
     fallback: Arc<Mutex<Fallback>>,
+    outage: Arc<Mutex<Outage>>,
     session: Weak<CaptureSession>,
     hook: Hook,
 ) -> Option<JoinHandle<()>> {
@@ -593,16 +655,28 @@ fn follow_the_microphone(
         .name("steno-notices".into())
         .spawn(move || {
             while let Ok(notice) = notices.recv() {
-                if !matches!(notice, CaptureNotice::DeviceResumed { .. }) {
-                    continue;
-                }
                 let Some(session) = session.upgrade() else {
                     return;
                 };
-                fallback
+                // The stream is still the replaced one until the resume.
+                let device = || device_name(session.stream().as_ref());
+                let mut outage = outage
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .set(fallback_input(session.stream().as_ref()));
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match notice {
+                    CaptureNotice::DeviceChanged(_) => outage.device = Some(device()),
+                    CaptureNotice::StillRestarting { .. } => {
+                        outage.still_trying = Some(outage.device.clone().unwrap_or_else(device));
+                    }
+                    CaptureNotice::DeviceResumed { .. } => {
+                        outage.still_trying = None;
+                        fallback
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .set(fallback_input(session.stream().as_ref()));
+                    }
+                }
+                drop(outage);
                 drop(session);
                 if let Some(hook) = &hook {
                     hook();
@@ -1032,9 +1106,12 @@ impl CaptureRecorder {
         let mut fallback = Fallback::default();
         fallback.set(fallback_input(session.stream().as_ref()));
         let fallback = Arc::new(Mutex::new(fallback));
+        let outage = Arc::new(Mutex::new(Outage::default()));
+        let recording_since = Instant::now();
         let notice_thread = follow_the_microphone(
             notices,
             fallback.clone(),
+            outage.clone(),
             Arc::downgrade(&session),
             self.hook(),
         );
@@ -1055,6 +1132,8 @@ impl CaptureRecorder {
                 levels: shared,
                 level_thread,
                 fallback,
+                outage,
+                recording_since,
                 notice_thread,
                 disk_warning: DiskWarning {
                     stops: disk.stops,
@@ -1249,6 +1328,7 @@ impl CaptureRecorder {
             })
         };
         let meeting_id = active.meeting_id;
+        let wall = active.recording_since.elapsed().as_secs_f64();
         let outcome = match active.session.stop() {
             Ok(result) => {
                 log_dropped_frames(meeting_id, &result.statistics);
@@ -1275,14 +1355,17 @@ impl CaptureRecorder {
                         None,
                     ),
                 );
+                // Gaps filled with silence, and wall time the master does
+                // not hold (a gap past `MAXIMUM_GAP`, a stop inside one).
+                let missing = statistics.gap_seconds + (wall - statistics.duration).max(0.0);
                 match completed {
-                    Ok(_) => Ok((recording_warning(active.mode, &statistics), ended)),
+                    Ok(_) => Ok((recording_warning(active.mode, &statistics), missing, ended)),
                     Err(error) => Err(not_saved(meeting_id, &error)),
                 }
             }
             Err(failure) => self
                 .recover_failed_stop(&intake, &active, &failure, &reason)
-                .map(|()| (Some(RECOVERED_AFTER_A_FAILURE.to_owned()), error)),
+                .map(|()| (Some(RECOVERED_AFTER_A_FAILURE.to_owned()), 0.0, error)),
         };
         // The folder recorded for the meeting stays whatever the outcome:
         // a saved meeting's commit is not durable yet (`synchronous =
@@ -1298,7 +1381,15 @@ impl CaptureRecorder {
             let _ = thread.join();
         }
         // Read once the notice thread is gone, so its last rebuild counts.
-        let outcome = outcome.map(|(warning, ended)| {
+        let outcome = outcome.map(|(warning, missing, ended)| {
+            let device = active
+                .outage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .device
+                .clone()
+                .unwrap_or_else(|| device_name(None));
+            let missing = missing_audio_note(missing, &device);
             let note = active
                 .fallback
                 .lock()
@@ -1306,7 +1397,7 @@ impl CaptureRecorder {
                 .was_on
                 .as_deref()
                 .map(fallback_note);
-            let warning = [warning, note]
+            let warning = [warning, missing, note]
                 .into_iter()
                 .flatten()
                 .reduce(|warning, note| format!("{warning} {note}"));
@@ -1484,9 +1575,16 @@ impl Recorder for CaptureRecorder {
                 .current
                 .as_deref()
                 .map(fallback_warning);
+            let no_audio = active
+                .outage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .still_trying
+                .as_deref()
+                .map(no_audio_warning);
             // Every warning that applies, the disk's first; the status's
             // own is `None` while recording.
-            status.warning = [active.disk_warning.shown(), fallback]
+            status.warning = [active.disk_warning.shown(), no_audio, fallback]
                 .into_iter()
                 .flatten()
                 .reduce(|warning, next| format!("{warning} {next}"));
@@ -1576,6 +1674,11 @@ impl Recorder for CaptureRecorder {
                 .fallback
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Fallback::default();
+            active
+                .outage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .still_trying = None;
             active.disk_warning.dismiss();
         }
         drop(inner);
@@ -2306,6 +2409,94 @@ mod tests {
                 "Steno heard nothing from the call's audio. Check the system audio permission. \
                  Steno recorded from Built-in Audio while the microphone chosen in Settings \
                  was not available."
+            )
+        );
+    }
+
+    /// A device that stops delivering and whose restarts keep failing (a
+    /// graph that does not run): once they pass `RESTART_ATTEMPTS` the
+    /// recorder warns that no audio arrives from it, naming it, and the
+    /// meter reads silence rather than the last level; after the stop a
+    /// note says about how much of the recording is missing and from
+    /// which device.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_device_that_stops_delivering_is_named_while_steno_keeps_trying() {
+        let capture: MakeCaptureSession = Arc::new(|configuration: CaptureConfiguration| {
+            let options = SyntheticOptions::tones(
+                &configuration.lanes(),
+                &[(AudioLane::Mixed, 440.0)],
+                600.0,
+            )
+            .real_time(true)
+            .stall_after(1.0)
+            .restarts_that_fail(usize::MAX)
+            .restarts_do_not_run()
+            .stream(CaptureStream {
+                input: Some(input(Some("USB Microphone"), false)),
+                ..CaptureStream::SYNTHETIC
+            });
+            CaptureSession::with_backend(
+                configuration,
+                Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
+                None,
+                CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+                Arc::new(steno_audio::SystemClock::new()),
+            )
+            .map_err(|error| error.to_string())
+        });
+        let harness = harness_capturing(
+            models_with(&[]),
+            "parakeet-v3",
+            platform_rule(SpeechSettings::default()),
+            capture,
+        );
+        let status = || harness.recorder.status();
+        start(&harness.recorder).await;
+        eventually("a level from the tone", || {
+            status().levels.is_some_and(|levels| levels.mic > 0.1)
+        })
+        .await;
+        assert_eq!(status().warning, None);
+        eventually("the warning once the restarts pass the attempts", || {
+            status().warning.as_deref() == Some("No audio from USB Microphone. Still trying.")
+        })
+        .await;
+        let mic = status().levels.map(|levels| levels.mic);
+        assert!(
+            mic.is_some_and(|mic| mic < 1e-6),
+            "the meter reads silence: {mic:?}"
+        );
+        stop(&harness.recorder).await;
+        let warning = status().warning.unwrap_or_default();
+        let seconds: u64 = warning
+            .strip_prefix("About ")
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|seconds| seconds.parse().ok())
+            .unwrap_or_else(|| panic!("the note: {warning}"));
+        assert!(seconds >= 3, "{warning}");
+        assert_eq!(
+            warning,
+            format!(
+                "About {seconds} seconds of the recording are missing: no audio arrived from \
+                 USB Microphone."
+            )
+        );
+    }
+
+    #[test]
+    fn the_missing_audio_note_comes_from_about_a_second_on() {
+        assert_eq!(missing_audio_note(1.0, "USB Microphone"), None);
+        assert_eq!(
+            missing_audio_note(1.2, "USB Microphone").as_deref(),
+            Some(
+                "About 1 second of the recording is missing: no audio arrived from USB Microphone."
+            )
+        );
+        assert_eq!(
+            missing_audio_note(12.6, "the microphone").as_deref(),
+            Some(
+                "About 13 seconds of the recording are missing: no audio arrived from the \
+                 microphone."
             )
         );
     }
