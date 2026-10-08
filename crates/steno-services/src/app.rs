@@ -1505,6 +1505,57 @@ mod tests {
         assert_eq!(store.all_meetings().unwrap(), []);
     }
 
+    /// "Process again" through the host on the selected failed meeting
+    /// whose master is on disk: the detail and the list show it queued or
+    /// further on once the call returns, and the run takes it to ready.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_through_the_host_runs_a_failed_meeting_to_ready() {
+        use steno_bridge::{BridgeMethod, BridgeTopic};
+        let (dir, store) = temp_store();
+        let mut app = recording_app(&dir, &store);
+        app.services.pipeline = Arc::new(HostPipeline {
+            pipeline: app.pipeline.clone(),
+            sweep: RetentionSweep::new(store.clone()),
+            export_retries: app.export_retries.clone(),
+        });
+        app.services.file_system = Arc::new(steno_host::services::RealFileSystem);
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = steno_core::MeetingState::Failed {
+            reason: "transcribe: the model is not installed".to_owned(),
+        };
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            &dir.path().join("audio"),
+            meeting.id,
+            steno_core::AudioRetention::KeepForever,
+        )
+        .unwrap();
+        store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        let host = wired_host(&app);
+        call(&host, BridgeMethod::PageReady, None);
+        let id = steno_core::json::uuid_string(meeting.id);
+        call(
+            &host,
+            BridgeMethod::MeetingsSelect,
+            Some(serde_json::json!({ "meetingID": id })),
+        );
+        let detail = host.snapshot(BridgeTopic::MeetingDetail).unwrap();
+        assert_eq!(detail["state"], "failed");
+        assert_eq!(detail["retention"]["filesExist"], true);
+
+        call(&host, BridgeMethod::MeetingProcessAgain, None);
+        let detail = host.snapshot(BridgeTopic::MeetingDetail).unwrap();
+        assert_ne!(detail["state"], "failed", "{detail}");
+        assert_eq!(detail.get("error"), None, "{detail}");
+        let list = host.snapshot(BridgeTopic::MeetingsList).unwrap();
+        assert_eq!(list["counts"]["failed"], 0, "{list}");
+
+        app.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            store.meeting(meeting.id).unwrap().unwrap().state,
+            steno_core::MeetingState::Ready
+        );
+    }
+
     /// A recording in progress, stopped from the sidebar or the tray (Stop,
     /// then Toggle): each command through the host returns, though the
     /// recorder's `Stopping` and `Idle` re-enter the host

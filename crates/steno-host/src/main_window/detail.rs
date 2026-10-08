@@ -7,12 +7,12 @@ use chrono::{DateTime, Utc};
 use steno_bridge::DetailTab;
 use steno_core::protocols::{BoundaryResult, BoxError};
 use steno_core::{
-    AudioRetention, Delivery, Meeting, MeetingExport, MeetingOperation, MeetingStateKind, Settings,
-    Store, StoreError, SummaryTemplate, paths::file_url_path,
+    AudioRetention, Delivery, Meeting, MeetingExport, MeetingOperation, MeetingStateKind, Platform,
+    Settings, Store, StoreError, SummaryTemplate, paths::file_url_path,
 };
 use uuid::Uuid;
 
-use crate::services::{ClipPlayer, FileSystem, Pipeline};
+use crate::services::{ClipPlayer, FileSystem, Pipeline, ProcessAgainRefusal};
 use crate::setup::{ExportStatus, SummaryStatus, all_delivered, llm_configured, vault_configured};
 use crate::speakers::SpeakersViewModel;
 
@@ -169,6 +169,11 @@ impl MeetingDetailViewModel {
         self.can_rerun() && self.llm_configured && self.has_transcript()
     }
 
+    fn is_failed(&self) -> bool {
+        self.meeting()
+            .is_some_and(|meeting| meeting.state.kind() == MeetingStateKind::Failed)
+    }
+
     /// "Re-export" and "Export now": without a vault there is nowhere to
     /// export to.
     #[must_use]
@@ -257,6 +262,35 @@ impl MeetingDetailViewModel {
     pub fn reexport(&mut self, pipeline: &dyn Pipeline) {
         let id = self.id;
         self.run("Re-export", || pipeline.redeliver(id));
+    }
+
+    /// "Process again", which the page offers for a failed meeting whose
+    /// recording is on disk (`state` and `retention.filesExist` in the
+    /// snapshot): the pipeline saves the meeting queued and runs it from
+    /// the start with its recording; the caller's reload then shows it
+    /// queued. A refusal, the detail's own (the meeting is not failed, its
+    /// recording is gone) or the pipeline's, is the error line in
+    /// [`process_again_refusal_line`]'s words; one while the app quits
+    /// shows nothing. Swift: `MeetingDetailViewModel.processAgain()`.
+    pub fn process_again(&mut self, pipeline: &dyn Pipeline, platform: Platform) {
+        let outcome = if !self.is_failed() {
+            Err(ProcessAgainRefusal::NotFailed)
+        } else if !self.recording_files_exist {
+            Err(ProcessAgainRefusal::RecordingGone)
+        } else {
+            self.is_busy = true;
+            let outcome = pipeline.process_again(self.id);
+            self.is_busy = false;
+            outcome
+        };
+        match outcome {
+            Ok(()) => self.error = None,
+            Err(refusal) => {
+                if let Some(line) = process_again_refusal_line(&refusal, platform) {
+                    self.error = Some(line);
+                }
+            }
+        }
     }
 
     // Recording line
@@ -388,6 +422,29 @@ impl MeetingDetailViewModel {
     pub fn operation_failed(&mut self, operation: MeetingOperation, failure: &str) {
         self.error = Some(format!("{} failed: {failure}", operation.label()));
     }
+}
+
+/// What the detail's error line says when "Process again" is refused;
+/// `None` while the app quits, which the user asked for. Swift: the same
+/// words in `MeetingDetailViewModel.processAgain()`.
+#[must_use]
+pub fn process_again_refusal_line(
+    refusal: &ProcessAgainRefusal,
+    platform: Platform,
+) -> Option<String> {
+    Some(match refusal {
+        ProcessAgainRefusal::MeetingGone => "This meeting no longer exists.".to_owned(),
+        ProcessAgainRefusal::NotFailed => "Only a failed meeting can be processed again.".to_owned(),
+        ProcessAgainRefusal::RecordingGone => platform
+            .mac_or(
+                "The recording is no longer on this Mac, so the meeting cannot be processed again.",
+                "The recording is no longer on this computer, so the meeting cannot be processed again.",
+            )
+            .to_owned(),
+        ProcessAgainRefusal::Busy => "This meeting is already being processed.".to_owned(),
+        ProcessAgainRefusal::Quitting => return None,
+        ProcessAgainRefusal::Failed(reason) => format!("Processing could not start: {reason}"),
+    })
 }
 
 /// The keep flag on `meeting_id`, selected or not: `keep` sets

@@ -20,8 +20,8 @@ use crate::services::{
     AudioDevices, AutoStopStatus, ClipPlayer, Clock, CodexModel, CodexModelsError, ExportValidator,
     FileSystem, FolderUsage, Handover, INSTALLING_UPDATE, InputDevice, LeftRecording,
     ListenerState, LlmService, LoginItem, LoginItemStatus, Opener, PairingCode, Permissions,
-    Pipeline, Preferences, QrEncoder, Recorder, RecorderStatus, Services, SpeechModels, StartHold,
-    UpdateOutcome, Updater, permission_is_required,
+    Pipeline, Preferences, ProcessAgainRefusal, QrEncoder, Recorder, RecorderStatus, Services,
+    SpeechModels, StartHold, UpdateOutcome, Updater, permission_is_required,
 };
 use crate::speech::ModelAsset;
 
@@ -447,6 +447,11 @@ impl Drop for FakeStartHold {
 pub struct FakePipeline {
     pub summary_reruns: Mutex<Vec<(Uuid, String)>>,
     pub redeliveries: Mutex<Vec<Uuid>>,
+    /// Every meeting `process_again` was asked for, refused or not.
+    pub processed_again: Mutex<Vec<Uuid>>,
+    /// The refusal `process_again` answers with; `None` lets it through
+    /// unless [`fail_calls`](Self::fail_calls) set a failure.
+    pub process_again_refusal: Mutex<Option<ProcessAgainRefusal>>,
     pub retention: Mutex<Vec<(Uuid, AudioRetention)>>,
     pub reloads: Mutex<usize>,
     pub kept_forever: Mutex<i64>,
@@ -486,6 +491,15 @@ impl Pipeline for FakePipeline {
 
     fn export_keeps_failing(&self, meeting_id: Uuid) -> bool {
         lock(&self.keeps_failing).contains(&meeting_id)
+    }
+
+    fn process_again(&self, meeting_id: Uuid) -> Result<(), ProcessAgainRefusal> {
+        lock(&self.processed_again).push(meeting_id);
+        if let Some(refusal) = lock(&self.process_again_refusal).clone() {
+            return Err(refusal);
+        }
+        self.outcome()
+            .map_err(|error| ProcessAgainRefusal::Failed(error.to_string()))
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {

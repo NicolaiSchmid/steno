@@ -1573,6 +1573,13 @@ impl BridgeHost for Host {
         self.detail_write(|detail| detail.reexport(&*self.shared.services.pipeline))
     }
 
+    fn meeting_process_again(&self) -> Outcome<()> {
+        let platform = self.shared.config.platform;
+        self.detail_write(|detail| {
+            detail.process_again(&*self.shared.services.pipeline, platform);
+        })
+    }
+
     fn meeting_set_keep_audio(&self, params: SetBoolParams) -> Outcome<ConfirmReply> {
         let (meeting_id, confirming) = {
             let inner = self.lock();

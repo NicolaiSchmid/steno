@@ -9,6 +9,7 @@ mod common;
 
 use steno_host::services::Recorder as _;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use common::*;
@@ -23,10 +24,11 @@ use steno_core::{
     AudioRetention, Delivery, DeliveryStatus, MeetingEvent, MeetingOperation, MeetingSource,
     MeetingState, PipelineStage, TitleOrigin,
 };
+use steno_host::fakes::FakeServices;
 use steno_host::host::TOPICS;
 use steno_host::labels::{display_title, utc};
 use steno_host::main_window::snapshots::{delivery_line, turns};
-use steno_host::services::{AutoStopStatus, FileSystem as _};
+use steno_host::services::{AutoStopStatus, FileSystem as _, ProcessAgainRefusal as Refusal};
 
 fn sample() -> Harness {
     Harness::builder()
@@ -1687,5 +1689,150 @@ fn an_export_line_shows_the_warnings_of_the_receipt_it_delivered() {
     assert_eq!(
         delivery_line(&failed, utc()),
         "Obsidian · Failed: disk full"
+    );
+}
+
+/// The failed sample meeting with a recording of its own on disk (in the
+/// fake file system); its master's path.
+fn give_the_failed_meeting_a_recording(store: &steno_core::Store, fakes: &FakeServices) -> PathBuf {
+    let audio_folder =
+        steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
+    let meeting = store.meeting(uuid(MEETING_FAILED)).unwrap().unwrap();
+    let master = audio_folder
+        .join(steno_core::json::uuid_string(meeting.id))
+        .join("master.caf");
+    let asset = steno_core::AudioAsset {
+        id: uuid(0x47),
+        meeting_id: meeting.id,
+        url: steno_core::paths::file_url(&master, false),
+        format: steno_core::AudioFormat::Caf48kFloat32,
+        lanes: vec![steno_core::AudioLane::Mic, steno_core::AudioLane::System],
+        sidecars_16k: std::collections::BTreeMap::new(),
+        mixdown_url: None,
+        retention: AudioRetention::KeepDays(30),
+        expires_at: None,
+    };
+    store.save_meeting_with_asset(&meeting, &asset).unwrap();
+    fakes.file_system.create(master.clone());
+    master
+}
+
+/// "Process again" on the selected failed meeting whose recording is on
+/// disk reaches the pipeline; each refusal is the error line in the user's
+/// words, and one while the app quits shows nothing. A meeting that is not
+/// failed, or whose recording is gone, never reaches the pipeline.
+#[test]
+fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
+    let master = Arc::new(Mutex::new(PathBuf::new()));
+    let harness = {
+        let master = master.clone();
+        Harness::builder()
+            .seed(move |store, fakes| {
+                populate_sample(store, fakes);
+                *master.lock().unwrap() = give_the_failed_meeting_a_recording(store, fakes);
+            })
+            .build()
+    };
+    let pipeline = &harness.fakes.pipeline;
+    let error_line = || harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"].clone();
+
+    // The selection is the ready meeting: only a failed one is processed again.
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        error_line(),
+        "Only a failed meeting can be processed again."
+    );
+    assert!(pipeline.processed_again.lock().unwrap().is_empty());
+
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(MEETING_FAILED),
+        })
+        .unwrap();
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(error_line(), Value::Null, "accepted: the line clears");
+    assert_eq!(
+        *pipeline.processed_again.lock().unwrap(),
+        [uuid(MEETING_FAILED)]
+    );
+    assert_eq!(
+        harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["isBusy"],
+        false
+    );
+
+    for (refusal, line) in [
+        (
+            Refusal::RecordingGone,
+            "The recording is no longer on this Mac, so the meeting cannot be processed again.",
+        ),
+        (Refusal::Busy, "This meeting is already being processed."),
+        (
+            Refusal::NotFailed,
+            "Only a failed meeting can be processed again.",
+        ),
+        (Refusal::MeetingGone, "This meeting no longer exists."),
+        (
+            Refusal::Failed("decode: the disk is full".to_owned()),
+            "Processing could not start: decode: the disk is full",
+        ),
+    ] {
+        *pipeline.process_again_refusal.lock().unwrap() = Some(refusal.clone());
+        harness.host.meeting_process_again().unwrap();
+        assert_eq!(error_line(), line, "{refusal:?}");
+    }
+
+    // Quitting: nothing is shown, not even the last refusal's line.
+    *pipeline.process_again_refusal.lock().unwrap() = None;
+    harness.host.meeting_process_again().unwrap();
+    *pipeline.process_again_refusal.lock().unwrap() = Some(Refusal::Quitting);
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(error_line(), Value::Null);
+
+    // The recording is gone: refused before the pipeline is asked.
+    let asked = pipeline.processed_again.lock().unwrap().len();
+    *pipeline.process_again_refusal.lock().unwrap() = None;
+    harness
+        .fakes
+        .file_system
+        .existing
+        .lock()
+        .unwrap()
+        .remove(&*master.lock().unwrap());
+    harness.host.store_changed();
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        error_line(),
+        "The recording is no longer on this Mac, so the meeting cannot be processed again."
+    );
+    assert_eq!(pipeline.processed_again.lock().unwrap().len(), asked);
+}
+
+/// Off the Mac the recording is "on this computer".
+#[test]
+fn process_again_words_a_gone_recording_for_the_platform() {
+    let harness = Harness::builder()
+        .platform(steno_core::Platform::Linux)
+        .seed(populate_sample)
+        .build();
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(MEETING_FAILED),
+        })
+        .unwrap();
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["error"],
+        "The recording is no longer on this computer, so the meeting cannot be processed again."
+    );
+    assert!(
+        harness
+            .fakes
+            .pipeline
+            .processed_again
+            .lock()
+            .unwrap()
+            .is_empty()
     );
 }
