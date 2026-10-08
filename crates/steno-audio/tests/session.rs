@@ -901,6 +901,10 @@ impl CaptureBackend for ChosenOrDefault {
         self.inner.delivers_continuously(lanes)
     }
 
+    fn waits_for_playback(&self, lanes: &[AudioLane]) -> bool {
+        self.inner.waits_for_playback(lanes)
+    }
+
     fn probes_inputs(&self) -> bool {
         self.probes.load(Ordering::Relaxed)
     }
@@ -3946,10 +3950,12 @@ fn only_a_capture_that_waits_for_playback_may_start_without_a_frame() {
     session.stop().unwrap();
 }
 
-/// After the recording's first frame, a restarted stream that delivers
-/// nothing is a stall too, over a backend that may wait for playback
-/// included; its wait runs from the resume, not from the last frame before
-/// the rebuild.
+/// Over a backend that may wait for playback a restart is not held to
+/// deliver at once (it may be waiting for something to play), so after the
+/// recording's first frame a restarted stream that delivers nothing is a
+/// stall of its own; its wait runs from the resume, not from the last
+/// frame before the rebuild. Elsewhere such a restart fails at once
+/// (`restarts_that_start_but_deliver_nothing_are_retried_until_one_does`).
 #[test]
 fn a_restarted_stream_that_never_delivers_is_a_stall() {
     let directory = tempfile::tempdir().unwrap();
@@ -3985,6 +3991,167 @@ fn a_restarted_stream_that_never_delivers_is_a_stall() {
     let result = session.stop().unwrap();
     assert_eq!(backend.starts(), 3);
     assert_eq!(result.statistics.device_changes, 2);
+}
+
+/// Moves the clock a sample at a time while the watch thread and the
+/// rebuild both sleep on it, until `done`; panics after `limit` samples.
+fn advance_the_rebuild_until(clock: &ManualClock, limit: usize, mut done: impl FnMut() -> bool) {
+    for _ in 0..limit {
+        if done() {
+            return;
+        }
+        assert!(
+            clock.wait_for_sleepers(2),
+            "the watch thread and the rebuild sleep"
+        );
+        clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
+    }
+    assert!(done(), "not within {limit} samples");
+}
+
+/// A stall whose restarts start but deliver nothing, with no chosen
+/// microphone to fall back from (a clock master that hangs on the Mac or
+/// on Windows, where such a device still starts): each restart that offers
+/// no frame within `STALL_TIMEOUT` of its start is stopped and counts as
+/// one whose graph did not run, so the restarts take the backoff, go on
+/// past `RESTART_ATTEMPTS` with `StillRestarting` (the recorder's warning),
+/// and resume on the first one that delivers, the gap written once.
+#[test]
+fn restarts_that_start_but_deliver_nothing_are_retried_until_one_does() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        stalling(1.0, 0.5).restarts_stall_after(0.0),
+    ));
+    // A relay of 30 s, so the 10 s gap never waits for the writer on the
+    // manual clock.
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        3_000,
+        clock.clone(),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    let mut still = None;
+    advance_the_rebuild_until(&clock, 200, || {
+        still = notices.try_recv().ok();
+        still.is_some()
+    });
+    assert_eq!(
+        still,
+        Some(CaptureNotice::StillRestarting {
+            attempt: CaptureSession::RESTART_ATTEMPTS
+        }),
+        "no restart delivered, none resumed"
+    );
+    assert_eq!(backend.starts(), 1 + CaptureSession::RESTART_ATTEMPTS);
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+    // The next restart starts after the backoff; it delivers once asked.
+    let restart = 1 + CaptureSession::RESTART_ATTEMPTS + 1;
+    advance_the_rebuild_until(&clock, 20, || backend.starts() == restart);
+    assert!(clock.wait_for_sleepers(2), "its wait for a first frame");
+    let before = backend.frames_delivered();
+    backend.resume_delivery();
+    let deadline = Instant::now() + RECV;
+    while backend.frames_delivered() == before {
+        assert!(Instant::now() < deadline, "the restart delivers");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed {
+            attempt: CaptureSession::RESTART_ATTEMPTS + 1,
+            gap_seconds: gap_seconds(CaptureSession::MAXIMUM_GAP)
+        },
+        "the gap runs past MAXIMUM_GAP and is capped there"
+    );
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(backend.starts(), restart);
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 1);
+    assert_eq!(
+        result.statistics.gap_seconds,
+        gap_seconds(CaptureSession::MAXIMUM_GAP)
+    );
+    assert_eq!(
+        result.statistics.duration,
+        0.5 + gap_seconds(CaptureSession::MAXIMUM_GAP) + 1.0,
+        "before the stall, the gap, the restart that delivered"
+    );
+}
+
+/// A stall whose restarts fail with an error that is not `DidNotRun` (a
+/// Mac start while `coreaudiod` is still gone, a Bluetooth device still
+/// switching): the watchdog caught an outage the backend did not report,
+/// so the restarts go on past the last attempt, with `StillRestarting`,
+/// and the recording resumes once one starts, never ending `DeviceLost`.
+/// Restarts that never start are cancelled by the stop, which returns the
+/// recording.
+#[test]
+fn a_stall_whose_restarts_fail_goes_on_until_one_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let failures = CaptureSession::RESTART_ATTEMPTS + 2;
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        stalling(1.0, 0.5).restarts_that_fail(failures),
+    ));
+    let session = in_person_session(directory.path(), backend.clone(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    for step in backoff_past_the_attempts(failures - CaptureSession::RESTART_BACKOFF.len()) {
+        assert!(
+            clock.wait_for_sleepers(2),
+            "the watch thread and the backoff"
+        );
+        assert!(matches!(session.state(), CaptureState::Recording { .. }));
+        clock.advance(step);
+    }
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::StillRestarting {
+            attempt: CaptureSession::RESTART_ATTEMPTS
+        }
+    );
+    assert!(matches!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed { attempt, .. } if attempt == failures + 1
+    ));
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 1);
+    assert_eq!(backend.starts(), 1 + failures + 1);
+
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        stalling(1.0, 0.5).restarts_that_fail(usize::MAX),
+    ));
+    let session = in_person_session(directory.path(), backend.clone(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    for step in backoff_past_the_attempts(3) {
+        assert!(clock.wait_for_sleepers(2));
+        clock.advance(step);
+    }
+    assert!(clock.wait_for_sleepers(2), "still restarting");
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+    let result = session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.duration, 0.5);
+    assert!(clock.wait_for_sleepers(0), "the stop cancelled the backoff");
 }
 
 /// Silence is delivery: a lane of zeros that keeps arriving is never
@@ -4271,6 +4438,46 @@ fn a_chosen_microphone_that_stalls_again_soon_is_replaced_by_the_default() {
     assert_eq!(result.statistics.device_changes, 2);
 }
 
+/// Over a backend whose streams may wait for playback (a Mac call capture
+/// without the capture permission, which stops whenever playback does) a
+/// chosen microphone that stalls again soon is not given up for the
+/// default: the stall says nothing about the microphone.
+#[test]
+fn a_capture_that_waits_for_playback_keeps_the_chosen_microphone_through_stalls() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(ChosenOrDefault::over(
+        tones(&[AudioLane::Mixed], 1.0)
+            .stall_after(0.5)
+            .restarts_stall_after(0.5)
+            .waits_for_playback(true),
+    ));
+    let session = backend.session(directory.path(), clock.clone());
+    let notices = session.notices();
+    let input = || session.stream().and_then(|stream| stream.input);
+    session.start(Uuid::new_v4()).unwrap();
+    backend.inner.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    for rebuild in 1..=2 {
+        assert!(matches!(
+            notices.recv_timeout(RECV).unwrap(),
+            CaptureNotice::DeviceResumed { attempt: 1, .. }
+        ));
+        assert_eq!(input(), ChosenOrDefault::chosen(), "rebuild {rebuild}");
+        backend.inner.wait_until_finished();
+        if rebuild == 1 {
+            advance_until_stalled(&clock, &notices);
+        }
+    }
+    assert_eq!(
+        backend.asked(),
+        vec![Some(ChosenOrDefault::CHOSEN.to_owned()); 3],
+        "the chosen microphone every time"
+    );
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.device_changes, 2);
+}
+
 /// Waits until `backend` answered `count` probes in all.
 fn wait_for_probes(backend: &ChosenOrDefault, count: usize) {
     let deadline = Instant::now() + RECV;
@@ -4360,6 +4567,7 @@ fn an_ask_that_finds_the_chosen_microphone_delivering_returns_to_it() {
     let notices = session.notices();
     let input = || session.stream().and_then(|stream| stream.input);
     let delivered = || backend.inner.frames_delivered();
+    let started = Instant::now();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(input(), ChosenOrDefault::fallback());
     backend.opens.store(true, Ordering::Relaxed);
@@ -4391,9 +4599,15 @@ fn an_ask_that_finds_the_chosen_microphone_delivering_returns_to_it() {
     assert!(clock.wait_for_sleepers(1));
     assert_no_notice(&notices, "on the chosen microphone nothing asks");
     assert_eq!(backend.probed.load(Ordering::SeqCst), 1);
+    let wall = started.elapsed().as_secs_f64();
     let result = session.stop().unwrap();
     assert_eq!(result.statistics.device_changes, 1);
     assert!(!result.statistics.ended_on_device_loss);
+    assert!(
+        (result.statistics.duration - wall).abs() < 0.1,
+        "the master through the return: {} s against {wall} s of wall time",
+        result.statistics.duration
+    );
 }
 
 /// Over a backend that cannot ask a microphone without touching the

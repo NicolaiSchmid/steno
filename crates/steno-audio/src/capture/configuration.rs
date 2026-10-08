@@ -144,7 +144,10 @@ pub enum CaptureError {
     /// a daemon that stopped answering the start, or a start thread that
     /// did not answer, while the connection held (a node whose owner
     /// stopped before the session manager configured it holds both up).
-    /// The session answers it on a chosen microphone by trying the default
+    /// The session gives it too, on every platform, for a rebuild's
+    /// restart whose stream offered no frame within
+    /// `CaptureSession::STALL_TIMEOUT` over a watched backend. The session
+    /// answers it on a chosen microphone by trying the default
     /// input at once, and a rebuild's restarts that keep failing with it go
     /// on until one runs. Rust only; reads as [`Self::BackendFailed`].
     #[error("capture backend failed: {0}")]
@@ -287,8 +290,9 @@ pub enum DeviceChangeReason {
     /// The capture stopped delivering: no frame reached the sink for
     /// longer than `CaptureSession::STALL_TIMEOUT` after it had delivered
     /// (a device whose driver or owner hangs, a graph that stopped
-    /// running). The session's watchdog reports it, on every platform.
-    /// Rust only.
+    /// running). The session's watchdog reports it, on every platform, and
+    /// its rebuild's restarts go on until one runs, whatever they fail
+    /// with. Rust only.
     DeliveryStalled,
     /// The audio service restarted (`coreaudiod` on macOS), taking the
     /// capture's aggregate device with it. macOS only. Rust only.
@@ -310,10 +314,15 @@ pub enum CaptureNotice {
     /// A change was reported; the rebuild begins.
     DeviceChanged(DeviceChangeReason),
     /// The rebuild's first `attempt` restarts (`RESTART_ATTEMPTS`) failed
-    /// in a way that may pass (a graph that does not run, the audio service
-    /// coming back), so it goes on restarting until one runs or the stop;
-    /// nothing is recorded meanwhile. Sent once per rebuild; the stream is
-    /// still the one that stopped. Rust only.
+    /// in a way that may pass (a graph that does not run, a restarted
+    /// stream that delivered nothing within `CaptureSession::STALL_TIMEOUT`,
+    /// any failure after a stall or a restart of the audio service), so it
+    /// goes on restarting until one runs or the stop; nothing is recorded
+    /// meanwhile. Sent once per rebuild; the stream is still the one that
+    /// stopped. Over a backend whose streams may wait for playback a restart
+    /// that starts counts as run, so a stream that stays silent there is
+    /// rebuilt again after each `STALL_TIMEOUT` instead, without this
+    /// notice. Rust only.
     StillRestarting {
         /// The restarts so far.
         attempt: usize,

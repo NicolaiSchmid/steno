@@ -6,7 +6,10 @@
 //! [`LaneFrameSink`] protocol the IOProc uses, in callbacks of
 //! `callback_frames`. By default it runs as fast as the rings accept (a
 //! 30 s recording takes milliseconds); `real_time` paces it at wall-clock
-//! speed for the CLI.
+//! speed for the CLI. `start` returns once the producer has offered its
+//! first callback to the sink (or stalled, reported a change or ended
+//! first), as the PipeWire backend returns after its first cycle, so the
+//! session's wait for a restarted stream's first frame finds it at once.
 //!
 //! Device changes, so the session's rebuild runs on CI exactly as in
 //! production: `change_device_after` reports `DefaultInputChanged` after
@@ -460,6 +463,11 @@ impl CaptureBackend for SyntheticCaptureBackend {
         let stop = Arc::clone(&self.stop_requested);
         let delivered_counter = Arc::clone(&self.frames_delivered);
         let completion = Arc::clone(&self.completion);
+        // Raised once the producer offered its first callback, or will
+        // offer none for now, so `start` returns with the sink's count
+        // moved, as the live backends do once their first callback ran.
+        let first = Arc::new(Completion::default());
+        let first_offered = Arc::clone(&first);
         let lane_count = lanes.len();
         let delivered_before = delivered_counter.load(Ordering::Relaxed);
         let thread = std::thread::Builder::new()
@@ -472,11 +480,15 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         && delivered >= change
                     {
                         changes_remaining.fetch_sub(1, Ordering::Relaxed);
+                        // Before the report: its handler takes the lock
+                        // the session's `start` holds.
+                        first_offered.finish();
                         sink.report_device_change(DeviceChangeReason::DefaultInputChanged);
                         break;
                     }
                     if stall_frame == Some(delivered) {
                         stall_frame = None;
+                        first_offered.finish();
                         completion.finish();
                         while !resumed.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
                             std::thread::sleep(Duration::from_millis(1));
@@ -501,6 +513,9 @@ impl CaptureBackend for SyntheticCaptureBackend {
                             std::thread::sleep(due - now);
                         }
                     } else {
+                        if !sink.rings().has_room(frames) {
+                            first_offered.finish();
+                        }
                         let mut spins = 0;
                         while !sink.rings().has_room(frames) && !stop.load(Ordering::Acquire) {
                             spins += 1;
@@ -518,17 +533,19 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         }
                         sink.end_callback();
                     }
+                    first_offered.finish();
                     delivered += frames;
                     delivered_counter.store(delivered_before + delivered, Ordering::Relaxed);
                 }
+                first_offered.finish();
                 completion.finish();
             })
             .expect("spawn synthetic producer");
         state.thread = Some(thread);
-        if self.options.start_panics_once_running && state.start_count == 1 {
-            drop(state);
-            panic!("the synthetic backend's start panics once it runs");
-        }
+        let panics = self.options.start_panics_once_running && state.start_count == 1;
+        drop(state);
+        first.wait();
+        assert!(!panics, "the synthetic backend's start panics once it runs");
         Ok(stream)
     }
 

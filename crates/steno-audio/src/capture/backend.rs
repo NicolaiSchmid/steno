@@ -47,7 +47,8 @@ pub trait CaptureBackend: Send + Sync {
     /// Whether a capture of `lanes` delivers callbacks on the device's
     /// clock whatever it hears, silence included, so that one that stops
     /// for longer than [`CaptureSession::STALL_TIMEOUT`] has stalled. The
-    /// session watches only such a backend (the stall watchdog and, with
+    /// session watches only such a backend (the stall watchdog, a
+    /// rebuild's restart held to deliver within that time and, with
     /// [`Self::probes_inputs`], the timed ask for a chosen microphone; see
     /// `CaptureSession`). `true` for the live backends, except a Windows
     /// capture of the system lane alone (endpoint loopback delivers nothing
@@ -65,8 +66,10 @@ pub trait CaptureBackend: Send + Sync {
     /// without the capture permission, whose IOProc runs only while
     /// another client has the output open. Until the recording's first
     /// frame the watchdog then takes no stream for stalled; after it, every
-    /// stream that stops is one. `false` by default and on Linux and
-    /// Windows. Rust only.
+    /// stream that stops is one, but a rebuild's restart is not held to
+    /// deliver at once, and a chosen microphone that stalls again soon is
+    /// not given up for the default (see `CaptureSession`). `false` by
+    /// default and on Linux and Windows. Rust only.
     fn waits_for_playback(&self, lanes: &[AudioLane]) -> bool {
         let _ = lanes;
         false
