@@ -230,7 +230,7 @@ fn setup(
 /// The exit code of an app that refused to start (`refuse_to_start`).
 const REFUSED_CODE: i32 = 3;
 
-/// How long a refused app waits for its alert to be closed before it ends
+/// How long a refused app waits for its dialog to be closed before it ends
 /// anyway (`refuse_to_start`).
 const REFUSED_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -286,8 +286,7 @@ impl Refusal {
                  Quit it, then open Steno again."
             }
             Refusal::Unavailable => {
-                "Steno could not open your meetings. Your meetings are safe. \
-                 Open Steno again; if this keeps happening, the log says why."
+                "Steno could not open your meetings. They are safe. Open Steno again."
             }
         }
     }
@@ -325,10 +324,10 @@ fn platform_app_running(bundle_id: &str) -> bool {
 }
 
 /// Says why this app does not start ([`Refusal`]), logs `reason`, and ends
-/// with [`REFUSED_CODE`] once the alert is closed, before it opens a window:
+/// with [`REFUSED_CODE`] once the dialog is closed, before it opens a window:
 /// two apps on one database would fail each other's recordings at launch,
 /// and a host that could not be built writes nothing more. Its run loop has
-/// no host to shut down (`host::is_running`). Should the alert never show,
+/// no host to shut down (`host::is_running`). Should the dialog never show,
 /// or its callback never run, the process ends after [`REFUSED_PATIENCE`]
 /// all the same, or after the wait of a smoke run (`STENO_SMOKE_SECONDS`,
 /// so the smoke sees the refusal end): it holds nothing to save. Rust only:

@@ -11,7 +11,8 @@
 # a fresh runner). Xvfb has no compositor, so the panels' transparent
 # corners render black there. Then it launches the binary once more over a
 # database it cannot open, in a throwaway XDG_DATA_HOME, and expects the
-# refusal: the "not starting" line and exit 3 (1 otherwise).
+# refusal: the "not starting" line and exit 3, and fails (exit 1)
+# otherwise.
 #
 #   [STENO_SMOKE_DPI=<dpi>] apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
 #
