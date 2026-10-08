@@ -179,6 +179,7 @@ bridge_host! {
     MeetingSetTemplate => fn meeting_set_template(params: SetTemplateParams) -> ();
     MeetingRerunSummary => fn meeting_rerun_summary() -> ();
     MeetingReexport => fn meeting_reexport() -> ();
+    MeetingProcessAgain => fn meeting_process_again() -> ();
     MeetingSetKeepAudio => fn meeting_set_keep_audio(params: SetBoolParams) -> ConfirmReply;
     MeetingDeleteRecordingNow => fn meeting_delete_recording_now() -> ConfirmReply;
     MeetingSaveNotes => fn meeting_save_notes(params: SaveNotesParams) -> ();
