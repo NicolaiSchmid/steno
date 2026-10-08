@@ -27,6 +27,10 @@ enum Verification {
     Answered(HandoverResponse),
 }
 
+/// The receipt a first announce made, the save's place in line, and what
+/// [`Engine::open_files`] returned.
+type MadeAndOpened = (HandoverReceipt, super::InOrder, Option<std::io::Result<()>>);
+
 pub(super) fn no_such_recording() -> HandoverResponse {
     HandoverResponse::problem(StatusCode::NOT_FOUND, "no such recording")
 }
@@ -85,31 +89,17 @@ impl Engine {
         // in it. That receipt stays, and this announce is answered as if the
         // read had found it, without touching the files the other one opens.
         //
-        // Otherwise this announce opens the files under the same hold of
-        // the files lock as its `change`, so no other request creates or
-        // discards a file of the recording in between, and the sidecar is
-        // the metadata of the receipt memory holds (`Engine::open_files`,
-        // which first discards the files no receipt owns). The lock is
-        // released before the save, and nothing between `change` and the
-        // save yields, so the place in line goes to the save whatever the
-        // opening did. A failed opening leaves the receipt saved without
-        // files, so the phone's retried announce reopens them as a
-        // re-announce. A device revoked since its receipt read opens none
-        // and is answered 401: its receipt stayed out of memory, or left it.
-        let picked = {
-            let files = self.files();
-            self.change(
-                recording_id,
-                |held| held.map_or(Ok(fresh), |held| Err(Box::new(held.clone()))),
-                |_| {},
-            )
-            .map(|(receipt, place)| {
-                let opened = self.open_files(&files, &metadata, device.id);
-                (receipt, place, opened)
-            })
-        };
-        let (receipt, place, opened) = match picked {
-            Ok(picked) => picked,
+        // Otherwise the place in line goes to the save whatever the opening
+        // did: nothing between `change` and the save yields. A failed
+        // opening leaves the receipt saved without files, so the phone's
+        // retried announce reopens them as a re-announce. A device revoked
+        // since its receipt read opens none and is answered 401: its
+        // receipt stayed out of memory, or left it. That receipt is still
+        // saved, so a device revoked and paired again since leaves a row
+        // without files, and its retried announce reopens them as a
+        // re-announce.
+        let (receipt, place, opened) = match self.make_and_open(fresh, &metadata) {
+            Ok(made) => made,
             Err(held) => return self.reannounce(*held, device, &metadata).await,
         };
         let saved = self.save(receipt.clone(), place).await;
@@ -124,6 +114,39 @@ impl Engine {
             return HandoverResponse::internal_error("opening the partial file", &error);
         }
         HandoverResponse::json(StatusCode::CREATED, &Self::status_of(&receipt))
+    }
+
+    /// A first announce's step under the files lock: [`Engine::change`]
+    /// makes `fresh` the receipt memory holds, or declines with the one
+    /// memory holds by then, and [`Engine::open_files`] opens the files of
+    /// the receipt it made. One hold of the lock covers both, so no other
+    /// request creates or discards a file of the recording in between, and
+    /// the sidecar is the metadata of the receipt memory holds. Nothing in
+    /// it yields, and the lock is released before the save. The unit tests
+    /// check the lock is held at `change` and run their in-between step
+    /// where requests on other threads that take no files lock could.
+    fn make_and_open(
+        &self,
+        fresh: HandoverReceipt,
+        metadata: &RecordingMetadata,
+    ) -> Result<MadeAndOpened, Box<HandoverReceipt>> {
+        let files = self.files();
+        let (receipt, place) = self.change(
+            fresh.recording_id,
+            |held| {
+                #[cfg(test)]
+                assert!(
+                    self.files.try_lock().is_err(),
+                    "a first announce makes its receipt under the files lock"
+                );
+                held.map_or(Ok(fresh), |held| Err(Box::new(held.clone())))
+            },
+            |_| {},
+        )?;
+        #[cfg(test)]
+        tests::meanwhile(self, receipt.recording_id);
+        let opened = self.open_files(&files, metadata, receipt.device_id);
+        Ok((receipt, place, opened))
     }
 
     /// A known recording announced again: 200 with the status, 409 when another
@@ -606,15 +629,15 @@ mod tests {
     //! White-box checks of what a request on another worker thread can
     //! leave in the synchronous stretches no gate of the integration tests
     //! can stop: the state is built by hand, and the step after the
-    //! stretch is called as its route calls it.
+    //! stretch is called as its route calls it, or the route runs with the
+    //! test's edit inside the stretch ([`first_announce`]).
 
+    use std::cell::RefCell;
     use std::sync::Arc;
 
     use chrono::{DateTime, TimeZone as _, Utc};
     use steno_core::testing::FakeHandoverIntake;
-    use steno_core::{
-        AudioFormat, HandoverReceipt, HandoverState, PairedDevice, RecordingMetadata, Store,
-    };
+    use steno_core::{AudioFormat, HandoverReceipt, PairedDevice, RecordingMetadata, Store};
     use tokio::sync::watch;
     use uuid::Uuid;
 
@@ -709,51 +732,49 @@ mod tests {
         );
     }
 
-    /// Phone Y's first announce of `ours`, whose read found no receipt,
-    /// from the files lock to its save as `Engine::announce` runs it, with
-    /// `meanwhile` editing the receipt memory holds between its `change`
-    /// and its opening, as requests on other threads that take no files
-    /// lock would. Returns what the opening returned.
-    async fn first_announce(
-        engine: &Engine,
-        ours: &RecordingMetadata,
-        y: &PairedDevice,
-        meanwhile: impl FnOnce(&mut HandoverReceipt),
-    ) -> Option<std::io::Result<()>> {
-        let recording_id = ours.recording_id;
-        let now = (engine.now)();
-        let made = HandoverReceipt {
-            recording_id,
-            device_id: y.id,
-            state: HandoverState::Receiving,
-            byte_count: ours.byte_count,
-            sha256: ours.sha256.clone(),
-            chunk_size: ours.chunk_size,
-            received_chunks: Vec::new(),
-            created_at: now,
-            updated_at: now,
-        };
-        let (receipt, place, opened) = {
-            let files = engine.files();
-            let (receipt, place) = engine
-                .change(
-                    recording_id,
-                    |held| held.map_or(Ok(made), |_| Err(())),
-                    |_| {},
-                )
-                .unwrap();
-            meanwhile(
+    /// An edit of the receipt memory holds, as a request on another thread
+    /// makes it.
+    type Edit = Box<dyn FnOnce(&mut HandoverReceipt)>;
+
+    thread_local! {
+        /// The edit the next first announce on this thread runs between
+        /// its `change` and its opening.
+        static MEANWHILE: RefCell<Option<Edit>> = const { RefCell::new(None) };
+    }
+
+    /// Runs the edit [`first_announce`] set for this thread, if any; called
+    /// by `Engine::make_and_open` between its `change` and its opening.
+    pub(super) fn meanwhile(engine: &Engine, recording_id: Uuid) {
+        if let Some(edit) = MEANWHILE.take() {
+            edit(
                 engine
                     .state()
                     .active_receipts
                     .get_mut(&recording_id)
                     .unwrap(),
             );
-            let opened = engine.open_files(&files, ours, y.id);
-            (receipt, place, opened)
-        };
-        engine.save(receipt, place).await.unwrap();
-        opened
+        }
+    }
+
+    /// Phone Y's announce of `ours`, which must find no receipt, with
+    /// `meanwhile` editing the receipt memory holds between its `change`
+    /// and its opening, as requests on other threads that take no files
+    /// lock would.
+    async fn first_announce(
+        engine: &Engine,
+        ours: &RecordingMetadata,
+        y: &PairedDevice,
+        meanwhile: impl FnOnce(&mut HandoverReceipt) + 'static,
+    ) -> super::HandoverResponse {
+        MEANWHILE.set(Some(Box::new(meanwhile)));
+        let answered = engine
+            .announce(ours.recording_id, y, &serde_json::to_vec(ours).unwrap())
+            .await;
+        assert!(
+            MEANWHILE.take().is_none(),
+            "the announce made its receipt and ran the edit"
+        );
+        answered
     }
 
     #[tokio::test]
@@ -836,7 +857,7 @@ mod tests {
         engine.inbox.begin(&theirs).unwrap();
         std::fs::write(engine.inbox.partial(recording_id), [9; 4]).unwrap();
 
-        let opened = first_announce(&engine, &metadata(recording_id, 3, "Y"), &y, |held| {
+        let answered = first_announce(&engine, &metadata(recording_id, 3, "Y"), &y, move |held| {
             *held = HandoverReceipt {
                 device_id: x.id,
                 byte_count: theirs.byte_count,
@@ -845,7 +866,11 @@ mod tests {
         })
         .await;
 
-        assert!(opened.is_none(), "Y's announce is answered 401");
+        assert_eq!(
+            answered.status,
+            http::StatusCode::UNAUTHORIZED,
+            "Y's announce is answered 401"
+        );
         assert_eq!(
             std::fs::read(engine.inbox.partial(recording_id)).unwrap(),
             [9; 4],
@@ -881,10 +906,9 @@ mod tests {
         engine.inbox.prepare().unwrap();
         std::fs::write(engine.inbox.verified(recording_id, ours.format), [5; 8]).unwrap();
 
-        first_announce(&engine, &ours, &y, |held| held.received_chunks.push(0))
-            .await
-            .unwrap()
-            .unwrap();
+        let answered =
+            first_announce(&engine, &ours, &y, |held| held.received_chunks.push(0)).await;
+        assert_eq!(answered.status, http::StatusCode::CREATED);
         assert!(
             !engine.inbox.has_verified(recording_id, ours.format),
             "the waiting verified file is gone"
