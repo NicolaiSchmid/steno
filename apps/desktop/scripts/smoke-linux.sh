@@ -79,11 +79,13 @@ refusal="$(mktemp -d)"
 trap 'rm -rf "$refusal"' EXIT
 mkdir -p "$refusal/Steno"
 printf 'not a database\n' > "$refusal/Steno/steno.sqlite"
+# Both streams go to one file: Debian's xvfb-run sends the command's
+# stderr to its stdout.
 code=0
 XDG_DATA_HOME="$refusal" STENO_SMOKE_SECONDS=3 \
-  xvfb-run --auto-servernum "$binary" 2> "$refusal/stderr" || code=$?
-if [[ "$code" != 3 ]] || ! grep -qF "[steno-desktop] not starting:" "$refusal/stderr"; then
-  cat "$refusal/stderr" >&2
+  xvfb-run --auto-servernum "$binary" > "$refusal/output" 2>&1 || code=$?
+if [[ "$code" != 3 ]] || ! grep -qF "[steno-desktop] not starting:" "$refusal/output"; then
+  cat "$refusal/output" >&2
   echo "smoke: over a database it cannot open the shell must refuse (exit 3), got $code" >&2
   exit 1
 fi
