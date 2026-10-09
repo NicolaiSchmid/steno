@@ -32,8 +32,9 @@
 //! One operation runs per meeting at a time; stage durations feed the
 //! `stageRate` table only when the meeting was alone in flight; every
 //! stage attributes its own errors and `process` marks the meeting failed
-//! in one place. A pipeline over core's fakes, as the CLI runs it without
-//! `--engine`:
+//! in one place, or leaves it `queued` when a model is missing, waiting for
+//! an install's resume (`ModelWaits`). A pipeline over core's fakes, as the
+//! CLI runs it without `--engine`:
 //!
 //! ```no_run
 //! use std::sync::Arc;

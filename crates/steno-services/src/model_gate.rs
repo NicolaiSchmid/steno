@@ -255,6 +255,16 @@ mod tests {
             .map(|failure| failure.stage)
     }
 
+    /// The refusal's reason and the title of a waiting meeting's card are
+    /// one sentence.
+    #[test]
+    fn the_refusal_and_the_waiting_card_say_the_same() {
+        assert_eq!(
+            PipelineFailure::MODELS_MISSING,
+            steno_host::main_window::ProgressEntry::MODELS_MISSING_TITLE
+        );
+    }
+
     /// Missing models: each call is refused at its stage and never reaches
     /// the engine or diarizer behind; installed, each passes through.
     #[tokio::test]
@@ -471,7 +481,7 @@ mod tests {
             },
         );
         setup.sidecar.install = Install::Allowed;
-        let engines = SpeechEngines::gated(setup, Arc::new(|_| true), Arc::new(|| true));
+        let engines = SpeechEngines::with_checks(setup, Arc::new(|_| true), Arc::new(|| true));
         assert_eq!(engines.setup().sidecar.install, Install::Never);
         let error = engines
             .engine(SpeechRuntime::OnnxSidecar)

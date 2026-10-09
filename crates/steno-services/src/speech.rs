@@ -315,7 +315,7 @@ impl SpeechEngines {
     pub fn new(setup: SpeechSetup) -> Self {
         let speech = ModelStoreSpeechModels::new(&setup);
         let store = setup.model_store();
-        Self::gated(
+        Self::with_checks(
             setup,
             Arc::new(move |runtime| speech.installed_on(runtime)),
             Arc::new(move || steno_diarize::models::installed(&store).is_ok()),
@@ -324,7 +324,7 @@ impl SpeechEngines {
 
     /// [`Self::new`] with the gates' checks passed in, for the tests: the
     /// speech engine's for the runtime it runs on, and the diarizer's.
-    pub(crate) fn gated(
+    pub(crate) fn with_checks(
         mut setup: SpeechSetup,
         speech_installed: Arc<dyn Fn(SpeechRuntime) -> bool + Send + Sync>,
         diarizer_installed: InstalledCheck,
@@ -671,7 +671,7 @@ impl SpeechModels for ModelStoreSpeechModels {
             ModelAsset::ParakeetV3 => {
                 install_with_progress(&self.speech, &steno_speech::ModelAsset::onnx(), progress)
             }
-            other => Err(format!("{} has no Rust engine yet", other.as_str()).into()),
+            other => Err(format!("{} is not part of this version", other.as_str()).into()),
         }
     }
 
@@ -685,7 +685,7 @@ impl SpeechModels for ModelStoreSpeechModels {
                 .remove(&steno_speech::ModelAsset::parakeet_v3_coreml())?),
             other => {
                 let asset = Self::onnx_asset(other)
-                    .ok_or_else(|| format!("{} has no Rust engine yet", other.as_str()))?;
+                    .ok_or_else(|| format!("{} is not part of this version", other.as_str()))?;
                 Ok(self.speech.remove(&asset)?)
             }
         }
@@ -1174,7 +1174,7 @@ mod tests {
     async fn the_apps_diarizer_never_downloads_its_models() {
         let dir = tempfile::tempdir().unwrap();
         let (mirror, requests) = counting_junk_mirror(0);
-        let engines = SpeechEngines::gated(
+        let engines = SpeechEngines::with_checks(
             testing::setup(
                 dir.path(),
                 SpeechSettings {
@@ -1688,7 +1688,7 @@ mod tests {
     /// Parakeet v3, then the diarizer's two ONNX models, each with its
     /// licence and who made it (the `WeSpeaker` model's CC-BY-4.0 asks for the
     /// attribution); no row for Whisper, Ultra or the German Parakeet, and
-    /// the Transcription row names the ONNX models.
+    /// `steno models` lists the ONNX models by name.
     #[test]
     fn the_diarizer_is_acknowledged_as_its_two_onnx_models() {
         let models = testing::models_in(Path::new("/tmp/steno-models"));

@@ -1308,6 +1308,9 @@ impl ProcessingPipeline {
             if among.is_some_and(|among| !among.contains(&meeting.id)) {
                 continue;
             }
+            // `claim_start` below is what keeps a second run out; this
+            // check keeps a held meeting whose asset row is gone from being
+            // marked failed under its run.
             if self.in_flight_set().meetings.contains(&meeting.id) {
                 busy.push(meeting.id);
                 continue;

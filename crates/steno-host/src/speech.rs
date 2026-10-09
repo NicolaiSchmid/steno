@@ -19,9 +19,10 @@ string_enum! {
 
 impl ModelAsset {
     /// The assets the Rust app offers: Parakeet v3 and the diarizer. The
-    /// Swift app's Ultra, German and Whisper models have no Rust engine
-    /// (`steno_core::store::RETIRED_SPEECH_ENGINE_IDS`), so Settings shows
-    /// no row for them. Rust only.
+    /// Swift app's Ultra, German and Whisper models are not part of this
+    /// version (a stored one becomes Parakeet v3 at launch,
+    /// `steno_core::Store::retire_speech_engine`), so Settings shows no row
+    /// for them. Rust only.
     pub const OFFERED: [ModelAsset; 2] = [ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer];
 
     /// The Hugging Face repository the files come from.
