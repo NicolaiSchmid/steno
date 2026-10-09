@@ -2266,4 +2266,291 @@ mod tests {
         harness.pipeline.current().wait_until_idle().await;
         assert_eq!(harness.state(&fresh), MeetingState::Ready);
     }
+
+    /// A power loss before any WAL frame reached the disk: the database
+    /// comes back from its file alone (as the last checkpoint left it),
+    /// opened by a new launch over the same support and audio folders.
+    fn power_loss(harness: Harness) -> Harness {
+        let Harness {
+            dir,
+            store,
+            pipeline,
+        } = harness;
+        let after = dir.path().join("after-power-loss.sqlite");
+        std::fs::copy(dir.path().join("steno.sqlite"), &after).unwrap();
+        drop((pipeline, store));
+        let store = Arc::new(Store::open(&after).unwrap());
+        let pipeline = current_pipeline(fake_dependencies(&store, "fake-engine"));
+        Harness {
+            dir,
+            store,
+            pipeline,
+        }
+    }
+
+    /// The adoption's insert commits under `synchronous = NORMAL`: a power
+    /// loss before a checkpoint takes its row, but not the entry, so the
+    /// next launch adopts the master again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_power_loss_after_an_adoption_leaves_the_master_to_the_next_launch() {
+        let harness = Harness::new();
+        harness.store.checkpoint_durably().unwrap();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 50);
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [orphan]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+
+        let after = power_loss(harness);
+        assert!(after.store.meeting(orphan).unwrap().is_none());
+        assert_eq!(reconcile_at_launch(&after, &[], &an_hour_later()), [orphan]);
+        after.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            after.store.meeting(orphan).unwrap().unwrap().state,
+            MeetingState::Ready
+        );
+    }
+
+    /// An entry with no row whose folder cannot be told empty stays: an
+    /// audio folder that is empty (a volume's mount point while it is not
+    /// mounted) or missing, and one that cannot be read. Once the volume is
+    /// back with the master, the launch adopts it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_entry_whose_folder_cannot_be_told_empty_stays_recorded() {
+        let harness = Harness::new();
+        let mount = harness.dir.path().join("volume");
+        std::fs::create_dir_all(&mount).unwrap();
+        let unmounted = Uuid::new_v4();
+        let gone = Uuid::new_v4();
+        crate::audio_folders::record(&harness.support_directory(), unmounted, &mount).unwrap();
+        crate::audio_folders::record(
+            &harness.support_directory(),
+            gone,
+            &harness.dir.path().join("gone"),
+        )
+        .unwrap();
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        let recorded = crate::audio_folders::recorded(&harness.support_directory()).unwrap();
+        assert!(recorded.contains_key(&unmounted) && recorded.contains_key(&gone));
+
+        #[cfg(unix)]
+        {
+            let locked = harness.dir.path().join("locked");
+            std::fs::create_dir_all(locked.join("other")).unwrap();
+            let unreadable = Uuid::new_v4();
+            crate::audio_folders::record(&harness.support_directory(), unreadable, &locked)
+                .unwrap();
+            if lock_out(&locked, || std::fs::read_dir(&locked).is_ok()) {
+                let adopted = reconcile_at_launch(&harness, &[], &an_hour_later());
+                set_mode(&locked, 0o755);
+                assert_eq!(adopted, Vec::<Uuid>::new());
+                assert!(
+                    crate::audio_folders::recorded(&harness.support_directory())
+                        .unwrap()
+                        .contains_key(&unreadable)
+                );
+            }
+        }
+
+        let layout = RecordingLayout::new(&mount, unmounted);
+        let mut writer = RecordingWriter::new(&layout, &[AudioLane::Mixed], false).unwrap();
+        write_frames(&mut writer, 50);
+        drop(writer);
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [unmounted]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+    }
+
+    /// A `Write` into a shared buffer, for a test's log subscriber.
+    #[derive(Clone, Default)]
+    struct Logged(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logged {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The masters the record does not name are logged in one line with
+    /// their count and the first few ids, and a folder whose id has a row
+    /// is not looked into, even when the record names it: it is neither
+    /// adopted nor logged.
+    #[test]
+    fn unrecorded_masters_are_logged_once_and_a_rows_folder_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("audio");
+        let master = |id: Uuid| {
+            let layout = RecordingLayout::new(&audio, id);
+            std::fs::create_dir_all(&layout.directory).unwrap();
+            std::fs::write(layout.master(AudioFormat::Caf48kFloat32), b"audio").unwrap();
+        };
+        let unrecorded: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+        unrecorded.iter().copied().for_each(master);
+        let (row, orphan) = (Uuid::new_v4(), Uuid::new_v4());
+        master(row);
+        master(orphan);
+        let recorded = BTreeMap::from([(row, audio.clone()), (orphan, audio.clone())]);
+
+        let logged = Logged::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let logged = logged.clone();
+                move || logged.clone()
+            })
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let found = tracing::subscriber::with_default(subscriber, || {
+            orphans(
+                std::slice::from_ref(&audio),
+                &HashSet::from([row]),
+                &recorded,
+            )
+        });
+
+        let ids: Vec<Uuid> = found.iter().map(|orphan| orphan.meeting_id).collect();
+        assert_eq!(ids, [orphan]);
+        let logged = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = logged.lines().collect();
+        let [line] = lines.as_slice() else {
+            panic!("one line: {logged}");
+        };
+        assert!(line.contains("count=5"), "{line}");
+        let named = unrecorded
+            .iter()
+            .filter(|id| line.contains(&id.to_string()))
+            .count();
+        assert_eq!(named, UNRECORDED_IDS_LOGGED, "{line}");
+        assert!(!line.contains(&row.to_string()), "{line}");
+    }
+
+    /// Meeting folders with masters and sidecars that the record does not
+    /// name, as the Swift app or an earlier release leaves them: a killed
+    /// call, a killed in-person recording and a finished call, a phone
+    /// m4a and WAV in the audio folder, and a killed one in a known
+    /// folder. Returns every file of theirs with its bytes, each time it
+    /// is called.
+    fn unrecorded_orphans(harness: &Harness) -> impl Fn() -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut folders = Vec::new();
+        for (lanes, finish) in [
+            (vec![AudioLane::Mic, AudioLane::System], false),
+            (vec![AudioLane::Mixed], false),
+            (vec![AudioLane::Mic, AudioLane::System], true),
+        ] {
+            let layout = RecordingLayout::new(&harness.audio_folder(), Uuid::new_v4());
+            let mut writer = RecordingWriter::new(&layout, &lanes, false).unwrap();
+            write_frames(&mut writer, 40);
+            if finish {
+                writer.finish().unwrap();
+            }
+            folders.push(layout.directory);
+        }
+        for (name, format) in [
+            ("tone-440-44k1-500ms.m4a", AudioFormat::M4aAac),
+            ("conversation-mic-6s.wav", AudioFormat::Wav16kInt16),
+        ] {
+            let layout = RecordingLayout::new(&harness.audio_folder(), Uuid::new_v4());
+            std::fs::create_dir_all(&layout.directory).unwrap();
+            std::fs::copy(audio_fixture(name), layout.master(format)).unwrap();
+            folders.push(layout.directory);
+        }
+        let known = harness.dir.path().join("known");
+        crate::audio_folders::remember(&harness.support_directory(), &known).unwrap();
+        let layout = RecordingLayout::new(&known, Uuid::new_v4());
+        let mut writer = RecordingWriter::new(&layout, &[AudioLane::Mixed], false).unwrap();
+        write_frames(&mut writer, 40);
+        drop(writer);
+        folders.push(layout.directory);
+        move || folders.iter().flat_map(|folder| files_in(folder)).collect()
+    }
+
+    /// Masters this install has no record of (the Swift app's, an earlier
+    /// release's, another install's), each with its sidecars, a killed one
+    /// among them, are never deleted or changed: not by a launch, nor by a
+    /// retention sweep that deletes after processing, nor by the delete of
+    /// another meeting with an asset or without one, nor by the next
+    /// launch. Every one of their files stays byte for byte.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unadopted_orphans_are_never_deleted_or_changed() {
+        let harness = Harness::new();
+        let mut settings = harness.store.settings().unwrap();
+        settings.default_retention = AudioRetention::DeleteAfterProcessing;
+        harness.store.save_settings(&settings).unwrap();
+        let snapshot = unrecorded_orphans(&harness);
+        let before = snapshot();
+        assert!(
+            before.keys().any(|path| path.ends_with("mic.wav")),
+            "{:?}",
+            before.keys()
+        );
+
+        // A meeting saved as a stop saves it, and one failed with no asset.
+        let saved = harness.begin(MeetingSource::MacInPerson);
+        harness.record(&saved, &harness.audio_folder());
+        let mut writer = harness.writer(&saved);
+        write_frames(&mut writer, 30);
+        let files = writer.finish().unwrap();
+        let mut result = finished(&saved, &files);
+        result.asset.retention = AudioRetention::DeleteAfterProcessing;
+        harness
+            .intake()
+            .complete(saved.id, result, None)
+            .await
+            .unwrap();
+        let failed = harness.begin(MeetingSource::MacInPerson);
+        harness.record(&failed, &harness.audio_folder());
+        harness.intake().fail(failed.id, "refused").unwrap();
+
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        harness.pipeline.current().wait_until_idle().await;
+        steno_pipeline::RetentionSweep::new(harness.store.clone())
+            .run(Utc::now() + chrono::Duration::days(1))
+            .unwrap();
+        assert_eq!(snapshot(), before);
+
+        let mut list = steno_host::main_window::MeetingListViewModel::new(
+            chrono::FixedOffset::east_opt(0).unwrap(),
+        );
+        assert!(list.delete(
+            saved.id,
+            &harness.store,
+            &steno_host::services::RealFileSystem,
+            None,
+            false,
+        ));
+        let left = steno_host::services::LeftRecording {
+            folders: meeting_folders(&harness.store, &harness.support_directory(), failed.id),
+            still_written: false,
+        };
+        assert!(left.folders.contains(&harness.dir.path().join("known")));
+        assert!(list.delete(
+            failed.id,
+            &harness.store,
+            &steno_host::services::RealFileSystem,
+            Some(&left),
+            false,
+        ));
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        harness.pipeline.current().wait_until_idle().await;
+
+        assert_eq!(harness.store.all_meetings().unwrap(), Vec::<Meeting>::new());
+        assert_eq!(snapshot(), before);
+    }
 }
