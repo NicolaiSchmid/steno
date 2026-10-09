@@ -323,6 +323,13 @@ pub trait Pipeline: Send + Sync {
     fn damaged_audio(&self, _meeting_id: Uuid) -> steno_core::AudioDamage {
         steno_core::AudioDamage::default()
     }
+    /// Whether the meeting's recording may have parts its last decode
+    /// replaced by silence: it has some, or the record of them could not
+    /// be read, so nobody can say. For the retention status to keep such a
+    /// recording. The default says no. Rust only.
+    fn audio_may_be_damaged(&self, _meeting_id: Uuid) -> bool {
+        false
+    }
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()>;
     /// Rebuilds the pipeline from the stored settings and the API key.
     fn reload(&self) -> BoundaryResult<()>;

@@ -229,6 +229,16 @@ impl Pipeline for HostPipeline {
             .damage(meeting_id)
     }
 
+    /// [`DamagedAudio::may_be_damaged`](steno_pipeline::DamagedAudio::may_be_damaged)
+    /// of the current pipeline's store.
+    fn audio_may_be_damaged(&self, meeting_id: Uuid) -> bool {
+        self.pipeline
+            .current()
+            .dependencies()
+            .damaged_audio
+            .may_be_damaged(meeting_id)
+    }
+
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
         let pipeline = self.pipeline.current();
         Ok(block_on(
@@ -610,6 +620,7 @@ mod tests {
         assert_eq!(state, MeetingState::Ready);
         let damage = service.damaged_audio(meeting.id);
         assert_eq!(damage.parts, 3);
+        assert!(service.audio_may_be_damaged(meeting.id));
         assert!((damage.seconds - 3.0 * 1_024.0 / 44_100.0).abs() < 1e-9);
         service.pipeline.reload().unwrap();
         assert_eq!(service.damaged_audio(meeting.id), damage, "after a reload");
@@ -619,6 +630,7 @@ mod tests {
             "on disk"
         );
         assert!(service.damaged_audio(Uuid::new_v4()).is_none());
+        assert!(!service.audio_may_be_damaged(Uuid::new_v4()));
 
         let state = process_phone_fixture(
             &service,
@@ -630,6 +642,29 @@ mod tests {
         .await;
         assert_eq!(state, MeetingState::Ready);
         assert!(service.damaged_audio(meeting.id).is_none());
+        assert!(!service.audio_may_be_damaged(meeting.id));
+    }
+
+    /// A record of the damage that does not parse says nothing about any
+    /// meeting, so the host pipeline answers that every recording may be
+    /// damaged, while the detail's warning shows no damage it cannot
+    /// read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_damage_record_makes_every_recording_possibly_damaged() {
+        let (dir, store) = temp_store();
+        std::fs::write(
+            dir.path().join(steno_pipeline::DamagedAudio::FILE_NAME),
+            b"{",
+        )
+        .unwrap();
+        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(dir.path()));
+        let service = pipeline_over(
+            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
+            &store,
+        );
+        let meeting = Uuid::new_v4();
+        assert!(service.audio_may_be_damaged(meeting));
+        assert!(service.damaged_audio(meeting).is_none());
     }
 
     /// A damaged recording whose damage cannot be written down (a support
@@ -678,9 +713,8 @@ mod tests {
             return;
         }
         assert!(
-            damaged
-                .failure_reason()
-                .is_some_and(|reason| reason.contains("damaged parts could not be noted")),
+            damaged.failure_reason().is_some_and(|reason| reason
+                .contains("what could not be read in the recording could not be saved")),
             "{damaged:?}"
         );
         let asset = store.asset(second.id).unwrap().expect("the asset");

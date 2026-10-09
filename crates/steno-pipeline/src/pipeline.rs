@@ -2142,7 +2142,8 @@ impl ProcessingPipeline {
     /// language as the hint. Each buffer goes out of scope before the next
     /// lane is decoded, except the last, which is returned for `diarize`.
     /// What of the recording the decoder replaced by silence is recorded
-    /// for the meeting's detail and the retention rule ([`DamagedAudio`]):
+    /// for the meeting's detail, and for the retention rule to ask
+    /// ([`DamagedAudio`]):
     /// the most any lane counted, as every lane of a master reads the same
     /// packets. A record that cannot be written fails the stage, so the
     /// meeting fails and keeps its recording rather than lose the mark.
@@ -2200,7 +2201,10 @@ impl ProcessingPipeline {
                 .damaged_audio
                 .record(meeting_id, damage)
                 .map_err(|error| {
-                    format!("the recording's damaged parts could not be noted: {error}")
+                    format!(
+                        "the record of what could not be read in the recording could not be \
+                         saved: {error}"
+                    )
                 }),
         )?;
         let language = elect_language(lanes.values().flatten());

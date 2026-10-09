@@ -214,8 +214,8 @@ fn api_key(
 /// again while the app runs keeps the key a rebuild had, and a key the user
 /// removed or changed is never the one kept. The decode stage records
 /// what of each recording it replaced by silence in `damaged_audio`, the
-/// support directory's [`DamagedAudio`], which the detail and the
-/// retention rule read.
+/// support directory's [`DamagedAudio`], which the detail reads, and the
+/// retention rule is to ask.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,

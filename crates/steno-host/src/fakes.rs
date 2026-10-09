@@ -545,6 +545,11 @@ impl Pipeline for FakePipeline {
             .unwrap_or_default()
     }
 
+    /// Yes for the meetings `damaged_audio` answers some damage for.
+    fn audio_may_be_damaged(&self, meeting_id: Uuid) -> bool {
+        !self.damaged_audio(meeting_id).is_none()
+    }
+
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
         lock(&self.retention).push((meeting_id, rule));
         self.outcome()

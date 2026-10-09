@@ -66,7 +66,8 @@ impl DatabaseOptions {
     /// The record of what the decoder replaced by silence per meeting
     /// ([`steno_pipeline::DamagedAudio`]) beside the database, the app's
     /// support directory by default, so a command that runs the pipeline
-    /// writes the marks the app's detail and retention rule read. The
+    /// writes the marks the app's detail reads, and its retention rule is
+    /// to ask. The
     /// command holds the database's lock, so the app is not running.
     pub fn damaged_audio(&self) -> Result<Arc<steno_pipeline::DamagedAudio>, Failure> {
         let path = self.path()?;

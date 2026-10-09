@@ -10,6 +10,12 @@
 //! The decode stage records the damage of every run, so a meeting
 //! processed again shows what that run found; a meeting whose recording
 //! decoded clean has no entry.
+//!
+//! A `damaged-audio.json` that is there but cannot be read or does not
+//! parse is left alone, and every meeting's recording counts as possibly
+//! damaged until it reads again ([`DamagedAudio::may_be_damaged`]); the
+//! launch logs this once. To clear it, remove the file (the meetings then
+//! lose their warnings) or repair its JSON.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,10 +36,10 @@ use crate::files::MeetingValues;
 /// [`record`](Self::record), and the decode stage fails the meeting, which
 /// keeps its recording.
 ///
-/// The retention wiring asks [`may_be_damaged`](Self::may_be_damaged),
-/// which says yes for every meeting while the store does not know, and
-/// keeps such a meeting's recording as it keeps an incomplete one's; the
-/// user's own keep or delete is not affected.
+/// [`may_be_damaged`](Self::may_be_damaged) says yes for every meeting
+/// while the store does not know, for the retention rule to ask: it is to
+/// keep such a meeting's recording as it keeps an incomplete one's, and
+/// leave the user's own keep or delete alone.
 ///
 /// ```
 /// use steno_core::AudioDamage;
@@ -77,7 +83,8 @@ impl DamagedAudio {
             Err(error) => {
                 tracing::warn!(
                     "{} could not be read ({error}); it stays and is not written, and every \
-                     meeting's recording counts as possibly damaged until it reads again",
+                     meeting's recording counts as possibly damaged until it reads again: \
+                     remove the file or repair it",
                     path.display()
                 );
                 DamagedAudio {
@@ -128,7 +135,7 @@ impl DamagedAudio {
 
     /// Whether `meeting_id`'s recording has damaged parts, or may have
     /// them because the store does not [know](Self::known): what the
-    /// retention wiring keeps a recording for.
+    /// retention rule is to keep a recording for.
     #[must_use]
     pub fn may_be_damaged(&self, meeting_id: Uuid) -> bool {
         !self.known || self.parts(meeting_id) > 0
