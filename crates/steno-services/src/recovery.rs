@@ -2331,6 +2331,34 @@ mod tests {
         );
     }
 
+    /// The launch that forgets an adopted meeting's entry checkpoints the
+    /// store first (`forget_settled`): a power loss after it keeps the
+    /// row, so the master is never left with neither a row nor an entry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_power_loss_after_the_forgetting_launch_keeps_the_meeting() {
+        let harness = Harness::new();
+        harness.store.checkpoint_durably().unwrap();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 50);
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [orphan]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        assert!(
+            !crate::audio_folders::recorded(&harness.support_directory())
+                .unwrap()
+                .contains_key(&orphan),
+            "the second launch forgets the entry"
+        );
+
+        let after = power_loss(harness);
+        assert!(after.store.meeting(orphan).unwrap().is_some());
+    }
+
     /// A meeting deleted while the launch runs, after the launch listed its
     /// entry and with its master still there (a removal not done yet, or
     /// one that failed), is not adopted back: the delete forgets the entry
