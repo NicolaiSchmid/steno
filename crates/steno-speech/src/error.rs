@@ -137,9 +137,9 @@ pub enum SidecarError {
     /// [`SidecarError::Remote`].
     #[error("the diarizer's models did not load: {0}")]
     DiarizerLoad(String),
-    /// The models root is not valid UTF-8, which the protocol's JSON cannot
-    /// carry; no child was started.
-    #[error("the models root {} is not valid UTF-8, which the protocol cannot carry", path.display())]
+    /// A path the protocol's JSON carries (the models root, a diarizer
+    /// model file) is not valid UTF-8; nothing was sent to a child.
+    #[error("the model path {} is not valid UTF-8, which the protocol cannot carry", path.display())]
     NotUtf8 { path: PathBuf },
 }
 

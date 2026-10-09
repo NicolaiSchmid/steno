@@ -4,8 +4,8 @@
 //! and ends the current request once it is over. A child that dies,
 //! hangs, overruns the ceiling or breaks the protocol during a request is
 //! killed and reaped, and the call returns [`SpeechError::Sidecar`]. One
-//! that does so between requests is replaced by the next `prepare` or
-//! `transcribe` without an error. Either way the next child loads the
+//! that does so between requests is replaced by the next `prepare`,
+//! `transcribe` or `diarize` without an error. Either way the next child loads the
 //! models again. Nothing here can take the app down with the child.
 //!
 //! After a child that crashed, hung or overran the memory ceiling during a
@@ -24,7 +24,8 @@
 //! under the same lock, deadline, memory ceiling and crash handling. A
 //! child that dies or hangs while it diarizes is killed and the call fails;
 //! the next call starts a new one. The diarizer runs on the CPU, so its
-//! failures never count against `DirectML`. A child started only to
+//! failures never count against `DirectML`, nor does a failure between
+//! requests that a diarization finds. A child started only to
 //! diarize, without speech's models, is stopped once the call returns, so
 //! no child outlives the job that needed it; one that holds speech's models
 //! stays for speech's release.
@@ -628,7 +629,7 @@ fn failure_kind(error: &SidecarError) -> &'static str {
         SidecarError::MemoryCeiling { .. } => "it passed the memory ceiling",
         SidecarError::Remote(_) => "it reported an error",
         SidecarError::DiarizerLoad(_) => "it could not load the diarizer's models",
-        SidecarError::NotUtf8 { .. } => "the models root is not UTF-8",
+        SidecarError::NotUtf8 { .. } => "a model path is not UTF-8",
     }
 }
 
@@ -698,7 +699,7 @@ impl Shared {
     /// no audio was sent yet, so a new child loads on the CPU within the
     /// same call. Blocking; the caller holds the lock.
     fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
-        self.drop_failed(slot);
+        self.drop_failed(slot, true);
         if slot.as_ref().is_some_and(|p| p.provider.is_some()) {
             return Ok(());
         }
@@ -708,9 +709,9 @@ impl Shared {
 
     /// Kills a child that failed since its last request, so the next one
     /// starts fresh. A death between requests does not count against
-    /// `DirectML`, an overrun does (see the module docs); with no provider,
-    /// `kill_unless_remote` does not count it.
-    fn drop_failed(&self, slot: &mut Option<SidecarProcess>) {
+    /// `DirectML`, an overrun does when `counts` (see the module docs); with
+    /// no provider, `kill_unless_remote_counting` does not count it.
+    fn drop_failed(&self, slot: &mut Option<SidecarProcess>, counts: bool) {
         if let Some(process) = slot.as_mut()
             && let Some(error) = process.failed_while_idle()
         {
@@ -718,7 +719,7 @@ impl Shared {
                 process.provider = None;
                 process.load_asked_directml = false;
             }
-            self.kill_unless_remote(slot, error);
+            self.kill_unless_remote_counting(slot, error, counts);
         }
     }
 
@@ -853,9 +854,9 @@ impl Shared {
         payload: Vec<u8>,
         timeout: Duration,
     ) -> Result<Vec<SpeakerCluster>, SidecarError> {
-        self.drop_failed(slot);
+        self.drop_failed(slot, false);
         let result = self
-            .diarize_in(slot, models, sample_count, payload, timeout)
+            .load_and_diarize(slot, models, sample_count, payload, timeout)
             .map_err(|error| self.kill_unless_remote_counting(slot, error, false));
         if let Some(process) = slot.take_if(|p| p.provider.is_none()) {
             self.pid.store(0, Ordering::SeqCst);
@@ -864,7 +865,7 @@ impl Shared {
         result
     }
 
-    fn diarize_in(
+    fn load_and_diarize(
         &self,
         slot: &mut Option<SidecarProcess>,
         models: DiarizerModels,
@@ -1095,8 +1096,10 @@ impl SidecarSpeechEngine {
     /// [`SpeechError::Sidecar`]: [`SidecarError::DiarizerLoad`] when the
     /// child could not load the models (the caller may check the files),
     /// [`SidecarError::Remote`] when the run failed in a child that keeps
-    /// running, any other variant when the child failed and was killed;
-    /// the next call starts a new child.
+    /// running, [`SidecarError::NotUtf8`] for a model path the protocol
+    /// cannot carry (nothing is sent, the child is untouched), any other
+    /// variant when the child failed and was killed; the next call starts
+    /// a new child.
     pub async fn diarize(
         &self,
         models: DiarizerModels,
@@ -1104,6 +1107,13 @@ impl SidecarSpeechEngine {
     ) -> Result<Vec<SpeakerCluster>, SpeechError> {
         if audio.is_empty() {
             return Ok(Vec::new());
+        }
+        // The `loadDiarizer` request carries the paths as JSON strings.
+        if let Some(path) = [&models.segmentation, &models.embedding]
+            .into_iter()
+            .find(|path| path.to_str().is_none())
+        {
+            return Err(SidecarError::NotUtf8 { path: path.clone() }.into());
         }
         let shared = Arc::clone(&self.shared);
         let sample_count = audio.samples.len() as u64;
@@ -1452,5 +1462,37 @@ mod tests {
             1,
             "`Install::Allowed` asks the host"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_diarizer_path_the_protocol_cannot_carry_is_refused_before_any_spawn() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let embedding = dir
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"embedding-\xff.onnx"));
+        let engine = SidecarSpeechEngine::with_assets(
+            ModelStore::new(dir.path()),
+            SidecarConfig::new(dir.path().join("no-such-sidecar")),
+            Vec::new(),
+        );
+        let models = DiarizerModels {
+            segmentation: dir.path().join("segmentation.onnx"),
+            embedding: embedding.clone(),
+            intra_threads: 1,
+        };
+        let error = engine
+            .diarize(models, &AudioBuffer16k::silence(1.0))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                SpeechError::Sidecar(SidecarError::NotUtf8 { path }) if *path == embedding
+            ),
+            "{error}"
+        );
+        assert_eq!(engine.spawns(), 0);
     }
 }
