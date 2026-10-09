@@ -88,15 +88,16 @@ pub enum SpeechError {
     #[error("{}: {detail}", path.display())]
     Wav { path: PathBuf, detail: String },
     /// The speech sidecar failed: unless the child reported the error
-    /// itself ([`SidecarError::Remote`]), no child is left running, and the
-    /// next call starts a fresh one.
+    /// itself ([`SidecarError::Remote`], [`SidecarError::DiarizerLoad`]), no
+    /// child is left running, and the next call starts a fresh one.
     #[error("speech sidecar: {0}")]
     Sidecar(#[from] SidecarError),
 }
 
 /// How the speech sidecar failed. Every variant but
-/// [`SidecarError::Remote`] leaves the parent without a child: the next
-/// `prepare` or `transcribe` spawns and loads again.
+/// [`SidecarError::Remote`] and [`SidecarError::DiarizerLoad`] leaves the
+/// parent without a child: the next `prepare`, `transcribe` or `diarize`
+/// spawns and loads again.
 #[derive(Debug, Error)]
 pub enum SidecarError {
     /// The binary could not be started.
@@ -131,6 +132,11 @@ pub enum SidecarError {
     /// a run ONNX Runtime refused) and keeps running.
     #[error("{0}")]
     Remote(String),
+    /// The child could not load the diarizer's models (a file ONNX Runtime
+    /// refuses) and keeps running; reported by the child, like
+    /// [`SidecarError::Remote`].
+    #[error("the diarizer's models did not load: {0}")]
+    DiarizerLoad(String),
     /// The models root is not valid UTF-8, which the protocol's JSON cannot
     /// carry; no child was started.
     #[error("the models root {} is not valid UTF-8, which the protocol cannot carry", path.display())]
