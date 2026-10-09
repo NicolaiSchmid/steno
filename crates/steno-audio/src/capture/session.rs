@@ -1582,14 +1582,15 @@ impl Core {
         reason: DeviceChangeReason,
         cancel: &Cancel,
     ) -> (usize, f32, Option<f64>) {
-        // The stopwatch runs from before the teardown: the HAL calls in
-        // `stop()` take tens to hundreds of milliseconds during a device
-        // transition, and that is dead time in the master too. It runs from
-        // earlier still when the watch thread saw the last frame arrive
-        // before the change was reported (the backends coalesce changes for
-        // 0.5 s, a stall is reported after `STALL_TIMEOUT`).
+        // The gap's stopwatch (`silent_from`) runs from before the
+        // teardown: the HAL calls in `stop()` take tens to hundreds of
+        // milliseconds during a device transition, and that is dead time in
+        // the master too. It runs from earlier still when the watch thread
+        // saw the last frame arrive before the change was reported (the
+        // backends coalesce changes for 0.5 s, a stall is reported after
+        // `STALL_TIMEOUT`).
         let now = self.clock.now();
-        let mut started = now;
+        let mut silent_from = now;
         let (sink, relay, processing, plan) = {
             let mut inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
@@ -1601,7 +1602,7 @@ impl Core {
             if let Some(watch) = &active.watch
                 && watch.progress.count == active.sink.frames_offered()
             {
-                started = started.min(watch.progress.at);
+                silent_from = silent_from.min(watch.progress.at);
             }
             let plan = self.restart_plan(active, reason, now);
             if plan.continues == 0 {
@@ -1665,21 +1666,21 @@ impl Core {
         let restart = self.restart_backend(&sink, plan, generation, cancel);
         let (unaccounted, restarted_rate) = match restart {
             Restart::Started {
-                started: restarted,
+                started,
                 attempt,
                 at,
             } => {
-                let rate = restarted.stream.sample_rate;
+                let rate = started.stream.sample_rate;
                 // The gap grows through every failed attempt and is written
                 // once, in full, when a start succeeds; what the restarted
                 // stream delivered after its start waits in the rings.
-                let elapsed = at.saturating_sub(started);
+                let elapsed = at.saturating_sub(silent_from);
                 let gap_frames =
                     CaptureSession::gap_frames(elapsed.min(CaptureSession::MAXIMUM_GAP));
                 let written = self.write_silence(gap_frames, &relay, generation, cancel);
                 if written == gap_frames
-                    && self.relay_has_room(&sink, &relay, &restarted.stream, generation, cancel)
-                    && self.resume(restarted, attempt, gap_frames, &sink, &relay, generation)
+                    && self.relay_has_room(&sink, &relay, &started.stream, generation, cancel)
+                    && self.resume(started, attempt, gap_frames, &sink, &relay, generation)
                 {
                     (0, None)
                 } else {
@@ -1708,19 +1709,15 @@ impl Core {
             .input
             .as_ref()
             .is_some_and(|input| input.is_fallback);
+        let watch = active.watch.as_ref();
         // A stream that may only be waiting for playback (a Mac call capture
         // without the capture permission) stops whenever playback does: no
         // restart can make it deliver, and the microphone is not to blame.
-        let waits_for_playback = active
-            .watch
-            .as_ref()
-            .is_some_and(|watch| watch.waits_for_playback);
+        let waits_for_playback = watch.is_some_and(|watch| watch.waits_for_playback);
         // The stream the last rebuild resumed on stalled soon after, or
         // before it delivered anything.
         let stalled = reason == DeviceChangeReason::DeliveryStalled;
-        let (soon, before_delivering) = active
-            .watch
-            .as_ref()
+        let (soon, before_delivering) = watch
             .and_then(|watch| Some((watch.resumed_at?, watch.progress.at)))
             .map_or((false, false), |(resumed_at, delivered_at)| {
                 (
@@ -1742,7 +1739,7 @@ impl Core {
                 reason,
                 DeviceChangeReason::AudioServiceRestarted | DeviceChangeReason::DeliveryStalled
             ),
-            awaits_delivery: active.watch.is_some() && !waits_for_playback,
+            awaits_delivery: watch.is_some() && !waits_for_playback,
             continues: if stalled && (soon || before_delivering) {
                 active.streak.attempts
             } else {

@@ -4023,6 +4023,18 @@ fn advance_the_backoff(clock: &ManualClock, backend: &SyntheticCaptureBackend, w
     }
 }
 
+/// Lets `backend`'s stalled producer deliver again, and waits for its
+/// first frame.
+fn resume_delivery_until_a_frame(backend: &SyntheticCaptureBackend) {
+    let before = backend.frames_delivered();
+    backend.resume_delivery();
+    let deadline = Instant::now() + RECV;
+    while backend.frames_delivered() == before {
+        assert!(Instant::now() < deadline, "the restart delivers");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// A stream that resumes and stalls again before it delivered anything (a
 /// Mac call capture whose output has no other client, which resumes
 /// waiting for playback) is one streak of rebuilds: the restarts count on
@@ -4080,13 +4092,7 @@ fn a_stream_that_resumes_and_stalls_over_and_over_backs_off_and_warns() {
     );
     backend.wait_until_finished();
     assert_no_notice(&notices, "the warning stands through the resumes");
-    let before = backend.frames_delivered();
-    backend.resume_delivery();
-    let deadline = Instant::now() + RECV;
-    while backend.frames_delivered() == before {
-        assert!(Instant::now() < deadline, "the restart delivers");
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    resume_delivery_until_a_frame(&backend);
     advance_watch(&clock, CaptureSession::STALL_CHECK_INTERVAL);
     assert_eq!(
         notices.recv_timeout(RECV).unwrap(),
@@ -4256,13 +4262,7 @@ fn restarts_that_start_but_deliver_nothing_are_retried_until_one_does() {
     let restart = 1 + CaptureSession::RESTART_ATTEMPTS + 1;
     advance_the_rebuild_until(&clock, 30, || backend.starts() == restart);
     assert!(clock.wait_for_sleepers(2), "its wait for a first frame");
-    let before = backend.frames_delivered();
-    backend.resume_delivery();
-    let deadline = Instant::now() + RECV;
-    while backend.frames_delivered() == before {
-        assert!(Instant::now() < deadline, "the restart delivers");
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    resume_delivery_until_a_frame(&backend);
     clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
     assert_eq!(
         notices.recv_timeout(RECV).unwrap(),
