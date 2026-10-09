@@ -2,9 +2,12 @@
 //! `steno_diarize::SidecarDiarizer` against the real binary. The fake
 //! engine's tests need no models: the clusters cross bit for bit, a child
 //! started only to diarize is stopped after the call, one that holds
-//! speech's models is kept, and a child that dies, aborts or hangs while it
-//! diarizes fails that call, leaves `DirectML` alone and is replaced by the
-//! next. The real engine refuses model files it cannot load without dying.
+//! speech's models is kept, a child that dies, aborts, hangs or overruns
+//! the memory ceiling while it diarizes fails that call, leaves `DirectML`
+//! alone and is replaced by the next, one that failed while idle is
+//! replaced before the diarization, and a refused load keeps a child that
+//! holds speech. The real engine refuses model files it cannot load
+//! without dying.
 //!
 //! The ignored tests run the real models: set `STENO_MODELS_DIR` to a
 //! models directory holding `onnx/diarization/`. They compare the sidecar's
@@ -19,8 +22,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    ASKED_FOR_DIRECTML, alive, binary, config, engine_in, engine_with_fault, kill, provider,
-    sidecar_error, tone, within_ten_seconds,
+    ASKED_FOR_DIRECTML, alive, assert_works, binary, config, engine_in, engine_with_fault,
+    fault_queued_soon, kill, kill_idle_child, provider, sidecar_error, tone, within_ten_seconds,
 };
 use steno_core::{AudioBuffer16k, Diarizer as _, SpeechEngine as _};
 use steno_diarize::onnx::OnnxBackend;
@@ -94,7 +97,7 @@ async fn a_child_started_to_diarize_is_stopped_after_the_call_and_one_with_speec
     assert_diarizes(&engine, &tone(0.5)).await;
     assert_eq!(engine.pid(), Some(pid));
     assert!(engine.health().await.unwrap().unwrap().loaded);
-    common::assert_works(&engine, &tone(0.5)).await;
+    assert_works(&engine, &tone(0.5)).await;
     assert_eq!(engine.spawns(), 3);
     // Speech's release ends it, diarizer and all.
     engine.release().await.unwrap();
@@ -151,7 +154,7 @@ async fn an_abort_while_diarizing_is_a_crash_that_leaves_directml_on() {
     }
     assert_eq!(engine.pid(), None);
     assert!(!directml_switched_off());
-    common::assert_works(&engine, &tone(0.5)).await;
+    assert_works(&engine, &tone(0.5)).await;
     assert_eq!(provider(&engine).await, Some(ASKED_FOR_DIRECTML));
     assert_diarizes(&engine, &tone(1.0)).await;
 }
@@ -172,6 +175,121 @@ async fn a_diarization_the_child_fails_keeps_a_child_that_holds_speech() {
     );
     assert_eq!(engine.pid(), Some(pid));
     assert_diarizes(&engine, &tone(1.0)).await;
+    assert_eq!(engine.spawns(), 1);
+}
+
+/// A diarization that never answers is killed at its deadline (the floor,
+/// for a second of audio); the next call diarizes in a new child.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_diarization_is_killed_at_the_deadline() {
+    let (engine, _dir) = engine_with_fault("hang", |c| {
+        c.transcribe_timeout_floor = Duration::from_secs(2);
+    });
+    let error = engine.diarize(fake_models(), &tone(1.0)).await.unwrap_err();
+    assert!(
+        matches!(sidecar_error(&error), SidecarError::Timeout { after } if *after == Duration::from_secs(2)),
+        "{error}"
+    );
+    assert_eq!(engine.pid(), None);
+    assert_diarizes(&engine, &tone(1.0)).await;
+    assert_eq!(engine.spawns(), 2);
+    assert_eq!(engine.pid(), None);
+}
+
+/// A hang in a child that holds speech ends that child too; speech and the
+/// diarizer both work again in a new one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_diarization_in_a_child_with_speech_ends_it_and_both_recover() {
+    let (engine, _dir) = engine_with_fault("hang", |c| {
+        c.transcribe_timeout_floor = Duration::from_secs(2);
+    });
+    // The hang is the first transcription's or diarization's, so speech
+    // is only loaded here.
+    engine.prepare().await.unwrap();
+    let pid = engine.pid().unwrap();
+    let error = engine.diarize(fake_models(), &tone(1.0)).await.unwrap_err();
+    assert!(
+        matches!(sidecar_error(&error), SidecarError::Timeout { .. }),
+        "{error}"
+    );
+    assert_eq!(engine.pid(), None);
+    assert!(within_ten_seconds(|| (!alive(pid)).then_some(())).is_some());
+    assert_works(&engine, &tone(0.5)).await;
+    assert_diarizes(&engine, &tone(1.0)).await;
+    assert_eq!(engine.spawns(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diarization_over_the_memory_ceiling_is_killed() {
+    const CEILING: u64 = 256 << 20;
+    let (engine, _dir) = engine_with_fault("allocate", |c| c.memory_ceiling_bytes = CEILING);
+    let error = engine.diarize(fake_models(), &tone(1.0)).await.unwrap_err();
+    let SidecarError::MemoryCeiling {
+        rss_bytes,
+        ceiling_bytes,
+    } = sidecar_error(&error)
+    else {
+        panic!("{error}");
+    };
+    assert_eq!(*ceiling_bytes, CEILING);
+    assert!(*rss_bytes > CEILING);
+    // Well under what the child would have taken (4 GiB) unchecked.
+    assert!(*rss_bytes < 2 << 30, "{rss_bytes}");
+    assert_eq!(engine.pid(), None);
+    assert_diarizes(&engine, &tone(1.0)).await;
+    assert_eq!(engine.spawns(), 2);
+}
+
+/// A child that died between requests is replaced before the diarization,
+/// without an error; the new one holds no speech, so it stops after.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_that_died_idle_is_replaced_before_a_diarization() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine_in(&dir, config(&[]));
+    engine.prepare().await.unwrap();
+    kill_idle_child(&engine);
+    assert_diarizes(&engine, &tone(1.0)).await;
+    assert_eq!(engine.pid(), None);
+    assert_eq!(engine.spawns(), 2);
+}
+
+/// A child over the ceiling while idle, after speech asked for `DirectML`
+/// where that is asked for, is replaced before the diarization, without an
+/// error; found by a diarization, the overrun leaves `DirectML` on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_over_the_ceiling_while_idle_is_replaced_before_a_diarization() {
+    let (engine, _dir) = engine_with_fault("swell", |config| {
+        config.options.directml = true;
+    });
+    engine.prepare().await.unwrap();
+    assert_works(&engine, &tone(0.5)).await;
+    assert!(
+        fault_queued_soon(&engine),
+        "the reader never queued the report over the ceiling"
+    );
+    assert_diarizes(&engine, &tone(1.0)).await;
+    assert_eq!(engine.pid(), None);
+    assert_eq!(engine.spawns(), 2);
+    assert!(!directml_switched_off());
+}
+
+/// A load the child refuses, in a child that holds speech for another
+/// job: the call fails as a refused load and the child stays, speech and
+/// all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_load_keeps_a_child_that_holds_speech() {
+    let (engine, _dir) = engine_with_fault("refuse-diarizer", |_| {});
+    engine.prepare().await.unwrap();
+    let pid = engine.pid().unwrap();
+    for _ in 0..2 {
+        let error = engine.diarize(fake_models(), &tone(1.0)).await.unwrap_err();
+        assert!(
+            matches!(sidecar_error(&error), SidecarError::DiarizerLoad(_)),
+            "{error}"
+        );
+        assert_eq!(engine.pid(), Some(pid));
+    }
+    assert_works(&engine, &tone(0.5)).await;
     assert_eq!(engine.spawns(), 1);
 }
 

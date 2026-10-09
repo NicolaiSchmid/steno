@@ -69,8 +69,9 @@
 //! a fallback to the CPU or lose the encoder, the child abort on any load
 //! or on a load that asks for `DirectML`, or stay silent, greet late or
 //! announce another protocol version from the start; the crashes, the hang,
-//! the allocation and the failure apply to the next diarization too, and
-//! one abort to a diarization only. `--fault-once
+//! the allocation and the failure apply to the next diarization too, one
+//! abort to a diarization only, and one fault refuses every diarizer load.
+//! `--fault-once
 //! <path>` limits that to the first child that creates `<path>`, which
 //! holds that child's pid. The isolation tests, the diarization tests and
 //! the `DirectML` test binaries drive the real client against these.
@@ -98,8 +99,9 @@ steno_core::string_enum! {
     /// What the next transcription of the fake engine does instead of
     /// answering; [`Fault::Abort`], [`Fault::Panic`], [`Fault::Exit`],
     /// [`Fault::Hang`], [`Fault::Allocate`] and [`Fault::Error`] apply to
-    /// the next diarization as well, whichever comes first, and
-    /// [`Fault::AbortDiarizing`] to the next diarization only.
+    /// the next diarization as well, whichever comes first,
+    /// [`Fault::AbortDiarizing`] to the next diarization only, and
+    /// [`Fault::RefuseDiarizer`] to every diarizer load.
     pub enum Fault {
         /// `std::process::abort`, the way an uncaught C++ exception in ONNX
         /// Runtime ends the process.
@@ -156,6 +158,10 @@ steno_core::string_enum! {
         /// uncaught C++ exception in ONNX Runtime ends it there;
         /// transcriptions answer.
         AbortDiarizing = "abort-diarizing",
+        /// Refuses every diarizer load with an error and keeps running, as
+        /// the real engine does with a file ONNX Runtime cannot load;
+        /// transcriptions answer.
+        RefuseDiarizer = "refuse-diarizer",
     }
 }
 
@@ -491,14 +497,18 @@ impl Engine for FakeEngine {
                 | Fault::SlowStart
                 | Fault::AbortOnLoad
                 | Fault::AbortOnDirectmlLoad
-                | Fault::AbortDiarizing,
+                | Fault::AbortDiarizing
+                | Fault::RefuseDiarizer,
             )
             | None => Ok(describe(samples, hint)),
         }
     }
 
-    /// Needs no files.
+    /// Needs no files; fails with [`Fault::RefuseDiarizer`].
     fn load_diarizer(&mut self, _: &ModelPaths, _: usize) -> Result<(), String> {
+        if self.fault == Some(Fault::RefuseDiarizer) {
+            return Err("simulated refusal of the diarizer's models".to_owned());
+        }
         Ok(())
     }
 
