@@ -665,7 +665,11 @@ Every package is written in parallel except where a dependency is named:
       `SecItemExport` as PKCS#12 through `steno-macos` (one prompt), decoded by a
       PKCS#12 crate (for example `p12-keystore`, which reads Apple's legacy
       encryption; `cargo deny` must allow it) into the PEM entry
-      `handover-identity`, replacing a desktop-id identity. A denied read leaves
+      `handover-identity`, replacing a desktop-id identity, through
+      `HandoverIdentity::store`, which records its fingerprint over the
+      desktop-id one so #221's guard accepts it. A fingerprint not recorded
+      after the secret was written is a failed store: Try again, and no
+      `swift-import-done` marker. A denied read leaves
       the key empty, and Settings asks for it; no later launch asks the keychain
       for it until a key is saved. A denied or failed export never
       mints an identity (D3): the handover listener stays off, and Settings'
@@ -683,8 +687,9 @@ Every package is written in parallel except where a dependency is named:
       reloaded with what it read. Not now leaves both unread for that launch
       (handover waits), writes no flag, and the step returns at the next
       launch. While the key stays unread or refused, the pipeline runs as
-      without a summaries service: meetings complete without a summary, which
-      can be run again once a key is saved. The same rule holds outside the import:
+      without a summaries service: meetings complete without a summary, and
+      the meeting detail says that Steno can't use the API key yet; the
+      summary can be run again once a key is saved. The same rule holds outside the import:
       when an existing `handover-identity` cannot be read (a denied prompt, a
       locked keychain), `handover_listener` waits with Try again and never mints
       over it; it mints only where #221's guard allows (no identity, no recorded
