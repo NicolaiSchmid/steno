@@ -913,10 +913,10 @@ fn adopted(
 /// ([`crate::audio_folders`]), which a recording's start and a phone
 /// upload's copy write before the row, both as the launch listed it and as
 /// read again after the rows: a delete forgets its entry before its rows
-/// go, so a meeting deleted while the launch ran is not adopted back. Each is adopted where it is, as a
-/// `queued` meeting with that id ([`adopted`]), its meeting and asset
-/// inserted in one transaction that fails when a row with the id was
-/// written meanwhile, and processed
+/// go, so a meeting deleted while the launch ran is not adopted back. Each
+/// is adopted where it is, as a `queued` meeting with that id
+/// ([`adopted`]), its meeting and asset inserted in one transaction that
+/// fails when a row with the id was written meanwhile, and processed
 /// ([`ProcessingPipeline::enqueue_new`](steno_pipeline::ProcessingPipeline::enqueue_new)).
 /// Its entry stays: the insert commits under `synchronous = NORMAL`, so a
 /// power loss can still take it, and a later launch forgets the entry
@@ -959,18 +959,15 @@ pub(crate) fn adopt_orphans(
     // is evidence: a delete forgets its entry before its rows go, so a
     // meeting deleted since the listing is not in this read, and one
     // started since is not in the listing.
-    let recorded = match crate::audio_folders::recorded(&interrupted.support_directory) {
-        Ok(now) => {
-            let mut recorded = listed_at_launch.clone();
-            recorded.retain(|meeting_id, _| now.contains_key(meeting_id));
-            recorded
-        }
+    let read_again = match crate::audio_folders::recorded(&interrupted.support_directory) {
+        Ok(read_again) => read_again,
         Err(error) => {
             tracing::debug!(%error, "recording folders not read again; none adopted");
             return Vec::new();
         }
     };
-    let recorded = &recorded;
+    let mut recorded = listed_at_launch.clone();
+    recorded.retain(|meeting_id, _| read_again.contains_key(meeting_id));
     let others = other_folders(store, &interrupted.known_folders).unwrap_or_else(|error| {
         tracing::debug!(%error, "the stored assets' folders were not listed");
         interrupted.known_folders.clone()
@@ -982,7 +979,7 @@ pub(crate) fn adopt_orphans(
             .chain(others),
         &[],
     );
-    let found = orphans(&folders, &ids, recorded);
+    let found = orphans(&folders, &ids, &recorded);
     let _entered = runtime.enter();
     let mut adopted_ids = Vec::new();
     // No master to lose: forgotten whether or not the store is durable.
@@ -1017,7 +1014,7 @@ pub(crate) fn adopt_orphans(
             }
         }
     }
-    for (&meeting_id, folder) in recorded {
+    for (&meeting_id, folder) in &recorded {
         if ids.contains(&meeting_id) || found.iter().any(|orphan| orphan.meeting_id == meeting_id) {
             continue;
         }

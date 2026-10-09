@@ -157,12 +157,13 @@ fn a_writer_whose_files_cannot_be_created_removes_the_folder_it_made() {
     };
     let directory = tempfile::tempdir().unwrap();
     let meeting_id = Uuid::new_v4();
-    // The meeting folder's path a few bytes short of the longest, so that
-    // of `recording.caf` in it is too long.
-    let folder = longest - 4 - "/".len() - meeting_id.to_string().len();
+    // The audio folder's length that puts the meeting folder's path a few
+    // bytes short of the longest, so that of `recording.caf` in it is too
+    // long.
+    let audio_length = longest - 4 - "/".len() - meeting_id.to_string().len();
     let mut audio = directory.path().to_path_buf();
-    while audio.as_os_str().len() + 1 < folder {
-        let room = folder - audio.as_os_str().len() - 1;
+    while audio.as_os_str().len() + 1 < audio_length {
+        let room = audio_length - audio.as_os_str().len() - 1;
         audio.push("a".repeat(room.min(200)));
     }
     std::fs::create_dir_all(&audio).unwrap();

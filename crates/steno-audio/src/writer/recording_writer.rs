@@ -128,12 +128,10 @@ impl RecordingWriter {
             std::io::ErrorKind::AlreadyExists => CaptureError::RecordingExists(directory.clone()),
             _ => failed(e),
         })?;
-        let opened = Self::open(layout, lanes, keep_raw_mic);
-        if opened.is_err() {
+        Self::open(layout, lanes, keep_raw_mic).inspect_err(|_| {
             // Created just above, so it holds only what `open` wrote.
             let _ = std::fs::remove_dir_all(directory);
-        }
-        opened
+        })
     }
 
     /// Creates the files in `layout.directory`, which `new` created.
