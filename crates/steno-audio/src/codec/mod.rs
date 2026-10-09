@@ -568,9 +568,6 @@ impl SymphoniaFrames {
         })
     }
 
-    /// Frames of silence handed on at a time for a damaged packet.
-    const SILENCE_BLOCK: usize = 4_096;
-
     /// Packet by packet. A packet that does not decode becomes silence of
     /// its length (see the module doc); a file with no decodable audio, or
     /// with more damaged packets than [`MAX_DAMAGED_SHARE`] allows, is an
@@ -599,55 +596,50 @@ impl SymphoniaFrames {
             }
             let index = self.damage.packets;
             self.damage.packets += 1;
-            let audio = match self.decoder.decode(&packet) {
-                Ok(audio) => audio,
-                Err(error) => {
-                    self.damage.damaged += 1;
-                    // The overlap of the packet before is no longer this
-                    // packet's to finish.
-                    self.decoder.reset();
-                    let shape = spec.unwrap_or(self.declared);
-                    let frames = self.packet_frames(&packet, shape.rate);
-                    tracing::warn!(
-                        packet = index,
-                        ts = packet.ts(),
-                        frames,
-                        %error,
-                        "a packet that does not decode is replaced by silence of its length"
-                    );
-                    let primed = self
-                        .priming
-                        .map_or(0, |trim| trim.frames_before(packet.ts(), frames));
-                    if spec != Some(shape) {
-                        spec = Some(shape);
-                        if shape.audible() {
-                            each(Event::Start(shape))?;
+            let (packet_spec, frames, samples): (Spec, usize, &[f32]) =
+                match self.decoder.decode(&packet) {
+                    Ok(audio) => {
+                        let frames = audio.frames();
+                        let shape = *audio.spec();
+                        let channels = shape.channels.count();
+                        let buffer = buffer.get_or_insert_with(|| {
+                            SampleBuffer::<f32>::new(audio.capacity() as u64, shape)
+                        });
+                        if buffer.capacity() < audio.capacity() * channels {
+                            *buffer = SampleBuffer::<f32>::new(audio.capacity() as u64, shape);
                         }
+                        buffer.copy_interleaved_ref(audio);
+                        let packet_spec = Spec {
+                            rate: shape.rate,
+                            channels,
+                            length: Length::Declared(self.frames),
+                        };
+                        (packet_spec, frames, buffer.samples())
                     }
-                    if shape.audible() {
-                        let mut left = frames - primed;
-                        while left > 0 {
-                            let block = left.min(Self::SILENCE_BLOCK) * shape.channels;
-                            if silence.len() < block {
-                                silence.resize(block, 0.0);
-                            }
-                            each(Event::Frames(shape, &silence[..block]))?;
-                            left -= block / shape.channels;
+                    Err(error) => {
+                        self.damage.damaged += 1;
+                        // The overlap of the packet before is no longer this
+                        // packet's to finish.
+                        self.decoder.reset();
+                        let shape = spec.unwrap_or(self.declared);
+                        let frames = self.packet_frames(&packet, shape.rate);
+                        tracing::warn!(
+                            packet = index,
+                            ts = packet.ts(),
+                            frames,
+                            %error,
+                            "a packet that does not decode is replaced by silence of its length"
+                        );
+                        let length = frames * shape.channels;
+                        if silence.len() < length {
+                            silence.resize(length, 0.0);
                         }
+                        (shape, frames, &silence[..length])
                     }
-                    continue;
-                }
-            };
+                };
             let primed = self
                 .priming
-                .map_or(0, |trim| trim.frames_before(packet.ts(), audio.frames()));
-            let shape = *audio.spec();
-            let count = shape.channels.count();
-            let packet_spec = Spec {
-                rate: shape.rate,
-                channels: count,
-                length: Length::Declared(self.frames),
-            };
+                .map_or(0, |trim| trim.frames_before(packet.ts(), frames));
             let audible = packet_spec.audible();
             if spec != Some(packet_spec) {
                 spec = Some(packet_spec);
@@ -655,16 +647,10 @@ impl SymphoniaFrames {
                     each(Event::Start(packet_spec))?;
                 }
             }
-            let buffer = buffer
-                .get_or_insert_with(|| SampleBuffer::<f32>::new(audio.capacity() as u64, shape));
-            if buffer.capacity() < audio.capacity() * count {
-                *buffer = SampleBuffer::<f32>::new(audio.capacity() as u64, shape);
-            }
-            buffer.copy_interleaved_ref(audio);
             if audible {
                 each(Event::Frames(
                     packet_spec,
-                    &buffer.samples()[primed * count..],
+                    &samples[primed * packet_spec.channels..],
                 ))?;
             }
         }
