@@ -220,10 +220,7 @@ mod tests {
 
     impl TestKey {
         fn new() -> Self {
-            Self(SecretKey::from(format!(
-                "steno-test-{}",
-                uuid::Uuid::new_v4()
-            )))
+            Self(SecretKey(format!("steno-test-{}", uuid::Uuid::new_v4())))
         }
 
         /// The credential as `CredReadW` returns it.
