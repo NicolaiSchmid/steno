@@ -12,7 +12,7 @@ pub struct AudioBuffer16k {
     /// silence of their length (an undecodable AAC packet), so the samples
     /// after them keep their time. 0 for a clean decode and for every
     /// buffer that does not come straight from a decoder; the pipeline
-    /// shows a count above 0 on the meeting. Rust only: AVFoundation
+    /// shows a count above 0 on the meeting. Rust only: `AVFoundation`
     /// conceals a bad packet and reports nothing.
     pub damaged_parts: u32,
 }

@@ -4,7 +4,7 @@
 //! kept in `damaged-audio.json` in the support directory (meeting id to
 //! count), so the meeting's detail can say so after the run. The database
 //! has no column for it, and the Swift app never reads the file, so a
-//! rollback ignores it. Rust only: AVFoundation conceals a damaged packet
+//! rollback ignores it. Rust only: `AVFoundation` conceals a damaged packet
 //! and reports nothing.
 //!
 //! The decode stage records the count of every run, so a meeting

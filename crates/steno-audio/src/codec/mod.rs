@@ -77,7 +77,7 @@ use steno_core::{
     AudioAsset, AudioBuffer16k, AudioDecoder, AudioFormat, AudioLane, BoundaryResult, async_trait,
     paths::file_url_path,
 };
-use symphonia::core::audio::SampleBuffer;
+use symphonia::core::audio::{Channels, SampleBuffer};
 use symphonia::core::codecs::{CODEC_TYPE_AAC, CodecParameters, Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, Packet};
@@ -547,7 +547,7 @@ impl SymphoniaFrames {
         let rate = params.sample_rate;
         let declared = Spec {
             rate: params.sample_rate.unwrap_or(0),
-            channels: params.channels.map_or(0, |channels| channels.count()),
+            channels: params.channels.map_or(0, Channels::count),
             length: Length::Declared(frames),
         };
         let time_base = params.time_base;

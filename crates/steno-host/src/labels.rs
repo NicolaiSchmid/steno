@@ -132,7 +132,7 @@ pub fn end_reason_sentence(reason: &RecordingEndReason) -> Option<String> {
 /// The detail's warning when the decoder replaced `parts` of the recording
 /// by silence; `None` for a recording that decoded whole. The phone's is
 /// named, as it is the one recording that can carry damaged packets
-/// (AAC). Rust only: AVFoundation conceals them and says nothing.
+/// (AAC). Rust only: `AVFoundation` conceals them and says nothing.
 #[must_use]
 pub fn damaged_audio_warning(parts: u32, source: MeetingSource) -> Option<String> {
     let recording = match source {
