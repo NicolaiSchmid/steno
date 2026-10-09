@@ -346,11 +346,13 @@ pub fn dependencies(
                 Some(directory) => standardized(directory),
                 None => steno_services::speech::models_directory(settings, &paths()?),
             });
+            // One sidecar engine for both, so they share its child.
+            let sidecar = Arc::new(steno_services::speech::sidecar_engine(&speech));
             (
                 // The flag names the engine for this run, as the Swift CLI's
                 // `makeSpeechEngine(engine, ...)` did; the stored id does not.
-                steno_services::speech::speech_engine(engine, &speech),
-                process_diarizer(&speech),
+                steno_services::speech::speech_engine_with(engine, &speech, &sidecar),
+                process_diarizer(sidecar),
                 Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
             )
         }
@@ -379,14 +381,16 @@ pub fn dependencies(
     })
 }
 
-/// The diarizer `steno process --engine` runs over `speech`. It stays on
-/// `Install::Allowed`: a user who runs an explicit command in a terminal
-/// asked for the work and sees its output, so it may download the
-/// diarizer's models on first use. The app's pipelines never do
+/// The diarizer `steno process --engine` runs in the child of `sidecar`.
+/// It stays on `Install::Allowed`: a user who runs an explicit command in
+/// a terminal asked for the work and sees its output, so it may download
+/// the diarizer's models on first use. The app's pipelines never do
 /// (`Install::Never` in `steno_services::speech::SpeechEngines`), and
 /// this wiring is built here, not shared with them.
-fn process_diarizer(speech: &SpeechSetup) -> Arc<dyn steno_core::Diarizer> {
-    steno_services::speech::diarizer(speech, steno_diarize::Install::Allowed)
+fn process_diarizer(
+    sidecar: Arc<steno_speech::SidecarSpeechEngine>,
+) -> Arc<dyn steno_core::Diarizer> {
+    steno_services::speech::diarizer_in(sidecar, steno_diarize::Install::Allowed)
 }
 
 /// A hex SHA-256, `sha256sum`'s spelling.
@@ -612,7 +616,8 @@ mod tests {
             &StenoPaths::new(dir.path()),
         );
         speech.speech_settings.models_mirror = Some(mirror);
-        assert!(process_diarizer(&speech).prepare().await.is_err());
+        let sidecar = Arc::new(steno_services::speech::sidecar_engine(&speech));
+        assert!(process_diarizer(sidecar).prepare().await.is_err());
         assert!(requests.load(Ordering::SeqCst) > 0);
     }
 

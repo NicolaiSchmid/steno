@@ -1,7 +1,8 @@
 //! A meeting processed while the diarizer's models are missing, through the
 //! diarizer the app builds (`steno_services::speech::diarizer`) over a
-//! loopback mirror. The speech engine is core's fake. No network beyond
-//! 127.0.0.1.
+//! loopback mirror, in the real `steno-speech-sidecar` binary from the
+//! target directory (`cargo test --workspace` builds it). The speech engine
+//! is core's fake. No network beyond 127.0.0.1.
 //!
 //! - Under `Install::Allowed` (what `steno process` builds, and
 //!   `SpeechEngines` until the pipeline gains its models-missing gate), a
@@ -49,6 +50,8 @@ use steno_pipeline::{
 };
 use steno_services::speech::{ModelStoreSpeechModels, SpeechSetup};
 use steno_speech::ModelStore;
+
+mod common;
 
 /// The body bytes the first response sends before the mirror cuts it.
 const CUT_AFTER: usize = 256 * 1024;
@@ -214,6 +217,8 @@ fn world(mirror: &Mirror, install: Install) -> World {
     let mut setup =
         SpeechSetup::in_models_directory(models_directory.clone(), &StenoPaths::new(dir.path()));
     setup.speech_settings.models_mirror = Some(mirror.url.clone());
+    // The real child, which loads (and refuses) the files it is handed.
+    setup.sidecar.program = common::sidecar_binary();
     let models = setup.model_store();
     assert_eq!(
         models.directory(&models::asset()),
