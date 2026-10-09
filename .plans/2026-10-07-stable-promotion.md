@@ -491,7 +491,7 @@ A for the audio path, P for the other data-loss fixes, X for the Linux targets.
 Every package is written in parallel except where a dependency is named:
 
 - S3 on S6's `steno-macos` (D10); S4's packaged-install message on X5; A8 on S2's
-  controller; X6 on X2, X4, X5 and P5; X7 on X4, X5 and P5; P5's save logging on
+  controller; X6 on X5 and P5 (X2's and X4's files join it in their PRs); X7 on X4, X5 and P5; P5's save logging on
   P3's recoverable save; S1's queued refusal on P9's queue.
 
 ### S: the Mac and the release
@@ -1092,8 +1092,27 @@ The table above names each package and its owner. Their tests:
   of the Omarchy gate passing. The first stable
   push is by hand; then **Nicolai** adds
   `AUR_SSH_PRIVATE_KEY`, and `publish` pushes from the second stable release
-  on. A candidate is installed with `makepkg -si` from `packaging/aur/`, with
-  `pkgver` in pacman form (`0.11.0rc1`, which `vercmp` ranks below `0.11.0`).
+  on. A candidate is installed with `makepkg -si` from `packaging/aur/` after
+  the README's Bump steps 1 to 5, with `pkgver` in pacman form (`0.11.0rc1`,
+  which `vercmp` ranks below `0.11.0`).
+  - As built (`packaging/aur/`, #265): pinned to `0.1.0rc3` as a build
+    vehicle until a release contains #227 and #261; the first AUR push is a
+    release with both, so #265 merges after #227 and #261. Two drop-ins (the
+    autostart service's and GNOME's scope's), copied from #227 until the
+    `.deb` installs them; `package()` keeps the `.deb`'s copy when it has one.
+    No install script: Arch's `30-systemd-daemon-reload-user.hook` reloads
+    the user managers. X4's `ufw` profile and X2's window rules are `TODO`
+    lines in `package()`, so X6 lands before X2 and X4 and gains them in their
+    PRs. `depends` adds what namcap finds linked (`cairo`, `gdk-pixbuf2`,
+    `glibc`, `hicolor-icon-theme`, `libgcc`, `libpipewire`, `libstdc++`).
+    The release key is also committed as
+    `packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`;
+    publishing it to keyserver.ubuntu.com, which yay and paru query for a
+    missing `validpgpkeys` key, is **Nicolai**'s. The repository gains a root
+    `LICENSE`, which the package's copy must match. `packaging/check-aur.sh`
+    (`aur-ci.yml`, also weekly) builds, verifies and installs it in an Arch
+    container, and fails when the signature check is skipped or the wrapper
+    runs anything but its three lines.
 - **X7 Nix on Linux.** `flake.nix` gains `packages.x86_64-linux.steno`, built
   from source with `rustPlatform` and `cargo-tauri.hook`, `wrapGAppsHook3`,
   `ORT_LIB_LOCATION` against nixpkgs' `onnxruntime` with
@@ -1216,7 +1235,8 @@ an install needs a newer build installed by hand (Rollback).
       release's `appcast.xml`;
     - bump the cask with `apps/macos/scripts/bump-homebrew-cask.sh` once
       `HOMEBREW_TAP_TOKEN` exists (D7);
-    - push the AUR bump once `AUR_SSH_PRIVATE_KEY` exists (X6);
+    - push the AUR bump once `AUR_SSH_PRIVATE_KEY` exists, and open a pull
+      request with the same bump to `packaging/aur/` (X6);
     - write the Nix flake lines (the macOS DMG's hash) to the summary;
     - output whether the branch already has an item without a channel.
   - The lane releases stay pre-releases with `--latest=false`.
@@ -1681,7 +1701,8 @@ where there is one, pairs the phone, records a one-minute meeting and turns on
 launch at login (on NixOS the module's `steno.service` does), then upgrades to
 the
 candidate under test: `sudo apt install ./<new>.deb` on GNOME; `makepkg -si` in
-`packaging/aur/` at the new tag on Omarchy; the flake input moved to the new
+`packaging/aur/` after the README's Bump steps 1 to 5 for the new tag (the
+PKGBUILD at the tag still names the previous release) on Omarchy; the flake input moved to the new
 tag, `nixos-rebuild switch` and `sudo nix-collect-garbage -d` on NixOS. Step 0
 passes when the meeting and the pairing are kept and, after a logout and login,
 Steno starts once, as the new version. Each target's step 1 sets up its step 0;
@@ -1735,12 +1756,15 @@ interrupted" after one. On the GNOME machine,
   7. Quit the `.deb`'s Steno; the AppImage starts (`pgrep -a steno-desktop`
      shows only its path) and finds the same meetings.
 - **Omarchy** (Omarchy 4, Arch with Hyprland on Wayland).
-  1. Before step 0: import the release key (`gpg --recv-keys
-     048B527950E4F609B90E63495F8810A6E6D4DB46`), so the PKGBUILD verifies each
-     `.deb`'s signature; add the README's Lua window rules to `~/.config/hypr/`
-     and reload Hyprland. In step 0, `sudo ufw allow Steno` runs right after the
-     install and before the pairing. From `v0.11.0` on, step 0 installs with
-     `yay -S steno-desktop-bin`.
+  1. Before step 0: import the release key from a checkout (`gpg --import
+     packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`), so
+     the PKGBUILD verifies each `.deb`'s signature; add the README's Lua window
+     rules to `~/.config/hypr/` and reload Hyprland. In step 0, `sudo ufw allow
+     Steno` runs right after the install and before the pairing, and the
+     upgrade runs while the previous candidate, started at login, records;
+     then stop the recording: the meeting processes. From `v0.11.0` on, step 0
+     installs with `yay -S steno-desktop-bin`, which verifies with the
+     imported key (and imports it itself once it is on keyserver.ubuntu.com).
   2. Start Steno from the Omarchy launcher. `cat /proc/$(pidof -s
      steno-desktop)/cgroup` names an `app-…scope` (not Hyprland's unit). The
      tray icon is in the bar's drawer; a right click opens the menu, and every
@@ -1887,7 +1911,9 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
      repos/NicolaiSchmid/steno/environments/appcast --jq
      '[.protection_rules[].type]'` includes `required_reviewers` and
      `branch_policy`;
-   - has his AUR account ready for the first push (X6).
+   - has his AUR account ready for the first push, and the release key on
+     keyserver.ubuntu.com, so `yay -S steno-desktop-bin` verifies without a
+     checkout (X6).
 7. **Bump to `0.11.0` on a fresh commit and tag it.** This publishes the full
    release as "latest", creates `desktop-stable`, moves `desktop-beta` to
    0.11.0, uploads `appcast.xml`, and puts the flake lines in the summary. The
