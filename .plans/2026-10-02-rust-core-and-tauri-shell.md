@@ -1770,6 +1770,13 @@ parity item until a plan says otherwise:
   from a file of another encoder that declares no priming (Android's
   `MPEG4Writer` primes 1 024), and the Rust decode keeps them (stable plan
   D9).
+- **A damaged packet becomes silence: Rust only.** AVFoundation conceals a
+  packet its decoder cannot read and says nothing; symphonia returns an
+  error, which stopped the whole decode. The decoder writes silence of the
+  packet's container duration in its place, counts it
+  (`AudioBuffer16k::damaged_parts`) and the meeting's detail says how many
+  parts were replaced; a file with more than half of its packets damaged
+  fails (stable plan A12).
 - **AAC-LC only.** AVFoundation also decoded HE-AAC; symphonia decodes
   AAC-LC alone. The iOS recorder writes AAC-LC, so nothing is lost today; a
   plan adds HE-AAC if an import needs it.
