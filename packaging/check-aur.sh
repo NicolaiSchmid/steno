@@ -53,9 +53,8 @@ cmp -s "$release_key" "$work/keys/pgp/$fpr.asc" \
 [[ "$(sed -n 's/^\tvalidpgpkeys = //p' "$work/.SRCINFO")" == "$fpr" ]] \
   || die "validpgpkeys is not exactly the release key's fingerprint $fpr"
 deb="$(sed -n 's/^\tsource = \(.*_amd64\.deb\)$/\1/p' "$work/.SRCINFO")"
-if [[ -z "$deb" ]] || ! grep -qxF "$(printf '\tsource = %s.asc' "$deb")" "$work/.SRCINFO"; then
-  die "source= lacks the .deb's signature, its .asc"
-fi
+grep -qxF $'\tsource = '"$deb.asc" "$work/.SRCINFO" \
+  || die "source= lacks the .deb's signature, its .asc"
 echo "ok: the PKGBUILD checks the .deb's .asc against the release key $fpr"
 
 cmp -s "$root/LICENSE" "$work/LICENSE" || die "packaging/aur/LICENSE is not the repository's LICENSE"
