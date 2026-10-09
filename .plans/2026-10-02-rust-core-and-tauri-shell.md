@@ -1396,29 +1396,24 @@ still has to draw the window side. `[ ]` is not ported yet.
     default. Two drop-ins in `apps/desktop/src-tauri/linux/` raise the timeout to 20 s:
     `[Service]` as `10-steno.conf` for the unit, `[Scope]` as `zz-steno.conf` for the
     scope, named to sort after `override.conf`. The `.deb` installs both under
-    `/usr/lib/systemd/user/` (checked by `check-bundle.sh`); the app writes them under
+    `/usr/lib/systemd/user/`, and its `postinst` (`linux/deb-postinst.sh`) reloads
+    every running user manager, so an app autostarted before the upgrade gets them
+    too (all three checked by `check-bundle.sh`). The app writes them under
     `~/.config/systemd/user/` whatever `XDG_CONFIG_HOME` says, the scope's at every
     launch and the unit's while Launch at login is on, and reloads the user manager
-    after a write, never after a removal (`stop_timeout.rs`). Launch at login turned
-    off while the app runs as the unit (its cgroup) is marked and goes after the
-    exit's save (`autostart.rs`): removing the entry earlier lets any reload unload
-    the running unit, and the session's end then sends no SIGTERM. The AUR and Nix
-    packages ship the files under stable plan X6 and X7. Each shutdown logs its
-    duration at `warn`. Measured under a real systemd 255 user manager in a 1-CPU
-    container, with a stand-in that needs 8 s after SIGTERM: the unit and the scope
-    (with `override.conf`) killed it at 5 s without the drop-ins and let it finish
-    with them. A debug build with 8 s added before its save wrote both drop-ins at
-    launch and reloaded, so the running unit and the running scope took 20 s; stopped
-    as the uwsm-style unit (`graphical-session.target` stopped) and in the scope, it
-    saved in about 8.1 s each time, the meeting `queued` with its duration. With
-    Launch at login turned off mid-recording as the unit and an unrelated
-    `daemon-reload` after it, the unit stayed loaded with 20 s and its `PartOf`, the
-    session's end saved the same way, and then the entry and the unit's drop-in were
-    gone; turned off outside the unit, both went at once. A reboot saves inside logind's delay; on Omarchy the delay is
-    15 s and the user manager then gets 5 s (`user@.service`), which no drop-in for
-    this unit can raise, so that path depends on the delay lock. A save still needs
-    to fit in the compositor's own stop when the app runs in its unit rather than its
-    own (uwsm's `wayland-wm@.service`, `TimeoutStopSec=10`).
+    after a write (`stop_timeout.rs`). A reload while the autostart entry is gone
+    unloads the running unit, and the session's end then sends no SIGTERM, so
+    neither the app, while it runs as the unit (its cgroup), nor the `postinst`
+    reloads without the entry, and Launch at login turned off while the app runs as
+    the unit is marked and goes after the exit's save (`autostart.rs`). The AUR and
+    Nix packages ship the files under stable plan X6 and X7. Each shutdown logs its
+    duration at `warn`. Measured under a real systemd 255 user manager (desktop
+    README, Launch at login under systemd). A reboot saves inside logind's delay; on
+    Omarchy the delay is 15 s and the user manager then gets 5 s (`user@.service`),
+    which no drop-in for this unit can raise, so that path depends on the delay
+    lock. A save still needs to fit in the compositor's own stop when the app runs
+    in its unit rather than its own (uwsm's `wayland-wm@.service`,
+    `TimeoutStopSec=10`).
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -3232,7 +3227,7 @@ PR off `main`.
 | Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | open |
 | The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | open |
-| An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | in review |
+| An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
