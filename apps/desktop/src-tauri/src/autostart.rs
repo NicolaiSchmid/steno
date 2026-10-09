@@ -287,6 +287,13 @@ enum AtLaunch {
     /// An entry marked to go at an exit that never came (a kill, a crash),
     /// and the app no longer runs as its unit: it goes now.
     TurnOff,
+    /// No entry while the app runs as the autostart unit: an older release
+    /// turned Launch at login off at once, or the user removed the entry,
+    /// and an update's relaunch stayed in the unit. The entry comes back,
+    /// marked to go at the exit, so the unit gets its drop-in and the
+    /// reload that applies it, and outlives any other reload until it has
+    /// stopped.
+    Restore,
     /// No entry: its drop-in goes, and a mark left behind.
     Gone,
     /// The entry could not be read: only GNOME's drop-in is installed.
@@ -300,19 +307,22 @@ fn at_launch(status: LoginItemStatus, marked: bool, as_autostart_unit: bool) -> 
     match status {
         LoginItemStatus::Enabled if marked && !as_autostart_unit => AtLaunch::TurnOff,
         LoginItemStatus::Enabled => AtLaunch::Keep,
+        LoginItemStatus::NotRegistered if as_autostart_unit => AtLaunch::Restore,
         LoginItemStatus::NotRegistered => AtLaunch::Gone,
         _ => AtLaunch::Unread,
     }
 }
 
 /// The login item the drop-ins follow after the launch's `step`
-/// (`stop_timeout::sync`); `turn_off` removes the entry for `TurnOff` and
-/// says whether it went, and an entry that stays is still on.
+/// (`stop_timeout::sync`). `switch` removes the entry for `TurnOff`
+/// (`false`) and restores it for `Restore` (`true`), and says whether that
+/// worked; an entry it could not change stays as it was.
 #[cfg(target_os = "linux")]
-fn login_item_after(step: AtLaunch, turn_off: impl FnOnce() -> bool) -> Option<bool> {
+fn login_item_after(step: AtLaunch, switch: impl FnOnce(bool) -> bool) -> Option<bool> {
     match step {
         AtLaunch::Keep => Some(true),
-        AtLaunch::TurnOff => Some(!turn_off()),
+        AtLaunch::TurnOff => Some(!switch(false)),
+        AtLaunch::Restore => Some(switch(true)),
         AtLaunch::Gone => Some(false),
         AtLaunch::Unread => None,
     }
@@ -321,7 +331,8 @@ fn login_item_after(step: AtLaunch, turn_off: impl FnOnce() -> bool) -> Option<b
 /// At launch, on Linux: the drop-ins follow the login item as it stands
 /// (`at_launch`), so an entry written before the drop-ins existed, or by
 /// an older release, gets them too, and one the user removed loses its
-/// own. While the system manages the login item, only GNOME's drop-in.
+/// own, unless the app runs as its unit (`AtLaunch::Restore`). While the
+/// system manages the login item, only GNOME's drop-in.
 #[cfg(target_os = "linux")]
 pub fn sync_at_launch(app: &AppHandle) {
     if packaged::login_item_is_managed() {
@@ -336,13 +347,27 @@ pub fn sync_at_launch(app: &AppHandle) {
         marked,
         stop_timeout::runs_as_autostart_unit(),
     );
-    let login_item = login_item_after(step, || match manager.disable() {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!("Launch at login could not be turned off; it stays on");
-            tracing::debug!(%error, "turning Launch at login off at launch");
-            false
+    let login_item = login_item_after(step, |on| {
+        let switched = if on {
+            // Marked first: a restored entry without its mark would stay.
+            mark.as_deref()
+                .ok_or_else(|| "the app has no config directory".to_owned())
+                .and_then(|mark| set_mark(mark, true).map_err(|error| error.to_string()))
+                .and_then(|()| enable(app).map_err(|error| error.to_string()))
+        } else {
+            manager.disable().map_err(|error| error.to_string())
+        };
+        if let Err(error) = &switched {
+            if on {
+                tracing::warn!(
+                    "the autostart entry could not be kept until the exit; the unit keeps a 5 s stop timeout"
+                );
+            } else {
+                tracing::warn!("Launch at login could not be turned off; it stays on");
+            }
+            tracing::debug!(%error, on, "the login item at launch");
         }
+        switched.is_ok()
     });
     // No entry is left: a mark has nothing more to turn off.
     if login_item == Some(false)
@@ -497,8 +522,9 @@ mod tests {
 
     /// The launch keeps a standing entry's drop-in, also for a marked
     /// entry while the app runs as its unit; turns a marked entry off once
-    /// it does not; drops the drop-in without an entry; and changes
-    /// nothing for an entry it could not read.
+    /// it does not; restores a missing entry while it does, and drops the
+    /// drop-in without an entry otherwise; and changes nothing for an
+    /// entry it could not read.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_launch_follows_the_entry_and_its_mark() {
@@ -506,25 +532,32 @@ mod tests {
         for as_unit in [false, true] {
             assert_eq!(at_launch(Enabled, false, as_unit), AtLaunch::Keep);
             for marked in [false, true] {
-                assert_eq!(at_launch(NotRegistered, marked, as_unit), AtLaunch::Gone);
                 assert_eq!(at_launch(NotFound, marked, as_unit), AtLaunch::Unread);
             }
+        }
+        for marked in [false, true] {
+            assert_eq!(at_launch(NotRegistered, marked, false), AtLaunch::Gone);
+            assert_eq!(at_launch(NotRegistered, marked, true), AtLaunch::Restore);
         }
         assert_eq!(at_launch(Enabled, true, true), AtLaunch::Keep);
         assert_eq!(at_launch(Enabled, true, false), AtLaunch::TurnOff);
     }
 
-    /// Only `TurnOff` removes the entry, and an entry that would not go
-    /// keeps its drop-in.
+    /// Only `TurnOff` removes the entry and only `Restore` brings it back;
+    /// an entry the launch could not change keeps the drop-in it had.
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_launch_turns_off_only_a_marked_entry_and_keeps_one_that_stays() {
-        let untouched = |step| login_item_after(step, || panic!("{step:?} turned it off"));
+    fn the_launch_changes_the_entry_only_to_turn_off_or_restore() {
+        let untouched = |step| login_item_after(step, |on| panic!("{step:?} switched to {on}"));
         assert_eq!(untouched(AtLaunch::Keep), Some(true));
         assert_eq!(untouched(AtLaunch::Gone), Some(false));
         assert_eq!(untouched(AtLaunch::Unread), None);
-        assert_eq!(login_item_after(AtLaunch::TurnOff, || true), Some(false));
-        assert_eq!(login_item_after(AtLaunch::TurnOff, || false), Some(true));
+        for worked in [true, false] {
+            let off = login_item_after(AtLaunch::TurnOff, |on| !on && worked);
+            assert_eq!(off, Some(!worked));
+            let restored = login_item_after(AtLaunch::Restore, |on| on && worked);
+            assert_eq!(restored, Some(worked));
+        }
     }
 
     #[cfg(target_os = "linux")]
