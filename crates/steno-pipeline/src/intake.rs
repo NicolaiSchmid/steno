@@ -141,7 +141,7 @@ impl RecordingIntake {
         }
     }
 
-    /// The intake noting each copy's folder in `folders`.
+    /// The intake noting each copy's folder in `folders`. Rust only.
     #[must_use]
     pub fn noting_folders_in(mut self, folders: Arc<dyn AdmissionFolders>) -> Self {
         self.folders = folders;
