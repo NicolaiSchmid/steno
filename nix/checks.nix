@@ -67,11 +67,11 @@ in {
       grep -q 'STENO_DISTRIBUTION' "$bin/steno-desktop"
       for elf in .steno-desktop-wrapped steno-speech-sidecar; do
         file -L "$bin/$elf" | grep -q ELF || { echo "$elf is not an ELF binary"; exit 1; }
-        if $ldd "$bin/$elf" | grep 'not found'; then echo "$elf misses a library"; exit 1; fi
+        libs="$($ldd "$bin/$elf")"
+        if grep 'not found' <<< "$libs"; then echo "$elf misses a library"; exit 1; fi
+        # nixpkgs' ONNX Runtime, linked.
+        grep -q "$onnxruntime/lib/libonnxruntime.so" <<< "$libs"
       done
-      # nixpkgs' ONNX Runtime, linked, in both.
-      $ldd "$bin/steno-speech-sidecar" | grep -q "$onnxruntime/lib/libonnxruntime.so"
-      $ldd "$bin/.steno-desktop-wrapped" | grep -q "$onnxruntime/lib/libonnxruntime.so"
 
       # The tray opens libayatana-appindicator by this store path.
       test -f "$tray"
