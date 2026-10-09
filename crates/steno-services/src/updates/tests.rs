@@ -18,8 +18,10 @@ fn launch_time() -> DateTime<Utc> {
 }
 
 /// Answers the checks a test queued (none left: up to date) and counts
-/// every call; a check waits for `release` while `stalls` is set, and an
-/// install records whether the gate's hold was alive.
+/// every call; a check waits for `release` while `stalls` is set, a
+/// download with `busy_after_download` set leaves the gate busy (a
+/// recording started meanwhile), and an install records whether the
+/// gate's hold was alive.
 #[derive(Default)]
 struct FakeSource {
     answers: Mutex<VecDeque<Result<Option<String>, String>>>,
@@ -27,6 +29,7 @@ struct FakeSource {
     stalls: AtomicBool,
     release: tokio::sync::Notify,
     downloads: AtomicUsize,
+    busy_after_download: AtomicBool,
     dropped: AtomicUsize,
     download_fails: AtomicBool,
     installs: AtomicUsize,
@@ -62,6 +65,11 @@ impl UpdateSource for FakeSource {
 
     async fn download(&self) -> Result<(), String> {
         self.downloads.fetch_add(1, Ordering::SeqCst);
+        if self.busy_after_download.load(Ordering::SeqCst)
+            && let Some(gate) = lock(&self.gate).as_ref()
+        {
+            gate.idle.store(false, Ordering::SeqCst);
+        }
         if self.download_fails.load(Ordering::SeqCst) {
             return Err("the download broke off".into());
         }
@@ -332,15 +340,44 @@ async fn a_found_update_is_announced_once_per_version_in_a_run() {
     assert_eq!(world.installs(), 0);
 }
 
-/// With automatic downloads on and a real gate, a found update is
-/// downloaded, and it is never installed while the gate says busy: the
-/// user is told instead, and later ticks try the install again without a
-/// second download. Once the app is idle the next tick installs while it
-/// holds the gate.
+/// With automatic downloads on and a real gate, nothing downloads while
+/// the app is busy, since a recording or a processing job has the disk and
+/// the network to itself: the user is told instead, and the first tick
+/// after the app is idle downloads and installs, without a second check.
+#[tokio::test]
+async fn nothing_downloads_while_the_app_is_busy() {
+    let world = World::new();
+    world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    for _ in 0..5 {
+        schedule.tick().await;
+        world.advance(TimeDelta::hours(1));
+    }
+    assert_eq!(world.checks(), 1);
+    assert_eq!(world.downloads(), 0);
+    assert_eq!(world.source.announced(), ["0.12.0"]);
+
+    world.gate.idle.store(true, Ordering::SeqCst);
+    schedule.tick().await;
+    assert_eq!(world.downloads(), 1);
+    assert_eq!(world.installs(), 1);
+    assert_eq!(world.checks(), 1);
+}
+
+/// A download the app turned busy during is never installed while the
+/// gate says busy, and later ticks try the install again without a second
+/// download. Once the app is idle the next tick installs while it holds
+/// the gate.
 #[tokio::test]
 async fn a_download_never_installs_while_the_gate_says_busy() {
     let world = World::new();
     world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.gate.idle.store(true, Ordering::SeqCst);
+    world
+        .source
+        .busy_after_download
+        .store(true, Ordering::SeqCst);
     world.source.answer(Ok(Some("0.12.0")));
     let schedule = world.schedule();
     schedule.tick().await;
@@ -360,6 +397,7 @@ async fn a_download_never_installs_while_the_gate_says_busy() {
     world.advance(TimeDelta::hours(1));
     schedule.tick().await;
     assert_eq!(world.installs(), 1);
+    assert_eq!(world.downloads(), 1);
     assert_eq!(*lock(&world.source.held_while_installing), [true]);
     assert_eq!(world.gate.alive.load(Ordering::SeqCst), 0, "released after");
     assert_eq!(world.source.announced(), ["0.12.0"]);
@@ -404,6 +442,11 @@ async fn nothing_downloads_while_the_gate_is_the_stand_in() {
 async fn turning_automatic_downloads_off_frees_the_download() {
     let world = World::new();
     world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.gate.idle.store(true, Ordering::SeqCst);
+    world
+        .source
+        .busy_after_download
+        .store(true, Ordering::SeqCst);
     world.source.answer(Ok(Some("0.12.0")));
     let schedule = world.schedule();
     schedule.tick().await;
@@ -424,6 +467,11 @@ async fn turning_automatic_downloads_off_frees_the_download() {
 async fn a_check_that_finds_no_update_forgets_the_download() {
     let world = World::new();
     world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.gate.idle.store(true, Ordering::SeqCst);
+    world
+        .source
+        .busy_after_download
+        .store(true, Ordering::SeqCst);
     world.source.answer(Ok(Some("0.12.0")));
     world.source.answer(Ok(None));
     let schedule = world.schedule();

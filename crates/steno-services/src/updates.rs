@@ -29,10 +29,11 @@
 //!   announces it. The user installs it from there. Automatic downloads
 //!   wait for P25's [`InstallGate`] (stable plan): until it replaces
 //!   [`NeverIdle`], the flag is stored and shown but nothing downloads by
-//!   itself. With the gate, a found update is downloaded and installed
-//!   while the install holds the gate's [`InstallHold`] through the
-//!   install, the shutdown and the relaunch; without a hold the download
-//!   waits for a later tick.
+//!   itself. With the gate, a found update is downloaded once the app is
+//!   idle ([`InstallGate::is_idle_now`]), and installed while the install
+//!   holds the gate's [`InstallHold`] through the install, the shutdown
+//!   and the relaunch; while the app is busy the download, and then the
+//!   install, wait for a later tick.
 //! - **Packaged installs** ([`updates_are_managed`], stable plan X5): no
 //!   schedule, and no check, the user's included.
 //!
@@ -113,11 +114,13 @@ pub trait InstallGate: Send + Sync {
     /// stopping, no save in progress, no processing job), `None` while it
     /// is busy.
     fn try_hold(&self) -> Option<InstallHold>;
-    /// True only for [`NeverIdle`]: a download it can never let install
-    /// would sit in memory for the rest of the run, so the schedule
-    /// downloads nothing by itself through the stand-in.
-    fn is_stand_in(&self) -> bool {
-        false
+    /// Whether the app is idle now, without keeping a hold: a download
+    /// waits for it, since a recording or a processing job has the disk
+    /// and the network to itself. A gate may answer it more cheaply.
+    /// [`NeverIdle`] never is, so through it nothing downloads by itself
+    /// and no package sits in memory that could never install.
+    fn is_idle_now(&self) -> bool {
+        self.try_hold().is_some()
     }
 }
 
@@ -130,10 +133,6 @@ pub struct NeverIdle;
 impl InstallGate for NeverIdle {
     fn try_hold(&self) -> Option<InstallHold> {
         None
-    }
-
-    fn is_stand_in(&self) -> bool {
-        true
     }
 }
 
@@ -168,6 +167,10 @@ struct State {
     checking: bool,
     /// The newer version the last successful check found.
     found: Option<String>,
+    /// The found version still to download, once the app is idle; taken
+    /// by the attempt, so a failed download or install waits for the next
+    /// check.
+    to_download: Option<String>,
     /// The version [`UpdateSource::download`] kept.
     staged: Option<String>,
     /// The version last announced or shown to the user, so a later tick in
@@ -243,6 +246,7 @@ impl UpdateSchedule {
                 outcome: UpdateOutcome::NotChecked,
                 checking: false,
                 found: None,
+                to_download: None,
                 staged: None,
                 announced: None,
             }),
@@ -272,33 +276,22 @@ impl UpdateSchedule {
         });
     }
 
-    /// One round of the schedule: a download a busy app held back installs
-    /// once the gate gives a hold; then, when a check is due, the check,
-    /// and with automatic downloads on and a real gate, the download and
-    /// the install; last, unless a recording is under way, the
-    /// announcement of a found update that did not install.
+    /// One round of the schedule: when a check is due, the check; with
+    /// automatic downloads on, the download of a found update and its
+    /// install, each once the gate says the app is idle; last, unless a
+    /// recording is under way, the announcement of a found update that
+    /// did not install.
     pub async fn tick(&self) {
         if self.managed {
             return;
         }
-        let downloads = self.automatically_downloads() && !self.gate.is_stand_in();
-        if downloads && self.state().staged.is_some() && self.install_when_idle().await {
-            return;
+        if self.automatically_checks() {
+            self.check_if_due().await;
         }
-        if self.automatically_checks()
-            && let Some(Ok(Some(version))) = self.check_if_due().await
-            && downloads
-        {
-            match self.source.download().await {
-                Ok(()) => {
-                    self.state().staged = Some(version);
-                    if self.install_when_idle().await {
-                        return;
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%version, "the update could not be downloaded: {error}");
-                }
+        if self.automatically_downloads() {
+            self.download_when_idle().await;
+            if self.state().staged.is_some() && self.install_when_idle().await {
+                return;
             }
         }
         self.announce_when_idle();
@@ -327,19 +320,36 @@ impl UpdateSchedule {
         result
     }
 
-    /// The tick's check, once it holds `one_check`: `None` when it is no
+    /// The tick's check, once it holds `one_check`: none when it is no
     /// longer due because the user's check ran meanwhile.
-    async fn check_if_due(&self) -> Option<Result<Option<String>, String>> {
+    async fn check_if_due(&self) {
         let one = self.one_check.lock().await;
-        if !self.is_due() {
-            return None;
+        if self.is_due() {
+            let _ = self.check_holding(one).await;
         }
-        Some(self.check_holding(one).await)
+    }
+
+    /// Downloads the found update when the app is idle; while it is busy
+    /// the download waits for a later tick.
+    async fn download_when_idle(&self) {
+        if !self.gate.is_idle_now() {
+            return;
+        }
+        let Some(version) = self.state().to_download.take() else {
+            return;
+        };
+        match self.source.download().await {
+            Ok(()) => self.state().staged = Some(version),
+            Err(error) => {
+                tracing::warn!(%version, "the update could not be downloaded: {error}");
+            }
+        }
     }
 
     /// Checks, giving up after [`CHECK_TIMEOUT`]: records the outcome and,
     /// when the check succeeded, the time and what it found; a kept
-    /// download of another version is forgotten.
+    /// download of another version is forgotten, and a version not kept is
+    /// to download.
     async fn check_holding(
         &self,
         _one: tokio::sync::MutexGuard<'_, ()>,
@@ -362,6 +372,7 @@ impl UpdateSchedule {
                         .map_or(UpdateOutcome::UpToDate, UpdateOutcome::Available);
                     if state.staged != *found {
                         state.staged = None;
+                        state.to_download.clone_from(found);
                     }
                     state.found.clone_from(found);
                 }
