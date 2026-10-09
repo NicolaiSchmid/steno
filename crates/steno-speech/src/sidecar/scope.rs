@@ -10,7 +10,8 @@
 //! the app with it, and the recording in progress. So right after the
 //! spawn the client asks the user manager to start a transient scope
 //! beside the app's unit, in the same slice, holding only the child, and
-//! waits until the child's cgroup names that scope. A start the manager
+//! waits up to [`MOVE_TIMEOUT`] until the child's cgroup names that
+//! scope. A start the manager
 //! has not carried out by then is called off, and the child stays in the
 //! app's cgroup; a child that joined its scope just before the call-off
 //! stays in it. `systemd-oomd` then weighs the two cgroups apart and takes
@@ -23,11 +24,12 @@
 //! The scope is `PartOf` the app's unit, so stopping that unit stops the
 //! child too; the child also ends at the app's exit, as everywhere (the
 //! `steno-speech-sidecar` crate docs). A kernel OOM kill of the child does
-//! not count against the app's unit either. An app outside a user unit (a
+//! not count against the app's unit. An app outside a user unit (a
 //! system service, an ssh login, a container without a user manager, a
 //! distribution without systemd) keeps its child in its own cgroup, as
-//! does any failure here, which is logged at info: the app records either
-//! way.
+//! does any failure here, but one that leaves unknown whether the manager
+//! moved the child, which leaves it where the manager put it. Every
+//! outcome is logged at info, and the app records either way.
 //!
 //! The request goes over the user bus's Unix socket in
 //! `$XDG_RUNTIME_DIR`, where the user manager listens, and carries the
@@ -59,7 +61,7 @@ use zbus::zvariant::{OwnedObjectPath, Value};
 /// How long the child has to be in its scope. The spawn waits
 /// [`POLL_INTERVAL`] and [`CALL_OFF_TIME`] longer, for the request's last
 /// read and the call-off.
-const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
+const MOVE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often the child's cgroup is read while the manager's job runs.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -155,8 +157,10 @@ enum ScopeError {
         "the user manager had not moved the child into its scope in time; the start was called off"
     )]
     CalledOff,
-    #[error("the user manager started the scope without the child; the scope was stopped")]
+    #[error("the user manager started the scope without the child; its stop was asked for")]
     NotMoved,
+    #[error("nothing says whether the user manager moved the child: {0}")]
+    Unsure(Box<dyn std::error::Error + Send + Sync>),
     #[error("an earlier request to the user bus is still waiting")]
     Busy,
     #[error("the request's thread did not start: {0}")]
@@ -268,9 +272,12 @@ fn cancel(connection: &Connection, job: &OwnedObjectPath) -> zbus::Result<()> {
 /// job moves the child later. A child not in its scope by `deadline`, or
 /// one that has ended first, has the start called off: the manager handles
 /// one call at a time, so a job it cancels never ran, and the child stays
-/// in the app's cgroup. A job it cannot cancel has run: a child in its
-/// scope then stays there, and a scope without it (the child had ended)
-/// is stopped. A start the manager answers only after `deadline` cannot
+/// in the app's cgroup. A job whose cancel the manager answers with an
+/// error has run: a child in its scope then stays there, and a scope
+/// without it (the child had ended) is stopped. A cancel without an answer,
+/// or a child's cgroup that cannot be read then, proves nothing, so the
+/// scope is left as it is: one that holds the child is `PartOf` the app's
+/// unit. A start the manager answers only after `deadline` cannot
 /// be called off; it may still move the child, which then stays in its
 /// scope.
 fn start_scope_over_bus(
@@ -296,10 +303,14 @@ fn start_scope_over_bus(
     let in_scope = || (system.child_cgroup)(pid).is_ok_and(|cgroup| holds(&cgroup, &name));
     while !in_scope() {
         if Instant::now() >= deadline || (system.child_ended)(pid) {
-            if cancel(&connection, &job).is_ok() {
-                return Err(ScopeError::CalledOff);
+            match cancel(&connection, &job) {
+                Ok(()) => return Err(ScopeError::CalledOff),
+                Err(zbus::Error::MethodError(..)) => {}
+                Err(error) => return Err(ScopeError::Unsure(error.into())),
             }
-            if in_scope() {
+            let cgroup =
+                (system.child_cgroup)(pid).map_err(|error| ScopeError::Unsure(error.into()))?;
+            if holds(&cgroup, &name) {
                 return Ok(name);
             }
             if let Err(error) = manager(&connection, "StopUnit", &(name.as_str(), "replace")) {
@@ -358,6 +369,11 @@ fn move_within(
                         %scope,
                         "speech sidecar in a scope of its own, after the spawn stopped waiting"
                     ),
+                    Err(error @ ScopeError::Unsure(_)) => tracing::info!(
+                        pid,
+                        %error,
+                        "the speech sidecar stays where the user manager put it, after the spawn stopped waiting"
+                    ),
                     Err(error) => tracing::info!(
                         pid,
                         %error,
@@ -374,15 +390,15 @@ fn move_within(
 }
 
 /// Moves the just-spawned child `pid` into a scope of its own when the
-/// app runs in a systemd user unit (the module docs), waiting about
-/// [`ANSWER_TIMEOUT`] at most. Called before the parent waits on the
+/// app runs in a systemd user unit (the module docs), waiting at most
+/// [`MOVE_TIMEOUT`] and the call-off. Called before the parent waits on the
 /// child, so `pid` cannot name another process yet. Never fails: the child
 /// stays in the app's cgroup otherwise.
 pub(super) fn move_to_own_scope(pid: u32) {
     let Some(system) = system() else {
         return;
     };
-    match move_within(pid, system, ANSWER_TIMEOUT, &IN_FLIGHT) {
+    match move_within(pid, system, MOVE_TIMEOUT, &IN_FLIGHT) {
         Ok(Some(scope)) => tracing::info!(pid, %scope, "speech sidecar in a scope of its own"),
         Ok(None) => tracing::debug!(
             pid,
@@ -392,6 +408,9 @@ pub(super) fn move_to_own_scope(pid: u32) {
             pid,
             "the user bus did not answer in time; the speech sidecar stays in the app's cgroup unless the user manager still moves it"
         ),
+        Err(error @ ScopeError::Unsure(_)) => {
+            tracing::info!(pid, %error, "the speech sidecar stays where the user manager put it");
+        }
         Err(error) => {
             tracing::info!(pid, %error, "the speech sidecar stays in the app's cgroup");
         }
@@ -486,7 +505,7 @@ mod tests {
 
     #[test]
     fn the_spawn_waits_two_seconds_at_most_and_reads_this_process() {
-        assert!(ANSWER_TIMEOUT <= Duration::from_secs(2));
+        assert!(MOVE_TIMEOUT <= Duration::from_secs(2));
         assert!(POLL_INTERVAL + CALL_OFF_TIME <= Duration::from_millis(110));
         let own = std::fs::read_to_string("/proc/self/cgroup").unwrap();
         assert_eq!(proc_cgroup(std::process::id()).unwrap(), own);
@@ -522,6 +541,8 @@ mod tests {
         // A zombie stays one until it is reaped.
         std::thread::sleep(Duration::from_millis(100));
         assert!(proc_ended(child.id()));
+        let system = System::new(String::new(), Some("/run".into())).unwrap();
+        assert!((system.child_ended)(child.id()));
         child.wait().unwrap();
         assert!(!proc_ended(std::process::id()));
         assert!(!proc_ended(u32::MAX));
@@ -598,15 +619,17 @@ mod tests {
     );
 
     /// The path of the fake's one job.
-    const JOB: &str = "/org/freedesktop/systemd1/job/1";
+    const JOB: &str = "/org/freedesktop/systemd1/job/4711";
 
     /// How the fake's job answers `Cancel`.
     #[derive(Clone, Copy)]
     enum Job {
         /// Still queued: it is cancelled.
         Queued,
-        /// Run already: the call errs, as for any job that is gone, after
-        /// the job's move set the flag given.
+        /// Still queued, and cancelled after the delay given.
+        SlowToCancel(Duration),
+        /// Has run: `Cancel` errs, as for any job that is gone, and first
+        /// sets the flag given, as the job's move would have.
         Ran(Option<&'static AtomicBool>),
     }
 
@@ -696,6 +719,10 @@ mod tests {
             let _ = self.cancelled.send(());
             match self.job {
                 Job::Queued => Ok(()),
+                Job::SlowToCancel(delay) => {
+                    std::thread::sleep(delay);
+                    Ok(())
+                }
                 Job::Ran(joined) => {
                     if let Some(joined) = joined {
                         joined.store(true, Ordering::SeqCst);
@@ -724,7 +751,7 @@ mod tests {
     }
 
     /// Waits until the request's thread cleared `in_flight`.
-    fn wait_until_ended(in_flight: &AtomicBool) {
+    fn wait_until_cleared(in_flight: &AtomicBool) {
         wait_until(|| !in_flight.load(Ordering::SeqCst));
     }
 
@@ -739,7 +766,7 @@ mod tests {
         let scope = move_within(
             4242,
             uwsm_system(daemon.path(), IN_ITS_SCOPE),
-            ANSWER_TIMEOUT,
+            MOVE_TIMEOUT,
             &IN_FLIGHT,
         )
         .unwrap();
@@ -792,7 +819,7 @@ mod tests {
             4242,
             &placement(UWSM).unwrap(),
             &uwsm_system(daemon.path(), after_three_reads),
-            Instant::now() + ANSWER_TIMEOUT,
+            Instant::now() + MOVE_TIMEOUT,
         )
         .unwrap();
         assert_eq!(scope, scope_name(4242));
@@ -828,6 +855,26 @@ mod tests {
     }
 
     #[test]
+    fn the_spawn_waits_for_a_call_off_that_takes_a_while() {
+        static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let asked = FakeManager::serve(&daemon, Job::SlowToCancel(Duration::from_millis(50)));
+
+        let error = move_within(
+            4242,
+            uwsm_system(daemon.path(), LEFT_BEHIND),
+            Duration::from_millis(300),
+            &IN_FLIGHT,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ScopeError::CalledOff), "{error}");
+        assert!(asked.cancelled.try_recv().is_ok());
+        assert!(asked.stopped.try_recv().is_err());
+    }
+
+    #[test]
     fn a_child_that_has_ended_has_the_start_called_off_at_once() {
         let Some(daemon) = Daemon::start() else {
             return;
@@ -843,7 +890,7 @@ mod tests {
             4242,
             &placement(UWSM).unwrap(),
             &ended,
-            started + ANSWER_TIMEOUT,
+            started + MOVE_TIMEOUT,
         )
         .unwrap_err();
         assert!(matches!(error, ScopeError::CalledOff), "{error}");
@@ -906,7 +953,26 @@ mod tests {
     }
 
     #[test]
-    fn a_manager_that_answers_after_the_deadline_holds_the_request_no_longer() {
+    fn a_scope_whose_child_cannot_be_read_after_the_job_ran_is_left() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let asked = FakeManager::serve(&daemon, Job::Ran(None));
+
+        let error = start_scope_over_bus(
+            4242,
+            &placement(UWSM).unwrap(),
+            &uwsm_system(daemon.path(), UNREADABLE),
+            Instant::now() + Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ScopeError::Unsure(_)), "{error}");
+        assert!(asked.cancelled.try_recv().is_ok());
+        assert!(asked.stopped.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_manager_that_answers_after_the_deadline_is_not_waited_for() {
         static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
         let Some(daemon) = Daemon::start() else {
             return;
@@ -922,7 +988,7 @@ mod tests {
             &IN_FLIGHT,
         );
         assert!(outcome.is_err(), "{outcome:?}");
-        wait_until_ended(&IN_FLIGHT);
+        wait_until_cleared(&IN_FLIGHT);
         assert!(
             started.elapsed() < timeout + Duration::from_millis(500),
             "{:?}",
@@ -940,7 +1006,7 @@ mod tests {
             ..uwsm_system(Path::new("/nonexistent"), IN_ITS_SCOPE)
         };
         assert!(matches!(
-            move_within(4242, outside, ANSWER_TIMEOUT, &IN_FLIGHT),
+            move_within(4242, outside, MOVE_TIMEOUT, &IN_FLIGHT),
             Ok(None)
         ));
         assert!(!IN_FLIGHT.load(Ordering::SeqCst));
@@ -953,7 +1019,7 @@ mod tests {
             move_within(
                 1,
                 uwsm_system(Path::new("/nonexistent"), IN_ITS_SCOPE),
-                ANSWER_TIMEOUT,
+                MOVE_TIMEOUT,
                 &IN_FLIGHT
             ),
             Err(ScopeError::Busy)
@@ -985,7 +1051,7 @@ mod tests {
     #[test]
     fn a_missing_bus_or_manager_is_an_error() {
         let uwsm = placement(UWSM).unwrap();
-        let in_time = || Instant::now() + ANSWER_TIMEOUT;
+        let in_time = || Instant::now() + MOVE_TIMEOUT;
         assert!(matches!(
             start_scope_over_bus(
                 1,
@@ -1027,14 +1093,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            asked.elapsed() < Duration::from_secs(2),
+            asked.elapsed()
+                < Duration::from_millis(200)
+                    + POLL_INTERVAL
+                    + CALL_OFF_TIME
+                    + Duration::from_millis(100),
             "{:?}",
             asked.elapsed()
         );
         assert!(matches!(error, ScopeError::Silent), "{error}");
         assert!(IN_FLIGHT.load(Ordering::SeqCst));
         drop(listener);
-        wait_until_ended(&IN_FLIGHT);
+        wait_until_cleared(&IN_FLIGHT);
     }
 
     /// A bus that takes the connection after the deadline is not asked,
@@ -1065,7 +1135,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, ScopeError::Silent), "{error}");
-        wait_until_ended(&IN_FLIGHT);
+        wait_until_cleared(&IN_FLIGHT);
         assert!(asked.started.try_recv().is_err());
     }
 
