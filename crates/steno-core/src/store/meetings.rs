@@ -362,13 +362,22 @@ impl Store {
     /// first write recomputes nothing, as in Swift. Rust only: Swift's
     /// `replaceTranscript` replaces the assignments and drops the suggestions
     /// (`.plans/2026-09-29-speaker-calibration.md`, decision 5).
+    ///
+    /// The `sampleClipURL`s of `speakers` are written in the same
+    /// transaction, so a kept confirmation and the clip of the run that
+    /// produced the row switch together, and every call commits so that
+    /// the commit is on the disk when it returns ([`Store::write_durably`],
+    /// one WAL sync per processing run): the pipeline removes the
+    /// clips the earlier rows named once it has returned, and a power loss
+    /// must not bring those rows back. Rust only: Swift commits with
+    /// `synchronous = NORMAL` and writes its clips in place.
     pub fn replace_transcript(
         &self,
         meeting: &Meeting,
         segments: &[TranscriptSegment],
         speakers: &[Speaker],
     ) -> Result<()> {
-        self.write(|transaction| {
+        self.write_durably(|transaction| {
             write_processing_results(transaction, meeting)?;
             let confirmed: BTreeMap<Uuid, SpeakerAssignment> =
                 people::speakers_of_meeting(transaction, meeting.id)?
@@ -589,6 +598,67 @@ mod tests {
                 PathBuf::from("/audio/elsewhere/mic.wav"),
                 PathBuf::from("/audio/clip.wav"),
             ]
+        );
+    }
+
+    /// The merge's write switches a kept confirmation and its new clip in
+    /// one commit, under `synchronous = FULL` (2): the pipeline removes the
+    /// earlier clip once it returns, so a power loss must not bring back the
+    /// row that named it. That the commit then survives a power loss is
+    /// SQLite's and cannot be tested.
+    #[test]
+    fn replacing_the_transcript_switches_the_clips_with_the_confirmations_durably() {
+        use std::sync::{Arc, Mutex};
+
+        use crate::testing::sample_data;
+        use crate::{Speaker, SpeakerAssignment};
+
+        /// What one commit wrote: its `synchronous` level, the speaker's
+        /// assignment and its clip.
+        type Commit = (i64, String, Option<String>);
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("steno.sqlite")).unwrap();
+        let anna = sample_data::person(0, "Anna");
+        store.save_person(&anna).unwrap();
+        let meeting = sample_data::meeting();
+        store.save_meeting(&meeting).unwrap();
+        let mut speaker = Speaker {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            cluster_label: "Speaker 1".to_owned(),
+            assignment: SpeakerAssignment::Confirmed { person_id: anna.id },
+            embedding: None,
+            sample_clip_range: None,
+            sample_clip_url: Some("file:///audio/speakers/earlier.wav".to_owned()),
+            cluster_confidence: 1.0,
+        };
+        store.save_speaker(&speaker).unwrap();
+        let seen: Arc<Mutex<Vec<Commit>>> = Arc::default();
+        let commits = seen.clone();
+        store.probe_commits(move |connection| {
+            let level = connection
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            let (assignment, clip) = connection
+                .query_row("SELECT assignment, sampleClipURL FROM speaker", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            commits.lock().unwrap().push((level, assignment, clip));
+        });
+
+        speaker.assignment = SpeakerAssignment::Unknown;
+        speaker.sample_clip_url = Some("file:///audio/speakers/new.wav".to_owned());
+        store.replace_transcript(&meeting, &[], &[speaker]).unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [(
+                2,
+                "confirmed".to_owned(),
+                Some("file:///audio/speakers/new.wav".to_owned())
+            )]
         );
     }
 }

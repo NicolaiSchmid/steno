@@ -285,7 +285,9 @@ impl Store {
     /// intake's admission, before `complete` tells the phone to delete its
     /// copy; the `failed` receipt after a failed admission commit, which
     /// writes over that commit's frames before the intake removes its copy;
-    /// a pairing, whose token the phone keeps; and a revoke.
+    /// a pairing, whose token the phone keeps; and a revoke. Also the
+    /// merge's [`Store::replace_transcript`], before the pipeline removes
+    /// the sample clips the earlier speaker rows named.
     /// The transaction runs under `synchronous = FULL` with `fullfsync`
     /// on, so its commit syncs the WAL (with `F_FULLFSYNC` on Apple
     /// platforms, which also flushes the drive's cache) instead of leaving

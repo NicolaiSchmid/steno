@@ -610,6 +610,19 @@ impl Store {
 }
 
 impl Store {
+    /// Every `sampleClipURL` a speaker row names, of every meeting: what
+    /// the pipeline's sweep of a meeting's clip folder keeps. Rust only.
+    pub fn sample_clip_urls(&self) -> Result<Vec<String>> {
+        self.read(|connection| {
+            query_all(
+                connection,
+                "SELECT sampleClipURL FROM speaker WHERE sampleClipURL IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+        })
+    }
+
     /// Clears `sampleClipURL` on the listed speakers of `meeting_id`, once
     /// their clip files are gone.
     /// Swift: `MeetingStore.clearSampleClips(meetingID:speakerIDs:)`.

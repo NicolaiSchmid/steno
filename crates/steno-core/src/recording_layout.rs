@@ -3,8 +3,9 @@
 //!
 //! `<audio folder>/<MEETING-UUID>/recording.caf`, one `<lane>.wav` sidecar
 //! per lane, `audio.<ext>` for the mixdown, `speakers/<SPEAKER-UUID>.wav`
-//! for the sample clips, and, while a meeting is processed, the
-//! pipeline's `.processing-runs`. The UUID folder is spelled as Swift's
+//! for the sample clips (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav` for the
+//! clips this port's pipeline writes), and, while a meeting is processed,
+//! the pipeline's `.processing-runs`. The UUID folder is spelled as Swift's
 //! `uuidString`: uppercase, hyphenated.
 
 use std::path::{Path, PathBuf};
@@ -48,6 +49,20 @@ impl RecordingLayout {
         Some(Self::from_directory(master.parent()?))
     }
 
+    /// [`Self::from_asset`] when that folder is named after the asset's
+    /// meeting, as [`Self::new`] names it, so no other meeting's files are
+    /// in it; `None` for a master in any other folder. Rust only.
+    #[must_use]
+    pub fn own_folder(asset: &AudioAsset) -> Option<Self> {
+        let folder = uuid_string(asset.meeting_id);
+        Self::from_asset(asset).filter(|layout| {
+            layout
+                .directory
+                .file_name()
+                .is_some_and(|name| name == folder.as_str())
+        })
+    }
+
     /// `recording.<ext>`, the 48 kHz master.
     #[must_use]
     pub fn master(&self, format: AudioFormat) -> PathBuf {
@@ -79,6 +94,20 @@ impl RecordingLayout {
     pub fn sample_clip(&self, speaker_id: Uuid) -> PathBuf {
         self.speakers_directory()
             .join(format!("{}.wav", uuid_string(speaker_id)))
+    }
+
+    /// `speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`, the clip one pipeline run
+    /// writes for a speaker: a name no other run uses, so a run never
+    /// writes over a clip a speaker row names (`steno_pipeline`'s
+    /// `sample_clips`). Rust only: Swift writes [`Self::sample_clip`] in
+    /// place.
+    #[must_use]
+    pub fn run_sample_clip(&self, speaker_id: Uuid, run_id: Uuid) -> PathBuf {
+        self.speakers_directory().join(format!(
+            "{}-{}.wav",
+            uuid_string(speaker_id),
+            uuid_string(run_id)
+        ))
     }
 
     /// `.processing-runs`, the pipeline's count of runs that ended with the
@@ -128,6 +157,39 @@ mod tests {
             layout
                 .directory
                 .join("speakers/0B6F4B1E-5C2A-4F8E-9D3B-7A1C2E3F4A5B.wav")
+        );
+        let run = Uuid::parse_str("9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d").unwrap();
+        assert_eq!(
+            layout.run_sample_clip(id, run),
+            layout.directory.join(
+                "speakers/0B6F4B1E-5C2A-4F8E-9D3B-7A1C2E3F4A5B-9A8B7C6D-5E4F-4A3B-8C2D-1E0F9A8B7C6D.wav"
+            )
+        );
+    }
+
+    /// Only a folder named after the meeting is the meeting's own.
+    #[test]
+    fn only_a_folder_named_after_the_meeting_is_its_own() {
+        let id = Uuid::parse_str("0b6f4b1e-5c2a-4f8e-9d3b-7a1c2e3f4a5b").unwrap();
+        let asset = |master: &Path| AudioAsset {
+            id: Uuid::nil(),
+            meeting_id: id,
+            url: crate::paths::file_url(master, false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: vec![AudioLane::Mixed],
+            sidecars_16k: std::collections::BTreeMap::new(),
+            mixdown_url: None,
+            retention: crate::AudioRetention::KeepForever,
+            expires_at: None,
+        };
+        let own = RecordingLayout::new(Path::new("/audio"), id);
+        assert_eq!(
+            RecordingLayout::own_folder(&asset(&own.master(AudioFormat::Wav16kInt16))),
+            Some(own)
+        );
+        assert_eq!(
+            RecordingLayout::own_folder(&asset(Path::new("/downloads/call.wav"))),
+            None
         );
     }
 }
