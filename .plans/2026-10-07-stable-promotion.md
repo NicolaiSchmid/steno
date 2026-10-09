@@ -1035,6 +1035,24 @@ The table above names each package and its owner. Their tests:
   and an opt-in raise of logind's `InhibitDelayMaxSec`. The macOS output stays
   as it is. A candidate is built from its tag
   (`nix build github:NicolaiSchmid/steno/v0.11.0-rc.N#steno`).
+  - As built (#259, merging after X5): the package and the module are in
+    `nix/`. The module adds the options `users` (a per-user install instead of
+    a system-wide one) and `launchAtLogin`, and puts `STENO_LOGIN_ITEM=managed`
+    in `environment.sessionVariables` too. The per-user path in the unit is
+    `/etc/profiles/per-user/%u/bin/steno-desktop`. `steno.service` carries
+    `X-RestartIfChanged=false` and `X-StopOnRemoval=false`, so a switch never
+    stops a recording; the new unit applies at the next login. GNOME Keyring is
+    a `mkDefault` only where neither Plasma 6, `services.passSecretService` nor
+    `programs.ssh.startAgent` is on (its gcr SSH agent conflicts with the
+    last); the app writes its secrets to the file until #221. X4's firewall port
+    is not in the module; X4 adds it. P5's drop-ins arrive through the `.deb`'s
+    `files` map once #227 merges. The path rule for the autostart entry without
+    the module is X5's work. ONNX Runtime is nixpkgs' 1.27.1 against the
+    1.28.0 build `ort` downloads, at FLEURS 4.9 % with both. Nix CI
+    (`nix-ci.yml`) runs on a pull request that touches the flake, the web UI's
+    dependencies, a Cargo manifest, the lockfile, a build script, the Tauri
+    configuration, the sidecar staging or the release's Tauri CLI pin, and on
+    main after any change to what the package builds.
 - **X8 The Linux gates** (Rehearsal).
 
 ## Release mechanics
@@ -1649,7 +1667,9 @@ interrupted" after one. On the GNOME machine,
      `steno.nixosModules.default` in the system's modules and
      `programs.steno.enable = true`.
   2. Steps 2 to 4 and 6 of the GNOME gate, with the phone through the firewall
-     the module opened.
+     the module opened. Under the module, step 5's `cat /proc/$(pidof -s
+     steno-desktop)/cgroup` ends in `steno.service`, and `systemctl --user show
+     steno.service -p TimeoutStopUSec` is 20 s.
   3. Open Settings and choose a folder: the file chooser opens (the wrapper's
      schemas).
   4. Launch at login: after step 0's upgrade and collection, `systemctl --user

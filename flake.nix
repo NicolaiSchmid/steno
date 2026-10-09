@@ -14,8 +14,8 @@
       hash = "sha256-Z65JPd8+TWpcDNq4k8ctds/HVtqNzTNWrs9F3wZOssQ=";
     };
 
-    # The app is a signed, notarised Apple Silicon bundle; there is nothing
-    # to build on the Mac.
+    # The Mac app is a signed, notarised Apple Silicon bundle: the Mac
+    # output unpacks the release and builds nothing.
     system = "aarch64-darwin";
     pkgs = nixpkgs.legacyPackages.${system};
     lib = pkgs.lib;

@@ -496,8 +496,8 @@ the workspace's own sources relative paths; any absolute one reads
 ### The Nix package and the NixOS module
 
 `flake.nix` builds the Linux app from the tree it is in
-(`packages.x86_64-linux.steno`, in `nix/package.nix`), so any tag builds as
-it is:
+(`packages.x86_64-linux.steno`, in `nix/package.nix`), so every tag from
+the first one with it builds as it is:
 
 ```sh
 nix build github:NicolaiSchmid/steno/<tag>#steno
@@ -509,20 +509,21 @@ UI, stages the sidecar with `stage-sidecar.sh`, runs `cargo tauri build
 the `.deb`'s tree. The differences:
 
 - ONNX Runtime is nixpkgs' `onnxruntime`, linked dynamically
-  (`ORT_LIB_LOCATION`, `ORT_PREFER_DYNAMIC_LINK=1`), since the sandbox
-  cannot download pyke's build.
+  (`ORT_LIB_LOCATION`, `ORT_PREFER_DYNAMIC_LINK=1`), in place of the build
+  `ort` downloads (pyke's, 1.28.0), which the sandbox forbids.
 - The tray's `dlopen` of `libayatana-appindicator3.so.1` names the library's
   store path (`postPatch`).
 - Only `steno-desktop` gets the GTK wrapper (`wrapGAppsHook3`, which the
   file chooser's schemas need). The wrapper sets `STENO_DISTRIBUTION=nix`
   unless the environment has it, and execs `bin/.steno-desktop-wrapped`;
   the sidecar beside it stays the plain binary.
-- `STENO_DISTRIBUTION=nix` is also in the build environment, for the
-  build-time default.
-- The `.deb`'s systemd user files (the stop timeout drop-ins) end up in
-  `share/systemd/user/`, where stdenv moves them, with `lib/systemd/user`
-  a link to it: the module links them into the user units, and a profile
-  install's `share/` is on the user manager's `XDG_DATA_DIRS` search path.
+- `STENO_DISTRIBUTION=nix` is also in the build environment, for X5's
+  build-time default; nothing reads either until X5 lands.
+- Once P5 (#227) lands, the `.deb`'s systemd user files (the stop timeout
+  drop-ins) end up in `share/systemd/user/`, where stdenv moves them, with
+  `lib/systemd/user` a link to it: the module links them into the user
+  units, and a profile install's `share/` is on the user manager's
+  `XDG_DATA_DIRS` search path.
 
 The crates' hashes come from `Cargo.lock`. The web UI's dependencies are
 one fixed-output hash, `pnpmDeps.hash` in `nix/package.nix`: a change to
@@ -542,19 +543,33 @@ steno.nixosModules.default
 It installs the package system-wide, or for the users in
 `programs.steno.users` only, and starts Steno with the graphical session as
 the user service `steno.service` (`TimeoutStopSec=20s`,
-`STENO_LOGIN_ITEM=managed`; `programs.steno.launchAtLogin = false` turns it
-off). The service runs the profile path, `/run/current-system/sw/bin/steno-desktop`
-or `/etc/profiles/per-user/%u/bin/steno-desktop`, never a store path. The
-module also turns PipeWire on and GNOME Keyring as the Secret Service
-(unless Plasma's KWallet is there; both are `mkDefault`), links the
-package's systemd user files, and raises logind's `InhibitDelayMaxSec` when
-`programs.steno.inhibitDelayMaxSec` is set. It does not open the handover's
-port in the firewall yet.
+`STENO_LOGIN_ITEM=managed`, which X5 reads; `programs.steno.launchAtLogin =
+false` turns it off). The service runs the profile path,
+`/run/current-system/sw/bin/steno-desktop` or
+`/etc/profiles/per-user/%u/bin/steno-desktop`, never a store path. A
+rebuild never restarts or stops a running Steno (`X-RestartIfChanged=false`,
+`X-StopOnRemoval=false`); the new version starts at the next login.
 
-`nix flake check` builds the package and checks its layout (the wrapper,
-the sidecar beside the real binary, no missing library, the tray's
-library, the `.deb`'s systemd user files), and evaluates the module in a
-system-wide and a per-user system down to the user units.
+The module also turns on PipeWire and, as the Secret Service, GNOME Keyring,
+both with `mkDefault`. The app's secrets move there with #221; until then
+they are a 0600 file. The keyring stays off where another Secret Service
+runs (Plasma's KWallet, `services.passSecretService`) and beside
+`programs.ssh.startAgent`, because the keyring brings gcr's SSH agent and
+nixpkgs refuses the two together. The module links the package's systemd
+user files (once P5, #227, lands), and raises logind's `InhibitDelayMaxSec`
+when `programs.steno.inhibitDelayMaxSec` is set. It does not open the
+handover's port in the firewall yet.
+
+The package is built with the flake's own pinned nixpkgs, so the system
+carries a second GTK and WebKit closure. `inputs.steno.inputs.nixpkgs.follows
+= "nixpkgs"` builds it with the system's nixpkgs instead, which CI does not
+test.
+
+`nix flake check` builds the package and checks its layout (the wrapper and
+its GTK schemas, the sidecar beside the real binary, no missing library, the
+tray's library, the `.deb`'s systemd user files) and that the release pins
+the same Tauri CLI. It evaluates the module in a system-wide and a per-user
+system down to the user units, and in one with `programs.ssh.startAgent`.
 
 ## Release
 
