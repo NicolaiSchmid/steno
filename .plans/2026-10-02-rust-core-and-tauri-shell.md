@@ -1413,20 +1413,20 @@ still has to draw the window side. `[ ]` is not ported yet.
     reloads without the entry, the `postinst` skips a user whose entry is gone
     unless their unit is known to be stopped (`inactive` or `failed`), and Launch
     at login turned off while the app runs as the unit is marked and goes after the
-    exit's save (`autostart.rs`); turned on again before the exit, it clears the
+    exit's save (`autostart.rs`). Turned on again before the exit, it clears the
     mark and leaves the entry unwritten, since the plugin empties an entry before it
-    rewrites it; a launch as the unit that finds no entry (an older
-    release removed it at once, then its update relaunched in the unit) puts it
-    back with the mark, and fails unless the entry is there after it. While the
-    system manages the login item (`STENO_LOGIN_ITEM=managed`), the switch writes
-    nothing; the app that runs as the unit made from an earlier build's entry, or
-    from the user's own, writes the unit's drop-in and reloads while that entry
-    stands, and the exit that removes an earlier build's entry removes the drop-in
-    with it. The AUR and Nix packages ship the files (X6 and X7 of
-    `.plans/2026-10-07-stable-promotion.md`); on Arch and NixOS every package change
-    reloads the user managers, so only the kept entry protects the unit there. Each shutdown logs its
-    duration at `warn`. Measured under a real systemd 255 user manager (desktop
-    README, Launch at login under systemd). A reboot saves inside logind's delay; on
+    rewrites it. A launch as the unit that finds no entry (an older release removed
+    it at once, then its update relaunched in the unit) puts it back with the mark,
+    and fails unless the entry is there after it. While the system manages the
+    login item (`STENO_LOGIN_ITEM=managed`), the switch writes nothing; the app that
+    runs as the unit made from an earlier build's entry, or from the user's own,
+    writes the unit's drop-in and reloads while that entry stands, and the exit that
+    removes an earlier build's entry removes the drop-in with it. The AUR and Nix
+    packages ship the files (X6 and X7 of `.plans/2026-10-07-stable-promotion.md`);
+    on Arch and NixOS every package change reloads the user managers, so only the
+    kept entry protects the unit there. Each shutdown logs its duration at `warn`.
+    Measured under a real systemd 255 user manager (desktop README, Launch at
+    login under systemd). A reboot saves inside logind's delay; on
     Omarchy the delay is 15 s and the user manager then gets 5 s (`user@.service`),
     which no drop-in for this unit can raise, so that path depends on the delay
     lock. A save still needs to fit in the compositor's own stop when the app runs

@@ -121,7 +121,9 @@ Forge and atlas.
   sets the AppUserModelID (taskbar pins), while the MSI upgrade code and the
   NSIS registry keys come from the product name, so an installer with a new
   identifier still upgrades in place; the NSIS uninstaller's opt-in data cleanup
-  removes only its own identifier's folders.
+  removes only its own identifier's folders. On Linux the login item's marks
+  (`launch-at-login-off-at-exit`, `systemd-reload-owed`) are in the support
+  directory (#227).
 - **The keyring service is not the identifier.** Every Steno keyring entry is
   filed under the service string `uno.schmid.steno.mac` (`KEYRING_SERVICE`), in
   the Keychain, in the Windows credential store, and on Linux in the Secret
@@ -1097,21 +1099,20 @@ The table above names each package and its owner. Their tests:
   `ORT_LIB_LOCATION` against nixpkgs' `onnxruntime` with
   `ORT_PREFER_DYNAMIC_LINK=1`, the sidecar staged by `stage-sidecar.sh`, the
   tray library's `dlopen` path patched, `STENO_DISTRIBUTION=nix`, and P5's
-  two drop-ins under `lib/systemd/user/`, which on NixOS reach the user
-  manager only through `systemd.packages`, so the module adds the package
-  there; without the module the app's own copies cover them. `nixos-rebuild
-  switch` and `home-manager switch` reload the user managers too, so without
-  the module (a profile or home-manager install with launch at login on) only
-  the autostart entry the app keeps until its exit (P5) protects a running
-  autostart unit; with it, Steno runs as `steno.service`, which the module
-  gives `TimeoutStopSec=20s` and no rebuild stops. The kept entry is a D3
-  requirement for NixOS wherever Steno runs as the autostart unit (the
-  Hyprland session; GNOME runs the entry in a scope, which a reload leaves
-  alone): X7 is accepted only with step 9 of the NixOS gate passing, in the
-  session that step names. Built from
-  `self` with every hash in the tree, so any tag builds as it is. Without
-  the module, the autostart entry names, as an absolute path, the
-  first of `$HOME/.nix-profile/bin/steno-desktop` and
+  two drop-ins, which the module links into the user units
+  (`systemd.packages`); without the module the app's own copies cover them.
+  `nixos-rebuild switch` and `home-manager switch` reload the user managers
+  too, so without the module (a profile or home-manager install with launch
+  at login on) only the autostart entry the app keeps until its exit (P5)
+  protects a running autostart unit; with it, Steno runs as `steno.service`,
+  which the module gives `TimeoutStopSec=20s` and no rebuild stops. The kept
+  entry is a D3 requirement for NixOS wherever Steno runs as the autostart
+  unit (the Hyprland session; GNOME runs the entry in a scope, which a reload
+  leaves alone): X7 is accepted only with step 9 of the NixOS gate passing,
+  in the session that step names. Built from `self` with every hash in the
+  tree, so any tag builds as it is. Without the module, the autostart entry
+  names, as an absolute path, the first of
+  `$HOME/.nix-profile/bin/steno-desktop` and
   `/etc/profiles/per-user/$USER/bin/steno-desktop` that resolves into the
   running package, else the bare `steno-desktop`; never a store path. Because this links a
   different ONNX Runtime build, the PR re-runs
@@ -1766,9 +1767,10 @@ interrupted" after one. On the GNOME machine,
      package manager (X5), and `~/.config/autostart/steno-desktop.desktop`'s
      `Exec` names `/usr/bin/steno-desktop`.
   8. The kept entry (P5, D3). With launch at login on, log out and in, so
-     Steno runs as `app-steno\x2ddesktop@autostart.service` (as in step 5 of
-     the GNOME gate), and start a recording. Turn launch at login off in
-     Settings: `~/.config/autostart/steno-desktop.desktop` stays. Run
+     Steno runs as `app-steno\x2ddesktop@autostart.service` (step 5 of the
+     GNOME gate's cgroup check names it), and start a recording. Turn launch
+     at login off in Settings: `~/.config/autostart/steno-desktop.desktop`
+     stays. Run
      `makepkg -si` in `packaging/aur/` again, which runs systemd's reload
      hook: `systemctl --user show 'app-steno\x2ddesktop@autostart.service' -p
      LoadState -p TimeoutStopUSec` still shows `loaded` and 20 s. Log out:
