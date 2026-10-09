@@ -1490,10 +1490,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   intake saves the receipt `failed` durably first
   (`Store::save_handover_receipt_durably`, `MeetingStore.saveDurably(_:)`), whose
   commit writes over those frames or voids them, and removes the copy only once that
-  save succeeds; otherwise the copy stays, an orphan at worst, and a replayed
-  admission still finds its master. The phone keeps its copy either way. Orphan
-  masters are not cleaned up or offered for re-import yet (the
-  `fix/recovery-adopts-orphans` item in "Open after the port"). The intake completes
+  save succeeds; otherwise the copy stays, and a replayed admission still finds its
+  master. The phone keeps its copy either way. A copy left behind stays noted in the
+  record of recording folders, and the next launch adopts it
+  (`recovery::adopt_orphans`, stable plan P3; Rust only). The earlier copy of a
+  re-admitted `complete` receipt is left alone and costs disk space only. The intake completes
   only a receipt of the admitting upload: its read and, again, the admission's
   transaction refuse another device's receipt under the same recording id, and one
   of other bytes (`StoreError::ReceiptOfAnotherUpload`,
@@ -3031,20 +3032,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   platform, against invariant 4, so a crash in ONNX Runtime there ends the app; moving
   it needs its own request in the sidecar protocol. Where: `crates/steno-diarize`; the
   "Open, against invariant 4" item under "Pipeline and services (WP6b)". Found: #183.
-- **`fix/recovery-adopts-orphans`.** Orphan masters, both apps: a recording's master
-  in the audio folder with no meeting row, which neither app cleans up or offers for
-  re-import. The phone intake copies the master before its commit, so a crash between
-  the copy and the commit leaves one. So does a failed admission commit whose `failed`
-  save fails too: the copy stays because Linux keeps a page whose fsync failed in its
-  cache, marked clean, and recovery after a crash can bring the admission back with
-  it; when recovery does not, the copy is an orphan. So does the re-admission of a
-  `complete` receipt whose meeting is missing (the Handover "Admission" item): the
-  earlier admission's copy stays beside the new meeting's. The phone keeps its copy
-  in every case, so the orphan costs disk space, not a recording. The capture
-  recovery's scan of audio folders without a meeting row is to adopt them. Where:
-  `RecordingIntake::admit` in `crates/steno-pipeline/src/intake.rs` and
-  `RecordingIntake.admit` in `Sources/StenoCore/Storage/RecordingIntake.swift`; the
-  Store item on `RecordingIntake.admit`. Found: #213.
 - **Unowned.** The speech settings (`onnxSidecarOnMac`, `directmlOnWindows`,
   `modelsMirror`) live only in `speech.json`, which nothing writes, and the bridge has
   no field for them; `.plans/2026-10-07-speech-settings-ui.md` proposes where they
