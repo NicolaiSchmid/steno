@@ -118,6 +118,15 @@ fn paths(receipt: &DeliveryReceipt) -> Vec<String> {
         .collect()
 }
 
+/// The hash the receipt records for `path`; `None` when it does not list it.
+fn hash_in(receipt: &DeliveryReceipt, path: &str) -> Option<Vec<u8>> {
+    receipt
+        .files
+        .iter()
+        .find(|file| file.relative_path == path)
+        .map(|file| file.sha256.clone())
+}
+
 fn managed(receipt: &DeliveryReceipt) -> Vec<String> {
     receipt
         .files
@@ -575,17 +584,16 @@ fn reexport_keeps_an_edited_note_writes_the_new_one_beside_it_and_recreates_a_de
     let export = vault.export_with_audio();
     let destination = vault.destination().with_now(october_seventh);
     let first = deliver(&destination, &export, None);
-    let note = format!("{FOLDER}/{FOLDER_SLUG}.md");
+    let note = folder_note();
     let original = vault.read(&note);
-    let edited = format!("{}\nMy addition.\n", vault.text(&note));
 
-    fs::write(vault.path(&note), &edited).unwrap();
+    let edited = edit_the_folder_note(&vault);
     fs::remove_file(vault.path(&format!("{FOLDER}/transcript.vtt"))).unwrap();
 
     let second = deliver(&destination, &export, Some(&first));
 
     assert_eq!(vault.text(&note), edited, "the edited note is left alone");
-    let beside = format!("{FOLDER}/{FOLDER_SLUG} (Steno 2026-10-07).md");
+    let beside = copy_on_the_seventh(None);
     assert_eq!(
         vault.read(&beside),
         original,
@@ -607,19 +615,12 @@ fn reexport_keeps_an_edited_note_writes_the_new_one_beside_it_and_recreates_a_de
              and export again"
         )]
     );
-    let hash = |receipt: &DeliveryReceipt, path: &str| {
-        receipt
-            .files
-            .iter()
-            .find(|file| file.relative_path == path)
-            .map(|file| file.sha256.clone())
-    };
     assert_eq!(
-        hash(&second, &note),
-        hash(&first, &note),
+        hash_in(&second, &note),
+        hash_in(&first, &note),
         "the receipt keeps the note's delivered hash, so the next delivery sees the edit too"
     );
-    assert_eq!(hash(&second, &beside), Some(sha256(&original)));
+    assert_eq!(hash_in(&second, &beside), Some(sha256(&original)));
 
     // The next delivery writes the same copy while it is unedited.
     let third = deliver(&destination, &export, Some(&second));
@@ -631,7 +632,7 @@ fn reexport_keeps_an_edited_note_writes_the_new_one_beside_it_and_recreates_a_de
     fs::write(vault.path(&beside), b"my copy\n").unwrap();
     let fourth = deliver(&destination, &export, Some(&third));
     assert_eq!(vault.text(&beside), "my copy\n");
-    let numbered = format!("{FOLDER}/{FOLDER_SLUG} (Steno 2026-10-07 2).md");
+    let numbered = copy_on_the_seventh(Some(2));
     assert_eq!(vault.read(&numbered), original);
     assert_eq!(vault.text(&note), edited);
     assert!(
@@ -2510,12 +2511,10 @@ fn a_retry_after_a_failed_delivery_heals() {
         without_audio(meeting_files(FOLDER_SLUG)),
         "no copy beside any note"
     );
-    let note = retry
-        .files
-        .iter()
-        .find(|file| file.relative_path == folder_note())
-        .unwrap();
-    assert_eq!(note.sha256, sha256(&vault.read(&folder_note())));
+    assert_eq!(
+        hash_in(&retry, &folder_note()),
+        Some(sha256(&vault.read(&folder_note())))
+    );
     let after = deliver(&destination, &changed, Some(&retry));
     assert_eq!(after.warnings, Vec::<String>::new());
 }
@@ -2543,12 +2542,10 @@ fn moving_the_copy_over_the_note_clears_the_warning() {
 
     assert_eq!(third.warnings, Vec::<String>::new());
     assert_eq!(vault.list(FOLDER), meeting_files(FOLDER_SLUG), "no copy");
-    let note = third
-        .files
-        .iter()
-        .find(|file| file.relative_path == folder_note())
-        .unwrap();
-    assert_eq!(note.sha256, sha256(&vault.read(&folder_note())));
+    assert_eq!(
+        hash_in(&third, &folder_note()),
+        Some(sha256(&vault.read(&folder_note())))
+    );
 }
 
 /// The note and its first copy are edited, so a delivery writes `… 2`; the
@@ -2852,15 +2849,11 @@ fn the_receipt_keeps_the_old_hash_of_an_edited_note_when_the_render_changed() {
         Some(&first),
     );
 
-    let hash = |receipt: &DeliveryReceipt| {
-        receipt
-            .files
-            .iter()
-            .find(|file| file.relative_path == folder_note())
-            .map(|file| file.sha256.clone())
-    };
-    assert!(hash(&first).is_some());
-    assert_eq!(hash(&second), hash(&first));
+    assert!(hash_in(&first, &folder_note()).is_some());
+    assert_eq!(
+        hash_in(&second, &folder_note()),
+        hash_in(&first, &folder_note())
+    );
 }
 
 /// A note kept by a delivery without a receipt stays in the receipt that
