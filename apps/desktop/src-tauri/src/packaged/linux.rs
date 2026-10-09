@@ -730,6 +730,74 @@ mod tests {
         assert!(path.exists(), "an entry no earlier build wrote stays");
     }
 
+    /// Set in the child [`the_entry_steps_read_this_process_s_environment`]
+    /// runs.
+    const ENVIRONMENT_CHILD: &str = "STENO_PACKAGED_TEST_CHILD";
+
+    /// The public steps over the environment: `USER`, `HOME`,
+    /// `XDG_STATE_HOME` (a relative one falls back to `~/.local/state`),
+    /// [`EXEC_PATH_VARIABLE`] and the managed variable, in a child of this
+    /// test binary run once managed and once not, with `HOME` in a temp
+    /// directory.
+    #[test]
+    fn the_entry_steps_read_this_process_s_environment() {
+        if std::env::var_os(ENVIRONMENT_CHILD).is_some() {
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            assert_eq!(
+                candidates_here(),
+                candidates(Some("ada"), Some(&home), Some(&home.join(".local/state")))
+            );
+            let path = entry_path(BINARY, &home);
+            let per_user = Path::new("/etc/profiles/per-user/ada/bin").join(BINARY);
+            write_entry_at(&path, BINARY, Some(&per_user)).unwrap();
+            remove_earlier_entry(BINARY);
+            let managed = super::super::login_item_is_managed();
+            assert_eq!(path.exists(), !managed, "managed: {managed}");
+            if !managed {
+                return;
+            }
+            // As the unit: the exit step re-reads the entry first, and an
+            // update's relaunch keeps it.
+            EARLIER_ENTRY_AT_EXIT.store(true, Ordering::Relaxed);
+            write_entry(BINARY).unwrap();
+            remove_earlier_entry_at_exit(BINARY, false);
+            assert!(path.exists(), "this build's own entry stays");
+            write_entry_at(&path, BINARY, Some(&per_user)).unwrap();
+            remove_earlier_entry_at_exit(BINARY, true);
+            assert!(path.exists(), "an update's relaunch keeps it");
+            remove_earlier_entry_at_exit(BINARY, false);
+            assert!(!path.exists(), "gone after the exit");
+            return;
+        }
+        for managed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let launcher = dir.path().join("opt").join(BINARY);
+            std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+            executable(&launcher, "");
+            let name = "packaged::linux::tests::the_entry_steps_read_this_process_s_environment";
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", name, "--test-threads=1"])
+                .env(ENVIRONMENT_CHILD, "1")
+                .env("HOME", dir.path())
+                .env("USER", "ada")
+                .env("XDG_STATE_HOME", "relative/state")
+                .env(EXEC_PATH_VARIABLE, &launcher);
+            if managed {
+                child.env(super::super::LOGIN_ITEM_VARIABLE, "managed");
+            } else {
+                child.env_remove(super::super::LOGIN_ITEM_VARIABLE);
+            }
+            let output = child.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "managed: {managed}\n{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[test]
     fn the_cgroup_names_the_autostart_unit() {
         let unit = AUTOSTART_UNIT;
