@@ -1220,6 +1220,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   - a meeting left `recording` can be deleted while the recorder is idle and its
     master has not been written for ten seconds, where Swift refused every recording
     row;
+  - deleting a meeting no asset names removes its meeting folder in the folder it was
+    recorded into, the settings' folder and the known folders, where Swift removed
+    only what an asset named;
   - the host reloads the meeting list when the recorder's state or meeting changes,
     where Swift's list observed the meeting table.
 - A recording start warms the pipeline up only when the models of the current
