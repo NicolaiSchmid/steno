@@ -80,7 +80,9 @@
 //! #251) it resumes and stalls about every 6 s once the backoff is at its
 //! longest. The log says when a streak's first restart fails and then
 //! about once a minute, with the count; meanwhile the lines a try would
-//! log, the session's and the backends', go to `debug` (`start_log`).
+//! log, the session's and the backends', go to `debug` (`start_log`). One
+//! `info` line says when audio arrives again, with the restarts and the
+//! silence written.
 //!
 //! A device that stops delivering without any notification (a driver or a
 //! source's owner that hangs, a graph that stops running) is caught by the
@@ -365,8 +367,27 @@ struct Streak {
     /// stands, across rebuilds, until audio arrives.
     warned: bool,
     /// When the streak's latest log line went out, on the clock; `None`
-    /// until its first restart failed.
+    /// until its first restart failed, and again once audio arrived.
     logged_at: Option<Duration>,
+    /// Silence its rebuilds wrote, for the line that says audio is back.
+    gap_seconds: f64,
+}
+
+impl Streak {
+    /// Audio arrived after the streak's restarts: one `info` line with the
+    /// count and the silence written when the streak logged a failure (so
+    /// its next failure logs at `warn` again), and whether the warning
+    /// stood (`StillRestarting`), which ends here.
+    fn delivered(&mut self) -> bool {
+        if self.logged_at.take().is_some() {
+            tracing::info!(
+                "the capture delivers again after {} restarts; {:.1} s of silence filled the gap",
+                self.attempts,
+                self.gap_seconds
+            );
+        }
+        std::mem::take(&mut self.warned)
+    }
 }
 
 /// Ring overruns in samples at [`SAMPLE_RATE`], per lane. The sink counts
@@ -1485,7 +1506,7 @@ impl Core {
                 if count != progress.count {
                     progress.count = count;
                     progress.at = now;
-                    delivering = std::mem::take(&mut active.streak.warned);
+                    delivering = active.streak.delivered();
                 } else if (count != 0 || !watched.waits_for_playback)
                     && now.saturating_sub(progress.at) > CaptureSession::STALL_TIMEOUT
                 {
@@ -1609,6 +1630,7 @@ impl Core {
             if plan.continues == 0 {
                 active.streak.attempts = 0;
                 active.streak.logged_at = None;
+                active.streak.gap_seconds = 0.0;
                 if reason == DeviceChangeReason::DeliveryStalled {
                     tracing::warn!(
                         "the capture delivered nothing for over {} ms; restarting it",
@@ -1791,7 +1813,10 @@ impl Core {
         let mut attempt = plan.continues;
         // What the restart before the next try failed with, for the log; a
         // streak's rebuild follows a stall of the stream it resumed on.
-        let mut failure = "the stream it resumed on stopped delivering".to_owned();
+        let mut failure = format!(
+            "the stream restart {} resumed on stopped delivering",
+            plan.continues
+        );
         loop {
             if attempt > 0 {
                 self.restart_failed(attempt, &failure, generation);
@@ -1834,7 +1859,8 @@ impl Core {
     /// failed with `failure`, and more follow. The log gets one line when
     /// the streak's first restart fails and one about every
     /// `RESTART_LOG_INTERVAL` after, with the count, and `debug` between
-    /// them, while every try's own lines go to `debug` (`try_start`).
+    /// them; after that first line every try's own lines go to `debug` too
+    /// (`try_start`), until audio arrives (`Streak::delivered`).
     /// `notices` carries `StillRestarting` once the streak passed
     /// `RESTART_ATTEMPTS`, unless its warning already stands.
     fn restart_failed(&self, attempt: usize, failure: &str, generation: usize) {
@@ -2056,11 +2082,12 @@ impl Core {
         active.gap_seconds += gap_seconds;
         active.rebuild = None;
         active.streak.attempts = attempt;
+        active.streak.gap_seconds += gap_seconds;
         // Unwatched, nothing tells the first frame: the resume stands for
         // it. A watched stream's first frame ends the warning on the watch
         // thread, after this resume or never, as a stream that waits for
         // playback may resume without one.
-        let delivering = active.watch.is_none() && std::mem::take(&mut active.streak.warned);
+        let delivering = active.watch.is_none() && active.streak.delivered();
         Self::emit(
             &mut inner,
             CaptureNotice::DeviceResumed {
