@@ -963,13 +963,18 @@ Each lands before `0.11.0-rc.1`.
   duration from the container's timing, 1 024 frames for AAC, the last
   decoded packet's length when the container gives none, and at most
   8 192 frames, so a corrupt duration cannot grow the lane. It logs the
-  first ten such packets (index and timestamp) at `warn` and one line with
-  the total, and counts them with the silence's length
-  (`AudioBuffer16k::damage`).
+  first ten such packets (index, timestamp and the error, never the
+  audio) at `warn` and one line with the total, and counts those whose
+  silence outlasts the priming trim, with the silence's length
+  (`AudioBuffer16k::damage`); a damaged packet inside the priming costs
+  no audio and is not counted.
   - After a damaged packet the decoder is a fresh one, not a reset:
     symphonia's AAC decoder fixes its channel layout at its first packet
     before checking it, so a reset after a corrupt first packet failed
-    every packet after it. A panic is caught and treated the same way.
+    every packet after it. A panic is caught and treated the same way. It
+    runs inside `crash_log::expected`, so the app's panic hooks write no
+    crash log for it, and a file that panics on many packets cannot push
+    the real crash logs out of the folder.
   - Damaged packets before the first one that decodes wait for it, since
     symphonia's MP4 reader declares no channel count for AAC. The priming
     trim (A9) then cuts them by timestamp like any packet, and the
@@ -982,12 +987,15 @@ Each lands before `0.11.0-rc.1`.
     support directory (no migration; the Swift app ignores it) and the
     detail's `audioWarning`, Rust only: "About 0.1 seconds of the phone
     recording could not be read and was replaced by silence." The app,
-    `steno process` and `steno deliver` write the same file; a write that
-    fails fails the meeting at decode, which keeps its recording. A file
-    that cannot be read or does not parse stays as it is, unwritten, and
-    every meeting then counts as possibly damaged
-    (`DamagedAudio::may_be_damaged`), for the retention rule to keep its
-    recording once #241 lands. The damage and the warning are the
+    `steno process` and `steno deliver` open the same file; a write that
+    fails fails the meeting at decode, which keeps its recording. A
+    `damaged-audio.json` that cannot be read or does not parse stays as it
+    is, unwritten, and every meeting then counts as possibly damaged
+    (`DamagedAudio::may_be_damaged`, which the host reads as
+    `Pipeline::audio_may_be_damaged`), for the retention rule to keep its
+    recording once #241 lands. The launch logs it once; to clear it,
+    remove the file (the meetings lose their warnings) or repair its
+    JSON. The damage and the warning are the
     decoder's, not AAC's, so a later salvage that replaces lost audio by
     silence reports through them too.
   - Tests: `Tests/Fixtures/audio/tone-440-44k1-500ms-damaged.m4a` (three
