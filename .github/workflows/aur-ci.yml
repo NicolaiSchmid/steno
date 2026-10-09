@@ -1,0 +1,39 @@
+# The AUR package (packaging/aur): builds it from the release .deb in an
+# Arch Linux container, verifies the .deb against the release key, installs
+# it and checks the files (packaging/check-aur.sh). The drop-ins are
+# compared with apps/desktop/src-tauri/linux, so a change there runs it too.
+name: AUR CI
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - 'apps/desktop/src-tauri/linux/**'
+      - 'apps/desktop/release-signing-key.asc'
+      - '.github/workflows/aur-ci.yml'
+  push:
+    branches: ['main']
+    paths:
+      - 'packaging/**'
+      - 'apps/desktop/src-tauri/linux/**'
+      - 'apps/desktop/release-signing-key.asc'
+      - '.github/workflows/aur-ci.yml'
+
+concurrency:
+  group: aur-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  aur:
+    name: AUR package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build, install and check the package
+        run: bash packaging/check-aur.sh

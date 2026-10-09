@@ -1,0 +1,93 @@
+# Maintainer: Nicolai Schmid <nicolai@schmid.uno>
+#
+# Repackages the release .deb. How to bump and publish: README.md beside
+# this file.
+
+pkgname=steno-desktop-bin
+_pkgname=steno-desktop
+# pacman's form of the release version: 0.1.0-rc.3 is 0.1.0rc3, which
+# vercmp ranks below 0.1.0.
+pkgver=0.1.0rc3
+pkgrel=1
+_version=${pkgver/rc/-rc.}
+# From 0.11.0 the tags are v<version> (stable plan D1).
+_tag=desktop-v$_version
+pkgdesc='Bot-free meeting recorder that transcribes on this computer'
+arch=('x86_64')
+url='https://github.com/NicolaiSchmid/steno'
+license=('MIT')
+# What the binary links, plus two namcap cannot see: the tray library, which
+# the app loads at run time, and pipewire, whose client.conf every recording
+# needs (the .deb depends on it too).
+depends=(
+  'cairo'
+  'dbus'
+  'gdk-pixbuf2'
+  'glib2'
+  'glibc'
+  'gtk3'
+  'hicolor-icon-theme'
+  'libayatana-appindicator'
+  'libgcc'
+  'libpipewire'
+  'libsoup3'
+  'libstdc++'
+  'pipewire'
+  'webkit2gtk-4.1'
+)
+optdepends=(
+  'gnome-shell-extension-appindicator: the tray icon on GNOME'
+  'xdg-desktop-portal-gtk: the file chooser on Hyprland'
+)
+provides=("$_pkgname=$pkgver")
+conflicts=("$_pkgname")
+# The binaries stay byte for byte as the signed release built them.
+options=('!strip' '!debug')
+source=(
+  "$url/releases/download/$_tag/${_pkgname}_${_version}_amd64.deb"
+  "$url/releases/download/$_tag/${_pkgname}_${_version}_amd64.deb.asc"
+  'steno-desktop.sh'
+  'autostart-service-stop-timeout.conf'
+  'gnome-scope-stop-timeout.conf'
+  'LICENSE'
+)
+# The release signing key, apps/desktop/release-signing-key.asc.
+validpgpkeys=('048B527950E4F609B90E63495F8810A6E6D4DB46')
+sha256sums=('2f2dfb3b3452a5473e7de6ab44a3733cf143871cf7da14d708a78ffc532e60e5'
+            '8d4bc8496033be5835365d35adcfd60dea5521813ea347550216a6af3cc34007'
+            'bca8bbf4ccc7b0f2b71026978a367ff8567e87fd3a549af16c0882d257be8b33'
+            '8be20b6744998a6ba94422ba008e9d927f77eb525ea1c1c165e73c6e5954c8e8'
+            '9c1f94b44d7b0e260e4a8ebcad2fee81b6dcb948ea37e4aecfb1e3953e8a4028'
+            '4adbf25a93d2acbdb0e1feb850b1a4e88b64ebfdf2063ae917a3827732fe7a86')
+
+package() {
+  # makepkg unpacked the .deb into control.tar.*, data.tar.* and
+  # debian-binary.
+  bsdtar -xf data.tar.* -C "$pkgdir"
+
+  # The app starts its sidecar from beside its own binary, so the two move
+  # together; /usr/bin/steno-desktop becomes the wrapper.
+  install -dm755 "$pkgdir/usr/lib/$_pkgname"
+  mv "$pkgdir/usr/bin/$_pkgname" "$pkgdir/usr/bin/steno-speech-sidecar" \
+    "$pkgdir/usr/lib/$_pkgname/"
+  install -Dm755 steno-desktop.sh "$pkgdir/usr/bin/$_pkgname"
+
+  # The stop timeout drop-ins (stable plan P5): the .deb installs them from
+  # the first release after #227; until then they come from here. Arch's
+  # systemd reloads the user managers after the install
+  # (30-systemd-daemon-reload-user.hook), so no install script does.
+  local units="$pkgdir/usr/lib/systemd/user"
+  local autostart='app-steno\x2ddesktop@autostart.service.d/10-steno.conf'
+  local gnome='app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf'
+  [[ -e "$units/$autostart" ]] \
+    || install -Dm644 autostart-service-stop-timeout.conf "$units/$autostart"
+  [[ -e "$units/$gnome" ]] \
+    || install -Dm644 gnome-scope-stop-timeout.conf "$units/$gnome"
+
+  # TODO(X4): the ufw profile for the handover's fixed port, as
+  # /etc/ufw/applications.d/steno (in backup=), once X4 fixes the port.
+  # TODO(X2): the Hyprland window rules for the panels, under
+  # /usr/share/doc/$_pkgname, once X2 writes them.
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
