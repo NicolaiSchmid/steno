@@ -3084,6 +3084,16 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `crates/steno-pipeline/src/files.rs`,
   `Sources/StenoCore/Storage/RecordingIntake.swift`, `crates/steno-llm`. Found: #167,
   #185, #213.
+- **Unowned.** A busy store fails a resumed meeting. A meeting resumed after its
+  models are installed whose run then meets a store write locked for longer than the
+  5 s busy timeout ends `failed` with "database is locked", as any run on main does;
+  #237 does not change that. A resume the store refuses (busy) is logged and not
+  retried, and the meetings stay `queued` for the next install, reload or launch. The
+  likely remedy treats a busy store (`StoreError::is_busy`) as a reason to park the
+  meeting and retry it, on the waiting set #237 adds (`ModelWaits`). Who owns it is
+  still to be decided. Where: `crates/steno-pipeline/src/pipeline.rs`,
+  `crates/steno-services/src/pipeline.rs`, `crates/steno-core/src/store/mod.rs`.
+  Found: #237.
 
 ## Progress
 
