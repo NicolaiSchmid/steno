@@ -1104,8 +1104,10 @@ The table above names each package and its owner. Their tests:
   the module (a profile or home-manager install with launch at login on) only
   the autostart entry the app keeps until its exit (P5) protects a running
   autostart unit; with it, Steno runs as `steno.service`, whose unit file the
-  package keeps. The kept entry is a D3 requirement for NixOS: X7 is accepted
-  only with step 7 of the NixOS gate passing. Built from
+  package keeps. The kept entry is a D3 requirement for NixOS wherever Steno
+  runs as the autostart unit (the Hyprland session; GNOME runs the entry in a
+  scope, which a reload leaves alone): X7 is accepted only with step 7 of the
+  NixOS gate passing, in the session that step names. Built from
   `self` with every hash in the tree, so any tag builds as it is. Without
   the module, the autostart entry names, as an absolute path, the
   first of `$HOME/.nix-profile/bin/steno-desktop` and
@@ -1823,9 +1825,13 @@ interrupted" after one. On the GNOME machine,
      `nix profile install github:NicolaiSchmid/steno/v0.11.0-rc.N#steno`);
      `nix-collect-garbage -d` as that user; log out and in: Steno starts once,
      as the new version, and its file chooser opens.
-  7. The kept entry (P5, D3), in step 6's package-only install: step 8 of the
-     Omarchy gate, with `nixos-rebuild switch` (and `home-manager switch` where
-     Nicolai uses home-manager) as the reload in place of `makepkg -si`.
+  7. The kept entry (P5, D3), in step 6's package-only install, in the
+     Hyprland session with `withUWSM = true`: step 8 of the Omarchy gate, with
+     `nixos-rebuild switch` (and `home-manager switch` where Nicolai uses
+     home-manager) as the reload in place of `makepkg -si`. Under GNOME alone,
+     step 5 of the GNOME gate, naming `app-gnome-steno\x2ddesktop-<pid>.scope`,
+     stands in for it: gnome-session runs the entry in a scope, which a reload
+     leaves alone.
 
 **The Windows gate** (before the site lists Windows): a Windows machine runs the
 `--ignored` WASAPI tests, one real call, a logoff during a recording of at least

@@ -320,11 +320,14 @@ They reach the user manager two ways:
   manager that reads `~/.config` has the unit. GNOME's drop-in is
   written at every launch and never removed; the autostart unit's while
   Launch at login is on, at each launch and when it is switched on. After
-  writing a file, and at each launch while one is in place, the app asks
-  the user manager to reload its units over the session bus, so a
-  running session takes the new timeout at once, and a reload that
-  failed or was skipped is made up for at the next launch
-  (`stop_timeout.rs`). This covers the AppImage, and installs that turned
+  writing a file the app asks the user manager to reload its units over
+  the session bus, so a running session takes the new timeout at once.
+  The write leaves a mark in the app's config directory
+  (`systemd-reload-owed`) that only a reload that went through clears,
+  so a reload that failed, was skipped or was cut off is asked for again
+  at the next launch or switch; with nothing written and nothing owed
+  the app does not reload, since each reload reruns every generator of
+  the user manager (`stop_timeout.rs`). This covers the AppImage, and installs that turned
   Launch at login on before the drop-ins existed. A directory it cannot
   write is logged, and the unit keeps 5 s.
 
@@ -349,10 +352,12 @@ config directory (`launch-at-login-off-at-exit`) and removes the entry
 and the drop-in after the exit's save. A mark left by a kill or a crash
 is applied at the next launch that does not run as the unit, so the
 next login still autostarts the app once; an update's relaunch keeps
-it. A launch as the autostart unit that finds no entry (an older
-release removed it at once when Launch at login was turned off, or the
-user removed it, and the update's relaunch stayed in the unit) puts the
-entry back with the mark, so the unit gets its drop-in and the reload
+it. Turning it on again before the exit clears the mark and leaves the
+entry as it is: the plugin rewrites an entry by emptying it first, and
+a reload that read it empty would unload the unit. A launch as the
+autostart unit that finds no entry (an older release removed it at
+once, or the user did, and then an update relaunched in the unit) puts
+the entry back with the mark, so the unit gets its drop-in and the reload
 that applies it, and the entry goes again after the save.
 
 The user's copies stay after the package is removed. They name only
@@ -549,13 +554,16 @@ passes a `steno:` link to the binary (`%u`) and claims the scheme. The
 `.deb` depends on `libayatana-appindicator3-1` explicitly: the Tauri CLI
 adds the tray's library only when it sees the `tray-icon` feature on a
 crate-local `tauri` dependency, and ours is inherited from the workspace.
-It depends on PipeWire too (`libpipewire-0.3-0t64 | libpipewire-0.3-0`
-and `pipewire`), which the CLI does not add: without the `pipewire`
-package's `client.conf` every recording fails at its start
-(`check-bundle.sh` checks both).
 For the same reason the AppImage does not bundle that library; a host
 without it runs the shell without a tray, and closing the main window
-then quits (see above). The icons in `icons/` come from `cargo tauri
+then quits (see above). The `.deb` also depends on PipeWire
+(`libpipewire-0.3-0t64 | libpipewire-0.3-0` and `pipewire`), which the
+CLI does not add: without `client.conf` (in `pipewire-bin`, which
+`pipewire` pulls in) every recording fails at its start. And it depends
+on `libc6 (>= 2.39)`, the newest glibc the binaries need when built on
+Ubuntu 24.04, so apt refuses an older system (Debian 12, Ubuntu 22.04)
+instead of installing binaries that cannot start there.
+`check-bundle.sh` checks all three. The icons in `icons/` come from `cargo tauri
 icon` over the Swift app icon
 (`apps/macos/Steno/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512@2x.png`),
 the tray's template mark in `icons/tray/` is drawn by hand. The identifier
@@ -1114,13 +1122,17 @@ tray host either; a smoke run stands in for one, so the built tray counts
 and the run checks the close rule a desktop with a tray gets.
 
 After the run the script checks the stop timeout drop-ins, then runs the
-smoke twice more as the autostart unit, in a throwaway `HOME`: in a
-cgroup named after the unit below a delegated `systemd-run --user`
-scope. The first, with `~/.config/autostart` unwritable, must fail to
-restore the entry and ask for no reload; the second must restore it,
-marked, and remove it and its drop-in after the shutdown's line. Without
-a user manager that starts the scope it skips them, unless
-`STENO_REQUIRE_UNIT_SMOKE` is set, as in CI. Its last launch is over a
+smoke once more in the same `HOME`, which must write nothing and reload
+only for a reload still owed. Then it runs the smoke twice as the
+autostart unit, in a throwaway `HOME` and a cgroup named after the unit,
+below a delegated `systemd-run --user` scope. The first, with
+`~/.config/autostart` unwritable, must fail to restore the entry, ask
+for no reload and leave it owed; the second must restore it, marked,
+reload, keep it through Launch at login turned on again, and remove it
+and its drop-in after the shutdown's line. Without a user manager that
+starts the scope, or as a root that can write to the unwritable
+directory, it skips them, unless `STENO_REQUIRE_UNIT_SMOKE` is set, as
+in CI. Its last launch is over a
 database it cannot open, which must refuse (exit 3) and leave an entry
 marked to go in place.
 

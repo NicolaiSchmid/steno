@@ -1404,25 +1404,29 @@ still has to draw the window side. `[ ]` is not ported yet.
     too (all three checked by `check-bundle.sh`). The app writes them under
     `~/.config/systemd/user/` whatever `XDG_CONFIG_HOME` says, the scope's at every
     launch and the unit's while Launch at login is on, and reloads the user manager
-    after a write and at each launch while a drop-in is in place, so a reload that
-    failed or was skipped is made up for (`stop_timeout.rs`). A reload while the
+    after a write; the write leaves a mark (`systemd-reload-owed`) that only a
+    reload that went through clears, so a reload that failed, was skipped or was cut
+    off is asked for again at the next launch or switch, and with nothing written
+    and nothing owed there is no reload (`stop_timeout.rs`). A reload while the
     autostart entry is gone unloads the running unit, and the session's end then
     sends no SIGTERM, so the app, while it runs as the unit (its cgroup), never
     reloads without the entry, the `postinst` skips a user whose entry is gone
     unless their unit is known to be stopped (`inactive` or `failed`), and Launch
     at login turned off while the app runs as the unit is marked and goes after the
-    exit's save (`autostart.rs`); a launch as the unit that finds no entry (an older
+    exit's save (`autostart.rs`); turned on again before the exit, it clears the
+    mark and leaves the entry unwritten, since the plugin empties an entry before it
+    rewrites it; a launch as the unit that finds no entry (an older
     release removed it at once, then its update relaunched in the unit) puts it
     back with the mark, and fails unless the entry is there after it. The AUR and
-    Nix packages ship the files under X6 and X7 of
-    `.plans/2026-10-07-stable-promotion.md`, where every package change reloads the
-    user managers, so only the kept entry protects the unit there. Each shutdown logs its
+    Nix packages ship the files (X6 and X7 of
+    `.plans/2026-10-07-stable-promotion.md`); on Arch and NixOS every package change
+    reloads the user managers, so only the kept entry protects the unit there. Each shutdown logs its
     duration at `warn`. Measured under a real systemd 255 user manager (desktop
     README, Launch at login under systemd). A reboot saves inside logind's delay; on
     Omarchy the delay is 15 s and the user manager then gets 5 s (`user@.service`),
     which no drop-in for this unit can raise, so that path depends on the delay
     lock. A save still needs to fit in the compositor's own stop when the app runs
-    in its unit rather than its own (uwsm's `wayland-wm@.service`,
+    in the compositor's unit rather than its own (uwsm's `wayland-wm@.service`,
     `TimeoutStopSec=10`).
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
