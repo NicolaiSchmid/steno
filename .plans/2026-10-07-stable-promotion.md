@@ -551,6 +551,18 @@ Every package is written in parallel except where a dependency is named:
     proves the schedule on real releases.
   - In "Open after the port", S4 cuts the shell's four-gaps item down to the
     badge and the clip player.
+  - As built (`steno_services::updates`, `steno_services::qr`): the last check
+    time is the key `lastCheckAt` in `update-check.json` in the support
+    directory (`~/Library/Application Support/Steno/update-check.json` on the
+    Mac), an RFC 3339 UTC string such as `{"lastCheckAt":"2026-10-09T08:00:00Z"}`,
+    which R4 sets back by 25 hours. The flags are the booleans
+    `steno.updates.automaticChecks` (missing: on, as `SUEnableAutomaticChecks`
+    in the Swift Info.plist) and `steno.updates.automaticDownload` (missing:
+    off, Sparkle's default) in `preferences.json`. A found update raises the
+    "Install and Relaunch" dialog once per version; the schedule installs by
+    itself only with a hold from P25's `InstallGate::try_hold`, whose stand-in
+    `NeverIdle` gives none. `updates_are_managed` is X5's switch. The QR code is
+    the `qrcode` crate's, level M, as a greyscale PNG.
 - **S5 Handover on a changing network** (`fix/handover-republish`).
   - Re-register the Bonjour record when the interfaces change, on every
     platform.

@@ -368,6 +368,19 @@ channel does in the Swift app: a pre-release reads the beta manifest first,
 a release the stable one only (`updater.rs`; the manifests are under
 Release).
 
+Besides the tray's Check for Updates and Settings' Check Now, the update
+schedule (`steno_services::updates`) checks at launch and every hour once
+the last check is a day old, as Sparkle's daily check did. Settings'
+switches are the booleans `steno.updates.automaticChecks` (on when
+missing) and `steno.updates.automaticDownload` (off when missing) in
+`preferences.json`; the last check time is `lastCheckAt`, RFC 3339 UTC,
+in `update-check.json` beside it, written only after a check that
+succeeded. To make the next launch check, set it back a day or delete the
+file. A found update brings up the Install and Relaunch dialog once; the
+app installs by itself only when its install gate says it is idle
+(`InstallGate`, which until then never does). With `STENO_DISTRIBUTION`
+set to `aur` or `nix` the schedule does not run.
+
 To run a debug binary against the embedded bundle instead of the dev server
 (what the smoke does), drop the dev URL through Tauri's own configuration
 merge:
@@ -845,7 +858,9 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 The Mac cutover (the bundle id, the Sparkle handoff, the Swift app's
 removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it
 lands the desktop app installs beside the Swift app on the Mac. WP6b
-filled the host's half of the WP8 seams except four (the plan's
+filled the host's half of the WP8 seams except four; S4 of
+`.plans/2026-10-07-stable-promotion.md` later filled the updater and the
+QR encoder, and three remain (the plan's
 "Pipeline and services (WP6b)" list gives each one's reason and what
 closes it): the detection controller (WP5) is not ported, so nothing
 raises the prompt (`panels::set_prompt`) and its X
@@ -853,14 +868,8 @@ raises the prompt (`panels::set_prompt`) and its X
 the services' fake (all granted), because `permissions` answers
 `unknown` off the Mac and for the Mac's system audio, which the host's
 onboarding opener counts as missing, so onboarding would open at every
-launch until the audio probe (WP5) and a rule for `unknown` land; the
-host's `Updater` stays the fake until an update schedule exists (due
-before the cutover), because `updater` has no automatic-check or
-automatic-download flag and keeps no last check time, so the General
-section's Updates row cannot be filled from it (`updates.check` stays the
-shell's, and its `UpdateOutcome` stays beside the host's); and the QR
-encoder and the clip player are fakes, which need a QR crate and an audio
-output (the audio output is WP5's; both are due before the cutover). The
+launch until the audio probe (WP5) and a rule for `unknown` land; and
+the clip player is a fake, which needs an audio output. The
 host may treat the main window as always present: a close hides it, or
 ends the process when no tray stands, so publishing to it never fails for
 want of a window. Launch at login is a Launch Agent, not `SMAppService`;
@@ -868,9 +877,7 @@ the cutover has to retire the Swift registration so the user does not
 get two login items (the plan's parity list,
 `.plans/2026-10-04-mac-cutover.md`). The macOS menu bar has no Record
 menu yet (`⌘⇧R` and Record In Person are the tray's and the sidebar's),
-and no Find Meetings (`⌘F`). Updates are checked only when asked (the
-tray's item, Settings), where Sparkle checks daily on its own (an update
-schedule, due before the cutover). On macOS the system audio permission
+and no Find Meetings (`⌘F`). On macOS the system audio permission
 has no status API; the audio crate's probe (WP5) records it and until
 then it reads `unknown`. The panels are re-tuned on the Mac once they run
 there beside the Swift ones (the plan's risk list). Linux and Windows

@@ -553,11 +553,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   installers stay unsigned and the release notes say so. WP9b is the cutover:
   `.plans/2026-10-04-mac-cutover.md`.
   The shell's gaps ("Open after the port"): the tray's badge for pending speaker
-  reviews; the QR encoder, a fake until a QR crate draws the pairing code; the clip
-  player, a fake with no audio output; and the update schedule behind the host's
-  `Updater`. Which of them block the stable release is decided by the blocking list
-  in `.plans/2026-10-07-stable-promotion.md` (D3): the QR encoder and the update
-  schedule do, the badge and the clip player follow.
+  reviews and the clip player, a fake with no audio output; both follow the stable
+  release (`.plans/2026-10-07-stable-promotion.md`, D3). The QR encoder and the
+  update schedule, which blocked it, landed with S4 (`feat/rust-update-schedule`):
+  `steno_services::qr` and `steno_services::updates`.
   The phone handover identity: on first launch on macOS the cutover either imports the
   Swift `SecIdentity` (certificate plus private key, exported from the keychain item
   `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
@@ -737,10 +736,12 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
   the host republishes `progress`; the tray (WP8) shows no badge for it; it follows the
   stable release (`.plans/2026-10-07-stable-promotion.md`, D3).
-- [ ] Updates: Sparkle today, the Tauri updater after the cutover; blocks the stable
-  release (`.plans/2026-10-07-stable-promotion.md`, S4): the `Updater` trait is still the services' fake, since WP8's
-  `updater` has no automatic-check or automatic-download flag and no last check time to
-  report (see "Pipeline and services (WP6b)").
+- [x] Updates: Sparkle in the Swift app; in the Rust app the update schedule
+  (`steno_services::updates::UpdateSchedule`, S4 of
+  `.plans/2026-10-07-stable-promotion.md`) is the host's `Updater` over the shell's
+  Tauri updater (`updater::ShellUpdates`): a daily check, the automatic-check and
+  automatic-download flags in `preferences.json`, the last check time in
+  `update-check.json` (see "Shell").
 - [x] Login item: registered on the first launch when the setting says so
   (`Host::register_login_item_on_first_launch`), toggled from General, the pane opened;
   the `LoginItem` trait over WP8's `autostart` (`autostart::ShellLoginItem`, WP6b).
@@ -748,9 +749,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   recording start: the recorder, WP5.
 - [x] Phone pairing: a phone's arrival closing the code, a code running out, revoke,
   the listener stopping when no phone is left; the `Handover` trait, WP7 implements.
-- [ ] QR encoder and clip player: fakes in the app, so the pairing code shows no QR
-  image and a speaker's sample clip does not play (see "Pipeline and services
-  (WP6b)").
+- [x] QR encoder: `steno_services::qr::PngQrEncoder` draws the pairing URL at
+  error correction level M, as Swift's `CIQRCodeGenerator` did (see "Handover").
+- [ ] Clip player: a fake in the app, so a speaker's sample clip does not play (see
+  "Pipeline and services (WP6b)").
 - [x] Onboarding opener rule (`Host::should_open_onboarding`): a missing required
   permission, or the flag unset; an install already configured writes the flag and
   stays closed.
@@ -1353,16 +1355,13 @@ still has to draw the window side. `[ ]` is not ported yet.
   `unknown` off the Mac and for the Mac's system audio, and the host's onboarding
   opener counts anything but `granted` as missing, so wiring it would open onboarding
   at every launch on Linux and Windows; it waits for the audio crate's tap probe (WP5)
-  and a rule for what `unknown` means, which WP5 sets with the probe; (3) the host's
-  `Updater` stays the fake: WP8's `updater` checks only when asked, keeps no
-  automatic-check or automatic-download flag and no last check time, so the General
-  section's Updates row has nothing real to show, and `updates.check` stays the
-  shell's; filling it is the update schedule due before the cutover (WP9b), and the
-  shell's `UpdateOutcome` stays beside the host's until then; (4) the QR encoder and
-  the clip player are fakes, so the pairing code shows no QR image and a speaker's
-  sample clip does not play: each needs new code (a QR crate, an audio output), not
-  wiring; the QR encoder blocks the stable release and the clip player follows it
-  (`.plans/2026-10-07-stable-promotion.md`, D3).
+  and a rule for what `unknown` means, which WP5 sets with the probe; (3) closed by
+  S4: the host's `Updater` is the update schedule over the shell's updater, and
+  `updates.check` stays the shell's, whose check records through the schedule; (4)
+  the clip player is a fake, so a speaker's sample clip does not play: it needs new
+  code (an audio output), not wiring, and follows the stable release
+  (`.plans/2026-10-07-stable-promotion.md`, D3); the QR encoder, the other half of
+  this seam, landed with S4.
 - The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
   `App::launch` and runs whether or not a code is shown, where Swift ran it only while
   the Phones pane showed one.
@@ -2601,6 +2600,15 @@ touch and admission lines; each fix is ported to Swift before cutover.
     an announce 409 only for admitted bytes over another device's unfinished upload
     of other bytes: it takes a receipt of the same bytes over and other bytes in as
     a new recording (the "Announce" item).
+- Pairing QR code, both apps: the pairing URL (`PairingPayload::url_string`) as a
+  QR code at error correction level M, black on white, 8 pixels a module. Swift draws
+  it with Core Image's `CIQRCodeGenerator` as an RGBA PNG; Rust with the `qrcode`
+  crate as an 8-bit greyscale PNG with a one-module margin
+  (`steno_services::qr::PngQrEncoder`), and a test reads it back with `rqrr` to the
+  exact URL, which `PairingPayload::parse` turns into the payload it came from. The
+  phone scans the text (`PairingSheet.tsx`, `parsePairingPayload`), so the image
+  format makes no difference to it. Both answer no image for a text too long for a
+  code.
 
 ### Shell
 
@@ -2675,8 +2683,27 @@ touch and admission lines; each fix is ported to Swift before cutover.
   `fix/recording-recovery` (#233) makes a Rust launch leave a `recording` row alone
   while its master still grows.
 - Updates: Sparkle checks daily on its own (`SUEnableAutomaticChecks`,
-  `SUScheduledCheckInterval` 86400 in `apps/macos/project.yml`); the shell checks only
-  when asked (the tray's Check for Updates, `updates.check` from Settings).
+  `SUScheduledCheckInterval` 86400 in `apps/macos/project.yml`). The Rust app's
+  update schedule (`steno_services::updates`, S4) checks at launch and every hour
+  when the last check is missing, a day old or in the future. Its flags are the
+  booleans `steno.updates.automaticChecks` and `steno.updates.automaticDownload` in
+  `preferences.json`, where the Mac's first launch copies Sparkle's
+  `SUEnableAutomaticChecks` and `SUAutomaticallyUpdate` (S6); a missing key reads as
+  a fresh Sparkle install, checks on and downloads off. The last check time is
+  `lastCheckAt` (RFC 3339 UTC) in `update-check.json` in the support directory, a
+  file of its own written with `replace_file` after a check that succeeded (Swift:
+  `SULastCheckTime`, which the import leaves behind); a failed check is tried again
+  at the next hourly tick, and a file that does not parse reads as no check yet.
+  The tray's and Settings' check records through the same schedule. Where Sparkle
+  showed its alert for a found update, the schedule raises the shell's "Install and
+  Relaunch" dialog once per version; with automatic downloads on it downloads first,
+  and it installs and relaunches by itself only through `InstallGate::try_hold`
+  (stable plan P25), whose stand-in `NeverIdle` never gives a hold, so until P25
+  lands the install waits for the user's yes. Sparkle installed a download at quit.
+  A packaged install (`STENO_DISTRIBUTION=aur|nix`, the environment before the
+  build's value; stable plan X5, `updates_are_managed`) runs no schedule and cannot
+  check. A smoke run (`STENO_SMOKE_SECONDS`) passes no update source, so it never
+  checks. The network is the updater's: the same lane manifests, nothing new sent.
 
 ### Bridge
 
@@ -2783,13 +2810,11 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   the unticked lines under "Beyond the bridge" and "Speech" and the open items under
   "Pipeline and services (WP6b)" and "Shell" in the parity list. Found: #170, #172,
   #173.
-- **WP9b.** The shell's four gaps: no tray badge for pending speaker reviews, a fake
-  QR encoder (the pairing code shows no QR image), a fake clip player (a speaker's
-  sample does not play) and no update schedule (the host's `Updater` is a fake and the
-  shell checks only when asked, where Sparkle checks daily). Where: the fakes in
-  `build` (`crates/steno-services/src/app.rs`), `apps/desktop/src-tauri/src/updater.rs`;
-  the WP9 paragraph and seams (3) and (4) under "Pipeline and services (WP6b)". Found:
-  #173, #185.
+- **WP9b.** The shell's two gaps, both following the stable release: no tray badge
+  for pending speaker reviews, and a fake clip player (a speaker's sample does not
+  play). Where: the fake in `build` (`crates/steno-services/src/app.rs`), the tray
+  (`apps/desktop/src-tauri/src/tray.rs`); the WP9 paragraph and seam (4) under
+  "Pipeline and services (WP6b)". Found: #173, #185.
 - **WP9b.** The Rust app cannot download the Mac's CoreML Parakeet model: Settings
   answers "This build cannot download the CoreML Parakeet v3 model", so only a Mac
   where the Swift app installed it can transcribe, and a fresh install of the cutover
@@ -3016,6 +3041,7 @@ PR off `main`.
 | Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
 | A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
 | Stable plan A9: the AAC priming trimmed from the edit list, the gapless tag or, in the phone recorder's layout alone, AVFoundation's default; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | open |
+| S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, installs only through the P25 install gate, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #PR | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
