@@ -1405,7 +1405,9 @@ still has to draw the window side. `[ ]` is not ported yet.
     unloads the running unit, and the session's end then sends no SIGTERM, so
     neither the app, while it runs as the unit (its cgroup), nor the `postinst`
     reloads without the entry, and Launch at login turned off while the app runs as
-    the unit is marked and goes after the exit's save (`autostart.rs`). The AUR and
+    the unit is marked and goes after the exit's save (`autostart.rs`); a launch as
+    the unit that finds no entry (an older release removed it at once, then its
+    update relaunched in the unit) puts it back with the mark. The AUR and
     Nix packages ship the files under stable plan X6 and X7. Each shutdown logs its
     duration at `warn`. Measured under a real systemd 255 user manager (desktop
     README, Launch at login under systemd). A reboot saves inside logind's delay; on

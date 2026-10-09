@@ -339,7 +339,12 @@ app marks the choice in its config directory
 (`launch-at-login-off-at-exit`) and removes the entry and the drop-in
 after the exit's save. A mark left by a kill or a crash is applied at the
 next launch that does not run as the unit, so the next login still
-autostarts the app once; an update's relaunch keeps it.
+autostarts the app once; an update's relaunch keeps it. A launch as the
+autostart unit that finds no entry (an older release removed it at once
+when Launch at login was turned off, or the user removed it, and the
+update's relaunch stayed in the unit) puts the entry back with the
+mark, so the unit gets its drop-in and the reload that applies it, and
+the entry goes again after the save.
 
 The user's copies stay after the package is removed. They name only
 Steno's units and change nothing once the app is gone.
