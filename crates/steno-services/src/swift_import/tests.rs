@@ -974,9 +974,7 @@ async fn the_pipeline_reads_the_key_through_the_gate_and_not_the_store_behind_it
     let (dir, store) = crate::testing::temp_store();
     let paths = steno_core::StenoPaths::new(dir.path().join("support"));
     let mut settings = store.settings().unwrap();
-    settings.llm_provider = steno_core::LlmProvider::Endpoint;
-    settings.llm_base_url = Some("http://127.0.0.1:9/v1".to_owned());
-    settings.llm_model = Some("model".to_owned());
+    summaries_from_endpoint(&mut settings, "http://127.0.0.1:9/v1");
     store.save_settings(&settings).unwrap();
     let raw = Arc::new(CountingSecrets::default());
     raw.inner
@@ -1417,9 +1415,7 @@ async fn the_detail_withholds_the_summary_only_for_an_endpoint_that_needs_the_ke
         .replace_transcript(&meeting, &[segment], &[])
         .unwrap();
     let mut settings = app.store.settings().unwrap();
-    settings.llm_provider = steno_core::LlmProvider::Endpoint;
-    settings.llm_base_url = Some("http://127.0.0.1:9/v1".to_owned());
-    settings.llm_model = Some("model".to_owned());
+    summaries_from_endpoint(&mut settings, "http://127.0.0.1:9/v1");
     app.store.save_settings(&settings).unwrap();
     let host = app.host().unwrap();
     let _ = host.snapshot(BridgeTopic::MeetingsList);
@@ -1436,9 +1432,7 @@ async fn the_detail_withholds_the_summary_only_for_an_endpoint_that_needs_the_ke
     );
     assert_eq!(detail["canRerunSummary"], false, "endpoint");
 
-    settings.llm_provider = steno_core::LlmProvider::Codex;
-    settings.codex_model = Some("gpt-5".to_owned());
-    settings.codex_confirmed_at = Some(chrono::Utc::now());
+    chatgpt_summaries(&mut settings);
     app.store.save_settings(&settings).unwrap();
     host.store_changed();
     assert!(gate.key_withheld(), "the key is still withheld");
@@ -1450,6 +1444,22 @@ async fn the_detail_withholds_the_summary_only_for_an_endpoint_that_needs_the_ke
     );
     assert_eq!(detail["canRerunSummary"], true, "Codex");
     app.shutdown();
+}
+
+/// `settings` with summaries from the endpoint at `base_url`, which needs
+/// the API key.
+fn summaries_from_endpoint(settings: &mut steno_core::Settings, base_url: &str) {
+    settings.llm_provider = steno_core::LlmProvider::Endpoint;
+    settings.llm_base_url = Some(base_url.to_owned());
+    settings.llm_model = Some("model".to_owned());
+}
+
+/// `settings` with `ChatGPT` summaries (the Codex backend), which need no
+/// API key.
+fn chatgpt_summaries(settings: &mut steno_core::Settings) {
+    settings.llm_provider = steno_core::LlmProvider::Codex;
+    settings.codex_model = Some("gpt-5".to_owned());
+    settings.codex_confirmed_at = Some(chrono::Utc::now());
 }
 
 fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
@@ -1993,9 +2003,7 @@ async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
     let (dir, store) = crate::testing::temp_store();
     let paths = steno_core::StenoPaths::new(dir.path().join("support"));
     let mut settings = store.settings().unwrap();
-    settings.llm_provider = steno_core::LlmProvider::Endpoint;
-    settings.llm_base_url = Some("http://127.0.0.1:9/v1".to_owned());
-    settings.llm_model = Some("model".to_owned());
+    summaries_from_endpoint(&mut settings, "http://127.0.0.1:9/v1");
     store.save_settings(&settings).unwrap();
     let graph_for =
         |keychain: FakeKeychain| wired(dir.path(), keychain, Arc::new(InMemorySecretStore::new()));
@@ -2040,9 +2048,7 @@ async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
         (true, true)
     );
 
-    settings.llm_provider = steno_core::LlmProvider::Codex;
-    settings.codex_model = Some("gpt-5".to_owned());
-    settings.codex_confirmed_at = Some(chrono::Utc::now());
+    chatgpt_summaries(&mut settings);
     store.save_settings(&settings).unwrap();
     let (codex, codex_secrets) = graph_for(FakeKeychain::swift_app());
     assert!(codex.gate.key_withheld());
@@ -2084,9 +2090,7 @@ async fn a_meeting_under_a_withheld_key_stays_raw_and_its_summary_runs_later_wit
         }
     }));
     let mut settings = store.settings().unwrap();
-    settings.llm_provider = steno_core::LlmProvider::Endpoint;
-    settings.llm_base_url = Some(server.base_url().to_string());
-    settings.llm_model = Some("stub-model".to_owned());
+    summaries_from_endpoint(&mut settings, server.base_url().as_str());
     store.save_settings(&settings).unwrap();
     let (graph, secrets) = wired(
         dir.path(),
