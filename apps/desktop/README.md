@@ -323,6 +323,45 @@ What a package sets:
   no `STENO_EXEC_PATH`; it still needs `STENO_DISTRIBUTION=aur`, from a
   wrapper or from the build's environment.
 
+## The update from the Swift app (macOS)
+
+The first launch after Sparkle replaced the Swift app with this one brings
+over what the Swift app kept outside the shared database
+(`steno_services::swift_import`, plan
+`.plans/2026-10-07-stable-promotion.md`, S6). Nothing else needs moving:
+meetings, audio and models stay in the same support directory.
+
+- **Preferences.** Before the services graph is built, while
+  `preferences.json` holds no onboarding flag, the shell reads the Swift
+  domain with `/usr/bin/defaults export uno.schmid.steno.mac -` and copies
+  `steno.onboardingCompleted`, and Sparkle's `SUEnableAutomaticChecks` and
+  `SUAutomaticallyUpdate` as `steno.updates.automaticChecks` and
+  `steno.updates.automaticDownload` (the updater's schedule reads those).
+  The login item flag stays behind, so this app registers its own login
+  item; the panel's position stays behind too.
+- **The API key and the phone pairing.** When the login keychain holds the
+  Swift app's handover certificate (labelled `Steno handover identity`),
+  onboarding opens on an import step first, and until it ran the app reads
+  no API key and starts no handover listener. The step says that macOS asks
+  for the login password once for each item it finds (the API key when it
+  is the Swift app's, then the pairing) and that Always Allow is the
+  answer. It reads the key, which stays shared with the Swift app, and
+  exports the handover identity as PKCS#12 into the `handover-identity`
+  entry, replacing one a desktop build stored. Paired phones keep uploading
+  without pairing again.
+- **A denied prompt.** A denied key leaves the key empty; Settings asks for
+  it. A denied or failed export never creates a new identity and never
+  replaces the stored one: phone handover waits, the step offers Try
+  again, and it comes back at the next launch. Not now on the step counts
+  as both denied.
+
+`steno.swiftImportRan` in `preferences.json` marks the import as over (the
+identity is in place, or there was none), after which it never runs again.
+A smoke run (`STENO_SMOKE_SECONDS`) and a launch whose `HOME` is not the
+account's home directory skip it, so neither touches the user's keychain.
+`STENO_KEYCHAIN_TESTS=1 cargo test -p steno-services --test swift_keychain`
+runs the export against a throwaway keychain on a Mac.
+
 ## Run
 
 `cargo tauri dev` from `apps/desktop/src-tauri` (`pnpm dlx
