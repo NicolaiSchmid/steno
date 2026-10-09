@@ -715,20 +715,31 @@ fn meeting_folder_id(name: &std::ffi::OsStr) -> Option<Uuid> {
 fn orphan_master(layout: &RecordingLayout) -> Option<(AudioFormat, PathBuf, SystemTime)> {
     AudioFormat::ALL.iter().find_map(|&format| {
         let master = layout.master(format);
-        let metadata = std::fs::metadata(&master)
-            .ok()
-            .filter(|metadata| metadata.is_file() && may_hold_audio(format, metadata.len()))?;
+        let metadata = std::fs::metadata(&master).ok().filter(|metadata| {
+            metadata.is_file() && may_hold_audio(format, &master, metadata.len())
+        })?;
         Some((format, master, metadata.modified().ok()?))
     })
 }
 
-/// Whether a master in `format` of `len` bytes may hold a sample. A CAF
-/// no longer than the header [`CafStreamWriter`] writes holds none (a kill
-/// right after its creation cuts it inside the header): no CAF with a
-/// sample is that short. Any other format holds none only when empty.
-fn may_hold_audio(format: AudioFormat, len: u64) -> bool {
+/// Whether `master`, in `format` and `len` bytes long, may hold a sample.
+/// A CAF shorter than the header [`CafStreamWriter`] writes and one whole
+/// frame holds none (a kill right after its creation cuts it inside the
+/// header, one before the first frame was whole leaves part of it): no
+/// CAF with a sample is that short. The frame is the header's channel
+/// count of samples, one sample when the header cannot be read. Any other
+/// format holds none only when empty.
+fn may_hold_audio(format: AudioFormat, master: &Path, len: u64) -> bool {
     match format {
-        AudioFormat::Caf48kFloat32 => len > CafStreamWriter::HEADER_SIZE as u64,
+        AudioFormat::Caf48kFloat32 => {
+            let header = CafStreamWriter::HEADER_SIZE as u64;
+            let sample = CafStreamWriter::BYTES_PER_SAMPLE as u64;
+            // The header is read only once it is whole and a sample follows.
+            len >= header + sample && {
+                let channels = CafHeader::read(master).map_or(1, |caf| caf.channel_count);
+                len >= header + channels as u64 * sample
+            }
+        }
         AudioFormat::M4aAac | AudioFormat::Wav16kInt16 => len > 0,
     }
 }
@@ -747,7 +758,10 @@ fn holds_no_master(folder: &Path, meeting_id: Uuid) -> bool {
             AudioFormat::ALL
                 .iter()
                 .all(|&format| match std::fs::metadata(layout.master(format)) {
-                    Ok(metadata) => metadata.is_file() && !may_hold_audio(format, metadata.len()),
+                    Ok(metadata) => {
+                        metadata.is_file()
+                            && !may_hold_audio(format, &layout.master(format), metadata.len())
+                    }
                     Err(error) => error.kind() == std::io::ErrorKind::NotFound,
                 })
         }
@@ -2497,6 +2511,31 @@ mod tests {
                 .contains_key(&orphan)
         );
         assert_eq!(std::fs::read(&master).unwrap(), header);
+    }
+
+    /// A recorded master of two channels with only part of its first
+    /// frame on disk (a kill while that frame was written) holds no
+    /// master, as a header-only one: its entry is forgotten and its file
+    /// stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_master_with_part_of_one_frame_is_forgotten() {
+        let harness = Harness::new();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mic, AudioLane::System], 0);
+        let master = master_path(&harness.audio_folder(), orphan);
+        let mut partial = std::fs::read(&master).unwrap();
+        partial.extend_from_slice(&[0; CafStreamWriter::BYTES_PER_SAMPLE + 1]);
+        std::fs::write(&master, &partial).unwrap();
+
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        assert!(
+            !crate::audio_folders::recorded(&harness.support_directory())
+                .unwrap()
+                .contains_key(&orphan)
+        );
+        assert_eq!(std::fs::read(&master).unwrap(), partial);
     }
 
     /// A recorded master cut inside its header (a kill right after its
