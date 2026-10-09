@@ -634,8 +634,9 @@ Every package is written in parallel except where a dependency is named:
     answers. Its sources (the defaults domain and the keychain) are
     traits. It is skipped under `STENO_SMOKE_SECONDS` and whenever `HOME` is not
     the account's home.
-    - **At launch,** first in the shell's `setup`, before `Host::real` builds the
-      graph: while `preferences.json` holds no onboarding flag, read the Swift
+    - **At launch,** in `build_with_import` (the shell's entry point), once the
+      database's lock is held and before the graph reads a preference or a
+      secret: while `preferences.json` holds no onboarding flag, read the Swift
       domain explicitly (`/usr/bin/defaults export uno.schmid.steno.mac -`,
       parsed with the `plist` crate); copy `steno.onboardingCompleted` (not
       `steno.loginItemRegistered`, so the new identifier registers itself);
@@ -644,7 +645,8 @@ Every package is written in parallel except where a dependency is named:
       opens at its default place). Whatever `preferences.json` holds, remove the
       Launch Agent a desktop-id build left behind, before the shell registers with
       `SMAppService`. If the keychain holds a Swift handover certificate (found by
-      label, which does not prompt) and the import has not run, the graph is
+      label, which does not prompt), or the lookup fails, and the import has
+      not run, the graph is
       built with the import pending: `steno-services` reads no API key and starts
       no handover listener until the second half ends. A key alone does not make
       the import pending, since a desktop-id build files its key under the same
@@ -691,7 +693,8 @@ Every package is written in parallel except where a dependency is named:
       (ChatGPT summaries keep running): the cleanup is skipped too, so the
       transcript stays raw, meetings complete without a summary, and the
       meeting detail says that Steno can't use the API key yet; the summary
-      can be run again once a key is saved. Pair again must keep the
+      can be run again once a key is saved, and Process again on a failed
+      meeting waits for the key too. Pair again must keep the
       `swift-import-done` marker and write it before it mints, since the
       step only logs a marker it could not write. The same rule holds outside the import:
       when an existing `handover-identity` cannot be read (a denied prompt, a

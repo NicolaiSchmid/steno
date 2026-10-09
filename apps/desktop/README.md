@@ -363,10 +363,13 @@ meetings, audio and models stay in the same support directory.
   it comes back at the next launch. Not now, or closing the window over
   the step, brings up no prompt: what the step has not read yet stays
   unread for this launch, and the step comes back with the same prompts at
-  the next launch. While the key stays unread (or refused), meetings are
-  processed as without a summaries service: they complete with their
-  transcript and no summary, and the summary can be run again once the
-  key is in place. Closing the window while a prompt is up leaves that
+  the next launch. While the key stays unread (or refused) and the
+  summaries come from an endpoint that needs it, meetings are processed
+  as without a summaries service: the cleanup is skipped too, so they
+  complete with their raw transcript and no summary, and the summary can
+  be run again once the key is in place; Process again on a failed
+  meeting waits for the key as well. ChatGPT summaries need no key and
+  keep running. Closing the window while a prompt is up leaves that
   prompt to the user; its answer still counts.
 
 Once the identity is stored the import also writes the keychain entry
