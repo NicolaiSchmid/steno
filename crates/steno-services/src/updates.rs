@@ -312,6 +312,9 @@ impl UpdateSchedule {
     /// caller shows it. [`MANAGED_CHECK`] on a packaged install, without a
     /// request.
     pub async fn check_on_request(&self) -> Result<Option<String>, String> {
+        if self.managed {
+            return Err(MANAGED_CHECK.to_owned());
+        }
         let one = self.one_check.lock().await;
         let result = self.check_holding(one).await;
         if let Ok(Some(version)) = &result {
@@ -354,9 +357,6 @@ impl UpdateSchedule {
         &self,
         _one: tokio::sync::MutexGuard<'_, ()>,
     ) -> Result<Option<String>, String> {
-        if self.managed {
-            return Err(MANAGED_CHECK.to_owned());
-        }
         self.change(|state| state.checking = true);
         let result = tokio::time::timeout(CHECK_TIMEOUT, self.source.check())
             .await
@@ -419,16 +419,16 @@ impl UpdateSchedule {
         if self.recorder.status().state != RecordingState::Idle {
             return;
         }
-        let version = {
-            let mut state = self.state();
-            let Some(found) = state.found.clone() else {
-                return;
-            };
-            if state.announced.replace(found.clone()).as_ref() == Some(&found) {
-                return;
-            }
-            found
+        let mut state = self.state();
+        let Some(version) = state
+            .found
+            .clone()
+            .filter(|found| state.announced.as_ref() != Some(found))
+        else {
+            return;
         };
+        state.announced = Some(version.clone());
+        drop(state);
         self.source.announce(&version);
     }
 
