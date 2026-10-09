@@ -133,9 +133,10 @@ default and the feature is opt-in, for UI work without a database.
 
 Platform backends behind traits, two implementations before generalising: `Capture`
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
-`SecretStore` (Keychain and the Windows credential store via `keyring`; a 0600 file on
-Linux until a Secret Service backend is chosen), `Updater` (Tauri updater on every
-platform; Sparkle retires at cutover).
+`SecretStore` (Keychain and the Windows credential store via `keyring`; the Secret
+Service over `zbus` on Linux, a 0600 file where no provider runs or the keyring stays
+locked before the first move), `Updater` (Tauri updater on every platform; Sparkle
+retires at cutover).
 
 ## Transition
 
@@ -774,6 +775,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   - A retried re-export after a refusal happens on the next store change (Swift
     retried on the next `.ready` tick); a pending re-export when the detail goes away
     is attempted once (Swift retried after three seconds in a detached task).
+  - An API key the secret store cannot read: the Summaries section loads the rest of
+    the form, shows the read error, and a save writes the key only when the field
+    changed (`KeyRead`, `LlmSettingsViewModel::writes_key`), so a locked keyring's key
+    is never deleted. Swift's `LLMSettingsViewModel.load` failed whole on the read, and
+    its save wrote the key every time.
 
 ### Pipeline and services (WP6b)
 
@@ -921,8 +927,66 @@ still has to draw the window side. `[ ]` is not ported yet.
   sources), so the Rust app reads the API key the Swift app stored. The `keyring`
   crate sets no label, where Swift wrote "Steno <key>"; lookups ignore it. The CLI and
   the app do not read each other on macOS and Windows, as Keychain and the file did
-  not. On Linux the app uses the same file, so the two share it; a write is atomic
-  under a lock.
+  not. On Linux the app keeps its secrets in the Secret Service (`SecretServiceStore`:
+  attributes `service` and `username`, label "Steno <key>"):
+  - The choice is made once per process, on a thread of the store's own. A read never
+    asks the user; one made while a prompt is up fails, and once the choice is made
+    `App::launch` builds the pipeline again, the host reads the key again (into a
+    Settings form whose key field holds no unsaved edit and whose key no load or save
+    wrote while it was read) and a handover that waited reads its identity again and
+    starts. The crash recovery (meetings left queued or processing, unfinished exports,
+    interrupted recordings) waits for the choice, so it runs on the pipeline with the
+    key; a quit before the answer hands no listener over. A write may wait on the user,
+    under the host's lock for Settings' save, and the first launch's mint of the
+    identity on the main thread may too.
+  - A keyring locked again while the app runs fails a pipeline rebuild's read; the
+    pipeline then keeps the key it last read or saved (`KeepsApiKey`), also after a
+    save the keyring refused, never one the user removed or changed since. A bus error
+    or a provider that stops answering after the choice reads as a locked keyring.
+  - The move: the first launch with a provider copies the file's entries into the
+    service, reads them back and marks the file (`"movedToSecretService": true`); a
+    later launch whose own connection reads every value back deletes the entries, and
+    writes again any the provider lost. Before the mark, a key both hold takes the
+    file's value, except the handover identity, which keeps the service's; with no
+    fingerprint recorded, the file identity's is recorded first, so the handover
+    reports the service's as replaced instead of adopting it.
+  - After the mark the service wins for every key, and the file is no store: a key it
+    lacks is an error (`KeyringUnavailable::NotOpened`), not `None`, and a write fails,
+    so a run that cannot open the keyring neither mints an identity nor drops the API
+    key. A write to the service drops that key's copy from the file at once, so a key
+    removed or changed in the move's own launch never comes back from the copy. At a
+    later launch an API key the file still holds goes when the service holds another;
+    the file holds no key written after the mark, as writes fail.
+  - The CLI reads `STENO_<KEY>` or the file; once the file is marked and its copy of the
+    API key gone, the key reads as none, with a line on stderr, so `steno process` runs
+    without summaries, as on the Mac. It reads the key only for a server endpoint.
+  - A value with a line break (the identity's PEM) is stored base64 behind
+    `steno-base64:`, as GNOME Keyring's unencrypted file (Omarchy's default) rejects a
+    whole keyring over one.
+  - Fallback and downgrade: with no provider, no default collection, a session bus that
+    is not a `unix:` socket, a bus that does not answer the connection and its session
+    within 2 s (zbus's method timeout does not cover the connection's set-up), or a
+    keyring the user leaves locked before the first move, the app keeps every secret in
+    the file for that run, shared with the CLI under the lock; after the mark the
+    secrets are unavailable for that run instead. A build from before the mark cannot
+    parse the marked file and fails every secret read and write (no summaries key, no
+    handover) rather than minting.
+  - Tested against a fake Secret Service on a private `dbus-daemon`, and against GNOME
+    Keyring 50 and KeePassXC 2.7.12 on private buses; KWallet is untried (the
+    manual checks are in #221).
+- Handover identity guard, every platform: the identity's SHA-256 fingerprint is
+  recorded outside the secret store and the settings, in `handover-identity.json`
+  under the support directory (`steno.handoverIdentityFingerprint`, written
+  atomically; `FingerprintFile`), and every write of the identity goes through
+  `HandoverIdentity::store`, which records it. `HandoverIdentity::load_or_create`
+  returns `IdentityError::Unavailable` and mints nothing when the secret store cannot
+  be read, when it holds no identity while a fingerprint is recorded or a phone is
+  paired, or when the identity's fingerprint is not the recorded one; the handover is
+  then off for the run (an identity read while the Linux keyring asked the user is read
+  again once it answered). It mints only with no phone paired, no fingerprint and no
+  identity. A rollback to the Swift app leaves the file alone; a lost record is
+  rewritten from the identity found while the paired phones, which the Swift app keeps,
+  hold the guard. Swift keeps its own identity in the Keychain and has no guard.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
@@ -2845,9 +2909,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `RecordingIntake::admit` in `crates/steno-pipeline/src/intake.rs` and
   `RecordingIntake.admit` in `Sources/StenoCore/Storage/RecordingIntake.swift`; the
   Store item on `RecordingIntake.admit`. Found: #213.
-- **Unowned.** Linux keeps secrets in the 0600 `secrets.json` under the support
-  directory, not in the Secret Service. Where: `crates/steno-services/src/secrets.rs`.
-  Found: #173.
 - **Unowned.** The speech settings (`onnxSidecarOnMac`, `directmlOnWindows`,
   `modelsMirror`) live only in `speech.json`, which nothing writes, and the bridge has
   no field for them; `.plans/2026-10-07-speech-settings-ui.md` proposes where they
@@ -3010,8 +3071,8 @@ in the app's process until #183 moved it into the speech sidecar; the
 `CoreML` engine leaves `language` unset (#163), and
 `LanguageTaggingEngine` in the services crate runs `steno_speech`'s tagger after it,
 as `ParakeetMapping` did in Swift. Secrets: the platform keyring on macOS and
-Windows, the 0600 `secrets.json` on Linux (the kernel keyring does not survive a
-reboot; the Secret Service, which needs D-Bus, has no work package yet).
+Windows, the Secret Service on Linux, or the 0600 `secrets.json` where no keyring
+answers before the first move into it (the kernel keyring does not survive a reboot).
 Parity items: the Pipeline and services list above.
 
 WP10a is the Windows half of `crates/steno-audio`: the WASAPI live backend

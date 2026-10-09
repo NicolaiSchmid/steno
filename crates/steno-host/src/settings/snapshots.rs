@@ -7,10 +7,11 @@ use steno_bridge::{
     PhoneListener, PhoneListenerState, PhonePairing, PhoneReceipt, PhoneSettingsSnapshot, Platform,
     RecordingDevice, RecordingFolderUsage, RecordingPermission, RecordingRetention,
     RecordingSettingsSnapshot, SummariesCodex, SummariesCodexModel, SummariesCodexSignIn,
-    SummariesPreset, SummariesSettingsSnapshot, SummariesTestResult, TranscriptionAsset,
-    TranscriptionAssetState, TranscriptionEngine, TranscriptionSettingsSnapshot,
+    SummariesKeyStore, SummariesPreset, SummariesSettingsSnapshot, SummariesTestResult,
+    TranscriptionAsset, TranscriptionAssetState, TranscriptionEngine,
+    TranscriptionSettingsSnapshot,
 };
-use steno_core::{HandoverReceipt, SummaryTemplate};
+use steno_core::{HandoverReceipt, SecretPlace, SummaryTemplate};
 
 use super::audio::{AudioSettingsViewModel, FolderUsageState, recording_permissions};
 use super::general::GeneralSettingsViewModel;
@@ -340,6 +341,10 @@ pub fn summaries(
         codex,
         error: llm.errors.error.clone(),
         error_details: llm.errors.details.clone(),
+        key_store: llm.key_store.map(|place| match place {
+            SecretPlace::Keyring => SummariesKeyStore::Keyring,
+            SecretPlace::File => SummariesKeyStore::File,
+        }),
     }
 }
 

@@ -15,7 +15,7 @@ use steno_core::{Settings, Store, StoreError};
 
 pub use audio::{AudioSettingsViewModel, FolderUsageState};
 pub use general::GeneralSettingsViewModel;
-pub use llm::{LlmPreset, LlmSettingsViewModel};
+pub use llm::{KeyRead, LlmPreset, LlmSettingsViewModel};
 pub use obsidian::ObsidianSettingsViewModel;
 pub use phones::PhonesSettingsViewModel;
 pub use transcription::{AssetState, SpeechSettingsViewModel};

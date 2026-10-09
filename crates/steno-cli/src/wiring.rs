@@ -9,8 +9,8 @@ use steno_core::{
     DatabaseLock, DatabaseLockError, SecretKey, Settings, StenoPaths, Store, StoreError,
 };
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
-use steno_services::BuildError;
 use steno_services::speech::SpeechSetup;
+use steno_services::{BuildError, KeyringUnavailable};
 use uuid::Uuid;
 
 /// A usage error exits 1, a runtime failure 2.
@@ -228,24 +228,80 @@ pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
 }
 
 /// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
-/// the 0600 secrets file in the support directory.
+/// the 0600 secrets file in the support directory. After the Linux app
+/// moved the file's secrets into the Secret Service, which the command
+/// line does not read, the file keeps a copy of the key only until the
+/// app's next launch removes it or the app saves the key; a key it no
+/// longer holds is read as none and the run goes on without one, saying so
+/// on stderr, as on the Mac, whose app keeps the key in the Keychain.
 pub async fn api_key() -> Result<Option<String>, Failure> {
-    steno_services::secret_store(false, &paths()?)
-        .secret(&SecretKey::llm_api_key())
-        .await
-        .map_err(Failure::runtime)
+    api_key_under(&paths()?).await
 }
 
-/// The LLM passes from the settings, `None` without an endpoint.
+/// [`api_key`] under `paths`.
+async fn api_key_under(paths: &StenoPaths) -> Result<Option<String>, Failure> {
+    let key = SecretKey::llm_api_key();
+    let read = steno_services::secret_store(false, paths)
+        .secret(&key)
+        .await;
+    key_or_none(read, &key)
+}
+
+/// A read of `key`, with a key kept in the keyring read as none.
+fn key_or_none(
+    read: steno_core::protocols::BoundaryResult<Option<String>>,
+    key: &SecretKey,
+) -> Result<Option<String>, Failure> {
+    match read {
+        Err(error)
+            if matches!(
+                error.downcast_ref::<KeyringUnavailable>(),
+                Some(KeyringUnavailable::NotOpened(_))
+            ) =>
+        {
+            eprintln!(
+                "No API key in the secrets file (the app keeps it in the keyring, which the \
+                 command line does not read); set {} to use it.",
+                steno_services::FileSecretStore::environment_variable(key)
+            );
+            Ok(None)
+        }
+        read => read.map_err(Failure::runtime),
+    }
+}
+
+/// The LLM passes from the settings, `None` without an endpoint. The API
+/// key is read only when [`sends_key`].
 pub async fn llm_passes(
     settings: &Settings,
 ) -> Result<Option<steno_services::llm::Passes>, Failure> {
+    passes_reading(settings, api_key).await
+}
+
+/// [`llm_passes`] with the key from `read`, called only when
+/// [`sends_key`].
+async fn passes_reading(
+    settings: &Settings,
+    read: impl AsyncFnOnce() -> Result<Option<String>, Failure>,
+) -> Result<Option<steno_services::llm::Passes>, Failure> {
+    let key = if sends_key(settings) {
+        read().await?
+    } else {
+        None
+    };
     Ok(steno_services::llm::passes(
         settings,
-        api_key().await?.as_deref(),
+        key.as_deref(),
         &steno_services::llm::codex_store(),
         steno_adapters::runtime::local_time_zone(),
     ))
+}
+
+/// Whether the settings name a server endpoint, the one provider that
+/// sends the API key.
+fn sends_key(settings: &Settings) -> bool {
+    settings.llm_provider == steno_core::LlmProvider::Endpoint
+        && steno_llm::LlmEndpoint::from_settings(settings).is_some()
 }
 
 /// The pipeline dependencies: core's fakes for speech and diarization
@@ -326,6 +382,86 @@ pub fn sha256_hex(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// After the Linux app's move the file has no key: none, as on the
+    /// Mac; any other failure stays one.
+    #[test]
+    fn a_key_kept_in_the_keyring_reads_as_none() {
+        let key = SecretKey::llm_api_key();
+        let in_keyring = Box::new(KeyringUnavailable::NotOpened(key.0.clone()));
+        assert_eq!(key_or_none(Err(in_keyring), &key).unwrap(), None);
+        assert_eq!(
+            key_or_none(Ok(Some("sk".to_owned())), &key)
+                .unwrap()
+                .as_deref(),
+            Some("sk")
+        );
+        assert!(key_or_none(Err("the file is damaged".into()), &key).is_err());
+    }
+
+    /// Only a configured server endpoint reads the key, and the passes
+    /// get the key it read.
+    #[tokio::test]
+    async fn only_a_server_endpoint_sends_the_key() {
+        let endpoint = Settings {
+            llm_provider: steno_core::LlmProvider::Endpoint,
+            llm_base_url: Some("https://api.openai.com/v1".to_owned()),
+            llm_model: Some("gpt-4.1-mini".to_owned()),
+            ..Settings::default()
+        };
+        assert!(sends_key(&endpoint));
+        let without_address = Settings {
+            llm_base_url: None,
+            ..endpoint.clone()
+        };
+        assert!(!sends_key(&without_address));
+        let codex = Settings {
+            llm_provider: steno_core::LlmProvider::Codex,
+            codex_model: Some("gpt-5".to_owned()),
+            codex_confirmed_at: Some(chrono::DateTime::UNIX_EPOCH),
+            ..endpoint.clone()
+        };
+        assert!(steno_llm::LlmEndpoint::from_settings(&codex).is_some());
+        assert!(!sends_key(&codex));
+
+        let reads = std::cell::Cell::new(0);
+        let read = async || {
+            reads.set(reads.get() + 1);
+            Ok(Some("sk-1".to_owned()))
+        };
+        let passes = passes_reading(&endpoint, read).await.unwrap();
+        assert!(passes.is_some());
+        assert_eq!(reads.get(), 1, "an endpoint reads the key");
+        for settings in [&without_address, &codex] {
+            passes_reading(settings, read).await.unwrap();
+        }
+        assert_eq!(reads.get(), 1, "no other provider reads it");
+    }
+
+    /// The command's own read over a file the app marked: a copy the move
+    /// left is used, and none once the app's next launch removed it.
+    #[tokio::test]
+    async fn the_key_is_read_from_a_marked_file_and_none_once_it_left() {
+        if std::env::var_os("STENO_LLM_API_KEY").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StenoPaths::new(dir.path().to_path_buf());
+        let file = dir.path().join("secrets.json");
+        std::fs::write(
+            &file,
+            br#"{"movedToSecretService": true, "llm-api-key": "sk-left"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            api_key_under(&paths).await.unwrap().as_deref(),
+            Some("sk-left")
+        );
+        std::fs::write(&file, br#"{"movedToSecretService": true}"#).unwrap();
+        assert_eq!(api_key_under(&paths).await.unwrap(), None);
+        std::fs::write(&file, b"{").unwrap();
+        assert!(api_key_under(&paths).await.is_err(), "a damaged file fails");
+    }
 
     #[test]
     fn a_path_is_standardized_lexically() {

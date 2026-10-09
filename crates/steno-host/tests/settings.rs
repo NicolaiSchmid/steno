@@ -19,9 +19,10 @@ use steno_bridge::{
     SetTemplateParams, SummariesUpdateParams,
 };
 use steno_core::paths::file_url;
-use steno_core::protocols::{SecretKey, SecretStore as _};
+use steno_core::protocols::{BoundaryResult, SecretKey, SecretStore};
 use steno_core::{AudioRetention, LlmProvider};
 use steno_host::services::{CodexModel, LoginItemStatus};
+use steno_host::settings::{KeyRead, LlmSettingsViewModel};
 use steno_host::speech::ModelAsset;
 
 /// Swift: `pageReadyPublishesEveryTopicOnce` and `testOverviewSubtitles`.
@@ -904,6 +905,410 @@ fn update(
     }
 }
 
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
+/// A harness whose secret store holds `sk-stored` and fails every read
+/// with "the keyring is locked", as a locked keyring.
+fn a_harness_whose_key_cannot_be_read() -> Harness {
+    Harness::builder()
+        .seed(|_, fakes| {
+            block_on(
+                fakes
+                    .secrets
+                    .set_secret(&SecretKey::llm_api_key(), Some("sk-stored")),
+            )
+            .unwrap();
+            fakes.secrets.fail_reads(Some("the keyring is locked"));
+        })
+        .build()
+}
+
+/// A key the secret store could not read (a locked keyring) shows as
+/// unreadable, a save of the other fields keeps it, and the section shows
+/// it once the store answers again (`Host::secrets_changed`).
+#[test]
+fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
+    let harness = a_harness_whose_key_cannot_be_read();
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["error"], KeyRead::UNREADABLE);
+    assert_eq!(summaries["errorDetails"], "the keyring is locked");
+    assert_eq!(summaries["hasAPIKey"], false);
+
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(
+        harness.store.settings().unwrap().llm_model.as_deref(),
+        Some("gpt-4.1-mini")
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["error"],
+        KeyRead::UNREADABLE,
+        "still not read"
+    );
+    harness.fakes.secrets.fail_reads(None);
+    assert_eq!(
+        block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key()))
+            .unwrap()
+            .as_deref(),
+        Some("sk-stored"),
+        "the saves left the key alone"
+    );
+
+    harness.host.secrets_changed();
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["hasAPIKey"], true);
+    assert!(summaries.get("error").is_none(), "{summaries}");
+}
+
+/// Over a key that could not be read, a field typed into and emptied
+/// again saves nothing over the key; a key typed before the store answered
+/// again stays in the field and is saved; a key typed and saved replaces
+/// it and the unreadable message goes.
+#[test]
+fn only_a_typed_key_replaces_one_that_could_not_be_read() {
+    let harness = a_harness_whose_key_cannot_be_read();
+    let stored = || {
+        harness.fakes.secrets.fail_reads(None);
+        let key = block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key())).unwrap();
+        harness
+            .fakes
+            .secrets
+            .fail_reads(Some("the keyring is locked"));
+        key
+    };
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    for typed in ["s", ""] {
+        harness
+            .host
+            .settings_summaries_update(update(None, None, Some(typed), None))
+            .unwrap();
+    }
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(stored().as_deref(), Some("sk-stored"), "typed and erased");
+
+    // Typed, then the store answers again before a save.
+    harness
+        .host
+        .settings_summaries_update(update(None, None, Some("sk-half"), None))
+        .unwrap();
+    harness.fakes.secrets.fail_reads(None);
+    harness.host.secrets_changed();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(
+        stored().as_deref(),
+        Some("sk-half"),
+        "the reread kept the edit"
+    );
+
+    harness
+        .host
+        .settings_summaries_update(update(None, None, Some("sk-typed"), None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(stored().as_deref(), Some("sk-typed"));
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert!(summaries.get("error").is_none(), "{summaries}");
+}
+
+/// The store answering again while the form holds unsaved edits: the key
+/// shows, and every edit stays as typed for the save.
+#[test]
+fn a_reread_key_keeps_the_forms_unsaved_edits() {
+    let harness = a_harness_whose_key_cannot_be_read();
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-typed"), None, None, None))
+        .unwrap();
+    harness.fakes.secrets.fail_reads(None);
+    harness.host.secrets_changed();
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["hasAPIKey"], true);
+    assert_eq!(summaries["model"], "gpt-typed");
+    assert!(summaries.get("error").is_none(), "{summaries}");
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(
+        harness.store.settings().unwrap().llm_model.as_deref(),
+        Some("gpt-typed")
+    );
+    assert_eq!(
+        block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key()))
+            .unwrap()
+            .as_deref(),
+        Some("sk-stored")
+    );
+}
+
+/// A save that wrote the key while the host read it again keeps the saved
+/// key: the read began before the save, so it may hold the older key.
+#[test]
+fn a_key_saved_while_it_was_read_again_keeps_the_saved_key() {
+    let harness = a_harness_whose_key_cannot_be_read();
+    let services = harness.host.services();
+    let mut model = LlmSettingsViewModel::new();
+    model.load(
+        &harness.store,
+        services,
+        KeyRead::Unreadable("the keyring is locked".to_owned()),
+    );
+    let read_at = model.key_version();
+    let older = KeyRead::Present("sk-stored".to_owned());
+    "sk-saved".clone_into(&mut model.api_key);
+    model.save(&harness.store, services, now());
+    assert_eq!(model.errors.error, None);
+    model.reload_key(services, older.clone(), read_at);
+    assert_eq!(model.api_key, "sk-saved", "the older read is dropped");
+    model.reload_key(services, older, model.key_version());
+    assert_eq!(
+        model.api_key, "sk-stored",
+        "a read begun after the save applies"
+    );
+}
+
+/// A load of the key that lands while the host reads it again (a window
+/// opened meanwhile) holds the newer key, so the reread that began before
+/// it is dropped; a save that leaves the key alone (the model only) keeps
+/// the reread.
+#[test]
+fn a_reread_gives_way_to_a_later_load_but_not_to_a_model_only_save() {
+    let harness = a_harness_whose_key_cannot_be_read();
+    let services = harness.host.services();
+    let unreadable = || KeyRead::Unreadable("the keyring is locked".to_owned());
+    let mut model = LlmSettingsViewModel::new();
+    model.load(&harness.store, services, unreadable());
+    let read_at = model.key_version();
+    model.load(
+        &harness.store,
+        services,
+        KeyRead::Present("sk-new".to_owned()),
+    );
+    model.reload_key(services, KeyRead::Present("sk-old".to_owned()), read_at);
+    assert_eq!(
+        model.api_key, "sk-new",
+        "the load came after the read began"
+    );
+
+    let mut settings = harness.store.settings().unwrap();
+    settings.llm_provider = LlmProvider::Endpoint;
+    settings.llm_base_url = Some("https://api.openai.com/v1".to_owned());
+    settings.llm_model = Some("gpt-4.1-mini".to_owned());
+    harness.store.save_settings(&settings).unwrap();
+    let mut model = LlmSettingsViewModel::new();
+    model.load(&harness.store, services, unreadable());
+    let read_at = model.key_version();
+    "gpt-other".clone_into(&mut model.model);
+    model.save(&harness.store, services, now());
+    assert_eq!(model.errors.error.as_deref(), Some(KeyRead::UNREADABLE));
+    assert_eq!(
+        harness.store.settings().unwrap().llm_model.as_deref(),
+        Some("gpt-other")
+    );
+    model.reload_key(services, KeyRead::Present("sk-stored".to_owned()), read_at);
+    assert_eq!(model.api_key, "sk-stored", "the model-only save kept it");
+    assert!(model.has_stored_api_key());
+    assert_eq!(model.errors.error, None, "the unreadable message went");
+}
+
+/// A secret store whose next read, once armed, takes the value and then
+/// waits until it is released: a read the test can save over.
+struct HeldReads {
+    inner: Arc<dyn SecretStore>,
+    hold: Arc<Hold>,
+}
+
+#[derive(Default)]
+struct Hold {
+    state: Mutex<Phases>,
+    changed: Condvar,
+}
+
+/// Where the armed read is.
+#[derive(Default)]
+struct Phases {
+    armed: bool,
+    holding: bool,
+    released: bool,
+}
+
+impl Hold {
+    fn arm(&self) {
+        *self.state.lock().unwrap() = Phases {
+            armed: true,
+            ..Phases::default()
+        };
+    }
+
+    fn until_holding(&self) {
+        let state = self.state.lock().unwrap();
+        let (_state, timeout) = self
+            .changed
+            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| {
+                !state.holding
+            })
+            .unwrap();
+        assert!(!timeout.timed_out(), "no read was held");
+    }
+
+    fn release(&self) {
+        self.state.lock().unwrap().released = true;
+        self.changed.notify_all();
+    }
+}
+
+#[steno_core::async_trait]
+impl SecretStore for HeldReads {
+    async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
+        let read = self.inner.secret(key).await;
+        let mut state = self.hold.state.lock().unwrap();
+        if state.armed {
+            state.armed = false;
+            state.holding = true;
+            self.hold.changed.notify_all();
+            drop(
+                self.hold
+                    .changed
+                    .wait_while(state, |state| !state.released)
+                    .unwrap(),
+            );
+        }
+        read
+    }
+
+    async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+        self.inner.set_secret(key, value).await
+    }
+}
+
+/// The reread takes the form's version before it reads the key: a key
+/// saved while the read is under way stays, though the read saw none.
+#[test]
+fn a_key_saved_during_the_reads_own_read_stays() {
+    let hold = Arc::new(Hold::default());
+    let harness = Harness::builder()
+        .seed(|_, fakes| fakes.secrets.fail_reads(Some("the keyring is locked")))
+        .change_services({
+            let hold = hold.clone();
+            move |services| {
+                services.secrets = Arc::new(HeldReads {
+                    inner: services.secrets.clone(),
+                    hold,
+                });
+            }
+        })
+        .build();
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
+        .unwrap();
+    harness.fakes.secrets.fail_reads(None);
+    hold.arm();
+    let reread = {
+        let host = harness.host.clone();
+        std::thread::spawn(move || host.secrets_changed())
+    };
+    hold.until_holding();
+    harness
+        .host
+        .settings_summaries_update(update(None, None, Some("sk-saved"), None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["hasAPIKey"],
+        true
+    );
+    hold.release();
+    reread.join().unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["hasAPIKey"],
+        true,
+        "the read that saw no key is dropped"
+    );
+    assert_eq!(
+        block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key()))
+            .unwrap()
+            .as_deref(),
+        Some("sk-saved")
+    );
+}
+
+/// A stored key whose field is emptied is removed by the save, and a save
+/// that leaves the field alone keeps it.
+#[test]
+fn emptying_the_key_field_removes_the_stored_key() {
+    let harness = Harness::builder()
+        .seed(|_, fakes| {
+            block_on(
+                fakes
+                    .secrets
+                    .set_secret(&SecretKey::llm_api_key(), Some("sk-stored")),
+            )
+            .unwrap();
+        })
+        .build();
+    let stored = || block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key())).unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["hasAPIKey"],
+        true
+    );
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(stored().as_deref(), Some("sk-stored"));
+
+    harness
+        .host
+        .settings_summaries_update(update(None, None, Some(""), None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(stored(), None);
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["hasAPIKey"],
+        false
+    );
+}
+
 /// Swift: `testLLMValidatesAndSavesSettingsAndKey`, `testLLMInvalidInputSavesNothing`,
 /// `testLLMCommitSavesOnlyChangesThenProbes`, `testLLMSelectPresetFillsAndStoresTheAddress`,
 /// `summariesAndExportDraftsStoreOnSave`.
@@ -969,11 +1374,7 @@ fn summaries_validate_save_the_key_apart_and_probe() {
     let settings = harness.store.settings().unwrap();
     assert_eq!(settings.llm_model.as_deref(), Some("gpt-4.1-mini"));
     assert_eq!(settings.llm_context_tokens, 16_000);
-    let stored_key = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap()
-        .block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key()))
-        .unwrap();
+    let stored_key = block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key())).unwrap();
     assert_eq!(
         stored_key.as_deref(),
         Some("sk-test"),

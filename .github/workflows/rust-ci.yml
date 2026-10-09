@@ -219,10 +219,11 @@ jobs:
             "$($drive.variable)=$($drive.letter):\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
-      # The shell's logout and shutdown tests run their fakes on a private
-      # `dbus-daemon` (scripts/setup-linux.sh installs it); on Linux a
-      # missing daemon fails them instead of skipping them.
-      - name: Require the D-Bus logout and shutdown tests (Linux)
+      # The shell's logout and shutdown tests and the services' Secret
+      # Service tests run their fakes on a private `dbus-daemon`
+      # (scripts/setup-linux.sh installs it); on Linux a missing daemon
+      # fails them instead of skipping them.
+      - name: Require the D-Bus tests (Linux)
         if: matrix.name == 'linux'
         run: echo "STENO_REQUIRE_DBUS_TEST=1" >> "$GITHUB_ENV"
 

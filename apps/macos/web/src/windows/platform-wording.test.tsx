@@ -403,16 +403,28 @@ describe("Settings", () => {
 			),
 		).toBeInTheDocument();
 		third.unmount();
-		const linuxKey = await createBridgeHarness("scenario=summaries-connected");
-		renderWithBridge(<SummariesSection />, linuxKey, platformFor("linux"));
-		expect(screen.getByTestId("api-key")).toHaveAttribute(
-			"placeholder",
-			"Saved in a file only you can read",
-		);
-		expect(
-			screen.getByText(
-				"Stored in a file only you can read and sent only to the server above.",
-			),
-		).toBeInTheDocument();
+		// Linux names the keyring only when the host says the key is there.
+		for (const [scenario, where] of [
+			["summaries-key-in-keyring", "your keyring"],
+			["summaries-key-in-file", "a file only you can read"],
+			["summaries-connected", "a file only you can read"],
+		] as const) {
+			const linuxKey = await createBridgeHarness(`scenario=${scenario}`);
+			const view = renderWithBridge(
+				<SummariesSection />,
+				linuxKey,
+				platformFor("linux"),
+			);
+			expect(screen.getByTestId("api-key")).toHaveAttribute(
+				"placeholder",
+				`Saved in ${where}`,
+			);
+			expect(
+				screen.getByText(
+					`Stored in ${where} and sent only to the server above.`,
+				),
+			).toBeInTheDocument();
+			view.unmount();
+		}
 	});
 });

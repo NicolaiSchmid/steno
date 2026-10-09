@@ -12,6 +12,8 @@ use crate::{BoundaryResult, SecretKey, SecretStore};
 #[derive(Debug, Default)]
 pub struct InMemorySecretStore {
     secrets: Mutex<BTreeMap<String, String>>,
+    /// The error every read fails with, as a locked keyring's.
+    read_failure: Mutex<Option<String>>,
 }
 
 impl InMemorySecretStore {
@@ -30,7 +32,14 @@ impl InMemorySecretStore {
                     .map(|(key, value)| (key.0, value))
                     .collect(),
             ),
+            read_failure: Mutex::default(),
         }
+    }
+
+    /// Makes every read fail with `message` (`None` ends it); writes still
+    /// land.
+    pub fn fail_reads(&self, message: Option<&str>) {
+        *lock(&self.read_failure) = message.map(str::to_owned);
     }
 
     /// Every stored key, sorted.
@@ -43,6 +52,9 @@ impl InMemorySecretStore {
 #[async_trait]
 impl SecretStore for InMemorySecretStore {
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
+        if let Some(message) = lock(&self.read_failure).clone() {
+            return Err(message.into());
+        }
         Ok(lock(&self.secrets).get(key.as_str()).cloned())
     }
 

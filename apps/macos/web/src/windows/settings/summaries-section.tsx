@@ -25,7 +25,7 @@ import {
 	FormRow,
 	Select,
 } from "@/components/ui";
-import { usePlatform } from "@/lib/platform";
+import { keyHome, usePlatform } from "@/lib/platform";
 import { SectionPage } from "./section-page";
 
 /** The consent card until confirmed, then the account line and the model. */
@@ -166,7 +166,8 @@ function statusOf(summaries: SummariesSettingsSnapshot): {
  */
 export function SummariesSection() {
 	const client = useBridge();
-	const { words } = usePlatform();
+	const platform = usePlatform();
+	const { words } = platform;
 	const summaries = useSnapshot("settings.summaries");
 	if (!summaries) {
 		return <SectionPage id="summaries" />;
@@ -191,7 +192,7 @@ export function SummariesSection() {
 						? codex.confirmed
 							? codexConsent(words).usageFootnote
 							: undefined
-						: `Stored in ${words.loginKeychain} and sent only to the server above.`
+						: `Stored in ${keyHome(platform, summaries.keyStore).full} and sent only to the server above.`
 				}
 			>
 				<SummariesEndpointForm

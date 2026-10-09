@@ -104,7 +104,7 @@ use crate::onboarding::{self, OnboardingViewModel};
 use crate::publisher::{RECORDING_INTERVAL, TopicPublisher};
 use crate::services::Services;
 use crate::settings::{
-    AudioSettingsViewModel, GeneralSettingsViewModel, LlmPreset, LlmSettingsViewModel,
+    AudioSettingsViewModel, GeneralSettingsViewModel, KeyRead, LlmPreset, LlmSettingsViewModel,
     ObsidianSettingsViewModel, PhonesSettingsViewModel, SpeechSettingsViewModel, llm::Probe,
     overview, snapshots as settings_snapshots,
 };
@@ -379,9 +379,7 @@ impl Host {
         services: Services,
         config: HostConfig,
     ) -> Result<Self, HostError> {
-        let secret = block_on(services.secrets.secret(&SecretKey::llm_api_key()))
-            .ok()
-            .flatten();
+        let key = KeyRead::from(block_on(services.secrets.secret(&SecretKey::llm_api_key())));
         let mut general = GeneralSettingsViewModel::new(&services);
         general.load(&store, &services);
         let mut audio = AudioSettingsViewModel::new();
@@ -389,7 +387,7 @@ impl Host {
         let mut speech = SpeechSettingsViewModel::new();
         speech.load(&store, &services);
         let mut llm = LlmSettingsViewModel::new();
-        llm.load(&store, &services, secret.clone());
+        llm.load(&store, &services, key.clone());
         let mut obsidian = ObsidianSettingsViewModel::default();
         obsidian.load(&store);
         let mut phones = PhonesSettingsViewModel::new(&services);
@@ -397,7 +395,7 @@ impl Host {
         phones.refresh(&services);
         let subtitles = overview::refresh(&store, &services, config.platform, &config.version);
         let mut onboarding = OnboardingViewModel::new(config.platform);
-        onboarding.load(&store, &services, secret);
+        onboarding.load(&store, &services, key);
         let mut list = MeetingListViewModel::new(config.zone);
         list.reload(&store);
         let mut progress = ProcessingProgressModel::default();
@@ -911,22 +909,48 @@ impl Host {
     /// opened again begins on page 1, not finished.
     pub fn onboarding_window_closed(&self) {
         OnboardingViewModel::mark_completed(&self.shared.services);
-        let secret = block_on(
-            self.shared
-                .services
-                .secrets
-                .secret(&SecretKey::llm_api_key()),
-        )
-        .ok()
-        .flatten();
+        let key = self.read_key();
         {
             let mut inner = self.lock();
             let mut fresh = OnboardingViewModel::new(self.shared.config.platform);
-            fresh.load(&self.shared.store, &self.shared.services, secret);
+            fresh.load(&self.shared.store, &self.shared.services, key);
             inner.onboarding = fresh;
             inner.publisher.schedule(BridgeTopic::Onboarding);
         }
         self.publish();
+    }
+
+    /// The secret store answers again after a read failed while the
+    /// keyring asked the user (it opened, or the choice fell to the file):
+    /// the Summaries section and onboarding's summaries step read the API
+    /// key again, unless their key field holds an unsaved edit or a save
+    /// wrote the key while it was read, and keep everything else they show
+    /// ([`LlmSettingsViewModel::reload_key`]).
+    pub fn secrets_changed(&self) {
+        let read_at = {
+            let inner = self.lock();
+            (inner.llm.key_version(), inner.onboarding.llm.key_version())
+        };
+        let key = self.read_key();
+        {
+            let mut inner = self.lock();
+            let services = &self.shared.services;
+            inner.llm.reload_key(services, key.clone(), read_at.0);
+            inner.onboarding.llm.reload_key(services, key, read_at.1);
+            inner.publisher.schedule(BridgeTopic::SettingsSummaries);
+            inner.publisher.schedule(BridgeTopic::Onboarding);
+        }
+        self.publish();
+    }
+
+    /// The stored API key; never asks the user.
+    fn read_key(&self) -> KeyRead {
+        KeyRead::from(block_on(
+            self.shared
+                .services
+                .secrets
+                .secret(&SecretKey::llm_api_key()),
+        ))
     }
 
     // Helpers for the commands
@@ -1040,19 +1064,21 @@ impl Host {
     /// when the window opened. A download in flight keeps its state. The
     /// API key is read from the secret store here with the lock held: this
     /// runs only when the stored settings changed (an outside write, an
-    /// onboarding save), the read is short, and moving it out would split
-    /// one reload into two publishes. A `SecretStore` must not call back
-    /// into the host.
+    /// onboarding save), and moving it out would split one reload into two
+    /// publishes. On Linux and Windows the read never asks the user (the
+    /// Secret Service store asks only on a write or at its own start); on
+    /// the Mac the Keychain may show its access dialog for an item another
+    /// app wrote (the Swift app's key, once at the cutover), and every
+    /// window waits until the user answers it. A `SecretStore` must not call
+    /// back into the host.
     fn reload_sections(&self, inner: &mut Inner) {
         let store = &self.shared.store;
         let services = &self.shared.services;
-        let secret = block_on(services.secrets.secret(&SecretKey::llm_api_key()))
-            .ok()
-            .flatten();
+        let key = self.read_key();
         inner.general.load(store, services);
         inner.audio.load(store, services);
         inner.speech.load(store, services);
-        inner.llm.load(store, services, secret);
+        inner.llm.load(store, services, key);
         inner.obsidian.load(store);
         for topic in SECTION_TOPICS {
             inner.publisher.schedule(topic);
@@ -1149,7 +1175,11 @@ impl Host {
     /// A command on `window`'s Summaries form: that window's model, its own
     /// topic, and the probe the model asked for run outside the lock
     /// afterwards. The four form commands pass the calling window (see the
-    /// module doc), the Codex card and Save the Settings window.
+    /// module doc), the Codex card and Save the Settings window. A save
+    /// that writes the key does so under the lock, and a keyring may ask
+    /// the user to confirm or unlock that write (the Linux store waits up
+    /// to two minutes): until the user answers, every window and the tray
+    /// wait with it.
     fn summaries_command(
         &self,
         window: BridgeWindow,
@@ -2072,9 +2102,10 @@ impl BridgeHost for Host {
 
     fn onboarding_refresh(&self) -> Outcome<()> {
         self.onboarding_command(|inner| {
+            // Loaded at start, so the key is not read again.
             inner
                 .onboarding
-                .load(&self.shared.store, &self.shared.services, None);
+                .load(&self.shared.store, &self.shared.services, KeyRead::Absent);
             self.advance_if_handled(inner);
         });
         Ok(())

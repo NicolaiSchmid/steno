@@ -269,6 +269,13 @@ public enum BridgeSamples {
         .init(slug: "gpt-5.1-codex-mini", name: "GPT-5.1 Codex mini"),
       ]))
 
+  /// The OpenAI preset with a saved key the host keeps in the secrets
+  /// file: what the Rust host sends on Linux without a keyring.
+  public static let settingsSummariesFileKey = SummariesSettingsSnapshot(
+    subtitle: "OpenAI", presets: settingsSummaries.presets, presetID: "openAI", baseURL: "",
+    model: "gpt-4.1-mini", contextTokens: "32000", hasAPIKey: true, isConfigured: true,
+    isTesting: false, keyStore: .file)
+
   public static let settingsExport = ExportSettingsSnapshot(
     subtitle: "Off", enabled: false, vaultPath: nil, vaultName: nil, peopleFolder: "People",
     includeAudio: false, taskTag: "#steno", saved: false)
@@ -438,6 +445,7 @@ extension BridgeSamples {
     BridgeFixture("settings.transcription", settingsTranscription),
     BridgeFixture("settings.summaries", settingsSummaries),
     BridgeFixture("settings.summaries.codex", settingsSummariesCodex),
+    BridgeFixture("settings.summaries.fileKey", settingsSummariesFileKey),
     BridgeFixture("settings.export", settingsExport),
     BridgeFixture("settings.iphone", settingsPhone),
     BridgeFixture("settings.iphone.pairing", settingsPhonePairing),

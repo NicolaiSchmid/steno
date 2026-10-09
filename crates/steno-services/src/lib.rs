@@ -16,10 +16,10 @@
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels`, and [`SpeechEngines`](speech::SpeechEngines), the engines and the diarizer the pipelines share across reloads |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
 //! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`LOG_FILTER`], [`flush_logs`] |
-//! | [`handover`] | The identity in the secret store and the host's `Handover` over the listener |
-//! | [`secrets`] | The platform keyring and the 0600 secrets file behind `SecretStore` |
+//! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, and the host's `Handover` over the listener |
+//! | [`secrets`] | The platform keyring, the Secret Service on Linux and the 0600 secrets file behind `SecretStore`, and [`KeepsApiKey`](secrets::KeepsApiKey), the app's store that keeps the API key for the pipeline's rebuilds |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
-//! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, the CLI's `meeting.json`, `recording-folders.json` and `audio-folders.json` |
+//! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json` and `audio-folders.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the first-launch flags |
 //!
 //! What stays a fake here is named in [`build`]'s doc: the platform
@@ -34,13 +34,22 @@
 //! run in this process.
 //!
 //! Secrets live in the platform keyring on macOS (the Keychain) and on
-//! Windows (the credential store). On Linux they live in the 0600
-//! `secrets.json` under the support directory, the store the CLI uses
-//! everywhere: the `keyring` crate's `linux-native` store is the kernel
-//! keyring, which does not survive a reboot (the handover identity and the
-//! LLM API key would vanish), and its Secret Service store needs D-Bus and
-//! a running secret service, which headless machines and the CI runners
-//! do not have. The Secret Service has no work package yet.
+//! Windows (the credential store). On Linux they live in the Secret
+//! Service when a provider answers on the session bus
+//! (`secrets::SecretServiceStore`, which first moves what the file holds
+//! into it and marks the file), else in the 0600 `secrets.json` under the
+//! support directory, the store the CLI uses everywhere; the choice is
+//! made once per process, on the store's own thread, and logged. A read
+//! never waits on the keyring's prompt: one made while the prompt is up
+//! fails, and [`App::launch`] reads again once the keyring answered (the
+//! handover's identity too). [`build`] still waits for the choice until a
+//! prompt shows, so a bus or a provider that never answers holds the start
+//! for two seconds (the connection and its session), and a provider that
+//! stops answering after the session for one D-Bus call timeout (25 s),
+//! before the file is chosen. A write may wait on the user. The `keyring`
+//! crate's `linux-native` store is the kernel keyring, which does not
+//! survive a reboot (the handover identity and the LLM API key would
+//! vanish), so it is not used.
 //!
 //! The shell's launch, in one piece:
 //!
@@ -88,9 +97,12 @@ mod testing;
 
 pub use app::{App, AppOptions, BuildError, build, lock_database, open_store};
 pub use logs::{LOG_FILTER, flush_logs, log_to_stderr};
-pub use secrets::{FileSecretStore, KeyringSecretStore, secret_store};
+pub use secrets::{
+    FileSecretStore, KeyringSecretStore, KeyringUnavailable, secret_store, secret_store_with_unlock,
+};
 /// The durable writes live with the pipeline, whose phone intake needs
-/// them; the secrets file and the CLI's `meeting.json` use them from here.
+/// them; the secrets file, `handover-identity.json` and the CLI's
+/// `meeting.json` use them from here.
 pub use steno_pipeline::files;
 
 /// Runs `future` to completion on `runtime` from a synchronous host

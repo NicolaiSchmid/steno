@@ -19,7 +19,10 @@
 //!   binds, where partial uploads live, the pairing window and the read
 //!   timeout; [`Clock`] is the one time source.
 //! - [`HandoverIdentity`]: the TLS identity, minted once and kept in the
-//!   [`SecretStore`](steno_core::SecretStore).
+//!   [`SecretStore`](steno_core::SecretStore), with its fingerprint
+//!   recorded through a [`FingerprintRecord`]: a store that cannot read
+//!   it, lost it or holds another one is [`Unavailability`], never a
+//!   mint, so no phone has to pair again.
 //! - [`PairingPayload`]: what the QR code shows; [`base64url`] is its
 //!   encoding of the fingerprint and the secret.
 //! - [`pinning`]: the trust rule the phone applies, in Rust, for a client
@@ -52,7 +55,7 @@ pub mod upload;
 pub mod wire;
 
 pub use configuration::{Clock, HandoverConfiguration};
-pub use identity::{HandoverIdentity, IdentityError};
+pub use identity::{FingerprintRecord, HandoverIdentity, IdentityError, Unavailability};
 pub use pairing::{PairingPayload, PairingPayloadError};
 pub use server::ServerMetrics;
 pub use service::{HandoverService, ListenerState, StoreNotSynced};

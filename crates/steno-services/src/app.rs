@@ -11,7 +11,7 @@ use steno_core::{
     DatabaseLock, DatabaseLockError, MeetingEvent, SecretKey, SecretStore, StenoPaths, Store,
     StoreError,
 };
-use steno_handover::HandoverService;
+use steno_handover::{HandoverService, IdentityError, Unavailability};
 use steno_host::fakes::{
     FakeClipPlayer, FakeFileSystem, FakeLoginItem, FakePermissions, FakeQrEncoder, FakeUpdater,
 };
@@ -23,7 +23,7 @@ use steno_pipeline::{
 };
 
 use crate::block_on;
-use crate::handover::ListenerHandover;
+use crate::handover::{ListenerHandover, start_if_paired};
 use crate::llm::{ClientLlmService, codex_store};
 use crate::pipeline::{
     BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
@@ -31,7 +31,7 @@ use crate::pipeline::{
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
 use crate::recovery::{Interrupted, LiveRecordingCheck, reconcile_interrupted};
-use crate::secrets::secret_store;
+use crate::secrets::{KeepsApiKey, KeyringUnavailable, SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 
 /// What stops the graph from being built: another process holds the
@@ -56,7 +56,8 @@ pub struct AppOptions {
     /// `None` opens the database under `paths`.
     pub database_path: Option<std::path::PathBuf>,
     /// The platform keyring when true, else the 0600 secrets file (the CLI
-    /// and headless machines). Linux always uses the file; see the crate doc.
+    /// and headless machines). On Linux the keyring is the Secret Service
+    /// when a provider runs, else the file; see the crate doc.
     pub keyring: bool,
     /// The window opener and URL opener; the shell's, a no-op for the CLI.
     pub opener: Arc<dyn Opener>,
@@ -116,7 +117,7 @@ pub struct App {
     /// resets.
     pub export_retries: Arc<ExportRetries>,
     pub services: Services,
-    pub handover: Option<Arc<HandoverService>>,
+    pub handover: Option<Arc<ListenerHandover>>,
     pub recorder: Arc<CaptureRecorder>,
     /// Where the speech and diarization models live.
     pub models_directory: std::path::PathBuf,
@@ -132,6 +133,12 @@ pub struct App {
     pub live_recording_check: LiveRecordingCheck,
     /// The launch's background half, for [`App::launch_finished`].
     pub(crate) launch_work: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Resolves once the secret store chose where the secrets are, true
+    /// when it turned a read away while the keyring asked the user, for
+    /// [`App::launch`] to read the API key and the handover identity again
+    /// before it recovers the meetings
+    /// ([`crate::secrets::secret_store_with_unlock`]).
+    pub(crate) secrets_unlocked: std::sync::Mutex<Option<SecretsUnlocked>>,
     /// Held while the graph lives, so no second app or CLI command takes
     /// the same database; `None` on a filesystem without locks
     /// ([`DatabaseLockError::Unsupported`], a startup warning). Declared
@@ -173,7 +180,7 @@ fn create_database_folder(path: &std::path::Path) -> Result<(), BuildError> {
 /// not be read: the app runs without summaries rather than not at all, as
 /// `AppEnvironment.live` did when the keychain was unreachable.
 fn api_key(
-    secrets: &Arc<dyn SecretStore>,
+    secrets: &dyn SecretStore,
     runtime: &tokio::runtime::Handle,
 ) -> Result<Option<String>, String> {
     block_on(runtime, secrets.secret(&SecretKey::llm_api_key()))
@@ -187,19 +194,27 @@ fn api_key(
 /// `engines` is read once by [`build`] and also backs the model service,
 /// so the two agree on where each engine runs; the recorder's warm-up
 /// reads the engine from the pipeline. A secret store that cannot be read
-/// is logged and the passes are built without a key.
+/// is logged, and the passes are built with the key last read or written
+/// through `secrets` ([`KeepsApiKey`]), or without one: a keyring locked
+/// again while the app runs keeps the key a rebuild had, and a key the user
+/// removed or changed is never the one kept.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,
-    secrets: &Arc<dyn SecretStore>,
+    secrets: &KeepsApiKey,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
 ) -> Result<BuiltPipeline, BuildError> {
     let settings = store.settings()?;
     let api_key = api_key(secrets, runtime).unwrap_or_else(|warning| {
-        tracing::warn!("{warning}");
-        None
+        let kept = secrets.kept_api_key();
+        if kept.is_some() {
+            tracing::warn!("{warning}; the pipeline keeps the key it last had");
+        } else {
+            tracing::warn!("{warning}");
+        }
+        kept
     });
     let zone = steno_adapters::runtime::local_time_zone();
     let passes = crate::llm::passes(&settings, api_key.as_deref(), codex, zone);
@@ -233,7 +248,7 @@ pub fn pipeline_dependencies(
 fn make_dependencies(
     store: &Arc<Store>,
     engines: &Arc<SpeechEngines>,
-    secrets: &Arc<dyn SecretStore>,
+    secrets: &Arc<KeepsApiKey>,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
@@ -271,35 +286,70 @@ pub fn handover_intake(
     )
 }
 
-/// The handover listener over a loaded or minted identity, with the mac id
-/// the Phones settings show; `None`, with the reason, when the launch
-/// checkpoint failed ([`HandoverService::checkpoint_store`], which says why
-/// it comes first) or the identity could not be read or stored. A failed
-/// checkpoint keeps the handover off until the next launch, and the rest of
-/// the app runs. Swift: `AppEnvironment.makeHandover`.
+/// The handover over the listener on a loaded or minted identity, whose
+/// mac id the Phones settings show; `None`, with the reason, when the
+/// launch checkpoint failed ([`HandoverService::checkpoint_store`], which
+/// says why it comes first), the identity could not be read or stored, or
+/// it is not the one the paired phones pinned
+/// (`HandoverIdentity::load_or_create`). A failed checkpoint keeps the
+/// handover off until the next launch, and the rest of the app runs. An
+/// identity read while the keyring was asking the user
+/// ([`KeyringUnavailable::Unlocking`]) gives a handover that waits for its
+/// listener, which [`App::launch`] reads again once the keyring answered.
+/// Swift: `AppEnvironment.makeHandover`.
 fn handover_listener(
     store: &Arc<Store>,
     pipeline: &Arc<CurrentPipeline>,
     secrets: &Arc<dyn SecretStore>,
+    paths: &StenoPaths,
     zone: FixedOffset,
     runtime: &tokio::runtime::Handle,
-) -> Result<(Arc<HandoverService>, uuid::Uuid), String> {
+) -> Result<Arc<ListenerHandover>, String> {
     HandoverService::checkpoint_store(store).map_err(|error| error.to_string())?;
+    let handover = match listener_over_identity(store, pipeline, secrets, paths, zone, runtime) {
+        Ok((service, mac_id)) => {
+            ListenerHandover::over(service, mac_id, store.clone(), runtime.clone())
+        }
+        Err(error) if waits_on_the_keyring(&error) => {
+            ListenerHandover::waiting(identity_failure(&error), store.clone(), runtime.clone())
+        }
+        Err(error) => return Err(identity_failure(&error)),
+    };
+    Ok(Arc::new(handover))
+}
+
+/// The listener over the identity the secret store holds, or one minted
+/// and stored, and the identity's mac id.
+fn listener_over_identity(
+    store: &Arc<Store>,
+    pipeline: &Arc<CurrentPipeline>,
+    secrets: &Arc<dyn SecretStore>,
+    paths: &StenoPaths,
+    zone: FixedOffset,
+    runtime: &tokio::runtime::Handle,
+) -> Result<(Arc<HandoverService>, uuid::Uuid), IdentityError> {
+    let record = crate::handover::FingerprintFile::in_support_directory(&paths.support_directory);
     let identity = block_on(
         runtime,
         steno_handover::HandoverIdentity::load_or_create(
             secrets.as_ref(),
+            &record,
+            store,
             &format!(
                 "Steno on {}",
                 steno_handover::HandoverConfiguration::default_service_name()
             ),
             chrono::Utc::now(),
         ),
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     let intake = Arc::new(handover_intake(store.clone(), pipeline.clone(), zone));
     let mac_id = identity.mac_id();
-    let service = Arc::new(crate::handover::service(store.clone(), intake, identity));
+    let service = Arc::new(crate::handover::service(
+        listener_configuration(paths),
+        store.clone(),
+        intake,
+        identity,
+    ));
     Ok((service, mac_id))
 }
 
@@ -319,6 +369,45 @@ fn lock_or_run_without(
             Ok(None)
         }
         Err(error) => Err(error),
+    }
+}
+
+/// The listener's configuration: the default, and in this crate's tests
+/// loopback only, unadvertised, with the inbox under the test's support
+/// directory.
+fn listener_configuration(paths: &StenoPaths) -> steno_handover::HandoverConfiguration {
+    let configuration = steno_handover::HandoverConfiguration::default();
+    if !cfg!(test) {
+        return configuration;
+    }
+    steno_handover::HandoverConfiguration {
+        advertise: false,
+        inbox_directory: paths.support_directory.join("handover-inbox"),
+        ..configuration
+    }
+}
+
+/// Why the identity is not available, for the Phones settings: the
+/// keyring's own sentence when it was not opened at start, as that one
+/// already names the pairing.
+fn identity_failure(error: &IdentityError) -> String {
+    match keyring_failure(error) {
+        Some(not_opened @ KeyringUnavailable::NotOpened(_)) => not_opened.to_string(),
+        _ => error.to_string(),
+    }
+}
+
+/// Whether the identity could not be read because the keyring was asking
+/// the user at that moment.
+fn waits_on_the_keyring(error: &IdentityError) -> bool {
+    keyring_failure(error) == Some(&KeyringUnavailable::Unlocking)
+}
+
+/// The keyring's reason when the identity could not be read from it.
+fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
+    match error {
+        IdentityError::Unavailable(Unavailability::Unreadable(source)) => source.downcast_ref(),
+        _ => None,
     }
 }
 
@@ -346,7 +435,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         .unwrap_or_else(|| paths.database_path());
     let database_lock = lock_or_run_without(&database_path, options.lock_patience, &mut warnings)?;
     let store = open_store(&database_path)?;
-    let secrets = secret_store(options.keyring, &paths);
+    let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
+    let kept = Arc::new(KeepsApiKey::new(secrets));
+    let secrets: Arc<dyn SecretStore> = kept.clone();
     let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
@@ -362,7 +453,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let speech = engines.setup();
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
-    let make = make_dependencies(&store, &engines, &secrets, &codex, &events, &runtime);
+    let make = make_dependencies(&store, &engines, &kept, &codex, &events, &runtime);
     let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
     let sweep = RetentionSweep::new(store.clone());
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
@@ -382,13 +473,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     // The save writes to the database's volume too.
     recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
 
-    let handover = match handover_listener(&store, &pipeline, &secrets, zone, &runtime) {
-        Ok(pair) => Some(pair),
-        Err(error) => {
-            warnings.push(format!("Phone handover is unavailable: {error}"));
-            None
-        }
-    };
+    let handover = handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
+        .inspect_err(|error| warnings.push(format!("Phone handover is unavailable: {error}")))
+        .ok();
 
     let services = Services {
         clock: Arc::new(WallClock),
@@ -406,13 +493,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         speech_models,
         llm: Arc::new(ClientLlmService { codex }),
         export_validator: Arc::new(crate::export::ObsidianExportValidator),
-        handover: handover.as_ref().map(|(service, mac_id)| {
-            Arc::new(ListenerHandover {
-                service: service.clone(),
-                mac_id: *mac_id,
-                runtime: runtime.clone(),
-            }) as Arc<dyn steno_host::services::Handover>
-        }),
+        handover: handover
+            .clone()
+            .map(|handover| handover as Arc<dyn steno_host::services::Handover>),
         qr: Arc::new(FakeQrEncoder::new("")),
         audio_devices: Arc::new(PlatformAudioDevices),
         folder_usage: Arc::new(DiskFolderUsage),
@@ -434,7 +517,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         sweep,
         export_retries,
         services,
-        handover: handover.map(|(service, _)| service),
+        handover,
         recorder,
         models_directory: speech.models_directory.clone(),
         zone,
@@ -443,6 +526,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         startup_warnings: warnings,
         live_recording_check: LiveRecordingCheck::default(),
         launch_work: std::sync::Mutex::default(),
+        secrets_unlocked: std::sync::Mutex::new(secrets_unlocked),
         database_lock,
     })
 }
@@ -683,12 +767,14 @@ impl App {
     /// written, the meeting enqueued, where it stays `queued` until the
     /// next launch processes it); and the handover listener stops. Every
     /// write is a committed transaction by then, so the store has nothing
-    /// left to flush. Swift: `AppController.shutdown`, whose pipeline died
-    /// with the app, so the next launch resumed its job.
+    /// left to flush. A handover still waiting for its listener gets none
+    /// after this ([`ListenerHandover::close`]). Swift:
+    /// `AppController.shutdown`, whose pipeline died with the app, so the
+    /// next launch resumed its job.
     pub fn shutdown(&self) {
         self.pipeline.quit();
         self.recorder.stop_for_quit();
-        if let Some(handover) = &self.handover {
+        if let Some(handover) = self.handover.as_deref().and_then(ListenerHandover::close) {
             block_on(&self.runtime, handover.stop());
         }
     }
@@ -708,6 +794,25 @@ impl App {
     ///    recovered, left alone or failed, and the list is refreshed.
     /// 5. Meanwhile the login item is registered the first time, and the
     ///    handover listener starts when a phone is already paired.
+    ///
+    /// Where the secret store can ask (the Secret Service), steps 3 and 4
+    /// (all but the sweep) wait until it chose and the reread below ran, so
+    /// no meeting, export or recovered recording runs on a pipeline built
+    /// without the key. The choice includes the unlock and the first
+    /// launch's move or a later launch's tidy; on a locked keyring or
+    /// `KeePassXC` each of their prompts may stay up for two minutes, so a
+    /// meeting a crash left processing can show as processing that long (it
+    /// is not a hang). [`build`] itself may wait on the user once: on the
+    /// first launch over an open keyring with no identity in it, the
+    /// handover identity is minted into it on the calling thread, before
+    /// any window shows, and that write waits up to two minutes when the
+    /// provider asks to confirm the new item (`KeePassXC` answers every new
+    /// item with a prompt, which may show a window).
+    ///
+    /// When the keyring answers later, after a read failed while it asked
+    /// the user, the pipeline is built again, the host reads the API key
+    /// again, and a handover that waits for its listener reads the identity
+    /// again and starts it when a phone is paired.
     ///
     /// Swift: `AppController.launch`, which failed every interrupted
     /// recording instead of recovering it.
@@ -763,25 +868,8 @@ impl App {
         });
 
         let interrupted = Interrupted::list(&self.store, &self.paths.support_directory);
-        let pipeline = self.pipeline.current();
-        match pipeline.resume_unfinished() {
-            Ok(resumed) if !resumed.is_empty() => {
-                tracing::info!(count = resumed.len(), "resumed unfinished meetings");
-            }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
-        }
-        // After `resume_unfinished`, so a meeting it resumed is skipped:
-        // its run exports it.
-        match pipeline.redeliver_unfinished(&self.export_retries) {
-            Ok(owed) if !owed.is_empty() => {
-                tracing::info!(count = owed.len(), "re-exporting unfinished exports");
-            }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "unfinished exports could not be re-exported"),
-        }
-        run_sweep(&self.sweep);
-        let work = {
+        let recover = self.recover_unfinished();
+        let reconcile = {
             let (store, pipeline) = (self.store.clone(), self.pipeline.clone());
             let (check, zone, runtime) = (
                 self.live_recording_check.clone(),
@@ -789,28 +877,120 @@ impl App {
                 self.runtime.clone(),
             );
             let host = host.clone();
-            tokio::task::spawn_blocking(move || {
+            move || {
                 reconcile_at_launch(&store, &pipeline, &interrupted, &check, zone, &runtime);
                 host.store_changed();
-            })
+            }
+        };
+        let unlocked = self
+            .secrets_unlocked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let work = match unlocked {
+            None => {
+                recover();
+                run_sweep(&self.sweep);
+                tokio::task::spawn_blocking(reconcile)
+            }
+            // The pipeline built while the keyring asked has no API key, so
+            // the meetings and the interrupted recordings wait for the one
+            // built after the answer.
+            Some(unlocked) => {
+                run_sweep(&self.sweep);
+                let reread = self.reread_after_unlock(host);
+                tokio::spawn(async move {
+                    let read_again = unlocked.await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if read_again {
+                            reread();
+                        }
+                        recover();
+                        reconcile();
+                    })
+                    .await;
+                })
+            }
         };
         *self
             .launch_work
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(work);
         host.register_login_item_on_first_launch();
-        if let Some(handover) = &self.handover {
-            let handover = handover.clone();
-            tokio::spawn(async move {
-                let paired = handover.paired_devices().await.unwrap_or_default();
-                if !paired.is_empty()
-                    && let Err(error) = handover.start().await
-                {
-                    tracing::warn!(%error, "handover listener did not start");
-                }
-            });
+        if let Some(handover) = self
+            .handover
+            .as_deref()
+            .and_then(ListenerHandover::listener)
+            .cloned()
+        {
+            tokio::spawn(async move { start_if_paired(&handover).await });
         }
         host.store_changed();
+    }
+
+    /// The launch's crash recovery: meetings left queued or processing
+    /// processed again on the current pipeline, then exports left
+    /// unfinished re-exported.
+    fn recover_unfinished(&self) -> impl FnOnce() + Send + 'static {
+        let (pipeline, export_retries) = (self.pipeline.clone(), self.export_retries.clone());
+        move || {
+            let pipeline = pipeline.current();
+            match pipeline.resume_unfinished() {
+                Ok(resumed) if !resumed.is_empty() => {
+                    tracing::info!(count = resumed.len(), "resumed unfinished meetings");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
+            }
+            // After `resume_unfinished`, so a meeting it resumed is skipped:
+            // its run exports it.
+            match pipeline.redeliver_unfinished(&export_retries) {
+                Ok(owed) if !owed.is_empty() => {
+                    tracing::info!(count = owed.len(), "re-exporting unfinished exports");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "unfinished exports could not be re-exported");
+                }
+            }
+        }
+    }
+
+    /// What [`App::launch`] runs once the keyring answered: the pipeline
+    /// built again, the API key read again, and the listener of a waiting
+    /// handover made and started.
+    fn reread_after_unlock(&self, host: &Arc<Host>) -> impl FnOnce() + Send + 'static {
+        let (pipeline, host) = (self.pipeline.clone(), host.clone());
+        let waiting = self
+            .handover
+            .clone()
+            .filter(|handover| handover.listener().is_none());
+        let (store, secrets, paths, zone, runtime) = (
+            self.store.clone(),
+            self.secrets.clone(),
+            self.paths.clone(),
+            self.zone,
+            self.runtime.clone(),
+        );
+        move || {
+            if let Err(error) = pipeline.reload() {
+                tracing::warn!(%error, "the pipeline was not rebuilt after the unlock");
+            }
+            host.secrets_changed();
+            let Some(waiting) = waiting else {
+                return;
+            };
+            match listener_over_identity(&store, &pipeline, &secrets, &paths, zone, &runtime) {
+                Ok((service, mac_id)) => {
+                    waiting.set(service, mac_id);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "the handover identity could not be read after the unlock");
+                    waiting.still_waiting(identity_failure(&error));
+                }
+            }
+            host.phones_changed();
+        }
     }
 
     /// Waits until the launch's background half (`reconcile_at_launch`)
@@ -835,10 +1015,12 @@ mod tests {
 
     use chrono::Utc;
 
+    use steno_bridge::BridgeTopic;
     use steno_core::{
         AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata, SecretKey, SecretStore,
         async_trait, paths::file_url, protocols::BoundaryResult,
     };
+    use steno_host::services::ListenerState;
     use steno_pipeline::MeetingEventBus;
     use steno_speech::SpeechRuntime;
 
@@ -952,7 +1134,7 @@ mod tests {
         let onboarding = app
             .host()
             .unwrap()
-            .snapshot(steno_bridge::BridgeTopic::Onboarding)
+            .snapshot(BridgeTopic::Onboarding)
             .unwrap();
         let listed: Vec<&str> = onboarding["permissions"]
             .as_array()
@@ -1687,7 +1869,9 @@ mod tests {
         let memory = Arc::new(steno_core::testing::InMemorySecretStore::new());
         let secrets: Arc<dyn SecretStore> = memory.clone();
         let runtime = tokio::runtime::Handle::current();
-        let listener = || handover_listener(&store, &pipeline, &secrets, local_zone(), &runtime);
+        let paths = StenoPaths::new(dir.path().join("support"));
+        let listener =
+            || handover_listener(&store, &pipeline, &secrets, &paths, local_zone(), &runtime);
         store
             .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
             .unwrap();
@@ -1703,6 +1887,402 @@ mod tests {
 
         writer.execute_batch("ROLLBACK").unwrap();
         assert!(listener().is_ok());
+    }
+
+    /// A secret store whose reads fail with `failure` while it is set:
+    /// [`KeyringUnavailable::Unlocking`] as the Linux store's while the
+    /// keyring's prompt is up, `Locked` or `NotOpened` after it.
+    #[derive(Default)]
+    struct UnavailableSecrets {
+        failure: std::sync::Mutex<Option<KeyringUnavailable>>,
+        inner: steno_core::testing::InMemorySecretStore,
+    }
+
+    impl UnavailableSecrets {
+        fn fail_with(&self, failure: Option<KeyringUnavailable>) {
+            *self.failure.lock().unwrap() = failure;
+        }
+    }
+
+    #[async_trait]
+    impl SecretStore for UnavailableSecrets {
+        async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
+            if let Some(failure) = self.failure.lock().unwrap().clone() {
+                return Err(Box::new(failure));
+            }
+            self.inner.secret(key).await
+        }
+
+        async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+            self.inner.set_secret(key, value).await
+        }
+
+        /// Undecided while the keyring asks, as the Linux store.
+        fn place(&self) -> Option<steno_core::SecretPlace> {
+            let asking = *self.failure.lock().unwrap() == Some(KeyringUnavailable::Unlocking);
+            (!asking).then_some(steno_core::SecretPlace::Keyring)
+        }
+    }
+
+    /// An app launched while the keyring asks the user: its secret store
+    /// holds the API key (and, with `paired`, an identity and a paired
+    /// phone) but turns every read away, its pipeline notes the key each
+    /// build read, a meeting the last process left queued without its
+    /// asset waits for the crash recovery, and its handover waits for its
+    /// listener. `answer` makes the keyring answer.
+    struct AskedAtLaunch {
+        _dir: tempfile::TempDir,
+        app: App,
+        host: Arc<Host>,
+        secrets: Arc<UnavailableSecrets>,
+        handover: Arc<ListenerHandover>,
+        keys_read: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        queued: uuid::Uuid,
+        /// A meeting the last process left recording, with no audio.
+        interrupted: uuid::Uuid,
+        paired: Vec<PairedDevice>,
+        answered: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl AskedAtLaunch {
+        async fn new(paired: bool) -> Self {
+            let (dir, store) = temp_store();
+            let mut app = recording_app(&dir, &store);
+            let secrets = Arc::new(UnavailableSecrets::default());
+            let key = SecretKey::llm_api_key();
+            secrets.inner.set_secret(&key, Some("sk-1")).await.unwrap();
+            let mut phones = Vec::new();
+            if paired {
+                let identity = steno_handover::HandoverIdentity::mint("x", Utc::now()).unwrap();
+                let record = crate::handover::FingerprintFile::in_support_directory(
+                    &app.paths.support_directory,
+                );
+                identity.store(&secrets.inner, &record).await.unwrap();
+                let phone = PairedDevice {
+                    id: uuid::Uuid::new_v4(),
+                    name: "Phone".to_owned(),
+                    paired_at: Utc::now(),
+                    last_seen_at: None,
+                };
+                store.save_paired_device(&phone, &[1; 32]).unwrap();
+                phones = store.paired_devices().unwrap();
+            }
+            secrets.fail_with(Some(KeyringUnavailable::Unlocking));
+            app.secrets = secrets.clone();
+            app.services.secrets = secrets.clone();
+
+            let keys_read = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let make: MakeDependencies = {
+                let (store, secrets, keys_read) =
+                    (store.clone(), app.secrets.clone(), keys_read.clone());
+                Arc::new(move || {
+                    let read = api_key(secrets.as_ref(), &tokio::runtime::Handle::current());
+                    keys_read.lock().unwrap().push(read.ok().flatten());
+                    Ok(built(fake_dependencies(&store, "fake-engine")))
+                })
+            };
+            app.pipeline = Arc::new(CurrentPipeline::new(
+                make().unwrap(),
+                make,
+                app.runtime.clone(),
+            ));
+            let mut meeting = steno_core::testing::sample_data::meeting();
+            meeting.state = steno_core::MeetingState::Queued;
+            store.save_meeting(&meeting).unwrap();
+            let audio_folder = store.settings().unwrap().audio_folder;
+            std::fs::create_dir_all(steno_core::paths::file_url_path(&audio_folder).unwrap())
+                .unwrap();
+            let mut interrupted = steno_core::testing::sample_data::meeting();
+            interrupted.id = uuid::Uuid::new_v4();
+            interrupted.state = steno_core::MeetingState::Recording;
+            store.save_meeting(&interrupted).unwrap();
+
+            let handover = handover_listener(
+                &app.store,
+                &app.pipeline,
+                &app.secrets,
+                &app.paths,
+                app.zone,
+                &app.runtime,
+            )
+            .unwrap();
+            app.handover = Some(handover.clone());
+            app.services.handover =
+                Some(handover.clone() as Arc<dyn steno_host::services::Handover>);
+            let (answered, unlocked) = tokio::sync::oneshot::channel::<()>();
+            *app.secrets_unlocked.get_mut().unwrap() =
+                Some(Box::pin(async move { unlocked.await.is_ok() }));
+            let host = Arc::new(app.host().unwrap());
+            app.launch(&host);
+            AskedAtLaunch {
+                _dir: dir,
+                app,
+                host,
+                secrets,
+                handover,
+                keys_read,
+                queued: meeting.id,
+                interrupted: interrupted.id,
+                paired: phones,
+                answered: Some(answered),
+            }
+        }
+
+        /// The keyring answers; reads fail with `failure` from now on.
+        fn answer(&mut self, failure: Option<KeyringUnavailable>) {
+            self.secrets.fail_with(failure);
+            self.answered.take().unwrap().send(()).unwrap();
+        }
+
+        fn queued_state(&self) -> steno_core::MeetingState {
+            self.app.store.meeting(self.queued).unwrap().unwrap().state
+        }
+
+        fn interrupted_state(&self) -> steno_core::MeetingState {
+            self.app
+                .store
+                .meeting(self.interrupted)
+                .unwrap()
+                .unwrap()
+                .state
+        }
+
+        /// Waits until the crash recovery ran, which ends the reread.
+        async fn until_recovered(&self) {
+            tokio::time::timeout(PATIENCE, async {
+                while self.queued_state() == steno_core::MeetingState::Queued {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the meetings were recovered after the answer");
+        }
+
+        fn snapshot(&self, topic: BridgeTopic) -> serde_json::Value {
+            let host = self.host.clone();
+            on_own_thread(PATIENCE, "the snapshot was built", move || {
+                host.snapshot(topic).unwrap()
+            })
+        }
+
+        fn handover_state(&self) -> ListenerState {
+            steno_host::services::Handover::state(self.handover.as_ref())
+        }
+    }
+
+    impl Drop for AskedAtLaunch {
+        fn drop(&mut self) {
+            if let Some(listener) = self.handover.listener() {
+                block_on(&self.app.runtime, listener.stop());
+            }
+        }
+    }
+
+    /// The identity read while the keyring asked the user: the handover
+    /// waits for its listener and says why, and once the keyring answered
+    /// `App::launch` rebuilds the pipeline with the key, shows the key in
+    /// Settings, reads the identity again and hands the listener over, and
+    /// only then recovers the meetings the last process left.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_handover_read_while_the_keyring_asked_gets_its_listener_once_it_answers() {
+        let mut asked = AskedAtLaunch::new(false).await;
+        let handover = asked.handover.clone();
+        assert!(handover.listener().is_none());
+        let ListenerState::Failed(reason) = asked.handover_state() else {
+            panic!("a waiting handover reads as failed");
+        };
+        assert!(reason.contains("waiting for an answer"), "{reason}");
+        assert!(steno_host::services::Handover::start(handover.as_ref()).is_err());
+        assert_eq!(
+            asked.secrets.inner.keys(),
+            [SecretKey::llm_api_key()],
+            "nothing minted"
+        );
+        assert_eq!(*asked.keys_read.lock().unwrap(), [None]);
+        let summaries = asked.snapshot(BridgeTopic::SettingsSummaries);
+        assert_eq!(summaries["hasAPIKey"], false);
+        assert!(summaries.get("keyStore").is_none(), "{summaries}");
+        let onboarding = asked.snapshot(BridgeTopic::Onboarding);
+        assert_eq!(
+            onboarding["summaries"]["error"],
+            steno_host::settings::KeyRead::UNREADABLE,
+            "{onboarding}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            asked.queued_state(),
+            steno_core::MeetingState::Queued,
+            "no recovery on the pipeline built without the key"
+        );
+        assert_eq!(
+            asked.interrupted_state(),
+            steno_core::MeetingState::Recording,
+            "nor of an interrupted recording"
+        );
+
+        asked.answer(None);
+        asked.until_recovered().await;
+        asked.app.launch_finished().await;
+        assert!(
+            matches!(
+                asked.interrupted_state(),
+                steno_core::MeetingState::Failed { .. }
+            ),
+            "the interrupted recording is settled after the answer"
+        );
+        assert!(handover.listener().is_some());
+        assert_ne!(
+            steno_host::services::Handover::mac_id(handover.as_ref()),
+            ""
+        );
+        assert_eq!(
+            asked.secrets.inner.keys(),
+            [
+                steno_handover::HandoverIdentity::secret_key(),
+                SecretKey::llm_api_key()
+            ],
+            "minted once the store answered, with no phone paired"
+        );
+        assert_eq!(
+            *asked.keys_read.lock().unwrap(),
+            [None, Some("sk-1".to_owned())],
+            "the pipeline was built again, with the key"
+        );
+        let summaries = asked.snapshot(BridgeTopic::SettingsSummaries);
+        assert_eq!(summaries["hasAPIKey"], true);
+        assert_eq!(summaries["keyStore"], "keyring", "{summaries}");
+        let onboarding = asked.snapshot(BridgeTopic::Onboarding);
+        assert!(
+            onboarding["summaries"].get("error").is_none(),
+            "onboarding read the key again: {onboarding}"
+        );
+        assert_eq!(onboarding["summaries"]["keyStore"], "keyring");
+        assert_eq!(asked.handover_state(), ListenerState::Stopped);
+    }
+
+    /// A phone paired: its listener starts once the keyring answered, the
+    /// Phones settings show it, and the paired phones come from the
+    /// database while the handover waits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_paired_phones_listener_starts_once_the_keyring_answered() {
+        let mut asked = AskedAtLaunch::new(true).await;
+        assert_eq!(
+            steno_host::services::Handover::paired_devices(asked.handover.as_ref()).unwrap(),
+            asked.paired,
+            "the paired phones come from the database meanwhile"
+        );
+        assert_eq!(asked.paired.len(), 1);
+        asked.answer(None);
+        asked.until_recovered().await;
+        assert!(
+            matches!(asked.handover_state(), ListenerState::Listening(_)),
+            "{:?}",
+            asked.handover_state()
+        );
+        let phone = asked.snapshot(BridgeTopic::SettingsPhone);
+        assert_eq!(phone["listener"]["state"], "listening", "{phone}");
+    }
+
+    /// The app quits after the keyring answered: the shutdown stops the
+    /// listener the reread started.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_quit_stops_the_listener_started_after_the_answer() {
+        let mut asked = AskedAtLaunch::new(true).await;
+        asked.answer(None);
+        asked.until_recovered().await;
+        assert!(matches!(
+            asked.handover_state(),
+            ListenerState::Listening(_)
+        ));
+        let app = &asked.app;
+        tokio::task::block_in_place(|| app.shutdown());
+        assert_eq!(asked.handover_state(), ListenerState::Stopped);
+    }
+
+    /// The store chose without turning a read away (the commonest Linux
+    /// launch): the meetings are recovered all the same, with no reread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_choice_that_turned_nothing_away_still_recovers_the_meetings() {
+        let mut asked = AskedAtLaunch::new(false).await;
+        asked.secrets.fail_with(None);
+        drop(asked.answered.take());
+        asked.until_recovered().await;
+        assert_eq!(*asked.keys_read.lock().unwrap(), [None], "no reread");
+    }
+
+    /// The app quits before the keyring answered: the reread hands no
+    /// listener over, so nothing listens after the shutdown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_quit_before_the_keyring_answered_leaves_no_listener_running() {
+        let mut asked = AskedAtLaunch::new(true).await;
+        let app = &asked.app;
+        tokio::task::block_in_place(|| app.shutdown());
+        asked.answer(None);
+        tokio::time::timeout(PATIENCE, async {
+            while asked.keys_read.lock().unwrap().len() < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the reread ran");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(asked.handover.listener().is_none());
+    }
+
+    /// A reread that still cannot read the identity keeps the handover
+    /// waiting, with the new reason, and recovers the meetings anyway.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reread_that_fails_again_says_why_and_recovers_the_meetings() {
+        let mut asked = AskedAtLaunch::new(true).await;
+        asked.answer(Some(KeyringUnavailable::Locked));
+        asked.until_recovered().await;
+        assert!(asked.handover.listener().is_none());
+        let ListenerState::Failed(reason) = asked.handover_state() else {
+            panic!("still waiting");
+        };
+        assert!(reason.contains("locked"), "{reason}");
+        let phone = asked.snapshot(BridgeTopic::SettingsPhone);
+        assert!(
+            phone["listener"]["failure"]
+                .as_str()
+                .is_some_and(|failure| failure.contains("locked")),
+            "{phone}"
+        );
+    }
+
+    /// An identity read that fails for any reason but the keyring asking
+    /// (locked again, or not opened at start) turns the handover off for
+    /// the run instead of waiting for a reread that never comes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_identity_read_that_fails_otherwise_turns_the_handover_off() {
+        let (dir, store) = temp_store();
+        let pipeline = crate::testing::current_pipeline(fake_dependencies(&store, "fake-engine"));
+        let paths = StenoPaths::new(dir.path().join("support"));
+        for failure in [
+            KeyringUnavailable::Locked,
+            KeyringUnavailable::NotOpened(steno_handover::HandoverIdentity::SECRET_KEY.to_owned()),
+        ] {
+            let unavailable = Arc::new(UnavailableSecrets::default());
+            unavailable.fail_with(Some(failure.clone()));
+            let secrets: Arc<dyn SecretStore> = unavailable.clone();
+            let error = handover_listener(
+                &store,
+                &pipeline,
+                &secrets,
+                &paths,
+                local_zone(),
+                &tokio::runtime::Handle::current(),
+            )
+            .err()
+            .unwrap();
+            let expected = match failure {
+                // Its own sentence names the pairing.
+                KeyringUnavailable::NotOpened(_) => failure.to_string(),
+                _ => format!("this computer's phone pairing could not be read ({failure})"),
+            };
+            assert_eq!(error, expected);
+            assert!(unavailable.inner.keys().is_empty(), "nothing minted");
+        }
     }
 
     /// A secret store whose reads fail, as the keyring does without a
@@ -1723,7 +2303,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_secret_store_that_cannot_be_read_leaves_the_pipeline_without_a_key() {
         let (dir, store) = temp_store();
-        let secrets: Arc<dyn SecretStore> = Arc::new(BrokenSecrets);
+        let secrets = KeepsApiKey::new(Arc::new(BrokenSecrets));
         let paths = StenoPaths::new(dir.path().join("support"));
         let built = pipeline_dependencies(
             &store,
@@ -1739,5 +2319,86 @@ mod tests {
             api_key(&secrets, &tokio::runtime::Handle::current()).unwrap_err(),
             "Could not read the LLM API key from the secret store: no default keychain"
         );
+    }
+
+    /// The Authorization header one build of the pipeline sends: builds it
+    /// as a reload does over `secrets` and runs its cleanup once against
+    /// `server`.
+    async fn authorization_sent(
+        store: &Arc<Store>,
+        paths: &StenoPaths,
+        secrets: &KeepsApiKey,
+        server: &steno_llm::testing::StubChatServer,
+    ) -> Option<String> {
+        let built = pipeline_dependencies(
+            store,
+            &SpeechEngines::new(SpeechSetup::new(&store.settings().unwrap(), paths)),
+            secrets,
+            &codex_store(),
+            &MeetingEventBus::new(),
+            &tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let cleaner = built.dependencies.cleaner.expect("an endpoint is set");
+        let before = server.request_count();
+        let segment = steno_core::TranscriptSegment {
+            id: uuid::Uuid::from_u128(1),
+            meeting_id: uuid::Uuid::from_u128(2),
+            start: 0.0,
+            end: 2.0,
+            speaker_id: None,
+            lane: steno_core::AudioLane::Mic,
+            text: "hello there".to_owned(),
+            raw_text: "hello there".to_owned(),
+        };
+        let input = steno_core::CleanupInput {
+            segments: vec![segment],
+            language: None,
+            participants: Vec::new(),
+            speakers: Vec::new(),
+            known_people: Vec::new(),
+        };
+        let _ = cleaner.clean(&input).await;
+        server.requests()[before].authorization().map(str::to_owned)
+    }
+
+    /// A keyring locked again while the app runs fails a rebuild's read
+    /// (a model-only save, a speech engine change): the pipeline keeps the
+    /// key it had. A key removed or changed meanwhile is never the one
+    /// kept, and a reread of no key drops it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pipeline_rebuilt_while_the_keyring_is_locked_keeps_the_key_it_had() {
+        let (dir, store) = temp_store();
+        let paths = StenoPaths::new(dir.path().join("support"));
+        let server = steno_llm::testing::StubChatServer::start().await.unwrap();
+        let mut settings = store.settings().unwrap();
+        settings.llm_provider = steno_core::LlmProvider::Endpoint;
+        settings.llm_base_url = Some(server.base_url().to_string());
+        settings.llm_model = Some("model".to_owned());
+        store.save_settings(&settings).unwrap();
+        let key = SecretKey::llm_api_key();
+        let memory = Arc::new(steno_core::testing::InMemorySecretStore::with([(
+            key.clone(),
+            "sk-1".to_owned(),
+        )]));
+        let secrets = KeepsApiKey::new(memory.clone());
+        let sent = || authorization_sent(&store, &paths, &secrets, &server);
+        assert_eq!(sent().await.as_deref(), Some("Bearer sk-1"));
+
+        memory.fail_reads(Some("the keyring is locked"));
+        assert_eq!(sent().await.as_deref(), Some("Bearer sk-1"), "kept");
+        secrets.set_secret(&key, Some("sk-2")).await.unwrap();
+        assert_eq!(sent().await.as_deref(), Some("Bearer sk-2"), "changed");
+        secrets.set_secret(&key, None).await.unwrap();
+        assert_eq!(sent().await, None, "a removal while locked keeps no key");
+
+        memory.fail_reads(None);
+        memory.set_secret(&key, Some("sk-3")).await.unwrap();
+        assert_eq!(sent().await.as_deref(), Some("Bearer sk-3"));
+        memory.set_secret(&key, None).await.unwrap();
+        assert_eq!(sent().await, None, "a read of no key drops it");
+        memory.fail_reads(Some("the keyring is locked"));
+        assert_eq!(sent().await, None);
+        server.stop();
     }
 }

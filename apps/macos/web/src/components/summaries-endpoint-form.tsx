@@ -4,7 +4,7 @@ import { send, useBridge } from "@/bridge/hooks";
 import type { CodexState } from "@/components/codex-consent-card";
 import { DraftField } from "@/components/draft-field";
 import { FormRow, Select } from "@/components/ui";
-import { usePlatform } from "@/lib/platform";
+import { keyHome, usePlatform } from "@/lib/platform";
 
 export interface SummariesUpdate {
 	baseURL?: string;
@@ -50,13 +50,13 @@ export function SummariesEndpointForm({
 	renderCodex,
 }: SummariesEndpointFormProps) {
 	const client = useBridge();
-	const { words } = usePlatform();
+	const platform = usePlatform();
 	const stacked = layout === "stack";
 	const preset = summaries.presets.find(
 		(candidate) => candidate.id === summaries.presetID,
 	);
 	const keyPlaceholder = summaries.hasAPIKey
-		? `Saved in ${words.keychain}`
+		? `Saved in ${keyHome(platform, summaries.keyStore).short}`
 		: preset?.needsAPIKey
 			? `Paste the key from your ${preset.title} account`
 			: stacked

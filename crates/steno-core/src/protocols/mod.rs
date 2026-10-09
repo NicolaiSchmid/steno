@@ -8,7 +8,8 @@
 //! - [`EchoCanceller`]: the one synchronous, real-time boundary.
 //! - [`LanguageModel`]: one completion; sends text and only text.
 //! - [`Destination`]: a one-way push target.
-//! - [`SecretStore`] and [`SecretKey`]: the API key and whatever follows it.
+//! - [`SecretStore`] and [`SecretKey`]: the API key and whatever follows it;
+//!   [`SecretPlace`] says where a store keeps them.
 //! - [`SpeakerMemory`]: known voices across meetings.
 //! - [`AudioDecoder`], [`TranscriptCleaner`], [`MeetingSummarizer`],
 //!   [`DeliveryDispatcher`], [`HandoverIntake`]: the pipeline's stage
@@ -112,7 +113,7 @@ pub use echo_canceller::EchoCanceller;
 pub use handover_intake::HandoverIntake;
 pub use language_model::LanguageModel;
 pub use meeting_summarizer::MeetingSummarizer;
-pub use secret_store::{SecretKey, SecretStore};
+pub use secret_store::{SecretKey, SecretPlace, SecretStore};
 pub use speaker_memory::{DEFAULT_MATCH_MARGIN, SpeakerMemory};
 pub use speech_engine::SpeechEngine;
 pub use transcript_cleaner::TranscriptCleaner;

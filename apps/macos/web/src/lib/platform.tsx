@@ -48,8 +48,10 @@ export interface PlatformWords {
 	/** The actions menu item that shows the recording's files. */
 	showRecording: string;
 	/**
-	 * Where a saved API key lives, after "in": "your keychain", "a file
-	 * only you can read" (`crates/steno-services/src/secrets.rs`).
+	 * Where the platform keyring keeps a saved API key, after "in": "your
+	 * keychain", "Credential Manager", "your keyring" (the Secret Service).
+	 * Read it through `keyHome`, which says the secrets file instead where
+	 * the host keeps the key there.
 	 */
 	keychain: string;
 	/** The same in full, after "in": "your login keychain". */
@@ -118,13 +120,38 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
 		revealInFileManager: "Show in folder",
 		showExport: "Show export in folder",
 		showRecording: "Show recording in folder",
-		keychain: "a file only you can read",
-		loginKeychain: "a file only you can read",
+		keychain: "your keyring",
+		loginKeychain: "your keyring",
 		systemSettings: "your system settings",
 		opensSystemSettings: false,
 		codexSignInFile: "~/.codex/auth.json",
 	},
 };
+
+/** Where the host keeps a saved key, as `settings.summaries` says. */
+export type KeyStore = "keyring" | "file";
+
+/** The secrets file, after "in" (`crates/steno-services/src/secrets.rs`). */
+export const SECRETS_FILE_WORDS = "a file only you can read";
+
+/**
+ * Where a saved API key lives, after "in", short and in full: the
+ * platform's keyring, or the secrets file where the host keeps the key
+ * there. Linux names the keyring only when the host says it holds the key
+ * (the Secret Service answered); the Mac and Windows always keep it in
+ * theirs, and the Swift app does not say.
+ */
+export function keyHome(
+	platform: Platform,
+	keyStore: KeyStore | undefined,
+): { short: string; full: string } {
+	const keyring =
+		keyStore === "keyring" ||
+		(keyStore === undefined && platform.os !== "linux");
+	return keyring
+		? { short: platform.words.keychain, full: platform.words.loginKeychain }
+		: { short: SECRETS_FILE_WORDS, full: SECRETS_FILE_WORDS };
+}
 
 /**
  * Whether Steno reads a calendar on the OS: whether the host's list
