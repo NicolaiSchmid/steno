@@ -12,6 +12,7 @@ use steno_core::{
 };
 use uuid::Uuid;
 
+use crate::main_window::ProgressEntry;
 use crate::services::{ClipPlayer, FileSystem, Pipeline, ProcessAgainRefusal};
 use crate::setup::{ExportStatus, SummaryStatus, all_delivered, llm_configured, vault_configured};
 use crate::speakers::SpeakersViewModel;
@@ -470,6 +471,7 @@ pub fn process_again_refusal_line(
             )
             .to_owned(),
         ProcessAgainRefusal::Busy => "This meeting is already being processed.".to_owned(),
+        ProcessAgainRefusal::ModelsMissing => ProgressEntry::MODELS_MISSING_TITLE.to_owned(),
         ProcessAgainRefusal::Quitting => return None,
         ProcessAgainRefusal::CouldNotStart(reason) => {
             format!("Processing could not start: {reason}")

@@ -4867,3 +4867,37 @@ async fn resume_waiting_starts_only_the_meetings_runs_left_waiting() {
     assert_eq!(meeting_state(&world, untouched.id), MeetingState::Queued);
     assert_eq!(pipeline.resume_waiting().unwrap(), Vec::<Uuid>::new());
 }
+
+/// "Process again" (or `reprocess`) on a meeting a run left waiting for
+/// models says so instead of "unfinished", under the claim, and leaves it
+/// waiting: nothing is saved, no run starts, and an install's resume then
+/// processes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn process_again_on_a_meeting_waiting_for_models_leaves_it_waiting() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let gate = Uninstalled::refusing(Refusal::Transcribe);
+    let pipeline = ProcessingPipeline::new(with_engine(&world, gate.clone()));
+    let refused = enqueue_refused_call(&world, &pipeline).await;
+    let before = world.store.meeting(refused).unwrap().unwrap();
+    let mut events = world.events.subscribe();
+
+    assert_eq!(
+        pipeline.process_again(refused),
+        Err(ReprocessError::WaitingForModels(refused))
+    );
+    assert_eq!(
+        pipeline.reprocess(refused),
+        Err(ReprocessError::WaitingForModels(refused))
+    );
+    pipeline.wait_until_idle().await;
+    assert_eq!(drain(&mut events), Vec::<MeetingEvent>::new());
+    assert_eq!(world.store.meeting(refused).unwrap().unwrap(), before);
+    assert_eq!(pipeline.dependencies().model_waits.waiting(), [refused]);
+    assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
+
+    gate.installed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(pipeline.resume_waiting().unwrap(), [refused]);
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, refused), MeetingState::Ready);
+}

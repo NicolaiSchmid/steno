@@ -973,6 +973,37 @@ fn process_meeting_writes_the_damage_beside_the_database() {
     assert_eq!(marks().parts(id), 3);
 }
 
+/// A queued meeting is not processed again. The command's pipeline is its
+/// own, so it cannot tell a meeting the app is processing from one the app
+/// left waiting for its speech models; it says what happens to both.
+#[test]
+fn process_meeting_on_a_queued_meeting_says_the_app_processes_it() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let mut meeting = steno_core::testing::sample_data::meeting();
+    meeting.state = steno_core::MeetingState::Queued;
+    steno_core::Store::open(&db)
+        .unwrap()
+        .save_meeting(&meeting)
+        .unwrap();
+    let id = steno_core::json::uuid_string(meeting.id);
+    let queued = steno(
+        &["process", "--meeting", &id, "--db", db.to_str().unwrap()],
+        home,
+    );
+    assert_eq!(queued.status, 2, "{}", queued.stderr);
+    assert!(
+        queued.stderr.contains(&format!(
+            "Meeting {id} is queued or being processed; the app processes it at its next \
+             launch or once its models are installed."
+        )),
+        "{}",
+        queued.stderr
+    );
+    assert_eq!(queued.stdout, "");
+}
+
 /// `--meeting` stands instead of the input, `--allow-ready` needs it, and
 /// an id no meeting has is a usage error that says so.
 #[test]

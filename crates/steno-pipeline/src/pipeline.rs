@@ -187,6 +187,12 @@ pub enum ReprocessError {
         /// Its state.
         state: MeetingStateKind,
     },
+    /// A run left the meeting `queued` for missing models, and it waits
+    /// for them ([`ModelWaits`]), not for a run: an install, the next
+    /// reload or the next launch starts it. The caller says what
+    /// [`PipelineFailure::MODELS_MISSING`] says.
+    #[error("meeting {0} waits for its speech models")]
+    WaitingForModels(Uuid),
     /// The meeting is finished, but [`process_again`] does not offer it
     /// ([`Meeting::offers_process_again`]): today, it is ready.
     ///
@@ -393,6 +399,11 @@ impl ModelWaits {
     #[must_use]
     pub fn waiting(&self) -> Vec<Uuid> {
         self.lock().waiting.iter().copied().collect()
+    }
+
+    /// Whether `meeting_id` waits now.
+    fn holds(&self, meeting_id: Uuid) -> bool {
+        self.lock().waiting.contains(&meeting_id)
     }
 
     /// How many resumes ran, read when a run starts.
@@ -1148,7 +1159,8 @@ impl ProcessingPipeline {
     /// guard's count starts afresh, so a meeting launch recovery gave up on
     /// ([`TOO_MANY_CRASHED_RUNS`]) gets new tries. Refused, with the
     /// [`ReprocessError`] that says why, when the meeting or its asset is
-    /// missing, when it is recording, queued or processing, when its master
+    /// missing, when it is recording, queued or processing (one queued for
+    /// missing models is [`ReprocessError::WaitingForModels`]), when its master
     /// is gone (the retention sweep keeps the asset row when it removes the
     /// files), when another operation holds it, and once the pipeline
     /// [quits](Self::quit). The retention stamp an earlier run left goes,
@@ -1194,6 +1206,9 @@ impl ProcessingPipeline {
             .ok_or(ReprocessError::MeetingNotFound(meeting_id))?;
         let state = meeting.state.kind();
         if !matches!(state, MeetingStateKind::Ready | MeetingStateKind::Failed) {
+            if self.inner.dependencies.model_waits.holds(meeting_id) {
+                return Err(ReprocessError::WaitingForModels(meeting_id));
+            }
             return Err(ReprocessError::Unfinished { meeting_id, state });
         }
         if !offered(&meeting) {
@@ -1253,8 +1268,11 @@ impl ProcessingPipeline {
     /// ([`ModelWaits`]) alone, which no run holds: the services call it
     /// once a model install finished, while other meetings may still run
     /// on a pipeline a reload retired. A waiting meeting another operation
-    /// holds (a summary rerun or a re-export) stays waiting, and so do all
-    /// of them when the store fails.
+    /// holds (a summary rerun, a re-export, or the brief claim of a
+    /// "Process again" from a stale detail, which then refuses it as
+    /// [`ReprocessError::WaitingForModels`]) stays waiting until the next
+    /// resume, a reload's or the launch's, and so do all of them when the
+    /// store fails.
     pub fn resume_waiting(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());

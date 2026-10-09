@@ -2089,6 +2089,10 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         ),
         (Refusal::Busy, "This meeting is already being processed."),
         (
+            Refusal::ModelsMissing,
+            "Download the speech models in Settings",
+        ),
+        (
             Refusal::NotOffered,
             "Only a failed meeting can be processed again.",
         ),
@@ -2216,6 +2220,17 @@ fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
     assert_eq!(
         entry(&harness)["title"],
         "Download the speech models in Settings"
+    );
+    // Waiting for its models, it is not offered "Process again".
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(0x89),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        false
     );
     harness.host.store_changed();
     assert_eq!(

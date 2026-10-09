@@ -330,9 +330,9 @@ impl Pipeline for HostPipeline {
 }
 
 /// The host's reading of a refused [`ProcessingPipeline::process_again`]:
-/// a queued or processing meeting is already being processed, and a
-/// meeting without a recording on record reads as one whose recording is
-/// gone, as the pipeline's docs ask.
+/// a queued or processing meeting is already being processed unless it
+/// waits for its models, and a meeting without a recording on record
+/// reads as one whose recording is gone, as the pipeline's docs ask.
 fn process_again_refusal(error: ReprocessError) -> ProcessAgainRefusal {
     match error {
         ReprocessError::MeetingNotFound(_) => ProcessAgainRefusal::MeetingGone,
@@ -341,6 +341,7 @@ fn process_again_refusal(error: ReprocessError) -> ProcessAgainRefusal {
             ..
         }
         | ReprocessError::Busy(_) => ProcessAgainRefusal::Busy,
+        ReprocessError::WaitingForModels(_) => ProcessAgainRefusal::ModelsMissing,
         ReprocessError::Unfinished { .. } | ReprocessError::NotOffered(_) => {
             ProcessAgainRefusal::NotOffered
         }
@@ -1594,6 +1595,44 @@ mod tests {
             current.current().dependencies().model_waits.waiting(),
             [waiting]
         );
+    }
+
+    /// A meeting a run left waiting for models is not "already being
+    /// processed": "Process again" from a stale detail says to download
+    /// the models, and the meeting keeps waiting, untouched, until an
+    /// install resumes it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_on_a_meeting_waiting_for_models_says_to_download_them() {
+        let (dir, store) = temp_store();
+        let (installed, current) = gated_current(&store, Arc::new(FakeSpeechEngine::default()));
+        let service = Arc::new(HostPipeline {
+            pipeline: Arc::new(current),
+            sweep: RetentionSweep::new(store.clone()),
+            export_retries: Arc::new(ExportRetries::in_memory()),
+        });
+        let waiting = enqueue_call(dir.path(), &service.pipeline.current());
+        service.pipeline.current().wait_until_idle().await;
+
+        assert_eq!(
+            process_again(&service, waiting),
+            Err(ProcessAgainRefusal::ModelsMissing)
+        );
+        service.pipeline.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
+        assert_eq!(
+            service
+                .pipeline
+                .current()
+                .dependencies()
+                .model_waits
+                .waiting(),
+            [waiting]
+        );
+
+        installed.store(true, Ordering::SeqCst);
+        service.pipeline.resume_waiting();
+        service.pipeline.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
     }
 
     /// Which model a Settings Remove takes away during a run.

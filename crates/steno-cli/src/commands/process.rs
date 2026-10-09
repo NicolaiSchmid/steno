@@ -310,11 +310,19 @@ fn reprocess_failure(error: ReprocessError) -> Failure {
         ReprocessError::MeetingNotFound(id) => {
             Failure::usage(format!("No meeting has the id {}.", uuid_string(id)))
         }
+        // The command's pipeline is its own, so a meeting the app left
+        // waiting for models reads as queued here: the app may not be
+        // running at all.
         ReprocessError::Unfinished {
             meeting_id,
             state: MeetingStateKind::Queued | MeetingStateKind::Processing,
         }
-        | ReprocessError::Busy(meeting_id) => Failure::runtime(format!(
+        | ReprocessError::WaitingForModels(meeting_id) => Failure::runtime(format!(
+            "Meeting {} is queued or being processed; the app processes it at its next launch \
+             or once its models are installed.",
+            uuid_string(meeting_id)
+        )),
+        ReprocessError::Busy(meeting_id) => Failure::runtime(format!(
             "Meeting {} is already being processed.",
             uuid_string(meeting_id)
         )),
@@ -423,6 +431,10 @@ mod tests {
         let id = Uuid::from_u128(0x6F96_19FF_8B86_D011_B42D_00C0_4FC9_64FF);
         let s = uuid_string(id);
         let busy = format!("Meeting {s} is already being processed.");
+        let queued = format!(
+            "Meeting {s} is queued or being processed; the app processes it at its next launch \
+             or once its models are installed."
+        );
         let unfinished = |state| ReprocessError::Unfinished {
             meeting_id: id,
             state,
@@ -440,11 +452,15 @@ mod tests {
             ),
             (
                 unfinished(MeetingStateKind::Queued),
-                Failure::runtime(busy.clone()),
+                Failure::runtime(queued.clone()),
             ),
             (
                 unfinished(MeetingStateKind::Processing),
-                Failure::runtime(busy.clone()),
+                Failure::runtime(queued.clone()),
+            ),
+            (
+                ReprocessError::WaitingForModels(id),
+                Failure::runtime(queued),
             ),
             (
                 ReprocessError::NotOffered(id),
