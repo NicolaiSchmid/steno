@@ -956,33 +956,48 @@ still has to draw the window side. `[ ]` is not ported yet.
     the folder before the merge; a write that fails removes the files it wrote, so the
     rows keep naming the earlier clips. The merge's `replace_transcript` switches the
     rows' `sampleClipURL`s to the new files in the transaction that keeps the
-    confirmations, and commits durably (`synchronous = FULL`). Only then does the run
-    remove the clip files in the meeting's own folder that no speaker row names: the
-    earlier clips, and the files of a run that ended before its commit. So a run that
-    ends at any point leaves each row naming a whole clip of the run that wrote the row,
-    and a confirmed speaker's earlier clip goes only once a durable commit names the new
-    one. The sweep runs while the run holds the meeting in the in-flight set, so no other
-    run has uncommitted clips in that folder; a master outside a folder of its meeting's
-    own is never swept. No migration: the rows name the old fixed-name clips until a
-    later run replaces them, or retention or a confirmation removes them by the name the
-    row holds
+    confirmations, commits durably (`synchronous = FULL`) and returns the rows it
+    replaced. Only then does the run sweep the meeting's own folder: it removes a clip
+    file of one of the meeting's speakers (by the speaker id the file name starts
+    with: one this run wrote or one the merge replaced) that no speaker row of any
+    meeting names, matched by file name. That takes the earlier clips and the files of
+    a run that ended before its commit. So a run that ends at any point leaves each row
+    naming a whole clip of the run that wrote the row, and a confirmed speaker's
+    earlier clip goes only once a durable commit names the new one. A confirmed
+    speaker the re-run drops, or whose new row has no clip, loses its row or its
+    `sampleClipURL`, as before, but keeps every clip file it had: the file stays on
+    the disk, unnamed and not played, until the meeting is deleted. The sweep runs
+    while the run holds the meeting in the in-flight set, so no other run of the
+    meeting has uncommitted clips in that folder, and speaker ids derive from the
+    meeting id, so another meeting's clips are never the sweep's. Clips are written
+    only into the meeting's own folder: a meeting whose master is not in its own
+    folder gets speakers without clips and sweeps nothing. When retention removes a
+    meeting's audio, it also removes the clip files of the meeting's speakers that no
+    row names. No migration: the rows name the old fixed-name clips until a later run
+    replaces them, or retention or a confirmation removes them by the name the row
+    holds
     (`a_rerun_that_ends_at_any_clip_step_leaves_each_speaker_its_own_clip`,
     `process_again_whose_clip_write_fails_keeps_the_confirmed_clip_playable`,
     `a_runs_uncommitted_clips_survive_every_other_runs_sweep`,
-    `the_sweep_removes_only_the_clip_files_no_row_names`,
-    `the_sweep_removes_the_run_clip_a_confirmed_row_names`,
-    `confirming_after_the_audio_is_gone_removes_the_run_clip_the_row_names`). On Windows
-    each write, move and removal is tried again while a file is busy
+    `a_meeting_whose_master_lies_in_another_meetings_folder_leaves_its_clips_alone`,
+    `a_confirmed_speaker_a_rerun_gives_no_clip_keeps_its_clip_file`,
+    `sample_clips::the_sweep_removes_only_this_meetings_clips_no_row_names`,
+    `sample_clips::after_the_merge_a_confirmed_speaker_given_no_clip_keeps_its_files`,
+    `retention::the_sweep_removes_the_run_clip_a_confirmed_row_names`,
+    `retention::the_sweep_removes_the_clips_no_row_names_of_the_meetings_speakers`,
+    `confirming_after_the_audio_is_gone_removes_the_run_clip_the_row_names`). On
+    Windows each write's rename and each removal is tried again while a file is busy
     (`steno_core::busy_file`). A diarizer that fails writes no clip, so the stored
     speakers come back with their clips and the sweep keeps them
     (`a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers`). Swift writes each
-    clip in place at `speakers/<SPEAKER-UUID>.wav`, over the file a row may name, and
-    commits the merge with `synchronous = NORMAL`. A Swift app run over this database
-    (a rollback before the Mac cutover) plays the per-run files the rows name, since it
-    reads each clip by its URL; its own re-run writes `<SPEAKER-UUID>.wav` and names it,
-    and the next Rust merge sweeps whichever clip no row names then. Once the app quits, a diarizer failure ends the run
-    unpersisted, so the meeting is processed again at the next launch
-    (`a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_launch`).
+    clip in place at `speakers/<SPEAKER-UUID>.wav`, over the file a row may name,
+    commits the merge with `synchronous = NORMAL`, and never removes the clip of a
+    speaker a re-run drops. A Swift app run over this database (a rollback before the
+    Mac cutover) plays the per-run files the rows name, since it reads each clip by
+    its URL; its own re-run writes `<SPEAKER-UUID>.wav` and names it, and the next Rust
+    merge sweeps whichever clip no row names then. Once the app quits, a diarizer
+    failure ends the run unpersisted, so the meeting is processed again at the next
+    launch (`a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_launch`).
     Swift fails the meeting.
   - Re-run transcript: the merge's `replace_transcript` keeps a stored confirmation
     and the model's name suggestion for a speaker id that comes back, and recomputes
@@ -994,9 +1009,10 @@ still has to draw the window side. `[ ]` is not ported yet.
     differs keeps a confirmation on whatever voice gets that label. A kept confirmation
     and the clip of the run that wrote the row switch in that one transaction (the
     sample clips above), so a confirmed speaker never plays the clip of a run that did
-    not map its voice onto it. This closes low 6 of the second code review of #231: a
-    clip write that failed partway left a kept speaker playing another voice.
-    Swift replaces the assignments and drops the suggestions.
+    not map its voice onto it; before, a clip write that failed partway left a kept
+    speaker playing another voice (found: #231). A confirmed speaker whose id does not
+    come back loses its row, as before, and its clip file stays on the disk, unnamed
+    and not played. Swift replaces the assignments and drops the suggestions.
   - Cleanup: the pass writes each segment's text by id and leaves the speakers alone,
     and summarize reads the speakers and segments as stored then, so a speaker named
     or merged during the pass stays so and is named in the summary
@@ -2844,7 +2860,7 @@ PR off `main`.
 | On Windows two writers of one path in the process rename and flush one after the other, and std's rename and the reopen for the flush are retried on a sharing or lock violation or "access denied" for about 0.9 s, so a durable replace no longer fails because of another writer's flush (`steno-pipeline`) | `fix/windows-parallel-replace` | #252 | open |
 | The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | open |
 | On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
-| Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably before the merge, named in the merge's durable transaction that keeps the confirmations, and the files no speaker row names swept from the meeting's own folder after that commit, under the run's in-flight claim: a run that fails or ends at any point leaves each speaker naming a whole clip of its own run (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
+| Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip of its own run (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
