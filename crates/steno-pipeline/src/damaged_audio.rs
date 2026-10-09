@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use steno_core::AudioDamage;
 use uuid::Uuid;
 
-use crate::files::MeetingCounts;
+use crate::files::MeetingValues;
 
 /// The damage of each meeting's recording, as its last decode counted it,
 /// replaced with [`write_json`](crate::files::write_json) on every change.
@@ -51,7 +51,7 @@ use crate::files::MeetingCounts;
 /// ```
 #[derive(Debug)]
 pub struct DamagedAudio {
-    damage: MeetingCounts<AudioDamage>,
+    damage: MeetingValues<AudioDamage>,
     /// False when the file is there but could not be read or parsed.
     known: bool,
 }
@@ -71,7 +71,7 @@ impl DamagedAudio {
         };
         match read {
             Ok(damage) => DamagedAudio {
-                damage: MeetingCounts::read(path, damage, true),
+                damage: MeetingValues::from_read(path, damage, true),
                 known: true,
             },
             Err(error) => {
@@ -81,7 +81,7 @@ impl DamagedAudio {
                     path.display()
                 );
                 DamagedAudio {
-                    damage: MeetingCounts::read(path, BTreeMap::new(), false),
+                    damage: MeetingValues::from_read(path, BTreeMap::new(), false),
                     known: false,
                 }
             }
@@ -100,7 +100,7 @@ impl DamagedAudio {
     #[must_use]
     pub fn in_memory() -> Self {
         DamagedAudio {
-            damage: MeetingCounts::in_memory(),
+            damage: MeetingValues::in_memory(),
             known: true,
         }
     }

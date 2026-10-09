@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use chrono::TimeDelta;
 use uuid::Uuid;
 
-use crate::files::MeetingCounts;
+use crate::files::MeetingValues;
 
 /// The launch re-exports in a row of each meeting that did not deliver
 /// every row
@@ -43,7 +43,7 @@ use crate::files::MeetingCounts;
 /// ```
 #[derive(Debug)]
 pub struct ExportRetries {
-    counts: MeetingCounts<u32>,
+    counts: MeetingValues<u32>,
 }
 
 impl ExportRetries {
@@ -62,7 +62,7 @@ impl ExportRetries {
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         ExportRetries {
-            counts: MeetingCounts::new(path.into()),
+            counts: MeetingValues::new(path.into()),
         }
     }
 
@@ -78,7 +78,7 @@ impl ExportRetries {
     #[must_use]
     pub fn in_memory() -> Self {
         ExportRetries {
-            counts: MeetingCounts::in_memory(),
+            counts: MeetingValues::in_memory(),
         }
     }
 

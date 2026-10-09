@@ -462,35 +462,35 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> std::io::Res
 /// change; a file that may not be written keeps the values of this run in
 /// memory only.
 #[derive(Debug)]
-pub(crate) struct MeetingCounts<V> {
+pub(crate) struct MeetingValues<V> {
     path: PathBuf,
-    counts: Mutex<BTreeMap<Uuid, V>>,
+    values: Mutex<BTreeMap<Uuid, V>>,
     /// False for [`in_memory`](Self::in_memory), and when the file on disk
     /// could not be read or set aside.
     writable: bool,
 }
 
-impl<V: Serialize + DeserializeOwned + Clone> MeetingCounts<V> {
+impl<V: Serialize + DeserializeOwned + Clone> MeetingValues<V> {
     /// The values in `path`, read now with [`read_json`]: a missing or
     /// corrupt file holds none.
     pub(crate) fn new(path: PathBuf) -> Self {
-        let (counts, writable) = read_json(&path);
-        Self::read(path, counts, writable)
+        let (values, writable) = read_json(&path);
+        Self::from_read(path, values, writable)
     }
 
-    /// `counts`, as read from `path`, written there on a change when
+    /// `values`, as read from `path`, written there on a change when
     /// `writable`.
-    pub(crate) fn read(path: PathBuf, counts: BTreeMap<Uuid, V>, writable: bool) -> Self {
-        MeetingCounts {
+    pub(crate) fn from_read(path: PathBuf, values: BTreeMap<Uuid, V>, writable: bool) -> Self {
+        MeetingValues {
             path,
-            counts: Mutex::new(counts),
+            values: Mutex::new(values),
             writable,
         }
     }
 
     /// Values that live in memory only and are never written.
     pub(crate) fn in_memory() -> Self {
-        Self::read(PathBuf::new(), BTreeMap::new(), false)
+        Self::from_read(PathBuf::new(), BTreeMap::new(), false)
     }
 
     /// `meeting_id`'s value, if it has one.
@@ -506,11 +506,11 @@ impl<V: Serialize + DeserializeOwned + Clone> MeetingCounts<V> {
         &self,
         change: impl FnOnce(&mut BTreeMap<Uuid, V>) -> bool,
     ) -> std::io::Result<()> {
-        let mut counts = self.lock();
-        if !change(&mut counts) || !self.writable {
+        let mut values = self.lock();
+        if !change(&mut values) || !self.writable {
             return Ok(());
         }
-        write_json(&self.path, &*counts).inspect_err(|error| {
+        write_json(&self.path, &*values).inspect_err(|error| {
             tracing::warn!("{} could not be written: {error}", self.path.display());
         })
     }
@@ -518,15 +518,15 @@ impl<V: Serialize + DeserializeOwned + Clone> MeetingCounts<V> {
     /// Keeps only the values of the meetings `keep` accepts, replacing the
     /// file when that drops any; a failed write is logged.
     pub(crate) fn retain(&self, mut keep: impl FnMut(Uuid) -> bool) {
-        let _ = self.change(|counts| {
-            let before = counts.len();
-            counts.retain(|meeting_id, _| keep(*meeting_id));
-            counts.len() != before
+        let _ = self.change(|values| {
+            let before = values.len();
+            values.retain(|meeting_id, _| keep(*meeting_id));
+            values.len() != before
         });
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeMap<Uuid, V>> {
-        self.counts
+        self.values
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
