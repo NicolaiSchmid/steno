@@ -9,13 +9,17 @@
 # crop per window and per panel (`magick` from ImageMagick 7, `convert`
 # from 6); the windows carry what the host's database holds (nothing on
 # a fresh runner). Xvfb has no compositor, so the panels' transparent
-# corners render black there. After the run it checks the app's log and
-# the stop timeout drop-ins (stop_timeout.rs): the shutdown's duration at
-# warn, GNOME's scope drop-in in ~/.config/systemd/user, the autostart
-# unit's when the autostart entry is there, a reload asked for after a
-# drop-in was written, and the owed reload's mark there exactly when that
-# reload failed. A second launch in the same HOME then writes nothing,
-# and asks for a reload only if one was still owed.
+# corners render black there. At the same moment, with xdotool on PATH,
+# each panel must be a visible X11 window with the title a window
+# manager's rules match ("Steno bubble", "Steno prompt", panels.rs), or
+# the smoke fails; without xdotool that check is skipped. After the run
+# it checks the app's log and the stop timeout drop-ins (stop_timeout.rs):
+# the shutdown's duration at warn, GNOME's scope drop-in in
+# ~/.config/systemd/user, the autostart unit's when the autostart entry is
+# there, a reload asked for after a drop-in was written, and the owed
+# reload's mark there exactly when that reload failed. A second launch in
+# the same HOME then writes nothing, and asks for a reload only if one was
+# still owed.
 #
 # Then runs as the autostart unit, in a throwaway HOME, inside a cgroup
 # named after the unit below a delegated `systemd-run --user` scope, so
@@ -103,8 +107,21 @@ xvfb-run --auto-servernum --server-args="$server_args" bash -c '
   # The log goes to $4 for the checks below, and to stderr as it comes.
   "$1" 2>"$4" & app=$!
   tail -f --pid="$app" "$4" >&2 &
+  sleep "$(( $2 > 3 ? $2 - 3 : 1 ))"
+  titles=0
+  if command -v xdotool >/dev/null; then
+    for title in "Steno bubble" "Steno prompt"; do
+      if xdotool search --onlyvisible --name "^$title\$" >/dev/null; then
+        echo "smoke: a visible window is titled \"$title\""
+      else
+        echo "smoke: no visible window is titled \"$title\"" >&2
+        titles=1
+      fi
+    done
+  else
+    echo "smoke: xdotool is not on PATH; the panel titles are not checked"
+  fi
   if command -v import >/dev/null; then
-    sleep "$(( $2 > 3 ? $2 - 3 : 1 ))"
     import -window root "$3/smoke-root.png" && echo "smoke: captured $3/smoke-root.png"
     # One file per window, at the positions smoke.rs lays them out.
     # ImageMagick 7 is `magick`; 6 (the hosted Ubuntu image) is `convert`.
@@ -126,7 +143,8 @@ xvfb-run --auto-servernum --server-args="$server_args" bash -c '
   fi
   wait "$app"; status=$?
   wait
-  exit "$status"
+  (( status == 0 )) || exit "$status"
+  exit "$titles"
 ' _ "$binary" "$seconds" "$screens" "$log" || status=$?
 (( status == 0 )) || exit "$status"
 
