@@ -35,10 +35,9 @@
 # Then two runs with the login item the system's (STENO_LOGIN_ITEM=managed,
 # packaged.rs), each in a throwaway HOME holding an autostart entry an
 # earlier build wrote, whose Exec starts a program in /nix/store. The
-# first must remove it. The second runs as the autostart unit, inside a
-# cgroup named after the unit below a delegated `systemd-run --user`
-# scope: the entry must still be there halfway through the run, and gone
-# after the exit, which removes it after the shutdown. Without a user manager
+# first must remove it. The second runs as the autostart unit, as above:
+# the entry must still be there halfway through the run, and gone after
+# the exit, which removes it after the shutdown. Without a user manager
 # that starts the scope the second run is skipped, unless
 # STENO_REQUIRE_UNIT_SMOKE is set (CI), which fails instead.
 #
