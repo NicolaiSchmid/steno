@@ -739,7 +739,11 @@ Each lands before `0.11.0-rc.1`.
   engine's child, lock, deadline and memory ceiling; a child started only to
   diarize stops after the call, and a child that dies while it diarizes fails
   that diarize stage (the job falls back to its stored speakers, as for any
-  diarizer failure) and the next call starts a new one. Parity: the sidecar's
+  diarizer failure) and the next call starts a new one. A load of the models
+  that fails, whether the child refuses the files or dies or hangs in it, has
+  the files hashed against the manifest: one that fails its checksum is
+  deleted and the meeting waits for the models, rather than falling back.
+  Parity: the sidecar's
   clusters equal the in-process pipeline's bit for bit on the two-voice
   fixture, once and tiled to 75 s, so refinement runs too.
 - **A4 PipeWire** (#214), plus `start`'s first cycle and the latencies measured

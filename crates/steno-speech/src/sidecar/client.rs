@@ -23,12 +23,14 @@
 //! the running child beside speech's, or into a new child when none runs,
 //! under the same lock, deadline, memory ceiling and crash handling. A
 //! child that dies or hangs while it diarizes is killed and the call fails;
-//! the next call starts a new one. The diarizer runs on the CPU, so its
-//! failures never count against `DirectML`, nor does a failure between
-//! requests that a diarization finds. A child started only to
-//! diarize, without speech's models, is stopped once the call returns, so
-//! no child outlives the job that needed it; one that holds speech's models
-//! stays for speech's release.
+//! the next call starts a new one. A failure while the child loads the
+//! diarizer's models, refused, crashed or hung alike, is
+//! [`SidecarError::DiarizerLoad`], so the caller can check the files. The
+//! diarizer runs on the CPU, so its failures never count against
+//! `DirectML`, nor does a failure between requests that a diarization
+//! finds. A child started only to diarize, without speech's models, is
+//! stopped once the call returns, so no child outlives the job that needed
+//! it; one that holds speech's models stays for speech's release.
 //!
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
@@ -792,8 +794,8 @@ impl Shared {
     }
 
     /// Kills the child unless `error` came from the child itself
-    /// ([`SidecarError::Remote`], [`SidecarError::DiarizerLoad`]), which
-    /// then still runs and answers; returns the error. The warning names
+    /// ([`SidecarError::reported_by_the_child`]), which then still runs and
+    /// answers; returns the error. The warning names
     /// the kind of failure in fixed words; the error itself, whose crash
     /// report holds the child's stderr (which may hold a path), goes to
     /// debug only.
@@ -814,10 +816,7 @@ impl Shared {
         error: SidecarError,
         counts: bool,
     ) -> SidecarError {
-        if !matches!(
-            error,
-            SidecarError::Remote(_) | SidecarError::DiarizerLoad(_)
-        ) {
+        if !error.reported_by_the_child() {
             if let Some(mut process) = slot.take() {
                 let status = process.kill();
                 tracing::warn!(
@@ -893,12 +892,10 @@ impl Shared {
                         other => Err(other),
                     },
                 )
-                // Told apart from a failed run, so the caller can check the
+                // Every failure here, a refusal, a crash, a hang, is told
+                // apart from a failed run, so the caller can check the
                 // files.
-                .map_err(|error| match error {
-                    SidecarError::Remote(message) => SidecarError::DiarizerLoad(message),
-                    other => other,
-                })?;
+                .map_err(|error| SidecarError::DiarizerLoad(Box::new(error)))?;
             tracing::info!(pid = process.pid, "speech sidecar loaded the diarizer");
             process.diarizer = Some(models);
         }
@@ -1094,9 +1091,10 @@ impl SidecarSpeechEngine {
     /// # Errors
     ///
     /// [`SpeechError::Sidecar`]: [`SidecarError::DiarizerLoad`] when the
-    /// child could not load the models (the caller may check the files),
-    /// [`SidecarError::Remote`] when the run failed in a child that keeps
-    /// running, [`SidecarError::NotUtf8`] for a model path the protocol
+    /// child failed while it loaded the models, whether it refused them and
+    /// keeps running or died or hung there and was killed (the caller may
+    /// check the files), [`SidecarError::Remote`] when the run failed in a
+    /// child that keeps running, [`SidecarError::NotUtf8`] for a model path the protocol
     /// cannot carry (nothing is sent, the child is untouched), any other
     /// variant when the child failed and was killed; the next call starts
     /// a new child.

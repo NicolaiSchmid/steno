@@ -742,8 +742,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   and the next run resumes it
   (`a_diarizer_download_cut_off_mid_job_falls_back_and_keeps_the_recording`); the
   recording's retention after such a fallback is the pipeline's. Content is checked at
-  download; a load that fails hashes the files, and one that fails its checksum is
-  deleted and reported not installed, so Settings offers Download.
+  download; a load that fails (refused by the sidecar's child, or the child dies or
+  hangs in it) hashes the files, and one that fails its checksum is deleted and
+  reported not installed, so Settings offers Download.
 
 ### Beyond the bridge
 
