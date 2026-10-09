@@ -304,6 +304,110 @@ fn the_swift_cli_flow_runs_end_to_end_on_a_fresh_home() {
     assert_eq!(steno(&["deliver", "nope", "--db", db], home).status, 1);
 }
 
+/// `steno deliver --vault <the app's vault>` delivers under its own id, so
+/// the app's receipt does not apply and the meeting's folder is reused
+/// through its `meeting.json`: a note the user edited since the app
+/// delivered it is kept, Steno's version goes beside it, and the line says
+/// so after `delivered`.
+#[test]
+fn deliver_into_the_apps_vault_keeps_a_note_edited_since_the_app_delivered() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let db = db.to_str().unwrap();
+    assert_eq!(steno(&["dev", "db", "migrate", "--db", db], home).status, 0);
+    let vault = home.join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    {
+        let store = steno_core::Store::open(db).unwrap();
+        let mut settings = store.settings().unwrap();
+        settings.obsidian = Some(steno_core::ObsidianSettings {
+            vault_path: vault.to_string_lossy().into_owned(),
+            people_folder: None,
+            include_audio: false,
+            task_tag: None,
+            extra: serde_json::Map::new(),
+        });
+        store.save_settings(&settings).unwrap();
+    }
+    let wav = fixtures_root().join("audio/sweep-3s.wav");
+    let process = steno(
+        &[
+            "process",
+            wav.to_str().unwrap(),
+            "--title",
+            "Sweep",
+            "--db",
+            db,
+            "--audio-folder",
+            home.join("audio").to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(process.status, 0, "{}", process.stderr);
+    let meeting_id = process.stdout.trim().to_owned();
+    let app = steno(&["deliver", &meeting_id, "--db", db], home);
+    assert_eq!(app.status, 0, "{}", app.stderr);
+    assert!(
+        app.stdout.starts_with("obsidian-folder\tdelivered\t"),
+        "the app's destination: {}",
+        app.stdout
+    );
+    let meetings = vault.join("Meetings");
+    let folders: Vec<_> = std::fs::read_dir(&meetings).unwrap().flatten().collect();
+    assert_eq!(folders.len(), 1);
+    let slug = folders[0].file_name().to_string_lossy().into_owned();
+    let note = meetings.join(&slug).join(format!("{slug}.md"));
+    let edited = format!(
+        "{}\nMy addition.\n",
+        std::fs::read_to_string(&note).unwrap()
+    );
+    std::fs::write(&note, &edited).unwrap();
+
+    let ad_hoc = steno(
+        &[
+            "deliver",
+            &meeting_id,
+            "--vault",
+            vault.to_str().unwrap(),
+            "--db",
+            db,
+        ],
+        home,
+    );
+
+    assert_eq!(ad_hoc.status, 0, "{}", ad_hoc.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&note).unwrap(),
+        edited,
+        "the edit is kept"
+    );
+    assert!(
+        ad_hoc.stdout.contains(&format!(
+            "\tdelivered · Kept your changes to {slug}.md and put Steno's version beside it as {slug} (Steno "
+        )),
+        "{}",
+        ad_hoc.stdout
+    );
+    assert_eq!(
+        std::fs::read_dir(&meetings).unwrap().count(),
+        1,
+        "the app's folder is reused"
+    );
+    let copies: Vec<String> = std::fs::read_dir(meetings.join(&slug))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(&format!("{slug} (Steno ")))
+        .collect();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    let copy = std::fs::read_to_string(meetings.join(&slug).join(&copies[0])).unwrap();
+    assert!(
+        !copy.contains("My addition."),
+        "the copy is Steno's version"
+    );
+}
+
 #[test]
 fn a_run_whose_meeting_ends_failed_exits_two_and_says_why() {
     let home = tempfile::tempdir().unwrap();
