@@ -191,6 +191,72 @@ mod tests {
         );
     }
 
+    /// A clip a run wrote under its own name goes by the name its row
+    /// holds: the confirmed speaker's, not another file of that speaker
+    /// that no row names, and not an unconfirmed speaker's.
+    #[test]
+    fn the_sweep_removes_the_run_clip_a_confirmed_row_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let now = Utc::now();
+        let person = sample_data::person(0, "Anna");
+        store.save_person(&person).unwrap();
+        let mut meeting = sample_data::meeting();
+        meeting.state = MeetingState::Ready;
+        let layout = RecordingLayout::new(&dir.path().join("audio"), meeting.id);
+        layout.create_directories(true).unwrap();
+        let master = layout.master(AudioFormat::Wav16kInt16);
+        std::fs::write(&master, b"wav").unwrap();
+        let asset = AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: file_url(&master, false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: vec![AudioLane::Mixed],
+            sidecars_16k: BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepDays(1),
+            expires_at: Some(now - Duration::hours(1)),
+        };
+        store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        let run = Uuid::new_v4();
+        let (confirmed, unconfirmed) = (Uuid::new_v4(), Uuid::new_v4());
+        let unnamed = layout.sample_clip(confirmed);
+        std::fs::write(&unnamed, b"an earlier run's clip").unwrap();
+        for (id, assignment) in [
+            (
+                confirmed,
+                SpeakerAssignment::Confirmed {
+                    person_id: person.id,
+                },
+            ),
+            (unconfirmed, SpeakerAssignment::Unknown),
+        ] {
+            let clip = layout.run_sample_clip(id, run);
+            std::fs::write(&clip, b"clip").unwrap();
+            store
+                .save_speaker(&Speaker {
+                    id,
+                    meeting_id: meeting.id,
+                    cluster_label: format!("SPEAKER_{id}"),
+                    assignment,
+                    embedding: None,
+                    sample_clip_range: None,
+                    sample_clip_url: Some(file_url(&clip, false)),
+                    cluster_confidence: 1.0,
+                })
+                .unwrap();
+        }
+
+        let removed = RetentionSweep::new(store.clone()).run(now).unwrap();
+        assert_eq!(
+            removed,
+            vec![master, layout.run_sample_clip(confirmed, run)]
+        );
+        assert!(unnamed.exists(), "a file no row names is not the sweep's");
+        assert!(layout.run_sample_clip(unconfirmed, run).exists());
+    }
+
     /// The sweep checks each asset again in the write that removes its
     /// files: a meeting `reprocess` queued after the list was read keeps
     /// its audio and its row.

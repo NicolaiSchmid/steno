@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -37,8 +37,7 @@ use steno_core::{
     MeetingOperation, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer,
     Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
     SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
-    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, busy_file,
-    derived_uuid,
+    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid,
     paths::{file_url, file_url_path},
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
 };
@@ -55,6 +54,7 @@ use crate::events::MeetingEventBus;
 use crate::export_retries::ExportRetries;
 use crate::lane_merger::{ClusterSpeaker, LaneMerger};
 use crate::run::ProcessingRun;
+use crate::sample_clips::{self, ClipProbe, ClipStep};
 
 /// The one failure type: any error inside a stage becomes this, and
 /// [`ProcessingPipeline::process`] marks the meeting failed in one place.
@@ -458,6 +458,10 @@ pub struct PipelineDependencies {
     /// A fresh in-flight set from [`new`](Self::new); clones share theirs,
     /// and [`with_in_flight`](Self::with_in_flight) shares the caller's.
     pub in_flight: InFlight,
+    /// Called at each step of a run's sample clips, for the tests that end
+    /// a run there as a crash would; `None` from [`new`](Self::new).
+    #[cfg(any(test, feature = "testing"))]
+    pub clip_probe: Option<ClipProbe>,
 }
 
 impl PipelineDependencies {
@@ -486,6 +490,8 @@ impl PipelineDependencies {
             clock: Arc::new(SystemClock::default()),
             quit_latch: QuitLatch::default(),
             in_flight: InFlight::default(),
+            #[cfg(any(test, feature = "testing"))]
+            clip_probe: None,
         }
     }
 
@@ -534,6 +540,15 @@ impl PipelineDependencies {
     #[must_use]
     pub fn with_in_flight(mut self, in_flight: InFlight) -> Self {
         self.in_flight = in_flight;
+        self
+    }
+
+    /// Calls `probe` at each [`ClipStep`] of a run's sample clips; a probe
+    /// that panics ends the run there, as a crash would.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn with_clip_probe(mut self, probe: ClipProbe) -> Self {
+        self.clip_probe = Some(probe);
         self
     }
 }
@@ -814,6 +829,18 @@ impl ProcessingPipeline {
     #[must_use]
     pub fn dependencies(&self) -> &PipelineDependencies {
         &self.inner.dependencies
+    }
+
+    /// The test probe of the clip steps; always `None` in the product.
+    fn clip_probe(&self) -> Option<ClipProbe> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.inner.dependencies.clip_probe.clone()
+        }
+        #[cfg(not(any(test, feature = "testing")))]
+        {
+            None
+        }
     }
 
     fn store(&self) -> &Arc<Store> {
@@ -1506,9 +1533,14 @@ impl ProcessingPipeline {
             // them.
             Err(failure) => self.carry_on_after(&failure, current.id)?,
         }
+        attributing(
+            PipelineStage::Merge,
+            sample_clips::reach(self.clip_probe().as_ref(), ClipStep::Merging),
+        )?;
         let merged = self
             .merge(&current, &transcription.lanes, &diarized)
             .await?;
+        self.sweep_sample_clips(asset);
         // This run's usage starts from the cleanup pass (None when it was
         // skipped) and the summarize stage adds its own.
         current.llm_usage = self
@@ -1553,6 +1585,38 @@ impl ProcessingPipeline {
         );
         tracing::debug!(target: BACKGROUND_RUN_LOG, %meeting_id, %failure, "stage failure");
         Ok(())
+    }
+
+    /// Removes the clip files no speaker row names from the meeting's own
+    /// `speakers/` folder, once the merge has committed the rows this run
+    /// wrote ([`sample_clips::sweep`]): the clips the earlier rows named,
+    /// and those of an earlier run that ended before its commit. This is
+    /// safe for two reasons together, and only for them: the folder is the
+    /// meeting's own ([`RecordingLayout::own_folder`]), so no other
+    /// meeting's run writes clips into it, and the run holds the meeting in
+    /// the in-flight set, so no other run of this meeting has clips there
+    /// that are not committed yet. A master in any other folder is never
+    /// swept, and the sweep must never be pointed at a folder that more
+    /// than one meeting writes into. A failure is logged and never fails
+    /// the run. Rust only: Swift writes its clips in place.
+    fn sweep_sample_clips(&self, asset: &AudioAsset) {
+        let Some(layout) = RecordingLayout::own_folder(asset) else {
+            return;
+        };
+        let probe = self.clip_probe();
+        if sample_clips::reach(probe.as_ref(), ClipStep::Sweeping).is_err() {
+            return;
+        }
+        if let Err(error) =
+            sample_clips::sweep(self.store(), &layout.speakers_directory(), probe.as_ref())
+        {
+            tracing::warn!(
+                target: BACKGROUND_RUN_LOG,
+                meeting_id = %asset.meeting_id,
+                %error,
+                "the sample clips no speaker names were not swept"
+            );
+        }
     }
 
     /// What the `diarize` stage falls back to when the diarizer fails or
@@ -2048,7 +2112,9 @@ impl ProcessingPipeline {
 
     /// Runs the diarizer over `lane` and turns every cluster into a
     /// `Speaker` with a deterministic id. Each cluster's clip is written as
-    /// 16 kHz WAV beside the master. A mic lane in which the diarizer hears
+    /// 16 kHz WAV under `speakers/` beside the master, named for this run
+    /// ([`sample_clips`]), so no clip a speaker row names is written over.
+    /// A mic lane in which the diarizer hears
     /// fewer than two voices is the user alone (headphones, the tap
     /// permission missing): the stage returns no clusters and no lane,
     /// writes no clip, and the merge keeps the mic as "me". `handed` is
@@ -2085,6 +2151,7 @@ impl ProcessingPipeline {
                 }
             }
             let layout = RecordingLayout::from_asset(asset);
+            let run_id = Uuid::new_v4();
             let mut speakers = Vec::new();
             let mut cluster_speakers = Vec::new();
             let mut clips = Vec::new();
@@ -2098,7 +2165,7 @@ impl ProcessingPipeline {
                     };
                     let clip = buffer.slice(capped);
                     if !clip.is_empty() {
-                        let path = layout.sample_clip(id);
+                        let path = layout.run_sample_clip(id, run_id);
                         clip_url = Some(file_url(&path, false));
                         clips.push((path, clip));
                     }
@@ -2119,10 +2186,18 @@ impl ProcessingPipeline {
                 });
             }
             if !clips.is_empty()
-                && let Some(layout) = &layout
+                && let Some(layout) = layout
             {
-                attributing(PipelineStage::Diarize, layout.create_directories(true))?;
-                attributing(PipelineStage::Diarize, write_sample_clips(&clips))?;
+                // Off the async workers: each clip is synced. A write
+                // that outlives a dropped run leaves files no row names,
+                // which the meeting's next sweep removes.
+                let probe = self.clip_probe();
+                let written = tokio::task::spawn_blocking(move || {
+                    sample_clips::write(&layout, &clips, probe.as_ref())
+                })
+                .await
+                .unwrap_or_else(|join| std::panic::resume_unwind(join.into_panic()));
+                attributing(PipelineStage::Diarize, written)?;
             }
             Ok(Diarization {
                 speakers,
@@ -2589,30 +2664,6 @@ pub fn ensure_me_participant(
     };
     store.save_participant(&me)?;
     Ok(me)
-}
-
-/// Writes every speaker's sample clip. Each is written beside its path
-/// first and moved into place once all are, in one rename that replaces
-/// the earlier clip ([`busy_file::rename`], which on Windows tries a held
-/// file again), so a failure while writing moves none and a path always
-/// holds a whole clip. A move that fails after earlier ones landed leaves
-/// those speakers with the new clips, so a kept speaker can then play
-/// another run's voice; per-run clip names would close that (plan, "Open
-/// after the port"). Rust only: Swift writes each clip in place.
-fn write_sample_clips(clips: &[(PathBuf, AudioBuffer16k)]) -> std::io::Result<()> {
-    let staged = |path: &Path| path.with_extension("wav.partial");
-    if let Err(error) = clips
-        .iter()
-        .try_for_each(|(path, clip)| write_wav_16k(&staged(path), clip))
-    {
-        for (path, _) in clips {
-            let _ = std::fs::remove_file(staged(path));
-        }
-        return Err(error);
-    }
-    clips
-        .iter()
-        .try_for_each(|(path, _)| busy_file::rename(&staged(path), path))
 }
 
 /// Clamps to `-1...1`, scales to Int16 and writes a 16 kHz mono WAV, the

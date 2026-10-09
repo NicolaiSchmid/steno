@@ -17,6 +17,7 @@
 //! | [`lane_merger`] | The lanes into one ordered transcript |
 //! | [`speaker_memory`] | The store-backed cosine `SpeakerMemory` |
 //! | [`retention`] | [`RetentionSweep`] over expired assets |
+//! | [`sample_clips`] | The speakers' sample clips written under each run's own names, named by the merge, and the files no speaker row names swept after it |
 //! | [`fixtures`] | The synthetic audio fixtures and the WAV writer |
 //! | [`files`] | Durable writes: a file replaced in one step, a recording copied, new folders, a JSON file read and written, set aside when corrupt; its Windows module is the one place in the crate allowed `unsafe` |
 //!
@@ -76,6 +77,7 @@ pub mod lane_merger;
 pub mod pipeline;
 pub mod retention;
 pub mod run;
+pub mod sample_clips;
 pub mod speaker_memory;
 
 pub use estimator::{ProcessingEstimator, StageRates, StageSample};
@@ -91,5 +93,6 @@ pub use pipeline::{
     SharedSpeechEngine, SystemClock, WeakSpeechEngine,
 };
 pub use retention::{RetentionSweep, SweepIncomplete};
+pub use sample_clips::{ClipProbe, ClipStep};
 pub use speaker_memory::StoreSpeakerMemory;
 pub use steno_core::{MeetingEvent, MeetingOperation, PipelineStage, ProcessingProgress};
