@@ -525,7 +525,7 @@ fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
     if crate::packaged::login_item_is_managed() {
         switch(false)?;
         if entry()? != before
-            || crate::autostart::marked_off_at_exit(app)
+            || crate::autostart::marked_off_at_exit()
             || crate::autostart::status(app) != crate::autostart::LoginItemStatus::Managed
         {
             return Err("managed, turning it off changed the login item".into());
@@ -539,7 +539,7 @@ fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
                 "turning it off as the autostart unit changed the entry at once".to_owned(),
             );
         }
-        if !crate::autostart::marked_off_at_exit(app) {
+        if !crate::autostart::marked_off_at_exit() {
             return Err("turning it off as the autostart unit set no mark".into());
         }
         if crate::autostart::status(app).is_on() {
@@ -564,7 +564,7 @@ fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
         };
         let at = written();
         switch(true)?;
-        if crate::autostart::marked_off_at_exit(app) || !crate::autostart::status(app).is_on() {
+        if crate::autostart::marked_off_at_exit() || !crate::autostart::status(app).is_on() {
             return Err("turned on again as the autostart unit, it still goes at the exit".into());
         }
         if at.is_none() || written() != at {

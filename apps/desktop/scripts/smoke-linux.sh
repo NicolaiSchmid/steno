@@ -131,14 +131,12 @@ xvfb-run --auto-servernum --server-args="$server_args" bash -c '
 (( status == 0 )) || exit "$status"
 
 fail() { echo "smoke: $*" >&2; exit 1; }
-# The autostart entry under a HOME, and in a config home the mark that
-# turns it off at the exit and the owed reload's (autostart.rs,
-# stop_timeout.rs).
-identifier="$(sed -n 's/^  "identifier": "\(.*\)",$/\1/p' "$root/apps/desktop/src-tauri/tauri.conf.json")"
-[[ -n "$identifier" ]] || fail "no identifier in tauri.conf.json"
+# The autostart entry under a HOME, and under a data home the marks in
+# Steno/, the support directory: Launch at login off at the exit, and the
+# owed reload (autostart.rs, stop_timeout.rs).
 entry() { echo "$1/.config/autostart/steno-desktop.desktop"; }
-mark() { echo "$1/$identifier/launch-at-login-off-at-exit"; }
-owed() { echo "$1/$identifier/systemd-reload-owed"; }
+mark() { echo "$1/Steno/launch-at-login-off-at-exit"; }
+owed() { echo "$1/Steno/systemd-reload-owed"; }
 reloads='the systemd user manager (reloaded|did not reload)'
 # The autostart unit's drop-in under a HOME, and the unit as the log
 # quotes it: unit="app-steno\\x2ddesktop@autostart.service".
@@ -164,21 +162,21 @@ fi
 if grep -qE 'drop-in changed.*on.*true' "$log"; then
   grep -qE "$reloads" "$log" || fail "a drop-in was written and no reload asked for"
 fi
-config="${XDG_CONFIG_HOME:-$HOME/.config}"
+data="${XDG_DATA_HOME:-$HOME/.local/share}"
 # A reload that went through clears the mark, and one that failed leaves
 # it, for the next launch to ask again.
 if grep -qF 'the systemd user manager reloaded' "$log"; then
-  [[ ! -e "$(owed "$config")" ]] || fail "a reload went through and stays owed"
+  [[ ! -e "$(owed "$data")" ]] || fail "a reload went through and stays owed"
 fi
 if grep -qF 'the systemd user manager did not reload' "$log"; then
-  [[ -e "$(owed "$config")" ]] || fail "a reload failed and is not owed"
+  [[ -e "$(owed "$data")" ]] || fail "a reload failed and is not owed"
 fi
 echo "smoke: the shutdown's duration logged at warn, the stop timeout drop-ins in place"
 
 # A second launch over what the first left writes no drop-in, and asks
 # for the reload only while one is owed.
 owed_before=false
-[[ -e "$(owed "$config")" ]] && owed_before=true
+[[ -e "$(owed "$data")" ]] && owed_before=true
 xvfb-run --auto-servernum --server-args="$server_args" "$binary" > "$scratch/again" 2>&1 \
   || { cat "$scratch/again" >&2; fail "the second launch failed"; }
 if grep -qF 'drop-in changed' "$scratch/again"; then
@@ -236,7 +234,7 @@ if [[ -z "$unit_skip" ]]; then
   if grep -qE "$reloads" "$scratch/unrestored"; then
     fail "as the unit without its entry, a reload was asked for"
   fi
-  [[ -e "$(owed "$home/.config")" ]] \
+  [[ -e "$(owed "$home/.local/share")" ]] \
     || fail "as the unit without its entry, the skipped reload is not owed"
   # A launch outside the unit counts the first launch, so the next one
   # registers nothing, and writes the entry naming the path whole (the
@@ -256,7 +254,7 @@ if [[ -z "$unit_skip" ]]; then
   fi
   removed_after_shutdown "$scratch/restored" \
     || { cat "$scratch/restored" >&2; fail "the exit did not remove the drop-in after the shutdown"; }
-  [[ ! -e "$(entry "$home")" && ! -e "$(mark "$home/.config")" ]] \
+  [[ ! -e "$(entry "$home")" && ! -e "$(mark "$home/.local/share")" ]] \
     || fail "the exit left the entry or its mark"
   # An update's relaunch runs on in the same unit: its exit keeps the
   # restored entry, the mark and the drop-in, for the next process.
@@ -264,7 +262,7 @@ if [[ -z "$unit_skip" ]]; then
   if ! grep -qF "ending as an update's relaunch" "$scratch/relaunched" \
     || ! grep -qE "drop-in changed $service on=true" "$scratch/relaunched" \
     || grep -qE "drop-in changed $service on=false" "$scratch/relaunched" \
-    || [[ ! -e "$(entry "$home")" || ! -e "$(mark "$home/.config")" || ! -f "$(autostart_drop_in "$home")" ]]; then
+    || [[ ! -e "$(entry "$home")" || ! -e "$(mark "$home/.local/share")" || ! -f "$(autostart_drop_in "$home")" ]]; then
     cat "$scratch/relaunched" >&2
     fail "as the autostart unit, an update's relaunch did not keep the entry, its mark and its drop-in"
   fi
@@ -339,9 +337,9 @@ fi
 # of panicking. Its HOME holds an entry marked to go, which a launch that
 # went on would remove (`LaunchStep::TurnOff`).
 refusal="$scratch/refusal"
-mkdir -p "$refusal/Steno" "$(dirname "$(entry "$refusal")")" "$(dirname "$(mark "$refusal/.config")")"
+mkdir -p "$refusal/Steno" "$(dirname "$(entry "$refusal")")"
 printf 'not a database\n' > "$refusal/Steno/steno.sqlite"
-touch "$(entry "$refusal")" "$(mark "$refusal/.config")"
+touch "$(entry "$refusal")" "$(mark "$refusal")"
 # Both streams go to one file: Debian's xvfb-run sends the command's
 # stderr to its stdout.
 code=0
@@ -351,6 +349,6 @@ if [[ "$code" != 3 ]] || ! grep -qF "[steno-desktop] not starting:" "$refusal/ou
   cat "$refusal/output" >&2
   fail "over a database it cannot open the shell must refuse (exit 3), got $code"
 fi
-[[ -e "$(entry "$refusal")" && -e "$(mark "$refusal/.config")" ]] \
+[[ -e "$(entry "$refusal")" && -e "$(mark "$refusal")" ]] \
   || fail "the refused launch changed the login item"
 echo "smoke: a database it cannot open is refused (exit 3), the login item untouched"

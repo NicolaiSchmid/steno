@@ -112,25 +112,25 @@ impl DropIn {
     }
 }
 
-/// The mark of a reload the user manager owes, in the app's config
-/// directory: set when `sync` writes a drop-in, cleared only by a reload
-/// that went through (`settle`). A file, so the debt outlives a kill
-/// before the reload.
+/// The mark of a reload the user manager owes, in the support directory:
+/// set when `sync` writes a drop-in, cleared only by a reload that went
+/// through (`settle`). A file, so the debt outlives a kill before the
+/// reload.
 const RELOAD_OWED: &str = "systemd-reload-owed";
 
 /// Brings the user's copies in line with Launch at login: installs GNOME's
 /// scope drop-in, and the autostart unit's for `Some(true)`; removes the
 /// autostart unit's for `Some(false)`; leaves it for `None` (the entry
 /// could not be read). Has the user manager reload when it wrote a file or
-/// a reload is owed (`RELOAD_OWED` in `config_dir`, the app's config
-/// directory), as `may_reload` allows. A failure is logged and changes
-/// nothing else: Launch at login works without the drop-ins.
-pub fn sync(login_item: Option<bool>, config_dir: Option<&Path>) {
+/// a reload is owed (`RELOAD_OWED` in `marks`, the support directory), as
+/// `may_reload` allows. A failure is logged and changes nothing else:
+/// Launch at login works without the drop-ins.
+pub fn sync(login_item: Option<bool>, marks: Option<&Path>) {
     let Some(home) = home() else {
         tracing::warn!("no home directory for the stop timeout drop-ins");
         return;
     };
-    let owed = config_dir.map(|directory| directory.join(RELOAD_OWED));
+    let owed = marks.map(|directory| directory.join(RELOAD_OWED));
     sync_in(
         &home,
         owed.as_deref(),

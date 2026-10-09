@@ -66,7 +66,7 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 /// the app at login; on Linux, an entry that goes at the exit
 /// (`OFF_AT_EXIT`) is already off.
 pub fn status(app: &AppHandle) -> LoginItemStatus {
-    let mark = off_at_exit(app).filter(|_| cfg!(target_os = "linux"));
+    let mark = off_at_exit().filter(|_| cfg!(target_os = "linux"));
     with_off_at_exit(
         status_unless_managed(packaged::login_item_is_managed(), || {
             app.autolaunch().is_enabled()
@@ -105,10 +105,10 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
         {
             switch_then_sync(
                 app,
-                off_at_exit(app).as_deref(),
+                off_at_exit().as_deref(),
                 enabled,
                 stop_timeout::runs_as_autostart_unit(),
-                |login_item| stop_timeout::sync(login_item, config_dir(app).as_deref()),
+                |login_item| stop_timeout::sync(login_item, marks_directory().as_deref()),
             )
         }
         #[cfg(not(target_os = "linux"))]
@@ -207,7 +207,7 @@ fn switch_entry(
     as_unit: bool,
 ) -> Result<bool, BridgeError> {
     let deferred = defers_off(enabled, as_unit);
-    let mark = mark.ok_or_else(|| failed("the app has no config directory"))?;
+    let mark = mark.ok_or_else(|| failed("the app has no support directory"))?;
     set_mark(mark, deferred).map_err(|error| failed(error.kind()))?;
     if deferred {
         return Ok(false);
@@ -253,20 +253,22 @@ fn defers_off(enabled: bool, as_autostart_unit: bool) -> bool {
 }
 
 /// The file that marks Launch at login to go off at the exit, in the
-/// app's config directory. A file rather than a flag, so the choice
-/// outlives a kill or a crash before the exit (`launch_step`). Read only on
-/// Linux.
+/// support directory (`marks_directory`). A file rather than a flag, so
+/// the choice outlives a kill or a crash before the exit (`launch_step`).
+/// Read only on Linux.
 const OFF_AT_EXIT: &str = "launch-at-login-off-at-exit";
 
-/// The app's config directory, which holds the marks (`OFF_AT_EXIT`,
-/// and `stop_timeout`'s owed reload).
-fn config_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
-    use tauri::Manager as _;
-    app.path().app_config_dir().ok()
+/// The support directory (`StenoPaths`), which holds the marks
+/// (`OFF_AT_EXIT`, and `stop_timeout`'s owed reload); no identifier names
+/// it, so a new one keeps them. `None` without a home, where the support
+/// directory would be relative.
+fn marks_directory() -> Option<std::path::PathBuf> {
+    Some(steno_core::StenoPaths::default_support_directory())
+        .filter(|directory| directory.is_absolute())
 }
 
-fn off_at_exit(app: &AppHandle) -> Option<std::path::PathBuf> {
-    config_dir(app).map(|directory| directory.join(OFF_AT_EXIT))
+fn off_at_exit() -> Option<std::path::PathBuf> {
+    marks_directory().map(|directory| directory.join(OFF_AT_EXIT))
 }
 
 /// Creates (`on`) or removes the file at `mark`; removing none is fine.
@@ -336,7 +338,7 @@ pub fn at_exit(app: &AppHandle, relaunching: bool) {
         }
         return;
     }
-    let Some(mark) = off_at_exit(app) else {
+    let Some(mark) = off_at_exit() else {
         return;
     };
     if !exit_turns_off(mark.exists(), relaunching) {
@@ -430,9 +432,9 @@ pub fn sync_at_launch(app: &AppHandle) {
     let login_item = if packaged::login_item_is_managed() {
         managed_login_item(as_unit, app.autolaunch().is_enabled().ok())
     } else {
-        launch(app, off_at_exit(app).as_deref(), as_unit)
+        launch(app, off_at_exit().as_deref(), as_unit)
     };
-    stop_timeout::sync(login_item, config_dir(app).as_deref());
+    stop_timeout::sync(login_item, marks_directory().as_deref());
 }
 
 /// The login item the drop-ins follow while the system manages it:
@@ -492,7 +494,7 @@ fn launch(entry: &impl Entry, mark: Option<&std::path::Path>, as_unit: bool) -> 
 /// there.
 #[cfg(target_os = "linux")]
 fn restore(entry: &impl Entry, mark: Option<&std::path::Path>) -> EntryResult<()> {
-    let mark = mark.ok_or("the app has no config directory")?;
+    let mark = mark.ok_or("the app has no support directory")?;
     set_mark(mark, true)?;
     entry.enable()?;
     if !entry.is_enabled()? {
@@ -505,8 +507,8 @@ fn restore(entry: &impl Entry, mark: Option<&std::path::Path>) -> EntryResult<()
 /// Whether Launch at login is marked to go at the exit (`OFF_AT_EXIT`),
 /// for the smoke run as the autostart unit (`smoke`).
 #[cfg(target_os = "linux")]
-pub fn marked_off_at_exit(app: &AppHandle) -> bool {
-    off_at_exit(app).is_some_and(|mark| mark.exists())
+pub fn marked_off_at_exit() -> bool {
+    off_at_exit().is_some_and(|mark| mark.exists())
 }
 
 /// Where the user manages login items; `None` where there is no such
@@ -937,6 +939,22 @@ mod tests {
         assert_eq!(launch(&unread, Some(&mark), true), None);
         assert_eq!(unread.calls(), NO_CALLS);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The marks are in the support directory the rest of the app uses,
+    /// which no identifier names, so a new identifier keeps them.
+    #[test]
+    fn the_marks_are_in_the_support_directory() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let identifier = config["identifier"].as_str().unwrap();
+        let directory = marks_directory().unwrap();
+        assert_eq!(
+            directory,
+            steno_core::StenoPaths::default_support_directory()
+        );
+        assert!(!directory.to_string_lossy().contains(identifier));
+        assert_eq!(off_at_exit(), Some(directory.join(OFF_AT_EXIT)));
     }
 
     #[cfg(target_os = "linux")]
