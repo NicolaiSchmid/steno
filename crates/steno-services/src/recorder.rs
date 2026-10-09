@@ -278,7 +278,7 @@ fn capture_refused(error: &CaptureError) -> String {
             format!("the audio devices run at {actual} Hz, which Steno cannot record.")
         }
         CaptureError::DeviceLost => "an audio device disappeared.".to_owned(),
-        CaptureError::WriterFailed(_) => {
+        CaptureError::WriterFailed(_) | CaptureError::RecordingExists(_) => {
             "Steno could not write to the recordings folder.".to_owned()
         }
         _ => DEVICES_DID_NOT_OPEN.to_owned(),

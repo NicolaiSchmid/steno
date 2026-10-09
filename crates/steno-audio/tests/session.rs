@@ -1982,11 +1982,43 @@ impl CaptureBackend for Failing {
     fn stop(&self) {}
 }
 
+/// Every file under `folder`, by path, with its bytes.
+fn tree(folder: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    for entry in std::fs::read_dir(folder).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(tree(&path));
+        } else {
+            files.insert(path.clone(), std::fs::read(&path).unwrap());
+        }
+    }
+    files
+}
+
+/// `audio` holds another meeting's folder with a master and a sidecar,
+/// and a file of its own; the meeting's id.
+fn audio_folder_with_a_meeting(audio: &Path) -> Uuid {
+    let id = Uuid::new_v4();
+    let other = RecordingLayout::new(audio, id);
+    std::fs::create_dir_all(&other.directory).unwrap();
+    std::fs::write(other.master(AudioFormat::Caf48kFloat32), b"another master").unwrap();
+    std::fs::write(other.sidecar(AudioLane::Mixed), b"another sidecar").unwrap();
+    std::fs::write(audio.join("notes.txt"), b"the user's").unwrap();
+    id
+}
+
+/// A start whose devices do not open removes the folder it made and
+/// nothing else: another meeting's folder and the audio folder stay.
 #[test]
 fn a_failing_backend_leaves_the_session_failed_and_no_folder() {
     let directory = tempfile::tempdir().unwrap();
+    let audio = directory.path().join("audio");
+    std::fs::create_dir(&audio).unwrap();
+    audio_folder_with_a_meeting(&audio);
+    let before = tree(&audio);
     let session = CaptureSession::with_backend(
-        configuration(CaptureMode::InPerson, directory.path(), false),
+        configuration(CaptureMode::InPerson, &audio, false),
         Arc::new(Failing),
         None,
         200,
@@ -2005,12 +2037,88 @@ fn a_failing_backend_leaves_the_session_failed_and_no_folder() {
             recording: None
         }
     );
+    assert!(!RecordingLayout::new(&audio, meeting_id).directory.exists());
+    assert!(tree(&audio) == before, "every other file is as it was");
+    assert!(matches!(session.stop(), Err(CaptureError::InvalidState(_))));
+}
+
+/// A start with the id of a meeting whose folder exists is refused before
+/// any device opens, and every file in it stays as it was.
+#[test]
+fn a_start_into_a_meeting_folder_that_exists_is_refused_and_writes_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let audio = directory.path();
+    let existing = audio_folder_with_a_meeting(audio);
+    let before = tree(audio);
+    for backend in [
+        Arc::new(SyntheticCaptureBackend::new(tones(&call(), 1.0))) as Arc<dyn CaptureBackend>,
+        Arc::new(Failing),
+    ] {
+        let session = CaptureSession::with_backend(
+            configuration(CaptureMode::Call, audio, false),
+            backend,
+            passthrough(),
+            200,
+            Arc::new(SystemClock::new()),
+        )
+        .unwrap();
+        let refused =
+            CaptureError::RecordingExists(RecordingLayout::new(audio, existing).directory);
+        assert_eq!(session.start(existing), Err(refused.clone()));
+        assert_eq!(
+            session.state(),
+            CaptureState::Failed {
+                error: refused,
+                recording: None
+            }
+        );
+        assert!(tree(audio) == before, "every file is as it was");
+    }
+}
+
+/// The real writer, which does not say it created the folder.
+struct Unclaimed(RecordingWriter);
+
+impl RecordingWriting for Unclaimed {
+    fn files(&self) -> RecordingFiles {
+        self.0.files()
+    }
+    fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+        self.0.write(frames)
+    }
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.0.sync()
+    }
+    fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+        self.0.finish()
+    }
+}
+
+/// A failed start removes a folder only when its writer says it made it.
+#[test]
+fn a_failed_start_keeps_a_folder_its_writer_does_not_claim() {
+    let directory = tempfile::tempdir().unwrap();
+    let session = CaptureSession::with_writer_factory(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        Arc::new(Failing),
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+        Arc::new(|layout, lanes, keep_raw| {
+            Ok(
+                Box::new(Unclaimed(RecordingWriter::new(layout, lanes, keep_raw)?))
+                    as Box<dyn RecordingWriting>,
+            )
+        }),
+    )
+    .unwrap();
+    let meeting_id = Uuid::new_v4();
+    assert!(session.start(meeting_id).is_err());
     assert!(
-        !RecordingLayout::new(directory.path(), meeting_id)
-            .directory
+        RecordingLayout::new(directory.path(), meeting_id)
+            .master(AudioFormat::Caf48kFloat32)
             .exists()
     );
-    assert!(matches!(session.stop(), Err(CaptureError::InvalidState(_))));
 }
 
 // Device changes

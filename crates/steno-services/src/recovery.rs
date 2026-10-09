@@ -1792,9 +1792,10 @@ mod tests {
         assert_eq!(harness.state(&meeting), MeetingState::Recording);
     }
 
-    /// A master `recording.<ext>` with no row, as `write` leaves it in a
-    /// new meeting folder under the audio folder, its folder recorded first
-    /// as the recorder and the phone intake record it; returns its id.
+    /// A master `recording.<ext>` with no row, as `write` leaves it in the
+    /// meeting folder it makes under the audio folder, its folder recorded
+    /// first as the recorder and the phone intake record it; returns its
+    /// id.
     fn orphan(harness: &Harness, write: impl FnOnce(&RecordingLayout)) -> Uuid {
         let meeting_id = Uuid::new_v4();
         crate::audio_folders::record(
@@ -1803,9 +1804,7 @@ mod tests {
             &harness.audio_folder(),
         )
         .unwrap();
-        let layout = RecordingLayout::new(&harness.audio_folder(), meeting_id);
-        std::fs::create_dir_all(&layout.directory).unwrap();
-        write(&layout);
+        write(&RecordingLayout::new(&harness.audio_folder(), meeting_id));
         meeting_id
     }
 
@@ -1829,6 +1828,7 @@ mod tests {
     /// The fixture `name` copied in as a phone's master in `format`.
     fn phone_orphan(harness: &Harness, name: &str, format: AudioFormat) -> Uuid {
         orphan(harness, |layout| {
+            std::fs::create_dir_all(&layout.directory).unwrap();
             std::fs::copy(audio_fixture(name), layout.master(format)).unwrap();
         })
     }
@@ -2013,6 +2013,7 @@ mod tests {
     async fn only_a_master_with_no_meeting_is_adopted() {
         let harness = Harness::new();
         let empty = orphan(&harness, |layout| {
+            std::fs::create_dir_all(&layout.directory).unwrap();
             std::fs::write(layout.master(AudioFormat::Caf48kFloat32), b"").unwrap();
         });
         let unrecorded = Uuid::new_v4();

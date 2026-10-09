@@ -99,6 +99,45 @@ fn two_lanes_round_trip_sample_accurately_with_sidecars() {
     );
 }
 
+/// The writer makes the meeting's folder and its parents, and refuses one
+/// that exists, empty or holding a recording, leaving its files as they
+/// were.
+#[test]
+fn the_writer_creates_the_meeting_folder_and_refuses_one_that_exists() {
+    let directory = tempfile::tempdir().unwrap();
+    let audio = directory.path().join("not yet").join("audio");
+    let layout = RecordingLayout::new(&audio, Uuid::new_v4());
+    let mut writer = RecordingWriter::new(&layout, &[AudioLane::Mixed], false).unwrap();
+    assert!(writer.created_directory());
+    write_lanes(&mut writer, &[&AudioFixtures::tone(500.0, 0.5, 0.5)]);
+    let files = writer.finish().unwrap();
+    let master = std::fs::read(&files.master).unwrap();
+    let sidecar = std::fs::read(&files.sidecars_16k[&AudioLane::Mixed]).unwrap();
+
+    for keep_raw in [false, true] {
+        let refused = RecordingWriter::new(&layout, &[AudioLane::Mic], keep_raw).unwrap_err();
+        assert_eq!(
+            refused,
+            CaptureError::RecordingExists(layout.directory.clone())
+        );
+        assert!(refused.to_string().contains("already holds a recording"));
+    }
+    assert_eq!(std::fs::read(&files.master).unwrap(), master);
+    assert_eq!(
+        std::fs::read(&files.sidecars_16k[&AudioLane::Mixed]).unwrap(),
+        sidecar
+    );
+    assert_eq!(std::fs::read_dir(&layout.directory).unwrap().count(), 2);
+
+    let empty = RecordingLayout::new(&audio, Uuid::new_v4());
+    std::fs::create_dir(&empty.directory).unwrap();
+    assert!(matches!(
+        RecordingWriter::new(&empty, &[AudioLane::Mixed], false),
+        Err(CaptureError::RecordingExists(_))
+    ));
+    assert_eq!(std::fs::read_dir(&empty.directory).unwrap().count(), 0);
+}
+
 #[test]
 fn raw_mic_lane_is_written_beside_the_master() {
     let directory = tempfile::tempdir().unwrap();
@@ -155,7 +194,7 @@ fn in_person_writes_one_channel_and_the_mixed_sidecar() {
 fn wrong_frame_shape_and_double_finish_fail() {
     let directory = tempfile::tempdir().unwrap();
     let mut writer = RecordingWriter::new(
-        &RecordingLayout::from_directory(directory.path()),
+        &RecordingLayout::from_directory(directory.path().join("meeting")),
         &[AudioLane::Mixed],
         false,
     )

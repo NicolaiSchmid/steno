@@ -4,7 +4,8 @@
 //! The master is `recording.caf` (48 kHz Float32, one channel per lane),
 //! plus one 16 kHz Int16 WAV sidecar per lane through
 //! [`Resampler48kTo16k`], plus `mic.raw.caf` when asked, all into
-//! `RecordingLayout`'s directory. Owned by the writer thread; one `write`
+//! `RecordingLayout`'s directory, which `new` creates and never reuses
+//! (Rust only). Owned by the writer thread; one `write`
 //! per 10 ms frame, `finish()` patches sizes and returns the files. All
 //! scratch buffers are allocated in `new`.
 //!
@@ -73,6 +74,12 @@ pub trait RecordingWriting: Send {
     /// fails here, the Mac's `fsync` fallback too, is a failure: the audio
     /// may not be on disk.
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError>;
+    /// Whether this writer created the meeting's folder, so a start that
+    /// fails after it may remove the folder. `false` unless the writer
+    /// says so: a folder no writer claims is never removed. Rust only.
+    fn created_directory(&self) -> bool {
+        false
+    }
 }
 
 /// The production writer: the master CAF, one sidecar per lane through the
@@ -99,15 +106,25 @@ impl std::fmt::Debug for RecordingWriter {
 }
 
 impl RecordingWriter {
-    /// `layout.directory` is created if needed.
+    /// Creates `layout.directory`, its parents when needed, and refuses
+    /// one that exists ([`CaptureError::RecordingExists`]): a meeting's
+    /// folder holds one recording, and `File::create` would empty its
+    /// files. Rust only: Swift created the folder if needed.
     pub fn new(
         layout: &RecordingLayout,
         lanes: &[AudioLane],
         keep_raw_mic: bool,
     ) -> Result<Self, CaptureError> {
         assert!(!lanes.is_empty(), "a recording needs at least one lane");
-        layout.create_directories(false).map_err(|e| {
-            CaptureError::WriterFailed(format!("{}: {e}", layout.directory.display()))
+        let directory = &layout.directory;
+        let failed =
+            |e: std::io::Error| CaptureError::WriterFailed(format!("{}: {e}", directory.display()));
+        if let Some(parent) = directory.parent() {
+            std::fs::create_dir_all(parent).map_err(failed)?;
+        }
+        std::fs::create_dir(directory).map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => CaptureError::RecordingExists(directory.clone()),
+            _ => failed(e),
         })?;
         let master = CafStreamWriter::create(
             &layout.master(AudioFormat::Caf48kFloat32),
@@ -224,6 +241,11 @@ impl RecordingWriting for RecordingWriter {
             result = result.and(raw_mic.sync());
         }
         result
+    }
+
+    /// Always: `new` refuses a folder it did not create.
+    fn created_directory(&self) -> bool {
+        true
     }
 
     /// Closes every file, the master first. A failure on one file still
