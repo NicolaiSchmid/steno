@@ -269,13 +269,14 @@ both set and `GDK_BACKEND` is not, `main` allows GDK only its `x11`
 backend before Tauri initialises GTK (`display.rs`). That setting stays
 inside the process, so a browser the shell opens still starts on Wayland.
 Every start logs one `display:` line naming the backend. A `GDK_BACKEND`
-that is a list, or holds GDK's `*`, counts as not set: it is a session's
-default for every app (Omarchy exports `wayland,x11,*`), and GDK skips
-the entries it is not allowed. A single `GDK_BACKEND` set before launch
-always wins: `GDK_BACKEND=wayland steno-desktop` runs natively on
-Wayland, with panels that neither stay on top nor keep their place. A
-Wayland session without XWayland (no `DISPLAY`) runs on Wayland too,
-since X11 would not open there.
+list that names `x11` or `*`, or a lone `*`, counts as not set: it is a
+session's default for every app (Omarchy exports `wayland,x11,*`), and
+GDK skips the entries it is not allowed. A list that names neither, such
+as `wayland,broadway`, stays the user's choice. A single `GDK_BACKEND`
+set before launch always wins: `GDK_BACKEND=wayland steno-desktop` runs
+natively on Wayland, with panels that neither stay on top nor keep their
+place. A Wayland session without XWayland (no `DISPLAY`) runs on Wayland
+too, since X11 would not open there.
 
 On Linux the panels are titled "Steno bubble" and "Steno prompt" (on
 macOS and Windows "Steno", as the main window), so a window manager's
@@ -496,27 +497,35 @@ pointer crosses them, and have no border, shadow or blur. The rules match
 the class and the panels' titles ("Steno bubble", "Steno prompt"), never
 the main window ("Steno").
 
-Load them at the end of `~/.config/hypr/hyprland.lua` (on Omarchy, below
-"Add any other personal Hyprland configuration below"):
+Load them with one line at the end of `~/.config/hypr/hyprland.lua` (on
+Omarchy, below "Add any other personal Hyprland configuration below").
+The `.deb` installs the file as
+`/usr/share/steno-desktop/hyprland-steno.lua`, and so does the AUR
+package from the next release on. From either:
 
 ```lua
--- the AUR package installs the file here
-require("/usr/share/steno-desktop/hyprland-steno")
--- or a copy of it at ~/.config/hypr/steno.lua
+dofile("/usr/share/steno-desktop/hyprland-steno.lua")
+```
+
+From a copy of the file at `~/.config/hypr/steno.lua`:
+
+```lua
 require("steno")
 ```
 
-Hyprland reloads its config when the file changes. A config in the older
-syntax, `hyprland.conf` from Hyprland 0.53 on (or the one Home Manager
-writes from `wayland.windowManager.hyprland.settings`), takes the same
-rule as one line:
+Save the file. Hyprland reloads its config, and `hyprctl configerrors`
+then prints nothing. A config in the older syntax, `hyprland.conf` from
+Hyprland 0.53 on (or the one Home Manager writes from
+`wayland.windowManager.hyprland.settings`), takes the same rule as one
+line:
 
 ```
 windowrule = match:class [Ss]teno-desktop, match:title Steno (bubble|prompt), float on, pin on, no_initial_focus on, no_follow_mouse on, border_size 0, no_shadow on, no_blur on
 ```
 
-With the rules loaded, a recording's bubble shows as floating, pinned
-and under XWayland:
+To check the rules, start a recording, then run the line below; it
+lists "Steno bubble" with `"xwayland": true`, `"floating": true` and
+`"pinned": true`:
 
 ```sh
 hyprctl clients -j | jq '.[] | select(.class | test("steno-desktop"; "i"))
@@ -526,8 +535,8 @@ hyprctl clients -j | jq '.[] | select(.class | test("steno-desktop"; "i"))
 On a `uwsm` session, as Omarchy's, start Steno from the app launcher or
 with `uwsm-app -- steno-desktop`, so it runs in a scope of its own and
 not in Hyprland's unit (stable plan X1). Steno runs under XWayland there
-even though Omarchy sets `GDK_BACKEND=wayland,x11,*`, since a list is a
-session default (above). Under native Wayland (a single
+even though Omarchy sets `GDK_BACKEND=wayland,x11,*`, since a list that
+names `x11` is a session default (above). Under native Wayland (a single
 `GDK_BACKEND=wayland`, or no XWayland) Hyprland places the panels itself
 and a drag is not saved; native panels on the layer-shell protocol,
 which would need no rules, are later work.
@@ -618,7 +627,9 @@ name is `steno-desktop` (`tauri.linux.conf.json`), so the `.deb` is the
 its name and the desktop entry (`linux/steno-desktop.desktop`, a template
 the bundler fills for the `.deb` and the AppImage) still reads Steno,
 passes a `steno:` link to the binary (`%u`) and claims the scheme. The
-`.deb` depends on `libayatana-appindicator3-1` explicitly: the Tauri CLI
+`.deb` also installs the Hyprland window rules as
+`/usr/share/steno-desktop/hyprland-steno.lua` (`bundle.linux.deb.files`;
+see Hyprland). The `.deb` depends on `libayatana-appindicator3-1` explicitly: the Tauri CLI
 adds the tray's library only when it sees the `tray-icon` feature on a
 crate-local `tauri` dependency, and ours is inherited from the workspace.
 For the same reason the AppImage does not bundle that library; a host
@@ -995,7 +1006,8 @@ every build, debug and test included. Where it lands:
 bundle as its installer would (`dpkg-deb -x`, `--appimage-extract`, an
 administrative MSI install, a silent NSIS install), finds the two binaries
 side by side and starts the sidecar from there, which greets and exits
-when its stdin ends.
+when its stdin ends. In the `.deb` it also finds the Hyprland rules,
+byte for byte `src-tauri/linux/hyprland-steno.lua`.
 
 ONNX Runtime is linked statically, so on macOS and Linux the sidecar needs
 no library beside it. On Windows both binaries load `DirectML.dll`, which
@@ -1179,7 +1191,9 @@ raises a second prompt, hides the panels, closes main and reports:
 `xvfb-run` and, when ImageMagick is present (`magick` or `convert`), captures
 the Xvfb root and one crop per window and per panel into
 `apps/desktop/screens/` (ignored by git; CI uploads it as the
-`desktop-smoke-screens` artifact). With `STENO_SMOKE_DPI=120` it runs Xvfb
+`desktop-smoke-screens` artifact). At that moment, when `xdotool` is on
+the `PATH` (CI's setup has it), each panel must be a visible window titled
+"Steno bubble" or "Steno prompt", the titles the Hyprland rules match. With `STENO_SMOKE_DPI=120` it runs Xvfb
 at that resolution, where WebKitGTK's pixel ratio is 1.25 and the panels
 must still fit their pills. The windows carry what the host's database
 holds: nothing on CI's fresh runner, synthetic data with `--features
