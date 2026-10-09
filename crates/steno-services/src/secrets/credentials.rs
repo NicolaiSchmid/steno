@@ -1,6 +1,6 @@
 //! The Windows credential store behind [`KeyringSecretStore`] on Windows:
 //! one generic credential per secret, filed as the `keyring` crate (3.x)
-//! filed it, so the entries the app wrote through that crate read
+//! filed it, so the credentials the app wrote through that crate read
 //! unchanged, but kept on this computer (`CRED_PERSIST_LOCAL_MACHINE`)
 //! where the crate kept them with the user's roaming profile
 //! (`CRED_PERSIST_ENTERPRISE`, its only choice). A roaming credential
@@ -12,26 +12,45 @@
 //! (`llm-api-key.uno.schmid.steno.mac`, [`target_name`]), the user name the
 //! key, the blob the value in UTF-16 little-endian without a terminating
 //! NUL. The target name and the type identify a credential, and
-//! `CredWriteW` replaces the credential of the same target name and type in
-//! place, so a write never deletes first. An empty value removes the entry,
-//! as with the crate.
+//! `CredWriteW` replaces the credential of the same target name and type,
+//! so [`write_secret`] is one `CredWriteW` and never deletes first. An
+//! empty value removes the credential, as with the crate.
 //!
-//! A credential kept any other way (the crate's roaming ones) moves on
-//! its first read, which is at launch for both secrets: once the read
-//! succeeded, the same credential, byte for byte, is written again with
-//! local persistence, replacing it in place. The move is read back; where
-//! the read-back finds nothing or fails, the credential is written back as
-//! it was read. A failed move is logged, the value read is still returned,
-//! and the next read tries again. Either persistence reads through the
-//! crate too, so a build from before the move still finds its secrets.
+//! Only a credential that does not exist (`ERROR_NOT_FOUND`) reads as none.
+//! Every other failed read, and a blob that is not UTF-16 text, is an
+//! error, so the handover identity's load reports it unreadable and never
+//! missing (#221).
+//!
+//! A credential kept any other way (the crate's roaming ones) moves on its
+//! first read in [`read_secret`], which is at launch for both secrets. Once
+//! the read succeeded, the credential is written again with local
+//! persistence and its user name and comment as read, under
+//! `CRED_PRESERVE_CREDENTIAL_BLOB`: the credential manager keeps the blob
+//! it holds. So the move carries no value and cannot write an old one over
+//! a newer one, and where the credential was removed since the read, it
+//! fails with `ERROR_NOT_FOUND` and writes nothing. The move is read back
+//! and logged, and nothing is written after it: the read-back reads the
+//! credential manager's set, so a credential it does not find was removed
+//! there, and writing it back would bring a removed credential back. A
+//! failed move is logged, the value read is still returned, and the next
+//! read tries again. Either persistence reads through the crate too, so a
+//! build from before the move still finds its secrets.
+//!
+//! Microsoft documents what `CredWriteW` replaces, not how or in which
+//! order the credential manager writes it to disk, and local and roaming
+//! credentials are kept in different folders of the profile. A power loss
+//! while it writes the move is therefore the one moment the move does not
+//! cover. Should the identity be gone after it, the next launch finds none
+//! and #221's guard reports the handover unavailable rather than minting a
+//! new identity.
 //!
 //! The rules above run over [`CredentialSet`], so they are tested on every
 //! platform over an in-memory set; the system's set, over `CredReadW`,
 //! `CredWriteW` and `CredDeleteW`, is the `windows` module, the one place
 //! in the crate allowed `unsafe`. Every call takes the set by `&mut`, and
 //! the system's set exists once per process behind a lock
-//! (`windows::credential_set`), so a read's move can never write an old
-//! value over a newer one this process wrote in between.
+//! (`windows::credential_set`), so this process's reads, moves and writes
+//! run one after the other.
 //!
 //! No Swift counterpart: the Swift app runs on the Mac only.
 //!
@@ -43,6 +62,8 @@ use steno_core::SecretKey;
 
 use super::KEYRING_SERVICE;
 
+// The crate's one `unsafe` module (AGENTS.md); every block in it carries a
+// SAFETY comment.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
@@ -64,8 +85,8 @@ const MAX_BLOB_BYTES: usize = 2560;
 pub(super) struct Credential {
     /// The name the credential is looked up by, with its type.
     pub(super) target_name: String,
-    /// The user name, which the credential manager ignores for a generic
-    /// credential.
+    /// The user name, which lookups ignore: the target name and the type
+    /// identify a credential.
     pub(super) user_name: String,
     /// The comment Credential Manager shows.
     pub(super) comment: String,
@@ -92,9 +113,12 @@ impl std::fmt::Debug for Credential {
 pub(super) trait CredentialSet {
     /// The credential filed under `target_name`, `None` when there is none.
     fn read(&mut self, target_name: &str) -> io::Result<Option<Credential>>;
-    /// Writes `credential`, replacing the one with the same target name in
-    /// place.
+    /// Writes `credential`, replacing the one with the same target name.
     fn write(&mut self, credential: &Credential) -> io::Result<()>;
+    /// Writes `credential` with local persistence, keeping the blob the
+    /// credential filed under its target name holds (`credential.blob` is
+    /// not written); false, writing nothing, when there is none.
+    fn move_to_this_computer(&mut self, credential: &Credential) -> io::Result<bool>;
     /// Deletes the credential filed under `target_name`; false when there
     /// was none.
     fn delete(&mut self, target_name: &str) -> io::Result<bool>;
@@ -123,7 +147,7 @@ pub(super) fn read_secret(
 }
 
 /// Writes `value` under `key`, kept on this computer, over whatever the
-/// entry held; `None` and an empty value remove the entry.
+/// credential held; `None` and an empty value remove the credential.
 pub(super) fn write_secret(
     set: &mut impl CredentialSet,
     key: &SecretKey,
@@ -141,47 +165,41 @@ pub(super) fn write_secret(
     }
 }
 
-/// Writes `stored` again with local persistence, which replaces it in
-/// place, and reads it back; where the read-back finds nothing or fails,
-/// writes `stored` back as it was read. Logs and returns on any failure:
+/// Moves `stored` to this computer, keeping the blob the credential
+/// manager holds, and reads it back. Writes nothing else and only logs:
 /// the caller holds the value either way.
 fn keep_on_this_computer(set: &mut impl CredentialSet, stored: &Credential) {
     let target = &stored.target_name;
-    let local = Credential {
-        persist: LOCAL_MACHINE,
-        ..stored.clone()
-    };
-    if let Err(error) = set.write(&local) {
-        tracing::warn!(
-            "secrets: {target} stays with the roaming profile; keeping it on this computer \
-             failed ({error})"
-        );
-        return;
-    }
-    let missing = match set.read(target) {
-        Ok(Some(read)) if read.blob == stored.blob && read.persist == LOCAL_MACHINE => {
-            tracing::info!("secrets: {target} is kept on this computer now");
+    match set.move_to_this_computer(stored) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!("secrets: {target} was removed before it moved to this computer");
             return;
         }
-        // Someone else's write, or a persistence the system chose: the
-        // credential is there, so it stays as it is.
-        Ok(Some(read)) => {
+        Err(error) => {
             tracing::warn!(
-                "secrets: {target} reads back other than it was written (persistence {}), \
-                 left as it is",
-                read.persist
+                "secrets: {target} stays with the roaming profile; keeping it on this computer \
+                 failed ({error})"
             );
             return;
         }
-        Ok(None) => "is not found".to_owned(),
-        Err(error) => format!("cannot be read ({error})"),
-    };
-    tracing::warn!(
-        "secrets: {target} {missing} after it was written to stay on this computer; writing \
-         it back as it was"
-    );
-    if let Err(error) = set.write(stored) {
-        tracing::error!("secrets: writing {target} back failed ({error})");
+    }
+    match set.read(target) {
+        Ok(Some(read)) if read.persist == LOCAL_MACHINE => {
+            tracing::info!("secrets: {target} is kept on this computer now");
+        }
+        // A persistence the system chose: the credential is there, and the
+        // next read tries again.
+        Ok(Some(read)) => tracing::warn!(
+            "secrets: {target} reads back with persistence {} after its move, left as it is",
+            read.persist
+        ),
+        Ok(None) => tracing::warn!(
+            "secrets: {target} was removed right after it moved to this computer, left removed"
+        ),
+        Err(error) => tracing::warn!(
+            "secrets: {target} cannot be read back after its move ({error}), left as it is"
+        ),
     }
 }
 
@@ -236,21 +254,29 @@ mod tests {
     enum Call {
         Read(String),
         Write(String, u32),
+        Move(String),
         Delete(String),
     }
 
+    /// Changes another program makes to the credentials.
+    type Meddling = fn(&mut BTreeMap<String, Credential>);
+
     /// An in-memory credential set, keyed by the target name as Windows
-    /// keys it (case-insensitively), that records every call and fails or
-    /// loses what a test asks it to.
+    /// keys it (case-insensitively), that records every call and fails,
+    /// loses or changes what a test asks it to.
     #[derive(Default)]
     struct FakeSet {
         credentials: BTreeMap<String, Credential>,
         calls: Vec<Call>,
-        /// How many of the next writes fail.
+        /// How many of the next writes and moves fail.
         failing_writes: usize,
         /// The next reads, one per entry, front first: `None` reads what is
         /// stored, `Some(Ok(()))` finds nothing, `Some(Err)` fails.
         odd_reads: Vec<Option<io::Result<()>>>,
+        /// Another program's change just before the next move.
+        before_move: Option<Meddling>,
+        /// Another program's change just after the next move succeeded.
+        after_move: Option<Meddling>,
     }
 
     impl FakeSet {
@@ -263,6 +289,12 @@ mod tests {
 
         fn stored(&self, target_name: &str) -> Option<&Credential> {
             self.credentials.get(&target_name.to_lowercase())
+        }
+
+        fn refuses(&mut self) -> bool {
+            let refuses = self.failing_writes > 0;
+            self.failing_writes = self.failing_writes.saturating_sub(1);
+            refuses
         }
     }
 
@@ -284,13 +316,37 @@ mod tests {
                 credential.target_name.clone(),
                 credential.persist,
             ));
-            if self.failing_writes > 0 {
-                self.failing_writes -= 1;
+            if self.refuses() {
                 return Err(io::Error::other("the credential manager refused"));
             }
             self.credentials
                 .insert(credential.target_name.to_lowercase(), credential.clone());
             Ok(())
+        }
+
+        fn move_to_this_computer(&mut self, credential: &Credential) -> io::Result<bool> {
+            self.calls.push(Call::Move(credential.target_name.clone()));
+            if let Some(meddle) = self.before_move.take() {
+                meddle(&mut self.credentials);
+            }
+            if self.refuses() {
+                return Err(io::Error::other("the credential manager refused"));
+            }
+            let Some(stored) = self
+                .credentials
+                .get_mut(&credential.target_name.to_lowercase())
+            else {
+                return Ok(false);
+            };
+            *stored = Credential {
+                blob: std::mem::take(&mut stored.blob),
+                persist: LOCAL_MACHINE,
+                ..credential.clone()
+            };
+            if let Some(meddle) = self.after_move.take() {
+                meddle(&mut self.credentials);
+            }
+            Ok(true)
         }
 
         fn delete(&mut self, target_name: &str) -> io::Result<bool> {
@@ -302,10 +358,51 @@ mod tests {
         }
     }
 
+    /// What every [`CredentialSet`] does, as Microsoft documents
+    /// `CredWriteW` with and without `CRED_PRESERVE_CREDENTIAL_BLOB`: a
+    /// move keeps the stored blob and takes the other fields it is given,
+    /// and once the credential is deleted it finds nothing to move and
+    /// does not bring it back. Run over [`FakeSet`] on every platform and
+    /// over the system's set on Windows, so the fake is held to the real
+    /// store.
+    pub(super) fn moves_as_the_credential_manager_documents(
+        set: &mut impl CredentialSet,
+        target_name: &str,
+        user_name: &str,
+    ) {
+        let roaming = Credential {
+            target_name: target_name.to_owned(),
+            user_name: user_name.to_owned(),
+            comment: "keyring v3.6.3".to_owned(),
+            blob: vec![b'a', 0],
+            persist: ENTERPRISE,
+        };
+        set.write(&roaming).unwrap();
+        let without_the_blob = Credential {
+            comment: "Steno moved".to_owned(),
+            blob: vec![b'x', 0],
+            ..roaming.clone()
+        };
+        assert!(set.move_to_this_computer(&without_the_blob).unwrap());
+        assert_eq!(
+            set.read(target_name).unwrap(),
+            Some(Credential {
+                comment: "Steno moved".to_owned(),
+                persist: LOCAL_MACHINE,
+                ..roaming.clone()
+            }),
+            "the stored blob is kept, the other fields are written"
+        );
+        assert!(set.delete(target_name).unwrap());
+        assert!(!set.move_to_this_computer(&without_the_blob).unwrap());
+        assert_eq!(set.read(target_name).unwrap(), None, "not brought back");
+        assert!(!set.delete(target_name).unwrap());
+    }
+
     const TARGET: &str = "llm-api-key.uno.schmid.steno.mac";
 
-    /// An entry as the `keyring` crate 3.6 wrote it: roaming persistence,
-    /// its comment, the value in UTF-16 little-endian.
+    /// A credential as the `keyring` crate 3.6 wrote it: roaming
+    /// persistence, its comment, the value in UTF-16 little-endian.
     fn written_by_the_keyring_crate(value: &str) -> Credential {
         Credential {
             target_name: TARGET.to_owned(),
@@ -316,8 +413,14 @@ mod tests {
         }
     }
 
-    /// The entries are filed where the `keyring` crate filed them, with
-    /// its blob format, pinned as literals.
+    /// The fake moves as the credential manager does.
+    #[test]
+    fn the_fake_set_moves_as_the_credential_manager_documents() {
+        moves_as_the_credential_manager_documents(&mut FakeSet::default(), TARGET, "llm-api-key");
+    }
+
+    /// The credentials are filed where the `keyring` crate filed them,
+    /// with its blob format, pinned as literals.
     #[test]
     fn a_secret_is_filed_as_the_keyring_crate_filed_it_and_kept_on_this_computer() {
         assert_eq!(target_name(&SecretKey::llm_api_key()), TARGET);
@@ -349,15 +452,15 @@ mod tests {
                 Call::Write(TARGET.to_owned(), LOCAL_MACHINE),
                 Call::Read(TARGET.to_owned())
             ],
-            "a local entry is read once and not written again"
+            "a local credential is read once and not written again"
         );
     }
 
-    /// A roaming entry reads, and is written again in place, byte for byte
-    /// and with its user name and comment, kept on this computer; nothing
-    /// is deleted on the way.
+    /// A roaming credential reads and moves to this computer with its
+    /// blob, user name and comment; nothing is deleted or written on the
+    /// way, and the next read finds it moved.
     #[test]
-    fn a_roaming_entry_reads_and_is_rewritten_in_place_on_this_computer() {
+    fn a_roaming_credential_reads_and_moves_to_this_computer_once() {
         let roaming = written_by_the_keyring_crate("sk-1");
         let mut set = FakeSet::with(roaming.clone());
         assert_eq!(
@@ -377,7 +480,7 @@ mod tests {
             set.calls,
             [
                 Call::Read(TARGET.to_owned()),
-                Call::Write(TARGET.to_owned(), LOCAL_MACHINE),
+                Call::Move(TARGET.to_owned()),
                 Call::Read(TARGET.to_owned()),
             ]
         );
@@ -386,10 +489,25 @@ mod tests {
         assert_eq!(set.calls, [Call::Read(TARGET.to_owned())], "moved once");
     }
 
-    /// A move the credential manager refuses leaves the roaming entry as
-    /// it was, and the value is still read; the next read tries again.
+    /// A failed read is an error, never a missing secret, and nothing is
+    /// moved or written.
     #[test]
-    fn a_refused_move_keeps_the_roaming_entry_and_still_reads_it() {
+    fn a_failed_read_is_an_error_and_writes_nothing() {
+        let roaming = written_by_the_keyring_crate("sk-1");
+        let mut set = FakeSet::with(roaming.clone());
+        set.odd_reads = vec![Some(Err(io::Error::other(
+            "the credential manager is busy",
+        )))];
+        let error = read_secret(&mut set, &SecretKey::llm_api_key()).unwrap_err();
+        assert_eq!(error.to_string(), "the credential manager is busy");
+        assert_eq!(set.calls, [Call::Read(TARGET.to_owned())]);
+        assert_eq!(set.stored(TARGET), Some(&roaming));
+    }
+
+    /// A move the credential manager refuses leaves the roaming credential
+    /// as it was, and the value is still read; the next read tries again.
+    #[test]
+    fn a_refused_move_keeps_the_roaming_credential_and_still_reads_it() {
         let roaming = written_by_the_keyring_crate("sk-1");
         let mut set = FakeSet::with(roaming.clone());
         set.failing_writes = 1;
@@ -404,17 +522,64 @@ mod tests {
         assert_eq!(set.stored(TARGET).unwrap().persist, LOCAL_MACHINE);
     }
 
-    /// Where the moved entry does not read back, or its read-back fails,
-    /// the entry is written back as it was read.
+    /// A credential another program removes between the read and the move
+    /// stays removed; one it rewrites keeps the newer value, as the move
+    /// carries none. The value read is still returned.
     #[test]
-    fn a_move_that_does_not_read_back_is_written_back_as_it_was() {
-        for read_back in [
-            Ok(()),
-            Err(io::Error::other("the credential manager is busy")),
+    fn a_move_never_brings_back_or_overwrites_what_changed_since_the_read() {
+        let mut set = FakeSet::with(written_by_the_keyring_crate("sk-1"));
+        set.before_move = Some(BTreeMap::clear);
+        assert_eq!(
+            read_secret(&mut set, &SecretKey::llm_api_key())
+                .unwrap()
+                .as_deref(),
+            Some("sk-1")
+        );
+        assert_eq!(
+            set.calls,
+            [Call::Read(TARGET.to_owned()), Call::Move(TARGET.to_owned())]
+        );
+        assert_eq!(set.stored(TARGET), None, "not brought back");
+
+        let mut set = FakeSet::with(written_by_the_keyring_crate("sk-1"));
+        set.before_move = Some(|credentials| {
+            credentials.insert(TARGET.to_owned(), written_by_the_keyring_crate("sk-2"));
+        });
+        read_secret(&mut set, &SecretKey::llm_api_key()).unwrap();
+        let stored = set.stored(TARGET).unwrap();
+        assert_eq!(text(stored).unwrap(), "sk-2", "the newer key stays");
+        assert_eq!(stored.persist, LOCAL_MACHINE);
+    }
+
+    /// Nothing is written after a move, whatever its read-back finds: a
+    /// credential removed right after it stays removed, a newer one stays,
+    /// and a failed read-back leaves the moved credential as it is.
+    #[test]
+    fn nothing_is_written_after_a_move_whatever_its_read_back_finds() {
+        let removed: Meddling = BTreeMap::clear;
+        let rewritten: Meddling = |credentials| {
+            credentials.insert(TARGET.to_owned(), written_by_the_keyring_crate("sk-2"));
+        };
+        let unreadable = || vec![None, Some(Err(io::Error::other("busy")))];
+        for (after_move, odd_reads, left) in [
+            (Some(removed), vec![], None),
+            (
+                Some(rewritten),
+                vec![],
+                Some(written_by_the_keyring_crate("sk-2")),
+            ),
+            (
+                None,
+                unreadable(),
+                Some(Credential {
+                    persist: LOCAL_MACHINE,
+                    ..written_by_the_keyring_crate("sk-1")
+                }),
+            ),
         ] {
-            let roaming = written_by_the_keyring_crate("sk-1");
-            let mut set = FakeSet::with(roaming.clone());
-            set.odd_reads = vec![None, Some(read_back)];
+            let mut set = FakeSet::with(written_by_the_keyring_crate("sk-1"));
+            set.after_move = after_move;
+            set.odd_reads = odd_reads;
             assert_eq!(
                 read_secret(&mut set, &SecretKey::llm_api_key())
                     .unwrap()
@@ -425,52 +590,18 @@ mod tests {
                 set.calls,
                 [
                     Call::Read(TARGET.to_owned()),
-                    Call::Write(TARGET.to_owned(), LOCAL_MACHINE),
+                    Call::Move(TARGET.to_owned()),
                     Call::Read(TARGET.to_owned()),
-                    Call::Write(TARGET.to_owned(), ENTERPRISE),
                 ]
             );
-            assert_eq!(set.stored(TARGET), Some(&roaming));
+            assert_eq!(set.stored(TARGET), left.as_ref());
         }
     }
 
-    /// A read-back that finds a credential other than the one written
-    /// leaves it alone: it is there, and may be newer.
-    #[test]
-    fn a_move_that_reads_back_another_credential_leaves_it_alone() {
-        struct Overwritten(FakeSet);
-        impl CredentialSet for Overwritten {
-            fn read(&mut self, target_name: &str) -> io::Result<Option<Credential>> {
-                self.0.read(target_name)
-            }
-            fn write(&mut self, credential: &Credential) -> io::Result<()> {
-                self.0.write(credential)?;
-                // Another process writes a new key right after the move.
-                let newer = Credential {
-                    blob: blob("sk-2").unwrap(),
-                    ..credential.clone()
-                };
-                self.0.credentials.insert(TARGET.to_owned(), newer);
-                Ok(())
-            }
-            fn delete(&mut self, target_name: &str) -> io::Result<bool> {
-                self.0.delete(target_name)
-            }
-        }
-        let mut set = Overwritten(FakeSet::with(written_by_the_keyring_crate("sk-1")));
-        read_secret(&mut set, &SecretKey::llm_api_key()).unwrap();
-        assert_eq!(
-            text(set.0.stored(TARGET).unwrap()).unwrap(),
-            "sk-2",
-            "the newer key stays"
-        );
-        assert_eq!(set.0.calls.len(), 3, "no write back: {:?}", set.0.calls);
-    }
-
-    /// A write over a roaming entry replaces it in place, kept on this
+    /// A write over a roaming credential replaces it, kept on this
     /// computer, without deleting it first.
     #[test]
-    fn a_write_over_a_roaming_entry_replaces_it_without_a_delete() {
+    fn a_write_over_a_roaming_credential_replaces_it_without_a_delete() {
         let mut set = FakeSet::with(written_by_the_keyring_crate("sk-1"));
         write_secret(&mut set, &SecretKey::llm_api_key(), Some("sk-2")).unwrap();
         assert_eq!(set.calls, [Call::Write(TARGET.to_owned(), LOCAL_MACHINE)]);
@@ -479,10 +610,10 @@ mod tests {
         assert_eq!(stored.persist, LOCAL_MACHINE);
     }
 
-    /// `None` and an empty value remove the entry; removing a missing one
-    /// is no error. A missing entry reads as `None`.
+    /// `None` and an empty value remove the credential; removing a missing
+    /// one is no error. A missing credential reads as `None`.
     #[test]
-    fn none_and_an_empty_value_remove_the_entry() {
+    fn none_and_an_empty_value_remove_the_credential() {
         for removal in [None, Some("")] {
             let mut set = FakeSet::with(written_by_the_keyring_crate("sk-1"));
             write_secret(&mut set, &SecretKey::llm_api_key(), removal).unwrap();
@@ -495,8 +626,8 @@ mod tests {
         }
     }
 
-    /// A blob that is not UTF-16 text is an error, and the entry is left
-    /// as it is: not moved, not deleted.
+    /// A blob that is not UTF-16 text is an error, and the credential is
+    /// left as it is: not moved, not deleted.
     #[test]
     fn a_blob_that_is_not_text_is_an_error_and_left_alone() {
         for blob in [vec![b's', 0, b'k'], vec![0x00, 0xD8]] {
@@ -513,7 +644,7 @@ mod tests {
     }
 
     /// A value longer than the credential store keeps is refused before
-    /// anything is written; the entry keeps what it held.
+    /// anything is written; the credential keeps what it held.
     #[test]
     fn a_value_too_long_for_the_store_is_refused_before_a_write() {
         let mut set = FakeSet::with(written_by_the_keyring_crate("sk-1"));

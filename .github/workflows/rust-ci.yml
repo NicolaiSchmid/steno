@@ -304,8 +304,8 @@ jobs:
           if grep -qF "SKIPPED" "$log"; then echo "::error::a durable writes test skipped"; exit 1; fi
 
       # The credential store tests against the runner's own credential
-      # store, again with their output, the same start-line greps as above
-      # (`--workspace` keeps the Test step's feature set). Each test writes
+      # store, again with their output and with the start-line greps of the
+      # step above (`--workspace` keeps the Test step's feature set). Each test writes
       # only under `steno-test-<uuid>` target names and deletes them again;
       # `cmdkey /list` then shows that none is left.
       - name: Credential store tests, with output (Windows)
@@ -315,8 +315,9 @@ jobs:
           log="$RUNNER_TEMP/credentials.log"
           tests=(
             secrets::credentials::windows::tests::on_windows_a_written_secret_is_kept_on_this_computer_and_reads_through_the_keyring_crate
-            secrets::credentials::windows::tests::on_windows_an_entry_the_keyring_crate_wrote_reads_and_moves_to_this_computer
+            secrets::credentials::windows::tests::on_windows_a_credential_the_keyring_crate_wrote_reads_and_moves_to_this_computer
             secrets::credentials::windows::tests::on_windows_a_write_replaces_the_credential_of_the_same_target_name
+            secrets::credentials::windows::tests::on_windows_a_move_keeps_the_stored_blob_and_never_brings_back_a_deleted_credential
           )
           cargo test --workspace --lib --locked -- --exact --nocapture \
             "${tests[@]}" 2>&1 | tee "$log"

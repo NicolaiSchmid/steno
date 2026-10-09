@@ -68,9 +68,9 @@ tempfile.workspace = true
 # The paused clock of the update check's timeout test.
 tokio = { workspace = true, features = ["test-util"] }
 
-# The Windows tests write entries as the `keyring` crate wrote them before
-# the services kept credentials on this computer, and read the services'
-# entries back through it.
+# The Windows tests write credentials as the `keyring` crate wrote them
+# before the services kept them on this computer, and read the services'
+# credentials back through it.
 [target.'cfg(windows)'.dev-dependencies]
 keyring = { workspace = true, features = ["windows-native"] }
 

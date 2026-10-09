@@ -37,9 +37,9 @@
 //!
 //! Secrets live in the platform keyring on macOS (the Keychain) and on
 //! Windows (the credential store, each credential kept on this computer,
-//! not with a roaming profile; one the `keyring` crate wrote to roam moves
-//! on its first read). On Linux they live in the Secret
-//! Service when a provider answers on the session bus
+//! not with a roaming profile; one the `keyring` crate wrote with the
+//! roaming profile moves here on its first read). On Linux they live in
+//! the Secret Service when a provider answers on the session bus
 //! (`secrets::SecretServiceStore`, which first moves what the file holds
 //! into it and marks the file), else in the 0600 `secrets.json` under the
 //! support directory, the store the CLI uses everywhere; the choice is

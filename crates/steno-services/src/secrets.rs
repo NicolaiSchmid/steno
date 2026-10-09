@@ -1,11 +1,10 @@
 //! `SecretStore` implementations: the platform keyring (the Keychain
 //! through the `keyring` crate, the Windows credential store through
-//! `credentials`, kept on this computer), the Secret
-//! Service on Linux (`secret_service::SecretServiceStore`), and the 0600
-//! JSON file the Swift CLI used where no keyring is reachable
-//! (`STENO_<KEY>` wins over the file and over the Secret Service); and
-//! [`KeepsApiKey`], the app's store over them, which keeps the API key for
-//! the pipeline's rebuilds.
+//! `credentials`, kept on this computer), the Secret Service on Linux
+//! (`secret_service::SecretServiceStore`), and the 0600 JSON file the
+//! Swift CLI used where no keyring is reachable (`STENO_<KEY>` wins over
+//! the file and over the Secret Service); and [`KeepsApiKey`], the app's
+//! store over them, which keeps the API key for the pipeline's rebuilds.
 //! Swift: `apps/macos/Steno/Services/KeychainSecretStore.swift`,
 //! `Sources/StenoCore/Testing/FileSecretStore.swift`.
 

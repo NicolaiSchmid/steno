@@ -1,19 +1,25 @@
 //! The user's generic credentials through `CredReadW`, `CredWriteW` and
 //! `CredDeleteW`: the system's [`CredentialSet`], once per process behind
-//! a lock ([`credential_set`]).
+//! a lock ([`credential_set`]). A read copies the credential out of the
+//! buffer `CredReadW` allocates, and [`Found`] zeroes its blob and frees it
+//! with `CredFree`, once. Only `ERROR_NOT_FOUND` ([`is_not_found`]) is a
+//! credential that does not exist; every other failure is an error. The
+//! tests run against the runner's real credential store, under target
+//! names of their own (`steno-test-<uuid>.uno.schmid.steno.mac`).
 
 use std::io;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
 use windows_sys::Win32::Security::Credentials::{
-    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
-    CredWriteW,
+    CRED_MAX_CREDENTIAL_BLOB_SIZE, CRED_PERSIST_LOCAL_MACHINE, CRED_PRESERVE_CREDENTIAL_BLOB,
+    CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
 };
 
-use super::{Credential, CredentialSet, LOCAL_MACHINE};
+use super::{Credential, CredentialSet, LOCAL_MACHINE, MAX_BLOB_BYTES};
 
 const _: () = assert!(LOCAL_MACHINE == CRED_PERSIST_LOCAL_MACHINE);
+const _: () = assert!(MAX_BLOB_BYTES == CRED_MAX_CREDENTIAL_BLOB_SIZE as usize);
 
 /// The user's credential set. Made only by [`credential_set`].
 pub(in crate::secrets) struct System(());
@@ -50,7 +56,9 @@ impl CredentialSet for System {
         let found = Found(found);
         // SAFETY: on success `found.0` points to one `CREDENTIALW` the
         // credential manager allocated, which stays valid and unchanged
-        // until `CredFree` (in `Found`'s drop, after this borrow ends).
+        // until `CredFree` in `Found`'s drop. `found` drops at the end of
+        // this function, after the `Credential` below is built from the
+        // last use of `credential`, so this borrow ends first.
         let credential = unsafe { &*found.0 };
         // SAFETY: the strings of a credential `CredReadW` returned are
         // NUL-terminated or null, and its blob is `CredentialBlobSize`
@@ -74,39 +82,15 @@ impl CredentialSet for System {
     }
 
     fn write(&mut self, credential: &Credential) -> io::Result<()> {
-        let mut target = wide(&credential.target_name)?;
-        let mut user = wide(&credential.user_name)?;
-        let mut comment = wide(&credential.comment)?;
-        let mut blob = credential.blob.clone();
-        let size = u32::try_from(blob.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the secret is too long"))?;
-        let raw = CREDENTIALW {
-            Type: CRED_TYPE_GENERIC,
-            TargetName: target.as_mut_ptr(),
-            Comment: comment.as_mut_ptr(),
-            CredentialBlobSize: size,
-            CredentialBlob: if blob.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                blob.as_mut_ptr()
-            },
-            Persist: credential.persist,
-            UserName: user.as_mut_ptr(),
-            // No flags, no attributes, no target alias; `LastWritten` is
-            // ignored on a write.
-            ..CREDENTIALW::default()
-        };
-        // SAFETY: every pointer in `raw` points into a buffer owned by this
-        // frame and alive until the call returns: `target`, `user` and
-        // `comment` are NUL-terminated UTF-16 strings without an interior
-        // NUL (`wide`), the blob is `size` bytes (or null when empty), and
-        // `Attributes` and `TargetAlias` are null. `CredWriteW` only reads
-        // them (the binding's pointers are mutable, the call writes through
-        // none) and keeps no pointer to them after it returns.
-        if unsafe { CredWriteW(&raw const raw, 0) } == 0 {
-            return Err(io::Error::last_os_error());
+        put(credential, credential.persist, Some(&credential.blob))
+    }
+
+    fn move_to_this_computer(&mut self, credential: &Credential) -> io::Result<bool> {
+        match put(credential, CRED_PERSIST_LOCAL_MACHINE, None) {
+            Ok(()) => Ok(true),
+            Err(error) if is_not_found(&error) => Ok(false),
+            Err(error) => Err(error),
         }
-        Ok(())
     }
 
     fn delete(&mut self, target_name: &str) -> io::Result<bool> {
@@ -126,17 +110,63 @@ impl CredentialSet for System {
     }
 }
 
+/// One `CredWriteW` of `credential` with `persist`: with `blob`, which
+/// replaces the stored blob, or with none under
+/// `CRED_PRESERVE_CREDENTIAL_BLOB`, which keeps the stored blob and fails
+/// with `ERROR_NOT_FOUND` when no credential is filed under the target name.
+fn put(credential: &Credential, persist: u32, blob: Option<&[u8]>) -> io::Result<()> {
+    let mut target = wide(&credential.target_name)?;
+    let mut user = wide(&credential.user_name)?;
+    let mut comment = wide(&credential.comment)?;
+    let (flags, mut blob) = match blob {
+        Some(blob) => (0, blob.to_vec()),
+        None => (CRED_PRESERVE_CREDENTIAL_BLOB, Vec::new()),
+    };
+    let size = u32::try_from(blob.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the secret is too long"))?;
+    let raw = CREDENTIALW {
+        Type: CRED_TYPE_GENERIC,
+        TargetName: target.as_mut_ptr(),
+        Comment: comment.as_mut_ptr(),
+        CredentialBlobSize: size,
+        CredentialBlob: if blob.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            blob.as_mut_ptr()
+        },
+        Persist: persist,
+        UserName: user.as_mut_ptr(),
+        // No credential flags (the call's own are `flags`), no attributes,
+        // no target alias; `LastWritten` is ignored on a write.
+        ..CREDENTIALW::default()
+    };
+    // SAFETY: every pointer in `raw` points into a buffer owned by this
+    // frame and alive until the call returns: `target`, `user` and
+    // `comment` are NUL-terminated UTF-16 strings without an interior NUL
+    // (`wide`), the blob is `size` bytes, or null with a size of zero when
+    // empty, which `CRED_PRESERVE_CREDENTIAL_BLOB` requires, and
+    // `Attributes` and `TargetAlias` are null. `CredWriteW` only reads them
+    // (the binding's pointers are mutable, the call writes through none)
+    // and keeps no pointer to them after it returns.
+    if unsafe { CredWriteW(&raw const raw, flags) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// A credential `CredReadW` allocated: its blob is zeroed and it is freed
 /// on drop.
 struct Found(*mut CREDENTIALW);
 
 impl Drop for Found {
     fn drop(&mut self) {
-        // SAFETY: `self.0` is the non-null pointer a successful `CredReadW`
-        // returned, not freed yet and freed only here, once. Its blob is
-        // `CredentialBlobSize` writable bytes of that allocation, or null;
-        // no borrow of the credential outlives `read`, which ends before
-        // this drop.
+        // SAFETY: `self.0` is the pointer a successful `CredReadW`
+        // returned, non-null as `read` makes a `Found` only after its null
+        // check, not freed yet and freed only here, once. `CredReadW`
+        // returns the credential in one buffer this process owns until
+        // `CredFree`, so its blob is `CredentialBlobSize` writable bytes of
+        // it, or null; no borrow of the credential outlives `read`, which
+        // ends before this drop.
         unsafe {
             let credential = &*self.0;
             if !credential.CredentialBlob.is_null() {
@@ -203,14 +233,17 @@ unsafe fn bytes<'a>(blob: *const u8, size: u32) -> &'a [u8] {
     unsafe { std::slice::from_raw_parts(blob, size as usize) }
 }
 
-/// Against the runner's real credential store, each test under target
-/// names of its own (`steno-test-<uuid>.uno.schmid.steno.mac`), which it
-/// deletes again however it ends; no other credential is touched.
+/// The `on_windows_` tests run against the runner's real credential store,
+/// each under target names of its own
+/// (`steno-test-<uuid>.uno.schmid.steno.mac`), which it deletes again
+/// however it ends; no other credential is touched.
 #[cfg(test)]
 mod tests {
     use steno_core::SecretKey;
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_NO_SUCH_LOGON_SESSION};
     use windows_sys::Win32::Security::Credentials::CRED_PERSIST_ENTERPRISE;
 
+    use super::super::tests::moves_as_the_credential_manager_documents;
     use super::super::{read_secret, target_name, write_secret};
     use super::*;
     use crate::secrets::KEYRING_SERVICE;
@@ -238,6 +271,17 @@ mod tests {
         fn drop(&mut self) {
             let _ = credential_set().delete(&target_name(&self.0));
         }
+    }
+
+    /// Only `ERROR_NOT_FOUND` is a credential that does not exist; a read
+    /// that fails any other way is an error, never a missing secret.
+    #[test]
+    fn only_a_credential_that_does_not_exist_reads_as_none() {
+        let code = |code: u32| io::Error::from_raw_os_error(code.cast_signed());
+        assert!(is_not_found(&code(ERROR_NOT_FOUND)));
+        assert!(!is_not_found(&code(ERROR_NO_SUCH_LOGON_SESSION)));
+        assert!(!is_not_found(&code(ERROR_ACCESS_DENIED)));
+        assert!(!is_not_found(&io::Error::other("not an OS error")));
     }
 
     /// A secret written here is kept on this computer, filed and encoded
@@ -268,12 +312,12 @@ mod tests {
         write_secret(&mut *credential_set(), &key.0, None).unwrap();
     }
 
-    /// An entry the `keyring` crate wrote roams (`CRED_PERSIST_ENTERPRISE`);
-    /// its first read returns it and rewrites it in place, the same bytes
-    /// under the same target name, kept on this computer, where the crate
-    /// still reads it.
+    /// A credential the `keyring` crate wrote roams
+    /// (`CRED_PERSIST_ENTERPRISE`); its first read returns it and moves it
+    /// to this computer with its blob, user name and comment, under the
+    /// same target name, where the crate still reads it.
     #[test]
-    fn on_windows_an_entry_the_keyring_crate_wrote_reads_and_moves_to_this_computer() {
+    fn on_windows_a_credential_the_keyring_crate_wrote_reads_and_moves_to_this_computer() {
         let key = TestKey::new();
         let identity = steno_handover::HandoverIdentity::mint("Steno on test", chrono::Utc::now())
             .unwrap()
@@ -300,9 +344,9 @@ mod tests {
         assert_eq!(key.keyring_entry().get_password().unwrap(), identity);
     }
 
-    /// `CredWriteW` replaces the credential of the same target name in
-    /// place, whatever its persistence: one credential per target name
-    /// and type, never two.
+    /// `CredWriteW` replaces the credential of the same target name,
+    /// whatever its persistence: one credential per target name and type,
+    /// never two.
     #[test]
     fn on_windows_a_write_replaces_the_credential_of_the_same_target_name() {
         let key = TestKey::new();
@@ -328,5 +372,18 @@ mod tests {
         assert!(credential_set().delete(&roaming.target_name).unwrap());
         assert!(key.stored().is_none(), "no second credential was left");
         assert!(!credential_set().delete(&roaming.target_name).unwrap());
+    }
+
+    /// A move under `CRED_PRESERVE_CREDENTIAL_BLOB` keeps the blob the
+    /// credential manager holds and never brings back a deleted credential,
+    /// as the in-memory set's does.
+    #[test]
+    fn on_windows_a_move_keeps_the_stored_blob_and_never_brings_back_a_deleted_credential() {
+        let key = TestKey::new();
+        moves_as_the_credential_manager_documents(
+            &mut *credential_set(),
+            &target_name(&key.0),
+            key.0.as_str(),
+        );
     }
 }
