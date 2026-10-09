@@ -312,9 +312,9 @@ why and the alternative.
     | Difference | Choice | Why |
     |---|---|---|
     | Mixdown format | Final: 16 kHz mono WAV on every platform | One code path and no encoder dependency; the mixdown is optional (`include_audio`). Matching Swift's AAC needs AudioToolbox on the Mac, Media Foundation on Windows and nothing exists for Linux, so the format would differ by platform. Cost: about 115 MB per hour in the vault instead of about 30. Alternative: AAC on the Mac and Windows, WAV on Linux. |
-    | Resampler (44.1 kHz phone audio) | Final as it is, proven by A9 | Within 0.3 dB to 6 kHz; A9's sweep and speech tests show no aliasing into the speech band. |
-    | Sidecar's 2 ms lag | Final, accepted | Far below a word; Swift had the same relationship. |
-    | AAC priming (23 to 48 ms late on phone recordings) | Fixed first (A9) | Reading the container's edit list is small and makes the decode exact, as AVFoundation's was. |
+    | Resampler (44.1 kHz phone audio) | Final, the 7 to 8 kHz fold included (Nicolai accepted it, 2026-10-08) | Within 0.3 dB to 6 kHz. A9's sweep (#246): aliases that land below 7 kHz stay under -60 dB (-67 dB at 6.9 to 7.0 kHz, under -90 dB below 6.8 kHz), and the sinc's transition band folds 8 to 9 kHz of input into 7 to 8 kHz at -21 to -58 dB; the capture's 3:1 path is under -60 dB everywhere below 8 kHz. A9's speech test: FLEURS German through the 44.1 kHz path 5.02 % WER, through the 48 kHz path 5.51 %, so the one-sided bound (at most 0.1 points over 48 kHz) holds by 0.49 points. That proves the passband only: FLEURS is 16 kHz, so neither path carries anything above 7.2 kHz and the fold's cost to a transcript is unmeasured; and the 48 kHz reference already sits 0.6 points over the 16 kHz original (4.9 %), so the margin is per-file noise, not headroom. Nicolai accepted the fold on the sweep (2026-10-08); a sharper sinc would have changed every 44.1 kHz decode. |
+    | Sidecar's 2 ms lag | Final, accepted | Far below a word; Swift had the same relationship. `tests/codec.rs` pins both onsets and the 32 samples between them. |
+    | AAC priming (23 to 48 ms late on phone recordings) | Fixed (A9, #246) | The decoder reads the edit list (ffmpeg's files), else iTunes' gapless tag (`AVAudioFile`, so the Swift app's mixdowns: 2 112 samples), else the 2 112 AVFoundation assumes, but only in the layout of the phone's `AVAudioRecorder`, which writes neither box (major brand `M4A `, `mp42`, no `udta`, and an `esds` with ES_ID 0 and stream byte 0x14). Any other file that declares neither keeps every sample: Android's recorder primes 1 024 and declares nothing, and 25 ms of priming is harmless where 25 ms of speech is not. It drops exactly that many frames, so the decode starts where AVFoundation's did (checked on files from Apple's encoder in both layouts); every other input decodes bit for bit as before. |
     | Call mode without an output client (the tap's IOProc runs only once another client opens the output) | Fixed first (A10) | Forge reproduces the loss over SSH: 0 callbacks while nothing plays. The tap aggregate runs only while a process the tap includes drives the output. The Swift app shares the defect and keeps its exclusion of its own process until the handoff, so this is not a regression, but D3 makes the loss blocking. The fix includes Steno in the tap, so the rule is: no in-app playback while recording, enforced by `Playback`. |
 
   - The Swift defects under "Store", "Adapters", "Handover", "LLM" and "Audio"
@@ -436,7 +436,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A6 | Devices that will not run at 48 kHz, and a headset's switch mid-call | #198 |
 | A7 | The Linux input device list and the device UID fallback | #222 |
 | A8 | Meeting detection on Linux, over PipeWire's streams | #222 |
-| A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; the call-mode start is A10's, whose step 2 runs the tone check on the Mac | audio |
+| A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; the call-mode start is A10's, whose step 2 runs the tone check on the Mac | audio (#246) |
 | A10 | Call mode without an output client: the tap includes Steno, and the capture starts a silent output IOProc of its own on the aggregate's clock master, so with nothing playing the first callback comes within 100 ms of `start` returning and 200 ms of the call to `start`; no in-app playback while recording, enforced by `Playback` | audio |
 
 **Per Linux target, blocking that target's listing (D6):**
@@ -702,12 +702,36 @@ Each lands before `0.11.0-rc.1`.
   controller. Tests: table tests over a fake PipeWire node list (a Firefox or
   Chromium input stream raises the prompt, an output-only stream does not,
   Steno's own stream is ignored).
-- **A9 The final choices proven.**
-  - The AAC priming offset is trimmed from the container's edit list.
-  - A 44.1 kHz sweep to 22 kHz, resampled, leaves less than −60 dB below
+- **A9 The final choices proven** (#246).
+  - The AAC priming offset is trimmed from the container's edit list, or from
+    iTunes' gapless tag where there is none (`AVAudioFile`: the Swift app's
+    mixdowns carry 2 112 samples there and no edit list), or, when the file
+    declares neither, by the 2 112 samples AVFoundation assumes, but only in
+    the layout of the phone's `AVAudioRecorder` (no edit list, no tag, and
+    the brands and `esds` marks of `codec::priming`); any other file that
+    declares neither keeps every sample. Exactly that many
+    frames go, by packet timestamp; the decode of every other input is bit for
+    bit what it was (`tests/codec_streaming.rs`), and AAC fixtures with an
+    onset at a known sample land on it, mono and stereo, from ffmpeg's encoder
+    and from Apple's in the recorder's layout, where the onset is
+    AVFoundation's, while ffmpeg's and Android's layouts that declare
+    nothing keep every sample (`tests/codec.rs`).
+  - A 44.1 kHz sweep to 22 kHz, resampled, leaves less than -60 dB below
     8 kHz, and speech recorded at 48 kHz and resampled from 44.1 kHz gives the
-    48 kHz path's word error rate within 0.1 points.
-  - The 2 ms sidecar lag stays pinned by `tests/codec.rs`.
+    48 kHz path's word error rate within 0.1 points. Measured
+    (`tests/resampler_sweep.rs`; `steno-speech`'s `tests/fleurs.rs`, model
+    gated): the capture's path (the converter to 48 kHz, then the 3:1 FIR)
+    keeps every alias below 8 kHz under -60 dB; the decoder's sinc keeps them
+    under -60 dB below 7 kHz and folds 8 to 9 kHz of input into 7 to 8 kHz
+    at -21 to -58 dB, so the first bound holds for the phone's path only
+    below 7 kHz. FLEURS German gives 5.02 % from 44.1 kHz against 5.51 %
+    from 48 kHz; a file moves by up to two points between the two, so the
+    test bounds the 44.1 kHz mean one way, as the G1 gate does. FLEURS has
+    nothing above 7.2 kHz on either path, so the fold's cost to a
+    transcript is unmeasured; Nicolai accepted the fold on the sweep
+    (2026-10-08, D9).
+  - The 2 ms sidecar lag is pinned by `tests/codec.rs`: both onsets and the
+    32 samples between them.
   - **The call-mode start is A10's.** Its step 2 is this package's tone check
     on the Mac: the first callback within 100 ms of `start` returning and
     200 ms of the call to `start`, and the tone's onset in the system channel
@@ -850,9 +874,10 @@ Each lands before `0.11.0-rc.1`.
          200ms)` with A at most 100 ms and B at most 200 ms. At a load of 4 or
          more it prints `end-to-end bound not checked: load N`; B is then
          read against 200 ms by eye.
-       - The tone, once #246 has merged and A10 is rebased onto it (#246
-         adds the `info` line; its description has the full take): with the
-         Rust app built from A10's branch in `~/Applications`, quit every
+       - The tone, with main checked out and its CLI rebuilt once #246 has
+         merged (#246 adds the `info` line and `steno dev onsets`; its
+         description has the full take): with the Rust app built from main
+         in `~/Applications`, quit every
          Steno, the Swift app included, run `: > ~/a10.log` and
          `open --env RUST_LOG=info --stderr ~/a10.log ~/Applications/Steno.app`,
          start a call recording, play a short tone at 10 s

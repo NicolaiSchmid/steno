@@ -10,7 +10,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use clap::{Args, Subcommand, ValueEnum};
 use steno_audio::testing::AudioFixtures;
-use steno_audio::{EchoMetrics, PassthroughEchoCanceller, SpeexEchoCanceller, WavFile};
+use steno_audio::{
+    EchoMetrics, PassthroughEchoCanceller, SpeexEchoCanceller, SymphoniaAudioCodec, WavFile,
+};
 use steno_core::{
     AudioBuffer16k, AudioLane, Diarizer, EchoCanceller, MeetingExport, MeetingSummarizer,
     SpeechEngine, SummaryTemplate, TranscriptCleaner, paths::file_url_path,
@@ -42,6 +44,8 @@ pub enum DevCommand {
     /// Record the live lanes and report levels, layout, onset alignment and
     /// digital silence.
     CaptureSpike(CaptureSpike),
+    /// Print where a sound starts in each channel of audio files.
+    Onsets(Onsets),
     /// List, download or remove speech and diarization models.
     Models(Models),
     /// Compare speech engines over a folder of recordings.
@@ -62,6 +66,7 @@ impl Dev {
             DevCommand::AudioDevices(command) => command.run(),
             DevCommand::AecBench(command) => command.run(),
             DevCommand::CaptureSpike(command) => command.run().await,
+            DevCommand::Onsets(command) => command.run(),
             DevCommand::Models(command) => command.run(),
             DevCommand::Bakeoff(command) => command.run().await,
             DevCommand::DiarizeSweep(command) => command.run().await,
@@ -425,6 +430,81 @@ impl CaptureSpike {
     }
 }
 
+// onsets
+
+/// For the stable plan's A10 step 2 on the Mac: where a tone played into a
+/// call recording starts in each channel of the master (`recording.caf`:
+/// channel 0 the microphone, 1 the system lane), the lane WAVs or
+/// `mic.raw.caf`, so the onsets can be compared.
+#[derive(Debug, Args)]
+pub struct Onsets {
+    /// Audio files: CAF, WAV, m4a or mp3.
+    #[arg(required = true)]
+    pub files: Vec<PathBuf>,
+    /// Look from this many seconds into each file.
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+    pub after: f64,
+    /// The onset is the first sample louder than this, in dBFS.
+    #[arg(long, default_value_t = -30.0, allow_negative_numbers = true)]
+    pub threshold: f64,
+}
+
+impl Onsets {
+    fn run(self) -> Outcome {
+        if self.after.is_nan() || self.after < 0.0 {
+            return Err(Failure::usage("--after must not be negative."));
+        }
+        if self.threshold.is_nan() || self.threshold >= 0.0 {
+            return Err(Failure::usage("--threshold must be below 0 dBFS."));
+        }
+        // A level below full scale.
+        #[allow(clippy::cast_possible_truncation)]
+        let level = 10f64.powf(self.threshold / 20.0) as f32;
+        for file in &self.files {
+            // Channel 0 says how many follow.
+            let mut channels = 1;
+            let mut channel = 0;
+            while channel < channels {
+                let decoded = SymphoniaAudioCodec::read_channel(file, channel, AudioLane::Mixed)
+                    .map_err(|error| Failure::runtime(format!("{}: {error}", file.display())))?;
+                println!(
+                    "{} channel {channel}: {}",
+                    file.display(),
+                    onset_line(&decoded.samples, decoded.sample_rate, self.after, level)
+                );
+                channels = decoded.channels;
+                channel += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `onset 10.023 s, peak -12.3 dBFS`: the first sample from `after`
+/// seconds on louder than `level`, and the loudest sample from there.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn onset_line(samples: &[f32], rate: u32, after: f64, level: f32) -> String {
+    let start = ((after * f64::from(rate)) as usize).min(samples.len());
+    let tail = &samples[start..];
+    let peak = tail.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
+    let peak = if peak > 0.0 {
+        format!("{:.1} dBFS", 20.0 * peak.log10())
+    } else {
+        "silent".to_owned()
+    };
+    match tail.iter().position(|s| s.abs() > level) {
+        Some(index) => format!(
+            "onset {:.3} s, peak {peak}",
+            (start + index) as f64 / f64::from(rate)
+        ),
+        None => format!("no onset, peak {peak}"),
+    }
+}
+
 // models
 
 #[derive(Debug, Args)]
@@ -636,7 +716,7 @@ impl Bakeoff {
             .clone()
             .unwrap_or_else(|| self.audio_directory.join("bakeoff"));
         std::fs::create_dir_all(&output).map_err(Failure::runtime)?;
-        let decoder = steno_audio::SymphoniaAudioCodec::new();
+        let decoder = SymphoniaAudioCodec::new();
         let cleaner: Option<Arc<dyn TranscriptCleaner>> = if self.cleanup {
             let store = self.models.database.open_to_read()?;
             let settings = store.settings().map_err(Failure::runtime)?;
@@ -833,10 +913,7 @@ fn render_bakeoff(rows: &[BakeoffRow]) -> String {
     out
 }
 
-async fn decode_any(
-    decoder: &steno_audio::SymphoniaAudioCodec,
-    file: &Path,
-) -> Result<AudioBuffer16k, Failure> {
+async fn decode_any(decoder: &SymphoniaAudioCodec, file: &Path) -> Result<AudioBuffer16k, Failure> {
     use steno_core::AudioDecoder as _;
     let asset = steno_core::AudioAsset {
         id: uuid::Uuid::nil(),

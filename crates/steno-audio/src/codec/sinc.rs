@@ -10,7 +10,10 @@
 //! 0.45 of the lower rate), beta 9. Measured from 44.1 kHz in
 //! `tests/codec.rs`: within 0.3 dB to 6 kHz, -1.3 dB at 6.5 kHz, 12 kHz
 //! aliases below -50 dB (the design stopband is about -69 dB); plenty for
-//! speech. The exact 3:1 FIR the 48 kHz path uses is the flat one.
+//! speech. A sweep (`tests/resampler_sweep.rs`) keeps every alias that
+//! lands below 7 kHz under -60 dB; the transition band folds 8 to 9 kHz
+//! into 7 to 8 kHz at -21 to -58 dB. The exact 3:1 FIR the 48 kHz path
+//! uses is the flat one.
 //!
 //! [`SincStream`] runs the same filter over a signal that arrives in
 //! pieces; [`SincResampler::resample`] is one piece. The table also serves

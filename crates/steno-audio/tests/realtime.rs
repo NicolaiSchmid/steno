@@ -3,11 +3,12 @@
 //! `process` body (`interleaved_view` over one interleaved buffer, then
 //! `deliver_slices` through the capture's gate on Linux), the WASAPI
 //! capture threads' two stream bodies (`FollowerLane` and
-//! `PacketRouter`), the processing loop with the real Speex canceller, its
-//! far-end delay line, metering, the raw-mic copy and the relay hand-off
-//! run one second of audio on the test's thread under the counting
-//! allocator and allocate nothing, as does the macOS call capture's silent
-//! output IOProc body (`silence_output`). `tests/pipewire.rs` counts
+//! `PacketRouter`), the macOS IOProc's first-callback mark, the
+//! processing loop with the real Speex canceller, its far-end delay line,
+//! metering, the raw-mic copy and the relay hand-off run one second of
+//! audio on the test's thread under the counting allocator and allocate
+//! nothing, as does the macOS call capture's silent output IOProc body
+//! (`silence_output`). `tests/pipewire.rs` counts
 //! the real data-loop thread against a PipeWire daemon on Linux.
 //! Swift: `Tests/StenoAudioTests/RealTimeAllocationTests.swift` (Darwin's
 //! `malloc_logger` hook); here the crate's own `#[global_allocator]`, so it
@@ -29,8 +30,9 @@ use std::sync::Arc;
 
 use steno_audio::capture::{ChannelRef, LaneSource, SplitStreamPlan, StreamLayout};
 use steno_audio::realtime::{
-    BufferView, FollowerLane, FrameRelay, LaneFrameSink, PacketRouter, ProcessingConfiguration,
-    ProcessingThread, SliceView, StreamBody, deliver, deliver_slices, interleaved_view,
+    BufferView, FirstCallback, FollowerLane, FrameRelay, LaneFrameSink, PacketRouter,
+    ProcessingConfiguration, ProcessingThread, SliceView, StreamBody, deliver, deliver_slices,
+    interleaved_view,
 };
 use steno_audio::testing::AudioFixtures;
 use steno_audio::testing::rt::CountingAllocator;
@@ -185,6 +187,21 @@ fn producer_processing_and_relay_allocate_nothing_after_warm_up() {
         "allocations inside the IOProc and processing path: {allocations} (process total {})",
         CountingAllocator::total()
     );
+}
+
+/// The macOS IOProc marks its first callback's host time on every call
+/// (stable plan A9): an atomic load, and a store the first time; no
+/// allocation.
+#[test]
+fn the_first_callback_mark_allocates_nothing() {
+    let first = FirstCallback::new();
+    let allocations = CountingAllocator::allocations_during(|| {
+        for host_time in 1_000..2_000 {
+            first.mark(host_time);
+        }
+    });
+    assert_eq!(allocations, 0);
+    assert_eq!(first.host_time(), Some(1_000));
 }
 
 /// A headset in the hands-free profile: the rings carry 24 kHz and the

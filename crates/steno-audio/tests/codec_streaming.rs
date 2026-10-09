@@ -5,8 +5,9 @@
 //! sidecars, an unfinished master, CAF (Float32) and WAV (16-bit and
 //! float) at 8, 16, 22.05, 44.1, 48 and 96 kHz, mono and stereo, lengths around the FIR's
 //! 480-sample frame and the decoder's 32 768-frame block, an empty file,
-//! the phone's AAC and MP3 fixtures, and sidecars that are missing, empty,
-//! unfinished or the wrong shape. With `STENO_FLEURS_DIR` set the FLEURS
+//! the phone's AAC and MP3 fixtures (each AAC less its encoder priming, which
+//! the streaming decoder drops and the whole-file one kept), and sidecars
+//! that are missing, empty, unfinished or the wrong shape. With `STENO_FLEURS_DIR` set the FLEURS
 //! recordings are compared too.
 
 #![allow(
@@ -167,8 +168,20 @@ fn assert_same(
 /// `read_channel` (one past the last too), and the mixdown, against the
 /// whole-file decoder.
 async fn assert_file_matches(what: &str, asset: &AudioAsset, scratch: &Path) {
+    assert_decodes_like(what, asset, asset, scratch).await;
+}
+
+/// [`assert_file_matches`] with the whole-file decoder reading `reference`
+/// instead of `asset`'s own master.
+async fn assert_decodes_like(
+    what: &str,
+    asset: &AudioAsset,
+    reference_asset: &AudioAsset,
+    scratch: &Path,
+) {
     let codec = SymphoniaAudioCodec::new();
     let master = steno_core::paths::file_url_path(&asset.url).unwrap();
+    let reference_master = steno_core::paths::file_url_path(&reference_asset.url).unwrap();
     for lane in asset.lanes.iter().copied().chain([AudioLane::Mixed]) {
         assert_same(
             &format!("{what}: decode {}", lane.as_str()),
@@ -181,17 +194,17 @@ async fn assert_file_matches(what: &str, asset: &AudioAsset, scratch: &Path) {
                         .cloned()
                         .unwrap_or_else(|| CodecError::Io(e.to_string()))
                 }),
-            whole_file::decode(asset, lane),
+            whole_file::decode(reference_asset, lane),
         );
     }
     for channel in 0..=asset.lanes.len() {
         assert_same(
             &format!("{what}: decode_path channel {channel}"),
             SymphoniaAudioCodec::decode_path(&master, channel, AudioLane::Mixed).map(|b| b.samples),
-            whole_file::decode_path(&master, channel, AudioLane::Mixed),
+            whole_file::decode_path(&reference_master, channel, AudioLane::Mixed),
         );
         let streamed = SymphoniaAudioCodec::read_channel(&master, channel, AudioLane::Mixed);
-        let reference = whole_file::read_channel(&master, channel, AudioLane::Mixed);
+        let reference = whole_file::read_channel(&reference_master, channel, AudioLane::Mixed);
         assert_eq!(
             streamed.as_ref().map(|c| c.sample_rate).ok(),
             reference.as_ref().map(|(rate, _)| *rate).ok(),
@@ -209,7 +222,7 @@ async fn assert_file_matches(what: &str, asset: &AudioAsset, scratch: &Path) {
         .mixdown(asset, &streamed_to)
         .await
         .map_err(|e| e.to_string());
-    let reference = whole_file::mixdown(asset, &reference_to).map_err(|e| e.to_string());
+    let reference = whole_file::mixdown(reference_asset, &reference_to).map_err(|e| e.to_string());
     assert_eq!(streamed, reference, "{what}: mixdown outcome");
     if reference.is_ok() {
         assert!(
@@ -342,10 +355,18 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The phone's MP3, and the same MP3 in an MP4 container whose edit list
+/// declares 1 105 samples (which only an AAC track's trim would act on),
+/// decode as before. Each AAC decodes as before less exactly its encoder
+/// priming: the 1 024 samples ffmpeg's edit list declares, or Apple's
+/// 2 112 for the file in the phone recorder's layout, which declares
+/// none. The reference is the whole-file decode of the m4a with those
+/// samples dropped from every channel, written as a float WAV at the
+/// m4a's rate, which the whole-file decoder reads back bit for bit.
 #[tokio::test]
 async fn the_phones_aac_and_mp3_decode_as_before() {
     let directory = scratch();
-    for name in ["tone-440-44k1-500ms.m4a", "tone-440-44k1-500ms.mp3"] {
+    for name in ["tone-440-44k1-500ms.mp3", "tone-440-44k1-500ms-mp3.mp4"] {
         assert_file_matches(
             name,
             &asset(
@@ -354,6 +375,31 @@ async fn the_phones_aac_and_mp3_decode_as_before() {
                 &[AudioLane::Mixed],
                 &[],
             ),
+            directory.path(),
+        )
+        .await;
+    }
+    for (name, priming) in [
+        ("tone-440-44k1-500ms.m4a", 1_024),
+        ("tone-440-44k1-onset-200ms.m4a", 1_024),
+        ("tone-440-1000-44k1-stereo-onset.m4a", 1_024),
+        ("tone-440-44k1-onset-200ms-apple.m4a", 2_112),
+    ] {
+        let m4a = fixture(name);
+        let mut rate = 0;
+        let mut channels = Vec::new();
+        while let Ok((at, samples)) =
+            whole_file::read_channel(&m4a, channels.len(), AudioLane::Mixed)
+        {
+            rate = at;
+            channels.push(samples[priming..].to_vec());
+        }
+        let reference = directory.path().join(format!("{name}.wav"));
+        write_wav(&reference, rate, &channels, true);
+        assert_decodes_like(
+            name,
+            &asset(&m4a, AudioFormat::M4aAac, &[AudioLane::Mixed], &[]),
+            &asset(&reference, AudioFormat::M4aAac, &[AudioLane::Mixed], &[]),
             directory.path(),
         )
         .await;

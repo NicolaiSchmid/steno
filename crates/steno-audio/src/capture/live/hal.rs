@@ -21,14 +21,15 @@ use std::ptr::NonNull;
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2_core_audio::{
-    AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProc, AudioDeviceIOProcID,
-    AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
-    AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice,
-    AudioHardwareDestroyProcessTap, AudioHardwareIOProcStreamUsage, AudioObjectAddPropertyListener,
-    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
-    AudioObjectPropertyAddress, AudioObjectPropertyScope, AudioObjectPropertySelector,
-    AudioObjectRemovePropertyListener, AudioObjectSetPropertyData, CATapDescription,
-    CATapMuteBehavior, kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
+    AudioConvertHostTimeToNanos, AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID,
+    AudioDeviceIOProc, AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop,
+    AudioGetCurrentHostTime, AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
+    AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap,
+    AudioHardwareIOProcStreamUsage, AudioObjectAddPropertyListener, AudioObjectGetPropertyData,
+    AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
+    AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
+    AudioObjectSetPropertyData, CATapDescription, CATapMuteBehavior,
+    kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
     kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey,
     kAudioAggregateDevicePropertyActiveSubDeviceList, kAudioAggregateDevicePropertyMainSubDevice,
     kAudioAggregateDeviceSubDeviceListKey, kAudioAggregateDeviceTapAutoStartKey,
@@ -820,6 +821,22 @@ impl std::fmt::Debug for PropertyListener {
             .field("object", &self.object)
             .finish_non_exhaustive()
     }
+}
+
+/// The HAL's host clock now, in its ticks: the clock an IOProc's
+/// timestamps (`mHostTime`) count in.
+#[must_use]
+pub fn host_time_now() -> u64 {
+    // SAFETY: no arguments and no preconditions; it reads the host clock.
+    unsafe { AudioGetCurrentHostTime() }
+}
+
+/// `ticks` of the host clock in nanoseconds.
+#[must_use]
+pub fn host_time_to_nanos(ticks: u64) -> u64 {
+    // SAFETY: a pure conversion by the host clock's timebase; any value is
+    // valid input.
+    unsafe { AudioConvertHostTimeToNanos(ticks) }
 }
 
 /// The body of a callback the HAL makes into us (the IOProc, a property

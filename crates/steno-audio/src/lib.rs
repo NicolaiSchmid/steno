@@ -9,7 +9,8 @@
 //!   and the live backend (Core Audio on macOS, PipeWire on Linux, WASAPI
 //!   on Windows).
 //! - [`codec`]: [`SymphoniaAudioCodec`], decoding recordings and phone
-//!   files to 16 kHz mono a block at a time, and the mixdown.
+//!   files to 16 kHz mono a block at a time (an AAC file's encoder priming
+//!   dropped), and the mixdown.
 //! - [`detection`]: the [`MeetingDetector`]: which processes hold the
 //!   microphone, debounced into a call starting and ending, the WASAPI
 //!   session mapping, and the live process-activity source on each
@@ -17,8 +18,8 @@
 //! - [`playback`]: the [`Playback`] gate: no in-app playback while
 //!   recording.
 //! - [`realtime`]: the rings, the sink, the IOProc body, the two-stream
-//!   bodies, the processing thread, the rate converter and the relay;
-//!   everything on the real-time path.
+//!   bodies, the processing thread, the rate converter, the relay and the
+//!   first callback's mark; everything on the real-time path.
 //! - [`writer`]: the recording writer (CAF master, 16 kHz WAV sidecars);
 //!   its thread, which syncs every file every 5 s; `durable`, the one sync
 //!   every file goes through; the 3:1 resampler; and what crash recovery

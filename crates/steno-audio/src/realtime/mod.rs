@@ -2,10 +2,14 @@
 //! and `deliver_slices` the live backends share (`io_proc`), the
 //! two-stream bodies of the Windows backend (`streams`), the processing
 //! thread that drains the rings in 10 ms frames (converting a device that
-//! does not run at 48 kHz on the way), and the relay to the writer thread.
-//! Nothing here allocates or locks once constructed.
+//! does not run at 48 kHz on the way), the relay to the writer thread, and
+//! the first callback's time (`first_callback`).
+//! Nothing here allocates or locks once constructed, except
+//! [`first_callback_line`], the log line `stop()` formats off the audio
+//! thread beside the mark it reads.
 //! Swift: `Sources/StenoAudio/RealTime/`.
 
+pub mod first_callback;
 pub mod io_proc;
 pub mod level_meter;
 pub mod processing;
@@ -17,6 +21,7 @@ pub mod sink;
 pub mod streams;
 pub mod wake;
 
+pub use first_callback::{FirstCallback, first_callback_line};
 pub use io_proc::{
     BufferView, MAX_SLICE_BUFFERS, SliceView, deliver, deliver_slices, interleaved_view,
 };

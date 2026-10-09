@@ -1,6 +1,8 @@
 //! `steno record --mode call|in-person --out DIR [--seconds N] [--backend
-//! live|synthetic]`: records one meeting folder under DIR, prints the lane
-//! levels at 10 Hz to stderr and the files plus statistics at the end.
+//! live|synthetic] [--keep-raw-mic]`: records one meeting folder under DIR,
+//! prints the lane levels at 10 Hz to stderr and the files plus statistics
+//! at the end; `--keep-raw-mic` keeps the microphone before echo
+//! cancellation beside the master as `mic.raw.caf`.
 //! Stops after `--seconds` or on Ctrl-C. `--backend synthetic` needs no
 //! devices. Swift: `Sources/steno/Commands/Record.swift`.
 
@@ -14,7 +16,7 @@ use steno_audio::{
     CaptureBackend, CaptureConfiguration, CaptureMode, CaptureNotice, CaptureSession, CaptureState,
     LaneLevels, LiveCaptureBackend, SpeexEchoCanceller, SystemClock,
 };
-use steno_core::{AudioLane, EchoCanceller, paths::file_url_path};
+use steno_core::{AudioLane, EchoCanceller, RecordingLayout, paths::file_url_path};
 use uuid::Uuid;
 
 use crate::wiring::{Failure, Outcome};
@@ -249,6 +251,12 @@ impl Record {
                     file_url_path(sidecar).unwrap_or_default().display()
                 );
             }
+        }
+        if let Some(raw) = RecordingLayout::from_asset(&result.asset)
+            .map(|layout| layout.directory.join("mic.raw.caf"))
+            .filter(|raw| self.keep_raw_mic && raw.is_file())
+        {
+            println!("raw mic: {}", raw.display());
         }
         println!("duration: {:.2} s", result.statistics.duration);
         let dropped: Vec<String> = result
