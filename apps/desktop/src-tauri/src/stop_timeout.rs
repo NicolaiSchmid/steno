@@ -21,11 +21,12 @@
 //! `tauri.conf.json`); the app writes the same files into the user's own
 //! unit directory (`sync`) for the `AppImage` and installs from before the
 //! drop-ins, and has the user manager reload its units when it wrote one.
-//! It never reloads after a removal: once the autostart entry is gone, a
-//! reload unloads the unit a running autostarted Steno is in, and the
-//! session's end then stops the app without a SIGTERM. So Launch at login,
-//! turned off while the app runs as that unit (`runs_as_autostart_unit`),
-//! goes off at the exit (`autostart::set_enabled`).
+//! It never reloads while the app runs as the autostart unit
+//! (`runs_as_autostart_unit`) unless the unit's entry stands (`may_reload`):
+//! once the autostart entry is gone, a reload unloads the unit, and the
+//! session's end then stops the app without a SIGTERM. For the same reason
+//! Launch at login, turned off while the app runs as that unit, goes off
+//! at the exit (`autostart::set_enabled`).
 //!
 //! Rust only: the Swift app is a macOS login item.
 
@@ -40,8 +41,9 @@ use zbus::blocking::connection::Builder;
 /// installs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DropIn {
-    /// The unit, or for a drop-in every unit of a prefix applies to, the
-    /// unit name cut after that prefix's last `-`, as systemd looks it up.
+    /// The unit's name, or for GNOME's scopes the name systemd also reads
+    /// drop-ins under for every `app-gnome-steno\x2ddesktop-<pid>.scope`:
+    /// the name cut after its last `-`, plus `.scope`.
     unit: &'static str,
     file_name: &'static str,
     contents: &'static str,
@@ -91,27 +93,47 @@ impl DropIn {
 /// Brings the user's copies in line with Launch at login: installs GNOME's
 /// scope drop-in, and the autostart unit's for `Some(true)`; removes the
 /// autostart unit's for `Some(false)`; leaves it for `None` (the entry
-/// could not be read). Has the user manager reload when it wrote a file.
-/// A failure is logged and changes nothing else: Launch at login works
-/// without the drop-ins.
+/// could not be read). Has the user manager reload when it wrote a file
+/// and `may_reload` allows it. A failure is logged and changes nothing
+/// else: Launch at login works without the drop-ins.
 pub fn sync(login_item: Option<bool>) {
     let Some(home) = home() else {
         tracing::warn!("no home directory for the stop timeout drop-ins");
         return;
     };
-    sync_in(&home, login_item, reload_user_manager);
+    sync_in(
+        &home,
+        login_item,
+        runs_as_autostart_unit(),
+        reload_user_manager,
+    );
 }
 
-/// `sync` under `home`, calling `reload` once when it wrote a file and
-/// never after a removal alone.
-fn sync_in(home: &Path, login_item: Option<bool>, reload: impl FnOnce()) {
+/// `sync` under `home`, for an app that runs as the autostart unit or not:
+/// calls `reload` once when it wrote a file, never after a removal alone,
+/// and only as `may_reload` allows.
+fn sync_in(home: &Path, login_item: Option<bool>, as_autostart_unit: bool, reload: impl FnOnce()) {
     let mut wrote = change(&DropIn::GNOME_SCOPE, home, true);
     if let Some(on) = login_item {
         wrote |= change(&DropIn::AUTOSTART, home, on);
     }
-    if wrote {
-        reload();
+    if !wrote {
+        return;
     }
+    if may_reload(login_item, as_autostart_unit) {
+        reload();
+    } else {
+        tracing::debug!("no reload while the app runs as the autostart unit without its entry");
+    }
+}
+
+/// Whether the user manager may reload its units: always when the app
+/// does not run as the autostart unit, and as that unit only while its
+/// entry stands (`Some(true)`). Without the entry, or with an entry that
+/// could not be read, a reload may unload the running unit, and the
+/// session's end then stops the app without a SIGTERM.
+fn may_reload(login_item: Option<bool>, as_autostart_unit: bool) -> bool {
+    login_item == Some(true) || !as_autostart_unit
 }
 
 /// Removes the autostart unit's drop-in without a reload, at the exit
@@ -243,7 +265,7 @@ fn reload_user_manager() {
     );
 }
 
-/// systemd's manager on `connection`: its name, object and interface.
+// systemd's manager: its bus name, object path and interface.
 const SYSTEMD: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER: &str = "org.freedesktop.systemd1.Manager";
@@ -370,8 +392,22 @@ mod tests {
         }
     }
 
+    /// Under `$HOME/.config` whatever `XDG_CONFIG_HOME` says: the second
+    /// half fails for a `user_path` that follows it, where the test runs
+    /// with it set elsewhere (a nix-shell, some desktops).
     #[test]
     fn the_user_copy_is_under_home_dot_config() {
+        if let Some(home) = home() {
+            for drop_in in ALL {
+                assert!(
+                    drop_in
+                        .user_path(&home)
+                        .starts_with(home.join(".config/systemd/user")),
+                    "{}",
+                    drop_in.unit
+                );
+            }
+        }
         assert_eq!(
             DropIn::AUTOSTART.user_path(Path::new("/home/u")),
             PathBuf::from(
@@ -481,7 +517,11 @@ mod tests {
             DropIn::AUTOSTART.user_path(&root),
         );
         let reloads = Cell::new(0);
-        let sync = |login_item| sync_in(&root, login_item, || reloads.set(reloads.get() + 1));
+        let sync = |login_item| {
+            sync_in(&root, login_item, false, || {
+                reloads.set(reloads.get() + 1);
+            });
+        };
 
         sync(None);
         assert!(scope.exists() && !service.exists());
@@ -501,6 +541,35 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// As the autostart unit, the launch writes GNOME's drop-in (the first
+    /// launch of this build, a `.deb` install) but reloads only while the
+    /// entry stands: with the entry gone, or unread, the reload could
+    /// unload the unit the app runs in.
+    #[test]
+    fn as_the_autostart_unit_it_reloads_only_while_the_entry_stands() {
+        for (login_item, reloaded) in [(Some(false), false), (None, false), (Some(true), true)] {
+            let root = scratch("as-unit");
+            let reloads = Cell::new(0);
+            sync_in(&root, login_item, true, || reloads.set(reloads.get() + 1));
+            assert!(
+                DropIn::GNOME_SCOPE.user_path(&root).exists(),
+                "{login_item:?}"
+            );
+            assert_eq!(reloads.get(), usize::from(reloaded), "{login_item:?}");
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_reload_may_unload_the_autostart_unit_only_without_its_entry() {
+        for login_item in [Some(true), Some(false), None] {
+            assert!(may_reload(login_item, false), "{login_item:?}");
+        }
+        assert!(may_reload(Some(true), true));
+        assert!(!may_reload(Some(false), true));
+        assert!(!may_reload(None, true));
+    }
+
     #[test]
     fn the_cgroup_names_the_autostart_unit() {
         let unit = DropIn::AUTOSTART.unit;
@@ -517,6 +586,24 @@ mod tests {
         let other = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-steno\\x2ddesktop@autostart.service.bak\n";
         assert!(!runs_in(other, unit));
         assert!(!runs_in("", unit));
+    }
+
+    /// On this process's real cgroup listing: its own innermost cgroup
+    /// counts, and the test runner is not the autostart unit.
+    #[test]
+    fn the_real_cgroup_names_its_own_unit() {
+        let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") else {
+            return;
+        };
+        let innermost = cgroup
+            .lines()
+            .filter_map(|line| line.splitn(3, ':').nth(2))
+            .filter_map(|path| path.rsplit('/').next())
+            .find(|name| !name.is_empty());
+        if let Some(innermost) = innermost {
+            assert!(runs_in(&cgroup, innermost), "{cgroup}");
+        }
+        assert!(!runs_as_autostart_unit(), "{cgroup}");
     }
 
     /// systemd's manager as far as `Reload` goes: each call arrives on the
