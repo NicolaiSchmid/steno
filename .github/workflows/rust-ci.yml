@@ -305,8 +305,9 @@ jobs:
 
       # The credential store tests against the runner's own credential
       # store, again with their output, the same start-line greps as above
-      # (`--workspace` keeps the Test step's feature set). Each test writes only under `steno-test-<uuid>` target names and
-      # deletes them again; `cmdkey /list` then shows that none is left.
+      # (`--workspace` keeps the Test step's feature set). Each test writes
+      # only under `steno-test-<uuid>` target names and deletes them again;
+      # `cmdkey /list` then shows that none is left.
       - name: Credential store tests, with output (Windows)
         if: matrix.name == 'windows'
         shell: bash
