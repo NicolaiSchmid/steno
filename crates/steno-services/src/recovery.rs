@@ -36,16 +36,25 @@
 //!
 //! A recording can also be left with no row at all: a phone upload copied
 //! into its meeting folder before a crash or a failed commit (the phone's
-//! retry admits it into a new folder), a row a power loss or a lost
-//! database took, a local recording whose save failed twice. After the
-//! rows left `recording`, the launch adopts each such master where it is,
-//! as a meeting with its folder's id (`adopt_orphans`), and the main
-//! window says so. Only a master this install wrote is adopted: the record
-//! in [`crate::audio_folders`] names it from before its row, so a meeting
-//! folder another install put into a shared audio folder (a second
-//! computer syncing it, a second database over it) is left alone. Nothing
-//! in the handover inbox is adopted: it holds files, not meeting folders,
-//! a receipt accounts for each, and the phone still has its copy.
+//! retry admits it into a new folder), a row a power loss took before it
+//! was durable, a local recording whose meeting was deleted while it
+//! recorded. After the rows left `recording`, the launch adopts each such
+//! master where it is, as a meeting with its folder's id (`adopt_orphans`),
+//! and the main window says so. Only a master this install wrote is
+//! adopted: the record in [`crate::audio_folders`] names it from before
+//! its row until a launch finds that row durable, so a meeting folder
+//! another install put into a shared audio folder (a second computer
+//! syncing it, a second database over it) is left alone. So is one the
+//! Swift app or an earlier release wrote, which kept no record: the
+//! launch logs how many it left. Nothing in the handover inbox is
+//! adopted: it holds files, not meeting folders, a receipt accounts for
+//! each, and the phone still has its copy.
+//!
+//! During the rollback window a recording can come back once: a Rust
+//! recording killed, the Swift app's launch fails its row, and the user
+//! deletes it there. The Swift app removes only what an asset names, so
+//! the master stays, and its entry too; the next launch here adopts it
+//! again. A delete here removes it for good.
 //!
 //! | Item | What it does |
 //! |------|--------------|
@@ -513,8 +522,9 @@ pub(crate) struct Reconciled {
 /// left alone; one with a master is recovered and queued through `intake`;
 /// the rest are failed with [`Store::INTERRUPTED_RECORDING_REASON`] through
 /// [`Store::fail_recordings`], which skips a row another process has moved
-/// on meanwhile. The record forgets every listed entry whose meeting is no
-/// longer left `recording`, also when no row was left `recording`. Blocks
+/// on meanwhile. The record forgets every listed entry whose meeting has a
+/// row no longer left `recording`, once a durable checkpoint has run
+/// (`forget_settled`), also when no row was left `recording`. Blocks
 /// for up to [`LiveRecordingCheck::fresh_within`] when a master is fresh,
 /// so the caller runs it off the main thread. Swift:
 /// `MeetingStore.failInterruptedRecordings` in `AppController.launch`, the
@@ -649,10 +659,16 @@ fn reconcile_listed(
 
 /// Forgets the recorded folder of every meeting in `interrupted`'s record
 /// that `reconciled` did not leave `recording` and that has a row:
-/// recovered, failed, or moved on before the launch. An entry with no row
-/// stays for the launch's adoption ([`adopt_orphans`]), since its master
-/// may still be on disk, and so does one whose row cannot be read or that
-/// was recorded since the launch listed the record.
+/// recovered, failed, adopted by an earlier launch, or saved or moved on
+/// before the launch. Only after a durable checkpoint
+/// ([`Store::checkpoint_durably`]): a row commits under `synchronous =
+/// NORMAL`, so until then a power loss can still take it, and the entry
+/// is what lets a later launch adopt its master. A checkpoint that fails
+/// (another connection holds the WAL) forgets nothing; a later launch
+/// tries again. An entry with no row stays for the launch's adoption
+/// ([`adopt_orphans`]), since its master may still be on disk, and so
+/// does one whose row cannot be read or that was recorded since the
+/// launch listed the record.
 fn forget_settled(store: &Store, interrupted: &Interrupted, reconciled: &Reconciled) {
     let Some(recorded) = &interrupted.recorded else {
         return;
@@ -665,6 +681,10 @@ fn forget_settled(store: &Store, interrupted: &Interrupted, reconciled: &Reconci
         .filter(|id| store.meeting(*id).is_ok_and(|row| row.is_some()))
         .collect();
     if settled.is_empty() {
+        return;
+    }
+    if let Err(error) = store.checkpoint_durably() {
+        tracing::debug!(%error, "settled recording folders kept: the store is not checkpointed");
         return;
     }
     if let Err(error) = crate::audio_folders::forget(&interrupted.support_directory, &settled) {
@@ -867,9 +887,13 @@ fn adopted(
 /// `queued` meeting with that id ([`adopted`]), its meeting and asset
 /// inserted in one transaction that fails when a row with the id was
 /// written meanwhile, and processed
-/// ([`ProcessingPipeline::enqueue_new`](steno_pipeline::ProcessingPipeline::enqueue_new));
-/// its entry is then forgotten, and so is each entry with no row whose
-/// folder provably holds no master. A master modified within
+/// ([`ProcessingPipeline::enqueue_new`](steno_pipeline::ProcessingPipeline::enqueue_new)).
+/// Its entry stays: the insert commits under `synchronous = NORMAL`, so a
+/// power loss can still take it, and a later launch forgets the entry
+/// once its row is durable (`forget_settled`). An entry with no row is
+/// forgotten here only when its folder provably holds no master
+/// (`holds_no_master`); one whose folder is empty, missing or unreadable
+/// stays, and is logged at debug. A master modified within
 /// [`LiveRecordingCheck::fresh_within`] is left for the next launch:
 /// another process (a phone upload still being admitted, the Swift app) may
 /// be writing it. One that cannot be read now, or whose rows cannot be
@@ -939,20 +963,22 @@ pub(crate) fn adopt_orphans(
             }
         }
     }
-    let settled: Vec<Uuid> = recorded
-        .iter()
-        .filter(|&(meeting_id, folder)| {
-            !ids.contains(meeting_id)
-                && !found.iter().any(|orphan| orphan.meeting_id == *meeting_id)
-                && holds_no_master(folder, *meeting_id)
-        })
-        .map(|(meeting_id, _)| *meeting_id)
-        .chain(adopted_ids.iter().copied())
-        .collect();
-    if !settled.is_empty()
-        && let Err(error) = crate::audio_folders::forget(&interrupted.support_directory, &settled)
+    // No master to lose: forgotten whether or not the store is durable.
+    let mut gone = Vec::new();
+    for (&meeting_id, folder) in recorded {
+        if ids.contains(&meeting_id) || found.iter().any(|orphan| orphan.meeting_id == meeting_id) {
+            continue;
+        }
+        if holds_no_master(folder, meeting_id) {
+            gone.push(meeting_id);
+        } else {
+            tracing::debug!(%meeting_id, "a recording with no meeting whose folder cannot be told empty is kept for the next launch");
+        }
+    }
+    if !gone.is_empty()
+        && let Err(error) = crate::audio_folders::forget(&interrupted.support_directory, &gone)
     {
-        tracing::debug!(%error, "adopted recording folders not forgotten");
+        tracing::debug!(%error, "recording folders with no master not forgotten");
     }
     adopted_ids
 }
@@ -1808,13 +1834,14 @@ mod tests {
         );
     }
 
-    /// A call master and an in-person master with no row (a row lost with
-    /// the database, a save that failed twice) are adopted at launch where
-    /// they are: a meeting with the folder's id, the source the channels
-    /// say, the master's length, the end reason `failed`, the default
-    /// title, started that long before the master was last modified, its
-    /// asset rebuilt with the sidecars, and processed. A second launch
-    /// adopts nothing.
+    /// A call master and an in-person master with no row (a row a power
+    /// loss took before it was durable, a meeting deleted while it
+    /// recorded) are adopted at launch where they are: a meeting with the
+    /// folder's id, the source the channels say, the master's length, the
+    /// end reason `failed`, the default title, started that long before
+    /// the master was last modified, its asset rebuilt with the sidecars,
+    /// and processed. Their entries stay until the second launch, which
+    /// adopts nothing and forgets them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_mac_master_with_no_meeting_is_adopted_and_processed() {
         let harness = Harness::new();
@@ -1869,11 +1896,15 @@ mod tests {
             );
         }
 
-        assert!(
-            crate::audio_folders::recorded(&harness.support_directory())
-                .unwrap()
-                .is_empty(),
-            "an adopted recording's folder is forgotten"
+        assert_eq!(
+            sorted(
+                crate::audio_folders::recorded(&harness.support_directory())
+                    .unwrap()
+                    .into_keys()
+                    .collect()
+            ),
+            sorted(vec![call, in_person]),
+            "an adopted recording's folder stays until its row is durable"
         );
         let assets = harness.store.asset_urls().unwrap().len();
         assert_eq!(
@@ -1881,6 +1912,12 @@ mod tests {
             Vec::<Uuid>::new()
         );
         assert_eq!(harness.store.asset_urls().unwrap().len(), assets);
+        assert!(
+            crate::audio_folders::recorded(&harness.support_directory())
+                .unwrap()
+                .is_empty(),
+            "the second launch forgets them"
+        );
         harness.pipeline.current().wait_until_idle().await;
     }
 

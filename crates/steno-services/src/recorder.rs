@@ -331,8 +331,10 @@ impl Unsaved {
 /// What a stop says when the meeting could not be stored. A meeting
 /// another process moved on is not this recorder's to keep; otherwise the
 /// recording stays on disk and the meeting `recording`, and the next
-/// launch recovers it. Rust only: Swift's `complete` marked the meeting
-/// failed without its asset.
+/// launch recovers it. Either way the files and the folder recorded for
+/// the meeting stay, so the next launch adopts the master of a meeting
+/// whose row was deleted meanwhile ([`crate::recovery`]). Rust only:
+/// Swift's `complete` marked the meeting failed without its asset.
 fn not_saved(meeting_id: Uuid, error: &LocalRecordingIntakeError) -> Unsaved {
     log_not_saved(meeting_id, intake_kind(error));
     if matches!(
@@ -1093,6 +1095,9 @@ impl CaptureRecorder {
     /// does not wait for good. One before or inside the save leaves the
     /// meeting's row `recording` over closed files (the session's drop
     /// closes them), which the next launch recovers ([`crate::recovery`]).
+    /// The folder recorded for the meeting is never forgotten here
+    /// ([`crate::audio_folders`]): the next launch does that once the row
+    /// is durable.
     fn finish_stop(&self, active: Active, reason: RecordingEndReason, error: Option<String>) {
         let unwinding = Unwinding::of(self, RecordingState::Stopping, SAVE_PANICKED);
         self.notify();
@@ -1142,10 +1147,12 @@ impl CaptureRecorder {
                 .recover_failed_stop(&intake, &active, &failure, &reason)
                 .map(|()| (Some(RECOVERED_AFTER_A_FAILURE.to_owned()), error)),
         };
-        // Every outcome but a meeting kept for the next launch settles it.
-        if !matches!(outcome, Err(Unsaved::Kept)) {
-            self.forget_recording(meeting_id);
-        }
+        // The folder recorded for the meeting stays whatever the outcome:
+        // a saved meeting's commit is not durable yet (`synchronous =
+        // NORMAL`), so a power loss can still take its row, and a meeting
+        // deleted meanwhile has no row; the next launch forgets the entry
+        // of a meeting with a row once a durable checkpoint has run, and
+        // adopts the master of one without ([`crate::recovery`]).
         drop(active.session);
         for thread in [active.level_thread, active.notice_thread]
             .into_iter()
@@ -2574,9 +2581,24 @@ mod tests {
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
+    /// The launch's background half over `store` and `pipeline`, the
+    /// record under `support`, with every master an hour old.
+    fn launch(store: &Arc<Store>, pipeline: &CurrentPipeline, support: &Path) -> Vec<Uuid> {
+        crate::app::reconcile_at_launch(
+            store,
+            pipeline,
+            &crate::recovery::Interrupted::list(store, support),
+            &crate::testing::an_hour_later(),
+            chrono::FixedOffset::east_opt(0).unwrap(),
+            &tokio::runtime::Handle::current(),
+        )
+    }
+
     /// A stop whose meeting was failed or deleted while it recorded (the
-    /// Swift app's launch, a delete) says the meeting was not stored and
-    /// forgets its folder, and a deleted meeting is not brought back.
+    /// Swift app's launch, a delete) says the meeting was not stored, does
+    /// not bring a deleted meeting back, and keeps the folder recorded for
+    /// it: the next launch forgets the failed one's and adopts the deleted
+    /// one's master, which stayed on disk.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_whose_meeting_moved_on_while_recording_settles() {
         let changes: [fn(&Store, Uuid); 2] = [
@@ -2608,29 +2630,76 @@ mod tests {
                 deleted
             );
             assert!(harness.store.asset(meeting_id).unwrap().is_none());
+            let support = harness.dir.path().join("support");
             assert!(
-                crate::audio_folders::recorded(&harness.dir.path().join("support"))
+                crate::audio_folders::recorded(&support)
                     .unwrap()
-                    .is_empty()
+                    .contains_key(&meeting_id)
+            );
+
+            let adopted = launch(&harness.store, &harness.recorder.pipeline, &support);
+            assert_eq!(adopted, if deleted { vec![meeting_id] } else { vec![] });
+            harness.recorder.pipeline.current().wait_until_idle().await;
+            assert!(harness.store.meeting(meeting_id).unwrap().is_some());
+            // The adopted one's entry goes at the launch after this one.
+            assert_eq!(
+                crate::audio_folders::recorded(&support)
+                    .unwrap()
+                    .contains_key(&meeting_id),
+                deleted
             );
         }
     }
 
-    /// A stop that saves its recording forgets the folder recorded for it.
+    /// A stop that saves its recording keeps the folder recorded for it,
+    /// since its commit is not durable yet; the next launch forgets it
+    /// once a durable checkpoint has run, and adopts nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_saved_stop_forgets_the_recorded_folder() {
+    async fn a_saved_stop_keeps_its_folder_for_the_next_launch_to_forget() {
         let harness = harness(&[]);
         start(&harness.recorder).await;
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let support = harness.dir.path().join("support");
+        stop(&harness.recorder).await;
+        assert!(harness.store.asset(meeting_id).unwrap().is_some());
         assert!(
             crate::audio_folders::recorded(&support)
                 .unwrap()
                 .contains_key(&meeting_id)
         );
+
+        harness.recorder.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            launch(&harness.store, &harness.recorder.pipeline, &support),
+            Vec::<Uuid>::new()
+        );
+        assert!(crate::audio_folders::recorded(&support).unwrap().is_empty());
+    }
+
+    /// A power loss after a short recording's start and saved stop, before
+    /// a checkpoint copied their commits into the database file: the
+    /// database comes back from that file alone, with no row, and the
+    /// next launch adopts the master, since the folder recorded for it
+    /// stayed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_power_loss_after_a_saved_stop_leaves_the_master_to_the_next_launch() {
+        let harness = harness(&[]);
+        harness.store.checkpoint_durably().unwrap();
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
         stop(&harness.recorder).await;
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
-        assert!(crate::audio_folders::recorded(&support).unwrap().is_empty());
+        harness.recorder.pipeline.current().wait_until_idle().await;
+
+        let after = harness.dir.path().join("after-power-loss.sqlite");
+        std::fs::copy(harness.dir.path().join("steno.sqlite"), &after).unwrap();
+        let store = Arc::new(Store::open(&after).unwrap());
+        assert!(store.meeting(meeting_id).unwrap().is_none());
+        let pipeline = crate::testing::current_pipeline(fake_dependencies(&store, "fake-engine"));
+        let support = harness.dir.path().join("support");
+        assert_eq!(launch(&store, &pipeline, &support), [meeting_id]);
+        pipeline.current().wait_until_idle().await;
+        assert!(store.asset(meeting_id).unwrap().is_some());
     }
 
     /// A stop whose capture failed (the writer died and took the asset)

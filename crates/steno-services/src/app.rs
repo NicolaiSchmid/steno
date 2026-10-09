@@ -1413,10 +1413,11 @@ mod tests {
     }
 
     /// `App::launch` itself: a call master in the audio folder with no
-    /// meeting (a row lost with the database), whose folder the recorder
-    /// recorded before its row, is adopted on the launch's blocking task
-    /// and processed, and the main window says so under the Record control
-    /// until the user dismisses it.
+    /// meeting (a row a power loss took before it was durable), whose
+    /// folder the recorder recorded before its row, is adopted on the
+    /// launch's blocking task and processed, and the main window says so
+    /// under the Record control until the user dismisses it. Its folder
+    /// stays recorded until a later launch finds the row durable.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn launch_adopts_a_recording_with_no_meeting_and_says_so() {
         use steno_host::services::Recorder as _;
@@ -1448,7 +1449,7 @@ mod tests {
         assert!(
             crate::audio_folders::recorded(&app.paths.support_directory)
                 .unwrap()
-                .is_empty()
+                .contains_key(&meeting_id)
         );
         app.recorder.clear_messages();
         assert_eq!(app.recorder.status().warning, None);
