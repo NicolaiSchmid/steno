@@ -305,6 +305,10 @@ pub struct FakeRecorder {
     /// `forget_recording` fails, as the support folder can when it is
     /// read-only or full.
     pub forget_fails: Mutex<bool>,
+    /// Runs once inside the next `restore_recording`, before it records
+    /// the entry: a test's moment between the guard's read of the row and
+    /// its restore.
+    pub before_restore: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl FakeRecorder {
@@ -324,6 +328,7 @@ impl FakeRecorder {
             recorded: Mutex::new(BTreeMap::new()),
             forget_fails: Mutex::new(false),
             asked: Mutex::new(Vec::new()),
+            before_restore: Mutex::new(None),
         }
     }
 
@@ -443,6 +448,10 @@ impl Recorder for FakeRecorder {
     }
 
     fn restore_recording(&self, meeting_id: Uuid, folder: &Path) {
+        let hook = lock(&self.before_restore).take();
+        if let Some(hook) = hook {
+            hook();
+        }
         lock(&self.recorded).insert(meeting_id, folder.to_path_buf());
     }
 }

@@ -102,7 +102,7 @@ use crate::main_window::{
 };
 use crate::onboarding::{self, OnboardingViewModel};
 use crate::publisher::{RECORDING_INTERVAL, TopicPublisher};
-use crate::services::{Recorder, Services};
+use crate::services::Services;
 use crate::settings::{
     AudioSettingsViewModel, GeneralSettingsViewModel, KeyRead, LlmPreset, LlmSettingsViewModel,
     ObsidianSettingsViewModel, PhonesSettingsViewModel, SpeechSettingsViewModel, llm::Probe,
@@ -1425,27 +1425,37 @@ fn wire_option(option: &ModelOption) -> SpeakerOption {
     }
 }
 
-/// The entry a confirmed delete forgot ([`Recorder::forget_recording`]),
+/// The entry a confirmed delete forgot
+/// ([`Recorder::forget_recording`](crate::services::Recorder::forget_recording)),
 /// recorded again when dropped unless the rows went (`folder` taken): a
 /// delete refused (the pipeline took the meeting up while the prompt was
 /// open), not committed, or unwound by a panic keeps its row, and until
 /// the row is durable its entry is what lets a launch adopt the master.
-/// Only while the row is still there: a second prompt for the meeting,
-/// answered after the first one deleted it, records nothing again. Rust
+/// Unless the row is gone: a second prompt for the meeting, answered
+/// after the first one deleted it, records nothing again, and a row that
+/// cannot be read keeps its entry. The read and the restore hold the host
+/// lock, which every delete commits under, so no other prompt's delete
+/// lands between them. Dropped with the lock released: after
+/// [`Host::command`] returns, or as a panic unwinds past its guard. Rust
 /// only.
 struct ForgottenEntry<'a> {
-    recorder: &'a dyn Recorder,
-    store: &'a Store,
+    host: &'a Host,
     meeting_id: Uuid,
     folder: Option<PathBuf>,
 }
 
 impl Drop for ForgottenEntry<'_> {
     fn drop(&mut self) {
-        if let Some(folder) = self.folder.take()
-            && matches!(self.store.meeting(self.meeting_id), Ok(Some(_)))
-        {
-            self.recorder.restore_recording(self.meeting_id, &folder);
+        let Some(folder) = self.folder.take() else {
+            return;
+        };
+        let _inner = self.host.lock();
+        let shared = &self.host.shared;
+        if !matches!(shared.store.meeting(self.meeting_id), Ok(None)) {
+            shared
+                .services
+                .recorder
+                .restore_recording(self.meeting_id, &folder);
         }
     }
 }
@@ -1561,11 +1571,14 @@ impl BridgeHost for Host {
                 .recorder
                 .forget_recording(params.meeting_id)
             else {
+                tracing::warn!(
+                    meeting_id = %params.meeting_id,
+                    "a meeting was not deleted: its recording's folder could not be forgotten"
+                );
                 return Err(BridgeError::failed(COULD_NOT_DELETE));
             };
             let mut forgotten = ForgottenEntry {
-                recorder: &*self.shared.services.recorder,
-                store: &self.shared.store,
+                host: self,
                 meeting_id: params.meeting_id,
                 folder,
             };

@@ -640,6 +640,67 @@ fn a_second_delete_prompt_records_no_entry_for_a_deleted_meeting() {
     assert!(harness.fakes.recorder.recorded.lock().unwrap().is_empty());
 }
 
+/// A refused delete reads the row and restores its entry under the host
+/// lock: a second prompt's delete, begun between the two, waits for the
+/// restore and then forgets that entry with the rows, so the deleted
+/// meeting keeps no entry.
+#[test]
+fn a_second_delete_waits_for_a_refused_deletes_restore() {
+    let first = Arc::new(AtomicBool::new(true));
+    let harness = Harness::builder()
+        .confirm_with(move |host, _| {
+            if first.swap(false, Ordering::SeqCst) {
+                // The pipeline takes the meeting up while the first prompt
+                // is open.
+                let mut meeting = host.store().meeting(uuid(MEETING)).unwrap().unwrap();
+                meeting.state = MeetingState::Processing;
+                host.store().save_meeting(&meeting).unwrap();
+            }
+            true
+        })
+        .seed(populate_sample)
+        .build();
+    let audio = harness.audio_folder();
+    harness
+        .fakes
+        .recorder
+        .recorded
+        .lock()
+        .unwrap()
+        .insert(uuid(MEETING), audio);
+    let host = harness.host.clone();
+    let second = Arc::new(Mutex::new(None));
+    let spawned = second.clone();
+    *harness.fakes.recorder.before_restore.lock().unwrap() = Some(Box::new(move || {
+        // The pipeline is done with it, and a second prompt deletes it.
+        let mut meeting = host.store().meeting(uuid(MEETING)).unwrap().unwrap();
+        meeting.state = MeetingState::Ready;
+        host.store().save_meeting(&meeting).unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        *spawned.lock().unwrap() = Some(std::thread::spawn(move || {
+            host.store_changed();
+            let reply = host.meetings_delete(MeetingIdParams {
+                meeting_id: uuid(MEETING),
+            });
+            let _ = done.send(());
+            reply
+        }));
+        // Long enough for that delete to finish if nothing held it back.
+        let _ = finished.recv_timeout(std::time::Duration::from_millis(500));
+    }));
+    let reply = harness
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap();
+    assert!(reply.confirmed);
+    let second = second.lock().unwrap().take().expect("a second prompt");
+    assert!(second.join().unwrap().unwrap().confirmed);
+    assert!(harness.store.meeting(uuid(MEETING)).unwrap().is_none());
+    assert!(harness.fakes.recorder.recorded.lock().unwrap().is_empty());
+}
+
 /// The detail heading derives the title as the list does (Swift:
 /// `meeting.displayTitle()`), so an untitled meeting reads "Monday 10:06".
 #[test]
