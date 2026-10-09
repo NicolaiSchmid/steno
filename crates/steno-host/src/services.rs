@@ -282,12 +282,44 @@ pub trait Pipeline: Send + Sync {
     fn export_keeps_failing(&self, _meeting_id: Uuid) -> bool {
         false
     }
+    /// "Process again": saves the meeting queued and starts its run from
+    /// `decode` with its recording, returning once the run has started.
+    /// Refused, without a change, for the reason [`ProcessAgainRefusal`]
+    /// gives, which includes a stored meeting that is not offered
+    /// ([`steno_core::Meeting::offers_process_again`]) whatever the
+    /// caller's view of it says. Rust only: the Swift app refuses it.
+    fn process_again(&self, meeting_id: Uuid) -> Result<(), ProcessAgainRefusal>;
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()>;
     /// Rebuilds the pipeline from the stored settings and the API key.
     fn reload(&self) -> BoundaryResult<()>;
     /// `RetentionSweep.keepAll()`: marks every recording still on disk as
     /// kept forever and returns how many.
     fn keep_all_recordings(&self) -> BoundaryResult<i64>;
+}
+
+/// Why [`Pipeline::process_again`] would not process a meeting again, one
+/// variant per answer the detail words differently (see
+/// `MeetingDetailViewModel::process_again`). Rust only: after
+/// `steno_pipeline::ReprocessError`, which the services map onto it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessAgainRefusal {
+    /// No meeting has the id: it was deleted under the detail.
+    MeetingGone,
+    /// The meeting is not one "Process again" is offered for
+    /// ([`steno_core::Meeting::offers_process_again`]): it is recording,
+    /// or ready.
+    NotOffered,
+    /// The master is not on disk, or the meeting has no recording on
+    /// record.
+    RecordingGone,
+    /// The meeting is queued or processing, or another operation holds
+    /// it.
+    Busy,
+    /// The app is exiting; the next launch can process the meeting again.
+    Quitting,
+    /// The store failed reading the meeting or saving it queued: the
+    /// failure's text.
+    CouldNotStart(String),
 }
 
 /// The speech model store (WP4). The fake keeps a map of installed

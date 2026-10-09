@@ -45,6 +45,11 @@ impl BridgeHost for SpyHost {
         Ok(())
     }
 
+    fn meeting_process_again(&self) -> Outcome<()> {
+        self.record("meeting.processAgain");
+        Ok(())
+    }
+
     fn settings_export_choose_vault(&self) -> Outcome<ChosenPathReply> {
         self.record("settings.export.chooseVault");
         Ok(ChosenPathReply {
@@ -90,6 +95,24 @@ fn routes_a_method_without_params_and_replies_with_the_id_only() {
     );
     assert_eq!(reply, json!({"id": "req-1"}));
     assert_eq!(host.calls(), ["page.ready"]);
+}
+
+/// "Process again" takes no params and acts on the selected meeting, as
+/// "Re-run summary" does. Its request envelope decodes and prints back byte
+/// for byte as the Swift encoder writes it (`BridgeFixturesTests`'
+/// `processAgainRequestRoundTrips` holds the same text).
+#[test]
+fn process_again_routes_without_params() {
+    let (host, dispatcher) = dispatcher();
+    let request = "{\n  \"id\" : \"req-9\",\n  \"method\" : \"meeting.processAgain\"\n}";
+    let decoded: BridgeRequest = serde_json::from_str(request).unwrap();
+    assert_eq!(decoded.method, BridgeMethod::MeetingProcessAgain);
+    assert_eq!(json::to_canonical_string(&decoded).unwrap(), request);
+    assert_eq!(
+        call(&dispatcher, &serde_json::from_str(request).unwrap()),
+        json!({"id": "req-9"})
+    );
+    assert_eq!(host.calls(), ["meeting.processAgain"]);
 }
 
 #[test]

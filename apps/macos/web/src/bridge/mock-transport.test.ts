@@ -154,6 +154,7 @@ describe("scenarios", () => {
 		expect(detail.state).toBe("failed");
 		expect(detail.failureReason).toContain("Transcription failed");
 		expect(detail.canRerunSummary).toBe(true);
+		expect(detail.canProcessAgain).toBe(true);
 		expect(detail.tab).toBe("transcript");
 	});
 

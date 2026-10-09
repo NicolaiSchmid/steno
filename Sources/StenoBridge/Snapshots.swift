@@ -468,6 +468,9 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
   public var decisions: [String]
   public var notes: String
   public var export: Export
+  /// Whether the page shows "Process again". The Swift app sends `false`:
+  /// it refuses the action.
+  public var canProcessAgain: Bool
   public var canRerunSummary: Bool
   public var isBusy: Bool
   public var error: String?
@@ -478,7 +481,8 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     endReason: String? = nil, tags: [String], tab: Tab, retention: Retention, speakers: [Speaker],
     templates: [Template], templateID: String, summaryStatus: SummaryStatus,
     summary: [SummarySection], transcript: [Turn], tasks: [Task], decisions: [String],
-    notes: String, export: Export, canRerunSummary: Bool, isBusy: Bool, error: String? = nil
+    notes: String, export: Export, canProcessAgain: Bool, canRerunSummary: Bool, isBusy: Bool,
+    error: String? = nil
   ) {
     self.id = id
     self.title = title
@@ -502,6 +506,7 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     self.decisions = decisions
     self.notes = notes
     self.export = export
+    self.canProcessAgain = canProcessAgain
     self.canRerunSummary = canRerunSummary
     self.isBusy = isBusy
     self.error = error

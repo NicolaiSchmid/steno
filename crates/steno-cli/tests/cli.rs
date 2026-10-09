@@ -678,6 +678,238 @@ fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
     assert!(line.ends_with(fp32.as_str()), "the sidecar chosen: {line}");
 }
 
+/// `steno process --meeting <id>` processes a stored failed meeting again
+/// from its recording: refused while the master is gone, and once the
+/// broken lane is replaced the run ends ready and prints the id. A ready
+/// meeting is refused unless `--allow-ready` asks for it, its master on
+/// disk or not.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let db = db.to_str().unwrap();
+    let audio = home.join("audio");
+    let broken = home.join("system.wav");
+    std::fs::write(&broken, b"not a wav").unwrap();
+    let first = steno(
+        &[
+            "process",
+            fixtures_root()
+                .join("audio/conversation-mic-6s.wav")
+                .to_str()
+                .unwrap(),
+            "--source",
+            "mac-call",
+            "--system-lane",
+            broken.to_str().unwrap(),
+            "--db",
+            db,
+            "--audio-folder",
+            audio.to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(first.status, 2, "{}", first.stderr);
+    let folders: Vec<PathBuf> = std::fs::read_dir(&audio)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let [folder] = folders.as_slice() else {
+        panic!("one meeting folder: {folders:?}");
+    };
+    let meeting_id = folder.file_name().unwrap().to_str().unwrap().to_owned();
+
+    let master = folder.join("mic.wav");
+    let aside = home.join("mic-aside.wav");
+    std::fs::rename(&master, &aside).unwrap();
+    let gone = steno(&["process", "--meeting", &meeting_id, "--db", db], home);
+    assert_eq!(gone.status, 2, "{}", gone.stderr);
+    assert!(
+        gone.stderr
+            .contains("is no longer on disk, so it cannot be processed again."),
+        "{}",
+        gone.stderr
+    );
+    std::fs::rename(&aside, &master).unwrap();
+
+    std::fs::copy(
+        fixtures_root().join("audio/conversation-system-6s.wav"),
+        folder.join("system.wav"),
+    )
+    .unwrap();
+    let again = steno(&["process", "--meeting", &meeting_id, "--db", db], home);
+    assert_eq!(again.status, 0, "{}", again.stderr);
+    assert!(again.stderr.contains("transcribe"), "{}", again.stderr);
+    assert_eq!(
+        again.stdout.trim().to_lowercase(),
+        meeting_id.to_lowercase(),
+        "stdout carries the meeting id"
+    );
+    let out = home.join("out");
+    let exported = steno(
+        &[
+            "export",
+            &meeting_id,
+            "--out",
+            out.to_str().unwrap(),
+            "--db",
+            db,
+        ],
+        home,
+    );
+    assert_eq!(exported.status, 0, "{}", exported.stderr);
+    assert_eq!(
+        export(&out.join("meeting.json"))["meeting"]["state"],
+        "ready"
+    );
+
+    let ready = steno(&["process", "--meeting", &meeting_id, "--db", db], home);
+    assert_eq!(ready.status, 2, "{}", ready.stderr);
+    assert!(
+        ready.stderr.contains(&format!(
+            "Meeting {meeting_id} is ready; pass --allow-ready to process it again."
+        )),
+        "{}",
+        ready.stderr
+    );
+    assert_eq!(ready.stdout, "");
+    // The rule comes before the files: a ready meeting whose master is
+    // gone still asks for --allow-ready.
+    std::fs::rename(&master, &aside).unwrap();
+    let swept = steno(&["process", "--meeting", &meeting_id, "--db", db], home);
+    assert_eq!(swept.status, 2, "{}", swept.stderr);
+    assert!(
+        swept.stderr.contains(&format!(
+            "Meeting {meeting_id} is ready; pass --allow-ready to process it again."
+        )),
+        "{}",
+        swept.stderr
+    );
+    std::fs::rename(&aside, &master).unwrap();
+    let allowed = steno(
+        &[
+            "process",
+            "--meeting",
+            &meeting_id,
+            "--allow-ready",
+            "--db",
+            db,
+        ],
+        home,
+    );
+    assert_eq!(
+        allowed.status, 0,
+        "--allow-ready runs a ready meeting again: {}",
+        allowed.stderr
+    );
+    assert!(allowed.stderr.contains("transcribe"), "{}", allowed.stderr);
+}
+
+/// `--meeting` stands instead of the input, `--allow-ready` needs it, and
+/// an id no meeting has is a usage error that says so.
+#[test]
+fn process_meeting_is_exclusive_of_the_input_and_names_an_unknown_id() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let db = db.to_str().unwrap();
+    let sweep = fixtures_root().join("audio/sweep-3s.wav");
+    let sweep = sweep.to_str().unwrap();
+    let id = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
+    let both = steno(&["process", sweep, "--meeting", id, "--db", db], home);
+    assert_eq!(both.status, 1, "{}", both.stderr);
+    assert!(
+        both.stderr.contains("cannot be used with"),
+        "{}",
+        both.stderr
+    );
+    // `--allow-ready` needs `--meeting`, beside an input or alone.
+    let beside = steno(&["process", sweep, "--allow-ready", "--db", db], home);
+    assert_eq!(beside.status, 1, "{}", beside.stderr);
+    assert!(
+        beside.stderr.contains("--allow-ready") && beside.stderr.contains("cannot be used with"),
+        "{}",
+        beside.stderr
+    );
+    let alone = steno(&["process", "--allow-ready", "--db", db], home);
+    assert_eq!(alone.status, 1, "{}", alone.stderr);
+    assert!(alone.stderr.contains("--meeting <ID>"), "{}", alone.stderr);
+    let neither = steno(&["process", "--db", db], home);
+    assert_eq!(neither.status, 1, "{}", neither.stderr);
+    assert!(neither.stderr.contains("<INPUT>"), "{}", neither.stderr);
+    let not_an_id = steno(&["process", "--meeting", "nope", "--db", db], home);
+    assert_eq!(not_an_id.status, 1, "{}", not_an_id.stderr);
+    assert!(
+        not_an_id.stderr.contains("nope is not a UUID."),
+        "{}",
+        not_an_id.stderr
+    );
+
+    let unknown = steno(&["process", "--meeting", id, "--db", db], home);
+    assert_eq!(unknown.status, 1, "{}", unknown.stderr);
+    assert!(
+        unknown
+            .stderr
+            .contains(&format!("No meeting has the id {id}.")),
+        "{}",
+        unknown.stderr
+    );
+    assert_eq!(unknown.stdout, "");
+}
+
+/// `--meeting` refuses every flag of a new meeting, each by name, and
+/// checks the speech flags before it opens the database.
+#[test]
+fn process_meeting_refuses_each_new_meeting_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let db = db.to_str().unwrap();
+    let lane = fixtures_root().join("audio/conversation-system-6s.wav");
+    let lane = lane.to_str().unwrap();
+    let folder = home.join("audio");
+    let folder = folder.to_str().unwrap();
+    let id = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
+    for (flag, value) in [
+        ("--title", "Sweep"),
+        ("--source", "phone"),
+        ("--system-lane", lane),
+        ("--template", "default"),
+        ("--audio-folder", folder),
+    ] {
+        let run = steno(&["process", "--meeting", id, flag, value, "--db", db], home);
+        assert_eq!(run.status, 1, "{flag}: {}", run.stderr);
+        assert!(
+            run.stderr.contains("cannot be used with") && run.stderr.contains(flag),
+            "{flag}: {}",
+            run.stderr
+        );
+        assert_eq!(run.stdout, "", "{flag}");
+    }
+    // An unknown engine is the usage error, before the database is opened.
+    let engine = steno(
+        &[
+            "process",
+            "--meeting",
+            id,
+            "--engine",
+            "parakeet-v9",
+            "--db",
+            db,
+        ],
+        home,
+    );
+    assert_eq!(engine.status, 1, "{}", engine.stderr);
+    assert!(engine.stderr.contains("parakeet-v9"), "{}", engine.stderr);
+    assert!(
+        !engine.stderr.contains("No meeting has the id"),
+        "{}",
+        engine.stderr
+    );
+}
+
 // Every usage error of the Swift test in one place.
 #[allow(clippy::too_many_lines)]
 #[test]

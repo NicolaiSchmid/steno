@@ -66,6 +66,7 @@ export const bridgeMethods = [
 	"meeting.setTemplate",
 	"meeting.rerunSummary",
 	"meeting.reexport",
+	"meeting.processAgain",
 	"meeting.setKeepAudio",
 	"meeting.deleteRecordingNow",
 	"meeting.saveNotes",
@@ -445,6 +446,8 @@ export const meetingDetailSnapshot = z
 				canReveal: z.boolean(),
 			})
 			.strict(),
+		/** Whether "Process again" is offered; the host decides. */
+		canProcessAgain: z.boolean(),
 		canRerunSummary: z.boolean(),
 		isBusy: z.boolean(),
 		error: z.string().optional(),
@@ -844,6 +847,7 @@ export const methodParams = {
 	"meeting.setTemplate": setTemplateParams,
 	"meeting.rerunSummary": null,
 	"meeting.reexport": null,
+	"meeting.processAgain": null,
 	"meeting.setKeepAudio": setBoolParams,
 	"meeting.deleteRecordingNow": null,
 	"meeting.saveNotes": saveNotesParams,

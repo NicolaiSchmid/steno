@@ -469,6 +469,7 @@ pub fn detail_snapshot(
             .collect(),
         notes: meeting.scratchpad.clone(),
         export: export_snapshot(detail, zone),
+        can_process_again: detail.can_process_again(),
         can_rerun_summary: detail.can_rerun_summary(),
         is_busy: detail.is_busy,
         // The speakers model's error (a clip that would not play, a name

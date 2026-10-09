@@ -1505,6 +1505,102 @@ mod tests {
         assert_eq!(store.all_meetings().unwrap(), []);
     }
 
+    /// [`recording_app`] whose host runs the app's own pipeline and the
+    /// real file system, over a failed meeting (`reason`) with a two-lane
+    /// call on disk, selected on a ready page; the meeting's id.
+    fn failed_meeting_selected(
+        dir: &tempfile::TempDir,
+        store: &Arc<Store>,
+        reason: &str,
+    ) -> (App, Host, uuid::Uuid) {
+        use steno_bridge::BridgeMethod;
+        let mut app = recording_app(dir, store);
+        app.services.pipeline = Arc::new(HostPipeline {
+            pipeline: app.pipeline.clone(),
+            sweep: RetentionSweep::new(store.clone()),
+            export_retries: app.export_retries.clone(),
+        });
+        app.services.file_system = Arc::new(steno_host::services::RealFileSystem);
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = steno_core::MeetingState::Failed {
+            reason: reason.to_owned(),
+        };
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            &dir.path().join("audio"),
+            meeting.id,
+            steno_core::AudioRetention::KeepForever,
+        )
+        .unwrap();
+        store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        let host = wired_host(&app);
+        call(&host, BridgeMethod::PageReady, None);
+        call(
+            &host,
+            BridgeMethod::MeetingsSelect,
+            Some(serde_json::json!({ "meetingID": steno_core::json::uuid_string(meeting.id) })),
+        );
+        (app, host, meeting.id)
+    }
+
+    /// "Process again" through the host on the selected failed meeting
+    /// whose master is on disk: the detail and the list show it queued or
+    /// further on once the call returns, and the run takes it to ready.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_through_the_host_runs_a_failed_meeting_to_ready() {
+        use steno_bridge::BridgeMethod;
+        let (dir, store) = temp_store();
+        let (app, host, id) =
+            failed_meeting_selected(&dir, &store, "transcribe: the model is not installed");
+        let detail = host.snapshot(BridgeTopic::MeetingDetail).unwrap();
+        assert_eq!(detail["state"], "failed");
+        assert_eq!(detail["retention"]["filesExist"], true);
+
+        call(&host, BridgeMethod::MeetingProcessAgain, None);
+        let detail = host.snapshot(BridgeTopic::MeetingDetail).unwrap();
+        assert_ne!(detail["state"], "failed", "{detail}");
+        assert_eq!(detail.get("error"), None, "{detail}");
+        let list = host.snapshot(BridgeTopic::MeetingsList).unwrap();
+        assert_eq!(list["counts"]["failed"], 0, "{list}");
+
+        app.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            store.meeting(id).unwrap().unwrap().state,
+            steno_core::MeetingState::Ready
+        );
+    }
+
+    /// The detail is loaded while the meeting is failed; the store then
+    /// marks it ready behind the host's back (as a Try again run does
+    /// before the host's `store_changed` reload). The click is refused
+    /// under the pipeline's own read: the ready meeting is not queued
+    /// again, and the error line says why.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_on_a_stale_failed_detail_refuses_a_ready_meeting() {
+        use steno_bridge::BridgeMethod;
+        let (dir, store) = temp_store();
+        let (app, host, id) =
+            failed_meeting_selected(&dir, &store, "summarize: the endpoint did not answer");
+        assert_eq!(
+            host.snapshot(BridgeTopic::MeetingDetail).unwrap()["state"],
+            "failed"
+        );
+
+        store
+            .set_state(id, steno_core::MeetingState::Ready, chrono::Utc::now())
+            .unwrap();
+        call(&host, BridgeMethod::MeetingProcessAgain, None);
+        assert_eq!(
+            store.meeting(id).unwrap().unwrap().state,
+            steno_core::MeetingState::Ready,
+            "a ready meeting is not queued again"
+        );
+        assert_eq!(
+            host.snapshot(BridgeTopic::MeetingDetail).unwrap()["error"],
+            "Only a failed meeting can be processed again."
+        );
+        app.pipeline.current().wait_until_idle().await;
+    }
+
     /// A recording in progress, stopped from the sidebar or the tray (Stop,
     /// then Toggle): each command through the host returns, though the
     /// recorder's `Stopping` and `Idle` re-enter the host

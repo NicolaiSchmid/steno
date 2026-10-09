@@ -333,6 +333,24 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(stored?.tags, ["ops", "q4"])
   }
 
+  // MARK: Process again
+
+  /// The Swift app refuses "Process again" in plain words and leaves the
+  /// failed meeting as it was.
+  func testProcessAgainIsRefusedAndChangesNothing() async throws {
+    let environment = try await TestSupport.environment()
+    let model = await makeModel(environment)
+    let failed = MeetingState.failed(reason: "Transcription failed: model not installed")
+    try await environment.store.setState(
+      failed, meetingID: SampleData.meetingID, now: TestSupport.now)
+    await TestSupport.waitUntil("failed observed") { model.meeting?.state.isFailed == true }
+    model.processAgain()
+    XCTAssertEqual(model.error, "Process again needs the new Steno app.")
+    XCTAssertFalse(model.isBusy)
+    let stored = try await environment.store.meeting(id: SampleData.meetingID)
+    XCTAssertEqual(stored?.state, failed)
+  }
+
   // MARK: Setup status
 
   /// `summaryStatus` for a ready meeting with a summary, without one before

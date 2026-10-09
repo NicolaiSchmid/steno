@@ -43,6 +43,9 @@ string_enum! {
         MeetingSetTemplate = "meeting.setTemplate",
         MeetingRerunSummary = "meeting.rerunSummary",
         MeetingReexport = "meeting.reexport",
+        /// "Process again": the selected failed meeting runs from the start
+        /// with its recording.
+        MeetingProcessAgain = "meeting.processAgain",
         MeetingSetKeepAudio = "meeting.setKeepAudio",
         MeetingDeleteRecordingNow = "meeting.deleteRecordingNow",
         MeetingSaveNotes = "meeting.saveNotes",

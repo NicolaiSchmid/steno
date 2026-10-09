@@ -146,10 +146,11 @@ Forge and atlas.
 - **The handover listens on a port the system picks** (`port: 0`) and advertises
   through its own mDNS responder (`mdns-sd`). A firewall that blocks incoming TCP
   hides it from the phone; `ufw` admits mDNS by default.
-- **The Rust app has no "Process again".** "Try again" re-runs only the summary
-  and is off without a transcript. The pipeline can process a meeting again
-  (`ProcessingPipeline::reprocess`), but neither the bridge nor the CLI calls it
-  yet, and the CLI reads WAV only. P9 adds them.
+- **"Process again" is new, and only in the Rust app.** "Try again" re-runs only
+  the summary and is off without a transcript; P9's "Process again" runs a
+  failed meeting from the start with its recording, from the button and from
+  `steno process --meeting <id>`. The Swift app refuses it. The CLI reads WAV
+  only.
 - **A recording ended by a kill is recovered at the next launch** from its CAF
   on disk and queued with the end reason `failed`; one with no audio on disk is
   marked failed as before (P3, #233).
@@ -393,7 +394,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P6 | The recording in progress: systemd-oomd kills the app's cgroup with its sidecar. The sidecar moves into its own transient scope on Linux | Linux desktop |
 | P7 | Every note: a people folder typed as `./People` or `.` in the Swift Settings makes each Rust delivery fail. `./People` becomes `People`; `.` becomes no people folder, as Swift wrote it | pipeline, store and export (`wp-pse-*`) |
 | P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221. At #221's first move, a key only `secrets.json` holds is copied; where both hold one, the file's API key wins and the Secret Service keeps its own `handover-identity`; after the move's mark, the Secret Service wins for every key | audio (with #221) |
-| P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess` (landed, #228), a `meeting.processAgain` bridge method and its button, and `steno process --meeting <id>` (with `input` optional and exclusive of `--meeting`); a meeting refused for missing models stays queued and resumes once they install | pipeline, store and export (`wp-pse-*`) |
+| P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess` (landed, #228), a `meeting.processAgain` bridge method and its button (`fix/pipeline-process-again`), shown while the detail's `canProcessAgain` holds (`Meeting::offers_process_again` and the master on disk; a ready meeting kept incomplete joins with P14); the Swift app refuses it; and `steno process --meeting <id>` (with `input` optional and exclusive of `--meeting`, a ready meeting only with `--allow-ready`; the same branch); a meeting refused for missing models stays queued and resumes once they install (S1's queue, #237) | pipeline, store and export (`wp-pse-*`) |
 | P10 | A meeting's whole result: a diarizer or speaker-match failure fails the meeting. It merges without diarization instead | pipeline, store and export (`wp-pse-*`) |
 | P11 | Speaker names confirmed while the meeting processes: the cleanup updates text by id, and `replace_transcript` keeps Confirmed assignments (calibration WP4) | pipeline, store and export (`wp-pse-*`) |
 | P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | pipeline, store and export (`wp-pse-*`) |
@@ -1776,6 +1777,11 @@ first candidate, every migration until S9 is mirrored in `Migrations.swift`, and
 none merges in the window. The last Swift release and every Rust build from P2
 on open a newer database, so going back stays possible until the Swift app is
 removed.
+
+**The Swift app's retention sweep** does not check an asset again before it
+removes its files, a race #228 closed in Rust only. It stays moot after a
+rollback: the race needs a meeting processed again, and the Swift app refuses
+"Process again" (P9).
 
 ## Changes to other plans in this plan's PR
 

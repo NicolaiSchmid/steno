@@ -244,6 +244,16 @@ final class MeetingDetailViewModel: Identifiable {
     await run("Re-export") { try await self.pipeline().redeliver(meetingID: self.id) }
   }
 
+  // MARK: - Process again
+
+  /// "Process again" is the Rust app's: the Swift app ships no further
+  /// release (D9 of the stable promotion plan), never offers it
+  /// (`canProcessAgain` is `false` in the snapshot) and answers a call with
+  /// a refusal on the error line, changing nothing.
+  func processAgain() {
+    error = "Process again needs the new Steno app."
+  }
+
   // MARK: - Recording line
 
   var recordingStatus: RecordingStatus? {

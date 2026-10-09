@@ -69,6 +69,16 @@ import Testing
     #expect(names == BridgeSamples.fixtures.map(\.name))
   }
 
+  /// "Process again" takes no params; its request decodes and encodes back
+  /// byte for byte (the Rust crate's `process_again_routes_without_params`
+  /// holds the same text).
+  @Test func processAgainRequestRoundTrips() throws {
+    let text = "{\n  \"id\" : \"req-9\",\n  \"method\" : \"meeting.processAgain\"\n}"
+    let request = try BridgeJSON.decode(BridgeRequest.self, from: Data(text.utf8))
+    #expect(request == BridgeRequest(id: "req-9", method: .meetingProcessAgain))
+    #expect(String(decoding: try BridgeJSON.encode(request), as: UTF8.self) == text)
+  }
+
   @Test func methodsAndTopicsUseDottedLowerCamelNames() {
     let pattern = try! Regex(#"^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*)*$"#)
     for method in BridgeMethod.allCases {

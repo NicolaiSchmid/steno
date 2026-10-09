@@ -252,6 +252,8 @@ final class MainWindowBridge: BridgeHost, TopicSource {
     case .meetingReexport:
       let detail = try requireDetail()
       await detail.reexport()
+    case .meetingProcessAgain:
+      try requireDetail().processAgain()
     case .meetingSetKeepAudio:
       let keep = try request.params(SetBoolParams.self).value
       let detail = try requireDetail()

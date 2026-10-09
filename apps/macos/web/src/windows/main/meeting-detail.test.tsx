@@ -2,7 +2,7 @@ import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
-import { loadFixtureSnapshots } from "@/bridge/mock-transport";
+import { applyScenario, loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { MeetingDetail } from "./meeting-detail";
 
@@ -50,6 +50,75 @@ describe("MeetingDetail", () => {
 		renderWithBridge(<MeetingDetail initialMenuOpen />, harness);
 		await screen.findByTestId("delete-meeting");
 		expect(screen.queryByTestId("delete-recording")).not.toBeInTheDocument();
+	});
+
+	it("processes a meeting again and holds the button until the host answers", async () => {
+		const user = userEvent.setup();
+		let answer: (value: undefined) => void = () => {};
+		const pending = new Promise<undefined>((resolve) => {
+			answer = resolve;
+		});
+		const harness = await createBridgeHarness(
+			"scenario=failed",
+			{},
+			{ "meeting.processAgain": pending },
+		);
+		renderWithBridge(<MeetingDetail />, harness);
+		const button = await screen.findByTestId("process-again");
+		expect(button).toHaveTextContent("Process again");
+		expect(button).toBeEnabled();
+		await user.click(button);
+		expect(callsTo(harness.transport, "meeting.processAgain")).toEqual([
+			{ method: "meeting.processAgain", params: null },
+		]);
+		expect(button).toBeDisabled();
+		await act(async () => {
+			answer(undefined);
+			await pending;
+		});
+		expect(button).toBeEnabled();
+	});
+
+	it("shows Process again only when the host offers it and disables it while busy", async () => {
+		const failed = applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams("scenario=failed"),
+		)["meeting.detail"] as MeetingDetailSnapshot;
+		const ready = await fixtureDetail();
+		const harness = await createBridgeHarness("scenario=failed");
+		renderWithBridge(<MeetingDetail />, harness);
+		expect(await screen.findByTestId("process-again")).toBeEnabled();
+		act(() => {
+			harness.transport.emit("meeting.detail", {
+				...failed,
+				isBusy: true,
+			} satisfies MeetingDetailSnapshot);
+		});
+		expect(screen.getByTestId("process-again")).toBeDisabled();
+		// Not offered (the recording is gone, or the host is the Swift app).
+		act(() => {
+			harness.transport.emit("meeting.detail", {
+				...failed,
+				canProcessAgain: false,
+			} satisfies MeetingDetailSnapshot);
+		});
+		expect(screen.getByTestId("summary-try-again")).toBeInTheDocument();
+		expect(screen.queryByTestId("process-again")).not.toBeInTheDocument();
+		// A plain ready meeting: not offered.
+		act(() => {
+			harness.transport.emit("meeting.detail", ready);
+		});
+		expect(ready.state).toBe("ready");
+		expect(screen.queryByText("Process again")).not.toBeInTheDocument();
+		// A ready meeting the host offers it for: the page reads only the
+		// host's flag, not the state.
+		act(() => {
+			harness.transport.emit("meeting.detail", {
+				...ready,
+				canProcessAgain: true,
+			} satisfies MeetingDetailSnapshot);
+		});
+		expect(screen.getByTestId("process-again")).toBeEnabled();
 	});
 
 	it("keeps Re-run summary for when the host allows it", async () => {

@@ -7,12 +7,12 @@ use chrono::{DateTime, Utc};
 use steno_bridge::DetailTab;
 use steno_core::protocols::{BoundaryResult, BoxError};
 use steno_core::{
-    AudioRetention, Delivery, Meeting, MeetingExport, MeetingOperation, MeetingStateKind, Settings,
-    Store, StoreError, SummaryTemplate, paths::file_url_path,
+    AudioRetention, Delivery, Meeting, MeetingExport, MeetingOperation, MeetingStateKind, Platform,
+    Settings, Store, StoreError, SummaryTemplate, paths::file_url_path,
 };
 use uuid::Uuid;
 
-use crate::services::{ClipPlayer, FileSystem, Pipeline};
+use crate::services::{ClipPlayer, FileSystem, Pipeline, ProcessAgainRefusal};
 use crate::setup::{ExportStatus, SummaryStatus, all_delivered, llm_configured, vault_configured};
 use crate::speakers::SpeakersViewModel;
 
@@ -169,6 +169,28 @@ impl MeetingDetailViewModel {
         self.can_rerun() && self.llm_configured && self.has_transcript()
     }
 
+    /// "Process again": the meeting is one it is offered for
+    /// ([`Meeting::offers_process_again`]) and its recording is on disk.
+    /// The snapshot's `canProcessAgain`, and the guard of
+    /// [`process_again`](Self::process_again), so the button and the action
+    /// cannot drift apart.
+    #[must_use]
+    pub fn can_process_again(&self) -> bool {
+        self.process_again_refusal().is_none()
+    }
+
+    /// Why the detail itself refuses "Process again": the meeting is not
+    /// one it is offered for, or its recording is gone.
+    fn process_again_refusal(&self) -> Option<ProcessAgainRefusal> {
+        if !self.meeting().is_some_and(Meeting::offers_process_again) {
+            Some(ProcessAgainRefusal::NotOffered)
+        } else if !self.recording_files_exist {
+            Some(ProcessAgainRefusal::RecordingGone)
+        } else {
+            None
+        }
+    }
+
     /// "Re-export" and "Export now": without a vault there is nowhere to
     /// export to.
     #[must_use]
@@ -257,6 +279,34 @@ impl MeetingDetailViewModel {
     pub fn reexport(&mut self, pipeline: &dyn Pipeline) {
         let id = self.id;
         self.run("Re-export", || pipeline.redeliver(id));
+    }
+
+    /// "Process again", offered while [`can_process_again`] holds: the
+    /// pipeline saves the meeting queued and runs it from the start with
+    /// its recording; the caller's reload then shows it queued. A refusal,
+    /// the detail's own (not offered, or the recording gone) or the
+    /// pipeline's, is the error line in [`process_again_refusal_line`]'s
+    /// words; one while the app quits shows nothing. Rust only: the Swift
+    /// app refuses it.
+    ///
+    /// [`can_process_again`]: Self::can_process_again
+    pub fn process_again(&mut self, pipeline: &dyn Pipeline, platform: Platform) {
+        let outcome = if let Some(refusal) = self.process_again_refusal() {
+            Err(refusal)
+        } else {
+            self.is_busy = true;
+            let outcome = pipeline.process_again(self.id);
+            self.is_busy = false;
+            outcome
+        };
+        match outcome {
+            Ok(()) => self.error = None,
+            Err(refusal) => {
+                if let Some(line) = process_again_refusal_line(&refusal, platform) {
+                    self.error = Some(line);
+                }
+            }
+        }
     }
 
     // Recording line
@@ -388,6 +438,32 @@ impl MeetingDetailViewModel {
     pub fn operation_failed(&mut self, operation: MeetingOperation, failure: &str) {
         self.error = Some(format!("{} failed: {failure}", operation.label()));
     }
+}
+
+/// What the detail's error line says when "Process again" is refused;
+/// `None` while the app quits, which the user asked for.
+#[must_use]
+pub fn process_again_refusal_line(
+    refusal: &ProcessAgainRefusal,
+    platform: Platform,
+) -> Option<String> {
+    Some(match refusal {
+        ProcessAgainRefusal::MeetingGone => "This meeting no longer exists.".to_owned(),
+        ProcessAgainRefusal::NotOffered => {
+            "Only a failed meeting can be processed again.".to_owned()
+        }
+        ProcessAgainRefusal::RecordingGone => platform
+            .mac_or(
+                "The recording is no longer on this Mac, so the meeting cannot be processed again.",
+                "The recording is no longer on this computer, so the meeting cannot be processed again.",
+            )
+            .to_owned(),
+        ProcessAgainRefusal::Busy => "This meeting is already being processed.".to_owned(),
+        ProcessAgainRefusal::Quitting => return None,
+        ProcessAgainRefusal::CouldNotStart(reason) => {
+            format!("Processing could not start: {reason}")
+        }
+    })
 }
 
 /// The keep flag on `meeting_id`, selected or not: `keep` sets

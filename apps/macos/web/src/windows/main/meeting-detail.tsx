@@ -6,6 +6,7 @@ import {
 	EllipsisIcon,
 	FolderIcon,
 	RefreshCwIcon,
+	RotateCcwIcon,
 	ShareIcon,
 	SparklesIcon,
 	TextAlignStartIcon,
@@ -170,6 +171,39 @@ function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
 					{format.duration(elapsed)}
 				</span>
 			) : null}
+		</Button>
+	);
+}
+
+/**
+ * "Process again" runs the meeting from the start with its recording; the
+ * host says when it is offered (`canProcessAgain`) and words any refusal on
+ * the error line. The button stays disabled until the host answers, so a
+ * second click cannot start a second run.
+ */
+function HeaderProcessAgain({ disabled }: { disabled: boolean }) {
+	const client = useBridge();
+	const [starting, setStarting] = useState(false);
+	async function processAgain() {
+		setStarting(true);
+		try {
+			await client.call("meeting.processAgain");
+		} catch (cause: unknown) {
+			console.error("bridge: meeting.processAgain failed", cause);
+		} finally {
+			setStarting(false);
+		}
+	}
+	return (
+		<Button
+			data-testid="process-again"
+			disabled={disabled || starting}
+			onClick={processAgain}
+			size="sm"
+			variant="outline"
+		>
+			<RotateCcwIcon aria-hidden="true" />
+			Process again
 		</Button>
 	);
 }
@@ -477,6 +511,9 @@ function DetailBody({
 	const actions = (
 		<div className="flex shrink-0 items-center gap-2">
 			{holdsRecorder && recording ? <HeaderStop recording={recording} /> : null}
+			{detail.canProcessAgain ? (
+				<HeaderProcessAgain disabled={detail.isBusy} />
+			) : null}
 			<Button
 				data-testid="export-meeting"
 				disabled={!canReexport}

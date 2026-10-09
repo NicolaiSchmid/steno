@@ -6,12 +6,12 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use steno_core::AudioRetention;
 use steno_core::protocols::BoundaryResult;
-use steno_host::services::Pipeline;
+use steno_core::{AudioRetention, MeetingStateKind};
+use steno_host::services::{Pipeline, ProcessAgainRefusal};
 use steno_pipeline::{
     ExportRetries, InFlight, Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline,
-    QuitLatch, RetentionSweep, SweepIncomplete,
+    QuitLatch, ReprocessError, RetentionSweep, SweepIncomplete,
 };
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
@@ -173,7 +173,9 @@ impl CurrentPipeline {
 /// after the claim is posted as `MeetingEvent::OperationFailed`, which the
 /// host shows on the detail's error line. `apply_retention` touches the store
 /// only and completes in place, so the detail the host reads back right
-/// after already shows the new rule.
+/// after already shows the new rule. "Process again" saves the meeting
+/// queued in place and spawns its run, so the detail the host reads back
+/// shows it queued.
 pub struct HostPipeline {
     pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
@@ -207,6 +209,16 @@ impl Pipeline for HostPipeline {
         self.export_retries.stopped(meeting_id)
     }
 
+    fn process_again(&self, meeting_id: Uuid) -> Result<(), ProcessAgainRefusal> {
+        // `reprocess` spawns the run on the runtime it is called in; the
+        // host calls from its own thread.
+        let _runtime = self.pipeline.runtime.enter();
+        self.pipeline
+            .current()
+            .process_again(meeting_id)
+            .map_err(process_again_refusal)
+    }
+
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
         let pipeline = self.pipeline.current();
         Ok(block_on(
@@ -224,6 +236,31 @@ impl Pipeline for HostPipeline {
             .sweep
             .keep_all()
             .map(|count| i64::try_from(count).unwrap_or(i64::MAX))?)
+    }
+}
+
+/// The host's reading of a refused [`ProcessingPipeline::process_again`]:
+/// a queued or processing meeting is already being processed, and a
+/// meeting without a recording on record reads as one whose recording is
+/// gone, as the pipeline's docs ask.
+fn process_again_refusal(error: ReprocessError) -> ProcessAgainRefusal {
+    match error {
+        ReprocessError::MeetingNotFound(_) => ProcessAgainRefusal::MeetingGone,
+        ReprocessError::Unfinished {
+            state: MeetingStateKind::Queued | MeetingStateKind::Processing,
+            ..
+        }
+        | ReprocessError::Busy(_) => ProcessAgainRefusal::Busy,
+        ReprocessError::Unfinished { .. } | ReprocessError::NotOffered(_) => {
+            ProcessAgainRefusal::NotOffered
+        }
+        ReprocessError::NoAsset(_) | ReprocessError::AudioGone(_) => {
+            ProcessAgainRefusal::RecordingGone
+        }
+        ReprocessError::Quitting => ProcessAgainRefusal::Quitting,
+        ReprocessError::Pipeline(failure) => {
+            ProcessAgainRefusal::CouldNotStart(failure.to_string())
+        }
     }
 }
 
@@ -711,6 +748,164 @@ mod tests {
             reexport.pipeline.current().in_flight().is_empty()
         })
         .await;
+    }
+
+    /// Calls `process_again` as the host does, from a thread outside the
+    /// runtime.
+    fn process_again(
+        service: &Arc<HostPipeline>,
+        meeting_id: Uuid,
+    ) -> Result<(), ProcessAgainRefusal> {
+        let service = service.clone();
+        on_own_thread(PATIENCE, "process_again returned", move || {
+            service.process_again(meeting_id)
+        })
+    }
+
+    /// `meeting` saved in `state` with a six-second call recorded under
+    /// `audio`.
+    fn recorded_meeting(
+        store: &Store,
+        audio: &std::path::Path,
+        state: MeetingState,
+    ) -> (steno_core::Meeting, steno_core::AudioAsset) {
+        let mut meeting = sample_data::meeting();
+        meeting.id = Uuid::new_v4();
+        meeting.state = state;
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            audio,
+            meeting.id,
+            AudioRetention::KeepDays(30),
+        )
+        .unwrap();
+        store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        (meeting, asset)
+    }
+
+    /// "Process again" on a failed meeting whose master is on disk saves it
+    /// queued before the call returns, and the run takes it to ready.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_runs_a_failed_meeting_with_its_master_to_ready() {
+        let (dir, store) = temp_store();
+        let service = Arc::new(pipeline(&store, None));
+        let failed = MeetingState::Failed {
+            reason: "transcribe: the model is not installed".to_owned(),
+        };
+        let (meeting, _) = recorded_meeting(&store, dir.path(), failed);
+        assert_eq!(process_again(&service, meeting.id), Ok(()));
+        assert_ne!(
+            meeting_state(&store, meeting.id).kind(),
+            steno_core::MeetingStateKind::Failed,
+            "saved queued before the call returned"
+        );
+        service.pipeline.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, meeting.id), MeetingState::Ready);
+    }
+
+    /// Each refusal of `reprocess` reaches the host as the refusal the
+    /// detail words; a store failure keeps its text.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_process_again_says_why() {
+        let (dir, store) = temp_store();
+        let (summarizer, release, asked) = held();
+        let service = Arc::new(pipeline(&store, Some(Arc::new(summarizer))));
+        let failed = || MeetingState::Failed {
+            reason: "decode: unreadable".to_owned(),
+        };
+
+        assert_eq!(
+            process_again(&service, Uuid::new_v4()),
+            Err(ProcessAgainRefusal::MeetingGone)
+        );
+
+        let mut without_asset = sample_data::meeting();
+        without_asset.id = Uuid::new_v4();
+        without_asset.state = failed();
+        store.save_meeting(&without_asset).unwrap();
+        assert_eq!(
+            process_again(&service, without_asset.id),
+            Err(ProcessAgainRefusal::RecordingGone)
+        );
+
+        let (swept, asset) = recorded_meeting(&store, dir.path(), failed());
+        std::fs::remove_file(steno_core::paths::file_url_path(&asset.url).unwrap()).unwrap();
+        assert_eq!(
+            process_again(&service, swept.id),
+            Err(ProcessAgainRefusal::RecordingGone)
+        );
+
+        let (held_meeting, _) = recorded_meeting(&store, dir.path(), failed());
+        let id = held_meeting.id;
+        let caller = service.clone();
+        assert_eq!(call(move || caller.rerun_summary(id, "default")), Ok(()));
+        reached(&asked).await;
+        assert_eq!(process_again(&service, id), Err(ProcessAgainRefusal::Busy));
+        release.notify_one();
+        eventually("the re-run released its meeting", || {
+            service.pipeline.current().in_flight().is_empty()
+        })
+        .await;
+
+        service.pipeline.quit();
+        assert_eq!(
+            process_again(&service, id),
+            Err(ProcessAgainRefusal::Quitting)
+        );
+
+        assert_eq!(
+            process_again_refusal(ReprocessError::Pipeline(PipelineFailure::new(
+                PipelineStage::Decode,
+                "the disk is full"
+            ))),
+            ProcessAgainRefusal::CouldNotStart("decode: the disk is full".to_owned())
+        );
+    }
+
+    /// "Process again" is for a meeting it is offered for: a ready one is
+    /// refused below the host too, so a stale detail cannot run it again.
+    /// A ready meeting whose recording was swept is refused as not offered
+    /// too, not as one whose recording is gone: the rule is checked before
+    /// the files.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_refuses_a_ready_meeting() {
+        let (dir, store) = temp_store();
+        let service = Arc::new(pipeline(&store, None));
+        let (ready, _) = recorded_meeting(&store, dir.path(), MeetingState::Ready);
+        assert_eq!(
+            process_again(&service, ready.id),
+            Err(ProcessAgainRefusal::NotOffered)
+        );
+        let (swept, asset) = recorded_meeting(&store, dir.path(), MeetingState::Ready);
+        std::fs::remove_file(steno_core::paths::file_url_path(&asset.url).unwrap()).unwrap();
+        assert_eq!(
+            process_again(&service, swept.id),
+            Err(ProcessAgainRefusal::NotOffered)
+        );
+        service.pipeline.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, ready.id), MeetingState::Ready);
+        assert_eq!(meeting_state(&store, swept.id), MeetingState::Ready);
+    }
+
+    /// A queued or processing meeting is already being processed; a
+    /// recording one is not offered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_on_a_queued_or_processing_meeting_is_busy() {
+        let (dir, store) = temp_store();
+        let service = Arc::new(pipeline(&store, None));
+        for state in [MeetingState::Queued, MeetingState::Processing] {
+            let (meeting, _) = recorded_meeting(&store, dir.path(), state.clone());
+            assert_eq!(
+                process_again(&service, meeting.id),
+                Err(ProcessAgainRefusal::Busy),
+                "{state:?}"
+            );
+            assert_eq!(meeting_state(&store, meeting.id), state, "unchanged");
+        }
+        let (recording, _) = recorded_meeting(&store, dir.path(), MeetingState::Recording);
+        assert_eq!(
+            process_again(&service, recording.id),
+            Err(ProcessAgainRefusal::NotOffered)
+        );
     }
 
     /// What every [`FakeSidecar`] of a test shares: the children (alive
