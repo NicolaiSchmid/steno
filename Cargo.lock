@@ -5030,6 +5030,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "steno-macos"
+version = "0.1.0-rc.2"
+dependencies = [
+ "core-foundation 0.10.1",
+ "security-framework 3.7.0",
+ "security-framework-sys",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "steno-pipeline"
 version = "0.1.0-rc.3"
 dependencies = [
