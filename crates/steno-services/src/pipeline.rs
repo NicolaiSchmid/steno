@@ -540,6 +540,15 @@ mod tests {
         );
     }
 
+    /// A new phone meeting, still recording.
+    fn phone_meeting() -> steno_core::Meeting {
+        let mut meeting = sample_data::meeting();
+        meeting.id = Uuid::new_v4();
+        meeting.source = steno_core::MeetingSource::Phone;
+        meeting.state = MeetingState::Recording;
+        meeting
+    }
+
     /// The phone meeting of `fixture` (a file in `Tests/Fixtures/audio/`,
     /// copied into `dir`) processed through `service`'s real decoder, to
     /// the state it ends in.
@@ -589,9 +598,7 @@ mod tests {
             fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
             &store,
         );
-        let mut meeting = sample_data::meeting();
-        meeting.source = steno_core::MeetingSource::Phone;
-        meeting.state = MeetingState::Recording;
+        let meeting = phone_meeting();
         let state = process_phone_fixture(
             &service,
             &store,
@@ -642,9 +649,7 @@ mod tests {
             &store,
         );
         std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let mut meeting = sample_data::meeting();
-        meeting.source = steno_core::MeetingSource::Phone;
-        meeting.state = MeetingState::Recording;
+        let meeting = phone_meeting();
         let clean = process_phone_fixture(
             &service,
             &store,
@@ -653,10 +658,7 @@ mod tests {
             "tone-440-44k1-500ms.m4a",
         )
         .await;
-        let mut second = sample_data::meeting();
-        second.id = Uuid::new_v4();
-        second.source = steno_core::MeetingSource::Phone;
-        second.state = MeetingState::Recording;
+        let second = phone_meeting();
         let damaged = process_phone_fixture(
             &service,
             &store,

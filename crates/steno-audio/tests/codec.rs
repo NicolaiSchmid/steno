@@ -1093,6 +1093,12 @@ fn with_zeroed_packets(directory: &Path, packets: impl IntoIterator<Item = usize
 /// Frames per AAC packet.
 const PACKET: usize = 1_024;
 
+/// The first frame of AAC packet `packet` in a decode, the 1 024 frames
+/// of priming trimmed.
+fn at(packet: usize) -> usize {
+    (packet - 1) * PACKET
+}
+
 /// The largest difference between `a` and `b` over `frames`.
 fn largest_difference(a: &[f32], b: &[f32], frames: std::ops::Range<usize>) -> f32 {
     frames.map(|i| (a[i] - b[i]).abs()).fold(0.0, f32::max)
@@ -1129,7 +1135,6 @@ async fn a_damaged_packet_becomes_silence_of_its_length() {
         "23 packets less the priming"
     );
     let (a, b) = (&damaged.samples, &clean.samples);
-    let at = |packet: usize| (packet - 1) * PACKET;
     assert!(same_bits(&a[..at(9)], &b[..at(9)]), "before the damage");
     for silent in [at(9)..at(11), at(15)..at(16)] {
         assert!(a[silent.clone()].iter().all(|&s| s == 0.0), "{silent:?}");
@@ -1291,7 +1296,6 @@ fn a_packet_that_panics_the_decoder_becomes_silence() {
     assert_eq!(PANICS.with(std::cell::Cell::get), 1, "the decoder panicked");
     assert_eq!(damaged.damage.parts, 2);
     assert_eq!(damaged.samples.len(), clean.samples.len() - (PACKET - 546));
-    let at = |packet: usize| (packet - 1) * PACKET;
     assert!(same_bits(
         &damaged.samples[..at(21)],
         &clean.samples[..at(21)]
@@ -1315,7 +1319,6 @@ async fn a_stereo_files_damaged_packets_are_silence_in_both_channels() {
             bytes[payloads[packet].clone()].fill(0);
         }
     });
-    let at = |packet: usize| (packet - 1) * PACKET;
     for channel in 0..2 {
         let clean =
             SymphoniaAudioCodec::read_channel(&fixture(name), channel, AudioLane::Mixed).unwrap();
@@ -1402,7 +1405,6 @@ fn a_damaged_packets_length_goes_through_the_time_base() {
     assert_eq!(damaged.damage.parts, 3);
     assert!((damaged.damage.seconds - 3.0 * PACKET as f64 / 44_100.0).abs() < 1e-9);
     assert_eq!(damaged.samples.len(), clean.samples.len());
-    let at = |packet: usize| (packet - 1) * PACKET;
     assert!(damaged.samples[at(9)..at(11)].iter().all(|&s| s == 0.0));
 }
 
