@@ -964,7 +964,7 @@ Each lands before `0.11.0-rc.1`.
   index and timestamp at `warn`, and counts it
   (`AudioBuffer16k::damaged_parts`). The priming trim (A9) cuts a damaged
   packet like any other, and the streamed decoder (A1) keeps its bound.
-  - A file with more than half of its packets damaged fails as before
+  - A file with more than half of its packets damaged fails
     (`codec::MAX_DAMAGED_SHARE`), and so does a container that cannot be
     read; a failure keeps the recording with "Processing failed", where a
     meeting of silence would let retention delete it.
