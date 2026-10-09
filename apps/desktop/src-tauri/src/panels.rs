@@ -70,9 +70,11 @@ impl Panel {
     }
 
     /// The window's title. On Linux "Steno bubble" and "Steno prompt", so
-    /// a window manager's rules tell the panels apart from each other and
-    /// from the main window ("Steno"): `linux/hyprland-steno.lua` matches
-    /// them under Hyprland. macOS and Windows keep "Steno".
+    /// a window manager's rules can match the panels and not the main
+    /// window ("Steno"); `linux/hyprland-steno.lua` does under Hyprland.
+    /// macOS and Windows keep "Steno".
+    ///
+    /// Swift: none; `FloatingPanel` sets no title.
     pub const fn title(self) -> &'static str {
         if cfg!(target_os = "linux") {
             match self {
@@ -910,12 +912,30 @@ mod tests {
     }
 
     /// On Linux each panel has a title of its own, the one the Hyprland
-    /// rules match; elsewhere both are "Steno", as the main window is.
+    /// rules match; elsewhere both are "Steno", as the main window is. The
+    /// rule itself is pinned whole, outside the file's comments: its
+    /// class, its titles and every effect.
     #[test]
     fn the_panels_carry_the_titles_the_hyprland_rules_match() {
         let rules = include_str!("../linux/hyprland-steno.lua");
-        assert!(
-            rules.contains(r#"title = "Steno (bubble|prompt)""#),
+        let code = rules
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            code,
+            r#"hl.window_rule({
+  name = "steno-panels",
+  match = { class = "[Ss]teno-desktop", title = "Steno (bubble|prompt)" },
+  float = true,
+  pin = true,
+  no_initial_focus = true,
+  no_follow_mouse = true,
+  border_size = 0,
+  no_shadow = true,
+  no_blur = true,
+})"#,
             "{rules}"
         );
         for panel in Panel::ALL {
