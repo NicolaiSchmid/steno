@@ -491,11 +491,13 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
 /// CLI's on the Mac, which never asks the keychain) the key stays
 /// readable, so a run with `STENO_LLM_API_KEY` set still gets its key.
 /// `secrets` is the app's [`KeepsApiKey`], so a write a gate swallows
-/// never reaches it.
+/// never reaches it. The import's step records the identity's fingerprint
+/// in the support directory of `paths`.
 fn gated_secrets(
     pending: Option<crate::swift_import::PendingImport>,
     preferences: &Arc<FilePreferences>,
     secrets: Arc<dyn SecretStore>,
+    paths: &StenoPaths,
     file: bool,
 ) -> (
     Option<GraphImport>,
@@ -504,7 +506,9 @@ fn gated_secrets(
 ) {
     match pending {
         Some(pending) => {
-            let import = GraphImport::new(pending, secrets);
+            let record =
+                crate::handover::FingerprintFile::in_support_directory(&paths.support_directory);
+            let import = GraphImport::new(pending, secrets, Arc::new(record));
             let (gated, gate) = (import.secrets.clone(), import.gate.clone());
             (Some(import), gated, Some(gate))
         }
@@ -620,8 +624,13 @@ pub fn build_with_import(
     let store = open_store(&database_path)?;
     let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
     let kept = Arc::new(KeepsApiKey::new(secrets));
-    let (import, secrets, key_gate) =
-        gated_secrets(pending, &preferences, kept.clone(), !options.keyring);
+    let (import, secrets, key_gate) = gated_secrets(
+        pending,
+        &preferences,
+        kept.clone(),
+        &paths,
+        !options.keyring,
+    );
     let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
@@ -2359,11 +2368,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let preferences = Arc::new(FilePreferences::in_support_directory(dir.path()));
         preferences.set_flag(crate::swift_import::KEY_DENIED_KEY, true);
+        let paths = StenoPaths::new(dir.path().to_path_buf());
         let secrets = Arc::new(steno_core::testing::InMemorySecretStore::new());
         let key = SecretKey::llm_api_key();
         secrets.set_secret(&key, Some("sk-stored")).await.unwrap();
         for (file, expected) in [(false, None), (true, Some("sk-stored"))] {
-            let (import, gated, _) = gated_secrets(None, &preferences, secrets.clone(), file);
+            let (import, gated, _) =
+                gated_secrets(None, &preferences, secrets.clone(), &paths, file);
             assert!(import.is_none());
             assert_eq!(
                 gated.secret(&key).await.unwrap().as_deref(),

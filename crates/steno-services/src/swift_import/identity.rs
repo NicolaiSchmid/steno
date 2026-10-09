@@ -1,11 +1,12 @@
 //! The exported Swift identity on its way into the secret store: the
 //! PKCS#12 file `SecItemExport` wrote, decoded into the PEM bundle
-//! `steno-handover` reads, checked, and stored under `handover-identity`.
+//! `steno-handover` reads, checked, and stored under `handover-identity`
+//! with its fingerprint recorded.
 
 use base64::Engine as _;
 use p12_keystore::{KeyStore, KeyStoreEntry, Pkcs12ImportPolicy};
 use steno_core::SecretStore;
-use steno_handover::HandoverIdentity;
+use steno_handover::{FingerprintRecord, HandoverIdentity, IdentityError};
 
 /// What went wrong between the export and the store.
 #[derive(Debug, thiserror::Error)]
@@ -18,6 +19,11 @@ pub enum ImportedIdentityError {
     Unusable(String),
     #[error("the identity could not be stored: {0}")]
     Store(String),
+    /// The identity is in the secret store, but its fingerprint was not
+    /// recorded: the handover refuses it as another identity than the
+    /// recorded one (`Unavailability::Replaced`) until a store records it.
+    #[error("the identity was stored, but its fingerprint could not be recorded: {0}")]
+    Record(String),
 }
 
 /// The identity in `pkcs12`, a file `SecItemExport` wrote under
@@ -58,21 +64,29 @@ pub fn decode_pkcs12(
     Ok((identity, bundle))
 }
 
-/// Stores an imported identity: the PEM bundle under
-/// [`HandoverIdentity::SECRET_KEY`], replacing whatever identity was there
-/// (a desktop-id build's, as the [module doc](super) defines it). The one
-/// place the import writes the identity. Once the handover's fingerprint
-/// record lands (#221), this becomes `HandoverIdentity::store(secrets,
-/// &record)`, which records the new fingerprint with it, so the guard
-/// accepts the Swift identity.
+/// Stores an imported identity through [`HandoverIdentity::store`]: the
+/// PEM bundle under [`HandoverIdentity::SECRET_KEY`], replacing whatever
+/// identity was there (a desktop-id build's, as the [module doc](super)
+/// defines it), then its fingerprint in `record`, over the one recorded for
+/// the identity it replaced, so the handover's guard accepts the Swift
+/// identity at the next load. The one place the import writes the
+/// identity. A record that fails after the secret was written is
+/// [`ImportedIdentityError::Record`]: the import is not done then, as the
+/// guard refuses the identity until a store records its fingerprint.
 pub async fn store_imported_identity(
     secrets: &dyn SecretStore,
+    record: &dyn FingerprintRecord,
     bundle: &str,
 ) -> Result<(), ImportedIdentityError> {
-    secrets
-        .set_secret(&HandoverIdentity::secret_key(), Some(bundle))
+    let identity = HandoverIdentity::from_pem(bundle)
+        .map_err(|error| ImportedIdentityError::Unusable(error.to_string()))?;
+    identity
+        .store(secrets, record)
         .await
-        .map_err(|error| ImportedIdentityError::Store(error.to_string()))
+        .map_err(|error| match error {
+            IdentityError::Record(error) => ImportedIdentityError::Record(error.to_string()),
+            error => ImportedIdentityError::Store(error.to_string()),
+        })
 }
 
 fn pem_block(tag: &str, der: &[u8]) -> String {

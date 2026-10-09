@@ -29,6 +29,13 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
+/// The fingerprint record under `support`, as the app keeps it.
+fn record_in(support: &Path) -> Arc<crate::handover::FingerprintFile> {
+    Arc::new(crate::handover::FingerprintFile::in_support_directory(
+        support,
+    ))
+}
+
 fn identity_der() -> Vec<u8> {
     std::fs::read(repository().join("Tests/Fixtures/handover/test-identity.der")).unwrap()
 }
@@ -464,6 +471,7 @@ struct Step {
     preferences: Arc<FilePreferences>,
     keychain: Arc<FakeKeychain>,
     raw: Arc<CountingSecrets>,
+    record: Arc<crate::handover::FingerprintFile>,
     graph: GraphImport,
     import: Arc<ImportStep>,
     reloads: Arc<AtomicUsize>,
@@ -496,7 +504,8 @@ fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) ->
         }
     });
     let pending = pending(launch_at_home(preferences.clone(), keychain.clone()));
-    let graph = GraphImport::new(pending, raw.clone());
+    let record = record_in(dir.path());
+    let graph = GraphImport::new(pending, raw.clone(), record.clone());
     let reloads = Arc::new(AtomicUsize::new(0));
     let counted = reloads.clone();
     let import = Arc::new(graph.step(
@@ -510,6 +519,7 @@ fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) ->
         preferences,
         keychain,
         raw,
+        record,
         graph,
         import,
         reloads,
@@ -707,6 +717,121 @@ fn a_refused_replace_counts_as_denied_and_try_again_repeats_only_the_store() {
     }
 }
 
+/// A fingerprint record that refuses every write while `refuse` is set,
+/// over the app's file.
+struct RefusingRecord {
+    file: Arc<crate::handover::FingerprintFile>,
+    refuse: std::sync::atomic::AtomicBool,
+}
+
+impl FingerprintRecord for RefusingRecord {
+    fn recorded(&self) -> BoundaryResult<Option<String>> {
+        self.file.recorded()
+    }
+
+    fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err("No space left on device".into());
+        }
+        self.file.record(fingerprint)
+    }
+}
+
+/// The handover's own load, as the listener does it, over `secrets` and
+/// `record` with no phone paired.
+fn load_identity(
+    secrets: &dyn SecretStore,
+    record: &dyn FingerprintRecord,
+) -> Result<HandoverIdentity, steno_handover::IdentityError> {
+    let store = steno_core::Store::in_memory().unwrap();
+    RUNTIME.block_on(HandoverIdentity::load_or_create(
+        secrets,
+        record,
+        &store,
+        "Steno on a test",
+        chrono::Utc::now(),
+    ))
+}
+
+/// The Swift identity replaces a desktop-id build's, whose fingerprint
+/// that build recorded. Its secret is written but its fingerprint is not:
+/// the step does not count that as done (Waiting with Try again, no
+/// marker, no `IMPORT_RAN`), and the handover's load refuses the stored
+/// identity rather than mint. Try again stores it again, now with its
+/// fingerprint, and the load accepts the Swift identity.
+#[test]
+fn a_fingerprint_not_recorded_after_the_store_is_surfaced_and_try_again_records_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let desktop =
+        HandoverIdentity::mint("Steno on a desktop-id build", chrono::Utc::now()).unwrap();
+    let raw = Arc::new(CountingSecrets::default());
+    let file = record_in(dir.path());
+    RUNTIME.block_on(desktop.store(&raw.inner, &*file)).unwrap();
+    let keychain = Arc::new(FakeKeychain {
+        stored_identity: Ok(true),
+        ..FakeKeychain::swift_app()
+    });
+    let preferences = preferences(&dir);
+    let record = Arc::new(RefusingRecord {
+        file: file.clone(),
+        refuse: std::sync::atomic::AtomicBool::new(true),
+    });
+    let graph = GraphImport::new(
+        pending(launch_at_home(preferences.clone(), keychain.clone())),
+        raw.clone(),
+        record.clone(),
+    );
+    let step = graph.step(RUNTIME.handle().clone(), Box::new(|| {}));
+
+    let status = step.run();
+    assert_eq!(status.stage, SwiftImportStage::Waiting);
+    assert_eq!(status.error.as_deref(), Some(FAILED_EXPORT));
+    assert_eq!(
+        stored_fingerprint(&*raw),
+        FIXTURE_FINGERPRINT,
+        "the secret was written"
+    );
+    assert_eq!(
+        file.recorded().unwrap(),
+        Some(hex(&desktop.fingerprint())),
+        "the desktop-id fingerprint is still the recorded one"
+    );
+    assert_eq!(*keychain.marker.lock().unwrap(), Ok(false), "no marker");
+    assert_eq!(keychain.count("mark done"), 0);
+    assert!(!preferences.flag(IMPORT_RAN_KEY));
+    assert_eq!(
+        graph.gate.handover(),
+        HandoverGate::Waiting(WaitReason::ImportDenied)
+    );
+    assert!(
+        matches!(
+            load_identity(&raw.inner, &*file),
+            Err(steno_handover::IdentityError::Unavailable(
+                steno_handover::Unavailability::Replaced
+            ))
+        ),
+        "the listener refuses it, and mints nothing"
+    );
+    assert_eq!(stored_fingerprint(&*raw), FIXTURE_FINGERPRINT);
+
+    record.refuse.store(false, Ordering::SeqCst);
+    assert_eq!(step.run().stage, SwiftImportStage::Done);
+    assert_eq!(
+        keychain.count("export"),
+        1,
+        "Try again repeats the store only"
+    );
+    assert_eq!(
+        file.recorded().unwrap().as_deref(),
+        Some(FIXTURE_FINGERPRINT)
+    );
+    assert_eq!(*keychain.marker.lock().unwrap(), Ok(true));
+    assert!(preferences.flag(IMPORT_RAN_KEY));
+    assert_eq!(graph.gate.handover(), HandoverGate::Ready);
+    let loaded = load_identity(&raw.inner, &*file).unwrap();
+    assert_eq!(hex(&loaded.fingerprint()), FIXTURE_FINGERPRINT);
+}
+
 /// A certificate query that failed may have hidden the Swift identity:
 /// the import stays pending rather than end, so the listener cannot mint
 /// over it.
@@ -810,7 +935,7 @@ fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
     let keychain = Arc::new(FakeKeychain::denying_the_key());
     let again = pending(launch_at_home(first.preferences.clone(), keychain.clone()));
     assert_eq!(again.key, LaunchKey::Denied);
-    let graph = GraphImport::new(again, first.raw.clone());
+    let graph = GraphImport::new(again, first.raw.clone(), first.record.clone());
     first.raw.reads.lock().unwrap().clear();
     let key = SecretKey::llm_api_key();
     assert_eq!(read(&*graph.secrets, &key), None);
@@ -1059,6 +1184,61 @@ async fn a_waiting_gate_keeps_the_listener_closed_until_the_identity_came_over()
         "FCF0D2A1-D2CE-48F7-BAFF-E17FD2E9C814",
         "the listener is over the Swift identity"
     );
+    app.shutdown();
+}
+
+/// D5 through the handover's guard: a desktop-id build ran first, so the
+/// secret store holds the identity it minted and its fingerprint is
+/// recorded. The Swift identity replaces it at the step, with its
+/// fingerprint, so the listener built behind the gate loads the Swift
+/// identity instead of refusing it as replaced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_swift_identity_that_replaced_a_desktop_id_one_is_the_one_the_listener_loads() {
+    use steno_handover::FingerprintRecord as _;
+    use steno_host::services::Handover as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+    let desktop = crate::build(test_options(paths.clone())).unwrap();
+    let desktop_id = desktop.handover.as_deref().unwrap().mac_id();
+    assert!(
+        !desktop_id.is_empty(),
+        "the desktop-id build minted an identity"
+    );
+    desktop.shutdown();
+    drop(desktop);
+    let record = crate::handover::FingerprintFile::in_support_directory(&paths.support_directory);
+    let recorded = record
+        .recorded()
+        .unwrap()
+        .expect("its fingerprint is recorded");
+    assert_ne!(recorded, FIXTURE_FINGERPRINT);
+
+    let keychain = Arc::new(FakeKeychain {
+        stored_identity: Ok(true),
+        ..FakeKeychain::swift_app()
+    });
+    let app = build_over(paths, keychain);
+    let step = app.services.swift_import.clone().unwrap();
+    let status = tokio::task::spawn_blocking(move || step.run())
+        .await
+        .unwrap();
+    assert_eq!(status.stage, SwiftImportStage::Done);
+    assert_eq!(
+        record.recorded().unwrap().as_deref(),
+        Some(FIXTURE_FINGERPRINT)
+    );
+    let gated = app.gated_handover.clone().unwrap();
+    let mut failure = gated.failure();
+    let mut follow = tokio::spawn(gated.clone().follow(|| {}));
+    tokio::select! {
+        failed = failure.wait_for(Option::is_some) => {
+            panic!("the listener refused the Swift identity: {:?}", *failed.unwrap());
+        }
+        opened = &mut follow => opened.unwrap(),
+    }
+    assert_eq!(gated.mac_id(), "FCF0D2A1-D2CE-48F7-BAFF-E17FD2E9C814");
+    assert_ne!(gated.mac_id(), desktop_id);
     app.shutdown();
 }
 
@@ -1351,7 +1531,11 @@ fn failed_attribute_queries_count_as_items_that_may_prompt() {
     let pending = pending(launch_at_home(preferences(&dir), keychain.clone()));
     assert_eq!(pending.key, LaunchKey::Unread(ApiKeyItem::Other));
     assert!(pending.replaces_identity);
-    let graph = GraphImport::new(pending, Arc::new(CountingSecrets::default()));
+    let graph = GraphImport::new(
+        pending,
+        Arc::new(CountingSecrets::default()),
+        record_in(dir.path()),
+    );
     let step = graph.step(RUNTIME.handle().clone(), Box::new(|| {}));
     assert_eq!(
         step.status().prompts,
@@ -1393,11 +1577,16 @@ fn the_marker_comes_after_the_identity_and_a_crash_between_them_stores_the_same_
     let raw = Arc::new(CountingSecrets::default());
     let (_, bundle) = decode_pkcs12(&identity_pkcs12("p"), "p", &identity_der()).unwrap();
     RUNTIME
-        .block_on(store_imported_identity(&*raw, &bundle))
+        .block_on(store_imported_identity(
+            &*raw,
+            &*record_in(dir.path()),
+            &bundle,
+        ))
         .unwrap();
     let graph = GraphImport::new(
         pending(launch_at_home(preferences(&dir), keychain.clone())),
         raw.clone(),
+        record_in(dir.path()),
     );
     let rerun = graph.step(RUNTIME.handle().clone(), Box::new(|| {}));
     assert_eq!(rerun.run().stage, SwiftImportStage::Done);
@@ -1538,7 +1727,7 @@ async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
             Arc::new(keychain),
         );
         let secrets = Arc::new(InMemorySecretStore::new());
-        GraphImport::new(pending(launched), secrets)
+        GraphImport::new(pending(launched), secrets, record_in(dir.path()))
     };
     let passes = |built: &crate::pipeline::BuiltPipeline| {
         let dependencies = &built.dependencies;
@@ -1653,6 +1842,7 @@ async fn app_behind_a_pending_import(
             Arc::new(FakeKeychain::swift_app()),
         )),
         secrets,
+        record_in(&support),
     );
     let make = keyed_make(store, &graph.secrets);
     app.pipeline = Arc::new(crate::pipeline::CurrentPipeline::new(

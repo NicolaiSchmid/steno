@@ -22,9 +22,11 @@
 //!   listener until the step ends.
 //! - **[`ImportStep`]**, the onboarding step's half, reads the Swift API key,
 //!   exports the handover identity and stores it as the `handover-identity`
-//!   entry, replacing a desktop-id build's. A denied or failed export or
-//!   store never mints an identity and never replaces one: the handover
-//!   waits ([`HandoverGate`]) and the step offers Try again.
+//!   entry, replacing a desktop-id build's, with its fingerprint recorded
+//!   (`handover-identity.json`, [`crate::handover::FingerprintFile`]) so
+//!   the handover's guard accepts it. A denied or failed export or store
+//!   never mints an identity and never replaces one: the handover waits
+//!   ([`HandoverGate`]) and the step offers Try again.
 //!
 //! | Part | Items |
 //! |------|-------|
@@ -55,8 +57,9 @@
 //! | Launch while Pending | as above | Pending | resume, re-export, sweep and recovery wait until the gate leaves Pending |
 //! | Run: the key read | read | | `KEY_READ` |
 //! | Run: the key refused | withheld | | `KEY_READ`, `KEY_DENIED` (unless a key was saved meanwhile) |
-//! | Run: identity stored | | Ready | the identity, then the marker, then `IMPORT_RAN` |
+//! | Run: identity stored | | Ready | the identity and its fingerprint, then the marker, then `IMPORT_RAN` |
 //! | Run: export or store denied or failed | | Waiting (Try again) | nothing |
+//! | Run: identity stored, its fingerprint not recorded | | Waiting (Try again repeats the store) | the identity; no marker, no `IMPORT_RAN` |
 //! | Not now, or the window closed | withheld (open when no key item) | Waiting | nothing: the step returns at the next launch |
 //! | A key saved in Settings | open | | the key; `KEY_DENIED` cleared |
 //! | Later launch with `KEY_DENIED` | withheld until a key is saved | | nothing |
@@ -80,6 +83,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use steno_core::protocols::BoundaryResult;
 use steno_core::{SecretKey, SecretStore, async_trait};
+use steno_handover::FingerprintRecord;
 use steno_host::onboarding::OnboardingViewModel;
 use steno_host::services::{Preferences as _, SwiftImport, SwiftImportStage, SwiftImportStatus};
 use tokio::sync::watch;
@@ -615,6 +619,8 @@ pub struct GraphImport {
     /// The store every read in the graph goes through.
     pub secrets: Arc<dyn SecretStore>,
     raw_secrets: Arc<dyn SecretStore>,
+    /// Where the imported identity's fingerprint is recorded.
+    record: Arc<dyn FingerprintRecord>,
     keychain: Arc<dyn SwiftKeychain>,
     /// The step's items, from the launch half.
     items: StepItems,
@@ -623,9 +629,14 @@ pub struct GraphImport {
 }
 
 impl GraphImport {
-    /// Wraps `secrets` for the graph.
+    /// Wraps `secrets` for the graph; the step stores the identity in
+    /// `secrets` and its fingerprint in `record`.
     #[must_use]
-    pub fn new(pending: PendingImport, secrets: Arc<dyn SecretStore>) -> Self {
+    pub fn new(
+        pending: PendingImport,
+        secrets: Arc<dyn SecretStore>,
+        record: Arc<dyn FingerprintRecord>,
+    ) -> Self {
         let key = match pending.key {
             LaunchKey::Unread(ApiKeyItem::Missing) => KeyGate::Closed,
             LaunchKey::Unread(_) | LaunchKey::Denied => KeyGate::Withheld,
@@ -641,6 +652,7 @@ impl GraphImport {
             preferences: pending.preferences,
             gate,
             raw_secrets: secrets,
+            record,
             keychain: pending.keychain,
             items: StepItems {
                 read_key: pending.key == LaunchKey::Unread(ApiKeyItem::Swift),
@@ -663,6 +675,7 @@ impl GraphImport {
             keychain: self.keychain.clone(),
             preferences: self.preferences.clone(),
             secrets: self.raw_secrets.clone(),
+            record: self.record.clone(),
             gate: self.gate.clone(),
             reload,
             runtime,
@@ -714,8 +727,9 @@ struct StepState {
 /// as PKCS#12 through `steno-macos`, one prompt), decodes it
 /// ([`decode_pkcs12`]) and stores it as the PEM entry `handover-identity`
 /// ([`store_imported_identity`]), replacing a desktop-id build's entry (one
-/// more prompt, as `keyring` reads an item before it overwrites it): the
-/// Swift identity is the one the paired phones pin.
+/// more prompt, as `keyring` reads an item before it overwrites it), and
+/// records its fingerprint: the Swift identity is the one the paired
+/// phones pin.
 ///
 /// A denied key read leaves the key empty, and Settings asks for it
 /// ([`KEY_DENIED_KEY`]). A denied or failed export or store leaves the
@@ -734,6 +748,8 @@ pub struct ImportStep {
     preferences: Arc<FilePreferences>,
     /// The store behind the gate: the identity is written here.
     secrets: Arc<dyn SecretStore>,
+    /// Where the identity's fingerprint is recorded.
+    record: Arc<dyn FingerprintRecord>,
     gate: Arc<ImportGate>,
     reload: Box<dyn Fn() + Send + Sync>,
     runtime: tokio::runtime::Handle,
@@ -828,11 +844,12 @@ impl ImportStep {
     }
 
     /// Stores the identity a failed store kept, or else the one an export
-    /// brings now, then writes the [`IMPORT_DONE_ENTRY`] marker. A store
-    /// that fails keeps the bundle for Try again; while a stored entry is
-    /// being replaced its failure counts as the prompt for that entry
-    /// denied (the `keyring` crate keeps the status in its text only),
-    /// which Always Allow fixes.
+    /// brings now, with its fingerprint, then writes the
+    /// [`IMPORT_DONE_ENTRY`] marker. A store that fails keeps the bundle for
+    /// Try again, and writes no marker, also when only the fingerprint was
+    /// not recorded; while a stored entry is being replaced a failed write
+    /// counts as the prompt for that entry denied (the `keyring` crate
+    /// keeps the status in its text only), which Always Allow fixes.
     fn import_identity(&self) -> Result<(), &'static str> {
         if self.state().marker_unknown {
             // Only a clean not-found is a first run: a marker that cannot
@@ -854,13 +871,19 @@ impl ImportStep {
         };
         let stored = block_on(
             &self.runtime,
-            store_imported_identity(&*self.secrets, &bundle),
+            store_imported_identity(&*self.secrets, &*self.record, &bundle),
         );
         stored.map_err(|error| {
             tracing::warn!(%error, "the Swift handover identity was not stored");
             let mut state = self.state();
             state.bundle = Some(bundle);
-            export_error(state.items.replaces_identity)
+            // A fingerprint that was not recorded is no keychain refusal:
+            // the handover refuses the stored identity until Try again
+            // stores it with its fingerprint.
+            match error {
+                ImportedIdentityError::Record(_) => FAILED_EXPORT,
+                _ => export_error(state.items.replaces_identity),
+            }
         })?;
         // Second, after the identity: a crash between the two leaves a
         // rerun that stores the same Swift identity again. A marker that
