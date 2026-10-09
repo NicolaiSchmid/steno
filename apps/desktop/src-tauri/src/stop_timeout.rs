@@ -1,9 +1,10 @@
 //! Linux: the systemd drop-ins that give Steno the time its save needs
-//! when the session stops the unit Steno runs in. systemd sends SIGTERM
-//! and kills the app 5 s later in both units below, while the save the app
-//! runs on SIGTERM may take up to `SHUTDOWN_PATIENCE` (ten seconds) and the
-//! process ends `EXIT_GRACE` (two) after it at the latest. Each drop-in
-//! raises the timeout to 20 s (`DropIn`):
+//! when the session stops the unit Steno runs in. systemd sends SIGTERM,
+//! and `SIGKILL` once the stop has waited out the unit's `TimeoutStopSec`:
+//! 5 s in both units below, while the save the app runs on SIGTERM may
+//! take up to `SHUTDOWN_PATIENCE` (ten seconds) and the process ends
+//! `EXIT_GRACE` (two) after it at the latest. Each drop-in raises the
+//! timeout to 20 s (`DropIn`):
 //!
 //! - **The autostart unit** (`DropIn::AUTOSTART`): a desktop that runs XDG
 //!   autostart through systemd (KDE Plasma, uwsm sessions such as

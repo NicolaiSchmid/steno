@@ -225,6 +225,11 @@ pub fn relaunching() {
 /// now, with the autostart unit's drop-in, and no reload, so the unit
 /// stays as it is until it has stopped. Not for an update's relaunch, nor
 /// while the system manages the login item.
+/// The one save that may not end the process is the one at an Xfce query
+/// on Wayland, which relaunches the app when the session goes on
+/// (`session_end::SaveAndQuit::of`); xfce4-session starts autostart
+/// entries itself, so that app is not the autostart unit, and a relaunch
+/// that were would put the entry back (`AtLaunch::Restore`).
 #[cfg(target_os = "linux")]
 pub fn turn_off_at_exit(app: &AppHandle) {
     if packaged::login_item_is_managed() {
