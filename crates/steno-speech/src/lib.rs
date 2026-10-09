@@ -26,7 +26,8 @@
 //!   encoder on `DirectML` on Windows when the settings ask and the probe
 //!   passes ([`EncoderProvider`]).
 //! - [`model_store`]: the manifest, its two hosts and the checksummed,
-//!   resumable download.
+//!   resumable download, and [`Install`], whether a missing file may be
+//!   downloaded.
 //! - [`engine`]: [`OnnxSpeechEngine`], the in-process `SpeechEngine` the
 //!   sidecar hosts.
 //! - [`sidecar`]: [`SidecarSpeechEngine`], the `SpeechEngine` over the

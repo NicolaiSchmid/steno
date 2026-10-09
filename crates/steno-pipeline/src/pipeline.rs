@@ -191,7 +191,7 @@ pub enum ReprocessError {
     /// for them ([`ModelWaits`]), not for a run: an install, a reload that
     /// finds them installed or the next launch starts it. The caller says what
     /// [`PipelineFailure::MODELS_MISSING`] says.
-    #[error("meeting {0} waits for its speech models")]
+    #[error("meeting {0} waits for the speech models to be installed")]
     WaitingForModels(Uuid),
     /// The meeting is finished, but [`process_again`] does not offer it
     /// ([`Meeting::offers_process_again`]): today, it is ready.
@@ -1270,8 +1270,8 @@ impl ProcessingPipeline {
     /// on a pipeline a reload retired. A waiting meeting another operation
     /// holds (a summary rerun, a re-export, or the brief claim of a
     /// "Process again" from a stale detail, which then refuses it) stays
-    /// waiting until the next resume (another install's, a reload's that
-    /// finds the models installed, or the launch's), and so do all of them
+    /// waiting until the next resume (another install, a reload that finds
+    /// the models installed, or the launch), and so do all of them
     /// when the store fails.
     pub fn resume_waiting(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {

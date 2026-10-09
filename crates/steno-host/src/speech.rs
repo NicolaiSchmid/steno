@@ -55,7 +55,10 @@ impl ModelAsset {
     /// segmentation 3.0 (MIT) and `WeSpeaker` ResNet34-LM (CC-BY-4.0, from
     /// its `VoxCeleb` training data): `steno_diarize::models::LICENCE`,
     /// which a `steno-services` test pins it to. Swift's line named the
-    /// Apache-2.0 of its `CoreML` diarizer's upstream.
+    /// Apache-2.0 of its `CoreML` diarizer's upstream. The diarizer's
+    /// [`display_name`](Self::display_name) and
+    /// [`source_repo`](Self::source_repo) stay Swift's copy; the services
+    /// override all three with the ONNX models'.
     #[must_use]
     pub fn licence(self) -> &'static str {
         match self {
