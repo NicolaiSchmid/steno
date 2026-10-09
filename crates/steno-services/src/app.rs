@@ -475,9 +475,7 @@ fn preferences_retiring_the_engine(
         preferences.set_flag(steno_host::setup::engine_notice::PENDING_KEY, true);
     });
     if let Err(error) = retired {
-        warnings.push(format!(
-            "The speech engine setting could not be updated: {error}"
-        ));
+        warnings.push(format!("Steno could not switch to Parakeet v3: {error}"));
     }
     preferences
 }
@@ -1577,6 +1575,48 @@ mod tests {
         );
         assert!(FilePreferences::new(&preferences).flag(PENDING_KEY));
         assert!(app.services.preferences.flag(PENDING_KEY));
+        app.pipeline.quit();
+    }
+
+    /// The notice's pending flag is written inside the retirement's
+    /// transaction, before the engine's row changes: when the database
+    /// refuses the update, the flag is pending all the same, the build
+    /// warns, and the stored engine is as it was, for the next launch to
+    /// retire.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retirement_the_database_refuses_leaves_the_notice_pending_and_warns() {
+        use steno_host::setup::engine_notice::PENDING_KEY;
+
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let paths = StenoPaths::new(&support);
+        let store = open_store(&paths.database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        "whisperkit-large-v3-turbo".clone_into(&mut settings.speech_engine_id);
+        store.save_settings(&settings).unwrap();
+        drop(store);
+        rusqlite::Connection::open(paths.database_path())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse_the_engine BEFORE UPDATE ON setting \
+                 WHEN OLD.key = 'speechEngineID' AND NEW.value <> OLD.value \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+
+        let app = build(options_under(&support)).unwrap();
+        assert!(
+            app.startup_warnings
+                .iter()
+                .any(|warning| warning.starts_with("Steno could not switch to Parakeet v3")),
+            "{:?}",
+            app.startup_warnings
+        );
+        assert_eq!(
+            app.store.settings().unwrap().speech_engine_id,
+            "whisperkit-large-v3-turbo"
+        );
+        assert!(FilePreferences::new(support.join("preferences.json")).flag(PENDING_KEY));
         app.pipeline.quit();
     }
 
