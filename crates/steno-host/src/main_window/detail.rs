@@ -44,9 +44,10 @@ pub struct MeetingDetailViewModel {
     /// `Settings::default_retention`, followed through the settings.
     pub default_retention: AudioRetention,
     pub llm_configured: bool,
-    /// The API key is withheld from the pipeline now
-    /// ([`ApiKeyGate`](crate::services::ApiKeyGate)), set by the host as it
-    /// builds the snapshot: a skipped summary says so, and none re-runs.
+    /// The API key is withheld from the pipeline now for the stored
+    /// endpoint ([`WithheldApiKey`](crate::services::WithheldApiKey)), set
+    /// by the host as it builds the snapshot and after every command: a
+    /// skipped summary says so, and none re-runs.
     pub key_withheld: bool,
     pub vault_configured: bool,
     /// The launch stopped re-exporting the meeting

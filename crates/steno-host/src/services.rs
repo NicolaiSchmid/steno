@@ -624,15 +624,18 @@ pub trait SwiftImport: Send + Sync {
     fn skip(&self) -> SwiftImportStatus;
 }
 
-/// Whether the API key is withheld from the pipeline now, so it runs no
-/// summary: the Swift import's gate before its step ran, after Not now or
-/// after a refused keychain read, until a key is saved (plan
+/// Whether the API key is withheld from the pipeline now: the Swift
+/// import's gate before its step ran, after Not now or after a refused
+/// keychain read, until a key is saved (plan
 /// `.plans/2026-10-07-stable-promotion.md`, S6). `None` in [`Services`]
-/// without such a gate. The meeting detail then says why a summary was
-/// skipped, and offers no re-run until the key is there. Rust only: the
-/// Swift app read its key itself.
-pub trait ApiKeyGate: Send + Sync {
-    fn key_withheld(&self) -> bool;
+/// without such a gate. Rust only: the Swift app read its key itself.
+pub trait WithheldApiKey: Send + Sync {
+    /// Whether the key is withheld for an endpoint that needs it, which
+    /// then runs no summary: the pipeline asks the same. The meeting
+    /// detail then says why a summary was skipped, and offers no re-run
+    /// until the key is there. `ChatGPT` summaries (the Codex backend) need
+    /// no key, so for them this is false.
+    fn withheld(&self, settings: &Settings) -> bool;
 }
 
 /// Everything the host is handed at construction, one `Arc` each so a test
@@ -661,8 +664,8 @@ pub struct Services {
     pub secrets: Arc<dyn steno_core::SecretStore>,
     /// The onboarding step of the Swift import, while it has work to do.
     pub swift_import: Option<Arc<dyn SwiftImport>>,
-    /// The gate that may withhold the API key, while there is one.
-    pub api_key_gate: Option<Arc<dyn ApiKeyGate>>,
+    /// What may withhold the API key, while there is such a gate.
+    pub withheld_api_key: Option<Arc<dyn WithheldApiKey>>,
 }
 
 /// `std::fs` as the [`FileSystem`]: the product's implementation, which

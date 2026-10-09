@@ -10,7 +10,7 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`app`] | [`AppOptions`], [`build`], [`build_with_import`], [`App`] with `host()`, `launch()`, `launch_finished()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`], [`open_store`], [`lock_database`] with [`LOCK_PATIENCE`](app::LOCK_PATIENCE) |
+//! | [`app`] | [`AppOptions`], [`build`], [`build_with_import`], [`App`] with `host()`, `launch()`, `launch_finished()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`], [`open_store`], [`lock_database`] with [`LOCK_PATIENCE`](app::LOCK_PATIENCE), [`GraphSecrets`](app::GraphSecrets), the graph's secret store in its three layers (the platform store, `KeepsApiKey`, the import's gate) |
 //! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) with the [`BuiltEngine`](pipeline::BuiltEngine) it was built with, and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
 //! | [`audio_folders`] | Where recordings were written, beside the database: each recording's and phone upload's folder, for crash recovery and the adoption of a master with no meeting, and the known folders |

@@ -578,12 +578,7 @@ impl Host {
             }
             BridgeTopic::MeetingDetail => {
                 self.sync_detail(inner);
-                let withheld = self
-                    .shared
-                    .services
-                    .api_key_gate
-                    .as_ref()
-                    .is_some_and(|gate| gate.key_withheld());
+                let withheld = self.key_withheld(inner);
                 if let Some(detail) = inner.detail.as_mut() {
                     detail.key_withheld = withheld;
                 }
@@ -1107,7 +1102,29 @@ impl Host {
                 self.reload_sections(inner);
             }
         }
+        // A key saved, or the import's step over, may release a withheld
+        // key without a settings change: the detail follows it as well.
+        let withheld = self.key_withheld(inner);
+        if let Some(detail) = inner.detail.as_mut()
+            && detail.key_withheld != withheld
+        {
+            detail.key_withheld = withheld;
+            inner.publisher.schedule(BridgeTopic::MeetingDetail);
+        }
         self.refresh_subtitles(inner);
+    }
+
+    /// Whether the API key is withheld for the stored endpoint now
+    /// ([`WithheldApiKey`](crate::services::WithheldApiKey)), as the
+    /// pipeline asks it.
+    fn key_withheld(&self, inner: &Inner) -> bool {
+        match (
+            &self.shared.services.withheld_api_key,
+            &inner.app.stored_settings,
+        ) {
+            (Some(withheld), Some(settings)) => withheld.withheld(settings),
+            _ => false,
+        }
     }
 
     /// Every Settings section's `load`, as `SettingsBridge.load()` ran them

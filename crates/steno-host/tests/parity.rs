@@ -752,7 +752,7 @@ fn onboarding_permissions() {
 #[test]
 fn meeting_detail_key_withheld() {
     let harness = Harness::builder()
-        .with_api_key_gate(true)
+        .with_withheld_api_key(true)
         .seed(|store, fakes| {
             populate_sample(store, fakes);
             configure_llm(store, "qwen3-8b");

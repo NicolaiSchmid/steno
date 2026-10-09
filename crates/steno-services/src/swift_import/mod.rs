@@ -40,9 +40,13 @@
 //! | The Swift app's names | [`SWIFT_DEFAULTS_DOMAIN`], [`SWIFT_IDENTITY_LABEL`], [`SWIFT_API_KEY_LABEL`] |
 //!
 //! The whole state machine, one row per event. The key gate is what the
-//! graph's API key reads answer ([`KeyGate`]): *withheld* answers no key
-//! and the pipeline runs no LLM pass (the meeting completes without a
-//! summary, which can be run again once a key is saved); *read* is the
+//! graph's API key reads answer ([`KeyGate`]): *closed* is no key item,
+//! so every read answers no key and the passes run keyless, until the
+//! step ran and opens it; *withheld* answers no key, and for an endpoint
+//! that needs the key the pipeline runs no LLM pass, neither the cleanup
+//! nor the summary (the meeting completes with its raw transcript and no
+//! summary, which can be run again once a key is saved; `ChatGPT` summaries
+//! keep running, [`ImportGate::withholds_summaries`]); *read* is the
 //! value the step read; *open* is the secret store. The handover gate
 //! ([`HandoverGate`]) is what the listener follows.
 //!
@@ -50,7 +54,7 @@
 //! |-------|----------|---------------|---------|
 //! | Launch, `IMPORT_RAN` set, or the [`IMPORT_DONE_ENTRY`] marker found | none, or withheld while `KEY_DENIED` | none (listener at launch) | `IMPORT_RAN` when the marker found it |
 //! | Launch, no Swift certificate | as above | none | `IMPORT_RAN` |
-//! | Launch, certificate found or its query failed, key unread | withheld (open when no key item) | Pending | nothing |
+//! | Launch, certificate found or its query failed, key unread | withheld (closed when no key item) | Pending | nothing |
 //! | Launch, as above, `KEY_READ` set | open | Pending | nothing |
 //! | Launch, as above, `KEY_DENIED` set | withheld | Pending | nothing |
 //! | Launch, the marker query failed | as above | Pending; the run replaces nothing until a query answers | nothing |
@@ -68,8 +72,11 @@
 //! handover gate is published, so a launch's held work runs on the
 //! reloaded pipeline. Once the marker or `IMPORT_RAN` exists the import
 //! never touches `handover-identity` again: a `preferences.json` set aside
-//! cannot bring the Swift identity back over one stored since (Pair
-//! again, in Settings, must keep the marker). The import is skipped
+//! cannot bring the Swift identity back over one stored since. Pair
+//! again (Settings, a later change) must keep the marker, and must write
+//! it ([`SwiftKeychain::mark_import_done`]) before it stores a new
+//! identity: the step only logs a marker it could not write, which leaves
+//! `IMPORT_RAN` as the one guard. The import is skipped
 //! altogether under `STENO_SMOKE_SECONDS` and whenever `HOME` is not the
 //! account's home directory ([`LaunchContext`]), so a smoke run or a test
 //! with a scratch `HOME` never touches the user's keychain or preferences.
@@ -82,7 +89,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use steno_core::protocols::BoundaryResult;
-use steno_core::{SecretKey, SecretPlace, SecretStore, async_trait};
+use steno_core::{SecretKey, SecretPlace, SecretStore, Settings, async_trait};
 use steno_handover::FingerprintRecord;
 use steno_host::onboarding::OnboardingViewModel;
 use steno_host::services::{Preferences as _, SwiftImport, SwiftImportStage, SwiftImportStatus};
@@ -116,7 +123,9 @@ pub const IMPORT_RAN_KEY: &str = "steno.swiftImportRan";
 /// `handover-identity` again, though `preferences.json` was set aside. An
 /// item of this app's own, found by an attribute query, so neither its
 /// write nor its lookup prompts. Pair again (Settings) must keep it, or a
-/// later launch would bring the Swift identity back over the new one.
+/// later launch would bring the Swift identity back over the new one, and
+/// must write it before it stores the new identity, as the step only logs
+/// a failed write.
 pub const IMPORT_DONE_ENTRY: &str = "swift-import-done";
 /// Set once the step read the Swift API key, or was refused: a later
 /// launch whose import still waits for the identity reads the key as it
@@ -443,7 +452,8 @@ enum KeyGate {
     Closed,
     /// A key is in the keychain that this launch does not read (before the
     /// step, after Not now or a refused read): every read answers no key,
-    /// and the pipeline runs no LLM pass ([`ImportGate::key_withheld`]).
+    /// and the pipeline runs no LLM pass for an endpoint that needs the
+    /// key ([`ImportGate::withholds_summaries`]).
     Withheld,
     /// The value the step read (`None` when the item was gone, or the
     /// user cleared it), answered without asking the keychain again.
@@ -465,7 +475,10 @@ impl std::fmt::Debug for KeyGate {
 }
 
 /// The shared state of a pending import: the handover gate and the key
-/// gate.
+/// gate. It is also the gate of a refused key read without a pending
+/// import ([`key_denied_secrets`]): there only its key half counts, and
+/// its handover half stays `Pending` for good, so nothing may follow
+/// [`Self::handover`] on that one.
 #[derive(Debug)]
 pub struct ImportGate {
     handover: watch::Sender<HandoverGate>,
@@ -501,12 +514,24 @@ impl ImportGate {
         let _ = gate.wait_for(|gate| *gate != HandoverGate::Pending).await;
     }
 
-    /// Whether the API key is withheld now: the graph builds no LLM pass
-    /// for an endpoint that needs the key, so a meeting completes without
-    /// a summary rather than fail at the summary.
+    /// Whether the API key is withheld now ([`KeyGate`]'s withheld state),
+    /// whatever the endpoint; [`Self::withholds_summaries`] is what the
+    /// graph asks.
     #[must_use]
     pub fn key_withheld(&self) -> bool {
         *self.key() == KeyGate::Withheld
+    }
+
+    /// Whether the graph runs no summaries now: the key is withheld and
+    /// the endpoint of `settings` needs it. The pipeline then builds no
+    /// LLM pass, so a meeting completes without a summary rather than fail
+    /// at it, and the meeting detail says why and offers no re-run. `ChatGPT`
+    /// summaries (the Codex backend) need no key and keep running.
+    #[must_use]
+    pub fn withholds_summaries(&self, settings: &Settings) -> bool {
+        self.key_withheld()
+            && steno_llm::LlmEndpoint::from_settings(settings)
+                .is_some_and(|endpoint| !endpoint.is_codex_backend())
     }
 
     fn set_handover(&self, gate: HandoverGate) {
@@ -518,11 +543,11 @@ impl ImportGate {
     }
 }
 
-/// The meeting detail asks the gate the pipeline asks
-/// ([`ImportGate::key_withheld`]).
-impl steno_host::services::ApiKeyGate for ImportGate {
-    fn key_withheld(&self) -> bool {
-        ImportGate::key_withheld(self)
+/// The meeting detail asks what the pipeline asks
+/// ([`ImportGate::withholds_summaries`]).
+impl steno_host::services::WithheldApiKey for ImportGate {
+    fn withheld(&self, settings: &Settings) -> bool {
+        self.withholds_summaries(settings)
     }
 }
 

@@ -1575,7 +1575,7 @@ fn the_detail_footer_and_summary_rows_follow_the_store() {
 #[test]
 fn a_summary_skipped_for_a_withheld_key_says_so_until_the_key_is_saved() {
     let harness = Harness::builder()
-        .with_api_key_gate(true)
+        .with_withheld_api_key(true)
         .seed(|store, fakes| {
             populate_sample(store, fakes);
             configure_llm(store, "qwen3-8b");
@@ -1602,7 +1602,7 @@ fn a_summary_skipped_for_a_withheld_key_says_so_until_the_key_is_saved() {
 
     *harness
         .fakes
-        .api_key_gate
+        .withheld_api_key
         .as_ref()
         .unwrap()
         .withheld
@@ -1613,6 +1613,63 @@ fn a_summary_skipped_for_a_withheld_key_says_so_until_the_key_is_saved() {
     assert_eq!(detail["summaryStatus"]["kind"], "skippedRunnable");
     assert_eq!(detail["summaryStatus"]["actionTitle"], "Run summary");
     assert_eq!(detail["canRerunSummary"], true);
+}
+
+/// A withheld key released without a settings change, by a key-only
+/// Summaries save or by the import's step, publishes the open detail
+/// again: its Run summary appears with the command, not with the next
+/// store poll.
+#[test]
+fn the_detail_goes_out_again_once_a_key_write_or_the_import_releases_the_key() {
+    for release in ["a key-only save", "the import's step"] {
+        let harness = Harness::builder()
+            .with_withheld_api_key(true)
+            .with_swift_import(1)
+            .seed(|store, fakes| {
+                populate_sample(store, fakes);
+                configure_llm(store, "qwen3-8b");
+                drop_sample_summary(store);
+            })
+            .build();
+        let _ = harness.snapshot(BridgeTopic::MeetingsList);
+        assert_eq!(
+            harness.snapshot(BridgeTopic::MeetingDetail)["canRerunSummary"],
+            false
+        );
+        harness.sink.clear();
+        // The real gate opens on the key's write and at the step's end.
+        *harness
+            .fakes
+            .withheld_api_key
+            .as_ref()
+            .unwrap()
+            .withheld
+            .lock()
+            .unwrap() = false;
+        if release == "a key-only save" {
+            let settings = harness.host.for_window(BridgeWindow::Settings);
+            settings
+                .settings_summaries_update(steno_bridge::SummariesUpdateParams {
+                    base_url: None,
+                    model: None,
+                    context_tokens: None,
+                    api_key: Some("sk-typed".to_owned()),
+                })
+                .unwrap();
+            settings.settings_summaries_save().unwrap();
+        } else {
+            harness.host.onboarding_import().unwrap();
+        }
+        let detail = harness
+            .sink
+            .last(BridgeTopic::MeetingDetail)
+            .unwrap_or_else(|| panic!("{release}: the detail did not go out"));
+        assert_eq!(detail["canRerunSummary"], true, "{release}");
+        assert_eq!(
+            detail["summaryStatus"]["kind"], "skippedRunnable",
+            "{release}"
+        );
+    }
 }
 
 /// Swift: `openURLAcceptsOnlyWebAndMailLinks`, `theAppPublishCarryingADeepLinkConsumesIt`.

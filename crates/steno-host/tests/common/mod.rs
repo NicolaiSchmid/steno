@@ -142,8 +142,8 @@ impl HarnessBuilder {
     }
 
     /// Adds a gate over the API key that withholds it while `withheld`.
-    pub fn with_api_key_gate(mut self, withheld: bool) -> Self {
-        self.fakes.api_key_gate = Some(Arc::new(steno_host::fakes::FakeApiKeyGate {
+    pub fn with_withheld_api_key(mut self, withheld: bool) -> Self {
+        self.fakes.withheld_api_key = Some(Arc::new(steno_host::fakes::FakeWithheldApiKey {
             withheld: std::sync::Mutex::new(withheld),
         }));
         self

@@ -920,10 +920,11 @@ fn a_gated_empty_key_write_leaves_the_stored_key_in_place() {
 }
 
 /// The graph's store is the import's gate over the app's `KeepsApiKey`,
-/// as `build` wraps them: an empty key write the gate swallows never
-/// reaches `KeepsApiKey`, so the key it kept for the pipeline stays; once
-/// a saved key opened the gate, `KeepsApiKey` keeps and drops the key as it
-/// does without an import.
+/// as the graph's one wiring function builds them
+/// (`crate::app::gated_secrets`): an empty key write the gate swallows
+/// never reaches `KeepsApiKey`, so the key it kept for the pipeline stays;
+/// once a saved key opened the gate, `KeepsApiKey` keeps and drops the key
+/// as it does without an import.
 #[test]
 fn a_write_the_gate_swallows_leaves_the_kept_key_and_an_open_gate_writes_through() {
     let dir = tempfile::tempdir().unwrap();
@@ -932,18 +933,15 @@ fn a_write_the_gate_swallows_leaves_the_kept_key_and_an_open_gate_writes_through
         key.clone(),
         "sk-swift".to_owned(),
     )]));
-    let kept = Arc::new(crate::secrets::KeepsApiKey::new(memory.clone()));
-    assert_eq!(read(&*kept, &key).as_deref(), Some("sk-swift"));
-    let graph = GraphImport::new(
-        pending(launch_at_home(
-            preferences(&dir),
-            Arc::new(FakeKeychain::swift_app()),
-        )),
-        kept.clone(),
-        record_in(dir.path()),
+    let (_graph, wired) = wired(dir.path(), FakeKeychain::swift_app(), memory.clone());
+    let kept = wired.kept.clone();
+    assert_eq!(
+        read(&*kept, &key).as_deref(),
+        Some("sk-swift"),
+        "KeepsApiKey reads the store behind no gate"
     );
     for cleared in [None, Some("")] {
-        set(&*graph.secrets, &key, cleared);
+        set(&*wired.secrets, &key, cleared);
         assert_eq!(
             kept.kept_api_key().as_deref(),
             Some("sk-swift"),
@@ -952,25 +950,25 @@ fn a_write_the_gate_swallows_leaves_the_kept_key_and_an_open_gate_writes_through
         assert_eq!(read(&*memory, &key).as_deref(), Some("sk-swift"));
     }
 
-    set(&*graph.secrets, &key, Some("sk-typed"));
+    set(&*wired.secrets, &key, Some("sk-typed"));
     assert_eq!(kept.kept_api_key().as_deref(), Some("sk-typed"));
     memory.fail_reads(Some("the keychain is locked"));
-    assert!(RUNTIME.block_on(graph.secrets.secret(&key)).is_err());
+    assert!(RUNTIME.block_on(wired.secrets.secret(&key)).is_err());
     assert_eq!(
         kept.kept_api_key().as_deref(),
         Some("sk-typed"),
         "a failed read keeps the key"
     );
     memory.fail_reads(None);
-    set(&*graph.secrets, &key, None);
+    set(&*wired.secrets, &key, None);
     assert_eq!(kept.kept_api_key(), None, "an open gate's removal drops it");
     assert_eq!(read(&*memory, &key), None);
 }
 
-/// The pipeline reads the key through the gate, as `build` wires it
-/// ([`crate::app::PipelineSecrets`]): behind a pending import its build
-/// asks the store behind the gate for no API key, though the
-/// `KeepsApiKey` it falls back on wraps that store.
+/// The pipeline reads the key through the gate, as the graph's one wiring
+/// function builds it (`crate::app::gated_secrets`): behind a pending
+/// import its build asks the store behind the gate for no API key, though
+/// the `KeepsApiKey` it falls back on wraps that store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_pipeline_reads_the_key_through_the_gate_and_not_the_store_behind_it() {
     let (dir, store) = crate::testing::temp_store();
@@ -985,31 +983,8 @@ async fn the_pipeline_reads_the_key_through_the_gate_and_not_the_store_behind_it
         .set_secret(&SecretKey::llm_api_key(), Some("sk-swift"))
         .await
         .unwrap();
-    let kept = Arc::new(crate::secrets::KeepsApiKey::new(raw.clone()));
-    let graph = GraphImport::new(
-        pending(launch_at_home(
-            preferences(&dir),
-            Arc::new(FakeKeychain::swift_app()),
-        )),
-        kept.clone(),
-        record_in(dir.path()),
-    );
-    let built = crate::app::pipeline_dependencies(
-        &store,
-        &crate::speech::SpeechEngines::new(crate::speech::SpeechSetup::new(
-            &store.settings().unwrap(),
-            &paths,
-        )),
-        &crate::app::PipelineSecrets {
-            secrets: graph.secrets.clone(),
-            kept,
-            key_gate: Some(graph.gate.clone()),
-        },
-        &crate::llm::codex_store(),
-        &steno_pipeline::MeetingEventBus::new(),
-        &tokio::runtime::Handle::current(),
-    )
-    .unwrap();
+    let (_graph, wired) = wired(dir.path(), FakeKeychain::swift_app(), raw.clone());
+    let built = built_over(&store, &paths, &wired);
     assert!(built.dependencies.summarizer.is_none());
     assert!(
         !raw.read_the_key(),
@@ -1411,6 +1386,72 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
     }
 }
 
+/// The meeting detail asks what the pipeline asks, over the real gate:
+/// behind a pending import whose key is withheld, a ready meeting without
+/// a summary says the key is not available yet and offers no re-run for
+/// an endpoint that needs the key; for `ChatGPT` summaries (the Codex
+/// backend), which need none and keep running, the row is the runnable one
+/// and Run summary is on offer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_detail_withholds_the_summary_only_for_an_endpoint_that_needs_the_key() {
+    use steno_bridge::{BridgeHost as _, BridgeTopic, MeetingIdParams};
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+    let app = build_over(paths, Arc::new(FakeKeychain::swift_app()));
+    let gate = app.import_gate.clone().unwrap();
+    assert!(gate.key_withheld());
+    let meeting = steno_core::testing::sample_data::meeting();
+    app.store.save_meeting(&meeting).unwrap();
+    let segment = steno_core::TranscriptSegment {
+        id: uuid::Uuid::from_u128(1),
+        meeting_id: meeting.id,
+        start: 0.0,
+        end: 2.0,
+        speaker_id: None,
+        lane: steno_core::AudioLane::Mic,
+        text: "hello there".to_owned(),
+        raw_text: "hello there".to_owned(),
+    };
+    app.store
+        .replace_transcript(&meeting, &[segment], &[])
+        .unwrap();
+    let mut settings = app.store.settings().unwrap();
+    settings.llm_provider = steno_core::LlmProvider::Endpoint;
+    settings.llm_base_url = Some("http://127.0.0.1:9/v1".to_owned());
+    settings.llm_model = Some("model".to_owned());
+    app.store.save_settings(&settings).unwrap();
+    let host = app.host().unwrap();
+    let _ = host.snapshot(BridgeTopic::MeetingsList);
+    host.meetings_select(MeetingIdParams {
+        meeting_id: meeting.id,
+    })
+    .unwrap();
+
+    let detail = host.snapshot(BridgeTopic::MeetingDetail).unwrap();
+    assert_eq!(
+        detail["summaryStatus"]["body"],
+        steno_host::setup::copy::SUMMARY_KEY_WITHHELD_BODY,
+        "endpoint: {detail}"
+    );
+    assert_eq!(detail["canRerunSummary"], false, "endpoint");
+
+    settings.llm_provider = steno_core::LlmProvider::Codex;
+    settings.codex_model = Some("gpt-5".to_owned());
+    settings.codex_confirmed_at = Some(chrono::Utc::now());
+    app.store.save_settings(&settings).unwrap();
+    host.store_changed();
+    assert!(gate.key_withheld(), "the key is still withheld");
+    let detail = host.snapshot(BridgeTopic::MeetingDetail).unwrap();
+    assert_eq!(detail["summaryStatus"]["kind"], "skippedRunnable", "Codex");
+    assert_ne!(
+        detail["summaryStatus"]["body"],
+        steno_host::setup::copy::SUMMARY_KEY_WITHHELD_BODY
+    );
+    assert_eq!(detail["canRerunSummary"], true, "Codex");
+    app.shutdown();
+}
+
 fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
     crate::AppOptions {
         paths,
@@ -1664,28 +1705,35 @@ fn failed_attribute_queries_count_as_items_that_may_prompt() {
     assert!(!keychain.calls().contains(&"read key"), "not the Swift key");
 }
 
-/// The marker is written second, after the identity: at its write the
-/// store already holds the Swift identity. A crash between the two leaves
-/// neither the marker nor `IMPORT_RAN_KEY`, and the rerun stores the same
+/// The marker is written second, after the identity, and before
+/// `IMPORT_RAN_KEY`: at its write the store already holds the Swift
+/// identity and `preferences.json` on disk has no `IMPORT_RAN_KEY` yet, so
+/// no crash leaves the flag without the marker (a `preferences.json` set
+/// aside later would then bring the import back). A crash between the
+/// identity and the marker leaves neither, and the rerun stores the same
 /// Swift identity again (harmless) and then the marker.
 #[test]
 fn the_marker_comes_after_the_identity_and_a_crash_between_them_stores_the_same_identity_again() {
     let step = step(FakeKeychain::swift_app(), None);
     let raw = step.raw.clone();
+    let support = step.dir.path().to_path_buf();
     let at_marker = Arc::new(Mutex::new(None));
     let seen = at_marker.clone();
     step.keychain.on_call(move |name| {
         let mut seen = seen.lock().unwrap();
         if name == "mark done" && seen.is_none() {
-            *seen = Some(read(&*raw, &HandoverIdentity::secret_key()).is_some());
+            let on_disk = FilePreferences::in_support_directory(&support);
+            *seen = Some((
+                read(&*raw, &HandoverIdentity::secret_key()).is_some(),
+                on_disk.contains(IMPORT_RAN_KEY),
+            ));
         }
     });
     assert_eq!(step.import.run().stage, SwiftImportStage::Done);
-    assert_eq!(
-        at_marker.lock().unwrap().take(),
-        Some(true),
-        "the marker came before the identity"
-    );
+    let (identity_first, flag_first) = at_marker.lock().unwrap().take().unwrap();
+    assert!(identity_first, "the marker came before the identity");
+    assert!(!flag_first, "IMPORT_RAN came before the marker");
+    assert!(step.preferences.flag(IMPORT_RAN_KEY));
     assert_eq!(step.keychain.count("mark done"), 1);
 
     // The crash window: the identity is stored, the marker and the flag
@@ -1801,11 +1849,34 @@ fn a_key_saved_while_the_key_prompt_is_up_survives_a_deny() {
     assert_eq!(read(&*next, &key).as_deref(), Some("sk-saved"));
 }
 
-/// The pipeline's dependencies over the gated store, with `settings`.
+/// The graph's secrets over `platform`, wired as the graph wires them
+/// (`crate::app::gated_secrets`), behind the import the launch half leaves
+/// pending under `support` with `keychain`; with that import.
+fn wired(
+    support: &Path,
+    keychain: FakeKeychain,
+    platform: Arc<dyn SecretStore>,
+) -> (GraphImport, crate::app::GraphSecrets) {
+    let preferences = Arc::new(FilePreferences::in_support_directory(support));
+    let (import, secrets) = crate::app::gated_secrets(
+        Some(pending(launch_at_home(
+            preferences.clone(),
+            Arc::new(keychain),
+        ))),
+        &preferences,
+        platform,
+        &steno_core::StenoPaths::new(support.to_path_buf()),
+        false,
+    );
+    (import.expect("the import is pending"), secrets)
+}
+
+/// The pipeline's dependencies over the graph's secrets, with the stored
+/// settings.
 fn built_over(
     store: &Arc<steno_core::Store>,
     paths: &steno_core::StenoPaths,
-    graph: &GraphImport,
+    secrets: &crate::app::GraphSecrets,
 ) -> crate::pipeline::BuiltPipeline {
     crate::app::pipeline_dependencies(
         store,
@@ -1813,11 +1884,7 @@ fn built_over(
             &store.settings().unwrap(),
             paths,
         )),
-        &crate::app::PipelineSecrets {
-            secrets: graph.secrets.clone(),
-            kept: Arc::new(crate::secrets::KeepsApiKey::new(graph.secrets.clone())),
-            key_gate: Some(graph.gate.clone()),
-        },
+        secrets,
         &crate::llm::codex_store(),
         &steno_pipeline::MeetingEventBus::new(),
         &tokio::runtime::Handle::current(),
@@ -1839,14 +1906,8 @@ async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
     settings.llm_base_url = Some("http://127.0.0.1:9/v1".to_owned());
     settings.llm_model = Some("model".to_owned());
     store.save_settings(&settings).unwrap();
-    let graph_for = |keychain: FakeKeychain| {
-        let launched = launch_at_home(
-            Arc::new(FilePreferences::in_support_directory(dir.path())),
-            Arc::new(keychain),
-        );
-        let secrets = Arc::new(InMemorySecretStore::new());
-        GraphImport::new(pending(launched), secrets, record_in(dir.path()))
-    };
+    let graph_for =
+        |keychain: FakeKeychain| wired(dir.path(), keychain, Arc::new(InMemorySecretStore::new()));
     let passes = |built: &crate::pipeline::BuiltPipeline| {
         let dependencies = &built.dependencies;
         (
@@ -1855,8 +1916,11 @@ async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
         )
     };
 
-    let graph = graph_for(FakeKeychain::swift_app());
-    assert_eq!(passes(&built_over(&store, &paths, &graph)), (false, false));
+    let (graph, secrets) = graph_for(FakeKeychain::swift_app());
+    assert_eq!(
+        passes(&built_over(&store, &paths, &secrets)),
+        (false, false)
+    );
     let step = graph.step(tokio::runtime::Handle::current(), Box::new(|| {}));
     let step = Arc::new(step);
     let skipping = step.clone();
@@ -1864,28 +1928,38 @@ async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
         .await
         .unwrap();
     assert!(graph.gate.key_withheld());
-    assert_eq!(passes(&built_over(&store, &paths, &graph)), (false, false));
+    assert_eq!(
+        passes(&built_over(&store, &paths, &secrets)),
+        (false, false)
+    );
     graph
         .secrets
         .set_secret(&SecretKey::llm_api_key(), Some("sk-saved"))
         .await
         .unwrap();
-    assert_eq!(passes(&built_over(&store, &paths, &graph)), (true, true));
+    assert_eq!(passes(&built_over(&store, &paths, &secrets)), (true, true));
 
-    let missing = graph_for(FakeKeychain {
+    let (missing, missing_secrets) = graph_for(FakeKeychain {
         key_item: Ok(ApiKeyItem::Missing),
         ..FakeKeychain::swift_app()
     });
     assert!(!missing.gate.key_withheld());
-    assert_eq!(passes(&built_over(&store, &paths, &missing)), (true, true));
+    assert_eq!(
+        passes(&built_over(&store, &paths, &missing_secrets)),
+        (true, true)
+    );
 
     settings.llm_provider = steno_core::LlmProvider::Codex;
     settings.codex_model = Some("gpt-5".to_owned());
     settings.codex_confirmed_at = Some(chrono::Utc::now());
     store.save_settings(&settings).unwrap();
-    let codex = graph_for(FakeKeychain::swift_app());
+    let (codex, codex_secrets) = graph_for(FakeKeychain::swift_app());
     assert!(codex.gate.key_withheld());
-    assert_eq!(passes(&built_over(&store, &paths, &codex)), (true, true));
+    assert!(!codex.gate.withholds_summaries(&store.settings().unwrap()));
+    assert_eq!(
+        passes(&built_over(&store, &paths, &codex_secrets)),
+        (true, true)
+    );
 }
 
 /// A meeting processed while the key is withheld runs neither LLM pass:
@@ -1923,18 +1997,15 @@ async fn a_meeting_under_a_withheld_key_stays_raw_and_its_summary_runs_later_wit
     settings.llm_base_url = Some(server.base_url().to_string());
     settings.llm_model = Some("stub-model".to_owned());
     store.save_settings(&settings).unwrap();
-    let graph = GraphImport::new(
-        pending(launch_at_home(
-            Arc::new(FilePreferences::in_support_directory(dir.path())),
-            Arc::new(FakeKeychain::swift_app()),
-        )),
+    let (graph, secrets) = wired(
+        dir.path(),
+        FakeKeychain::swift_app(),
         Arc::new(InMemorySecretStore::new()),
-        record_in(dir.path()),
     );
     assert!(graph.gate.key_withheld());
     // The passes the graph builds now, on core's fakes for the rest.
     let pipeline_now = || {
-        let built = built_over(&store, &paths, &graph).dependencies;
+        let built = built_over(&store, &paths, &secrets).dependencies;
         steno_pipeline::ProcessingPipeline::new(
             crate::testing::fake_dependencies(&store, "fake-engine")
                 .with_llm(built.cleaner, built.summarizer),
@@ -2089,7 +2160,9 @@ async fn app_behind_a_pending_import(
 /// What the Swift app left at the update, launched behind a pending
 /// import: a queued meeting (`resume_unfinished`) and an interrupted
 /// recording (the recovery's intake) wait until the step ran, then run on
-/// the pipeline the step reloaded with the key. A meeting that failed for
+/// the pipeline the step reloaded with the key. The retention sweep waits
+/// with them, so it follows the resume: a ready meeting's expired audio
+/// stays until the step ran. A meeting that failed for
 /// want of the key before the step processes again with it
 /// (`ProcessingPipeline::reprocess`, the one reprocess entry point on
 /// main).
@@ -2146,9 +2219,19 @@ async fn meetings_left_at_the_first_launch_wait_for_the_step_and_run_with_its_ke
     app.pipeline.current().wait_until_idle().await;
     let state = |meeting: &steno_core::Meeting| store.meeting(meeting.id).unwrap().unwrap().state;
     assert!(matches!(state(&keyless), MeetingState::Failed { .. }));
+    // Ready, its audio past its retention.
+    let (expired, files) = recording(100, true);
+    let mut asset = finished_result(&expired, files.as_ref().unwrap(), &lanes).asset;
+    asset.retention = steno_core::AudioRetention::KeepDays(1);
+    asset.expires_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+    let mut ready = expired.clone();
+    ready.state = MeetingState::Ready;
+    store.save_meeting_with_asset(&ready, &asset).unwrap();
+    let expired_master = files.unwrap().master;
 
     let host = Arc::new(app.host().unwrap());
     app.launch(&host);
+    assert!(expired_master.exists(), "swept before the step");
     assert_eq!(
         state(&queued),
         MeetingState::Queued,
@@ -2176,6 +2259,10 @@ async fn meetings_left_at_the_first_launch_wait_for_the_step_and_run_with_its_ke
         state(&interrupted),
         MeetingState::Ready,
         "the recovered job ran without the key"
+    );
+    assert!(
+        !expired_master.exists(),
+        "the sweep did not run after the step"
     );
 
     // Process again, with the key now.

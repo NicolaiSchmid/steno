@@ -17,12 +17,12 @@ use steno_core::{AudioRetention, HandoverReceipt, ObsidianSettings, PairedDevice
 use uuid::Uuid;
 
 use crate::services::{
-    ApiKeyGate, AudioDevices, AutoStopStatus, ClipPlayer, Clock, CodexModel, CodexModelsError,
-    ExportValidator, FileSystem, FolderUsage, Handover, INSTALLING_UPDATE, InputDevice,
-    LeftRecording, ListenerState, LlmService, LoginItem, LoginItemStatus, Opener, PairingCode,
-    Permissions, Pipeline, Preferences, ProcessAgainRefusal, QrEncoder, Recorder, RecorderStatus,
-    Services, SpeechModels, StartHold, SwiftImport, SwiftImportStage, SwiftImportStatus,
-    UpdateOutcome, Updater, permission_is_required,
+    AudioDevices, AutoStopStatus, ClipPlayer, Clock, CodexModel, CodexModelsError, ExportValidator,
+    FileSystem, FolderUsage, Handover, INSTALLING_UPDATE, InputDevice, LeftRecording,
+    ListenerState, LlmService, LoginItem, LoginItemStatus, Opener, PairingCode, Permissions,
+    Pipeline, Preferences, ProcessAgainRefusal, QrEncoder, Recorder, RecorderStatus, Services,
+    SpeechModels, StartHold, SwiftImport, SwiftImportStage, SwiftImportStatus, UpdateOutcome,
+    Updater, WithheldApiKey, permission_is_required,
 };
 use crate::speech::ModelAsset;
 
@@ -1154,14 +1154,15 @@ impl SwiftImport for FakeSwiftImport {
     }
 }
 
-/// An [`ApiKeyGate`] a test sets: withholds the key while `withheld`.
+/// A [`WithheldApiKey`] a test sets: withholds the key while `withheld`,
+/// whatever the settings.
 #[derive(Debug, Default)]
-pub struct FakeApiKeyGate {
+pub struct FakeWithheldApiKey {
     pub withheld: Mutex<bool>,
 }
 
-impl ApiKeyGate for FakeApiKeyGate {
-    fn key_withheld(&self) -> bool {
+impl WithheldApiKey for FakeWithheldApiKey {
+    fn withheld(&self, _settings: &Settings) -> bool {
         *lock(&self.withheld)
     }
 }
@@ -1189,7 +1190,7 @@ pub struct FakeServices {
     /// The core's own fake, behind the one core boundary the host consumes.
     pub secrets: Arc<InMemorySecretStore>,
     pub swift_import: Option<Arc<FakeSwiftImport>>,
-    pub api_key_gate: Option<Arc<FakeApiKeyGate>>,
+    pub withheld_api_key: Option<Arc<FakeWithheldApiKey>>,
 }
 
 impl FakeServices {
@@ -1220,7 +1221,7 @@ impl FakeServices {
             preferences: Arc::new(FakePreferences::default()),
             secrets: Arc::new(InMemorySecretStore::new()),
             swift_import: None,
-            api_key_gate: None,
+            withheld_api_key: None,
         }
     }
 
@@ -1264,10 +1265,10 @@ impl FakeServices {
                 .swift_import
                 .clone()
                 .map(|import| import as Arc<dyn SwiftImport>),
-            api_key_gate: self
-                .api_key_gate
+            withheld_api_key: self
+                .withheld_api_key
                 .clone()
-                .map(|gate| gate as Arc<dyn ApiKeyGate>),
+                .map(|withheld| withheld as Arc<dyn WithheldApiKey>),
         }
     }
 }

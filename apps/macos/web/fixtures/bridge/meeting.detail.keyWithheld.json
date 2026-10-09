@@ -72,7 +72,7 @@
   ],
   "summaryStatus" : {
     "actionTitle" : "Set up summaries",
-    "body" : "Steno can't use your API key yet, so this meeting has no summary. Save the key in Settings, then run the summary. The transcript is complete.",
+    "body" : "Steno can't use your API key yet, so this meeting has no summary. Enter your API key in Settings, then run the summary. The transcript is complete.",
     "kind" : "skippedUnconfigured",
     "title" : "Summary skipped"
   },

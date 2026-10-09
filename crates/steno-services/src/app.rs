@@ -138,7 +138,8 @@ pub struct App {
     /// once the import's gate opens (`crate::swift_import`).
     pub gated_handover: Option<Arc<GatedHandover>>,
     /// The Swift import's gate while it is pending: [`App::launch`] holds
-    /// the resume, the re-exports and the recovery until the step is over.
+    /// the resume, the re-exports, the sweep and the recovery until the
+    /// step is over.
     pub import_gate: Option<Arc<ImportGate>>,
     pub recorder: Arc<CaptureRecorder>,
     /// Where the speech and diarization models live.
@@ -209,23 +210,38 @@ fn api_key(
         .map_err(|error| format!("Could not read the LLM API key from the secret store: {error}"))
 }
 
-/// What the pipeline reads the API key through ([`pipeline_dependencies`]):
-/// the graph's secret store, behind the Swift import's gate when there is
-/// one, so a key the gate withholds is never read from the keychain; the
-/// app's [`KeepsApiKey`] inside it, whose kept key a failed read falls back
-/// on; and that gate.
+/// The graph's secret store, in three layers from the inside out: the
+/// platform store (the keyring, the Secret Service or the secrets file;
+/// [`crate::secrets`]); the app's [`KeepsApiKey`] around it, which keeps
+/// the API key last read or written for a rebuild whose read fails; and,
+/// outermost, the Swift import's gate while one stands (the
+/// [`GraphImport`]'s while an import is pending, else the gate of a
+/// refused key read, [`crate::swift_import::key_denied_secrets`]). So a key
+/// the gate withholds is never read from the keychain, and an empty key
+/// write the gate swallows never reaches `KeepsApiKey`, whose kept key
+/// stays. `secrets` is what everything in the graph reads and writes
+/// through: the host's [`Services`], the pipeline
+/// ([`pipeline_dependencies`]) and the handover listener. Only the
+/// import's step writes the identity to the store behind the gate.
+/// [`build_with_import`] builds the layers in one place, which the tests
+/// share.
 #[derive(Clone)]
-pub struct PipelineSecrets {
+pub struct GraphSecrets {
+    /// The outermost layer.
     pub secrets: Arc<dyn SecretStore>,
+    /// The middle layer, whose kept key a failed read falls back on.
     pub kept: Arc<KeepsApiKey>,
+    /// The gate, which the pipeline and the meeting detail ask whether the
+    /// key is withheld ([`ImportGate::withholds_summaries`]).
     pub key_gate: Option<Arc<ImportGate>>,
 }
 
-impl PipelineSecrets {
-    /// `kept` read directly, behind no gate.
+impl GraphSecrets {
+    /// `platform` behind the app's [`KeepsApiKey`] and no gate.
     #[must_use]
-    pub fn ungated(kept: Arc<KeepsApiKey>) -> Self {
-        PipelineSecrets {
+    pub fn ungated(platform: Arc<dyn SecretStore>) -> Self {
+        let kept = Arc::new(KeepsApiKey::new(platform));
+        GraphSecrets {
             secrets: kept.clone(),
             kept,
             key_gate: None,
@@ -244,14 +260,16 @@ impl PipelineSecrets {
 /// through the app's store ([`KeepsApiKey`]), or without one: a keyring
 /// locked again while the app runs keeps the key a rebuild had, and a key
 /// the user removed or changed is never the one kept. While the Swift
-/// import's gate withholds the key ([`ImportGate::key_withheld`]) an
-/// endpoint other than the Codex backend gets no passes, as when no
-/// summaries are set up: the meeting completes without a summary instead
-/// of failing at it, and its summary can be run again once a key is saved.
+/// import's gate withholds the key for the stored endpoint
+/// ([`ImportGate::withholds_summaries`]: an endpoint that needs the key,
+/// not `ChatGPT`'s) there are no passes, as when no summaries are set up:
+/// the meeting completes with its raw transcript and without a summary
+/// instead of failing at it, and its summary can be run again once a key
+/// is saved.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,
-    secrets: &PipelineSecrets,
+    secrets: &GraphSecrets,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
@@ -270,9 +288,7 @@ pub fn pipeline_dependencies(
     let withheld = secrets
         .key_gate
         .as_deref()
-        .is_some_and(ImportGate::key_withheld)
-        && steno_llm::LlmEndpoint::from_settings(&settings)
-            .is_some_and(|endpoint| !endpoint.is_codex_backend());
+        .is_some_and(|gate| gate.withholds_summaries(&settings));
     let passes = if withheld {
         None
     } else {
@@ -308,7 +324,7 @@ pub fn pipeline_dependencies(
 fn make_dependencies(
     store: &Arc<Store>,
     engines: &Arc<SpeechEngines>,
-    secrets: &PipelineSecrets,
+    secrets: &GraphSecrets,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
@@ -483,41 +499,45 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
     }
 }
 
-/// The secret store the graph reads through, with the gate the pipeline
-/// asks whether the key is withheld: the import's gate over `secrets`
-/// while an import is pending, else `secrets` behind the gate of a refused
-/// key read, if any ([`crate::swift_import::key_denied_secrets`]).
-/// That gate is the keychain's only: over the secrets file (`file`, the
-/// CLI's on the Mac, which never asks the keychain) the key stays
-/// readable, so a run with `STENO_LLM_API_KEY` set still gets its key.
-/// `secrets` is the app's [`KeepsApiKey`], so a write a gate swallows
-/// never reaches it. The import's step records the identity's fingerprint
-/// in the support directory of `paths`.
-fn gated_secrets(
+/// The graph's [`GraphSecrets`] over `platform`, the one place its three
+/// layers are built: [`KeepsApiKey`] around `platform`, and around that
+/// the import's gate while an import is pending (returned with the
+/// import), else the gate of a refused key read, if any
+/// ([`crate::swift_import::key_denied_secrets`]). That gate is the
+/// keychain's only: over the secrets file (`file`, the CLI's on the Mac,
+/// which never asks the keychain) the key stays readable, so a run with
+/// `STENO_LLM_API_KEY` set still gets its key. The import's step records
+/// the identity's fingerprint in the support directory of `paths`.
+pub(crate) fn gated_secrets(
     pending: Option<crate::swift_import::PendingImport>,
     preferences: &Arc<FilePreferences>,
-    secrets: Arc<dyn SecretStore>,
+    platform: Arc<dyn SecretStore>,
     paths: &StenoPaths,
     file: bool,
-) -> (
-    Option<GraphImport>,
-    Arc<dyn SecretStore>,
-    Option<Arc<ImportGate>>,
-) {
-    match pending {
+) -> (Option<GraphImport>, GraphSecrets) {
+    let kept = Arc::new(KeepsApiKey::new(platform));
+    let (import, secrets, key_gate) = match pending {
         Some(pending) => {
             let record =
                 crate::handover::FingerprintFile::in_support_directory(&paths.support_directory);
-            let import = GraphImport::new(pending, secrets, Arc::new(record));
+            let import = GraphImport::new(pending, kept.clone(), Arc::new(record));
             let (gated, gate) = (import.secrets.clone(), import.gate.clone());
             (Some(import), gated, Some(gate))
         }
-        None if file => (None, secrets, None),
+        None if file => (None, kept.clone() as Arc<dyn SecretStore>, None),
         None => {
-            let (gated, gate) = crate::swift_import::key_denied_secrets(preferences, secrets);
+            let (gated, gate) = crate::swift_import::key_denied_secrets(preferences, kept.clone());
             (None, gated, gate)
         }
-    }
+    };
+    (
+        import,
+        GraphSecrets {
+            secrets,
+            kept,
+            key_gate,
+        },
+    )
 }
 
 /// The handover while an import is pending: its listener, over the
@@ -622,15 +642,10 @@ pub fn build_with_import(
     ));
     let pending = import(preferences.clone());
     let store = open_store(&database_path)?;
-    let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
-    let kept = Arc::new(KeepsApiKey::new(secrets));
-    let (import, secrets, key_gate) = gated_secrets(
-        pending,
-        &preferences,
-        kept.clone(),
-        &paths,
-        !options.keyring,
-    );
+    let (platform, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
+    let (import, graph_secrets) =
+        gated_secrets(pending, &preferences, platform, &paths, !options.keyring);
+    let secrets = graph_secrets.secrets.clone();
     let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
@@ -646,22 +661,11 @@ pub fn build_with_import(
     let speech = engines.setup();
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
-    let api_key_gate = key_gate
+    let withheld_api_key = graph_secrets
+        .key_gate
         .clone()
-        .map(|gate| gate as Arc<dyn steno_host::services::ApiKeyGate>);
-    let pipeline_secrets = PipelineSecrets {
-        secrets: secrets.clone(),
-        kept,
-        key_gate,
-    };
-    let make = make_dependencies(
-        &store,
-        &engines,
-        &pipeline_secrets,
-        &codex,
-        &events,
-        &runtime,
-    );
+        .map(|gate| gate as Arc<dyn steno_host::services::WithheldApiKey>);
+    let make = make_dependencies(&store, &engines, &graph_secrets, &codex, &events, &runtime);
     let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
     let sweep = RetentionSweep::new(store.clone());
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
@@ -744,7 +748,7 @@ pub fn build_with_import(
         preferences,
         secrets: secrets.clone(),
         swift_import,
-        api_key_gate,
+        withheld_api_key,
     };
 
     Ok(App {
@@ -1080,19 +1084,22 @@ impl App {
     ///    the update schedule starts with its launch tick
     ///    ([`UpdateSchedule::start`]).
     ///
-    /// While the Swift import is pending ([`App::import_gate`]), steps 3
-    /// and 4 wait on a task of their own until the onboarding step ran or
-    /// was skipped ([`ImportGate::step_over`]): the pipeline has reloaded
-    /// with what the step read by then, so a meeting the Swift app left
-    /// queued is not processed without the key. [`App::launch_finished`]
-    /// then waits for the step too.
+    /// Steps 3 and 4 may wait on a task of their own: first for the
+    /// keyring's answer, where the secret store can ask (the Secret
+    /// Service), until it chose and the reread below ran; then, while the
+    /// Swift import is pending ([`App::import_gate`]), for the onboarding
+    /// step to run or be skipped ([`ImportGate::step_over`]), by when the
+    /// pipeline has reloaded with what the step read. Then they run on the
+    /// reread pipeline, so no meeting, export or recovered recording runs
+    /// on a pipeline built without the key, and a meeting the Swift app
+    /// left queued is not processed without it. The sweep waits only
+    /// behind the import, so it still follows the resume; behind the
+    /// keyring alone it runs at once. [`App::launch_finished`] waits for
+    /// that task too. The update schedule waits for the keyring's answer
+    /// as well, so its launch tick's alert does not come up beside the
+    /// keyring's prompt, but not for the import's step.
     ///
-    /// Where the secret store can ask (the Secret Service), steps 3 and 4
-    /// (all but the sweep) wait until it chose and the reread below ran, so
-    /// no meeting, export or recovered recording runs on a pipeline built
-    /// without the key, and the update schedule waits until it chose, so
-    /// its launch tick's alert does not come up beside the keyring's
-    /// prompt. The choice includes the unlock and the first
+    /// The keyring's choice includes the unlock and the first
     /// launch's move or a later launch's tidy; on a locked keyring or
     /// `KeePassXC` each of their prompts may stay up for two minutes, so a
     /// meeting a crash left processing can show as processing that long (it
@@ -2377,11 +2384,10 @@ mod tests {
         let key = SecretKey::llm_api_key();
         secrets.set_secret(&key, Some("sk-stored")).await.unwrap();
         for (file, expected) in [(false, None), (true, Some("sk-stored"))] {
-            let (import, gated, _) =
-                gated_secrets(None, &preferences, secrets.clone(), &paths, file);
+            let (import, gated) = gated_secrets(None, &preferences, secrets.clone(), &paths, file);
             assert!(import.is_none());
             assert_eq!(
-                gated.secret(&key).await.unwrap().as_deref(),
+                gated.secrets.secret(&key).await.unwrap().as_deref(),
                 expected,
                 "file: {file}"
             );
@@ -3034,7 +3040,7 @@ mod tests {
         let built = pipeline_dependencies(
             &store,
             &SpeechEngines::new(SpeechSetup::new(&store.settings().unwrap(), &paths)),
-            &PipelineSecrets::ungated(Arc::new(KeepsApiKey::new(Arc::new(BrokenSecrets)))),
+            &GraphSecrets::ungated(Arc::new(BrokenSecrets)),
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
@@ -3053,7 +3059,7 @@ mod tests {
     async fn authorization_sent(
         store: &Arc<Store>,
         paths: &StenoPaths,
-        secrets: &PipelineSecrets,
+        secrets: &GraphSecrets,
         server: &steno_llm::testing::StubChatServer,
     ) -> Option<String> {
         let built = pipeline_dependencies(
@@ -3107,8 +3113,8 @@ mod tests {
             key.clone(),
             "sk-1".to_owned(),
         )]));
-        let kept = Arc::new(KeepsApiKey::new(memory.clone()));
-        let secrets = PipelineSecrets::ungated(kept.clone());
+        let secrets = GraphSecrets::ungated(memory.clone());
+        let kept = secrets.kept.clone();
         let sent = || authorization_sent(&store, &paths, &secrets, &server);
         assert_eq!(sent().await.as_deref(), Some("Bearer sk-1"));
 
