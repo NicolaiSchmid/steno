@@ -220,6 +220,8 @@ export const appSnapshot = z
 				body: z.string(),
 				offersSummaries: z.boolean(),
 				offersVault: z.boolean(),
+				/** A one-time notice in the banner's place (Rust host only). */
+				isNotice: z.boolean().optional(),
 			})
 			.strict()
 			.optional(),

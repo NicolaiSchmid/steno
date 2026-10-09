@@ -108,6 +108,7 @@ use crate::settings::{
     ObsidianSettingsViewModel, PhonesSettingsViewModel, SpeechSettingsViewModel, llm::Probe,
     overview, snapshots as settings_snapshots,
 };
+use crate::setup::engine_notice;
 use crate::speakers::{OptionKind, SpeakerOption as ModelOption};
 use crate::speech::{ModelAsset, SpeechEngineId};
 
@@ -411,6 +412,7 @@ impl Host {
         let mut progress = ProcessingProgressModel::default();
         progress.meetings_changed(&list.all, services.clock.now());
         let app = AppState {
+            speech_engine_notice: services.preferences.flag(engine_notice::PENDING_KEY),
             stored_settings: store.settings().ok(),
             phone: Self::phone_card(&services),
             ..AppState::default()
@@ -1812,9 +1814,20 @@ impl BridgeHost for Host {
         Ok(())
     }
 
+    /// "Not now" on the setup banner hides it for this launch; OK on the
+    /// engine notice, which shows in its place, clears its pending flag
+    /// ([`engine_notice::PENDING_KEY`]), so it never shows again.
     fn setup_dismiss_banner(&self) -> Outcome<()> {
         self.command(&[BridgeTopic::App], |inner| {
-            inner.app.setup_banner_dismissed = true;
+            if inner.app.speech_engine_notice {
+                self.shared
+                    .services
+                    .preferences
+                    .set_flag(engine_notice::PENDING_KEY, false);
+                inner.app.speech_engine_notice = false;
+            } else {
+                inner.app.setup_banner_dismissed = true;
+            }
         });
         Ok(())
     }

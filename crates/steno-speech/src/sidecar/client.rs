@@ -37,7 +37,7 @@ use steno_core::{AudioBuffer16k, LanguageTag, RawSegment, SpeechEngine};
 use super::protocol::{self, FrameError, PROTOCOL_VERSION, Reply, Request};
 use crate::engine::{OnnxSpeechEngine, blocking, log_download};
 use crate::error::{SidecarError, SpeechError};
-use crate::model_store::{ModelAsset, ModelStore};
+use crate::model_store::{Install, ModelAsset, ModelStore};
 use crate::onnx::{EncoderProvider, OnnxOptions};
 
 /// The binary's file name, `steno-speech-sidecar` plus `.exe` on Windows.
@@ -86,6 +86,10 @@ pub struct SidecarConfig {
     /// (`steno_core::crash_log`, through its environment variable); the
     /// app passes its support directory, `None` writes none.
     pub crash_log_directory: Option<PathBuf>,
+    /// Whether the engine downloads a missing model before it starts a
+    /// child: [`Install::Never`] by default; the `steno` command sets
+    /// [`Install::Allowed`].
+    pub install: Install,
 }
 
 impl SidecarConfig {
@@ -104,6 +108,7 @@ impl SidecarConfig {
             transcribe_timeout_ratio: 1.0,
             control_timeout: Duration::from_secs(5),
             crash_log_directory: None,
+            install: Install::Never,
         }
     }
 
@@ -621,7 +626,10 @@ impl Shared {
         self.process.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Installs the assets in this process; a no-op once they are.
+    /// Installs the assets in this process under
+    /// [`Install::Allowed`]; a no-op once they are. Under [`Install::Never`]
+    /// (the default) a missing file is [`SpeechError::NotInstalled`]
+    /// instead, and nothing is downloaded.
     /// Blocking. `prepare` calls it before it takes the lock, so a
     /// download does not hold up `health`, `release` or a transcription in
     /// a running child; [`Shared::ensure_loaded`] calls it again under the
@@ -635,7 +643,10 @@ impl Shared {
             .into());
         }
         for asset in &self.assets {
-            self.store.ensure(asset, &mut log_download)?;
+            match self.config.install {
+                Install::Allowed => self.store.ensure(asset, &mut log_download)?,
+                Install::Never => self.store.installed_directory(asset)?,
+            };
         }
         Ok(())
     }
@@ -1183,5 +1194,93 @@ mod tests {
             "{error}"
         );
         assert_eq!(engine.spawns(), 0);
+    }
+
+    /// By default (`Install::Never`, the app's pipelines), a missing model
+    /// is `NotInstalled` from `prepare` and from `transcribe`, which
+    /// restarts a child: no request reaches the host and no child starts.
+    /// Under `Install::Allowed` (the `steno` command) the engine asks the
+    /// host for it.
+    #[tokio::test]
+    async fn by_default_a_missing_model_is_refused_and_nothing_is_fetched() {
+        use crate::model_store::{ModelFile, ModelSource};
+        let dir = tempfile::tempdir().unwrap();
+        // A host that answers every request 404 and counts them.
+        let host = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = host.local_addr().unwrap();
+        let requests = Arc::new(AtomicU64::new(0));
+        std::thread::spawn({
+            let requests = Arc::clone(&requests);
+            move || {
+                for stream in host.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    let mut head = [0u8; 1024];
+                    let _ = std::io::Read::read(&mut stream, &mut head);
+                    let _ = std::io::Write::write_all(
+                        &mut stream,
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            }
+        });
+        let asset = ModelAsset {
+            id: "test-asset".to_owned(),
+            display_name: "Test".to_owned(),
+            licence: "MIT".to_owned(),
+            attribution: String::new(),
+            files: vec![ModelFile {
+                name: "model.onnx".to_owned(),
+                source: Some(ModelSource::Url(format!("http://{address}/model.onnx"))),
+                sha256: "0".repeat(64),
+                size: 4,
+            }],
+        };
+        let engine = |install: Option<Install>| {
+            let mut config = SidecarConfig::new(dir.path().join("no-such-sidecar"));
+            if let Some(install) = install {
+                config.install = install;
+            }
+            config.control_timeout = Duration::from_millis(200);
+            SidecarSpeechEngine::with_assets(
+                ModelStore::new(dir.path()),
+                config,
+                vec![asset.clone()],
+            )
+        };
+        let refusing = engine(None);
+        let not_installed = |error: steno_core::protocols::BoxError| {
+            assert!(
+                matches!(
+                    error.downcast_ref::<SpeechError>(),
+                    Some(SpeechError::NotInstalled { missing, .. }) if missing == &["model.onnx"]
+                ),
+                "{error}"
+            );
+        };
+        not_installed(refusing.prepare().await.unwrap_err());
+        not_installed(
+            refusing
+                .transcribe(&AudioBuffer16k::silence(1.0), None)
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(refusing.spawns(), 0);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "no download was asked for"
+        );
+        let error = engine(Some(Install::Allowed))
+            .prepare()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("404"), "{error}");
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "`Install::Allowed` asks the host"
+        );
     }
 }

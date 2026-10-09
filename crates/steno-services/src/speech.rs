@@ -24,13 +24,16 @@ use steno_core::{
     async_trait, paths::file_url_path, protocols::BoundaryResult,
 };
 use steno_diarize::{DiarizerConfig, Install, ModelDiarizer};
-use steno_host::services::SpeechModels;
+use steno_host::services::{ModelNotice, SpeechModels};
 use steno_host::speech::ModelAsset;
 use steno_pipeline::{SharedSpeechEngine, WeakSpeechEngine};
 use steno_speech::{
     LanguageTagger, ModelStore, OnnxSpeechEngine, SidecarConfig, SidecarSpeechEngine,
     SpeechRuntime, SpeechSettings,
 };
+
+use crate::model_gate::{GatedDiarizer, GatedSpeechEngine, InstalledCheck};
+use crate::pipeline::ModelsInstalled;
 
 /// Threads for one ONNX operator; the plan measured at four.
 pub const ONNX_THREADS: usize = 4;
@@ -120,7 +123,9 @@ pub struct SpeechSetup {
     pub speech_settings: SpeechSettings,
     /// How the speech sidecar starts ([`sidecar_config`]), its encoder on
     /// `DirectML` when the speech settings ask for it on Windows
-    /// ([`SpeechSettings::directml_on_windows`]).
+    /// ([`SpeechSettings::directml_on_windows`]). It never downloads a
+    /// missing model ([`Install::Never`], the default); the `steno`
+    /// command turns that on in its own setup.
     pub sidecar: SidecarConfig,
 }
 
@@ -151,9 +156,9 @@ impl SpeechSetup {
     /// Where the engine `engine_id` runs. `parakeet-v3` runs on `CoreML` in
     /// this process on the Mac, unless the speech settings choose the
     /// sidecar there; it runs in the speech sidecar everywhere else. Every
-    /// other id runs in the speech sidecar on every platform: the engines
-    /// the Swift app offered beyond Parakeet v3 have no Rust counterpart
-    /// yet (the parity list says so).
+    /// other id runs in the speech sidecar on every platform; the app
+    /// stores none, as `Store::retire_speech_engine` moves one the Swift
+    /// app left to `parakeet-v3` at launch.
     #[must_use]
     pub fn runtime(&self, engine_id: &str) -> SpeechRuntime {
         engine_runtime(engine_id, &self.speech_settings)
@@ -214,39 +219,8 @@ fn models_directory_with(
 /// The `CoreML` Parakeet directory under `models_directory`.
 #[must_use]
 pub fn coreml_model_directory(models_directory: &Path) -> PathBuf {
-    models_directory
-        .join("fluidaudio")
-        .join("parakeet-tdt-0.6b-v3")
-}
-
-/// What makes the `CoreML` Parakeet installed: Swift's
-/// `ModelAsset.requiredFiles` (`Sources/StenoSpeech/Models/ModelAsset.swift`),
-/// the bundles counting when their `coremldata.bin` is in place, as
-/// `ModelStore.isInstalled` checks. `steno_speech_coreml::backend` names
-/// the same files (a macOS test pins them); it also reads the model
-/// repository's `parakeet_v3_vocab.json` when the Swift name is absent.
-pub const COREML_PARAKEET_FILES: [&str; 5] = [
-    "Preprocessor.mlmodelc",
-    "Encoder.mlmodelc",
-    "Decoder.mlmodelc",
-    "JointDecisionv3.mlmodelc",
-    "parakeet_vocab.json",
-];
-
-/// Whether every file the `CoreML` Parakeet loads is complete in `directory`.
-#[must_use]
-pub fn coreml_parakeet_installed(directory: &Path) -> bool {
-    COREML_PARAKEET_FILES.iter().all(|name| {
-        let path = directory.join(name);
-        if Path::new(name)
-            .extension()
-            .is_some_and(|ext| ext == "mlmodelc")
-        {
-            path.join("coremldata.bin").is_file()
-        } else {
-            path.is_file()
-        }
-    })
+    ModelStore::coreml_in_models_directory(models_directory)
+        .directory(&steno_speech::ModelAsset::parakeet_v3_coreml())
 }
 
 /// The engine `engine_id` names, where [`SpeechSetup::runtime`] runs it:
@@ -322,6 +296,8 @@ pub struct SpeechEngines {
     build: BuildEngine,
     diarizer: Arc<dyn Diarizer>,
     kept: std::sync::Mutex<KeptEngines>,
+    /// The gates' checks, together ([`Self::models_installed`]).
+    installed: ModelsInstalled,
 }
 
 /// The engines [`SpeechEngines`] hands out again.
@@ -334,23 +310,78 @@ struct KeptEngines {
 }
 
 impl SpeechEngines {
-    /// The engines [`speech_engine`] builds over `setup`.
+    /// The engines [`speech_engine`] builds over `setup`, and the diarizer,
+    /// each behind a gate that refuses a call while its models are not
+    /// installed, with the speech sidecar's own install turned off: no
+    /// pipeline run downloads a model ([`crate::model_gate`]).
     #[must_use]
     pub fn new(setup: SpeechSetup) -> Self {
+        let speech = ModelStoreSpeechModels::new(&setup);
+        let store = setup.model_store();
+        Self::with_checks(
+            setup,
+            Arc::new(move |runtime| speech.installed_on(runtime)),
+            Arc::new(move || steno_diarize::models::installed(&store).is_ok()),
+        )
+    }
+
+    /// [`Self::new`] with the gates' checks passed in, for the tests: the
+    /// speech engine's for the runtime it runs on, and the diarizer's.
+    pub(crate) fn with_checks(
+        mut setup: SpeechSetup,
+        speech_installed: ModelsInstalled,
+        diarizer_installed: InstalledCheck,
+    ) -> Self {
+        // The default already; set so a setup that allows downloads (the
+        // CLI's) never reaches the app's engines or `setup()`.
+        setup.sidecar.install = Install::Never;
         let over = setup.clone();
-        Self::with_builder(setup, Box::new(move |runtime| engine_on(runtime, &over)))
+        let mut engines = Self::with_builder(
+            setup,
+            Box::new({
+                let speech_installed = speech_installed.clone();
+                move |runtime| {
+                    let installed = speech_installed.clone();
+                    Arc::new(GatedSpeechEngine::new(
+                        engine_on(runtime, &over),
+                        Arc::new(move || installed(runtime)),
+                    ))
+                }
+            }),
+        );
+        engines.diarizer = Arc::new(GatedDiarizer::new(
+            engines.diarizer,
+            diarizer_installed.clone(),
+        ));
+        engines.installed =
+            Arc::new(move |runtime| speech_installed(runtime) && diarizer_installed());
+        engines
     }
 
     /// Engines from `build` instead, for the tests.
     pub(crate) fn with_builder(setup: SpeechSetup, build: BuildEngine) -> Self {
         SpeechEngines {
-            // S1 (`.plans/2026-10-07-stable-promotion.md`) flips this to
-            // `Install::Never` together with the pipeline's models-missing gate.
-            diarizer: diarizer(&setup, Install::Allowed),
+            // Never downloads: a missing file is `NotInstalled`, which the
+            // gate takes as the models-missing refusal, so the meeting waits
+            // with its audio instead of ending with one room speaker (S1 of
+            // `.plans/2026-10-07-stable-promotion.md`).
+            diarizer: diarizer(&setup, Install::Never),
             setup,
             build,
             kept: std::sync::Mutex::default(),
+            installed: Arc::new(|_| true),
         }
+    }
+
+    /// Whether the gates would let a pipeline whose speech engine runs on
+    /// `runtime` through now: its speech models and the diarizer's are
+    /// installed. Always, for engines from [`Self::with_builder`], which
+    /// have no gates. What the app asks before an install or a reload
+    /// resumes the meetings waiting for models
+    /// ([`CurrentPipeline::resuming_when`](crate::pipeline::CurrentPipeline::resuming_when)).
+    #[must_use]
+    pub fn models_installed(&self, runtime: SpeechRuntime) -> bool {
+        (self.installed)(runtime)
     }
 
     /// What the engines are built from.
@@ -516,9 +547,9 @@ impl SpeechEngine for LanguageTaggingEngine {
 /// `<models directory>/onnx/diarization/` on first use. `install` says
 /// whether a missing file is downloaded first (`Install::Allowed`) or
 /// fails the call with `DiarizeError::NotInstalled` and no request
-/// (`Install::Never`, for a pipeline once it checks for missing models
-/// itself; `steno_diarize::models::installed` is the same check without a
-/// load). A load that fails fails that call only; the next call tries again,
+/// (`Install::Never`, the app's pipelines through [`SpeechEngines`];
+/// `steno_diarize::models::installed` is the same check without a load).
+/// A load that fails fails that call only; the next call tries again,
 /// resuming a cut-off download where downloads are allowed.
 #[must_use]
 pub fn diarizer(setup: &SpeechSetup, install: Install) -> Arc<dyn Diarizer> {
@@ -538,8 +569,10 @@ pub struct ModelStoreSpeechModels {
     /// The ONNX store, with the speech settings' mirror: the speech models
     /// and the diarizer's.
     pub speech: ModelStore,
-    /// The `CoreML` Parakeet's directory.
-    pub coreml: PathBuf,
+    /// The `CoreML` store, the models directory's `fluidaudio/`, with the
+    /// speech settings' mirror: Settings installs the `CoreML` Parakeet
+    /// through it, into [`Self::coreml_directory`].
+    pub coreml_store: ModelStore,
     /// The speech settings, which decide where [`speech_engine`] runs
     /// each engine id.
     speech_settings: SpeechSettings,
@@ -552,8 +585,29 @@ impl ModelStoreSpeechModels {
     pub fn new(setup: &SpeechSetup) -> Self {
         ModelStoreSpeechModels {
             speech: setup.model_store(),
-            coreml: coreml_model_directory(&setup.models_directory),
+            coreml_store: setup.speech_settings.coreml_store(&setup.models_directory),
             speech_settings: setup.speech_settings.clone(),
+        }
+    }
+
+    /// The `CoreML` Parakeet's directory, where the engine loads it.
+    #[must_use]
+    pub fn coreml_directory(&self) -> PathBuf {
+        self.coreml_store
+            .directory(&steno_speech::ModelAsset::parakeet_v3_coreml())
+    }
+
+    /// Whether every model file the engine on `runtime` loads is on disk
+    /// at its manifest size: the `CoreML` Parakeet's 23, or every model
+    /// the speech sidecar loads (the VAD and the fp32 Parakeet).
+    pub(crate) fn installed_on(&self, runtime: SpeechRuntime) -> bool {
+        match runtime {
+            SpeechRuntime::CoreMlInProcess => self
+                .coreml_store
+                .is_installed(&steno_speech::ModelAsset::parakeet_v3_coreml()),
+            SpeechRuntime::OnnxSidecar => steno_speech::ModelAsset::onnx()
+                .iter()
+                .all(|asset| self.speech.is_installed(asset)),
         }
     }
 
@@ -577,6 +631,11 @@ impl ModelStoreSpeechModels {
         }
     }
 
+    /// Why a row Settings does not offer cannot be downloaded or removed.
+    fn not_offered(asset: ModelAsset) -> String {
+        format!("{} is not part of this version", asset.as_str())
+    }
+
     fn size_of(path: &Path) -> i64 {
         fn walk(path: &Path) -> u64 {
             if path.is_file() {
@@ -588,43 +647,6 @@ impl ModelStoreSpeechModels {
         }
         i64::try_from(walk(path)).unwrap_or(i64::MAX)
     }
-
-    /// Installs `assets` into the ONNX store one after another, reporting
-    /// the fraction of all their bytes and the file under way, then
-    /// `(1.0, "Installed")`.
-    fn install(
-        &self,
-        assets: &[steno_speech::ModelAsset],
-        progress: &mut dyn FnMut(f64, &str),
-    ) -> BoundaryResult<()> {
-        let total = assets
-            .iter()
-            .map(steno_speech::ModelAsset::total_size)
-            .sum::<u64>()
-            .max(1);
-        let mut throttle = ProgressThrottle::default();
-        let mut received_before: u64 = 0;
-        for asset in assets {
-            self.speech.ensure(asset, &mut |report| {
-                let earlier_files: u64 = asset
-                    .files
-                    .iter()
-                    .take_while(|f| f.name != report.file)
-                    .map(|f| f.size)
-                    .sum();
-                #[allow(clippy::cast_precision_loss)]
-                let fraction = ((received_before + earlier_files + report.received) as f64
-                    / total as f64)
-                    .min(1.0);
-                if throttle.forwards(fraction, report.file) {
-                    progress(fraction, report.file);
-                }
-            })?;
-            received_before += asset.total_size();
-        }
-        progress(1.0, "Installed");
-        Ok(())
-    }
 }
 
 impl SpeechModels for ModelStoreSpeechModels {
@@ -632,13 +654,7 @@ impl SpeechModels for ModelStoreSpeechModels {
     /// ([`SpeechSetup::runtime`]): the `CoreML` Parakeet's files, or every
     /// model the speech sidecar loads (the VAD and the fp32 Parakeet).
     fn engine_installed(&self, engine_id: &str) -> bool {
-        if self.runs_on_coreml(engine_id) {
-            coreml_parakeet_installed(&self.coreml)
-        } else {
-            steno_speech::ModelAsset::all()
-                .iter()
-                .all(|asset| self.speech.is_installed(asset))
-        }
+        self.installed_on(engine_runtime(engine_id, &self.speech_settings))
     }
 
     fn is_installed(&self, asset: ModelAsset) -> bool {
@@ -656,7 +672,9 @@ impl SpeechModels for ModelStoreSpeechModels {
             return None;
         }
         Some(match asset {
-            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Self::size_of(&self.coreml),
+            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
+                Self::size_of(&self.coreml_directory())
+            }
             other => Self::size_of(&self.speech.directory(&Self::onnx_asset(other)?)),
         })
     }
@@ -669,16 +687,19 @@ impl SpeechModels for ModelStoreSpeechModels {
         match asset {
             ModelAsset::OfflineDiarizer => {
                 steno_diarize::models::remove_old_parts(&self.speech);
-                self.install(&[steno_diarize::models::asset()], progress)
+                install_with_progress(&self.speech, &[steno_diarize::models::asset()], progress)
             }
-            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Err(
-                "This build cannot download the CoreML Parakeet v3 model; install it from the Steno Mac app."
-                    .into(),
+            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => install_with_progress(
+                &self.coreml_store,
+                &[steno_speech::ModelAsset::parakeet_v3_coreml()],
+                progress,
             ),
             // Silero VAD (640 KB) too, so the ONNX engine is ready offline
             // once the row says Installed.
-            ModelAsset::ParakeetV3 => self.install(&steno_speech::ModelAsset::all(), progress),
-            other => Err(format!("{} has no Rust engine yet", other.as_str()).into()),
+            ModelAsset::ParakeetV3 => {
+                install_with_progress(&self.speech, &steno_speech::ModelAsset::onnx(), progress)
+            }
+            other => Err(Self::not_offered(other).into()),
         }
     }
 
@@ -687,15 +708,11 @@ impl SpeechModels for ModelStoreSpeechModels {
     /// downloaded either way.
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()> {
         match asset {
-            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
-                match std::fs::remove_dir_all(&self.coreml) {
-                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
-                    _ => Ok(()),
-                }
-            }
+            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Ok(self
+                .coreml_store
+                .remove(&steno_speech::ModelAsset::parakeet_v3_coreml())?),
             other => {
-                let asset = Self::onnx_asset(other)
-                    .ok_or_else(|| format!("{} has no Rust engine yet", other.as_str()))?;
+                let asset = Self::onnx_asset(other).ok_or_else(|| Self::not_offered(other))?;
                 Ok(self.speech.remove(&asset)?)
             }
         }
@@ -708,6 +725,7 @@ impl SpeechModels for ModelStoreSpeechModels {
     fn display_name(&self, asset: ModelAsset) -> &'static str {
         match asset {
             ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => "Parakeet TDT 0.6B v3 (fp32)",
+            ModelAsset::OfflineDiarizer => steno_diarize::models::DISPLAY_NAME,
             other => other.display_name(),
         }
     }
@@ -717,21 +735,103 @@ impl SpeechModels for ModelStoreSpeechModels {
     fn source_repo(&self, asset: ModelAsset) -> &'static str {
         match asset {
             ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => "nvidia/parakeet-tdt-0.6b-v3",
+            ModelAsset::OfflineDiarizer => ONNX_DIARIZER_NOTICES[0].2,
             other => other.source_repo(),
         }
     }
 
-    /// Where the speech sidecar runs Parakeet v3, the fp32 export's size
-    /// from its manifest, not the `CoreML` build's.
-    fn expected_bytes(&self, asset: ModelAsset) -> i64 {
+    /// The diarizer's two ONNX models each have a line with their own
+    /// licence and attribution ([`ONNX_DIARIZER_NOTICES`]); every other
+    /// asset has the default one.
+    fn notices(&self, asset: ModelAsset) -> Vec<ModelNotice> {
         match asset {
-            ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => {
-                let bytes = steno_speech::ModelAsset::parakeet_v3_fp32().total_size();
-                i64::try_from(bytes).unwrap_or(i64::MAX)
-            }
-            other => other.approximate_bytes(),
+            ModelAsset::OfflineDiarizer => ONNX_DIARIZER_NOTICES
+                .iter()
+                .map(|(name, licence, source)| ModelNotice {
+                    name: (*name).to_owned(),
+                    licence: (*licence).to_owned(),
+                    source: (*source).to_owned(),
+                })
+                .collect(),
+            other => vec![ModelNotice {
+                name: self.display_name(other).to_owned(),
+                licence: other.licence().to_owned(),
+                source: self.source_repo(other).to_owned(),
+            }],
         }
     }
+
+    /// The manifest size of the model behind the row: the `CoreML`
+    /// Parakeet's or, where the speech sidecar runs it, the fp32 export's,
+    /// and the diarizer's two ONNX files.
+    fn expected_bytes(&self, asset: ModelAsset) -> i64 {
+        let bytes = match asset {
+            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
+                steno_speech::ModelAsset::parakeet_v3_coreml().total_size()
+            }
+            ModelAsset::ParakeetV3 => steno_speech::ModelAsset::parakeet_v3_fp32().total_size(),
+            ModelAsset::OfflineDiarizer => steno_diarize::models::asset().total_size(),
+            other => return other.approximate_bytes(),
+        };
+        i64::try_from(bytes).unwrap_or(i64::MAX)
+    }
+}
+
+/// The diarizer's two acknowledgement lines, `(name with attribution,
+/// licence, source)`: the models `steno_diarize::models` fetches,
+/// converted to ONNX from their originals, whose licences
+/// `steno_diarize::models::LICENCE` joins (a test pins it).
+const ONNX_DIARIZER_NOTICES: [(&str, &str, &str); 2] = [
+    (
+        "pyannote segmentation 3.0 by pyannote.audio, converted to ONNX",
+        "MIT",
+        "pyannote/segmentation-3.0",
+    ),
+    (
+        "WeSpeaker ResNet34-LM by WeSpeaker, trained on VoxCeleb, converted to ONNX",
+        "CC-BY-4.0",
+        "Wespeaker/wespeaker-voxceleb-resnet34-LM",
+    ),
+];
+
+/// Installs `assets` into `store` one after another, reporting the
+/// fraction of all their bytes and the file under way (at most once per
+/// whole percent or file), then `(1.0, "Installed")`. A file inside a
+/// bundle (`Encoder.mlmodelc/weights/weight.bin`) is reported as the
+/// bundle, `Encoder.mlmodelc`.
+fn install_with_progress(
+    store: &ModelStore,
+    assets: &[steno_speech::ModelAsset],
+    progress: &mut dyn FnMut(f64, &str),
+) -> BoundaryResult<()> {
+    let total = assets
+        .iter()
+        .map(steno_speech::ModelAsset::total_size)
+        .sum::<u64>()
+        .max(1);
+    let mut throttle = ProgressThrottle::default();
+    let mut received_before: u64 = 0;
+    for asset in assets {
+        store.ensure(asset, &mut |report| {
+            let earlier_files: u64 = asset
+                .files
+                .iter()
+                .take_while(|f| f.name != report.file)
+                .map(|f| f.size)
+                .sum();
+            #[allow(clippy::cast_precision_loss)]
+            let fraction = ((received_before + earlier_files + report.received) as f64
+                / total as f64)
+                .min(1.0);
+            let shown = report.file.split('/').next().unwrap_or(report.file);
+            if throttle.forwards(fraction, shown) {
+                progress(fraction, shown);
+            }
+        })?;
+        received_before += asset.total_size();
+    }
+    progress(1.0, "Installed");
+    Ok(())
 }
 
 /// Lets a download report through only when its whole percent or its file
@@ -766,7 +866,7 @@ pub(crate) mod testing {
 
     use steno_speech::{SidecarConfig, SpeechSettings};
 
-    use super::{COREML_PARAKEET_FILES, ModelStoreSpeechModels, SpeechSetup};
+    use super::{ModelStoreSpeechModels, SpeechSetup};
 
     /// A setup over `models_directory` with `speech_settings` and a sidecar
     /// binary that does not exist, so nothing starts one.
@@ -792,19 +892,13 @@ pub(crate) mod testing {
         ModelStoreSpeechModels::new(&setup(models_directory, SpeechSettings::default()))
     }
 
-    /// The `CoreML` Parakeet in `directory`, complete: each bundle with a
-    /// one-byte `coremldata.bin`, the vocabulary as `{}`.
-    pub fn install_coreml_parakeet(directory: &Path) {
-        for name in COREML_PARAKEET_FILES {
-            let path = directory.join(name);
-            if name.ends_with(".mlmodelc") {
-                std::fs::create_dir_all(&path).unwrap();
-                std::fs::write(path.join("coremldata.bin"), b"x").unwrap();
-            } else {
-                std::fs::create_dir_all(directory).unwrap();
-                std::fs::write(&path, b"{}").unwrap();
-            }
-        }
+    /// The `CoreML` Parakeet in its store, complete: each of its files a
+    /// sparse file of its manifest size.
+    pub fn install_coreml_parakeet(models: &ModelStoreSpeechModels) {
+        install_in(
+            &models.coreml_store,
+            &steno_speech::ModelAsset::parakeet_v3_coreml(),
+        );
     }
 
     /// The two ONNX diarizer models, each a sparse file of its manifest
@@ -813,13 +907,29 @@ pub(crate) mod testing {
         install_speech_asset(models, &steno_diarize::models::asset());
     }
 
+    /// Every model the app's engines load: the `CoreML` Parakeet, the
+    /// speech sidecar's ONNX models and the diarizer's.
+    pub fn install_every_model(models: &ModelStoreSpeechModels) {
+        install_coreml_parakeet(models);
+        for asset in steno_speech::ModelAsset::onnx() {
+            install_speech_asset(models, &asset);
+        }
+        install_onnx_diarizer(models);
+    }
+
     /// `asset`'s files in the speech store, each a sparse file of its
     /// manifest size.
     pub fn install_speech_asset(models: &ModelStoreSpeechModels, asset: &steno_speech::ModelAsset) {
-        let directory = models.speech.directory(asset);
-        std::fs::create_dir_all(&directory).unwrap();
+        install_in(&models.speech, asset);
+    }
+
+    /// `asset`'s files in `store`, each a sparse file of its manifest size.
+    fn install_in(store: &steno_speech::ModelStore, asset: &steno_speech::ModelAsset) {
+        let directory = store.directory(asset);
         for file in &asset.files {
-            std::fs::File::create(directory.join(&file.name))
+            let path = directory.join(&file.name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(path)
                 .unwrap()
                 .set_len(file.size)
                 .unwrap();
@@ -933,31 +1043,30 @@ mod tests {
         );
     }
 
+    /// The `CoreML` Parakeet counts as installed only with each of its 23
+    /// files at its manifest size: a short weight file, as a download cut
+    /// short would leave, is not installed, so the engine is never asked
+    /// to load a partial tree.
     #[test]
     fn the_coreml_parakeet_counts_as_installed_only_when_complete() {
         let dir = tempfile::tempdir().unwrap();
-        let directory = dir.path().join("parakeet");
-        assert!(!coreml_parakeet_installed(&directory));
-        for name in COREML_PARAKEET_FILES {
-            let path = directory.join(name);
-            if name.ends_with(".mlmodelc") {
-                std::fs::create_dir_all(&path).unwrap();
-            } else {
-                std::fs::create_dir_all(&directory).unwrap();
-                std::fs::write(&path, b"{}").unwrap();
-            }
-        }
-        assert!(
-            !coreml_parakeet_installed(&directory),
-            "bundles without their coremldata.bin are incomplete"
-        );
-        for name in COREML_PARAKEET_FILES
+        let models = testing::models_in(dir.path());
+        assert!(!models.installed_on(SpeechRuntime::CoreMlInProcess));
+        testing::install_coreml_parakeet(&models);
+        assert!(models.installed_on(SpeechRuntime::CoreMlInProcess));
+        let asset = steno_speech::ModelAsset::parakeet_v3_coreml();
+        let weights = asset
+            .files
             .iter()
-            .filter(|n| n.ends_with(".mlmodelc"))
-        {
-            std::fs::write(directory.join(name).join("coremldata.bin"), b"x").unwrap();
-        }
-        assert!(coreml_parakeet_installed(&directory));
+            .find(|file| file.name.starts_with("Encoder.mlmodelc/") && file.size > 1)
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(models.coreml_directory().join(&weights.name))
+            .unwrap()
+            .set_len(weights.size - 1)
+            .unwrap();
+        assert!(!models.installed_on(SpeechRuntime::CoreMlInProcess));
     }
 
     #[test]
@@ -965,16 +1074,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let models = testing::models_in(dir.path());
         assert!(!models.is_installed(ModelAsset::ParakeetV3));
-        testing::install_coreml_parakeet(&models.coreml);
+        testing::install_coreml_parakeet(&models);
         assert_eq!(
             models.is_installed(ModelAsset::ParakeetV3),
             cfg!(target_os = "macos"),
             "the CoreML model counts on the Mac only"
         );
         if cfg!(target_os = "macos") {
-            assert_eq!(models.installed_size(ModelAsset::ParakeetV3), Some(6));
+            assert_eq!(
+                models.installed_size(ModelAsset::ParakeetV3),
+                Some(
+                    i64::try_from(steno_speech::ModelAsset::parakeet_v3_coreml().total_size())
+                        .unwrap()
+                )
+            );
             models.remove(ModelAsset::ParakeetV3).unwrap();
-            assert!(!models.coreml.exists());
+            assert!(!models.coreml_directory().exists());
             assert!(!models.is_installed(ModelAsset::ParakeetV3));
         }
     }
@@ -1077,23 +1192,71 @@ mod tests {
         assert!(!old_part.exists(), "the earlier store's partial is deleted");
     }
 
-    /// Until the pipeline checks for missing models itself, the diarizer
-    /// every pipeline runs may download them: over an empty models
-    /// directory its `prepare` asks the mirror. S1 inverts this together
-    /// with its models-missing gate.
+    /// The diarizer every pipeline runs never downloads its models: past
+    /// a gate that lets everything through, over an empty models directory
+    /// and a mirror, its `prepare` is the models-missing refusal for the
+    /// diarize stage (`DiarizeError::NotInstalled` from `Install::Never`)
+    /// and the mirror gets no request.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_apps_diarizer_may_download_its_models_until_the_gate() {
+    async fn the_apps_diarizer_never_downloads_its_models() {
         let dir = tempfile::tempdir().unwrap();
         let (mirror, requests) = counting_junk_mirror(0);
-        let engines = SpeechEngines::new(testing::setup(
-            dir.path(),
-            SpeechSettings {
-                models_mirror: Some(mirror),
-                ..SpeechSettings::default()
-            },
-        ));
-        assert!(engines.diarizer().prepare().await.is_err());
-        assert!(requests.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        let engines = SpeechEngines::with_checks(
+            testing::setup(
+                dir.path(),
+                SpeechSettings {
+                    models_mirror: Some(mirror),
+                    ..SpeechSettings::default()
+                },
+            ),
+            Arc::new(|_| true),
+            Arc::new(|| true),
+        );
+        let error = engines.diarizer().prepare().await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<steno_pipeline::PipelineFailure>(),
+            Some(&steno_pipeline::PipelineFailure::models_missing(
+                steno_core::PipelineStage::Diarize
+            )),
+            "{error}"
+        );
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// `models_installed` holds only while both gates would let a run
+    /// through: the speech engine's models on the runtime and the
+    /// diarizer's.
+    #[test]
+    fn models_installed_needs_the_speech_models_and_the_diarizers() {
+        let dir = tempfile::tempdir().unwrap();
+        for (speech, diarizer) in [(false, false), (true, false), (false, true), (true, true)] {
+            let engines = SpeechEngines::with_checks(
+                testing::setup(dir.path(), SpeechSettings::default()),
+                Arc::new(move |_| speech),
+                Arc::new(move || diarizer),
+            );
+            assert_eq!(
+                engines.models_installed(SpeechRuntime::OnnxSidecar),
+                speech && diarizer,
+                "speech {speech}, diarizer {diarizer}"
+            );
+        }
+    }
+
+    /// The diarizer's acknowledgement lines carry the licences
+    /// `steno_diarize::models::LICENCE` joins, and the host's default line
+    /// gives that licence too.
+    #[test]
+    fn the_diarizer_notices_carry_the_models_licences() {
+        let licences: Vec<&str> = ONNX_DIARIZER_NOTICES
+            .iter()
+            .map(|(_, licence, _)| *licence)
+            .collect();
+        assert_eq!(licences.join(" AND "), steno_diarize::models::LICENCE);
+        assert_eq!(
+            ModelAsset::OfflineDiarizer.licence(),
+            steno_diarize::models::LICENCE
+        );
     }
 
     /// A mirror on 127.0.0.1 that answers every request with `len` bytes
@@ -1193,6 +1356,67 @@ mod tests {
         );
     }
 
+    /// Settings downloads the `CoreML` Parakeet into the models
+    /// directory's `fluidaudio/parakeet-tdt-0.6b-v3/`, through the mirror
+    /// when one is set (`<mirror>/parakeet-tdt-0.6b-v3/<file>`), with the
+    /// progress of the file under way; here the mirror serves junk of the
+    /// first file's size, which fails its checksum and installs nothing.
+    /// On the Mac that is the Parakeet v3 row's download.
+    #[test]
+    fn the_coreml_parakeet_downloads_into_the_fluidaudio_folder_with_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset = steno_speech::ModelAsset::parakeet_v3_coreml();
+        let first = &asset.files[0];
+        let models = ModelStoreSpeechModels::new(&testing::setup(
+            dir.path(),
+            SpeechSettings {
+                models_mirror: Some(junk_mirror(usize::try_from(first.size).unwrap())),
+                ..SpeechSettings::default()
+            },
+        ));
+        assert_eq!(
+            models.coreml_store.directory(&asset),
+            models.coreml_directory()
+        );
+        assert_eq!(
+            models.coreml_directory(),
+            dir.path().join("fluidaudio").join("parakeet-tdt-0.6b-v3")
+        );
+        let mut reports = Vec::new();
+        let mut record = |fraction: f64, file: &str| reports.push((fraction, file.to_owned()));
+        let error = if cfg!(target_os = "macos") {
+            models.download(ModelAsset::ParakeetV3, &mut record)
+        } else {
+            install_with_progress(
+                &models.coreml_store,
+                std::slice::from_ref(&asset),
+                &mut record,
+            )
+        }
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("sha256") && error.contains("coremldata.bin"),
+            "{error}"
+        );
+        let bundle = first.name.split('/').next().unwrap();
+        assert!(
+            first.name.contains('/')
+                && !reports.is_empty()
+                && reports
+                    .iter()
+                    .all(|(fraction, file)| file == bundle && *fraction < 1.0),
+            "the bundle, not the file inside it: {reports:?}"
+        );
+        assert!(!models.installed_on(SpeechRuntime::CoreMlInProcess));
+        assert!(
+            testing::files_under(&models.coreml_directory())
+                .iter()
+                .all(|path| path.extension().is_some_and(|ext| ext == "lock")),
+            "only the lock of the file that failed"
+        );
+    }
+
     #[test]
     fn download_progress_goes_through_once_per_percent_or_file() {
         let mut throttle = ProgressThrottle::default();
@@ -1222,7 +1446,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let models = testing::models_in(dir.path());
         assert!(!models.engine_installed("parakeet-v3"));
-        testing::install_coreml_parakeet(&models.coreml);
+        testing::install_coreml_parakeet(&models);
         assert_eq!(
             models.engine_installed("parakeet-v3"),
             cfg!(target_os = "macos")
@@ -1239,16 +1463,24 @@ mod tests {
             coreml_model_directory(&support.join("Models")),
             steno_speech_coreml::engine::model_directory(support)
         );
-        assert_eq!(
-            COREML_PARAKEET_FILES,
-            [
-                steno_speech_coreml::backend::PREPROCESSOR_FILE,
-                steno_speech_coreml::backend::ENCODER_FILE,
-                steno_speech_coreml::backend::DECODER_FILE,
-                steno_speech_coreml::backend::JOINT_FILE,
-                steno_speech_coreml::backend::VOCABULARY_FILE,
-            ]
-        );
+        // The gate's manifest holds every file the backend opens: each
+        // bundle's `coremldata.bin` and the vocabulary.
+        let names: Vec<String> = steno_speech::ModelAsset::parakeet_v3_coreml()
+            .files
+            .into_iter()
+            .map(|file| file.name)
+            .collect();
+        for bundle in [
+            steno_speech_coreml::backend::PREPROCESSOR_FILE,
+            steno_speech_coreml::backend::ENCODER_FILE,
+            steno_speech_coreml::backend::DECODER_FILE,
+            steno_speech_coreml::backend::JOINT_FILE,
+        ] {
+            let data = format!("{bundle}/coremldata.bin");
+            assert!(names.contains(&data), "{data}");
+        }
+        let vocabulary = steno_speech_coreml::backend::VOCABULARY_FILE.to_owned();
+        assert!(names.contains(&vocabulary), "{vocabulary}");
     }
 
     /// On the Mac `parakeet-v3` is the `CoreML` engine, and with the
@@ -1436,7 +1668,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let models =
             ModelStoreSpeechModels::new(&testing::setup(dir.path(), testing::sidecar_chosen()));
-        testing::install_coreml_parakeet(&models.coreml);
+        testing::install_coreml_parakeet(&models);
         assert!(!models.is_installed(ModelAsset::ParakeetV3));
         assert!(!models.engine_installed("parakeet-v3"));
         assert_eq!(
@@ -1448,6 +1680,26 @@ mod tests {
             "nvidia/parakeet-tdt-0.6b-v3"
         );
         assert_eq!(parakeet_size_text(&models), fp32_size_text());
+    }
+
+    /// A row this version does not offer (a Swift app's model) is refused
+    /// by Download and Remove alike, with the one wording, and nothing is
+    /// fetched or touched.
+    #[test]
+    fn download_and_remove_refuse_a_retired_row_with_the_same_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = testing::models_in(dir.path());
+        for asset in [
+            ModelAsset::ParakeetUltra,
+            ModelAsset::ParakeetDe,
+            ModelAsset::WhisperLargeV3Turbo,
+        ] {
+            let download = models.download(asset, &mut |_, _| {}).unwrap_err();
+            let remove = models.remove(asset).unwrap_err();
+            let words = format!("{} is not part of this version", asset.as_str());
+            assert_eq!(download.to_string(), words);
+            assert_eq!(remove.to_string(), words);
+        }
     }
 
     /// The Parakeet v3 row of Settings > Transcription before a download,
@@ -1469,16 +1721,17 @@ mod tests {
     }
 
     /// Settings shows the size of the model the platform runs: the
-    /// `CoreML` build's on the Mac by default, the fp32 export's (about
-    /// 2.6 GB) elsewhere. The diarizer keeps the Swift app's measure for
-    /// now (the open item on the diarizer's rows in the plan).
+    /// `CoreML` build's manifest on the Mac by default (about 483 MB), the
+    /// fp32 export's (about 2.6 GB) elsewhere, and the two ONNX diarizer
+    /// files' (about 33 MB) everywhere.
     #[test]
     fn the_expected_size_is_that_of_the_model_the_platform_runs() {
         let models = testing::models_in(Path::new("/tmp/steno-models"));
         let expected = if cfg!(target_os = "macos") {
+            let bytes = steno_speech::ModelAsset::parakeet_v3_coreml().total_size();
             format!(
                 "Not downloaded · {}",
-                steno_host::labels::file_size(ModelAsset::ParakeetV3.approximate_bytes())
+                steno_host::labels::file_size(i64::try_from(bytes).unwrap())
             )
         } else {
             fp32_size_text()
@@ -1486,7 +1739,7 @@ mod tests {
         assert_eq!(parakeet_size_text(&models), expected);
         assert_eq!(
             models.expected_bytes(ModelAsset::OfflineDiarizer),
-            ModelAsset::OfflineDiarizer.approximate_bytes()
+            32_523_463
         );
     }
 
@@ -1495,12 +1748,51 @@ mod tests {
     fn parakeet_acknowledgement() -> (String, String) {
         let models = testing::models_in(Path::new("/tmp/steno-models"));
         let rows = steno_host::settings::snapshots::acknowledgements(&models);
-        assert_eq!(
-            rows[4].name,
-            ModelAsset::OfflineDiarizer.display_name(),
-            "the other assets keep their names"
-        );
         (rows[0].name.clone(), rows[0].source.clone())
+    }
+
+    /// Settings > General acknowledges the two models the Rust app offers:
+    /// Parakeet v3, then the diarizer's two ONNX models, each with its
+    /// licence and who made it (the `WeSpeaker` model's CC-BY-4.0 asks for the
+    /// attribution); no row for Whisper, Ultra or the German Parakeet, and
+    /// `steno models` lists the ONNX models by name.
+    #[test]
+    fn the_diarizer_is_acknowledged_as_its_two_onnx_models() {
+        let models = testing::models_in(Path::new("/tmp/steno-models"));
+        let rows = steno_host::settings::snapshots::acknowledgements(&models);
+        let speech: Vec<_> = rows
+            .iter()
+            .filter(|row| row.group == steno_bridge::GeneralAcknowledgementGroup::SpeechModels)
+            .map(|row| (row.name.as_str(), row.licence.as_str(), row.source.as_str()))
+            .collect();
+        assert_eq!(speech.len(), 3, "{speech:?}");
+        assert_eq!(
+            &speech[1..],
+            [
+                (
+                    "pyannote segmentation 3.0 by pyannote.audio, converted to ONNX",
+                    "MIT",
+                    "pyannote/segmentation-3.0",
+                ),
+                (
+                    "WeSpeaker ResNet34-LM by WeSpeaker, trained on VoxCeleb, converted to ONNX",
+                    "CC-BY-4.0",
+                    "Wespeaker/wespeaker-voxceleb-resnet34-LM",
+                ),
+            ]
+        );
+        assert_eq!(
+            models.display_name(ModelAsset::OfflineDiarizer),
+            "Speaker diarization (pyannote segmentation 3.0, WeSpeaker ResNet34-LM)"
+        );
+        assert!(
+            speech
+                .iter()
+                .all(|(name, _, source)| !name.contains("Whisper")
+                    && !name.contains("Ultra")
+                    && !source.contains("speaker-diarization-coreml")),
+            "{speech:?}"
+        );
     }
 
     #[cfg(target_os = "macos")]

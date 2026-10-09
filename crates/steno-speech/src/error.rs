@@ -66,8 +66,9 @@ pub enum SpeechError {
         expected: String,
         actual: String,
     },
-    /// An asset id or file name in a manifest is not one plain path
-    /// component, so joining it to the root could escape it.
+    /// An asset id in a manifest is not one plain path component, or a
+    /// file name is not plain components joined by `/`, so joining it to
+    /// the root could escape it.
     #[error("model asset {asset}: {name:?} is not a plain file or directory name")]
     InvalidName { asset: String, name: String },
     /// `tokens.txt` is not the sherpa-onnx `piece id` list in id order.

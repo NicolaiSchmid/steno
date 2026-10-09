@@ -50,8 +50,8 @@ use steno_core::{AudioBuffer16k, SpeechEngine};
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::sidecar::{FALLBACK_NOTICE, directml_switched_off};
 use steno_speech::{
-    EncoderProvider, ModelAsset, ModelFile, ModelSource, ModelStore, OnnxOptions, OnnxSpeechEngine,
-    SidecarConfig, SidecarError, SidecarSpeechEngine,
+    EncoderProvider, Install, ModelAsset, ModelFile, ModelSource, ModelStore, OnnxOptions,
+    OnnxSpeechEngine, SidecarConfig, SidecarError, SidecarSpeechEngine,
 };
 
 /// Waits up to ten seconds for `pid` to be gone.
@@ -980,9 +980,12 @@ async fn the_engine_installs_its_models_on_first_use_and_outside_its_lock() {
         }],
     };
     let store = ModelStore::new(dir.path().join("models"));
+    // Downloads are the `steno` command's; the default never fetches.
+    let mut config = config(&[]);
+    config.install = Install::Allowed;
     let engine = Arc::new(SidecarSpeechEngine::with_assets(
         store.clone(),
-        config(&[]),
+        config,
         vec![asset.clone()],
     ));
     // A transcription without `prepare` installs them too.

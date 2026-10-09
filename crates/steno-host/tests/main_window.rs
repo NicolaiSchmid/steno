@@ -2089,6 +2089,10 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         ),
         (Refusal::Busy, "This meeting is already being processed."),
         (
+            Refusal::ModelsMissing,
+            "Download the speech models in Settings.",
+        ),
+        (
             Refusal::NotOffered,
             "Only a failed meeting can be processed again.",
         ),
@@ -2188,4 +2192,94 @@ fn process_again_words_a_gone_recording_for_the_platform() {
         harness.snapshot(BridgeTopic::MeetingDetail)["error"],
         "The recording is no longer on this computer, so the meeting cannot be processed again."
     );
+}
+
+/// A run refused for a missing model leaves the meeting queued; its
+/// progress entry then says what to do (stage `modelsMissing`), until the
+/// next run's first event. Rust only.
+#[test]
+fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
+    let harness = Harness::builder()
+        .seed(|store, _| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x89);
+            meeting.state = MeetingState::Queued;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+        })
+        .build();
+    let entry = |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
+    assert_eq!(entry(&harness)["stage"], "waiting");
+    assert_eq!(entry(&harness)["title"], "Waiting to process");
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::ModelsMissing {
+            meeting_id: uuid(0x89),
+        });
+    assert_eq!(entry(&harness)["stage"], "modelsMissing");
+    assert_eq!(
+        entry(&harness)["title"],
+        "Download the speech models in Settings"
+    );
+    // Waiting for its models, it is not offered "Process again".
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(0x89),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        false
+    );
+    harness.host.store_changed();
+    assert_eq!(
+        entry(&harness)["stage"],
+        "modelsMissing",
+        "the store's poll keeps it"
+    );
+    harness.host.apply_meeting_event(&MeetingEvent::Progress {
+        meeting_id: uuid(0x89),
+        progress: steno_core::ProcessingProgress {
+            stage: PipelineStage::Decode,
+            fraction: 0.05,
+            next_fraction: 0.1,
+            estimated_remaining_seconds: 60.0,
+            is_estimate_seeded: false,
+            lane: 0,
+            lane_count: 1,
+        },
+    });
+    assert_eq!(entry(&harness)["stage"], "decode");
+}
+
+/// A pending engine notice (its `preferences.json` flag) takes the setup
+/// banner's place, marked as a notice and with no action to offer;
+/// dismissing it clears the flag, so the next host (the next launch) shows
+/// the setup banner again and the notice never.
+#[test]
+fn the_engine_notice_shows_once_in_the_banners_place() {
+    use steno_host::services::Preferences as _;
+    let seed = |store: &steno_core::Store, fakes: &steno_host::fakes::FakeServices| {
+        populate_sample(store, fakes);
+        fakes
+            .preferences
+            .set_flag(steno_host::setup::engine_notice::PENDING_KEY, true);
+    };
+    let harness = Harness::builder().seed(seed).build();
+    let banner = harness.snapshot(BridgeTopic::App)["setupBanner"].clone();
+    assert_eq!(banner["title"], "Steno now transcribes with Parakeet v3");
+    assert_eq!(banner["isNotice"], true);
+    assert_eq!(banner["offersSummaries"], false);
+    assert_eq!(banner["offersVault"], false);
+    harness.host.setup_dismiss_banner().unwrap();
+    assert!(
+        !harness
+            .fakes
+            .preferences
+            .flag(steno_host::setup::engine_notice::PENDING_KEY)
+    );
+    let after = harness.snapshot(BridgeTopic::App)["setupBanner"].clone();
+    assert_ne!(after["title"], "Steno now transcribes with Parakeet v3");
+    assert_eq!(after.get("isNotice"), None, "the setup banner is no notice");
 }

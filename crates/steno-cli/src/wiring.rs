@@ -233,12 +233,18 @@ pub fn paths() -> Result<StenoPaths, Failure> {
 }
 
 /// The speech setup over `models_directory`, the speech settings read
-/// from the default support directory without creating it.
+/// from the default support directory without creating it. Its sidecar
+/// downloads a missing model on first use (`Install::Allowed`): a user who
+/// runs an explicit command in a terminal asked for the work and sees its
+/// output. The app's setup never does (`Install::Never`, the default), and
+/// this one is built here, not shared with it.
 pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
-    SpeechSetup::in_models_directory(
+    let mut setup = SpeechSetup::in_models_directory(
         models_directory,
         &StenoPaths::new(StenoPaths::default_support_directory()),
-    )
+    );
+    setup.sidecar.install = steno_speech::Install::Allowed;
+    setup
 }
 
 /// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
@@ -373,9 +379,12 @@ pub fn dependencies(
     })
 }
 
-/// The diarizer `steno process --engine` runs over `speech`. An explicit
-/// command run in a terminal, so it may download the diarizer's models on
-/// first use (`Install::Allowed`), also once the app's pipeline may not.
+/// The diarizer `steno process --engine` runs over `speech`. It stays on
+/// `Install::Allowed`: a user who runs an explicit command in a terminal
+/// asked for the work and sees its output, so it may download the
+/// diarizer's models on first use. The app's pipelines never do
+/// (`Install::Never` in `steno_services::speech::SpeechEngines`), and
+/// this wiring is built here, not shared with them.
 fn process_diarizer(speech: &SpeechSetup) -> Arc<dyn steno_core::Diarizer> {
     steno_services::speech::diarizer(speech, steno_diarize::Install::Allowed)
 }
@@ -555,6 +564,23 @@ mod tests {
         };
         let _store = options.open_to_read().unwrap();
         DatabaseLock::acquire(&database).expect("the read let go of the lock");
+    }
+
+    /// The command's speech sidecar may download a missing model, where
+    /// the app's setup, built the same way without the CLI's switch, may
+    /// not.
+    #[test]
+    fn the_commands_sidecar_may_download_its_models() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            speech_setup(dir.path().join("models")).sidecar.install,
+            steno_speech::Install::Allowed
+        );
+        let app = SpeechSetup::in_models_directory(
+            dir.path().join("models"),
+            &StenoPaths::new(dir.path()),
+        );
+        assert_eq!(app.sidecar.install, steno_speech::Install::Never);
     }
 
     /// `steno process` may download the diarizer's models: over an empty

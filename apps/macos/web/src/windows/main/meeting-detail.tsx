@@ -89,12 +89,17 @@ export interface MeetingDetailProps {
 	initialPickerOpen?: boolean;
 }
 
-/** The notice at the top of the reading column: summaries or export still need setting up. */
+/**
+ * The notice at the top of the reading column: summaries or export still
+ * need setting up, or a one-time notice (`isNotice`) the host records as
+ * seen once it is dismissed with OK.
+ */
 function SetupBanner({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 	const client = useBridge();
 	if (!banner) {
 		return null;
 	}
+	const notice = banner.isNotice === true;
 	return (
 		<Callout
 			actions={
@@ -133,9 +138,9 @@ function SetupBanner({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 						data-testid="banner-not-now"
 						onClick={() => send(client, "setup.dismissBanner")}
 						size="xs"
-						variant="ghost"
+						variant={notice ? "outline" : "ghost"}
 					>
-						Not now
+						{notice ? "OK" : "Not now"}
 					</Button>
 				</>
 			}

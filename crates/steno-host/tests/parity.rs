@@ -275,6 +275,12 @@ fn progress() {
             lane_count: 1,
         },
     });
+    // A run refused for missing models: the second entry, Rust only.
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::ModelsMissing {
+            meeting_id: uuid(0x04),
+        });
     assert_parity(
         "progress",
         &harness.snapshot(BridgeTopic::Progress),
@@ -398,7 +404,7 @@ fn settings_general() {
     let templates = host["templates"].clone();
     let acknowledgements = host["acknowledgements"].clone();
     assert_eq!(templates.as_array().unwrap().len(), 4);
-    assert_eq!(acknowledgements.as_array().unwrap().len(), 12);
+    assert_eq!(acknowledgements.as_array().unwrap().len(), 9);
     assert_parity(
         "settings.general",
         &host,
@@ -406,7 +412,7 @@ fn settings_general() {
             deviation(
                 "/acknowledgements",
                 acknowledgements,
-                "every speech model and the seven libraries; the fixture lists four",
+                "the two speech models the Rust app offers (Parakeet v3, the diarizer) and the seven libraries; the fixture lists four",
             ),
             deviation(
                 "/templates",
@@ -528,7 +534,12 @@ fn settings_transcription() {
             deviation(
                 "/engines",
                 host_engines,
-                "engines carry `SpeechSettingsViewModel.engineTitle` (\"Parakeet · fast · 25 languages\")",
+                "engines carry `SpeechSettingsViewModel.engineTitle` (\"Parakeet · fast · 25 languages\"); the Rust app offers Parakeet v3 alone",
+            ),
+            deviation(
+                "/showsEnginePicker",
+                json!(false),
+                "with one engine there is no choice, so no picker (Rust only: Whisper, Ultra and DE have no Rust engine)",
             ),
             deviation(
                 "/subtitle",

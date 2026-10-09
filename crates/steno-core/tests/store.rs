@@ -425,6 +425,72 @@ fn an_unknown_obsidian_field_survives_a_load_edit_save() {
     );
 }
 
+/// Every stored engine id but `parakeet-v3` becomes `parakeet-v3`, which
+/// Swift decodes too: the three the Swift app offered beyond it and one
+/// this build has never heard of. `before_rewrite` runs once and the move
+/// happens once; `parakeet-v3` or no row change nothing and call nothing.
+#[test]
+fn every_stored_engine_but_parakeet_v3_becomes_parakeet_v3_once() {
+    for retired in [
+        "whisperkit-large-v3-turbo",
+        "parakeet-ultra",
+        "parakeet-de",
+        "some-later-engine",
+    ] {
+        let store = Store::in_memory().unwrap();
+        put_setting_row(&store, "speechEngineID", &format!("\"{retired}\""));
+        put_setting_row(&store, "aFutureSetting", "1");
+        let mut calls = 0;
+        assert!(
+            store.retire_speech_engine(|| calls += 1).unwrap(),
+            "{retired}"
+        );
+        assert_eq!(calls, 1, "{retired}");
+        assert_eq!(
+            setting_row(&store, "speechEngineID").as_deref(),
+            Some(r#""parakeet-v3""#)
+        );
+        assert_eq!(store.settings().unwrap().speech_engine_id, "parakeet-v3");
+        assert_eq!(setting_row(&store, "aFutureSetting").as_deref(), Some("1"));
+        assert!(
+            !store
+                .retire_speech_engine(|| panic!("called again for {retired}"))
+                .unwrap(),
+            "only once"
+        );
+    }
+    for kept in [Some(r#""parakeet-v3""#), None] {
+        let store = Store::in_memory().unwrap();
+        if let Some(value) = kept {
+            put_setting_row(&store, "speechEngineID", value);
+        }
+        assert!(
+            !store
+                .retire_speech_engine(|| panic!("called for {kept:?}"))
+                .unwrap()
+        );
+        assert_eq!(setting_row(&store, "speechEngineID").as_deref(), kept);
+    }
+}
+
+/// `before_rewrite` comes before the rewrite: when it does not return
+/// (the process ends there), the old id stays stored, so the next launch
+/// retires it and records the notice again.
+#[test]
+fn an_engine_retirement_that_ends_in_before_rewrite_stores_nothing() {
+    let store = Store::in_memory().unwrap();
+    put_setting_row(&store, "speechEngineID", r#""parakeet-ultra""#);
+    let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.retire_speech_engine(|| panic!("the process ends here"))
+    }));
+    assert!(ended.is_err());
+    assert_eq!(
+        setting_row(&store, "speechEngineID").as_deref(),
+        Some(r#""parakeet-ultra""#)
+    );
+    assert!(store.retire_speech_engine(|| {}).unwrap());
+}
+
 #[test]
 fn persons_are_saved_and_listed_by_name() {
     let store = Store::in_memory().unwrap();

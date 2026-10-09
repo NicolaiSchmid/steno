@@ -24,6 +24,10 @@ pub struct ProgressEntry {
     pub progress: Option<ProcessingProgress>,
     /// When `progress` landed, or when the entry was created.
     pub since: DateTime<Utc>,
+    /// The last run was refused because a model is not installed
+    /// ([`MeetingEvent::ModelsMissing`]); the meeting waits in the queue
+    /// until the next run's first event. Rust only.
+    pub models_missing: bool,
 }
 
 impl ProgressEntry {
@@ -31,15 +35,28 @@ impl ProgressEntry {
     /// event.
     pub const WAITING_TITLE: &'static str = "Waiting to process";
 
+    /// The title of a meeting whose run was refused for a missing model,
+    /// `PipelineFailure::MODELS_MISSING` in `steno-pipeline`.
+    pub const MODELS_MISSING_TITLE: &'static str = "Download the speech models in Settings";
+
+    /// The bridge stage of such a meeting, beside `waiting` and the
+    /// pipeline's stages; the page drops "starts when the current meeting
+    /// finishes" for it.
+    pub const MODELS_MISSING_STAGE: &'static str = "modelsMissing";
+
     #[must_use]
     pub fn stage(&self) -> Option<PipelineStage> {
         self.progress.as_ref().map(|progress| progress.stage)
     }
 
     /// `stage_label` plus an ellipsis, "Transcribing…"; [`Self::WAITING_TITLE`]
-    /// before the first event.
+    /// before the first event, [`Self::MODELS_MISSING_TITLE`] after a
+    /// refusal for a missing model.
     #[must_use]
     pub fn title(&self) -> String {
+        if self.models_missing {
+            return Self::MODELS_MISSING_TITLE.to_owned();
+        }
         self.progress.as_ref().map_or_else(
             || Self::WAITING_TITLE.to_owned(),
             |progress| format!("{}…", stage_label(progress.stage)),
@@ -78,6 +95,8 @@ impl ProcessingProgressModel {
     /// even when an earlier run's entry is still there; any other stage
     /// updates the meeting's entry and never lowers its fraction. Progress
     /// for a meeting without an entry drives nothing. `deleted` evicts.
+    /// `modelsMissing` starts an entry without progress that says so,
+    /// until the next run's first event.
     pub fn apply(&mut self, event: &MeetingEvent, now: DateTime<Utc>) {
         match event {
             MeetingEvent::Progress {
@@ -91,6 +110,7 @@ impl ProcessingProgressModel {
                             meeting_id: *meeting_id,
                             progress: Some(progress.clone()),
                             since: now,
+                            models_missing: false,
                         },
                     );
                 } else if let Some(current) = self.entries.get(meeting_id) {
@@ -103,12 +123,24 @@ impl ProcessingProgressModel {
                             meeting_id: *meeting_id,
                             progress: Some(next),
                             since: now,
+                            models_missing: false,
                         },
                     );
                 }
             }
             MeetingEvent::Deleted { meeting_id } => {
                 self.entries.remove(meeting_id);
+            }
+            MeetingEvent::ModelsMissing { meeting_id } => {
+                self.entries.insert(
+                    *meeting_id,
+                    ProgressEntry {
+                        meeting_id: *meeting_id,
+                        progress: None,
+                        since: now,
+                        models_missing: true,
+                    },
+                );
             }
             MeetingEvent::SpeakersNeedReview { .. }
             | MeetingEvent::RetentionApplied { .. }
@@ -131,6 +163,7 @@ impl ProcessingProgressModel {
                             meeting_id: meeting.id,
                             progress: None,
                             since: now,
+                            models_missing: false,
                         });
                 }
                 MeetingStateKind::Recording

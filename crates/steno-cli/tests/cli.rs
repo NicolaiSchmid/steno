@@ -743,16 +743,18 @@ fn models_list_line(home: &Path, asset: &str) -> String {
 }
 
 /// Parakeet v3 is listed with the size of the model the platform runs:
-/// the `CoreML` build's on the Mac by default; the fp32 export's (about
-/// 2.6 GB) elsewhere, and on the Mac too once `speech.json` chooses the
-/// speech sidecar.
+/// the `CoreML` build's manifest on the Mac by default (about 483 MB); the
+/// fp32 export's (about 2.6 GB) elsewhere, and on the Mac too once
+/// `speech.json` chooses the speech sidecar.
 #[test]
 fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     let not_installed =
         |bytes: i64| format!("not installed (~{})", steno_host::labels::file_size(bytes));
-    let coreml = not_installed(steno_host::speech::ModelAsset::ParakeetV3.approximate_bytes());
+    let coreml = not_installed(
+        i64::try_from(steno_speech::ModelAsset::parakeet_v3_coreml().total_size()).unwrap(),
+    );
     let fp32 = not_installed(
         i64::try_from(steno_speech::ModelAsset::parakeet_v3_fp32().total_size()).unwrap(),
     );
@@ -969,6 +971,37 @@ fn process_meeting_writes_the_damage_beside_the_database() {
     );
     assert_eq!(again.status, 0, "{}", again.stderr);
     assert_eq!(marks().parts(id), 3);
+}
+
+/// A queued meeting is not processed again. The command's pipeline is its
+/// own, so it cannot tell a meeting the app is processing from one the app
+/// left waiting for its speech models; it says what happens to both.
+#[test]
+fn process_meeting_on_a_queued_meeting_says_the_app_processes_it() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let mut meeting = steno_core::testing::sample_data::meeting();
+    meeting.state = steno_core::MeetingState::Queued;
+    steno_core::Store::open(&db)
+        .unwrap()
+        .save_meeting(&meeting)
+        .unwrap();
+    let id = steno_core::json::uuid_string(meeting.id);
+    let queued = steno(
+        &["process", "--meeting", &id, "--db", db.to_str().unwrap()],
+        home,
+    );
+    assert_eq!(queued.status, 2, "{}", queued.stderr);
+    assert!(
+        queued.stderr.contains(&format!(
+            "Meeting {id} is queued or being processed; the app processes it at its next \
+             launch, or once the speech models are installed in Settings."
+        )),
+        "{}",
+        queued.stderr
+    );
+    assert_eq!(queued.stdout, "");
 }
 
 /// `--meeting` stands instead of the input, `--allow-ready` needs it, and

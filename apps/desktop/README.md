@@ -385,10 +385,12 @@ meeting fails with "could not start" and the path it looked for.
 
 The sidecar also needs the fp32 Parakeet export (2.6 GB, from Hugging Face)
 and Silero VAD. With Parakeet v3 as the engine, Settings > Transcription
-downloads both, and so does the first meeting processed without them, into
-`onnx/` under the models directory (`Models` in the support directory, unless
-`STENO_MODELS_DIR` or the settings name another). `STENO_MODELS_MIRROR` serves
-them from a copy instead. The bundles carry the sidecar beside the shell (see
+downloads both into `onnx/` under the models directory (`Models` in the
+support directory, unless `STENO_MODELS_DIR` or the settings name another). A
+meeting processed before then waits in the queue with "Download the speech
+models in Settings" and is processed once they are installed. `steno process`
+downloads them on first use. `STENO_MODELS_MIRROR` serves them from a copy
+instead. The bundles carry the sidecar beside the shell (see
 Release).
 
 Every build without the `custom-protocol` feature loads `devUrl` (the Vite

@@ -26,6 +26,7 @@ use steno_pipeline::{
 use crate::block_on;
 use crate::handover::{ListenerHandover, start_if_paired};
 use crate::llm::{ClientLlmService, codex_store};
+use crate::model_gate::ResumingSpeechModels;
 use crate::pipeline::{
     BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
 };
@@ -456,6 +457,29 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
     }
 }
 
+/// `preferences.json` under the support directory, once a stored engine
+/// id other than Parakeet v3 (Whisper, Ultra or the German Parakeet the
+/// Swift app offered) became Parakeet v3, before anything reads the
+/// engine, with the notice the main window shows once: its pending flag
+/// ([`engine_notice::PENDING_KEY`](steno_host::setup::engine_notice::PENDING_KEY))
+/// is written before the database changes. A failed update is a warning.
+fn preferences_retiring_the_engine(
+    store: &Store,
+    paths: &StenoPaths,
+    warnings: &mut Vec<String>,
+) -> Arc<FilePreferences> {
+    let preferences = Arc::new(FilePreferences::new(
+        paths.support_directory.join("preferences.json"),
+    ));
+    let retired = store.retire_speech_engine(|| {
+        preferences.set_flag(steno_host::setup::engine_notice::PENDING_KEY, true);
+    });
+    if let Err(error) = retired {
+        warnings.push(format!("Steno could not switch to Parakeet v3: {error}"));
+    }
+    preferences
+}
+
 /// Builds the graph. First the database's lock ([`DatabaseLock`]): while
 /// another process holds it past [`AppOptions::lock_patience`] the build
 /// fails with [`BuildError::Lock`] before the database is opened; on a
@@ -490,6 +514,10 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let runtime = options.runtime;
     let zone = local_zone();
 
+    // The one `preferences.json` the engine notice, the update schedule and
+    // the host share.
+    let preferences: Arc<dyn Preferences> =
+        preferences_retiring_the_engine(&store, &paths, &mut warnings);
     // The speech settings and the models directory are read once, here:
     // the pipeline (and every reload, which keeps its engine when it runs
     // where the last one did) and the model service share them.
@@ -514,12 +542,22 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         &runtime,
         &damaged_audio,
     );
-    let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
+    let pipeline = Arc::new(
+        CurrentPipeline::new(make()?, make, runtime.clone()).resuming_when({
+            let engines = engines.clone();
+            Arc::new(move |on| engines.models_installed(on))
+        }),
+    );
     let sweep = RetentionSweep::new(store.clone());
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
 
     let permissions = Arc::new(FakePermissions::all_granted());
-    let speech_models = Arc::new(ModelStoreSpeechModels::new(speech));
+    // Settings and onboarding install the models; the pipeline never does
+    // (`model_gate`), so an install resumes the meetings waiting for it.
+    let speech_models = Arc::new(ResumingSpeechModels::resuming(
+        ModelStoreSpeechModels::new(speech),
+        pipeline.clone(),
+    ));
     let recorder = CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
@@ -538,9 +576,6 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         .ok();
 
     let clock = Arc::new(WallClock);
-    let preferences: Arc<dyn Preferences> = Arc::new(FilePreferences::new(
-        paths.support_directory.join("preferences.json"),
-    ));
     let updates = options.update_source.map(|source| {
         UpdateSchedule::new(ScheduleParts {
             source,
@@ -938,7 +973,8 @@ impl App {
                                 event_host.store_changed();
                             }
                             MeetingEvent::SpeakersNeedReview { .. }
-                            | MeetingEvent::Deleted { .. } => {
+                            | MeetingEvent::Deleted { .. }
+                            | MeetingEvent::ModelsMissing { .. } => {
                                 event_host.store_changed();
                             }
                             MeetingEvent::OperationFailed { .. } => {
@@ -1520,24 +1556,147 @@ mod tests {
         assert_eq!(app.recorder.status().warning, None);
     }
 
+    /// The app's resumes ask the app's gates: a meeting a run left waiting
+    /// for models stays waiting through a reload while they are missing,
+    /// no run started, and the first reload once every model the gates
+    /// check is on disk (the `steno` command's install) starts it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_resumes_the_waiting_meetings_once_the_apps_gates_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        std::fs::create_dir_all(&support).unwrap();
+        // The sidecar on every platform; a closed port, should anything
+        // fetch.
+        std::fs::write(
+            support.join("speech.json"),
+            r#"{"onnxSidecarOnMac":true,"modelsMirror":"http://127.0.0.1:9"}"#,
+        )
+        .unwrap();
+        let app = build(options_under(&support)).unwrap();
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.id = uuid::Uuid::new_v4();
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            &dir.path().join("audio"),
+            meeting.id,
+            steno_core::AudioRetention::KeepForever,
+        )
+        .unwrap();
+        app.pipeline.current().enqueue(&meeting, &asset).unwrap();
+        app.pipeline.current().wait_until_idle().await;
+        let waiting = || app.pipeline.current().dependencies().model_waits.waiting();
+        assert_eq!(waiting(), [meeting.id]);
+        let mut events = app.events.subscribe();
+        let decodes = |events: &mut steno_pipeline::EventReceiver| {
+            std::iter::from_fn(|| events.try_recv().ok())
+                .filter(|event| {
+                    matches!(event, steno_core::MeetingEvent::Progress { progress, .. }
+                        if progress.stage == steno_core::PipelineStage::Decode)
+                })
+                .count()
+        };
+
+        app.pipeline.reload().unwrap();
+        app.pipeline.current().wait_until_idle().await;
+        assert_eq!(decodes(&mut events), 0, "no run started");
+        assert_eq!(waiting(), [meeting.id]);
+
+        crate::speech::testing::install_every_model(&crate::speech::testing::models_in(
+            &app.models_directory,
+        ));
+        app.pipeline.reload().unwrap();
+        assert_eq!(waiting(), Vec::<uuid::Uuid>::new());
+        assert!(decodes(&mut events) > 0, "the meeting started");
+        app.pipeline.quit();
+        app.pipeline.current().wait_until_idle().await;
+    }
+
+    /// A stored engine the Rust app does not run (the Swift app's Whisper)
+    /// is Parakeet v3 once the app is built, with the notice's pending flag
+    /// in `preferences.json`, which the main window then shows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_build_retires_a_stored_whisper_engine_with_the_notice_pending() {
+        use steno_host::setup::engine_notice::PENDING_KEY;
+
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let paths = StenoPaths::new(&support);
+        let store = open_store(&paths.database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        "whisperkit-large-v3-turbo".clone_into(&mut settings.speech_engine_id);
+        store.save_settings(&settings).unwrap();
+        drop(store);
+        let preferences = support.join("preferences.json");
+
+        let app = build(options_under(&support)).unwrap();
+        assert_eq!(
+            app.store.settings().unwrap().speech_engine_id,
+            "parakeet-v3"
+        );
+        assert!(FilePreferences::new(&preferences).flag(PENDING_KEY));
+        assert!(app.services.preferences.flag(PENDING_KEY));
+        app.pipeline.quit();
+    }
+
+    /// The notice's pending flag is written inside the retirement's
+    /// transaction, before the engine's row changes: when the database
+    /// refuses the update, the flag is pending all the same, the build
+    /// warns, and the stored engine is as it was, for the next launch to
+    /// retire.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retirement_the_database_refuses_leaves_the_notice_pending_and_warns() {
+        use steno_host::setup::engine_notice::PENDING_KEY;
+
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let paths = StenoPaths::new(&support);
+        let store = open_store(&paths.database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        "whisperkit-large-v3-turbo".clone_into(&mut settings.speech_engine_id);
+        store.save_settings(&settings).unwrap();
+        drop(store);
+        rusqlite::Connection::open(paths.database_path())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse_the_engine BEFORE UPDATE ON setting \
+                 WHEN OLD.key = 'speechEngineID' AND NEW.value <> OLD.value \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+
+        let app = build(options_under(&support)).unwrap();
+        assert!(
+            app.startup_warnings
+                .iter()
+                .any(|warning| warning.starts_with("Steno could not switch to Parakeet v3")),
+            "{:?}",
+            app.startup_warnings
+        );
+        assert_eq!(
+            app.store.settings().unwrap().speech_engine_id,
+            "whisperkit-large-v3-turbo"
+        );
+        assert!(FilePreferences::new(support.join("preferences.json")).flag(PENDING_KEY));
+        app.pipeline.quit();
+    }
+
     /// The models directory is decided once, when the app is built: a
     /// reload after the settings name another directory keeps the first,
-    /// so the pipeline and the model service agree. Both directories are
-    /// plain files, so the engine's `prepare` fails naming the one it uses
-    /// without touching the network (`CoreML` misses its bundles under it
-    /// on the Mac; elsewhere the sidecar's store cannot create its folder
-    /// in it).
+    /// so the pipeline and the model service agree. The first is empty,
+    /// the second holds every model (placeholder files of their sizes):
+    /// the engine's `prepare` is refused for missing models before the
+    /// reload and still after it, where an engine over the second would
+    /// get past the gate. No network.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_keeps_the_models_directory_the_app_was_built_with() {
+        use crate::speech::testing::{install_every_model, models_in};
         let dir = tempfile::tempdir().unwrap();
         let paths = StenoPaths::new(dir.path().join("support"));
         let (first, reloaded) = (
             dir.path().join("built-models"),
             dir.path().join("reloaded-models"),
         );
-        for file in [&first, &reloaded] {
-            std::fs::write(file, b"not a directory").unwrap();
-        }
+        std::fs::create_dir_all(&first).unwrap();
+        install_every_model(&models_in(&reloaded));
         let store = open_store(&paths.database_path()).unwrap();
         let mut settings = store.settings().unwrap();
         settings.models_directory = Some(file_url(&first, true));
@@ -1545,21 +1704,21 @@ mod tests {
         drop(store);
 
         let app = build(options_under(&dir.path().join("support"))).unwrap();
-        let prepare = async || {
+        let refused = async || {
             let engine = app.pipeline.current().dependencies().speech_engine.clone();
-            engine.prepare().await.unwrap_err().to_string()
+            let error = engine.prepare().await.unwrap_err();
+            error
+                .downcast_ref::<steno_pipeline::PipelineFailure>()
+                .is_some_and(steno_pipeline::PipelineFailure::is_models_missing)
         };
-        let named = first.display().to_string();
-        let error = prepare().await;
-        assert!(error.contains(&named), "{named} in {error}");
+        assert!(refused().await, "the empty directory");
 
         settings.models_directory = Some(file_url(&reloaded, true));
         app.store.save_settings(&settings).unwrap();
         app.pipeline.reload().unwrap();
-        let error = prepare().await;
         assert!(
-            error.contains(&named) && !error.contains("reloaded-models"),
-            "{named} in {error}"
+            refused().await,
+            "still the empty directory after the reload"
         );
     }
 

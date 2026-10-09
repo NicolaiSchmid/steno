@@ -507,7 +507,7 @@ Every package is written in parallel except where a dependency is named:
   - **No download inside the pipeline.** While any model the meeting needs is
     missing (the speech models in `prepare`, the diarizer's through `warm_up`,
     the sidecar's own install in `transcribe`), the meeting stays queued with
-    "Download the speech model in Settings", and resumes once the models are
+    "Download the speech models in Settings", and resumes once the models are
     installed (P9's queue).
   - **The diarizer row** describes the ONNX models: pyannote segmentation 3.0
     (MIT) and WeSpeaker ResNet34-LM, whose `licence` in

@@ -13,10 +13,14 @@ export interface ProcessingCardProps {
 	entry: ProgressEntry | undefined;
 }
 
+/** The progress stage of a queued meeting whose run waits for a model download. */
+export const MODELS_MISSING_STAGE = "modelsMissing";
+
 /**
  * Where the pipeline is with this meeting while it is queued or processing:
  * the stage, the time left, a bar, and the privacy line. Before the first
- * progress event the bar is indeterminate and the title says so.
+ * progress event the bar is indeterminate and the title says so; a meeting
+ * that waits for a model download says what to do instead.
  */
 export function ProcessingCard({ state, entry }: ProcessingCardProps) {
 	const { words } = usePlatform();
@@ -28,7 +32,7 @@ export function ProcessingCard({ state, entry }: ProcessingCardProps) {
 	const remaining =
 		entry?.estimatedRemainingSeconds !== undefined
 			? format.remaining(entry.estimatedRemainingSeconds)
-			: state === "queued"
+			: state === "queued" && entry?.stage !== MODELS_MISSING_STAGE
 				? "starts when the current meeting finishes"
 				: undefined;
 	return (

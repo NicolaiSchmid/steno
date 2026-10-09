@@ -1,7 +1,7 @@
 import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { MeetingDetailSnapshot } from "@/bridge/contract";
+import type { AppSnapshot, MeetingDetailSnapshot } from "@/bridge/contract";
 import { applyScenario, loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { MeetingDetail } from "./meeting-detail";
@@ -15,6 +15,57 @@ async function fixtureDetail(): Promise<MeetingDetailSnapshot> {
 }
 
 describe("MeetingDetail", () => {
+	it("shows the setup banner's Not now, and OK on a notice", async () => {
+		const user = userEvent.setup();
+		const app = (await loadFixtureSnapshots()).app as AppSnapshot;
+		const setup = await createBridgeHarness();
+		const first = renderWithBridge(<MeetingDetail />, setup);
+		expect(await screen.findByTestId("banner-not-now")).toHaveTextContent(
+			"Not now",
+		);
+		first.unmount();
+		const harness = await createBridgeHarness("", {
+			app: {
+				...app,
+				setupBanner: {
+					title: "Steno now transcribes with Parakeet v3",
+					body: "The speech model you chose before is not part of this version.",
+					offersSummaries: false,
+					offersVault: false,
+					isNotice: true,
+				},
+			} satisfies AppSnapshot,
+		});
+		renderWithBridge(<MeetingDetail />, harness);
+		const ok = await screen.findByTestId("banner-not-now");
+		expect(ok).toHaveTextContent("OK");
+		expect(screen.queryByTestId("setup-summaries")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("choose-vault")).not.toBeInTheDocument();
+		await user.click(ok);
+		await vi.waitFor(() =>
+			expect(callsTo(harness.transport, "setup.dismissBanner")).toHaveLength(1),
+		);
+	});
+
+	it("keeps Not now on a banner with nothing to offer that is no notice", async () => {
+		const app = (await loadFixtureSnapshots()).app as AppSnapshot;
+		const harness = await createBridgeHarness("", {
+			app: {
+				...app,
+				setupBanner: {
+					title: "A later banner",
+					body: "Nothing to set up here.",
+					offersSummaries: false,
+					offersVault: false,
+				},
+			} satisfies AppSnapshot,
+		});
+		renderWithBridge(<MeetingDetail />, harness);
+		expect(await screen.findByTestId("banner-not-now")).toHaveTextContent(
+			"Not now",
+		);
+	});
+
 	it("deletes from the actions menu and leaves the alert to the host", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
