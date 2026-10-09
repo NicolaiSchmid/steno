@@ -793,8 +793,8 @@ fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
     assert!(allowed.stderr.contains("transcribe"), "{}", allowed.stderr);
 }
 
-/// `--meeting` stands instead of the input and the new meeting's flags,
-/// and an id no meeting has is a usage error that says so.
+/// `--meeting` stands instead of the input, `--allow-ready` needs it, and
+/// an id no meeting has is a usage error that says so.
 #[test]
 fn process_meeting_is_exclusive_of_the_input_and_names_an_unknown_id() {
     let home = tempfile::tempdir().unwrap();
@@ -804,19 +804,13 @@ fn process_meeting_is_exclusive_of_the_input_and_names_an_unknown_id() {
     let sweep = fixtures_root().join("audio/sweep-3s.wav");
     let sweep = sweep.to_str().unwrap();
     let id = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
-    for args in [
-        vec!["process", sweep, "--meeting", id, "--db", db],
-        vec!["process", "--meeting", id, "--title", "Sweep", "--db", db],
-        vec!["process", "--meeting", id, "--source", "phone", "--db", db],
-    ] {
-        let run = steno(&args, home);
-        assert_eq!(run.status, 1, "{args:?}: {}", run.stderr);
-        assert!(
-            run.stderr.contains("cannot be used with"),
-            "{args:?}: {}",
-            run.stderr
-        );
-    }
+    let both = steno(&["process", sweep, "--meeting", id, "--db", db], home);
+    assert_eq!(both.status, 1, "{}", both.stderr);
+    assert!(
+        both.stderr.contains("cannot be used with"),
+        "{}",
+        both.stderr
+    );
     // `--allow-ready` needs `--meeting`, beside an input or alone.
     let beside = steno(&["process", sweep, "--allow-ready", "--db", db], home);
     assert_eq!(beside.status, 1, "{}", beside.stderr);
@@ -849,6 +843,57 @@ fn process_meeting_is_exclusive_of_the_input_and_names_an_unknown_id() {
         unknown.stderr
     );
     assert_eq!(unknown.stdout, "");
+}
+
+/// `--meeting` refuses every flag of a new meeting, each by name, and
+/// checks the speech flags before it opens the database.
+#[test]
+fn process_meeting_refuses_each_new_meeting_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let db = db.to_str().unwrap();
+    let lane = fixtures_root().join("audio/conversation-system-6s.wav");
+    let lane = lane.to_str().unwrap();
+    let folder = home.join("audio");
+    let folder = folder.to_str().unwrap();
+    let id = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
+    for (flag, value) in [
+        ("--title", "Sweep"),
+        ("--source", "phone"),
+        ("--system-lane", lane),
+        ("--template", "default"),
+        ("--audio-folder", folder),
+    ] {
+        let run = steno(&["process", "--meeting", id, flag, value, "--db", db], home);
+        assert_eq!(run.status, 1, "{flag}: {}", run.stderr);
+        assert!(
+            run.stderr.contains("cannot be used with") && run.stderr.contains(flag),
+            "{flag}: {}",
+            run.stderr
+        );
+        assert_eq!(run.stdout, "", "{flag}");
+    }
+    // An unknown engine is the usage error, before the database is opened.
+    let engine = steno(
+        &[
+            "process",
+            "--meeting",
+            id,
+            "--engine",
+            "parakeet-v9",
+            "--db",
+            db,
+        ],
+        home,
+    );
+    assert_eq!(engine.status, 1, "{}", engine.stderr);
+    assert!(engine.stderr.contains("parakeet-v9"), "{}", engine.stderr);
+    assert!(
+        !engine.stderr.contains("No meeting has the id"),
+        "{}",
+        engine.stderr
+    );
 }
 
 // Every usage error of the Swift test in one place.
@@ -1285,53 +1330,4 @@ fn bakeoff_with_fake_engines_reports_one_segment_per_second() {
             "{name}"
         );
     }
-}
-
-/// `--meeting` refuses every flag of a new meeting, each by name, and
-/// checks the speech flags before it opens the database.
-#[test]
-fn process_meeting_refuses_each_new_meeting_flag() {
-    let home = tempfile::tempdir().unwrap();
-    let home = home.path();
-    let db = home.join("steno.sqlite");
-    let db = db.to_str().unwrap();
-    let lane = fixtures_root().join("audio/conversation-system-6s.wav");
-    let lane = lane.to_str().unwrap();
-    let folder = home.join("audio");
-    let folder = folder.to_str().unwrap();
-    let id = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
-    for (flag, value) in [
-        ("--system-lane", lane),
-        ("--template", "default"),
-        ("--audio-folder", folder),
-    ] {
-        let run = steno(&["process", "--meeting", id, flag, value, "--db", db], home);
-        assert_eq!(run.status, 1, "{flag}: {}", run.stderr);
-        assert!(
-            run.stderr.contains("cannot be used with") && run.stderr.contains(flag),
-            "{flag}: {}",
-            run.stderr
-        );
-        assert_eq!(run.stdout, "", "{flag}");
-    }
-    // An unknown engine is the usage error, before the database is opened.
-    let engine = steno(
-        &[
-            "process",
-            "--meeting",
-            id,
-            "--engine",
-            "parakeet-v9",
-            "--db",
-            db,
-        ],
-        home,
-    );
-    assert_eq!(engine.status, 1, "{}", engine.stderr);
-    assert!(engine.stderr.contains("parakeet-v9"), "{}", engine.stderr);
-    assert!(
-        !engine.stderr.contains("No meeting has the id"),
-        "{}",
-        engine.stderr
-    );
 }
