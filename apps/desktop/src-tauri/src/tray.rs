@@ -107,7 +107,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         app,
         MenuAction::LaunchAtLogin.as_str(),
         MenuAction::LaunchAtLogin.label(),
-        login_item != autostart::LoginItemStatus::Managed,
+        autostart::switchable(login_item),
         login_item.is_on(),
         None::<&str>,
     )?;

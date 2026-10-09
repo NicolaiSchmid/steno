@@ -151,6 +151,8 @@ impl UpdateSource for ShellUpdates {
     /// gate released and goes through (`main::exit_request`).
     async fn relaunch(&self) {
         let handle = self.app.clone();
+        #[cfg(target_os = "linux")]
+        crate::autostart::relaunching();
         let _ = tauri::async_runtime::spawn_blocking(move || {
             crate::shut_down_before_exit(&handle);
         })

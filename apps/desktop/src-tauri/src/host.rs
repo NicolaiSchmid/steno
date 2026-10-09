@@ -642,7 +642,7 @@ impl Host {
     /// pipelines quit, a start or a stop settles, a recording in progress
     /// is stopped and saved, the handover listener stops; a no-op for the
     /// fixtures.
-    pub fn shutdown_action(&self) -> impl FnOnce() + Send + 'static {
+    pub fn shutdown_action(&self) -> impl FnOnce() + Send + 'static + use<> {
         #[cfg(not(feature = "fixture-host"))]
         {
             let app = self.inner.app.clone();

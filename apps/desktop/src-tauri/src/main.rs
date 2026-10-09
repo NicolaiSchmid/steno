@@ -519,10 +519,8 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
 /// Swift: the Dock's Quit and a logout reached `applicationShouldTerminate`
 /// as Quit did.
 fn shut_down_before_exit(app: &tauri::AppHandle) {
-    app.state::<steno_services::app::ExitGate>().exiting(
-        steno_services::app::SHUTDOWN_PATIENCE,
-        host::host(app).shutdown_action(),
-    );
+    app.state::<steno_services::app::ExitGate>()
+        .exiting(steno_services::app::SHUTDOWN_PATIENCE, exit_action(app));
     steno_services::flush_logs();
 }
 
@@ -545,6 +543,32 @@ fn onboarding_closed(app: &tauri::AppHandle) {
     host::host(app).onboarding_window_closed();
 }
 
+/// What every exit runs once (`ExitGate`): the host's shutdown
+/// (`Host::shutdown_action`), then, on Linux, an autostart entry an
+/// earlier build wrote that waited for the exit goes
+/// (`autostart::at_exit`): only once the save is over, since until then
+/// the unit the app runs as needs the entry.
+fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
+    let shutdown = host::host(app).shutdown_action();
+    #[cfg(target_os = "linux")]
+    let app = app.clone();
+    then(shutdown, move || {
+        #[cfg(target_os = "linux")]
+        autostart::at_exit(&app);
+    })
+}
+
+/// `shutdown`, then `after`, in that order.
+fn then(
+    shutdown: impl FnOnce() + Send + 'static,
+    after: impl FnOnce() + Send + 'static,
+) -> impl FnOnce() + Send + 'static {
+    move || {
+        shutdown();
+        after();
+    }
+}
+
 /// One turn of the run loop; nothing for an app that refused to start
 /// (`refuse_to_start`), which has no host and ends without a shutdown.
 fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
@@ -561,7 +585,7 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 code,
                 || tray_at_close(app),
                 &app.state::<steno_services::app::ExitGate>(),
-                host::host(app).shutdown_action(),
+                exit_action(app),
                 move |code| handle.exit(code),
             ) {
                 #[cfg(target_os = "linux")]
@@ -874,6 +898,20 @@ mod tests {
     #[test]
     fn an_app_that_is_not_running_reads_as_not_running() {
         assert!(!platform_app_running("com.nicolaischmid.steno.no-such-app"));
+    }
+
+    /// What runs after the shutdown (on Linux, an earlier build's
+    /// autostart entry that waited for the exit) runs only once the save
+    /// is over.
+    #[test]
+    fn the_exit_action_runs_its_after_step_once_the_shutdown_ended() {
+        let steps = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (shutdown, after) = (steps.clone(), steps.clone());
+        then(
+            move || shutdown.lock().unwrap().push("shutdown"),
+            move || after.lock().unwrap().push("after"),
+        )();
+        assert_eq!(*steps.lock().unwrap(), ["shutdown", "after"]);
     }
 
     #[test]
