@@ -353,14 +353,14 @@ pub fn sync_at_launch(app: &AppHandle) {
     );
     let switch = |on| -> Result<(), Box<dyn std::error::Error>> {
         if on {
-            // Marked first: a restored entry without its mark would stay.
-            let mark = mark.as_deref().ok_or("the app has no config directory")?;
-            set_mark(mark, true)?;
-            enable(app)?;
+            restore(
+                mark.as_deref(),
+                || enable(app),
+                || manager.is_enabled(),
+            )
         } else {
-            manager.disable()?;
+            Ok(manager.disable()?)
         }
-        Ok(())
     };
     let login_item = login_item_after(step, |on| {
         let Err(error) = switch(on) else {
@@ -382,6 +382,26 @@ pub fn sync_at_launch(app: &AppHandle) {
         clear_mark(mark);
     }
     stop_timeout::sync_at_launch(login_item);
+}
+
+/// Puts the entry back for `AtLaunch::Restore`, with the mark at `mark`
+/// set first: a restored entry without its mark would stay. An `enable`
+/// that reports success while `is_enabled` finds no entry is a failure,
+/// so the drop-ins and the reload never follow an entry that is not
+/// there.
+#[cfg(target_os = "linux")]
+fn restore<E: std::error::Error + 'static>(
+    mark: Option<&std::path::Path>,
+    enable: impl FnOnce() -> Result<(), E>,
+    is_enabled: impl FnOnce() -> Result<bool, E>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mark = mark.ok_or("the app has no config directory")?;
+    set_mark(mark, true)?;
+    enable()?;
+    if !is_enabled()? {
+        return Err("no autostart entry was written".into());
+    }
+    Ok(())
 }
 
 /// Where the user manages login items; `None` where there is no such
@@ -564,6 +584,37 @@ mod tests {
             let restored = login_item_after(AtLaunch::Restore, |on| on && worked);
             assert_eq!(restored, Some(worked));
         }
+    }
+
+    /// The restore marks the entry before it enables it, and fails, with
+    /// the mark left for the launch to clear, when there is no config
+    /// directory, `enable` fails, or the entry is not there after it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_restore_fails_without_the_entry_it_wrote() {
+        use std::io::Error;
+        let root = std::env::temp_dir().join(format!("steno-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mark = root.join(OFF_AT_EXIT);
+        let enable_marked = || {
+            assert!(mark.exists(), "enabled before the mark");
+            Ok::<(), Error>(())
+        };
+        assert!(restore(Some(&mark), enable_marked, || Ok(true)).is_ok());
+        std::fs::remove_file(&mark).unwrap();
+        assert!(restore(Some(&mark), enable_marked, || Ok(false)).is_err());
+        assert!(
+            restore(
+                Some(&mark),
+                || Err(Error::other("refused")),
+                || -> Result<bool, Error> { panic!("read after a failed enable") }
+            )
+            .is_err()
+        );
+        assert!(restore(Some(&mark), enable_marked, || Err(Error::other("unread"))).is_err());
+        let unreached = || -> Result<(), Error> { panic!("enabled without a mark") };
+        assert!(restore(None, unreached, || Ok(true)).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(target_os = "linux")]
