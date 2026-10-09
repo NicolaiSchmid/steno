@@ -134,17 +134,21 @@ impl UpdateSource for ShellUpdates {
             .map_err(|error| error.to_string())
     }
 
-    /// Writes the package; on Windows the installer's own exit runs the
+    /// Writes the package on a blocking thread, since the updater may wait
+    /// on a password prompt; on Windows the installer's own exit runs the
     /// shutdown (`UpdateSource::check`).
     async fn install(&self, version: &str, package: Vec<u8>) -> Result<(), String> {
-        self.found(version)?
-            .install(package)
+        let update = self.found(version)?;
+        tauri::async_runtime::spawn_blocking(move || update.install(package))
+            .await
+            .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())
     }
 
-    /// The relaunch bypasses the exit request, so the shutdown runs first
-    /// (`shut_down_before_exit`), as Sparkle's relaunch went through
-    /// `applicationShouldTerminate`.
+    /// Runs the shutdown first (`shut_down_before_exit`), as Sparkle's
+    /// relaunch went through `applicationShouldTerminate`. The restart's
+    /// own exit request (`tauri::RESTART_EXIT_CODE`) then finds the exit
+    /// gate released and goes through (`main::exit_request`).
     async fn relaunch(&self) {
         let handle = self.app.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || {
