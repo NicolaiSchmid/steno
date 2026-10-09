@@ -1976,6 +1976,11 @@ fn clip_files(asset: &AudioAsset) -> BTreeSet<OsString> {
         .collect()
 }
 
+/// The name of the file a clip URL names.
+fn file_name_of(url: &str) -> OsString {
+    file_url_path(url).unwrap().file_name().unwrap().to_owned()
+}
+
 /// A re-run that ends at any step of its sample clips, as a crash would,
 /// leaves each speaker row naming a whole clip of the run that wrote the
 /// row: the confirmed speaker keeps its earlier clip until the merge
@@ -2242,9 +2247,7 @@ async fn a_merge_into_a_confirmed_speaker_without_a_clip_keeps_its_clip_through_
         .unwrap();
     let took_path = file_url_path(&took).unwrap();
     assert!(
-        took_path
-            .file_name()
-            .unwrap()
+        file_name_of(&took)
             .to_string_lossy()
             .starts_with(&merged.to_string().to_uppercase()),
         "the clip stays under the merged speaker's id"
@@ -2277,16 +2280,12 @@ async fn a_dropped_confirmed_speaker_that_comes_back_without_a_clip_keeps_its_fi
         .store
         .confirm_speaker(ben, &sample_data::person(1, "Ben"))
         .unwrap();
-    let bens_clip = file_url_path(
+    let bens_clip = file_name_of(
         speaker(&speakers, "Speaker 2")
             .sample_clip_url
             .as_ref()
             .unwrap(),
-    )
-    .unwrap()
-    .file_name()
-    .unwrap()
-    .to_owned();
+    );
 
     rerun_with_clipless(&world, 1, &[], 1.0)
         .process(asset.id)
@@ -2324,17 +2323,14 @@ async fn a_confirmation_during_a_rerun_keeps_the_speakers_clip() {
         let speakers = world.store.speakers(meeting).unwrap();
         let ben = speaker(&speakers, "Speaker 2").id;
         let bens_clip = speaker(&speakers, "Speaker 2").sample_clip_url.clone();
-        let bens_file = file_url_path(bens_clip.as_ref().unwrap())
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_owned();
+        let bens_file = file_name_of(bens_clip.as_ref().unwrap());
         let (gate, held_there, go) = held_at_merging();
-        let mut dependencies = rerun_with_clipless(&world, clusters, clipless, 1.0)
-            .dependencies()
-            .clone();
-        dependencies = dependencies.with_clip_probe(gate);
-        let pipeline = ProcessingPipeline::new(dependencies);
+        let pipeline = ProcessingPipeline::new(
+            rerun_with_clipless(&world, clusters, clipless, 1.0)
+                .dependencies()
+                .clone()
+                .with_clip_probe(gate),
+        );
         let run = tokio::spawn(async move { pipeline.process(asset.id).await });
         tokio::task::spawn_blocking(move || held_there.recv().unwrap())
             .await
