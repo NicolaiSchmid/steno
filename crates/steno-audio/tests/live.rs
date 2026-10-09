@@ -353,7 +353,7 @@ fn call_capture_runs_from_its_start_with_nothing_playing() {
 #[test]
 #[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
 fn a_rebuilt_call_capture_keeps_its_silent_output() {
-    let runs = within(
+    let (first, second) = within(
         Duration::from_secs(30),
         "two starts, captures, stops",
         || {
@@ -363,7 +363,6 @@ fn a_rebuilt_call_capture_keeps_its_silent_output() {
             (first, second)
         },
     );
-    let (first, second) = runs;
     assert_ran_from_the_start(&first);
     assert_ran_from_the_start(&second);
 }

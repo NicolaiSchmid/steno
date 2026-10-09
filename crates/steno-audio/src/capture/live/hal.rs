@@ -727,8 +727,8 @@ fn input_stream_count(device: Id) -> Result<usize, CoreAudioError> {
 fn stream_usage(proc_id: AudioDeviceIOProcID, streams: usize) -> (Vec<u64>, u32) {
     let size = std::mem::offset_of!(AudioHardwareIOProcStreamUsage, mStreamIsOn)
         + streams * std::mem::size_of::<u32>();
-    let words = size.max(std::mem::size_of::<AudioHardwareIOProcStreamUsage>());
-    let mut usage = vec![0u64; words.div_ceil(8)];
+    let bytes = size.max(std::mem::size_of::<AudioHardwareIOProcStreamUsage>());
+    let mut usage = vec![0u64; bytes.div_ceil(8)];
     let header = usage.as_mut_ptr().cast::<AudioHardwareIOProcStreamUsage>();
     let proc_ptr = proc_id.map_or(std::ptr::null_mut(), |f| f as *mut c_void);
     // SAFETY: `usage` is zeroed, aligned for the struct and at least its
@@ -748,11 +748,11 @@ fn stream_usage(proc_id: AudioDeviceIOProcID, streams: usize) -> (Vec<u64>, u32)
 fn streams_on(usage: &[u64], streams: usize) -> Vec<u32> {
     let on = std::mem::offset_of!(AudioHardwareIOProcStreamUsage, mStreamIsOn);
     let bytes: Vec<u8> = usage.iter().flat_map(|word| word.to_ne_bytes()).collect();
-    (0..streams)
-        .map(|index| {
-            let at = on + index * 4;
-            u32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-        })
+    let (entries, _) = bytes[on..].as_chunks::<4>();
+    entries
+        .iter()
+        .take(streams)
+        .map(|entry| u32::from_ne_bytes(*entry))
         .collect()
 }
 
