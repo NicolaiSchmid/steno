@@ -105,12 +105,14 @@ impl Store {
     }
 
     /// [`Store::save_asset`] committed under `synchronous = FULL` with
-    /// `fullfsync` ([`Store::write_durably`]). The retention stamp goes this
-    /// way: once it is on disk the sweep may delete the recording, and a
-    /// durable commit also syncs every commit before it, the meeting's
-    /// transcript and summary among them, so a power loss can never leave
-    /// the recording deleted and its results rolled back. Rust only: Swift
-    /// stamps at its store's default level.
+    /// `fullfsync` ([`Store::write_durably`]). Every retention write goes
+    /// this way. A stamp: once it is on disk the sweep may delete the
+    /// recording, and a durable commit also syncs every commit before it,
+    /// the meeting's transcript and summary among them, so a power loss can
+    /// never leave the recording deleted and its results rolled back. A
+    /// cleared stamp: a power loss can never bring back the stamp the user's
+    /// keep removed, for the sweep to delete what they kept. Rust only:
+    /// Swift writes retention at its store's default level.
     pub fn save_asset_durably(&self, asset: &AudioAsset) -> Result<()> {
         self.write_durably(|transaction| save(transaction, asset))
     }
@@ -229,9 +231,11 @@ impl Store {
     }
 
     /// Marks every listed asset `keepForever` with `expiresAt` cleared, in
-    /// one write. Swift: `MeetingStore.keepForever(assetIDs:)`.
+    /// one durable write ([`Store::write_durably`]), so a power loss never
+    /// brings back a stamp the sweep would act on. Swift:
+    /// `MeetingStore.keepForever(assetIDs:)`. Rust only: durable.
     pub fn keep_forever(&self, asset_ids: &[Uuid]) -> Result<()> {
-        self.write(|transaction| {
+        self.write_durably(|transaction| {
             for id in asset_ids {
                 transaction.execute(
                     "UPDATE audioAsset SET retention = ?1, retentionDays = NULL, expiresAt = NULL \

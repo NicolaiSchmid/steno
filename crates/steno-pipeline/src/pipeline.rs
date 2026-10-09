@@ -41,6 +41,7 @@ use steno_core::{
     derived_uuid,
     paths::{file_url, file_url_path},
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
+    room_speaker_id,
 };
 use tokio::sync::{
     Mutex as AsyncMutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock as AsyncRwLock,
@@ -880,6 +881,8 @@ impl fmt::Debug for ProcessingPipeline {
 struct Transcription {
     lanes: BTreeMap<AudioLane, Vec<RawSegment>>,
     language: Option<LanguageTag>,
+    /// The longest decoded lane, in seconds.
+    seconds: f64,
 }
 
 /// A decoded lane with the lane it came from.
@@ -895,6 +898,13 @@ struct Diarization {
     cluster_speakers: Vec<ClusterSpeaker>,
     /// The lane the clusters cover; `None` when nothing was diarized.
     lane: Option<AudioLane>,
+    /// The diarizer failed and the stage fell back
+    /// ([`ProcessingPipeline::diarization_without_diarizer`]). A re-run
+    /// that keeps the stored speakers maps the new segments onto their old
+    /// spans and leaves no room speaker, so only this mark tells the run's
+    /// retention that the speakers can still need the recording. It lives
+    /// for the run only.
+    fell_back: bool,
 }
 
 impl Diarization {
@@ -902,6 +912,7 @@ impl Diarization {
         speakers: Vec::new(),
         cluster_speakers: Vec::new(),
         lane: None,
+        fell_back: false,
     };
 
     /// What `diarize` falls back to for a meeting with no stored speakers:
@@ -916,19 +927,15 @@ impl Diarization {
     fn one_room_speaker(meeting_id: Uuid, lane: AudioLane) -> Diarization {
         Diarization {
             speakers: vec![Self::room_speaker(meeting_id)],
-            cluster_speakers: vec![Self::whole_recording(Self::room_speaker_id(meeting_id))],
+            cluster_speakers: vec![Self::whole_recording(room_speaker_id(meeting_id))],
             lane: Some(lane),
+            fell_back: true,
         }
-    }
-
-    /// The id of [`one_room_speaker`](Self::one_room_speaker)'s speaker.
-    fn room_speaker_id(meeting_id: Uuid) -> Uuid {
-        derived_uuid(meeting_id, "speaker-room")
     }
 
     fn room_speaker(meeting_id: Uuid) -> Speaker {
         Speaker {
-            id: Self::room_speaker_id(meeting_id),
+            id: room_speaker_id(meeting_id),
             meeting_id,
             // The first label a diarizer hands out.
             cluster_label: "Speaker 1".to_owned(),
@@ -1886,6 +1893,9 @@ impl ProcessingPipeline {
             Err(failure) => return (Err(failure), None),
         };
         let meeting_id = meeting.id;
+        // Set when the diarizer fell back, also when the run fails after
+        // its ready write.
+        let fell_back = AtomicBool::new(false);
         let mut refused = None;
         let result = self
             .exclusively(meeting_id, PipelineStage::Decode, async {
@@ -1896,9 +1906,12 @@ impl ProcessingPipeline {
                 // move into the helper by value.
                 let until_persist = unless_it_panics(
                     || self.stage_in_progress(meeting_id),
-                    Box::pin(self.process_until_persist(&asset, meeting)),
+                    Box::pin(self.process_until_persist(&asset, meeting, &fell_back)),
                 )
                 .await;
+                let stamp = Stamp::Automatic {
+                    fell_back: fell_back.load(Ordering::SeqCst),
+                };
                 let persisted = match until_persist {
                     Ok(asset) => asset,
                     Err(failure) if self.quitting() => return Err(failure),
@@ -1922,9 +1935,7 @@ impl ProcessingPipeline {
                             .is_some_and(|stored| stored.state == MeetingState::Ready);
                         if ready {
                             self.deliver(meeting_id).await;
-                            let _ = self
-                                .stamp_deferred_retention(meeting_id, Stamp::WhenComplete)
-                                .await;
+                            let _ = self.stamp_deferred_retention(meeting_id, stamp).await;
                             return Err(failure);
                         }
                         let _ = self.store().set_state(
@@ -1938,7 +1949,7 @@ impl ProcessingPipeline {
                     }
                 };
                 self.deliver(meeting_id).await;
-                self.retention(&persisted, Stamp::WhenComplete).await
+                self.retention(&persisted, stamp).await
             })
             .await;
         (result, refused)
@@ -1992,6 +2003,7 @@ impl ProcessingPipeline {
         &self,
         asset: &AudioAsset,
         meeting: Meeting,
+        fell_back: &AtomicBool,
     ) -> Result<AudioAsset> {
         let claim = self.speech_engine().claim();
         let transcribed: Result<_> = async {
@@ -2017,6 +2029,11 @@ impl ProcessingPipeline {
         .await;
         self.finish_speech(claim).await;
         let (mut current, settings, transcription, last) = transcribed?;
+        // A recording that announced no length (a phone's metadata may say
+        // 0) gets the one the run decoded, which the retention reads.
+        if current.duration <= 0.0 {
+            current.duration = transcription.seconds;
+        }
         // The last decoded lane is handed to `diarize` and dropped there, so
         // no buffer is alive from `match_speakers` on. The lane to diarize
         // is decided from the transcription (a call whose tap carried
@@ -2033,6 +2050,7 @@ impl ProcessingPipeline {
                 self.diarization_without_diarizer(current.id, lane)?
             }
         };
+        fell_back.store(diarized.fell_back, Ordering::SeqCst);
         current.language = transcription.language;
         match self
             .match_speakers(&diarized.speakers, current.id, &settings)
@@ -2198,7 +2216,7 @@ impl ProcessingPipeline {
             })
             .filter(|owner| !owner.ranges.is_empty())
             .collect();
-        let room = Diarization::room_speaker_id(meeting_id);
+        let room = room_speaker_id(meeting_id);
         let cluster_speakers = match owners.as_slice() {
             [only] if only.speaker_id == room => vec![Diarization::whole_recording(room)],
             // A stored room speaker that owns nothing on `lane` was the
@@ -2214,6 +2232,7 @@ impl ProcessingPipeline {
             speakers,
             cluster_speakers,
             lane: Some(lane),
+            fell_back: true,
         })
     }
 
@@ -2308,7 +2327,7 @@ impl ProcessingPipeline {
         // `deliver` leaves `pending` rows for the next launch.
         self.inner.dependencies.dispatcher.mark_pending(meeting_id);
         self.deliver(meeting_id).await;
-        self.stamp_deferred_retention(meeting_id, Stamp::WhenComplete)
+        self.stamp_deferred_retention(meeting_id, Stamp::AFTER_DELIVERY)
             .await
     }
 
@@ -2398,7 +2417,7 @@ impl ProcessingPipeline {
             &settings,
         )?;
         self.deliver(meeting_id).await;
-        self.stamp_deferred_retention(meeting_id, Stamp::WhenComplete)
+        self.stamp_deferred_retention(meeting_id, Stamp::AFTER_DELIVERY)
             .await
     }
 
@@ -2425,9 +2444,10 @@ impl ProcessingPipeline {
     }
 
     /// The per-meeting keep: `rule` replaces the asset's retention and
-    /// clears its stamp, then the deferred-case rules decide whether a new
-    /// stamp is written now. Safe while the meeting is processing: the
-    /// stages read the row again before they write it.
+    /// clears its stamp, durably ([`Store::save_asset_durably`]), then the
+    /// deferred-case rules decide whether a new stamp is written now. Safe
+    /// while the meeting is processing: the stages read the row again
+    /// before they write it.
     pub async fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> Result<()> {
         let mut asset = required(
             PipelineStage::Retention,
@@ -2436,8 +2456,11 @@ impl ProcessingPipeline {
         )?;
         asset.retention = rule;
         asset.expires_at = None;
-        attributing(PipelineStage::Retention, self.store().save_asset(&asset))?;
-        self.stamp_deferred_retention(meeting_id, Stamp::UserChose)
+        attributing(
+            PipelineStage::Retention,
+            self.store().save_asset_durably(&asset),
+        )?;
+        self.stamp_deferred_retention(meeting_id, Stamp::Chosen)
             .await
     }
 
@@ -2629,6 +2652,7 @@ impl ProcessingPipeline {
         let mut hint: Option<LanguageTag> = None;
         let mut last: Option<DecodedLane> = None;
         let mut damage = AudioDamage::default();
+        let mut seconds: f64 = 0.0;
         for (index, lane) in ordered_lanes(&asset.lanes).into_iter().enumerate() {
             // Release the previous lane before decoding the next.
             drop(last.take());
@@ -2644,6 +2668,7 @@ impl ProcessingPipeline {
                 attributing(PipelineStage::Decode, decoder.decode(asset, lane).await)?
             };
             damage = damage.max(buffer.damage);
+            seconds = seconds.max(buffer.duration());
             let lane_hint = hint.clone();
             let segments = self
                 .run(
@@ -2679,7 +2704,14 @@ impl ProcessingPipeline {
                 }),
         )?;
         let language = elect_language(lanes.values().flatten());
-        Ok((Transcription { lanes, language }, last))
+        Ok((
+            Transcription {
+                lanes,
+                language,
+                seconds,
+            },
+            last,
+        ))
     }
 
     /// Runs the diarizer over `lane` and turns every cluster into a
@@ -2777,6 +2809,7 @@ impl ProcessingPipeline {
                 speakers,
                 cluster_speakers,
                 lane: Some(lane),
+                fell_back: false,
             })
         })
         .await
@@ -3089,8 +3122,9 @@ impl ProcessingPipeline {
     /// `RetentionApplied`. Deletion waits for delivery: when any delivery of
     /// the meeting is not delivered the asset is left unstamped and nothing
     /// is posted, not even the stage's progress. With
-    /// [`Stamp::WhenComplete`] it also waits while the meeting's results
-    /// could still need the audio ([`Self::results_need_the_audio`]).
+    /// [`Stamp::Automatic`] it also waits while the meeting's results could
+    /// still need the audio: the run's diarizer fell back, or
+    /// [`Self::results_need_the_audio`].
     async fn retention(&self, asset: &AudioAsset, stamp: Stamp) -> Result<()> {
         let store = self.store();
         let events = &self.inner.dependencies.events;
@@ -3101,7 +3135,9 @@ impl ProcessingPipeline {
         if !delivered {
             return Ok(());
         }
-        if stamp == Stamp::WhenComplete && self.results_need_the_audio(meeting_id)? {
+        if let Stamp::Automatic { fell_back } = stamp
+            && (fell_back || self.results_need_the_audio(asset)?)
+        {
             tracing::info!(
                 target: BACKGROUND_RUN_LOG,
                 %meeting_id,
@@ -3124,26 +3160,20 @@ impl ProcessingPipeline {
         .await
     }
 
-    /// Whether a ready meeting's results could still need its recording,
-    /// so the automatic retention keeps it unstamped: the diarizer failed
-    /// and the room fell back to one unknown speaker
-    /// ([`Diarization::one_room_speaker`]), or the transcript is empty
-    /// although the recording runs longer than
-    /// [`TRANSCRIPT_EXPECTED_AFTER_SECONDS`]. A later run that succeeds
-    /// (Process again) stamps it, and so does a rule the user applies. Rust
-    /// only: Swift stamps once every delivery succeeded.
-    fn results_need_the_audio(&self, meeting_id: Uuid) -> Result<bool> {
+    /// [`steno_core::results_need_the_audio`] over the meeting's rows as
+    /// stored.
+    fn results_need_the_audio(&self, asset: &AudioAsset) -> Result<bool> {
         let store = self.store();
-        let room = Diarization::room_speaker_id(meeting_id);
-        let fell_back = attributing(PipelineStage::Retention, store.speakers(meeting_id))?
-            .iter()
-            .any(|speaker| speaker.id == room);
-        if fell_back {
-            return Ok(true);
-        }
-        let long = attributing(PipelineStage::Retention, store.meeting(meeting_id))?
-            .is_some_and(|meeting| meeting.duration > TRANSCRIPT_EXPECTED_AFTER_SECONDS);
-        Ok(long && attributing(PipelineStage::Retention, store.segments(meeting_id))?.is_empty())
+        let meeting_id = asset.meeting_id;
+        let Some(meeting) = attributing(PipelineStage::Retention, store.meeting(meeting_id))?
+        else {
+            return Ok(false);
+        };
+        let speakers = attributing(PipelineStage::Retention, store.speakers(meeting_id))?;
+        let segments = attributing(PipelineStage::Retention, store.segments(meeting_id))?;
+        Ok(steno_core::results_need_the_audio(
+            &meeting, &speakers, &segments, asset,
+        ))
     }
 
     /// The deferred case after `deliver` ran again: an asset with a finite
@@ -3173,13 +3203,19 @@ impl ProcessingPipeline {
 /// or the user's own rule (`apply_retention`), which is stamped as chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stamp {
-    WhenComplete,
-    UserChose,
+    /// After a run, or after a re-export or a summary re-run. `fell_back`
+    /// is the run's [`Diarization::fell_back`]; a stamp after delivery
+    /// alone cannot know it and reads only the stored rows.
+    Automatic {
+        fell_back: bool,
+    },
+    Chosen,
 }
 
-/// A recording longer than this with no transcript at all most likely
-/// failed to transcribe, so the automatic retention keeps it.
-const TRANSCRIPT_EXPECTED_AFTER_SECONDS: f64 = 30.0;
+impl Stamp {
+    /// The stamp a re-export or a summary re-run asks for.
+    const AFTER_DELIVERY: Stamp = Stamp::Automatic { fell_back: false };
+}
 
 /// The in-flight mark of one operation; dropping it clears the mark and
 /// the run, whichever way the operation ended.
