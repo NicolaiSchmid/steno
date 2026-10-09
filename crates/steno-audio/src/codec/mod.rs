@@ -48,6 +48,19 @@
 //!   Every other input decodes as before, bit for bit. The padding after
 //!   the last sample stays (under a packet of silence), as the
 //!   exact-length rule counts what was decoded.
+//! - **A damaged packet.** AVFoundation conceals a packet its decoder
+//!   cannot read; symphonia returns an error, which stopped the whole
+//!   decode. The decoder replaces such a packet by silence of its length
+//!   (its duration in the container's timing, 1 024 frames for AAC), so the
+//!   audio after it keeps its time, logs it (its index and timestamp, never
+//!   its content) and counts it: [`AudioBuffer16k::damaged_parts`], which
+//!   the pipeline shows on the meeting. The first packet after a damaged
+//!   one starts from a cleared overlap, so its frames differ from a clean
+//!   decode's; the later ones equal it bit for bit, except in the bands the
+//!   encoder filled with noise, whose generator has moved on (within
+//!   2 * 10^-3 on the test tone, `tests/codec.rs`). A file with more
+//!   damaged packets than whole ones fails ([`MAX_DAMAGED_SHARE`]), so a
+//!   corrupt file never becomes a meeting of silence.
 //! - **CAF**: PCM only (what the writer produces); a CAF holding AAC fails.
 //! - An unfinished master (data chunk size -1) decodes to its last whole
 //!   frame through the crate's own CAF reader (the chunk walk
@@ -67,7 +80,7 @@ use steno_core::{
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_AAC, CodecParameters, Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::{FormatOptions, FormatReader, Packet};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -116,7 +129,20 @@ pub struct DecodedChannel {
     pub channels: usize,
     /// The channel's samples at `sample_rate`.
     pub samples: Vec<f32>,
+    /// Packets that could not be decoded, each replaced by silence of its
+    /// length: [`AudioBuffer16k::damaged_parts`].
+    pub damaged_parts: u32,
 }
+
+/// The share of a file's packets that may be damaged: a file in which more
+/// than half of the packets cannot be decoded fails with
+/// [`CodecError::ConversionFailed`] rather than decode to more silence than
+/// sound. Such a file is not a recording with a few bad packets but one
+/// this decoder cannot read (a codec it decodes wrongly, a payload
+/// overwritten wholesale); the error keeps it, and the meeting says
+/// processing failed, where a transcript of a few words would let the
+/// retention rule delete the file.
+pub const MAX_DAMAGED_SHARE: f64 = 0.5;
 
 /// The decoder, stateless; see the module doc.
 #[derive(Debug, Clone, Copy, Default)]
@@ -155,7 +181,10 @@ impl SymphoniaAudioCodec {
             Ok(())
         })?;
         spec.check_channel(channel, lane)?;
-        Ok(AudioBuffer16k::new(decode.finish()))
+        Ok(AudioBuffer16k {
+            damaged_parts: frames.damaged_parts(),
+            ..AudioBuffer16k::new(decode.finish())
+        })
     }
 
     /// One channel at the source rate, whole: for the tests and the bench
@@ -186,6 +215,7 @@ impl SymphoniaAudioCodec {
             sample_rate: spec.rate,
             channels: spec.channels,
             samples,
+            damaged_parts: frames.damaged_parts(),
         })
     }
 
@@ -386,6 +416,15 @@ impl Frames {
             Self::Symphonia(frames) => frames.stream(each),
         }
     }
+
+    /// The packets [`stream`](Self::stream) replaced by silence; the
+    /// crate's CAF reader reads PCM, which has none.
+    fn damaged_parts(&self) -> u32 {
+        match self {
+            Self::Caf { .. } => 0,
+            Self::Symphonia(frames) => u32::try_from(frames.damage.damaged).unwrap_or(u32::MAX),
+        }
+    }
 }
 
 /// Symphonia's demuxer and decoder over one file.
@@ -400,6 +439,30 @@ struct SymphoniaFrames {
     priming: Option<Trim>,
     /// The track's rate in hertz, as its header declares it.
     rate: Option<u32>,
+    /// The track's shape as its header declares it, for the silence of a
+    /// damaged packet before any packet decoded.
+    declared: Spec,
+    /// The packets' timestamp unit, which their durations are in.
+    time_base: Option<TimeBase>,
+    /// The track's packets so far, and the damaged ones among them.
+    damage: Damage,
+}
+
+/// A track's packets read and how many of them could not be decoded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Damage {
+    packets: u64,
+    damaged: u64,
+}
+
+impl Damage {
+    /// More of the packets damaged than [`MAX_DAMAGED_SHARE`] allows.
+    fn too_much(self) -> bool {
+        // Exact for any packet count a file can hold.
+        #[allow(clippy::cast_precision_loss)]
+        let share = self.damaged as f64 / self.packets.max(1) as f64;
+        share > MAX_DAMAGED_SHARE
+    }
 }
 
 /// The frames before a track's first presented sample, and how to place a
@@ -478,9 +541,16 @@ impl SymphoniaFrames {
             .default_track()
             .ok_or_else(|| CodecError::UnsupportedFormat("no audio track".into()))?;
         let track_id = track.id;
-        let frames = track.codec_params.n_frames;
-        let priming = Trim::for_track(path, &track.codec_params);
-        let rate = track.codec_params.sample_rate;
+        let params = &track.codec_params;
+        let frames = params.n_frames;
+        let priming = Trim::for_track(path, params);
+        let rate = params.sample_rate;
+        let declared = Spec {
+            rate: params.sample_rate.unwrap_or(0),
+            channels: params.channels.map_or(0, |channels| channels.count()),
+            length: Length::Declared(frames),
+        };
+        let time_base = params.time_base;
         let decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
             .map_err(|e| CodecError::UnsupportedFormat(e.to_string()))?;
@@ -492,17 +562,27 @@ impl SymphoniaFrames {
             frames,
             priming,
             rate,
+            declared,
+            time_base,
+            damage: Damage::default(),
         })
     }
 
-    /// Packet by packet; corrupt packets are skipped, a file with no
-    /// decodable audio is an error.
+    /// Frames of silence handed on at a time for a damaged packet.
+    const SILENCE_BLOCK: usize = 4_096;
+
+    /// Packet by packet. A packet that does not decode becomes silence of
+    /// its length (see the module doc); a file with no decodable audio, or
+    /// with more damaged packets than [`MAX_DAMAGED_SHARE`] allows, is an
+    /// error.
     fn stream(
         &mut self,
         mut each: impl FnMut(Event<'_>) -> Result<(), CodecError>,
     ) -> Result<Spec, CodecError> {
         let mut spec: Option<Spec> = None;
         let mut buffer: Option<SampleBuffer<f32>> = None;
+        let mut silence: Vec<f32> = Vec::new();
+        self.damage = Damage::default();
         loop {
             let packet = match self.format.next_packet() {
                 Ok(packet) => packet,
@@ -517,10 +597,46 @@ impl SymphoniaFrames {
             if packet.track_id() != self.track_id {
                 continue;
             }
+            let index = self.damage.packets;
+            self.damage.packets += 1;
             let audio = match self.decoder.decode(&packet) {
                 Ok(audio) => audio,
-                Err(SymphoniaError::DecodeError(_)) => continue,
-                Err(e) => return Err(CodecError::ConversionFailed(e.to_string())),
+                Err(error) => {
+                    self.damage.damaged += 1;
+                    // The overlap of the packet before is no longer this
+                    // packet's to finish.
+                    self.decoder.reset();
+                    let shape = spec.unwrap_or(self.declared);
+                    let frames = self.packet_frames(&packet, shape.rate);
+                    tracing::warn!(
+                        packet = index,
+                        ts = packet.ts(),
+                        frames,
+                        %error,
+                        "a packet that does not decode is replaced by silence of its length"
+                    );
+                    let primed = self
+                        .priming
+                        .map_or(0, |trim| trim.frames_before(packet.ts(), frames));
+                    if spec != Some(shape) {
+                        spec = Some(shape);
+                        if shape.audible() {
+                            each(Event::Start(shape))?;
+                        }
+                    }
+                    if shape.audible() {
+                        let mut left = frames - primed;
+                        while left > 0 {
+                            let block = left.min(Self::SILENCE_BLOCK) * shape.channels;
+                            if silence.len() < block {
+                                silence.resize(block, 0.0);
+                            }
+                            each(Event::Frames(shape, &silence[..block]))?;
+                            left -= block / shape.channels;
+                        }
+                    }
+                    continue;
+                }
             };
             let primed = self
                 .priming
@@ -552,9 +668,28 @@ impl SymphoniaFrames {
                 ))?;
             }
         }
+        if self.damage.too_much() {
+            return Err(CodecError::ConversionFailed(format!(
+                "{}: {} of {} packets do not decode",
+                self.path.display(),
+                self.damage.damaged,
+                self.damage.packets
+            )));
+        }
         spec.filter(|spec| spec.audible()).ok_or_else(|| {
             CodecError::UnsupportedFormat(format!("{}: no decodable audio", self.path.display()))
         })
+    }
+
+    /// A packet's length in frames at `rate`, from its duration in the
+    /// container's timing; at most a second, so a corrupt duration cannot
+    /// grow the lane (no codec here has packets longer than 8 192 frames).
+    fn packet_frames(&self, packet: &Packet, rate: u32) -> usize {
+        let duration = u128::from(packet.dur());
+        let frames = self.time_base.map_or(duration, |base| {
+            duration * u128::from(base.numer) * u128::from(rate) / u128::from(base.denom.max(1))
+        });
+        usize::try_from(frames.min(u128::from(rate))).unwrap_or(0)
     }
 }
 

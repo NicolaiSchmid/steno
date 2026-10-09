@@ -8,6 +8,13 @@ use super::TimeRange;
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AudioBuffer16k {
     pub samples: Vec<f32>,
+    /// Parts of the recording the decoder could not read and replaced by
+    /// silence of their length (an undecodable AAC packet), so the samples
+    /// after them keep their time. 0 for a clean decode and for every
+    /// buffer that does not come straight from a decoder; the pipeline
+    /// shows a count above 0 on the meeting. Rust only: AVFoundation
+    /// conceals a bad packet and reports nothing.
+    pub damaged_parts: u32,
 }
 
 impl AudioBuffer16k {
@@ -16,15 +23,16 @@ impl AudioBuffer16k {
 
     #[must_use]
     pub fn new(samples: Vec<f32>) -> Self {
-        AudioBuffer16k { samples }
+        AudioBuffer16k {
+            samples,
+            damaged_parts: 0,
+        }
     }
 
     /// `seconds` of silence, rounded down to whole samples.
     #[must_use]
     pub fn silence(seconds: f64) -> Self {
-        AudioBuffer16k {
-            samples: vec![0.0; Self::sample_index(seconds, false)],
-        }
+        AudioBuffer16k::new(vec![0.0; Self::sample_index(seconds, false)])
     }
 
     #[must_use]
@@ -55,9 +63,7 @@ impl AudioBuffer16k {
         if lower >= upper {
             return AudioBuffer16k::default();
         }
-        AudioBuffer16k {
-            samples: self.samples[lower..upper].to_vec(),
-        }
+        AudioBuffer16k::new(self.samples[lower..upper].to_vec())
     }
 
     /// The sample index of `seconds`, floored or ceiled, never below zero.
