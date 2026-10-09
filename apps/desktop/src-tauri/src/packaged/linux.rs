@@ -24,10 +24,6 @@ const BINARY: &str = "steno-desktop";
 /// Where Nix keeps its builds, which a garbage collection removes.
 const STORE: &str = "/nix/store/";
 
-/// The unit systemd's XDG autostart generator makes from the entry
-/// (`app-<escaped entry name>@autostart.service`).
-const AUTOSTART_UNIT: &str = "app-steno\\x2ddesktop@autostart.service";
-
 /// Where a package puts the app's launcher, in the order they are tried:
 /// `/usr/bin` (the `.deb`, and a package that installs the binary or a
 /// link to it there), `/usr/local/bin`, the NixOS system profile, the
@@ -265,7 +261,7 @@ static EARLIER_ENTRY_AT_EXIT: AtomicBool = AtomicBool::new(false);
 /// (`packaged::login_item_is_managed`), the autostart entry of `app_name`
 /// an earlier build wrote ([`is_earlier_entry`]) goes, and only such an
 /// entry. While the app runs as the autostart unit
-/// ([`runs_as_autostart_unit`]) it goes at the exit instead
+/// (`stop_timeout::runs_as_autostart_unit`) it goes at the exit instead
 /// ([`remove_earlier_entry_at_exit`]).
 pub fn remove_earlier_entry(app_name: &str) {
     let Some(path) = entry_path_here(app_name) else {
@@ -275,7 +271,7 @@ pub fn remove_earlier_entry(app_name: &str) {
         &path,
         super::login_item_is_managed(),
         &candidates_here(),
-        runs_as_autostart_unit(),
+        crate::stop_timeout::runs_as_autostart_unit(),
     );
     if removal == Removal::AtExit {
         EARLIER_ENTRY_AT_EXIT.store(true, Ordering::Relaxed);
@@ -349,24 +345,6 @@ fn remove_if_earlier(path: &Path, candidates: &[PathBuf]) -> bool {
             false
         }
     }
-}
-
-/// Whether this process runs in the autostart unit (`AUTOSTART_UNIT`):
-/// a component of its cgroup's path in `/proc/self/cgroup` is that unit.
-/// False when the file cannot be read.
-fn runs_as_autostart_unit() -> bool {
-    std::fs::read_to_string("/proc/self/cgroup")
-        .is_ok_and(|cgroup| runs_in(&cgroup, AUTOSTART_UNIT))
-}
-
-/// Whether a cgroup listing, as `/proc/<pid>/cgroup` holds it (one
-/// `<id>:<controllers>:<path>` line per hierarchy), puts the process in
-/// `unit` or below it.
-fn runs_in(cgroup: &str, unit: &str) -> bool {
-    cgroup
-        .lines()
-        .filter_map(|line| line.splitn(3, ':').nth(2))
-        .any(|path| path.split('/').any(|component| component == unit))
 }
 
 #[cfg(test)]
@@ -796,29 +774,5 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-    }
-
-    #[test]
-    fn the_cgroup_names_the_autostart_unit() {
-        let unit = AUTOSTART_UNIT;
-        let v2 = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-steno\\x2ddesktop@autostart.service\n";
-        assert!(runs_in(v2, unit));
-        let uwsm = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-graphical.slice/app-steno\\x2ddesktop@autostart.service/sub\n";
-        assert!(runs_in(uwsm, unit), "a cgroup below the unit is in it");
-        let hybrid = "12:cpu,cpuacct:/\n1:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/app-steno\\x2ddesktop@autostart.service\n0::/\n";
-        assert!(runs_in(hybrid, unit));
-        let service = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/steno.service\n";
-        assert!(!runs_in(service, unit));
-        let other = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-steno\\x2ddesktop@autostart.service.bak\n";
-        assert!(!runs_in(other, unit));
-        assert!(!runs_in("", unit));
-    }
-
-    /// On this process's real cgroup listing: the test runner is not the
-    /// autostart unit.
-    #[test]
-    fn the_test_runner_is_not_the_autostart_unit() {
-        let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-        assert!(!runs_as_autostart_unit(), "{cgroup}");
     }
 }

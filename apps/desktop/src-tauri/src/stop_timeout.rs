@@ -871,6 +871,8 @@ esac
         assert!(!runs_in(gnome, unit));
         let terminal = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-1.scope\n";
         assert!(!runs_in(terminal, unit));
+        let service = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/steno.service\n";
+        assert!(!runs_in(service, unit), "the NixOS module's user service");
         let other = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-steno\\x2ddesktop@autostart.service.bak\n";
         assert!(!runs_in(other, unit));
         assert!(!runs_in("", unit));
