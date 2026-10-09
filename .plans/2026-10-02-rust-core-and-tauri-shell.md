@@ -1032,9 +1032,12 @@ still has to draw the window side. `[ ]` is not ported yet.
     stored span reaches (every segment of a meeting with no stored speakers, or new
     speech on a re-run) goes to one unknown room speaker without an embedding, the
     earlier fallback speaker when it owns a segment there, otherwise a new row under
-    the first "Speaker N" no stored speaker uses ("Speaker 1" on a first run); the
-    mic lane goes to it too when it is the room, so the other party is never "me". A
-    stored room speaker of the other lane takes none of this lane's segments
+    the next "Speaker N" after the highest stored one ("Speaker 1" on a first run),
+    so a label merged away is not reused; the mic lane goes to it too when it is the
+    room, so the other party is never "me". A stored room speaker of the other lane
+    takes none of this lane's segments; after such a lane switch that row can be left
+    with no segment, and it then keeps the recording (the safe direction) and shows
+    as a speaker, as the arm did before #241
     (`a_failing_diarizer_keeps_the_transcript_with_one_room_speaker`,
     `a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers`,
     `a_failing_diarizer_on_the_mic_lane_makes_it_the_room`,
@@ -1228,7 +1231,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   the speakers of an earlier working diarization, as complete as before, and is
   stamped as usual
   (`a_rerun_whose_diarizer_fails_stamps_when_the_stored_speakers_cover_every_segment`).
-  A first-run fallback whose lane has no segment leaves no room row either. The row
+  A first-run fallback whose lane has no segment leaves no room row either, and the
+  empty-lane arm alone decides
+  (`a_first_run_fallback_over_an_empty_call_stores_no_room_row`,
+  `a_first_run_fallback_over_an_empty_phone_recording_stores_no_room_row`). The row
   has no embedding, so it feeds no voice and the next meeting's matching never sees
   it (`the_room_row_feeds_no_voice`). Two merges the user makes are the user
   resolving the gap and are accepted: confirming a diarized speaker to the room's

@@ -1776,9 +1776,8 @@ hand. The database is untouched (R6).
 and `resummarize` call `stampDeferredRetention` once every delivery succeeded, so
 an Export again, a speaker rename or a summary re-run in the Swift app stamps a
 meeting the Rust app kept unstamped (a diarizer fallback, an empty lane), and
-Swift's sweep can then delete its recording. Swift reads the room speaker the
-Rust app stores as the mark as an ordinary speaker. Swift is not changed for
-this. The stamps that rc builds before #241 wrote on fallback meetings also
+Swift's sweep can then delete its recording. Swift shows the room speaker the
+Rust app stores as an ordinary speaker. Swift is not changed for this. The stamps that rc builds before #241 wrote on fallback meetings also
 still expire, in either app: nothing clears them.
 
 **The database.** Migrations only add (Tags and versions), v5 lands before the
