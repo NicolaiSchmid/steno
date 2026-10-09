@@ -597,6 +597,12 @@ mod tests {
             path,
             dir.path().join(".config/autostart/steno-desktop.desktop")
         );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[Desktop Entry]\n").unwrap();
+        // A hard link to the old entry keeps its bytes: the entry is
+        // written atomically, not rewritten in place.
+        let old = dir.path().join("old");
+        std::fs::hard_link(&path, &old).unwrap();
         write_entry_at(
             &path,
             "steno-desktop",
@@ -606,6 +612,7 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("\nExec=/usr/bin/steno-desktop\n"));
         assert!(!is_earlier_entry(&written, &[]));
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "[Desktop Entry]\n");
     }
 
     /// With no launcher at a stable path nothing is written, and turning

@@ -672,11 +672,19 @@ esac
         );
 
         std::fs::write(&file, "[Service]\nTimeoutStopSec=5s\n").unwrap();
+        // A hard link to the old file keeps its bytes: a new file was
+        // renamed over it, not the old one rewritten in place.
+        let old = root.join("old");
+        std::fs::hard_link(&file, &old).unwrap();
         assert!(
             install(&file, contents).unwrap(),
             "other contents are replaced"
         );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), contents);
+        assert_eq!(
+            std::fs::read_to_string(&old).unwrap(),
+            "[Service]\nTimeoutStopSec=5s\n"
+        );
 
         assert!(remove(&file).unwrap());
         assert!(!directory.exists(), "the empty directory goes with it");
