@@ -898,13 +898,15 @@ struct Diarization {
     cluster_speakers: Vec<ClusterSpeaker>,
     /// The lane the clusters cover; `None` when nothing was diarized.
     lane: Option<AudioLane>,
-    /// The diarizer failed and the stage fell back
-    /// ([`ProcessingPipeline::diarization_without_diarizer`]). A re-run
-    /// that keeps the stored speakers maps the new segments onto their old
-    /// spans and leaves no room speaker, so only this mark tells the run's
-    /// retention that the speakers can still need the recording. It lives
-    /// for the run only.
-    fell_back: bool,
+    /// The room speaker ([`room_speaker_id`]) a segment on `lane` that no
+    /// cluster covers goes to, set only when the diarizer failed
+    /// ([`ProcessingPipeline::diarization_without_diarizer`]); a working
+    /// diarizer leaves such a segment without a speaker. `merge` stores
+    /// its row ([`Diarization::room_speaker`]) only when a segment names
+    /// it, so the stored room row is the mark that the speakers are
+    /// incomplete ([`steno_core::results_need_the_audio`]), read again by
+    /// every later stamp. Rust only: Swift fails the meeting.
+    fallback: Option<Uuid>,
 }
 
 impl Diarization {
@@ -912,49 +914,44 @@ impl Diarization {
         speakers: Vec::new(),
         cluster_speakers: Vec::new(),
         lane: None,
-        fell_back: false,
+        fallback: None,
     };
 
-    /// What `diarize` falls back to for a meeting with no stored speakers:
-    /// the transcript is kept, and `lane`, the lane that was to be diarized,
-    /// becomes one unknown speaker the user can still name. A mic lane is
-    /// diarized only when it is the room (a call whose tap carried no
-    /// conversation), so it becomes the room speaker too and the other
-    /// party's words never go to "me". The speaker has no embedding, so
-    /// confirming it teaches no voice, and an id of its own, so a later run
-    /// that diarizes never inherits its confirmation. Rust only: Swift
-    /// fails the meeting.
-    fn one_room_speaker(meeting_id: Uuid, lane: AudioLane) -> Diarization {
-        Diarization {
-            speakers: vec![Self::room_speaker(meeting_id)],
-            cluster_speakers: vec![Self::whole_recording(room_speaker_id(meeting_id))],
-            lane: Some(lane),
-            fell_back: true,
-        }
-    }
-
-    fn room_speaker(meeting_id: Uuid) -> Speaker {
+    /// The one unknown room speaker the diarizer fallback gives the
+    /// segments no stored speaker covers, under the first "Speaker N" no
+    /// row in `taken` uses (compared lower-cased, as the summary's label
+    /// map `SpeakerLabels` does), so it never shares a name with a stored
+    /// speaker: "Speaker 1" when nothing is stored. A mic lane is diarized only when
+    /// it is the room (a call whose tap carried no conversation), so it
+    /// becomes the room speaker too and the other party's words never go
+    /// to "me". The speaker has no embedding, so confirming it teaches no
+    /// voice and matching never sees it, and an id of its own, so a later
+    /// run that diarizes never inherits its confirmation. Two merges the
+    /// user makes change it, and both are the user resolving the gap:
+    /// confirming a diarized speaker to the room's person merges that
+    /// speaker into this row with its own embedding (what a plain
+    /// confirmation teaches, nothing from the room's segments), and
+    /// confirming this row to someone who has another speaker merges the
+    /// row away, the mark with it. Rust only: Swift fails the meeting.
+    fn room_speaker(meeting_id: Uuid, taken: &[Speaker]) -> Speaker {
+        let taken: Vec<String> = taken
+            .iter()
+            .map(|speaker| speaker.cluster_label.to_lowercase())
+            .collect();
+        // One of the first `taken.len() + 1` labels is free.
+        let label = (1..=taken.len() + 1)
+            .map(|number| format!("Speaker {number}"))
+            .find(|label| !taken.contains(&label.to_lowercase()))
+            .unwrap_or_default();
         Speaker {
             id: room_speaker_id(meeting_id),
             meeting_id,
-            // The first label a diarizer hands out.
-            cluster_label: "Speaker 1".to_owned(),
+            cluster_label: label,
             assignment: SpeakerAssignment::Unknown,
             embedding: None,
             sample_clip_range: None,
             sample_clip_url: None,
             cluster_confidence: 0.0,
-        }
-    }
-
-    /// `speaker_id` over the whole recording.
-    fn whole_recording(speaker_id: Uuid) -> ClusterSpeaker {
-        ClusterSpeaker {
-            speaker_id,
-            ranges: vec![TimeRange {
-                lower: 0.0,
-                upper: f64::INFINITY,
-            }],
         }
     }
 }
@@ -1893,9 +1890,6 @@ impl ProcessingPipeline {
             Err(failure) => return (Err(failure), None),
         };
         let meeting_id = meeting.id;
-        // Set when the diarizer fell back, also when the run fails after
-        // its ready write.
-        let fell_back = AtomicBool::new(false);
         let mut refused = None;
         let result = self
             .exclusively(meeting_id, PipelineStage::Decode, async {
@@ -1906,12 +1900,9 @@ impl ProcessingPipeline {
                 // move into the helper by value.
                 let until_persist = unless_it_panics(
                     || self.stage_in_progress(meeting_id),
-                    Box::pin(self.process_until_persist(&asset, meeting, &fell_back)),
+                    Box::pin(self.process_until_persist(&asset, meeting)),
                 )
                 .await;
-                let stamp = Stamp::Automatic {
-                    fell_back: fell_back.load(Ordering::SeqCst),
-                };
                 let persisted = match until_persist {
                     Ok(asset) => asset,
                     Err(failure) if self.quitting() => return Err(failure),
@@ -1935,7 +1926,9 @@ impl ProcessingPipeline {
                             .is_some_and(|stored| stored.state == MeetingState::Ready);
                         if ready {
                             self.deliver(meeting_id).await;
-                            let _ = self.stamp_deferred_retention(meeting_id, stamp).await;
+                            let _ = self
+                                .stamp_deferred_retention(meeting_id, Stamp::Automatic)
+                                .await;
                             return Err(failure);
                         }
                         let _ = self.store().set_state(
@@ -1949,7 +1942,7 @@ impl ProcessingPipeline {
                     }
                 };
                 self.deliver(meeting_id).await;
-                self.retention(&persisted, stamp).await
+                self.retention(&persisted, Stamp::Automatic).await
             })
             .await;
         (result, refused)
@@ -2003,7 +1996,6 @@ impl ProcessingPipeline {
         &self,
         asset: &AudioAsset,
         meeting: Meeting,
-        fell_back: &AtomicBool,
     ) -> Result<AudioAsset> {
         let claim = self.speech_engine().claim();
         let transcribed: Result<_> = async {
@@ -2050,7 +2042,6 @@ impl ProcessingPipeline {
                 self.diarization_without_diarizer(current.id, lane)?
             }
         };
-        fell_back.store(diarized.fell_back, Ordering::SeqCst);
         current.language = transcription.language;
         match self
             .match_speakers(&diarized.speakers, current.id, &settings)
@@ -2174,13 +2165,17 @@ impl ProcessingPipeline {
     /// as stored, assignments, embeddings and clips included, so no
     /// confirmation or voice is lost. Each covers the spans of the stored
     /// segments it owns on `lane`, so the new transcript's segments on
-    /// `lane` map onto them; a speaker that owns none on `lane` (the lane
-    /// diarized last time was the other one) keeps its row and gets no
-    /// segment. The earlier fallback speaker, when it is the only one on
-    /// `lane`, covers the whole recording again. When no stored speaker
-    /// owns a segment on `lane`, [`Diarization::one_room_speaker`] covers
-    /// it next to the stored rows; a meeting without any falls back to it
-    /// alone. Rust only: Swift fails the meeting.
+    /// `lane` map onto them, by midpoint or overlap
+    /// ([`LaneMerger::cluster_covering`]); a speaker that owns none on
+    /// `lane` (the lane diarized last time was the other one) keeps its row
+    /// and gets no segment. A segment no stored span reaches (new speech,
+    /// or a meeting without stored speakers) goes to the room speaker
+    /// ([`Diarization::fallback`]), the earlier fallback's row when it owns
+    /// a segment on `lane`. A stored room speaker that owns none on `lane`
+    /// was the room of the other lane: its confirmation does not carry
+    /// over and its id is taken, so those segments get no speaker, and its
+    /// row still marks the speakers incomplete. Rust only: Swift fails the
+    /// meeting.
     fn diarization_without_diarizer(
         &self,
         meeting_id: Uuid,
@@ -2190,14 +2185,11 @@ impl ProcessingPipeline {
             return Ok(Diarization::NONE);
         };
         let me = LaneMerger::me_speaker_id(meeting_id);
-        let mut speakers: Vec<Speaker> =
+        let speakers: Vec<Speaker> =
             attributing(PipelineStage::Diarize, self.store().speakers(meeting_id))?
                 .into_iter()
                 .filter(|speaker| speaker.id != me)
                 .collect();
-        if speakers.is_empty() {
-            return Ok(Diarization::one_room_speaker(meeting_id, lane));
-        }
         let segments = attributing(PipelineStage::Diarize, self.store().segments(meeting_id))?;
         let owners: Vec<ClusterSpeaker> = speakers
             .iter()
@@ -2217,22 +2209,13 @@ impl ProcessingPipeline {
             .filter(|owner| !owner.ranges.is_empty())
             .collect();
         let room = room_speaker_id(meeting_id);
-        let cluster_speakers = match owners.as_slice() {
-            [only] if only.speaker_id == room => vec![Diarization::whole_recording(room)],
-            // A stored room speaker that owns nothing on `lane` was the
-            // room of the other lane: its confirmation does not carry over,
-            // and its id is taken, so the lane's segments get no speaker.
-            [] if !speakers.iter().any(|speaker| speaker.id == room) => {
-                speakers.push(Diarization::room_speaker(meeting_id));
-                vec![Diarization::whole_recording(room)]
-            }
-            _ => owners,
-        };
+        let room_of_the_other_lane = speakers.iter().any(|speaker| speaker.id == room)
+            && !owners.iter().any(|owner| owner.speaker_id == room);
         Ok(Diarization {
             speakers,
-            cluster_speakers,
+            cluster_speakers: owners,
             lane: Some(lane),
-            fell_back: true,
+            fallback: (!room_of_the_other_lane).then_some(room),
         })
     }
 
@@ -2327,7 +2310,7 @@ impl ProcessingPipeline {
         // `deliver` leaves `pending` rows for the next launch.
         self.inner.dependencies.dispatcher.mark_pending(meeting_id);
         self.deliver(meeting_id).await;
-        self.stamp_deferred_retention(meeting_id, Stamp::AFTER_DELIVERY)
+        self.stamp_deferred_retention(meeting_id, Stamp::Automatic)
             .await
     }
 
@@ -2417,7 +2400,7 @@ impl ProcessingPipeline {
             &settings,
         )?;
         self.deliver(meeting_id).await;
-        self.stamp_deferred_retention(meeting_id, Stamp::AFTER_DELIVERY)
+        self.stamp_deferred_retention(meeting_id, Stamp::Automatic)
             .await
     }
 
@@ -2809,7 +2792,7 @@ impl ProcessingPipeline {
                 speakers,
                 cluster_speakers,
                 lane: Some(lane),
-                fell_back: false,
+                fallback: None,
             })
         })
         .await
@@ -2881,7 +2864,19 @@ impl ProcessingPipeline {
                 &diarization.cluster_speakers,
                 me_speaker_id,
                 diarization.lane,
+                diarization.fallback,
             );
+            // The diarizer fallback's room row exists only when it holds a
+            // segment, and once: a stored one is among the speakers already.
+            if let Some(room) = diarization.fallback
+                && segments
+                    .iter()
+                    .any(|segment| segment.speaker_id == Some(room))
+                && !all_speakers.iter().any(|speaker| speaker.id == room)
+            {
+                let row = Diarization::room_speaker(meeting.id, &all_speakers);
+                all_speakers.push(row);
+            }
             let mut updated = meeting.clone();
             updated.updated_at = now;
             let replaced = store.replace_transcript(&updated, &segments, &all_speakers)?;
@@ -3123,8 +3118,9 @@ impl ProcessingPipeline {
     /// the meeting is not delivered the asset is left unstamped and nothing
     /// is posted, not even the stage's progress. With
     /// [`Stamp::Automatic`] it also waits while the meeting's results could
-    /// still need the audio: the run's diarizer fell back, or
-    /// [`Self::results_need_the_audio`].
+    /// still need the audio ([`Self::results_need_the_audio`] over the
+    /// stored rows: the diarizer fallback's room speaker, or an empty
+    /// lane).
     async fn retention(&self, asset: &AudioAsset, stamp: Stamp) -> Result<()> {
         let store = self.store();
         let events = &self.inner.dependencies.events;
@@ -3135,9 +3131,7 @@ impl ProcessingPipeline {
         if !delivered {
             return Ok(());
         }
-        if let Stamp::Automatic { fell_back } = stamp
-            && (fell_back || self.results_need_the_audio(asset)?)
-        {
+        if stamp == Stamp::Automatic && self.results_need_the_audio(asset)? {
             tracing::info!(
                 target: BACKGROUND_RUN_LOG,
                 %meeting_id,
@@ -3203,18 +3197,10 @@ impl ProcessingPipeline {
 /// or the user's own rule (`apply_retention`), which is stamped as chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stamp {
-    /// After a run, or after a re-export or a summary re-run. `fell_back`
-    /// is the run's [`Diarization::fell_back`]; a stamp after delivery
-    /// alone cannot know it and reads only the stored rows.
-    Automatic {
-        fell_back: bool,
-    },
+    /// After a run, a re-export or a summary re-run.
+    Automatic,
+    /// After the user applied a rule.
     Chosen,
-}
-
-impl Stamp {
-    /// The stamp a re-export or a summary re-run asks for.
-    const AFTER_DELIVERY: Stamp = Stamp::Automatic { fell_back: false };
 }
 
 /// The in-flight mark of one operation; dropping it clears the mark and
@@ -3385,6 +3371,26 @@ mod tests {
         .await
         .expect("woken by the release");
         assert!(in_flight.try_hold().is_some());
+    }
+
+    /// The room speaker takes the first "Speaker N" no stored row uses,
+    /// compared lower-cased as `SpeakerLabels` maps labels back to ids.
+    #[test]
+    fn the_room_speaker_takes_the_first_label_no_stored_speaker_uses() {
+        let meeting_id = Uuid::new_v4();
+        let stored = |label: &str| Speaker {
+            cluster_label: label.to_owned(),
+            ..Diarization::room_speaker(meeting_id, &[])
+        };
+        assert_eq!(
+            Diarization::room_speaker(meeting_id, &[]).cluster_label,
+            "Speaker 1"
+        );
+        let taken = [stored("Me"), stored("speaker 1"), stored("Speaker 3")];
+        let room = Diarization::room_speaker(meeting_id, &taken);
+        assert_eq!(room.cluster_label, "Speaker 2");
+        assert_eq!(room.id, room_speaker_id(meeting_id));
+        assert_eq!(room.embedding, None);
     }
 
     /// A stage's own failure keeps its stage however it travels: bare, or

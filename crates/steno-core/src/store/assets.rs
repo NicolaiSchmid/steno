@@ -105,8 +105,10 @@ impl Store {
     }
 
     /// [`Store::save_asset`] committed under `synchronous = FULL` with
-    /// `fullfsync` ([`Store::write_durably`]). Every retention write goes
-    /// this way. A stamp: once it is on disk the sweep may delete the
+    /// `fullfsync` ([`Store::write_durably`]). Every stamp and every keep
+    /// goes this way. The clears before a re-run and in the crash-loop guard
+    /// do not need it: a rollback restores the stamped ready meeting with
+    /// its old results, or a `processing` row the sweep skips. A stamp: once it is on disk the sweep may delete the
     /// recording, and a durable commit also syncs every commit before it,
     /// the meeting's transcript and summary among them, so a power loss can
     /// never leave the recording deleted and its results rolled back. A
