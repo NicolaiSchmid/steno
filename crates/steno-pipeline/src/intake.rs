@@ -272,8 +272,9 @@ impl HandoverIntake for RecordingIntake {
                     // WAL, and recovery after a crash replays them. The
                     // durable `failed` save writes over them, or voids them
                     // when the WAL restarts, so the copy goes only once that
-                    // save is on the disk; otherwise it stays, an orphan at
-                    // worst, and a replayed admission still finds its master.
+                    // save is on the disk; otherwise it stays, still noted,
+                    // so the next launch adopts it unless a replay brings
+                    // its meeting back.
                     receipt.state = HandoverState::Failed(format!("admit: {error}"));
                     if self.store.save_handover_receipt_durably(&receipt).is_ok() {
                         let _ = std::fs::remove_file(&destination);

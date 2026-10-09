@@ -922,7 +922,8 @@ fn adopted(
 /// power loss can still take it, and a later launch forgets the entry
 /// once its row is durable (`forget_settled`). An entry with no row is
 /// forgotten here only when its folder provably holds no master
-/// (`holds_no_master`); one whose audio folder is empty, missing or
+/// (`holds_no_master`) or its master is a header with no audio
+/// ([`Unrecoverable::Empty`]); one whose audio folder is empty, missing or
 /// unreadable stays, and is logged at debug. A master modified within
 /// [`LiveRecordingCheck::fresh_within`] is left for the next launch:
 /// another process (a phone upload still being admitted, the Swift app) may
@@ -1004,6 +1005,11 @@ pub(crate) fn adopt_orphans(
             Ok(()) => {
                 tracing::warn!(%meeting_id, "a recording with no meeting was recovered");
                 adopted_ids.push(meeting_id);
+            }
+            // A header and no audio: it holds no master either.
+            Err(RecoveryError::Unrecoverable(Unrecoverable::Empty)) => {
+                tracing::debug!(%meeting_id, "a recording with no meeting holds no audio; its entry is forgotten");
+                gone.push(meeting_id);
             }
             Err(error) => {
                 tracing::warn!(%meeting_id, "a recording with no meeting could not be recovered; it stays on disk");
@@ -2397,6 +2403,31 @@ mod tests {
         harness.pipeline.current().wait_until_idle().await;
         assert!(harness.store.meeting(orphan).unwrap().is_none());
         assert!(master_path(&harness.audio_folder(), orphan).is_file());
+    }
+
+    /// A recorded master that is a header with no audio (a crash before
+    /// the first frame) holds no master: nothing is adopted, its entry is
+    /// forgotten so later launches do not warn about it again, and its
+    /// file stays as it is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_header_only_master_with_no_meeting_is_forgotten() {
+        let harness = Harness::new();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 0);
+        let master = master_path(&harness.audio_folder(), orphan);
+        assert_eq!(CafHeader::read(&master).unwrap().frame_count, 0);
+        let header = std::fs::read(&master).unwrap();
+
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        assert!(harness.store.meeting(orphan).unwrap().is_none());
+        assert!(
+            !crate::audio_folders::recorded(&harness.support_directory())
+                .unwrap()
+                .contains_key(&orphan)
+        );
+        assert_eq!(std::fs::read(&master).unwrap(), header);
     }
 
     /// An entry with no row whose folder cannot be told empty stays: an
