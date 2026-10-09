@@ -176,6 +176,39 @@ function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
 }
 
 /**
+ * "Process again" runs the meeting from the start with its recording; the
+ * host says when it is offered (`canProcessAgain`) and words any refusal on
+ * the error line. The button stays disabled until the host answers, so a
+ * second click cannot start a second run.
+ */
+function HeaderProcessAgain({ disabled }: { disabled: boolean }) {
+	const client = useBridge();
+	const [starting, setStarting] = useState(false);
+	async function processAgain() {
+		setStarting(true);
+		try {
+			await client.call("meeting.processAgain");
+		} catch (cause: unknown) {
+			console.error("bridge: meeting.processAgain failed", cause);
+		} finally {
+			setStarting(false);
+		}
+	}
+	return (
+		<Button
+			data-testid="process-again"
+			disabled={disabled || starting}
+			onClick={processAgain}
+			size="sm"
+			variant="outline"
+		>
+			<RotateCcwIcon aria-hidden="true" />
+			Process again
+		</Button>
+	);
+}
+
+/**
  * "Keep the recording": the switch follows the host, shows the new position
  * at once, and slides back when the host's alert was declined.
  */
@@ -402,22 +435,6 @@ function DetailBody({
 		send(client, "meeting.rerunSummary");
 	}
 
-	// "Process again" runs the meeting from the start with its recording;
-	// the host says when it is offered (`canProcessAgain`) and words any
-	// refusal on the error line. The button stays disabled until the host
-	// answers, so a second click cannot start a second run.
-	const [startingAgain, setStartingAgain] = useState(false);
-	async function processAgain() {
-		setStartingAgain(true);
-		try {
-			await client.call("meeting.processAgain");
-		} catch (cause: unknown) {
-			console.error("bridge: meeting.processAgain failed", cause);
-		} finally {
-			setStartingAgain(false);
-		}
-	}
-
 	const canReexport = detail.export.canReexport && !detail.isBusy;
 	useShortcut(
 		SHORTCUTS.exportAgain,
@@ -495,16 +512,7 @@ function DetailBody({
 		<div className="flex shrink-0 items-center gap-2">
 			{holdsRecorder && recording ? <HeaderStop recording={recording} /> : null}
 			{detail.canProcessAgain ? (
-				<Button
-					data-testid="process-again"
-					disabled={detail.isBusy || startingAgain}
-					onClick={processAgain}
-					size="sm"
-					variant="outline"
-				>
-					<RotateCcwIcon aria-hidden="true" />
-					Process again
-				</Button>
+				<HeaderProcessAgain disabled={detail.isBusy} />
 			) : null}
 			<Button
 				data-testid="export-meeting"
