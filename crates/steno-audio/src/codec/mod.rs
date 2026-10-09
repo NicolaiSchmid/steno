@@ -193,8 +193,8 @@ impl SymphoniaAudioCodec {
     /// m4a's track header, a WAV's data chunk), read without decoding it;
     /// `None` when the container does not say. Without the AAC priming the
     /// decode drops, so it matches the decode up to the encoder's padding
-    /// at the end (under a packet), and capped at five hours as a declared
-    /// length is when its buffer is reserved, so a corrupt header cannot
+    /// at the end (under a packet), and capped at five hours, as
+    /// `reserved_frames` caps a declared length, so a corrupt header cannot
     /// move a start absurdly far back. For a recording that has no stored
     /// duration, such as one the launch adopts from the audio folder. Rust
     /// only.

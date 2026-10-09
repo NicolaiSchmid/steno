@@ -833,14 +833,14 @@ fn orphans(
     found
 }
 
-/// How many ids of the masters a launch leaves alone, or could not
-/// recover, its one log line names.
-const UNRECORDED_IDS_LOGGED: usize = 3;
+/// How many ids each of the launch's two summary lines names: the masters
+/// it leaves alone, and the ones it could not recover.
+const IDS_LOGGED: usize = 3;
 
-/// The first [`UNRECORDED_IDS_LOGGED`] of `ids`, joined for a log line.
+/// The first [`IDS_LOGGED`] of `ids`, joined for a log line.
 fn first_ids(ids: &[Uuid]) -> String {
     ids.iter()
-        .take(UNRECORDED_IDS_LOGGED)
+        .take(IDS_LOGGED)
         .map(Uuid::to_string)
         .collect::<Vec<_>>()
         .join(", ")
@@ -2713,7 +2713,7 @@ mod tests {
             .iter()
             .filter(|id| line.contains(&id.to_string()))
             .count();
-        assert_eq!(named, UNRECORDED_IDS_LOGGED, "{line}");
+        assert_eq!(named, IDS_LOGGED, "{line}");
         assert!(!line.contains(&row.to_string()), "{line}");
     }
 
