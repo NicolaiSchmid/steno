@@ -2,11 +2,12 @@
 //! GitHub release, checked on request from the tray or from Settings
 //! (`updates.check`), and daily by the update schedule
 //! (`steno_services::updates`), which drives [`ShellUpdates`], records each
-//! check's outcome and time for the General section, and installs by
-//! itself only through its install gate. The lane follows the installed version, as Sparkle's
-//! channel does in the Swift app: a pre-release build ("0.11.0-rc.1") reads
-//! the beta lane's manifest first and falls back to the stable one; a
-//! stable build reads the stable manifest only. No setting.
+//! check's outcome and time for the General section, and downloads and
+//! installs by itself only through its install gate (stable plan P25). The
+//! lane follows the installed version, as Sparkle's channel does in the
+//! Swift app: a pre-release build ("0.11.0-rc.1") reads the beta lane's
+//! manifest first and falls back to the stable one; a stable build reads
+//! the stable manifest only. No setting.
 //!
 //! Each lane is a rolling GitHub release that holds only its `latest.json`,
 //! which `.github/workflows/desktop-release.yml` replaces when it publishes
@@ -56,20 +57,31 @@ pub fn endpoints(version: &str) -> Vec<Url> {
     urls
 }
 
-/// The plugin; `check` supplies the lanes per build and `tauri.conf.json`
-/// the public key.
+/// The plugin; [`ShellUpdates`]'s `UpdateSource::check` supplies the lanes
+/// per build and `tauri.conf.json` the public key.
 pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry, tauri_plugin_updater::Config> {
     tauri_plugin_updater::Builder::new().build()
 }
 
-/// The update source the schedule drives, managed state: the update the
-/// last check found and, once downloaded, its verified bytes, which an
-/// install the user agrees to uses instead of downloading again.
+/// The update source the schedule drives, kept as Tauri managed state: the
+/// update the last check found and, once downloaded, its verified bytes,
+/// which an install the user agrees to uses instead of downloading again.
+/// Nothing is downloaded before the user's yes until P25's install gate
+/// lets the schedule download.
 pub struct ShellUpdates {
     app: AppHandle,
     found: Mutex<Option<Update>>,
     /// The version and the bytes [`UpdateSource::download`] kept.
-    downloaded: Mutex<Option<(String, Vec<u8>)>>,
+    downloaded: Mutex<Option<Download>>,
+}
+
+/// A verified package and its version.
+type Download = (String, Vec<u8>);
+
+/// Frees `downloaded` unless it holds `version`: a check found another
+/// update, or none.
+fn keep_only(downloaded: &Mutex<Option<Download>>, version: Option<&str>) {
+    lock(downloaded).take_if(|(kept, _)| Some(kept.as_str()) != version);
 }
 
 impl ShellUpdates {
@@ -85,7 +97,8 @@ impl ShellUpdates {
 #[async_trait::async_trait]
 impl UpdateSource for ShellUpdates {
     /// Asks the lanes. The update itself, when there is one, is kept for
-    /// the download and the install.
+    /// the download and the install; a package kept for another version is
+    /// freed.
     async fn check(&self) -> Result<Option<String>, String> {
         let version = self.app.package_info().version.to_string();
         let handle = self.app.clone();
@@ -101,8 +114,10 @@ impl UpdateSource for ShellUpdates {
             .check()
             .await
             .map_err(|error| error.to_string())?;
-        lock(&self.found).clone_from(&update);
-        Ok(update.map(|update| update.version))
+        let version = update.as_ref().map(|update| update.version.clone());
+        keep_only(&self.downloaded, version.as_deref());
+        *lock(&self.found) = update;
+        Ok(version)
     }
 
     async fn download(&self) -> Result<(), String> {
@@ -128,10 +143,10 @@ impl UpdateSource for ShellUpdates {
     /// The relaunch bypasses the exit request, so the shutdown runs first
     /// (`shut_down_before_exit`), as Sparkle's relaunch went through
     /// `applicationShouldTerminate`; on Windows the installer's own exit
-    /// runs it (`check`). An install that fails after that shutdown ran
-    /// (Windows: the installer did not launch) ends the app once its
-    /// message is closed: the recorder and the pipeline start nothing after
-    /// a shutdown, and the next Quit would run none.
+    /// runs it (`UpdateSource::check`). An install that fails after that
+    /// shutdown ran (Windows: the installer did not launch) ends the app
+    /// once its message is closed: the recorder and the pipeline start
+    /// nothing after a shutdown, and the next Quit would run none.
     async fn install_and_relaunch(&self) -> Result<(), String> {
         let app = &self.app;
         let Some(update) = lock(&self.found).clone() else {
@@ -171,6 +186,10 @@ impl UpdateSource for ShellUpdates {
         }
     }
 
+    fn drop_download(&self) {
+        lock(&self.downloaded).take();
+    }
+
     fn announce(&self, version: &str) {
         let (app, version) = (self.app.clone(), version.to_owned());
         tauri::async_runtime::spawn(async move { offer(&app, &version).await });
@@ -192,11 +211,12 @@ fn schedule(app: &AppHandle) -> Option<Arc<UpdateSchedule>> {
     app.try_state::<crate::host::Host>()?.updates()
 }
 
-/// Checks the lanes; through the schedule when there is one, so the
-/// General section shows the outcome and the time.
-async fn check(app: &AppHandle) -> Result<Option<String>, String> {
+/// The user's check of the lanes; through the schedule when there is one,
+/// so the General section shows the outcome and the time and the schedule
+/// does not announce the same version again.
+async fn check_on_request(app: &AppHandle) -> Result<Option<String>, String> {
     match schedule(app) {
-        Some(schedule) => schedule.check_now().await,
+        Some(schedule) => schedule.check_on_request().await,
         None => source(app).check().await,
     }
 }
@@ -213,7 +233,7 @@ fn dialog(
 /// The tray's Check for Updates: checks, then asks before installing,
 /// as Sparkle's standard driver does.
 pub async fn check_and_offer(app: &AppHandle) {
-    match check(app).await {
+    match check_on_request(app).await {
         Ok(Some(version)) => offer(app, &version).await,
         Ok(None) => {
             dialog(app, MessageDialogKind::Info, "Steno is up to date.").show(|_| {});
@@ -286,6 +306,20 @@ mod tests {
             assert_eq!(url.host_str(), Some("github.com"));
             assert!(url.path().ends_with("/latest.json"));
         }
+    }
+
+    /// A check that finds another version, or none, frees the package kept
+    /// for the old one; the same version keeps it.
+    #[test]
+    fn a_kept_package_is_freed_when_the_check_finds_another_version() {
+        let downloaded = Mutex::new(Some(("0.12.0".to_owned(), vec![1, 2, 3])));
+        keep_only(&downloaded, Some("0.12.0"));
+        assert!(lock(&downloaded).is_some());
+        keep_only(&downloaded, Some("0.12.1"));
+        assert!(lock(&downloaded).is_none());
+        *lock(&downloaded) = Some(("0.12.1".to_owned(), vec![4]));
+        keep_only(&downloaded, None);
+        assert!(lock(&downloaded).is_none());
     }
 
     #[test]

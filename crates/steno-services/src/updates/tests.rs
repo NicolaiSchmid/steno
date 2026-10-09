@@ -1,11 +1,14 @@
-//! The schedule against a fake clock, a scripted update source and a gate
-//! a test opens and closes.
+//! The schedule against a fake clock, a scripted update source, a gate a
+//! test opens and closes, and a recorder a test puts in any state.
 
 use std::collections::VecDeque;
+use std::future::Future as _;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::Poll;
 
 use chrono::TimeZone as _;
-use steno_host::fakes::{FakeClock, FakePreferences};
+use steno_host::fakes::{FakeClock, FakePermissions, FakePreferences, FakeRecorder};
+use steno_host::services::RecorderStatus;
 
 use super::*;
 use crate::platform::FilePreferences;
@@ -15,12 +18,16 @@ fn launch_time() -> DateTime<Utc> {
 }
 
 /// Answers the checks a test queued (none left: up to date) and counts
-/// every call; an install records whether the gate's hold was alive.
+/// every call; a check waits for `release` while `stalls` is set, and an
+/// install records whether the gate's hold was alive.
 #[derive(Default)]
 struct FakeSource {
     answers: Mutex<VecDeque<Result<Option<String>, String>>>,
     checks: AtomicUsize,
+    stalls: AtomicBool,
+    release: tokio::sync::Notify,
     downloads: AtomicUsize,
+    dropped: AtomicUsize,
     download_fails: AtomicBool,
     installs: AtomicUsize,
     install_fails: AtomicBool,
@@ -47,6 +54,9 @@ impl FakeSource {
 impl UpdateSource for FakeSource {
     async fn check(&self) -> Result<Option<String>, String> {
         self.checks.fetch_add(1, Ordering::SeqCst);
+        if self.stalls.load(Ordering::SeqCst) {
+            self.release.notified().await;
+        }
         lock(&self.answers).pop_front().unwrap_or(Ok(None))
     }
 
@@ -68,6 +78,10 @@ impl UpdateSource for FakeSource {
             return Err("the bundle could not be replaced".into());
         }
         Ok(())
+    }
+
+    fn drop_download(&self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
     }
 
     fn announce(&self, version: &str) {
@@ -106,6 +120,7 @@ struct World {
     preferences: Arc<FakePreferences>,
     source: Arc<FakeSource>,
     gate: Arc<FakeGate>,
+    recorder: Arc<FakeRecorder>,
     changes: Arc<AtomicUsize>,
 }
 
@@ -114,12 +129,18 @@ impl World {
         let source = Arc::new(FakeSource::default());
         let gate = Arc::new(FakeGate::default());
         *lock(&source.gate) = Some(gate.clone());
+        let clock = Arc::new(FakeClock::new(launch_time()));
+        let recorder = Arc::new(FakeRecorder::new(
+            clock.clone(),
+            Arc::new(FakePermissions::all_granted()),
+        ));
         World {
             directory: tempfile::tempdir().unwrap(),
-            clock: Arc::new(FakeClock::new(launch_time())),
+            clock,
             preferences: Arc::new(FakePreferences::default()),
             source,
             gate,
+            recorder,
             changes: Arc::default(),
         }
     }
@@ -144,6 +165,7 @@ impl World {
             preferences,
             clock: self.clock.clone(),
             gate,
+            recorder: self.recorder.clone(),
             support_directory: self.directory.path().to_owned(),
             managed,
             runtime: tokio::runtime::Handle::current(),
@@ -161,6 +183,17 @@ impl World {
 
     fn installs(&self) -> usize {
         self.source.installs.load(Ordering::SeqCst)
+    }
+
+    fn downloads(&self) -> usize {
+        self.source.downloads.load(Ordering::SeqCst)
+    }
+
+    fn recording(&self, state: RecordingState) {
+        self.recorder.set_status(RecorderStatus {
+            state,
+            ..RecorderStatus::idle()
+        });
     }
 
     fn advance(&self, by: TimeDelta) {
@@ -273,10 +306,10 @@ async fn a_failed_check_keeps_the_last_good_time() {
 }
 
 /// A found update counts as a successful check; with automatic downloads
-/// off it is announced once, not at every later check of the same version,
-/// and nothing is downloaded or installed.
+/// off it is announced once in a run, not at every later check of the
+/// same version, and nothing is downloaded or installed.
 #[tokio::test]
-async fn a_found_update_is_announced_once_per_version() {
+async fn a_found_update_is_announced_once_per_version_in_a_run() {
     let world = World::new();
     world.gate.idle.store(true, Ordering::SeqCst);
     world.source.answer(Ok(Some("0.12.0")));
@@ -295,14 +328,15 @@ async fn a_found_update_is_announced_once_per_version() {
     }
     assert_eq!(world.checks(), 3);
     assert_eq!(world.source.announced(), ["0.12.0", "0.12.1"]);
-    assert_eq!(world.source.downloads.load(Ordering::SeqCst), 0);
+    assert_eq!(world.downloads(), 0);
     assert_eq!(world.installs(), 0);
 }
 
-/// With automatic downloads on, a found update is downloaded, and it is
-/// never installed while the gate says busy: the user is told instead, and
-/// later ticks try the install again without a second download. Once the
-/// app is idle the next tick installs while it holds the gate.
+/// With automatic downloads on and a real gate, a found update is
+/// downloaded, and it is never installed while the gate says busy: the
+/// user is told instead, and later ticks try the install again without a
+/// second download. Once the app is idle the next tick installs while it
+/// holds the gate.
 #[tokio::test]
 async fn a_download_never_installs_while_the_gate_says_busy() {
     let world = World::new();
@@ -310,7 +344,7 @@ async fn a_download_never_installs_while_the_gate_says_busy() {
     world.source.answer(Ok(Some("0.12.0")));
     let schedule = world.schedule();
     schedule.tick().await;
-    assert_eq!(world.source.downloads.load(Ordering::SeqCst), 1);
+    assert_eq!(world.downloads(), 1);
     assert_eq!(world.installs(), 0);
     assert_eq!(world.source.announced(), ["0.12.0"]);
 
@@ -319,7 +353,7 @@ async fn a_download_never_installs_while_the_gate_says_busy() {
         schedule.tick().await;
     }
     assert_eq!(world.installs(), 0);
-    assert_eq!(world.source.downloads.load(Ordering::SeqCst), 1);
+    assert_eq!(world.downloads(), 1);
     assert_eq!(world.checks(), 1);
 
     world.gate.idle.store(true, Ordering::SeqCst);
@@ -331,7 +365,8 @@ async fn a_download_never_installs_while_the_gate_says_busy() {
     assert_eq!(world.source.announced(), ["0.12.0"]);
 }
 
-/// Idle at the check: the download installs at once, unannounced.
+/// A real gate, idle at the check: the download installs at once,
+/// unannounced.
 #[tokio::test]
 async fn an_idle_app_installs_the_download_at_once() {
     let world = World::new();
@@ -345,9 +380,10 @@ async fn an_idle_app_installs_the_download_at_once() {
     assert_eq!(world.source.announced(), Vec::<String>::new());
 }
 
-/// The stand-in gate never gives a hold, so the schedule never installs.
+/// The stand-in gate: with automatic downloads on, nothing downloads or
+/// installs by itself, and the found update is announced instead.
 #[tokio::test]
-async fn the_stand_in_gate_never_installs() {
+async fn nothing_downloads_while_the_gate_is_the_stand_in() {
     let world = World::new();
     world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
     world.source.answer(Ok(Some("0.12.0")));
@@ -356,8 +392,151 @@ async fn the_stand_in_gate_never_installs() {
         schedule.tick().await;
         world.advance(TimeDelta::hours(1));
     }
+    assert_eq!(world.checks(), 2);
+    assert_eq!(world.downloads(), 0);
     assert_eq!(world.installs(), 0);
     assert_eq!(world.source.announced(), ["0.12.0"]);
+}
+
+/// Turning automatic downloads off frees the kept download, so an idle
+/// tick afterwards installs nothing.
+#[tokio::test]
+async fn turning_automatic_downloads_off_frees_the_download() {
+    let world = World::new();
+    world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    assert_eq!(world.downloads(), 1);
+    schedule.set_automatically_downloads(false);
+    assert_eq!(world.source.dropped.load(Ordering::SeqCst), 1);
+
+    world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.gate.idle.store(true, Ordering::SeqCst);
+    world.advance(TimeDelta::hours(1));
+    schedule.tick().await;
+    assert_eq!(world.installs(), 0);
+}
+
+/// A check that finds no update, or another one, forgets the download kept
+/// for the old one, so an idle tick afterwards does not install it.
+#[tokio::test]
+async fn a_check_that_finds_no_update_forgets_the_download() {
+    let world = World::new();
+    world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.source.answer(Ok(Some("0.12.0")));
+    world.source.answer(Ok(None));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    assert_eq!(world.downloads(), 1);
+    world.advance(CHECK_INTERVAL);
+    schedule.tick().await;
+    assert_eq!(world.checks(), 2);
+
+    world.gate.idle.store(true, Ordering::SeqCst);
+    world.advance(TimeDelta::hours(1));
+    schedule.tick().await;
+    assert_eq!(world.installs(), 0);
+}
+
+/// While a recording starts, runs or stops, a found update is not
+/// announced, since one click on the dialog would end the recording; the
+/// first tick after it ends announces it, once.
+#[tokio::test]
+async fn a_found_update_waits_for_the_recording_to_end() {
+    let world = World::new();
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    for state in [
+        RecordingState::Starting,
+        RecordingState::Recording,
+        RecordingState::Stopping,
+    ] {
+        world.recording(state);
+        schedule.tick().await;
+        world.advance(TimeDelta::hours(1));
+    }
+    assert_eq!(
+        schedule.last_outcome(),
+        UpdateOutcome::Available("0.12.0".into())
+    );
+    assert_eq!(world.source.announced(), Vec::<String>::new());
+
+    world.recording(RecordingState::Idle);
+    schedule.tick().await;
+    world.advance(TimeDelta::hours(1));
+    schedule.tick().await;
+    assert_eq!(world.source.announced(), ["0.12.0"]);
+    assert_eq!(world.checks(), 1);
+}
+
+/// The user's check shows its own dialog, so the schedule does not
+/// announce the version it found, not even at its next day's check.
+#[tokio::test]
+async fn the_users_check_counts_as_the_announcement() {
+    let world = World::new();
+    world.source.answer(Ok(Some("0.12.0")));
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    assert_eq!(schedule.check_on_request().await, Ok(Some("0.12.0".into())));
+    schedule.tick().await;
+    world.advance(CHECK_INTERVAL);
+    schedule.tick().await;
+    assert_eq!(world.checks(), 2);
+    assert_eq!(world.source.announced(), Vec::<String>::new());
+}
+
+/// A check that does not answer fails after [`CHECK_TIMEOUT`], on a held
+/// clock: the tick ends, Settings' button comes back and the next check
+/// runs.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_check_fails_after_a_minute_and_frees_the_next() {
+    let world = World::new();
+    world.source.stalls.store(true, Ordering::SeqCst);
+    let schedule = world.schedule();
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(TICK, schedule.tick())
+        .await
+        .expect("the check gives up before the next tick");
+    let waited = started.elapsed();
+    assert!(
+        waited >= CHECK_TIMEOUT && waited < CHECK_TIMEOUT * 2,
+        "{waited:?}"
+    );
+    assert_eq!(
+        schedule.last_outcome(),
+        UpdateOutcome::Failed(CHECK_TIMED_OUT.into())
+    );
+    assert_eq!(schedule.last_check_at(), None);
+    assert!(schedule.can_check_for_updates());
+
+    world.source.stalls.store(false, Ordering::SeqCst);
+    assert_eq!(schedule.check_on_request().await, Ok(None));
+    assert_eq!(world.checks(), 2);
+}
+
+/// A tick that waited behind the user's check finds the check no longer
+/// due and does not ask the lanes a second time.
+#[tokio::test]
+async fn a_tick_behind_the_users_check_does_not_check_again() {
+    let world = World::new();
+    world.source.stalls.store(true, Ordering::SeqCst);
+    let schedule = world.schedule();
+    let users = tokio::spawn({
+        let schedule = schedule.clone();
+        async move { schedule.check_on_request().await }
+    });
+    while world.checks() == 0 {
+        tokio::task::yield_now().await;
+    }
+    let mut tick = std::pin::pin!(schedule.tick());
+    let first = std::future::poll_fn(|context| Poll::Ready(tick.as_mut().poll(context))).await;
+    assert!(first.is_pending(), "the tick waits for the user's check");
+
+    world.source.release.notify_one();
+    assert_eq!(users.await.unwrap(), Ok(None));
+    tick.await;
+    assert_eq!(world.checks(), 1);
 }
 
 /// A failed install is shown and not retried; a failed download leaves the
@@ -401,17 +580,22 @@ async fn automatic_checks_off_leaves_only_the_users_check() {
     let schedule = world.schedule();
     schedule.tick().await;
     assert_eq!(world.checks(), 0);
-    assert_eq!(schedule.check_now().await, Ok(None));
+    assert_eq!(schedule.check_on_request().await, Ok(None));
     assert_eq!(world.checks(), 1);
     assert_eq!(schedule.last_check_at(), Some(launch_time()));
 }
 
-/// A package manager's install: no tick checks and Settings cannot check.
+/// A package manager's install: no tick checks, Settings cannot check, and
+/// the tray's check fails without a request.
 #[tokio::test]
 async fn a_managed_install_never_checks() {
     let world = World::new();
     let schedule = world.schedule_with(world.preferences.clone(), world.gate.clone(), true);
     schedule.tick().await;
+    assert_eq!(
+        schedule.check_on_request().await,
+        Err(MANAGED_CHECK.to_owned())
+    );
     assert_eq!(world.checks(), 0);
     assert!(!schedule.can_check_for_updates());
     assert!(world.schedule().can_check_for_updates());
@@ -541,42 +725,18 @@ async fn the_flags_are_booleans_under_their_keys_with_sparkles_defaults() {
 /// While a check runs, Settings cannot start another.
 #[tokio::test]
 async fn no_second_check_starts_while_one_runs() {
-    struct Slow(tokio::sync::Notify, AtomicBool);
-    #[async_trait]
-    impl UpdateSource for Slow {
-        async fn check(&self) -> Result<Option<String>, String> {
-            self.1.store(true, Ordering::SeqCst);
-            self.0.notified().await;
-            Ok(None)
-        }
-        async fn download(&self) -> Result<(), String> {
-            Ok(())
-        }
-        async fn install_and_relaunch(&self) -> Result<(), String> {
-            Ok(())
-        }
-        fn announce(&self, _version: &str) {}
-    }
     let world = World::new();
-    let source = Arc::new(Slow(tokio::sync::Notify::new(), AtomicBool::new(false)));
-    let schedule = UpdateSchedule::new(ScheduleParts {
-        source: source.clone(),
-        preferences: world.preferences.clone(),
-        clock: world.clock.clone(),
-        gate: Arc::new(NeverIdle),
-        support_directory: world.directory.path().to_owned(),
-        managed: false,
-        runtime: tokio::runtime::Handle::current(),
-    });
+    world.source.stalls.store(true, Ordering::SeqCst);
+    let schedule = world.schedule();
     let running = tokio::spawn({
         let schedule = schedule.clone();
-        async move { schedule.check_now().await }
+        async move { schedule.check_on_request().await }
     });
-    while !source.1.load(Ordering::SeqCst) {
+    while world.checks() == 0 {
         tokio::task::yield_now().await;
     }
     assert!(!schedule.can_check_for_updates());
-    source.0.notify_one();
+    world.source.release.notify_one();
     assert_eq!(running.await.unwrap(), Ok(None));
     assert!(schedule.can_check_for_updates());
 }

@@ -19,7 +19,7 @@
 //! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, and the host's `Handover` over the listener |
 //! | [`secrets`] | The platform keyring, the Secret Service on Linux and the 0600 secrets file behind `SecretStore`, and [`KeepsApiKey`](secrets::KeepsApiKey), the app's store that keeps the API key for the pipeline's rebuilds |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
-//! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json` and `audio-folders.json` |
+//! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json`, `audio-folders.json` and `update-check.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the first-launch flags |
 //! | [`updates`] | The host's `Updater`: the daily update schedule over the shell's updater, its flags, the last check time, the install gate and the packaged-install switch |
 //! | [`qr`] | The host's `QrEncoder`: the pairing code as a PNG |

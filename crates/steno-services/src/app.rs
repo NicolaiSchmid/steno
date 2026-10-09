@@ -70,7 +70,8 @@ pub struct AppOptions {
     /// `None` for a fake that never checks (the CLI, the tests).
     pub update_source: Option<Arc<dyn UpdateSource>>,
     /// Whether an update may install now (stable plan P25); [`NeverIdle`]
-    /// until the shell supplies the real gate.
+    /// until the shell supplies the real gate, and through it nothing
+    /// downloads or installs by itself.
     pub install_gate: Arc<dyn InstallGate>,
     /// The runtime the host's synchronous service calls block on.
     pub runtime: tokio::runtime::Handle,
@@ -502,6 +503,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
             preferences: preferences.clone(),
             clock: clock.clone(),
             gate: options.install_gate,
+            recorder: recorder.clone(),
             support_directory: paths.support_directory.clone(),
             managed: crate::updates::updates_are_managed(),
             runtime: runtime.clone(),
@@ -1801,6 +1803,7 @@ mod tests {
             async fn install_and_relaunch(&self) -> Result<(), String> {
                 Ok(())
             }
+            fn drop_download(&self) {}
             fn announce(&self, _version: &str) {}
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1811,13 +1814,14 @@ mod tests {
         })
         .unwrap();
         let updates = app.updates.clone().expect("the schedule");
+        assert!(app.services.updater.can_check_for_updates());
         app.services.updater.set_automatically_downloads(true);
         assert!(
             app.services
                 .preferences
                 .flag(crate::updates::AUTOMATIC_DOWNLOAD_KEY)
         );
-        assert_eq!(updates.check_now().await, Ok(None));
+        assert_eq!(updates.check_on_request().await, Ok(None));
         assert!(app.services.updater.last_check_at().is_some());
         assert!(support.join(crate::updates::LAST_CHECK_FILE).is_file());
         assert!(app.services.qr.png_base64("steno://pair/v1").is_some());

@@ -484,8 +484,9 @@ pub trait Opener: Send + Sync {
 
 /// The flags the Swift app kept in `UserDefaults`: whether onboarding has
 /// finished, whether the login item was registered once, and Sparkle's
-/// automatic-check and automatic-download flags (the updater's). The shell
-/// (WP6b) keeps them in its own settings file; the fake holds a map.
+/// automatic-check and automatic-download flags (the updater's).
+/// `steno_services::platform::FilePreferences` keeps them in
+/// `preferences.json`; the fake holds a map.
 pub trait Preferences: Send + Sync {
     /// False when the key is missing or holds no boolean.
     fn flag(&self, key: &str) -> bool {
