@@ -1028,11 +1028,16 @@ still has to draw the window side. `[ ]` is not ported yet.
     cost only the speaker labels, and the stage is logged with its meeting and stage
     only. A re-run keeps the speakers stored for the meeting, confirmations, voices
     and clips included, and maps the new segments onto them by the spans of the
-    stored segments each owned on the lane diarized now; an earlier fallback speaker
-    alone on that lane covers the whole recording again. For a meeting with no
-    stored speakers, or none on that lane (the lane diarized last time was the other
-    one), the diarized lane becomes one unknown "Speaker 1" without an embedding, the
-    mic lane too when it is the room, so the other party is never "me"
+    stored segments each owned on the lane diarized now. A segment on that lane no
+    stored span reaches (every segment of a meeting with no stored speakers, or new
+    speech on a re-run) goes to one unknown room speaker without an embedding, the
+    earlier fallback speaker when it owns a segment there, otherwise a new row under
+    the next "Speaker N" after the highest stored one ("Speaker 1" on a first run),
+    so a label merged away is not reused; the mic lane goes to it too when it is the
+    room, so the other party is never "me". A stored room speaker of the other lane
+    takes none of this lane's segments; after such a lane switch that row can be left
+    with no segment, and it then keeps the recording (the safe direction) and shows
+    as a speaker, as the arm did before #241
     (`a_failing_diarizer_keeps_the_transcript_with_one_room_speaker`,
     `a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers`,
     `a_failing_diarizer_on_the_mic_lane_makes_it_the_room`,
@@ -1041,7 +1046,14 @@ still has to draw the window side. `[ ]` is not ported yet.
     `a_second_diarizer_failure_keeps_the_named_room_speaker`,
     `a_job_whose_diarizer_does_not_load_keeps_its_transcript`,
     `a_failing_speaker_match_keeps_the_speakers_unknown`,
-    `a_diarizer_failure_warns_with_its_stage_not_its_reason`). Sample clips
+    `a_diarizer_failure_warns_with_its_stage_not_its_reason`,
+    `confirmed_and_renamed_speakers_keep_their_segments_on_a_fell_back_rerun`,
+    `the_room_row_beside_stored_speakers_takes_the_next_free_label`,
+    `the_room_label_skips_every_stored_label`,
+    `a_rerun_of_a_first_run_fallback_keeps_one_room_row`,
+    `a_confirmed_room_row_of_the_other_lane_takes_no_tap_segment`); a working
+    diarizer's uncovered segments keep no speaker and add no room row
+    (`a_working_diarizer_leaves_what_its_clusters_miss_without_a_speaker`). Sample clips
     (`crates/steno-pipeline/src/sample_clips.rs`): `diarize` writes each clip under a
     name of its run's own, `speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`, and syncs it and
     the folder before the merge; a write that fails removes the files it wrote, so the
@@ -1198,6 +1210,60 @@ still has to draw the window side. `[ ]` is not ported yet.
   one check-and-insert on the set, held until the run ends, so a second start across
   pipelines is refused too (`a_reprocess_is_refused_while_a_retired_pipeline_runs_the_meeting`).
   Swift kept it per pipeline.
+- The automatic retention keeps a recording whose results could still need it (P14 of
+  `.plans/2026-10-07-stable-promotion.md`), even under "delete after processing":
+  after a run, a re-export or a summary re-run, a ready meeting is not stamped while
+  `steno_core::results_need_the_audio` holds over its stored rows. The rule: the
+  meeting has the diarizer fallback's room speaker (`room_speaker_id`), or a lane the
+  asset recorded (system and mic for a call, the one lane of an in-person or phone
+  meeting) has no segment while the meeting runs longer than
+  `EMPTY_LANE_MAXIMUM_SECONDS` (30 s) or has no positive duration. It errs towards
+  keeping: a call whose mic stayed muted is kept too. A phone meeting whose metadata
+  announced no duration gets the length the run decoded
+  (`a_phone_meeting_without_a_duration_gets_the_decoded_length`). The stored room
+  speaker is the mark: it holds only the diarized lane's segments no kept speaker
+  covers, never one a confirmed or renamed speaker covers, under the next free
+  "Speaker N", and it is stored only when it holds one. A re-run whose diarizer fails
+  with new speech outside the stored spans stores it, so the later re-exports,
+  summary re-runs and launch re-exports read it from the store and keep the recording
+  (`a_fell_back_rerun_with_new_speech_keeps_the_recording_through_every_later_stamp`).
+  A re-run whose diarizer fails while every segment falls inside a stored span keeps
+  the speakers of an earlier working diarization, as complete as before, and is
+  stamped as usual
+  (`a_rerun_whose_diarizer_fails_stamps_when_the_stored_speakers_cover_every_segment`).
+  A first-run fallback whose lane has no segment leaves no room row either, and the
+  empty-lane arm alone decides
+  (`a_first_run_fallback_over_an_empty_call_stores_no_room_row`,
+  `a_first_run_fallback_over_an_empty_phone_recording_stores_no_room_row`). The row
+  has no embedding, so it feeds no voice and the next meeting's matching never sees
+  it (`the_room_row_feeds_no_voice`). Two merges the user makes are the user
+  resolving the gap and are accepted: confirming a diarized speaker to the room's
+  person merges it into the room row with its own embedding, what a plain
+  confirmation teaches, and confirming the room row to someone who has another
+  speaker merges it away, the mark with it, so the next re-export stamps. A later
+  run whose diarizer works replaces every speaker row, the room row with it. A run
+  whose diarizer works and whose lanes all have segments stamps the meeting; a re-run
+  on the same silent audio keeps it again, so for an empty lane only a rule the user
+  applies, stamped as chosen, releases it. The meeting detail says "Recording kept
+  because the speakers or the transcript may be incomplete" (`keptIncomplete`) over
+  the same rule, and never over another status
+  (`a_diarizer_fallback_keeps_the_recording_until_a_run_finds_the_speakers`,
+  `a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed`,
+  `a_long_recording_with_no_transcript_keeps_its_recording`,
+  `a_call_with_an_empty_mic_lane_keeps_its_recording_past_the_bound`,
+  `the_empty_lane_bound_is_exclusive`, the re-export, launch re-export, summary re-run
+  and failure-after-ready tests beside them, `an_incomplete_meeting_says_why_its_recording_is_kept`,
+  `a_room_row_beside_diarized_speakers_reads_kept_incomplete`,
+  `kept_incomplete_never_hides_another_status`).
+  Every stamp and every keep commits with `Store::save_asset_durably` or
+  `write_durably` (`synchronous = FULL` and `fullfsync`): the stamp, which also syncs
+  the transcript and summary committed before it, so a power loss can never leave the
+  recording swept and its results rolled back (`the_retention_stamp_commits_durably`),
+  and the keep that clears a stamp, per meeting and Settings' Keep forever for every
+  recording, so a power loss never brings a stamp back (`the_keep_that_clears_a_stamp_commits_durably`,
+  `keep_forever_for_every_recording_commits_durably`). Rust only: Swift stamps once
+  every delivery succeeded, at its store's default level, and its diarizer failure fails
+  the meeting; the rollback consequence is in the stable plan's Rollback section.
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file
@@ -1434,9 +1500,16 @@ still has to draw the window side. `[ ]` is not ported yet.
   selected meeting) is answered through the host's `Pipeline::process_again`, whose
   `ProcessAgainRefusal` the detail words on its error line (nothing while the app
   quits). The host decides when it is offered: the detail snapshot's
-  `canProcessAgain`, `Meeting::offers_process_again` (a failed meeting today) and the
-  master on disk, and the pipeline's `process_again` checks the same rule under its
-  own read, so a stale detail cannot run a ready meeting again. The Swift app sends
+  `canProcessAgain`, `Meeting::offers_process_again` (a failed meeting, and since #241
+  a ready one whose results could still need the recording,
+  `steno_core::results_need_the_audio` over its stored speakers, segments and asset,
+  so the detail's `keptIncomplete` line offers what it names) and the master on disk,
+  and the pipeline's `process_again` checks the same rule under its own read of those
+  rows, so a stale detail cannot run a ready, complete meeting again
+  (`a_failed_meeting_and_a_ready_one_kept_incomplete_offer_process_again`,
+  `process_again_runs_a_ready_meeting_kept_incomplete`,
+  `a_ready_meeting_kept_incomplete_offers_process_again`,
+  `process_again_through_the_host_runs_a_ready_meeting_kept_incomplete`). The Swift app sends
   `canProcessAgain: false` and refuses the method in words. `steno process --meeting
   <id>` is Rust only and takes a ready meeting only with `--allow-ready`.
 - Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds

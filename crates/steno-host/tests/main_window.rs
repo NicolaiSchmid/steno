@@ -1013,6 +1013,63 @@ fn keep_audio_goes_through_the_pipeline_and_asks_before_deleting_now() {
     );
 }
 
+/// A ready, exported meeting without a stamp whose speakers or transcript
+/// may be incomplete ([`steno_core::results_need_the_audio`]) says why the
+/// recording is kept; with every lane transcribed it reads as on its way
+/// to the retention stage. Rust only.
+#[test]
+fn an_incomplete_meeting_says_why_its_recording_is_kept() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+        })
+        .build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["retention"]["kind"],
+        "keptWhileProcessing"
+    );
+
+    // The mic lane of the 45-minute call came out empty.
+    empty_the_mic_lane(&harness.store);
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["retention"]["kind"], "keptIncomplete");
+    assert_eq!(detail["retention"]["filesExist"], true);
+}
+
+/// A ready meeting kept incomplete is offered "Process again" (the line
+/// names it as the way out), and the click reaches the pipeline; the same
+/// meeting with every lane transcribed is not offered it.
+#[test]
+fn a_ready_meeting_kept_incomplete_offers_process_again() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+        })
+        .build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        false
+    );
+
+    empty_the_mic_lane(&harness.store);
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["retention"]["kind"], "keptIncomplete");
+    assert_eq!(detail["canProcessAgain"], true);
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"],
+        Value::Null
+    );
+    assert_eq!(
+        *harness.fakes.pipeline.processed_again.lock().unwrap(),
+        [uuid(MEETING)]
+    );
+}
+
 /// `ui.confirmDestructive` hands the page's prompt to the shell's dialog
 /// as sent and replies with the answer, a decline included.
 #[test]
@@ -1733,7 +1790,8 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
     let pipeline = &harness.fakes.pipeline;
     let error_line = || harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"].clone();
 
-    // The selection is the ready meeting: only a failed one is processed again.
+    // The selection is the ready meeting with every lane transcribed: not
+    // offered.
     assert_eq!(
         harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
         false
@@ -1741,7 +1799,7 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
     harness.host.meeting_process_again().unwrap();
     assert_eq!(
         error_line(),
-        "Only a failed meeting can be processed again."
+        "Only a failed meeting, or one whose results may be incomplete, can be processed again."
     );
     assert!(pipeline.processed_again.lock().unwrap().is_empty());
 
@@ -1774,7 +1832,7 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         (Refusal::Busy, "This meeting is already being processed."),
         (
             Refusal::NotOffered,
-            "Only a failed meeting can be processed again.",
+            "Only a failed meeting, or one whose results may be incomplete, can be processed again.",
         ),
         (Refusal::MeetingGone, "This meeting no longer exists."),
         (
@@ -1871,5 +1929,148 @@ fn process_again_words_a_gone_recording_for_the_platform() {
     assert_eq!(
         harness.snapshot(BridgeTopic::MeetingDetail)["error"],
         "The recording is no longer on this computer, so the meeting cannot be processed again."
+    );
+}
+
+/// Sets the default retention to "delete after processing" and the
+/// sample recording's rule to `retention`, with no stamp.
+fn unstamped(store: &steno_core::Store, retention: AudioRetention) {
+    set_retention(store, AudioRetention::DeleteAfterProcessing);
+    let mut asset = store.asset(uuid(MEETING)).unwrap().unwrap();
+    asset.retention = retention;
+    asset.expires_at = None;
+    store.save_asset(&asset).unwrap();
+}
+
+/// Drops the sample's mic segments, as if that lane came out empty.
+fn empty_the_mic_lane(store: &steno_core::Store) {
+    let export = store.export(uuid(MEETING)).unwrap();
+    let system: Vec<_> = export
+        .segments
+        .iter()
+        .filter(|segment| segment.lane != steno_core::AudioLane::Mic)
+        .cloned()
+        .collect();
+    store
+        .replace_transcript(&export.meeting, &system, &export.speakers)
+        .unwrap();
+}
+
+/// The stored shape a diarizer fallback on a re-run leaves: a room row
+/// beside diarized speakers, owning one tap segment, every lane
+/// transcribed, delivered, no stamp. The detail reads keptIncomplete from
+/// the room arm alone.
+#[test]
+fn a_room_row_beside_diarized_speakers_reads_kept_incomplete() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+        })
+        .build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["retention"]["kind"],
+        "keptWhileProcessing"
+    );
+    let export = harness.store.export(uuid(MEETING)).unwrap();
+    let room = steno_core::room_speaker_id(export.meeting.id);
+    let mut speakers = export.speakers.clone();
+    speakers.push(steno_core::Speaker {
+        id: room,
+        meeting_id: export.meeting.id,
+        cluster_label: format!("Speaker {}", speakers.len() + 1),
+        assignment: steno_core::SpeakerAssignment::Unknown,
+        embedding: None,
+        sample_clip_range: None,
+        sample_clip_url: None,
+        cluster_confidence: 0.0,
+    });
+    let mut segments = export.segments.clone();
+    segments
+        .iter_mut()
+        .rev()
+        .find(|segment| segment.lane == steno_core::AudioLane::System)
+        .unwrap()
+        .speaker_id = Some(room);
+    harness
+        .store
+        .replace_transcript(&export.meeting, &segments, &speakers)
+        .unwrap();
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["retention"]["kind"], "keptIncomplete");
+    assert_eq!(detail["retention"]["filesExist"], true);
+}
+
+/// The incomplete line never hides another status: with the sample's mic
+/// lane emptied (so `results_need_the_audio` holds), a stamp still reads
+/// deletesOn, a keep keptForever, gone files deleted, a failed meeting
+/// keptProcessingFailed and a failed export keptUntilExportSucceeds.
+/// Read first, the incomplete line would tell the user a recording is
+/// kept when the sweep is about to delete it, or already did.
+#[test]
+fn kept_incomplete_never_hides_another_status() {
+    let kind = |seed: fn(&steno_core::Store, &steno_host::fakes::FakeServices)| {
+        let harness = Harness::builder()
+            .seed(move |store, fakes| {
+                populate_sample(store, fakes);
+                empty_the_mic_lane(store);
+                seed(store, fakes);
+            })
+            .build();
+        harness.snapshot(BridgeTopic::MeetingDetail)["retention"]["kind"].clone()
+    };
+    // The base case: unstamped, delivered, ready.
+    assert_eq!(
+        kind(|store, _| unstamped(store, AudioRetention::DeleteAfterProcessing)),
+        "keptIncomplete"
+    );
+    // The sample's own stamp (KeepDays(30)).
+    assert_eq!(kind(|_, _| {}), "deletesOn");
+    assert_eq!(
+        kind(|store, _| unstamped(store, AudioRetention::KeepForever)),
+        "keptForever"
+    );
+    assert_eq!(
+        kind(|store, fakes| {
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+            let asset = store.asset(uuid(MEETING)).unwrap().unwrap();
+            fakes
+                .file_system
+                .remove(&steno_core::paths::file_url_path(&asset.url).unwrap())
+                .unwrap();
+        }),
+        "deleted"
+    );
+    assert_eq!(
+        kind(|store, _| {
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+            store
+                .set_state(
+                    uuid(MEETING),
+                    MeetingState::Failed {
+                        reason: "diarize: no model".to_owned(),
+                    },
+                    now(),
+                )
+                .unwrap();
+        }),
+        "keptProcessingFailed"
+    );
+    assert_eq!(
+        kind(|store, _| {
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+            store
+                .save_delivery(&Delivery {
+                    id: Delivery::id_for(uuid(MEETING), "obsidian-folder"),
+                    meeting_id: uuid(MEETING),
+                    destination_id: "obsidian-folder".to_owned(),
+                    status: DeliveryStatus::Failed("vault missing".to_owned()),
+                    last_attempt_at: Some(now()),
+                    receipt: None,
+                })
+                .unwrap();
+        }),
+        "keptUntilExportSucceeds"
     );
 }

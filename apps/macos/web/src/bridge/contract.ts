@@ -360,6 +360,7 @@ export const meetingDetailSnapshot = z
 					"deletesOn",
 					"keptUntilExportSucceeds",
 					"keptProcessingFailed",
+					"keptIncomplete",
 					"keptWhileProcessing",
 					"keptForever",
 				]),
@@ -942,6 +943,7 @@ export type MethodReply<M extends BridgeMethod> = ReplyOf<M>;
 export const fixtureSchemas = {
 	...topicSchemas,
 	"recording.live": recordingSnapshot,
+	"meeting.detail.keptIncomplete": meetingDetailSnapshot,
 	"settings.summaries.codex": summariesSettingsSnapshot,
 	"settings.summaries.fileKey": summariesSettingsSnapshot,
 	"settings.iphone.pairing": phoneSettingsSnapshot,

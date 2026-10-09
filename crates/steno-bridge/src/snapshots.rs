@@ -275,6 +275,8 @@ string_enum! {
         DeletesOn = "deletesOn",
         KeptUntilExportSucceeds = "keptUntilExportSucceeds",
         KeptProcessingFailed = "keptProcessingFailed",
+        /// Rust only: the Swift app never reports it.
+        KeptIncomplete = "keptIncomplete",
         KeptWhileProcessing = "keptWhileProcessing",
         KeptForever = "keptForever",
     }

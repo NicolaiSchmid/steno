@@ -272,6 +272,8 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
       case deletesOn
       case keptUntilExportSucceeds
       case keptProcessingFailed
+      /// Rust only: the Swift host never sends it.
+      case keptIncomplete
       case keptWhileProcessing
       case keptForever
     }

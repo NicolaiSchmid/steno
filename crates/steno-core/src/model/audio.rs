@@ -7,7 +7,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-use super::AudioLane;
+use super::{AudioLane, Meeting, Speaker, TranscriptSegment, room_speaker_id};
 use crate::json::{
     self,
     case_coding::{self, Case},
@@ -164,9 +164,48 @@ impl AudioAsset {
     }
 }
 
+/// The longest recording in which a lane can come out with no segment at
+/// all and still be taken as silent; past it the lane most likely failed to
+/// transcribe ([`results_need_the_audio`]). Rust only.
+pub const EMPTY_LANE_MAXIMUM_SECONDS: f64 = 30.0;
+
+/// Whether a ready meeting's results could still need its recording, so
+/// the automatic retention keeps it unstamped: the diarizer failed and the
+/// segments no stored speaker covers went to the one unknown room speaker
+/// ([`room_speaker_id`]), whose stored row is the mark, or a lane the
+/// asset recorded (a call records the system audio and the mic, an
+/// in-person or phone meeting one lane) has no segment while the meeting
+/// runs longer than [`EMPTY_LANE_MAXIMUM_SECONDS`] or has no positive
+/// duration. It errs towards keeping: a call whose mic stayed muted is
+/// kept too. The pipeline asks it before the automatic stamp, over the
+/// rows it reads from the store, and the meeting detail's recording line
+/// asks it over the export, so both read the same rule. A rule the user
+/// applies is stamped as chosen. Rust only: Swift stamps once every
+/// delivery succeeded.
+#[must_use]
+pub fn results_need_the_audio(
+    meeting: &Meeting,
+    speakers: &[Speaker],
+    segments: &[TranscriptSegment],
+    asset: &AudioAsset,
+) -> bool {
+    let room = room_speaker_id(meeting.id);
+    if speakers.iter().any(|speaker| speaker.id == room) {
+        return true;
+    }
+    let positive = meeting.duration > 0.0;
+    let long = meeting.duration > EMPTY_LANE_MAXIMUM_SECONDS;
+    (long || !positive)
+        && asset
+            .lanes
+            .iter()
+            .any(|lane| !segments.iter().any(|segment| segment.lane == *lane))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MeetingState;
     use crate::json::to_column_string;
 
     #[test]
@@ -181,6 +220,141 @@ mod tests {
         );
         let parsed: AudioRetention = serde_json::from_str(r#"{"keepDays":30}"#).unwrap();
         assert_eq!(parsed, AudioRetention::KeepDays(30));
+    }
+
+    fn call_asset(meeting_id: Uuid) -> AudioAsset {
+        AudioAsset {
+            id: Uuid::nil(),
+            meeting_id,
+            url: "file:///master.caf".to_owned(),
+            format: AudioFormat::Caf48kFloat32,
+            lanes: vec![AudioLane::Mic, AudioLane::System],
+            sidecars_16k: BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::DeleteAfterProcessing,
+            expires_at: None,
+        }
+    }
+
+    fn segment(meeting_id: Uuid, lane: AudioLane) -> TranscriptSegment {
+        TranscriptSegment {
+            id: Uuid::new_v4(),
+            meeting_id,
+            start: 0.0,
+            end: 1.0,
+            speaker_id: None,
+            lane,
+            text: "Hello.".to_owned(),
+            raw_text: "Hello.".to_owned(),
+        }
+    }
+
+    fn speaker(meeting_id: Uuid, id: Uuid) -> Speaker {
+        Speaker {
+            id,
+            meeting_id,
+            cluster_label: "Speaker 1".to_owned(),
+            assignment: crate::SpeakerAssignment::Unknown,
+            embedding: None,
+            sample_clip_range: None,
+            sample_clip_url: None,
+            cluster_confidence: 0.0,
+        }
+    }
+
+    /// The room speaker the diarizer fallback leaves keeps the recording,
+    /// however short the meeting and whatever its lanes hold.
+    #[test]
+    fn the_room_speaker_needs_the_audio() {
+        let mut meeting = crate::testing::sample_data::meeting();
+        meeting.duration = 6.0;
+        let asset = call_asset(meeting.id);
+        let both = [
+            segment(meeting.id, AudioLane::Mic),
+            segment(meeting.id, AudioLane::System),
+        ];
+        let room = [speaker(meeting.id, room_speaker_id(meeting.id))];
+        let diarized = [speaker(meeting.id, Uuid::new_v4())];
+        assert!(results_need_the_audio(&meeting, &room, &both, &asset));
+        assert!(!results_need_the_audio(&meeting, &diarized, &both, &asset));
+    }
+
+    /// A recorded lane with no segment keeps the recording past the bound,
+    /// and at any length when the meeting has no positive duration.
+    #[test]
+    fn an_empty_lane_needs_the_audio_past_the_bound_or_without_a_duration() {
+        let mut meeting = crate::testing::sample_data::meeting();
+        let asset = call_asset(meeting.id);
+        let mic_only = [segment(meeting.id, AudioLane::Mic)];
+        let both = [
+            segment(meeting.id, AudioLane::Mic),
+            segment(meeting.id, AudioLane::System),
+        ];
+        for (duration, kept) in [
+            (EMPTY_LANE_MAXIMUM_SECONDS, false),
+            (EMPTY_LANE_MAXIMUM_SECONDS + 0.5, true),
+            (0.0, true),
+            (-1.0, true),
+        ] {
+            meeting.duration = duration;
+            assert_eq!(
+                results_need_the_audio(&meeting, &[], &mic_only, &asset),
+                kept,
+                "{duration} s"
+            );
+            assert!(
+                !results_need_the_audio(&meeting, &[], &both, &asset),
+                "{duration} s with every lane transcribed"
+            );
+        }
+        // A one-lane recording: the lane the asset did not record is not
+        // missing.
+        let mut phone = call_asset(meeting.id);
+        phone.lanes = vec![AudioLane::Mixed];
+        meeting.duration = 0.0;
+        assert!(results_need_the_audio(&meeting, &[], &[], &phone));
+        assert!(!results_need_the_audio(
+            &meeting,
+            &[],
+            &[segment(meeting.id, AudioLane::Mixed)],
+            &phone
+        ));
+    }
+
+    /// A failed meeting is offered "Process again" whatever its rows; a
+    /// ready one only while its results need the audio (here the diarizer
+    /// fallback's room row) and its asset is on record; an unfinished one
+    /// never ([`Meeting::offers_process_again`]).
+    #[test]
+    fn a_failed_meeting_and_a_ready_one_kept_incomplete_offer_process_again() {
+        let mut meeting = crate::testing::sample_data::meeting();
+        meeting.duration = 6.0;
+        let asset = call_asset(meeting.id);
+        let both = [
+            segment(meeting.id, AudioLane::Mic),
+            segment(meeting.id, AudioLane::System),
+        ];
+        let room = [speaker(meeting.id, room_speaker_id(meeting.id))];
+        for state in [
+            MeetingState::Recording,
+            MeetingState::Queued,
+            MeetingState::Processing,
+        ] {
+            meeting.state = state;
+            assert!(
+                !meeting.offers_process_again(&room, &both, Some(&asset)),
+                "{:?}",
+                meeting.state
+            );
+        }
+        meeting.state = MeetingState::Ready;
+        assert!(!meeting.offers_process_again(&[], &both, Some(&asset)));
+        assert!(meeting.offers_process_again(&room, &both, Some(&asset)));
+        assert!(!meeting.offers_process_again(&room, &both, None));
+        meeting.state = MeetingState::Failed {
+            reason: "decode: unreadable".to_owned(),
+        };
+        assert!(meeting.offers_process_again(&[], &both, None));
     }
 
     #[test]

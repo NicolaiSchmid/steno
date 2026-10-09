@@ -173,6 +173,18 @@ public enum BridgeSamples {
       canReexport: false, canReveal: false),
     canProcessAgain: false, canRerunSummary: true, isBusy: false)
 
+  /// `meetingDetail` ready and exported, its recording kept because the
+  /// speakers or the transcript may be incomplete, so Process again is
+  /// offered. Only the Rust host sends this kind.
+  public static let meetingDetailKeptIncomplete: MeetingDetailSnapshot = {
+    var detail = meetingDetail
+    detail.retention = .init(
+      kind: .keptIncomplete, deletesAt: nil, keepsAudio: false, showsKeepToggle: true,
+      filesExist: true)
+    detail.canProcessAgain = true
+    return detail
+  }()
+
   public static let settingsGeneral = GeneralSettingsSnapshot(
     subtitle: "Steno 0.10.0", version: "0.10.0", loginItem: .enabled, detectionEnabled: true,
     defaultTemplateID: "default",
@@ -440,6 +452,7 @@ extension BridgeSamples {
     BridgeFixture("progress", progress),
     BridgeFixture("meetings.list", meetingsList),
     BridgeFixture("meeting.detail", meetingDetail),
+    BridgeFixture("meeting.detail.keptIncomplete", meetingDetailKeptIncomplete),
     BridgeFixture("settings.general", settingsGeneral),
     BridgeFixture("settings.recording", settingsRecording),
     BridgeFixture("settings.transcription", settingsTranscription),

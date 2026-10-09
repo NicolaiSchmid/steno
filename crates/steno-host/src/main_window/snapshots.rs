@@ -410,6 +410,7 @@ pub fn detail_snapshot(
         Some(RecordingStatus::KeptProcessingFailed) => {
             (DetailRetentionKind::KeptProcessingFailed, None)
         }
+        Some(RecordingStatus::KeptIncomplete) => (DetailRetentionKind::KeptIncomplete, None),
         Some(RecordingStatus::KeptWhileProcessing) => {
             (DetailRetentionKind::KeptWhileProcessing, None)
         }

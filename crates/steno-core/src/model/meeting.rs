@@ -5,7 +5,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-use super::{LanguageTag, LlmUsage, SummaryDocument};
+use super::{
+    AudioAsset, LanguageTag, LlmUsage, Speaker, SummaryDocument, TranscriptSegment,
+    results_need_the_audio,
+};
 use crate::json::{
     self,
     case_coding::{self, Case},
@@ -265,11 +268,17 @@ impl Meeting {
 
     /// Copies the columns the pipeline owns from `results`: language,
     /// state, summary, usage and `updatedAt`, plus the title and its origin
-    /// unless the stored origin is `user` (a rename during a run stays).
-    /// The template is the user's alone: the summary's `template_id`
-    /// records which one made it. Rust only: Swift's
-    /// `writeProcessingResults` copies the template, title and origin.
+    /// unless the stored origin is `user` (a rename during a run stays),
+    /// and the duration when the stored one is not positive (a phone
+    /// recording whose metadata announced none gets the length the run
+    /// decoded). The template is the user's alone: the summary's
+    /// `template_id` records which one made it. Rust only: Swift's
+    /// `writeProcessingResults` copies the template, title and origin, and
+    /// never the duration.
     pub fn apply_processing_results(&mut self, results: &Meeting) {
+        if self.duration <= 0.0 {
+            self.duration = results.duration;
+        }
         if self.title_origin != TitleOrigin::User {
             self.title.clone_from(&results.title);
             self.title_origin = results.title_origin;
@@ -284,13 +293,23 @@ impl Meeting {
     /// Whether the app offers "Process again" for this meeting, given its
     /// recording is on disk: the one rule the meeting detail's button, the
     /// host's guard, the pipeline's `process_again` and `steno process
-    /// --meeting` read. Today a failed meeting. The place a ready meeting
-    /// whose recording is kept because its results may be incomplete
-    /// (`keptIncomplete`, #241) joins it, with the rows that rule reads.
-    /// Rust only: the Swift app refuses "Process again".
+    /// --meeting` read. A failed meeting, and a ready one whose results
+    /// could still need its recording ([`results_need_the_audio`] over its
+    /// stored `speakers`, `segments` and `asset`), the rule that keeps the
+    /// recording and that the detail's `keptIncomplete` line names
+    /// "Process again" for. Rust only: the Swift app refuses "Process
+    /// again".
     #[must_use]
-    pub fn offers_process_again(&self) -> bool {
+    pub fn offers_process_again(
+        &self,
+        speakers: &[Speaker],
+        segments: &[TranscriptSegment],
+        asset: Option<&AudioAsset>,
+    ) -> bool {
         self.state.is_failed()
+            || (self.state == MeetingState::Ready
+                && asset
+                    .is_some_and(|asset| results_need_the_audio(self, speakers, segments, asset)))
     }
 }
 
@@ -324,23 +343,5 @@ mod tests {
         assert_eq!(parsed, RecordingEndReason::CallEnded { app_name: None });
         assert!(serde_json::from_str::<MeetingState>(r#""paused""#).is_err());
         assert!(serde_json::from_str::<MeetingState>(r#""failed""#).is_err());
-    }
-
-    #[test]
-    fn only_a_failed_meeting_offers_process_again() {
-        let mut meeting = crate::testing::sample_data::meeting();
-        for state in [
-            MeetingState::Recording,
-            MeetingState::Queued,
-            MeetingState::Processing,
-            MeetingState::Ready,
-        ] {
-            meeting.state = state;
-            assert!(!meeting.offers_process_again(), "{:?}", meeting.state);
-        }
-        meeting.state = MeetingState::Failed {
-            reason: "decode: unreadable".to_owned(),
-        };
-        assert!(meeting.offers_process_again());
     }
 }
