@@ -31,6 +31,7 @@ use rusqlite::{Connection, ErrorCode, Params, Row, Transaction, TransactionBehav
 use thiserror::Error;
 use uuid::Uuid;
 
+pub use assets::ExpiredAsset;
 pub use meetings::DeletedMeeting;
 pub use search::{SearchHit, fts5_pattern};
 pub use timings::StageRateRow;
