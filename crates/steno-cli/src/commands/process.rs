@@ -256,15 +256,18 @@ impl Process {
         let events = MeetingEventBus::new();
         let mut receiver = events.subscribe();
         let models = settings.models_directory.as_deref().and_then(file_url_path);
-        let pipeline = ProcessingPipeline::new(crate::wiring::dependencies(
-            store.clone(),
-            settings,
-            self.speech.engine.as_deref(),
-            models.as_deref(),
-            None,
-            llm,
-            events.clone(),
-        )?);
+        let pipeline = ProcessingPipeline::new(
+            crate::wiring::dependencies(
+                store.clone(),
+                settings,
+                self.speech.engine.as_deref(),
+                models.as_deref(),
+                None,
+                llm,
+                events.clone(),
+            )?
+            .with_damaged_audio(self.database.damaged_audio()?),
+        );
         let printer = tokio::spawn(async move {
             while let Ok(event) = receiver.recv().await {
                 if let MeetingEvent::Progress {

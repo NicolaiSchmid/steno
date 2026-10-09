@@ -63,6 +63,20 @@ impl DatabaseOptions {
         }
     }
 
+    /// The record of what the decoder replaced by silence per meeting
+    /// ([`steno_pipeline::DamagedAudio`]) beside the database, the app's
+    /// support directory by default, so a command that runs the pipeline
+    /// writes the marks the app's detail reads, and its retention rule is
+    /// to ask. The
+    /// command holds the database's lock, so the app is not running.
+    pub fn damaged_audio(&self) -> Result<Arc<steno_pipeline::DamagedAudio>, Failure> {
+        let path = self.path()?;
+        let directory = path.parent().unwrap_or_else(|| Path::new(""));
+        Ok(Arc::new(steno_pipeline::DamagedAudio::in_directory(
+            directory,
+        )))
+    }
+
     /// Opens the database for a command that writes, holding its lock
     /// (`steno_core::DatabaseLock`) until the process ends; refused while
     /// the app or another steno command holds it, so the two never process
@@ -382,6 +396,30 @@ pub fn sha256_hex(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The damage a command's pipeline records goes to the file beside the
+    /// database, where the app reads it.
+    #[test]
+    fn the_damage_is_recorded_beside_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = DatabaseOptions {
+            database_path: Some(dir.path().join("steno.sqlite")),
+        };
+        let meeting = Uuid::new_v4();
+        let damage = steno_core::AudioDamage {
+            parts: 2,
+            seconds: 0.05,
+        };
+        options
+            .damaged_audio()
+            .unwrap()
+            .record(meeting, damage)
+            .unwrap();
+        assert_eq!(
+            steno_pipeline::DamagedAudio::in_directory(dir.path()).damage(meeting),
+            damage
+        );
+    }
 
     /// After the Linux app's move the file has no key: none, as on the
     /// Mac; any other failure stays one.

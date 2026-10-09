@@ -1,6 +1,8 @@
 //! The one audio format the speech boundary accepts.
 //! Swift: `AudioBuffer16k` in `Sources/StenoCore/Model/Transcript.swift`.
 
+use serde::{Deserialize, Serialize};
+
 use super::TimeRange;
 
 /// Mono `f32` audio at 16 kHz, the only format speech engines and diarizers
@@ -8,6 +10,44 @@ use super::TimeRange;
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AudioBuffer16k {
     pub samples: Vec<f32>,
+    /// What the decoder could not read and replaced by silence of its
+    /// length (an undecodable AAC packet), so the samples after it keep
+    /// their time. None for a clean decode and for every buffer that does
+    /// not come straight from a decoder; the meeting's detail warns about
+    /// the rest. Rust only: `AVFoundation` conceals a bad packet and
+    /// reports nothing.
+    pub damage: AudioDamage,
+}
+
+/// The parts of a recording a decoder could not read, each replaced by
+/// silence of its length, and how long that silence lasts in all.
+/// [`AudioBuffer16k::damage`]. Rust only.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct AudioDamage {
+    /// The packets that did not decode, less those the encoder priming
+    /// trims whole, which cost no audio.
+    pub parts: u32,
+    /// The silence they became, in seconds of the recording (less any of
+    /// it the encoder priming trims).
+    pub seconds: f64,
+}
+
+impl AudioDamage {
+    /// No part damaged: a clean decode.
+    #[must_use]
+    pub fn is_none(self) -> bool {
+        self.parts == 0
+    }
+
+    /// The larger count and the longer silence of the two: the damage of
+    /// a recording whose lanes read the same packets.
+    #[must_use]
+    pub fn max(self, other: AudioDamage) -> AudioDamage {
+        AudioDamage {
+            parts: self.parts.max(other.parts),
+            seconds: self.seconds.max(other.seconds),
+        }
+    }
 }
 
 impl AudioBuffer16k {
@@ -16,15 +56,16 @@ impl AudioBuffer16k {
 
     #[must_use]
     pub fn new(samples: Vec<f32>) -> Self {
-        AudioBuffer16k { samples }
+        AudioBuffer16k {
+            samples,
+            damage: AudioDamage::default(),
+        }
     }
 
     /// `seconds` of silence, rounded down to whole samples.
     #[must_use]
     pub fn silence(seconds: f64) -> Self {
-        AudioBuffer16k {
-            samples: vec![0.0; Self::sample_index(seconds, false)],
-        }
+        AudioBuffer16k::new(vec![0.0; Self::sample_index(seconds, false)])
     }
 
     #[must_use]
@@ -55,9 +96,7 @@ impl AudioBuffer16k {
         if lower >= upper {
             return AudioBuffer16k::default();
         }
-        AudioBuffer16k {
-            samples: self.samples[lower..upper].to_vec(),
-        }
+        AudioBuffer16k::new(self.samples[lower..upper].to_vec())
     }
 
     /// The sample index of `seconds`, floored or ceiled, never below zero.

@@ -351,6 +351,8 @@ export const meetingDetailSnapshot = z
 		state: meetingState,
 		failureReason: z.string().optional(),
 		endReason: z.string().optional(),
+		/** Sent by the Rust host when parts of the recording could not be decoded and were replaced by silence. */
+		audioWarning: z.string().optional(),
 		tags: z.array(z.string()),
 		tab: detailTab,
 		retention: z
@@ -952,6 +954,7 @@ export type MethodReply<M extends BridgeMethod> = ReplyOf<M>;
 export const fixtureSchemas = {
 	...topicSchemas,
 	"recording.live": recordingSnapshot,
+	"meeting.detail.damagedAudio": meetingDetailSnapshot,
 	"settings.summaries.codex": summariesSettingsSnapshot,
 	"settings.summaries.fileKey": summariesSettingsSnapshot,
 	"settings.iphone.pairing": phoneSettingsSnapshot,

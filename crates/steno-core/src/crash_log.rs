@@ -10,12 +10,19 @@
 //! [`DIRECTORY_VARIABLE`], and its files end in `-sidecar.log`. Rust only:
 //! the Swift app had the system's crash reporter.
 //!
+//! A panic raised inside [`expected`] is one its caller catches and
+//! reports itself (the decoder's, for a packet that panics symphonia), so
+//! the hook writes no file for it, prunes nothing and runs none of the
+//! hooks it replaced: the panics of one damaged recording must not push
+//! the real crash logs out of the folder.
+//!
 //! The file stays on the computer, as every log does; nothing sends it.
 //! The panic's message is written as it was raised, so it can hold text
 //! the panicking code was handling (a slice of a string in an
 //! out-of-bounds message, a path), unlike the log lines, which carry
 //! counts and kinds only.
 
+use std::cell::Cell;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +37,44 @@ const PREFIX: &str = "crash-";
 /// The environment variable a parent sets to the folder a child process
 /// writes its crash logs into: the speech sidecar's.
 pub const DIRECTORY_VARIABLE: &str = "STENO_CRASH_LOG_DIRECTORY";
+
+thread_local! {
+    /// Whether this thread is inside [`expected`].
+    static EXPECTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `body`, a panic inside it marked as expected on this thread: its
+/// caller catches it with `catch_unwind` and reports it, so the panic
+/// hooks leave it alone ([`is_expected`]). The mark is lifted when `body`
+/// returns or unwinds; the hooks run before the unwind, so they still see
+/// it.
+///
+/// ```
+/// let caught = std::panic::catch_unwind(|| {
+///     steno_core::crash_log::expected(|| panic!("a corrupt packet"))
+/// });
+/// assert!(caught.is_err());
+/// assert!(!steno_core::crash_log::is_expected());
+/// ```
+pub fn expected<R>(body: impl FnOnce() -> R) -> R {
+    /// Puts back the mark found on entry, so a nested call keeps it.
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EXPECTED.with(|expected| expected.set(self.0));
+        }
+    }
+    let _restore = Restore(EXPECTED.with(|expected| expected.replace(true)));
+    body()
+}
+
+/// Whether a panic raised now on this thread is inside [`expected`]: a
+/// panic hook returns at once for one, without calling the hook it
+/// replaced.
+#[must_use]
+pub fn is_expected() -> bool {
+    EXPECTED.with(Cell::get)
+}
 
 /// Installs the panic hook (see the module doc) over the one installed
 /// now, so the shell calls it after its log output, and trims `folder` to
@@ -47,6 +92,9 @@ pub fn install_crash_log_hook(folder: PathBuf, process: Option<&'static str>) {
     prune(&folder, KEPT_CRASH_LOGS);
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
+        if is_expected() {
+            return;
+        }
         let location = panic
             .location()
             .map_or_else(|| "an unknown place".to_owned(), ToString::to_string);
@@ -75,8 +123,11 @@ pub fn install_crash_log_hook(folder: PathBuf, process: Option<&'static str>) {
     }));
 }
 
-/// The text a panic was raised with, when it is a string.
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+/// The text a panic was raised with, when it is a string: its message, or
+/// "a panic without a message". For a hook's report and for the caller of
+/// [`expected`] that caught it.
+#[must_use]
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_owned()
     } else if let Some(message) = payload.downcast_ref::<String>() {

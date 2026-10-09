@@ -48,6 +48,13 @@ pub struct MeetingDetailViewModel {
     /// The launch stopped re-exporting the meeting
     /// ([`Pipeline::export_keeps_failing`]), read with the deliveries.
     pub export_keeps_failing: bool,
+    /// What of the recording its last decode replaced by silence
+    /// ([`Pipeline::damaged_audio`]), read with the deliveries.
+    pub damaged_audio: steno_core::AudioDamage,
+    /// Whether the recording may have parts replaced by silence
+    /// ([`Pipeline::audio_may_be_damaged`]), read with the deliveries,
+    /// for the retention status to keep such a recording.
+    pub audio_may_be_damaged: bool,
     pub error: Option<String>,
     pub is_busy: bool,
     pub tab: DetailTab,
@@ -75,6 +82,8 @@ impl MeetingDetailViewModel {
             llm_configured: settings.is_some_and(llm_configured),
             vault_configured: settings.is_some_and(vault_configured),
             export_keeps_failing: false,
+            damaged_audio: steno_core::AudioDamage::default(),
+            audio_may_be_damaged: false,
             error: None,
             is_busy: false,
             tab: DetailTab::Summary,
@@ -127,6 +136,8 @@ impl MeetingDetailViewModel {
             Err(error) => self.error = Some(format!("Deliveries could not be loaded: {error}")),
         }
         self.export_keeps_failing = pipeline.export_keeps_failing(self.id);
+        self.damaged_audio = pipeline.damaged_audio(self.id);
+        self.audio_may_be_damaged = pipeline.audio_may_be_damaged(self.id);
     }
 
     /// The settings as stored now: the keep toggle appears and disappears

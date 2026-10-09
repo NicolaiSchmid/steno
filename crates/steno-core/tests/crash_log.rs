@@ -1,15 +1,18 @@
 //! The panic hook end to end, in a process of its own: a hook is global,
-//! so it would catch every other test's panics.
+//! so it would catch every other test's panics. A panic inside
+//! `crash_log::expected`, which its caller catches, leaves no file and
+//! does not reach the previous hook.
 
 #[test]
 fn a_panic_leaves_a_crash_log_and_still_reaches_the_previous_hook() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join("support");
-    let previous_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let previous_ran = std::sync::Arc::new(AtomicUsize::new(0));
     {
         let previous_ran = previous_ran.clone();
         std::panic::set_hook(Box::new(move |_| {
-            previous_ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            previous_ran.fetch_add(1, Ordering::SeqCst);
         }));
     }
     steno_core::crash_log::install_crash_log_hook(folder.clone(), None);
@@ -20,6 +23,14 @@ fn a_panic_leaves_a_crash_log_and_still_reaches_the_previous_hook() {
         .unwrap()
         .join();
     assert!(caught.is_err());
+    let expected = std::thread::spawn(|| {
+        std::panic::catch_unwind(|| {
+            steno_core::crash_log::expected(|| panic!("a packet the decoder catches"))
+        })
+        .is_err()
+    })
+    .join();
+    assert!(matches!(expected, Ok(true)), "caught inside the thread");
     // The assertions below report through the default hook again.
     drop(std::panic::take_hook());
 
@@ -39,5 +50,9 @@ fn a_panic_leaves_a_crash_log_and_still_reaches_the_previous_hook() {
     assert!(text.contains("crash_log.rs:"), "{text}");
     assert!(text.contains("on thread 'steno-crash-test'"), "{text}");
     assert!(text.contains("backtrace:"), "{text}");
-    assert!(previous_ran.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        previous_ran.load(Ordering::SeqCst),
+        1,
+        "the expected panic ran no hook"
+    );
 }

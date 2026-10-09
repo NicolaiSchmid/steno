@@ -219,6 +219,26 @@ impl Pipeline for HostPipeline {
             .map_err(process_again_refusal)
     }
 
+    /// From the current pipeline's [`DamagedAudio`](steno_pipeline::DamagedAudio),
+    /// which every reload shares.
+    fn damaged_audio(&self, meeting_id: Uuid) -> steno_core::AudioDamage {
+        self.pipeline
+            .current()
+            .dependencies()
+            .damaged_audio
+            .damage(meeting_id)
+    }
+
+    /// [`DamagedAudio::may_be_damaged`](steno_pipeline::DamagedAudio::may_be_damaged)
+    /// of the current pipeline's store.
+    fn audio_may_be_damaged(&self, meeting_id: Uuid) -> bool {
+        self.pipeline
+            .current()
+            .dependencies()
+            .damaged_audio
+            .may_be_damaged(meeting_id)
+    }
+
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
         let pipeline = self.pipeline.current();
         Ok(block_on(
@@ -528,6 +548,178 @@ mod tests {
             call(move || fourth.redeliver(unknown)),
             Err(format!("deliver: meeting {unknown} not found"))
         );
+    }
+
+    /// A new phone meeting, still recording.
+    fn phone_meeting() -> steno_core::Meeting {
+        let mut meeting = sample_data::meeting();
+        meeting.id = Uuid::new_v4();
+        meeting.source = steno_core::MeetingSource::Phone;
+        meeting.state = MeetingState::Recording;
+        meeting
+    }
+
+    /// The phone meeting of `fixture` (a file in `Tests/Fixtures/audio/`,
+    /// copied into `dir`) processed through `service`'s real decoder, to
+    /// the state it ends in.
+    async fn process_phone_fixture(
+        service: &HostPipeline,
+        store: &Store,
+        dir: &std::path::Path,
+        meeting: &steno_core::Meeting,
+        fixture: &str,
+    ) -> MeetingState {
+        let upload = dir.join(format!("{fixture}-{}.m4a", Uuid::new_v4()));
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../Tests/Fixtures/audio")
+                .join(fixture),
+            &upload,
+        )
+        .unwrap();
+        let asset = steno_core::AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: steno_core::paths::file_url(&upload, false),
+            format: steno_core::AudioFormat::M4aAac,
+            lanes: vec![steno_core::AudioLane::Mixed],
+            sidecars_16k: std::collections::BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepForever,
+            expires_at: None,
+        };
+        let pipeline = service.pipeline.current();
+        pipeline.enqueue(meeting, &asset).unwrap();
+        pipeline.wait_until_idle().await;
+        store.meeting(meeting.id).unwrap().unwrap().state
+    }
+
+    /// The damage the real decoder counts reaches the detail: a phone
+    /// recording with three undecodable packets processes to Ready, and
+    /// the host pipeline answers 3 parts and their 3 * 1 024 frames of
+    /// silence for it, from the support directory's file, after a reload
+    /// too; the same meeting processed again from a clean file answers
+    /// none.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_damage_of_a_recording_reaches_the_detail() {
+        let (dir, store) = temp_store();
+        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(dir.path()));
+        let service = pipeline_over(
+            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
+            &store,
+        );
+        let meeting = phone_meeting();
+        let state = process_phone_fixture(
+            &service,
+            &store,
+            dir.path(),
+            &meeting,
+            "tone-440-44k1-500ms-damaged.m4a",
+        )
+        .await;
+        assert_eq!(state, MeetingState::Ready);
+        let damage = service.damaged_audio(meeting.id);
+        assert_eq!(damage.parts, 3);
+        assert!(service.audio_may_be_damaged(meeting.id));
+        assert!((damage.seconds - 3.0 * 1_024.0 / 44_100.0).abs() < 1e-9);
+        service.pipeline.reload().unwrap();
+        assert_eq!(service.damaged_audio(meeting.id), damage, "after a reload");
+        assert_eq!(
+            steno_pipeline::DamagedAudio::in_directory(dir.path()).parts(meeting.id),
+            3,
+            "on disk"
+        );
+        assert!(service.damaged_audio(Uuid::new_v4()).is_none());
+        assert!(!service.audio_may_be_damaged(Uuid::new_v4()));
+
+        let state = process_phone_fixture(
+            &service,
+            &store,
+            dir.path(),
+            &meeting,
+            "tone-440-44k1-500ms.m4a",
+        )
+        .await;
+        assert_eq!(state, MeetingState::Ready);
+        assert!(service.damaged_audio(meeting.id).is_none());
+        assert!(!service.audio_may_be_damaged(meeting.id));
+    }
+
+    /// A record of the damage that does not parse says nothing about any
+    /// meeting, so the host pipeline answers that every recording may be
+    /// damaged, while the detail's warning shows no damage it cannot
+    /// read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_damage_record_makes_every_recording_possibly_damaged() {
+        let (dir, store) = temp_store();
+        std::fs::write(
+            dir.path().join(steno_pipeline::DamagedAudio::FILE_NAME),
+            b"{",
+        )
+        .unwrap();
+        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(dir.path()));
+        let service = pipeline_over(
+            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
+            &store,
+        );
+        let meeting = Uuid::new_v4();
+        assert!(service.audio_may_be_damaged(meeting));
+        assert!(service.damaged_audio(meeting).is_none());
+    }
+
+    /// A damaged recording whose damage cannot be written down (a support
+    /// directory that may not be written) fails the meeting at the decode
+    /// stage, so the retention rule never stamps it, and the recording
+    /// stays; a clean one, which changes nothing in the file, processes.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn damage_that_cannot_be_written_fails_the_meeting() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (dir, store) = temp_store();
+        let support = dir.path().join("support");
+        std::fs::create_dir(&support).unwrap();
+        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(&support));
+        let service = pipeline_over(
+            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
+            &store,
+        );
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let meeting = phone_meeting();
+        let clean = process_phone_fixture(
+            &service,
+            &store,
+            dir.path(),
+            &meeting,
+            "tone-440-44k1-500ms.m4a",
+        )
+        .await;
+        let second = phone_meeting();
+        let damaged = process_phone_fixture(
+            &service,
+            &store,
+            dir.path(),
+            &second,
+            "tone-440-44k1-500ms-damaged.m4a",
+        )
+        .await;
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(clean, MeetingState::Ready);
+        // Root writes anywhere: then the damage was written and the
+        // meeting is ready.
+        if support
+            .join(steno_pipeline::DamagedAudio::FILE_NAME)
+            .exists()
+        {
+            return;
+        }
+        assert!(
+            damaged.failure_reason().is_some_and(|reason| reason
+                .contains("what could not be read in the recording could not be saved")),
+            "{damaged:?}"
+        );
+        let asset = store.asset(second.id).unwrap().expect("the asset");
+        let master = steno_core::paths::file_url_path(&asset.url).unwrap();
+        assert!(master.exists(), "the recording stays");
     }
 
     /// A summary re-run exports the new summary, so it starts the count of
