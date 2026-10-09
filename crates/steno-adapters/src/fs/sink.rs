@@ -151,3 +151,62 @@ fn same_entry(left: &Path, right: &Path) -> bool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A vault folder `Vault` in a fresh temporary directory, with a
+    /// sibling `Other`, and its sink.
+    fn vault() -> (tempfile::TempDir, PathBuf, LocalFolderSink) {
+        let directory = tempfile::Builder::new()
+            .prefix("steno-adapters-sink-")
+            .tempdir()
+            .unwrap();
+        let root = directory.path().join("Vault");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(directory.path().join("Other")).unwrap();
+        let sink = LocalFolderSink::new(root.clone());
+        (directory, root, sink)
+    }
+
+    #[test]
+    fn the_root_is_the_root_and_a_sibling_or_a_gone_path_is_not() {
+        let (directory, root, sink) = vault();
+        assert!(sink.is_root(&root.to_string_lossy()));
+        assert!(!sink.is_root(&directory.path().join("Other").to_string_lossy()));
+        assert!(
+            !sink.is_root(&directory.path().join("Gone").to_string_lossy()),
+            "a gone path is not the root"
+        );
+    }
+
+    /// Runs where the disk is case-insensitive (macOS and Windows CI); a
+    /// case-sensitive disk has no `VAULT` and returns early.
+    #[test]
+    fn the_root_in_another_case_on_a_case_insensitive_disk_is_the_root() {
+        let (directory, _root, sink) = vault();
+        let shouted = directory.path().join("VAULT");
+        if !shouted.exists() {
+            return;
+        }
+        assert!(sink.is_root(&shouted.to_string_lossy()));
+    }
+
+    /// procfs and sysfs both have inode 1 at their roots, on two devices:
+    /// the device is compared too.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn roots_of_two_file_systems_with_one_inode_are_not_one_root() {
+        use std::os::unix::fs::MetadataExt as _;
+        let (proc, sys) = (
+            fs::metadata("/proc").unwrap(),
+            fs::metadata("/sys").unwrap(),
+        );
+        assert_eq!(proc.ino(), sys.ino(), "the premise: one inode");
+        assert_ne!(proc.dev(), sys.dev(), "the premise: two devices");
+        let sink = LocalFolderSink::new(PathBuf::from("/proc"));
+        assert!(sink.is_root("/proc"));
+        assert!(!sink.is_root("/sys"), "another device, same inode");
+    }
+}

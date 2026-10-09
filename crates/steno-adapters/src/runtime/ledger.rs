@@ -193,11 +193,17 @@ impl DeliveryLedger {
     }
 
     /// Keeps the receipt's entry for `path`, a file the user edited that
-    /// this delivery left alone: the hash Steno last wrote there when the
-    /// receipt carries one, else this render's; never the user's bytes, so
-    /// the next delivery still sees the edit, and never no entry, so the
-    /// path stays Steno's to write once the user takes Steno's version.
+    /// this delivery left alone, when Steno may write there
+    /// ([`Self::may_write`]): the hash Steno last wrote there when the
+    /// receipt carries one, else this render's. Never the user's bytes, so
+    /// the next delivery still sees the edit, and kept so the path stays
+    /// Steno's to write once the user takes Steno's version. No entry for a
+    /// file Steno never wrote (a receipt applies and does not list it): a
+    /// rolled-back Swift app writes any path the receipt lists.
     pub fn keep(&mut self, path: &str, data: &[u8]) {
+        if !self.may_write(path, true) {
+            return;
+        }
         self.files
             .entry(path.to_owned())
             .or_insert_with(|| DeliveredFile {
@@ -207,16 +213,35 @@ impl DeliveryLedger {
             });
     }
 
-    /// The newest copy an earlier delivery wrote beside `path` because the
-    /// note there had been edited, when the previous receipt lists one:
-    /// ordered by date, then number ([`Self::copy_stamp`]).
+    /// Whether `hash` is what the previous delivery wrote to an owned file
+    /// at `path` or to a copy beside it ([`Self::copy_stamp`]): bytes on
+    /// disk with that hash are Steno's, also after the user moved a copy
+    /// over the note.
     #[must_use]
-    pub fn listed_copy(&self, path: &str) -> Option<&str> {
-        self.previous_files()
+    pub fn wrote(&self, path: &str, hash: &[u8]) -> bool {
+        self.previous_files().any(|file| {
+            file.ownership == FileOwnership::Owned
+                && file.sha256 == hash
+                && (file.relative_path == path
+                    || Self::copy_stamp(path, &file.relative_path).is_some())
+        })
+    }
+
+    /// The copies an earlier delivery wrote beside `path` because the note
+    /// there had been edited, as the previous receipt lists them, newest
+    /// first: by date, then number ([`Self::copy_stamp`]).
+    #[must_use]
+    pub fn listed_copies(&self, path: &str) -> Vec<String> {
+        let mut copies: Vec<_> = self
+            .previous_files()
             .filter(|file| file.ownership == FileOwnership::Owned)
             .filter_map(|file| Some((Self::copy_stamp(path, &file.relative_path)?, file)))
-            .max_by_key(|(stamp, _)| *stamp)
-            .map(|(_, file)| file.relative_path.as_str())
+            .collect();
+        copies.sort_by(|(left, _), (right, _)| right.cmp(left));
+        copies
+            .into_iter()
+            .map(|(_, file)| file.relative_path.clone())
+            .collect()
     }
 
     /// The path of a copy beside `path`: `<stem> (Steno <date>).<extension>`

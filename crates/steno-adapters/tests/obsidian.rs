@@ -1645,7 +1645,13 @@ fn a_redelivery_that_failed_after_claiming_a_folder_writes_that_folder_the_next_
         ArtifactRenderer::new().render_json(&ours).unwrap(),
         "the failed attempt's meeting.json is kept"
     );
-    assert_eq!(again.warnings.len(), 2, "{:?}", again.warnings);
+    assert_eq!(
+        again.warnings,
+        [kept_several(&[
+            "meeting.json",
+            &format!("{FOLDER_SLUG}-2.md")
+        ])]
+    );
 }
 
 #[test]
@@ -2335,12 +2341,37 @@ fn edit_the_folder_note(vault: &Vault) -> String {
     edited
 }
 
+/// The files a "Kept your changes" warning names: one, or several as
+/// `a, b and c`; none for another warning.
+fn kept_in(warning: &str) -> Vec<String> {
+    let Some(rest) = warning.strip_prefix("Kept your changes to ") else {
+        return Vec::new();
+    };
+    let names = rest.split(" and put Steno's").next().unwrap_or_default();
+    let (head, last) = names.rsplit_once(" and ").unwrap_or(("", names));
+    head.split(", ")
+        .filter(|name| !name.is_empty())
+        .chain([last])
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Whether a warning names the folder note as kept.
 fn warns_about_the_folder_note(receipt: &DeliveryReceipt) -> bool {
     receipt
         .warnings
         .iter()
-        .any(|warning| warning.starts_with(&format!("Kept your changes to {FOLDER_SLUG}.md ")))
+        .any(|warning| kept_in(warning).contains(&format!("{FOLDER_SLUG}.md")))
+}
+
+/// The one warning for several kept files, named in render order.
+fn kept_several(names: &[&str]) -> String {
+    let (last, rest) = names.split_last().unwrap();
+    format!(
+        "Kept your changes to {} and {last} and put Steno's versions beside them; \
+         to use Steno's, delete your versions and export again",
+        rest.join(", ")
+    )
 }
 
 /// With no receipt that applies, the folder holding this meeting's
@@ -2373,8 +2404,14 @@ fn a_receiptless_delivery_into_the_existing_folder_keeps_an_edited_note() {
     );
     assert!(warns_about_the_folder_note(&again), "{:?}", again.warnings);
     // Every file whose render changed has no recorded hash and gets a copy:
-    // the folder note and meeting.json.
-    assert_eq!(again.warnings.len(), 2, "{:?}", again.warnings);
+    // meeting.json and the folder note, in one warning.
+    assert_eq!(
+        again.warnings,
+        [kept_several(&[
+            "meeting.json",
+            &format!("{FOLDER_SLUG}.md")
+        ])]
+    );
     assert!(
         vault
             .path(&format!("{FOLDER}/meeting (Steno 2026-10-07).json"))
@@ -2433,7 +2470,13 @@ fn switching_the_vault_away_and_back_keeps_an_edited_note() {
     assert_eq!(vault.text(&folder_note()), edited, "the edit is kept");
     assert!(vault.path(&copy_on_the_seventh(None)).is_file());
     assert!(warns_about_the_folder_note(&back), "{:?}", back.warnings);
-    assert_eq!(back.warnings.len(), 2, "{:?}", back.warnings);
+    assert_eq!(
+        back.warnings,
+        [kept_several(&[
+            "meeting.json",
+            &format!("{FOLDER_SLUG}.md")
+        ])]
+    );
 
     let after = deliver(&at_a, &changed, Some(&back));
     assert_eq!(
@@ -2521,7 +2564,9 @@ fn a_retry_after_a_failed_delivery_heals() {
 
 /// The user takes Steno's version by moving the copy over the note: the
 /// note now holds this render, so it is Steno's again; no copy, no
-/// warning, and the receipt records the note's new hash.
+/// warning, and the receipt records the note's new hash. It stays Steno's
+/// when the render changes after the move: the bytes are the copy's, which
+/// Steno wrote, so the note is rewritten in place.
 #[test]
 fn moving_the_copy_over_the_note_clears_the_warning() {
     let vault = Vault::new();
@@ -2546,6 +2591,32 @@ fn moving_the_copy_over_the_note_clears_the_warning() {
         hash_in(&third, &folder_note()),
         Some(sha256(&vault.read(&folder_note())))
     );
+
+    // The same move, then a changed render at once: the receipt still has
+    // the note's old hash, and the bytes on disk are the copy's.
+    edit_the_folder_note(&vault);
+    let fourth = deliver(&destination, &export, Some(&third));
+    assert!(
+        warns_about_the_folder_note(&fourth),
+        "{:?}",
+        fourth.warnings
+    );
+    fs::rename(
+        vault.path(&copy_on_the_seventh(None)),
+        vault.path(&folder_note()),
+    )
+    .unwrap();
+    let changed = with_a_changed_decision(&export);
+    let fifth = deliver(&destination, &changed, Some(&fourth));
+
+    assert_eq!(fifth.warnings, Vec::<String>::new());
+    assert!(
+        vault
+            .text(&folder_note())
+            .contains("Die Aufteilung wird verschoben."),
+        "the note, Steno's bytes, is rewritten in place"
+    );
+    assert_eq!(vault.list(FOLDER), meeting_files(FOLDER_SLUG), "no copy");
 }
 
 /// The note and its first copy are edited, so a delivery writes `… 2`; the
@@ -2577,6 +2648,11 @@ fn a_delivery_after_an_edited_copy_reuses_the_numbered_copy() {
         fourth.warnings
     );
     assert_eq!(vault.text(&copy_on_the_seventh(None)), "my copy\n");
+    assert!(
+        paths(&fourth).contains(&copy_on_the_seventh(None)),
+        "the edited copy stays on the receipt: {:?}",
+        paths(&fourth)
+    );
 }
 
 /// Copy 10 is newer than copy 9. The user's files hold the copy names up
@@ -2748,7 +2824,10 @@ fn an_edited_meeting_json_and_transcript_vtt_are_kept() {
             .path(&format!("{FOLDER}/transcript (Steno 2026-10-07).vtt"))
             .is_file()
     );
-    assert_eq!(second.warnings.len(), 2, "{:?}", second.warnings);
+    assert_eq!(
+        second.warnings,
+        [kept_several(&["meeting.json", "transcript.vtt"])]
+    );
 }
 
 /// The warning names the files only, not the folder, and says how to get
@@ -2884,5 +2963,283 @@ fn a_note_kept_without_a_receipt_is_steno_s_again_once_the_user_takes_the_copy()
     assert!(
         vault.text(&folder_note()).contains("# Neuer Titel\n"),
         "the note is rewritten in place"
+    );
+}
+
+/// A file at a rendered path that the applying receipt does not list (an
+/// older or foreign receipt) is one Steno never wrote: it is left alone,
+/// the render goes beside it, and it does not enter the receipt, so a
+/// rolled-back Swift app, which writes any path the receipt lists, never
+/// overwrites it.
+#[test]
+fn a_file_the_receipt_does_not_list_stays_off_the_receipt() {
+    let vault = Vault::new();
+    let export = vault.export_with_audio();
+    let destination = vault.destination().with_now(october_seventh);
+    let mut first = deliver(&destination, &export, None);
+    let vtt = format!("{FOLDER}/transcript.vtt");
+    first.files.retain(|file| file.relative_path != vtt);
+    fs::write(vault.path(&vtt), b"WEBVTT\n\nNOTE the user's own file\n").unwrap();
+
+    let second = deliver(&destination, &export, Some(&first));
+
+    assert_eq!(
+        vault.read(&vtt),
+        b"WEBVTT\n\nNOTE the user's own file\n",
+        "the user's file is left alone"
+    );
+    assert!(
+        vault
+            .path(&format!("{FOLDER}/transcript (Steno 2026-10-07).vtt"))
+            .is_file()
+    );
+    assert_eq!(hash_in(&second, &vtt), None, "{:?}", paths(&second));
+}
+
+fn october_eighth() -> chrono::DateTime<chrono::Utc> {
+    steno_core::json::parse_date("2026-10-08T10:00:00.000Z").unwrap()
+}
+
+/// The clock goes back while the newest copy is edited: the delivery on
+/// the 7th writes a copy of the 7th, and the deliveries on the 8th reuse it,
+/// an older listed copy that is unedited, instead of writing one of the
+/// 8th each time.
+#[test]
+fn a_clock_gone_back_reuses_an_older_unedited_copy() {
+    let vault = Vault::new();
+    let export = vault.export_with_audio();
+    let on_ninth = vault.destination().with_now(october_ninth);
+    let first = deliver(&on_ninth, &export, None);
+    edit_the_folder_note(&vault);
+    let second = deliver(&on_ninth, &export, Some(&first));
+    let ninth_copy = format!("{FOLDER}/{FOLDER_SLUG} (Steno 2026-10-09).md");
+    assert!(vault.path(&ninth_copy).is_file());
+    fs::write(vault.path(&ninth_copy), b"my copy\n").unwrap();
+
+    let third = deliver(
+        &vault.destination().with_now(october_seventh),
+        &export,
+        Some(&second),
+    );
+    let on_eighth = vault.destination().with_now(october_eighth);
+    let fourth = deliver(&on_eighth, &export, Some(&third));
+    let fifth = deliver(&on_eighth, &export, Some(&fourth));
+
+    let copies: Vec<String> = vault
+        .list(FOLDER)
+        .into_iter()
+        .filter(|name| name.starts_with(&format!("{FOLDER_SLUG} (Steno ")))
+        .collect();
+    assert_eq!(
+        copies,
+        [
+            format!("{FOLDER_SLUG} (Steno 2026-10-07).md"),
+            format!("{FOLDER_SLUG} (Steno 2026-10-09).md"),
+        ],
+        "{:?}",
+        fifth.warnings
+    );
+    assert_eq!(vault.text(&ninth_copy), "my copy\n");
+}
+
+/// A delivery that fails after writing a copy leaves it unlisted; the
+/// retry with the old receipt finds this render already at the copy name
+/// and reuses it instead of writing `… 2`.
+#[test]
+fn a_retry_reuses_the_copy_a_failed_delivery_wrote() {
+    let vault = Vault::new();
+    let destination = vault
+        .destination_with(false, Some("People"))
+        .with_now(october_seventh);
+    let ours = export();
+    let first = deliver(&destination, &ours, None);
+    let edited = edit_the_folder_note(&vault);
+    let changed = with_a_changed_decision(&ours);
+    let mut latin1 = b"# Anna M".to_vec();
+    latin1.push(0xFC);
+    latin1.extend(b"ller\n");
+    fs::write(vault.path(ANNA_PAGE), &latin1).unwrap();
+    assert!(matches!(
+        destination.deliver_meeting(&changed, Some(&first)),
+        Err(ObsidianError::ReadFailed { .. })
+    ));
+    assert!(
+        vault.path(&copy_on_the_seventh(None)).is_file(),
+        "the failed attempt wrote the copy before it failed"
+    );
+    fs::write(vault.path(ANNA_PAGE), b"# Anna\n").unwrap();
+
+    let retry = deliver(&destination, &changed, Some(&first));
+
+    assert_eq!(vault.text(&folder_note()), edited);
+    assert!(
+        !vault.path(&copy_on_the_seventh(Some(2))).exists(),
+        "{:?}",
+        vault.list(FOLDER)
+    );
+    assert!(
+        retry.warnings[0].contains(&format!("as {FOLDER_SLUG} (Steno 2026-10-07).md;")),
+        "{:?}",
+        retry.warnings
+    );
+    assert!(paths(&retry).contains(&copy_on_the_seventh(None)));
+}
+
+/// A case-only spelling of the vault path is the same root where the disk
+/// is case-insensitive (macOS and Windows CI); a case-sensitive disk
+/// returns early.
+#[test]
+fn a_case_only_spelling_of_the_vault_is_the_same_root() {
+    let vault = Vault::new();
+    if !is_case_insensitive(vault.directory.path()) {
+        return;
+    }
+    let export = vault.export_with_audio();
+    let first = deliver(&vault.destination(), &export, None);
+    let shouted = vault.directory.path().join("VAULT");
+    assert_ne!(shouted, vault.root);
+    let edited = edit_the_folder_note(&vault);
+    let changed = with_a_changed_decision(&export);
+
+    let through_case = destination_at(&shouted, true, Some("People")).with_now(october_seventh);
+    let again = deliver(&through_case, &changed, Some(&first));
+
+    assert_eq!(again.folder, FOLDER);
+    assert_eq!(vault.list("Meetings"), [FOLDER_SLUG], "no second folder");
+    assert_eq!(vault.text(&folder_note()), edited, "the edit is kept");
+    assert!(vault.path(&copy_on_the_seventh(None)).is_file());
+    assert_eq!(again.warnings.len(), 1, "{:?}", again.warnings);
+    assert_eq!(
+        vault.read(&format!("{FOLDER}/meeting.json")),
+        ArtifactRenderer::new().render_json(&changed).unwrap(),
+        "meeting.json is Steno's and rewritten"
+    );
+}
+
+/// `is_root` on Windows goes through `canonicalize`: another case, forward
+/// slashes, a trailing separator and the verbatim prefix are the root; a
+/// sibling and a missing path are not. End to end, a receipt written under
+/// the upper-case spelling applies to the vault, so no second folder
+/// appears.
+#[cfg(windows)]
+#[test]
+fn on_windows_the_vault_root_is_compared_canonicalized() {
+    let vault = Vault::new();
+    let root = vault.root.to_string_lossy().into_owned();
+    let sink = steno_adapters::fs::LocalFolderSink::new(vault.root.clone());
+    assert!(sink.is_root(&root));
+    assert!(
+        sink.is_root(&root.to_uppercase()),
+        "NTFS is case-insensitive"
+    );
+    assert!(sink.is_root(&root.replace('\\', "/")), "forward slashes");
+    assert!(sink.is_root(&format!("{root}\\")), "a trailing separator");
+    assert!(
+        sink.is_root(&format!(r"\\?\{root}")),
+        "the verbatim prefix canonicalize returns"
+    );
+    let sibling = vault.directory.path().join("other");
+    fs::create_dir_all(&sibling).unwrap();
+    assert!(!sink.is_root(&sibling.to_string_lossy()));
+    assert!(
+        !sink.is_root(&vault.directory.path().join("gone").to_string_lossy()),
+        "a missing root is not this one"
+    );
+
+    let export = vault.export_with_audio();
+    let shouted = PathBuf::from(root.to_uppercase());
+    let first = deliver(
+        &destination_at(&shouted, true, Some("People")),
+        &export,
+        None,
+    );
+    let again = deliver(&vault.destination(), &export, Some(&first));
+    assert_eq!(again.folder, FOLDER);
+    assert_eq!(vault.list("Meetings"), [FOLDER_SLUG]);
+    assert_eq!(again.warnings, Vec::<String>::new());
+}
+
+/// A receipt-less delivery of a changed render after the user edited the
+/// folder note and `transcript.vtt`: `meeting.json` (no recorded hash),
+/// the folder note and `transcript.vtt` are kept. Returns the receipt and
+/// the changed export.
+fn keep_three_files(
+    vault: &Vault,
+    destination: &ObsidianFolderDestination,
+) -> (DeliveryReceipt, MeetingExport) {
+    let export = vault.export_with_audio();
+    deliver(destination, &export, None);
+    edit_the_folder_note(vault);
+    let vtt = format!("{FOLDER}/transcript.vtt");
+    let edited_vtt = format!("{}\nNOTE mine\n", vault.text(&vtt));
+    fs::write(vault.path(&vtt), edited_vtt).unwrap();
+    let changed = with_a_changed_decision(&export);
+    (deliver(destination, &changed, None), changed)
+}
+
+/// Several kept files share one warning, which names them in render order
+/// and not their copies; one kept file has the sentence naming both.
+#[test]
+fn several_kept_files_share_one_warning() {
+    let vault = Vault::new();
+    let destination = vault.destination().with_now(october_seventh);
+
+    let (kept, _) = keep_three_files(&vault, &destination);
+
+    assert_eq!(
+        kept.warnings,
+        [format!(
+            "Kept your changes to meeting.json, {FOLDER_SLUG}.md and transcript.vtt and put \
+             Steno's versions beside them; to use Steno's, delete your versions and export again"
+        )]
+    );
+    assert!(
+        vault
+            .path(&format!("{FOLDER}/meeting (Steno 2026-10-07).json"))
+            .is_file()
+    );
+    assert!(vault.path(&copy_on_the_seventh(None)).is_file());
+    assert!(
+        vault
+            .path(&format!("{FOLDER}/transcript (Steno 2026-10-07).vtt"))
+            .is_file()
+    );
+}
+
+/// The hint holds when the user follows it for every kept file at once:
+/// with `meeting.json`, `transcript.vtt` and the folder note deleted, the
+/// receipt's copy of `meeting.json` names the meeting, so the next export
+/// writes Steno's versions back into the same folder, not into `-2`.
+#[test]
+fn deleting_every_kept_file_keeps_the_meeting_in_its_folder() {
+    let vault = Vault::new();
+    let destination = vault.destination().with_now(october_seventh);
+    let (kept, changed) = keep_three_files(&vault, &destination);
+    for name in [
+        "meeting.json".to_owned(),
+        format!("{FOLDER_SLUG}.md"),
+        "transcript.vtt".to_owned(),
+    ] {
+        fs::remove_file(vault.path(&format!("{FOLDER}/{name}"))).unwrap();
+    }
+
+    let again = deliver(&destination, &changed, Some(&kept));
+
+    assert_eq!(again.folder, FOLDER);
+    assert_eq!(vault.list("Meetings"), [FOLDER_SLUG], "no second folder");
+    assert_eq!(again.warnings, Vec::<String>::new());
+    assert_eq!(
+        vault.read(&format!("{FOLDER}/meeting.json")),
+        ArtifactRenderer::new().render_json(&changed).unwrap()
+    );
+    assert!(
+        vault
+            .text(&folder_note())
+            .contains("Die Aufteilung wird verschoben.")
+    );
+    assert!(
+        vault
+            .text(&format!("{FOLDER}/transcript.vtt"))
+            .starts_with("WEBVTT - Steno ")
     );
 }

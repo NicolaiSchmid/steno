@@ -152,8 +152,8 @@ fn a_root_the_file_system_resolves_to_this_one_is_the_same_root() {
 }
 
 /// Copies beside a note are named by date, numbered from 2 on the same
-/// day, and ordered by date and then number, not by name: `… 2)` comes
-/// after `…)` and `… 10)` after `… 9)`.
+/// day, and listed newest first by date and then number, not by name:
+/// `… 2)` comes after `…)` and `… 10)` after `… 9)`.
 #[test]
 fn copies_beside_a_note_are_ordered_by_date_and_number() {
     let copy = |date: &str, number: u32| DeliveryLedger::copy_beside_path(NOTE, date, number);
@@ -186,6 +186,14 @@ fn copies_beside_a_note_are_ordered_by_date_and_number() {
         None,
         "another note's copy"
     );
+    assert_eq!(
+        DeliveryLedger::copy_stamp(
+            NOTE,
+            "Meetings/2026-09-24-sync/2026-09-24-sync (Steno 2026-10-07 x).md"
+        ),
+        None,
+        "a suffix that is not a number"
+    );
 
     let listed = |copies: &[String]| {
         let files: Vec<(&str, FileOwnership)> = copies
@@ -193,44 +201,94 @@ fn copies_beside_a_note_are_ordered_by_date_and_number() {
             .map(|path| (path.as_str(), FileOwnership::Owned))
             .collect();
         let previous = receipt(ROOT, &files);
-        DeliveryLedger::new(Some(&previous), ROOT, |_| false)
-            .listed_copy(NOTE)
-            .map(str::to_owned)
+        DeliveryLedger::new(Some(&previous), ROOT, |_| false).listed_copies(NOTE)
     };
     assert_eq!(
         listed(&[copy("2026-10-07", 1), copy("2026-10-07", 2)]),
-        Some(copy("2026-10-07", 2))
+        [copy("2026-10-07", 2), copy("2026-10-07", 1)]
     );
     assert_eq!(
         listed(&[copy("2026-10-07", 9), copy("2026-10-07", 10)]),
-        Some(copy("2026-10-07", 10))
+        [copy("2026-10-07", 10), copy("2026-10-07", 9)]
     );
     assert_eq!(
-        listed(&[copy("2026-10-07", 3), copy("2026-10-08", 1)]),
-        Some(copy("2026-10-08", 1))
+        listed(&[
+            copy("2026-10-08", 1),
+            copy("2026-10-07", 3),
+            copy("2026-10-09", 1)
+        ]),
+        [
+            copy("2026-10-09", 1),
+            copy("2026-10-08", 1),
+            copy("2026-10-07", 3)
+        ]
     );
-    assert_eq!(listed(&[NOTE.to_owned()]), None);
+    assert_eq!(listed(&[NOTE.to_owned()]), Vec::<String>::new());
+}
+
+/// Bytes Steno wrote to the note or to a copy beside it are Steno's at the
+/// note: the user who moved a copy over the note took Steno's version.
+/// Another note's copy, a managed page's hash or other bytes are not.
+#[test]
+fn bytes_steno_wrote_to_the_note_or_a_copy_beside_it_are_steno_s() {
+    let copy = DeliveryLedger::copy_beside_path(NOTE, "2026-10-07", 2);
+    let tasks_copy = "Meetings/2026-09-24-sync/2026-09-24-sync - Tasks (Steno 2026-10-07).md";
+    let mut previous = receipt(ROOT, &[(NOTE, FileOwnership::Owned)]);
+    let entry = |path: &str, ownership, hash: &[u8]| DeliveredFile {
+        relative_path: path.to_owned(),
+        ownership,
+        sha256: sha256(hash),
+    };
+    previous.files.extend([
+        entry(&copy, FileOwnership::Owned, b"copy"),
+        entry(tasks_copy, FileOwnership::Owned, b"tasks copy"),
+        entry(ANNA, FileOwnership::ManagedBlock, b"page"),
+    ]);
+    let ledger = DeliveryLedger::new(Some(&previous), ROOT, |_| false);
+
+    assert!(ledger.wrote(NOTE, &[1; 32]), "the note's own hash");
+    assert!(ledger.wrote(NOTE, &sha256(b"copy")), "a copy beside it");
+    assert!(ledger.wrote(&copy, &sha256(b"copy")));
+    assert!(
+        !ledger.wrote(NOTE, &sha256(b"tasks copy")),
+        "another note's copy"
+    );
+    assert!(!ledger.wrote(ANNA, &sha256(b"page")), "a managed page");
+    assert!(!ledger.wrote(NOTE, &sha256(b"the user's")));
+    assert!(
+        !DeliveryLedger::new(None, ROOT, |_| false).wrote(NOTE, &[1; 32]),
+        "nothing without a receipt"
+    );
 }
 
 /// A kept note keeps the hash Steno last wrote there, or gets this
-/// render's when the receipt carries none.
+/// render's when no receipt applies. A file the applying receipt does not
+/// list is one Steno never wrote, and gets no entry.
 #[test]
 fn keep_records_the_delivered_hash_or_the_render_s() {
-    let previous = receipt(ROOT, &[(NOTE, FileOwnership::Owned)]);
-    let mut ledger = DeliveryLedger::new(Some(&previous), ROOT, |_| false);
-    ledger.keep(NOTE, b"new render");
     let json = "Meetings/2026-09-24-sync/meeting.json";
-    ledger.keep(json, b"new render");
-    let kept = ledger.receipt(LEDGER_FOLDER, 1);
-    let hash = |path: &str| {
-        kept.files
+    let hash = |ledger: &DeliveryLedger, path: &str| {
+        ledger
+            .receipt(LEDGER_FOLDER, 1)
+            .files
             .iter()
             .find(|file| file.relative_path == path)
             .map(|file| (file.ownership, file.sha256.clone()))
     };
-    assert_eq!(hash(NOTE), Some((FileOwnership::Owned, vec![1; 32])));
+    let previous = receipt(ROOT, &[(NOTE, FileOwnership::Owned)]);
+    let mut ledger = DeliveryLedger::new(Some(&previous), ROOT, |_| false);
+    ledger.keep(NOTE, b"new render");
+    ledger.keep(json, b"new render");
     assert_eq!(
-        hash(json),
+        hash(&ledger, NOTE),
+        Some((FileOwnership::Owned, vec![1; 32]))
+    );
+    assert_eq!(hash(&ledger, json), None, "not listed, so not Steno's");
+
+    let mut first = DeliveryLedger::new(None, ROOT, |_| false);
+    first.keep(json, b"new render");
+    assert_eq!(
+        hash(&first, json),
         Some((FileOwnership::Owned, sha256(b"new render")))
     );
 }
