@@ -563,9 +563,16 @@ Every package is written in parallel except where a dependency is named:
     not answered after 60 seconds fails. A found update raises the "Install and
     Relaunch" dialog once per version in a run, not while a recording starts,
     runs or stops, and a yes given once a recording has started asks again
-    before it installs. Automatic downloads wait for P25's gate: the schedule
-    downloads by itself only while `InstallGate::is_idle_now` says idle and
-    installs only with a hold from `InstallGate::try_hold`; the stand-in
+    before it installs. The install downloads first, then holds recording
+    starts off (`Recorder::hold_starts`) from just before the package is
+    written through the relaunch, and a Record meanwhile says "Steno is
+    installing an update and relaunches in a moment."; a recording that
+    started during the download puts the install off, with the package kept
+    and the version raised again. P25's `InstallHold` takes the same
+    recorder start hold rather than building a second one. Automatic
+    downloads wait for P25's gate: the schedule downloads by itself only
+    while `InstallGate::is_idle_now` says idle and installs only with the
+    gate's hold from `InstallGate::try_hold`; the stand-in
     `NeverIdle` is never idle, so it downloads nothing, and P25's gate turns
     automatic downloads on. P25 also re-reads the automatic-downloads flag when
     a download ends and before the install: a switch turned off during the

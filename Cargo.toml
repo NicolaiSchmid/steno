@@ -219,7 +219,8 @@ x509-parser = { version = "0.18", features = ["verify"] }
 # The pairing QR code in Settings (`steno-services`' `qr`): the code's
 # modules (`qrcode`, without its `image` and `svg` renderers) written as a
 # greyscale PNG (`png`, the version already in the lock through Tauri);
-# both pure Rust; our code adds no `unsafe`. Test only: `rqrr` reads the PNG back.
+# both pure Rust; our code adds no `unsafe`. Test only: `rqrr` reads the
+# PNG back.
 qrcode = { version = "0.14", default-features = false }
 png = "0.18"
 rqrr = { version = "0.11", default-features = false }

@@ -381,8 +381,14 @@ delete the file. A found update brings up the Install and Relaunch dialog
 once per version in a run, and not while a recording starts, runs or
 stops: the first hourly tick after the recording ends brings it up. A yes
 given once a recording has started asks again before it installs
-("Installing stops and saves the recording in progress."); Not Now leaves
-the update for the next idle tick. The app downloads and installs by
+("Installing stops and saves the recording in progress."); Not Now, the
+default button, leaves the update for the next idle tick. A yes downloads
+the update first and then installs and relaunches. From just before the
+install, Record in the sidebar, the tray or a meeting prompt is refused
+with "Steno is installing an update and relaunches in a moment." A
+recording started during the download puts the install off: no restart,
+and the dialog comes back at the first idle tick, whose yes installs
+without downloading again. The app downloads and installs by
 itself only when its install gate says it is idle, and no build has that
 gate until P25 of `.plans/2026-10-07-stable-promotion.md` builds it;
 until then automatic downloads stay off in effect, and every install is
