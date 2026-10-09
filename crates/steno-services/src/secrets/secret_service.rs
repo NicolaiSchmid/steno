@@ -561,15 +561,16 @@ impl Keyring {
     /// Connects, opens a session and unlocks the default collection and
     /// every Steno item in it (`KeePassXC` locks items one by one).
     async fn open(bus: &Bus, ask: Ask<'_>) -> Result<Self, ServiceError> {
+        let local = match bus {
+            Bus::Session => std::env::var("DBUS_SESSION_BUS_ADDRESS")
+                .map_or(true, |address| local_bus(&address)),
+            Bus::Address(address) => local_bus(address),
+        };
+        if !local {
+            return Err(ServiceError::NotLocal);
+        }
         let builder = match bus {
-            Bus::Session => {
-                let address = std::env::var("DBUS_SESSION_BUS_ADDRESS");
-                if address.as_deref().is_ok_and(|address| !local_bus(address)) {
-                    return Err(ServiceError::NotLocal);
-                }
-                zbus::connection::Builder::session()?
-            }
-            Bus::Address(address) if !local_bus(address) => return Err(ServiceError::NotLocal),
+            Bus::Session => zbus::connection::Builder::session()?,
             Bus::Address(address) => zbus::connection::Builder::address(address.as_str())?,
         };
         let connection = builder.method_timeout(CALL_TIMEOUT).build().await?;
