@@ -204,7 +204,7 @@ describe("MeetingDetail", () => {
 		const damaged = await createBridgeHarness("scenario=damaged-audio");
 		renderWithBridge(<MeetingDetail />, damaged);
 		expect(screen.getByTestId("audio-warning")).toHaveTextContent(
-			"3 damaged parts of the recording were replaced by silence.",
+			"About 0.1 seconds of the phone recording could not be read and was replaced by silence.",
 		);
 	});
 

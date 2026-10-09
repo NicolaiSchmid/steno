@@ -733,8 +733,8 @@ fn the_detail_heading_derives_an_untitled_meetings_title() {
 }
 
 /// Parts of a recording the decoder replaced by silence show as the
-/// detail's audio warning, naming the phone's recording, in the singular
-/// for one; a recording that decoded whole carries none.
+/// detail's audio warning, naming the phone's recording and saying how
+/// long the silence lasts; a recording that decoded clean carries none.
 #[test]
 fn the_detail_warns_about_a_recording_replaced_in_parts_by_silence() {
     let harness = Harness::builder()
@@ -758,14 +758,16 @@ fn the_detail_warns_about_a_recording_replaced_in_parts_by_silence() {
     let detail = harness.snapshot(BridgeTopic::MeetingDetail);
     assert_eq!(detail["id"], id(0x67));
     assert!(detail.get("audioWarning").is_none(), "{detail}");
-    for (parts, warning) in [
+    for (parts, seconds, warning) in [
         (
             3,
-            "3 damaged parts of the phone recording were replaced by silence.",
+            0.07,
+            "About 0.1 seconds of the phone recording could not be read and was replaced by silence.",
         ),
         (
-            1,
-            "1 damaged part of the phone recording was replaced by silence.",
+            1_200,
+            27.9,
+            "About 28 seconds of the phone recording could not be read and was replaced by silence.",
         ),
     ] {
         harness
@@ -774,7 +776,7 @@ fn the_detail_warns_about_a_recording_replaced_in_parts_by_silence() {
             .damaged_audio
             .lock()
             .unwrap()
-            .insert(uuid(0x67), parts);
+            .insert(uuid(0x67), steno_core::AudioDamage { parts, seconds });
         harness.host.store_changed();
         let detail = harness.snapshot(BridgeTopic::MeetingDetail);
         assert_eq!(detail["audioWarning"], warning);

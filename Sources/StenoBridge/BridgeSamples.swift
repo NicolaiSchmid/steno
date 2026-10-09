@@ -173,11 +173,14 @@ public enum BridgeSamples {
       canReexport: false, canReveal: false),
     canProcessAgain: false, canRerunSummary: true, isBusy: false)
 
-  /// `meetingDetail` with three damaged parts of its recording replaced by
-  /// silence. Only the Rust host sends the warning.
+  /// `meetingDetail` as a phone recording with damaged parts, about 0.07
+  /// seconds of it replaced by silence. Only the Rust host sends the
+  /// warning.
   public static let meetingDetailDamagedAudio: MeetingDetailSnapshot = {
     var detail = meetingDetail
-    detail.audioWarning = "3 damaged parts of the recording were replaced by silence."
+    detail.source = .phone
+    detail.audioWarning =
+      "About 0.1 seconds of the phone recording could not be read and was replaced by silence."
     return detail
   }()
 

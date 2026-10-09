@@ -1,5 +1,6 @@
 {
-  "audioWarning" : "3 damaged parts of the recording were replaced by silence.",
+  "audioWarning" : "About 0.1 seconds of the phone recording could not be read and was replaced by silence.",
+  "canProcessAgain" : false,
   "canRerunSummary" : true,
   "decisions" : [
     "Wir setzen neunzig Prozent auf den Kern. Nebenprojekte pausieren bis zur Q1-Planung."
@@ -22,7 +23,7 @@
     "kind" : "deletesOn",
     "showsKeepToggle" : true
   },
-  "source" : "call",
+  "source" : "phone",
   "speakers" : [
     {
       "assignment" : "confirmed",

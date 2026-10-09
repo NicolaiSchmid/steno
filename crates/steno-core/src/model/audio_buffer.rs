@@ -1,6 +1,8 @@
 //! The one audio format the speech boundary accepts.
 //! Swift: `AudioBuffer16k` in `Sources/StenoCore/Model/Transcript.swift`.
 
+use serde::{Deserialize, Serialize};
+
 use super::TimeRange;
 
 /// Mono `f32` audio at 16 kHz, the only format speech engines and diarizers
@@ -8,13 +10,43 @@ use super::TimeRange;
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AudioBuffer16k {
     pub samples: Vec<f32>,
-    /// Parts of the recording the decoder could not read and replaced by
-    /// silence of their length (an undecodable AAC packet), so the samples
-    /// after them keep their time. 0 for a clean decode and for every
-    /// buffer that does not come straight from a decoder; the pipeline
-    /// shows a count above 0 on the meeting. Rust only: `AVFoundation`
-    /// conceals a bad packet and reports nothing.
-    pub damaged_parts: u32,
+    /// What the decoder could not read and replaced by silence of its
+    /// length (an undecodable AAC packet), so the samples after it keep
+    /// their time. None for a clean decode and for every buffer that does
+    /// not come straight from a decoder; the meeting's detail warns about
+    /// the rest. Rust only: `AVFoundation` conceals a bad packet and
+    /// reports nothing.
+    pub damage: AudioDamage,
+}
+
+/// The parts of a recording a decoder could not read, each replaced by
+/// silence of its length, and how long that silence lasts in all.
+/// [`AudioBuffer16k::damage`]. Rust only.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct AudioDamage {
+    /// The packets that did not decode.
+    pub parts: u32,
+    /// The silence they became, in seconds of the recording (less any of
+    /// it the encoder priming trims).
+    pub seconds: f64,
+}
+
+impl AudioDamage {
+    /// No part damaged: a clean decode.
+    #[must_use]
+    pub fn is_none(self) -> bool {
+        self.parts == 0
+    }
+
+    /// The larger count and the longer silence of the two: the damage of
+    /// a recording whose lanes read the same packets.
+    #[must_use]
+    pub fn max(self, other: AudioDamage) -> AudioDamage {
+        AudioDamage {
+            parts: self.parts.max(other.parts),
+            seconds: self.seconds.max(other.seconds),
+        }
+    }
 }
 
 impl AudioBuffer16k {
@@ -25,7 +57,7 @@ impl AudioBuffer16k {
     pub fn new(samples: Vec<f32>) -> Self {
         AudioBuffer16k {
             samples,
-            damaged_parts: 0,
+            damage: AudioDamage::default(),
         }
     }
 

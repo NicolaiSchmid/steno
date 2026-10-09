@@ -1064,17 +1064,30 @@ fn packet_payloads(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
         .collect()
 }
 
-/// The clean tone fixture with the payload of `packets` zeroed, which
-/// symphonia rejects as invalid data, written into `directory`.
-fn with_zeroed_packets(directory: &Path, packets: impl IntoIterator<Item = usize>) -> PathBuf {
-    let mut bytes = std::fs::read(fixture("tone-440-44k1-500ms.m4a")).unwrap();
+/// The fixture `name` with `change` applied to its bytes, given the
+/// payload of each of its packets, written into `directory` as
+/// `damaged.m4a`.
+fn damaged_copy(
+    directory: &Path,
+    name: &str,
+    change: impl FnOnce(&mut [u8], &[std::ops::Range<usize>]),
+) -> PathBuf {
+    let mut bytes = std::fs::read(fixture(name)).unwrap();
     let payloads = packet_payloads(&bytes);
-    for packet in packets {
-        bytes[payloads[packet].clone()].fill(0);
-    }
+    change(&mut bytes, &payloads);
     let path = directory.join("damaged.m4a");
     std::fs::write(&path, bytes).unwrap();
     path
+}
+
+/// The clean tone fixture with the payload of `packets` zeroed, which
+/// symphonia rejects as invalid data, written into `directory`.
+fn with_zeroed_packets(directory: &Path, packets: impl IntoIterator<Item = usize>) -> PathBuf {
+    damaged_copy(directory, "tone-440-44k1-500ms.m4a", |bytes, payloads| {
+        for packet in packets {
+            bytes[payloads[packet].clone()].fill(0);
+        }
+    })
 }
 
 /// Frames per AAC packet.
@@ -1094,19 +1107,21 @@ fn largest_difference(a: &[f32], b: &[f32], frames: std::ops::Range<usize>) -> f
 /// clean one at the source rate and at 16 kHz, and so is the mixdown;
 /// the damaged packets read as exact silence; everything before the first
 /// is the clean decode bit for bit; the first packet after each damaged
-/// run starts from a cleared overlap, so it is no louder than the clean
+/// run comes from a fresh decoder, so it is no louder than the clean
 /// decode there (the stale overlap would click above it); the rest is the
-/// clean decode within 2 * 10^-3, the noise the encoder substituted in a few
-/// bands coming from a generator that has moved on (most of it within
-/// 10^-5); and the three are counted.
+/// clean decode within 2 * 10^-3, the noise the decoder substitutes in a
+/// few bands coming from a generator that started over (most of it within
+/// 10^-5); and the three are counted, with their 3 * 1 024 frames of
+/// silence.
 #[tokio::test]
 async fn a_damaged_packet_becomes_silence_of_its_length() {
     let clean_path = fixture("tone-440-44k1-500ms.m4a");
     let damaged_path = fixture("tone-440-44k1-500ms-damaged.m4a");
     let clean = SymphoniaAudioCodec::read_channel(&clean_path, 0, AudioLane::Mixed).unwrap();
     let damaged = SymphoniaAudioCodec::read_channel(&damaged_path, 0, AudioLane::Mixed).unwrap();
-    assert_eq!(clean.damaged_parts, 0);
-    assert_eq!(damaged.damaged_parts, 3);
+    assert_eq!(clean.damage.parts, 0);
+    assert_eq!(damaged.damage.parts, 3);
+    assert!((damaged.damage.seconds - 3.0 * PACKET as f64 / 44_100.0).abs() < 1e-9);
     assert_eq!(damaged.samples.len(), clean.samples.len());
     assert_eq!(
         clean.samples.len(),
@@ -1127,7 +1142,7 @@ async fn a_damaged_packet_becomes_silence_of_its_length() {
         let largest = largest_difference(a, b, after.clone());
         assert!(largest < 2e-3, "{after:?}: {largest}");
     }
-    // The cleared overlap: the stale tail of the packet before the damage
+    // The fresh decoder: the stale tail of the packet before the damage
     // would add to the first one after it, peaking 0.17 over the tone.
     let peak = |samples: &[f32], frames: std::ops::Range<usize>| {
         samples[frames]
@@ -1145,7 +1160,7 @@ async fn a_damaged_packet_becomes_silence_of_its_length() {
     let clean_16k = SymphoniaAudioCodec::decode_path(&clean_path, 0, AudioLane::Mixed).unwrap();
     let damaged_16k = SymphoniaAudioCodec::decode_path(&damaged_path, 0, AudioLane::Mixed).unwrap();
     assert_eq!(damaged_16k.len(), clean_16k.len());
-    assert_eq!((clean_16k.damaged_parts, damaged_16k.damaged_parts), (0, 3));
+    assert_eq!((clean_16k.damage.parts, damaged_16k.damage.parts), (0, 3));
     let directory = tempfile::tempdir().unwrap();
     let asset = |path: &Path| make_asset(path, AudioFormat::M4aAac, &[AudioLane::Mixed], &[]);
     let decoded = SymphoniaAudioCodec::new()
@@ -1167,9 +1182,10 @@ async fn a_damaged_packet_becomes_silence_of_its_length() {
     }
 }
 
-/// A damaged packet inside the encoder priming is trimmed with it: the
-/// decode keeps its length, and from the second packet after it is the
-/// clean decode within the noise generator's drift.
+/// A damaged packet inside the encoder priming is trimmed with it: packet
+/// 0 is all priming (1 024 frames), so its silence is cut whole, the decode
+/// keeps its length and no second of it is silent, and from the second
+/// packet after it is the clean decode within the noise generator's drift.
 #[test]
 fn a_damaged_packet_in_the_priming_is_trimmed_with_it() {
     let directory = tempfile::tempdir().unwrap();
@@ -1178,7 +1194,8 @@ fn a_damaged_packet_in_the_priming_is_trimmed_with_it() {
             .unwrap();
     let path = with_zeroed_packets(directory.path(), [0]);
     let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
-    assert_eq!(damaged.damaged_parts, 1);
+    assert_eq!(damaged.damage.parts, 1);
+    assert_eq!(damaged.damage.seconds, 0.0, "the priming took all of it");
     assert_eq!(damaged.samples.len(), clean.samples.len());
     let largest = largest_difference(
         &damaged.samples,
@@ -1188,18 +1205,219 @@ fn a_damaged_packet_in_the_priming_is_trimmed_with_it() {
     assert!(largest < 2e-3, "{largest}");
 }
 
-/// A file with more damaged packets than whole ones fails rather than
+/// A damaged run from the first packet, before any packet gave the
+/// stream's shape (symphonia's MP4 reader declares no channel count for
+/// AAC), is held until the first packet that decodes, then becomes
+/// silence of its length less the priming: packets 0 to 3 zeroed are
+/// three packets of silence after the 1 024 frames of priming, the decode
+/// keeps the clean length at the source rate and at 16 kHz, and the audio
+/// after it sits where the clean decode has it.
+#[test]
+fn a_damaged_run_from_the_first_packet_keeps_its_length() {
+    let directory = tempfile::tempdir().unwrap();
+    let clean_path = fixture("tone-440-44k1-500ms.m4a");
+    let clean = SymphoniaAudioCodec::read_channel(&clean_path, 0, AudioLane::Mixed).unwrap();
+    let path = with_zeroed_packets(directory.path(), 0..4);
+    let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
+    assert_eq!(damaged.damage.parts, 4);
+    let silent = 3 * PACKET;
+    assert!((damaged.damage.seconds - silent as f64 / 44_100.0).abs() < 1e-9);
+    assert_eq!(damaged.samples.len(), clean.samples.len());
+    assert!(damaged.samples[..silent].iter().all(|&s| s == 0.0));
+    let after = silent + PACKET..clean.samples.len();
+    let largest = largest_difference(&damaged.samples, &clean.samples, after.clone());
+    assert!(largest < 2e-3, "{after:?}: {largest}");
+    assert_eq!(
+        SymphoniaAudioCodec::decode_path(&path, 0, AudioLane::Mixed)
+            .unwrap()
+            .len(),
+        SymphoniaAudioCodec::decode_path(&clean_path, 0, AudioLane::Mixed)
+            .unwrap()
+            .len()
+    );
+}
+
+/// A corrupt first packet that reads as a channel pair in a mono file
+/// (`0x2F` leads with a channel pair element) costs that packet only:
+/// symphonia's AAC decoder fixes its channel layout at its first packet
+/// before checking it, and a reset keeps that layout, so every packet
+/// after it failed; the decoder after a damaged packet is a fresh one.
+#[test]
+fn a_first_packet_read_as_a_channel_pair_costs_only_itself() {
+    let directory = tempfile::tempdir().unwrap();
+    let clean =
+        SymphoniaAudioCodec::read_channel(&fixture("tone-440-44k1-500ms.m4a"), 0, AudioLane::Mixed)
+            .unwrap();
+    let path = damaged_copy(
+        directory.path(),
+        "tone-440-44k1-500ms.m4a",
+        |bytes, payloads| {
+            bytes[payloads[0].clone()].fill(0x2F);
+        },
+    );
+    let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
+    assert_eq!(damaged.damage.parts, 1);
+    assert_eq!(damaged.samples.len(), clean.samples.len());
+}
+
+/// A packet that makes symphonia's AAC decoder panic (an index out of
+/// bounds in its section data, reached from a fresh decoder) is a damaged
+/// packet too: the panic is caught, the packet becomes silence, the
+/// decoder is replaced, and the file decodes. In the stereo fixture,
+/// packet 21 with its bytes from 27 on set to `0xFF` fails, and packet 22,
+/// zeros but for a 4 at byte 6, then panics the fresh decoder. Packet 22
+/// is the last, whose container duration is 546 frames where its decode
+/// gives 1 024, so the decode is 478 frames shorter than the clean one.
+#[test]
+fn a_packet_that_panics_the_decoder_becomes_silence() {
+    thread_local! {
+        static PANICS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        PANICS.with(|count| count.set(count.get() + 1));
+        previous(panic);
+    }));
+    let directory = tempfile::tempdir().unwrap();
+    let name = "tone-440-1000-44k1-stereo-onset.m4a";
+    let clean = SymphoniaAudioCodec::read_channel(&fixture(name), 1, AudioLane::Mixed).unwrap();
+    let path = damaged_copy(directory.path(), name, |bytes, payloads| {
+        let (failing, panicking) = (payloads[21].clone(), payloads[22].clone());
+        bytes[failing.start + 27..failing.end].fill(0xFF);
+        bytes[panicking.clone()].fill(0);
+        bytes[panicking.start + 6] = 4;
+    });
+    let damaged = SymphoniaAudioCodec::read_channel(&path, 1, AudioLane::Mixed).unwrap();
+    assert_eq!(PANICS.with(std::cell::Cell::get), 1, "the decoder panicked");
+    assert_eq!(damaged.damage.parts, 2);
+    assert_eq!(damaged.samples.len(), clean.samples.len() - (PACKET - 546));
+    let at = |packet: usize| (packet - 1) * PACKET;
+    assert!(same_bits(
+        &damaged.samples[..at(21)],
+        &clean.samples[..at(21)]
+    ));
+    assert!(damaged.samples[at(21)..].iter().all(|&s| s == 0.0));
+}
+
+/// A stereo file's damaged packets are silence in both channels, of the
+/// packet's length in frames: packets 12, 13 and 18 of the stereo fixture
+/// zeroed, after both of its tones began. Each channel keeps its clean length, at the source rate, at
+/// 16 kHz and in the mixdown, the damaged packets are exact zeros,
+/// everything before them is the clean decode bit for bit, and the rest is
+/// within 5 * 10^-3 of it (the noise generator's drift, larger in the
+/// second channel's 1 kHz tone than in the mono fixture).
+#[tokio::test]
+async fn a_stereo_files_damaged_packets_are_silence_in_both_channels() {
+    let directory = tempfile::tempdir().unwrap();
+    let name = "tone-440-1000-44k1-stereo-onset.m4a";
+    let path = damaged_copy(directory.path(), name, |bytes, payloads| {
+        for packet in [12, 13, 18] {
+            bytes[payloads[packet].clone()].fill(0);
+        }
+    });
+    let at = |packet: usize| (packet - 1) * PACKET;
+    for channel in 0..2 {
+        let clean =
+            SymphoniaAudioCodec::read_channel(&fixture(name), channel, AudioLane::Mixed).unwrap();
+        let damaged = SymphoniaAudioCodec::read_channel(&path, channel, AudioLane::Mixed).unwrap();
+        assert_eq!(damaged.damage.parts, 3);
+        assert_eq!(damaged.samples.len(), clean.samples.len(), "{channel}");
+        let (a, b) = (&damaged.samples, &clean.samples);
+        assert!(same_bits(&a[..at(12)], &b[..at(12)]), "{channel}");
+        for silent in [at(12)..at(14), at(18)..at(19)] {
+            assert!(a[silent.clone()].iter().all(|&s| s == 0.0), "{silent:?}");
+            assert!(b[silent].iter().any(|&s| s.abs() > 0.1), "loud there");
+        }
+        for after in [at(15)..at(18), at(20)..a.len()] {
+            let largest = largest_difference(a, b, after.clone());
+            assert!(largest < 5e-3, "{channel} {after:?}: {largest}");
+        }
+        assert_eq!(
+            SymphoniaAudioCodec::decode_path(&path, channel, AudioLane::Mixed)
+                .unwrap()
+                .len(),
+            SymphoniaAudioCodec::decode_path(&fixture(name), channel, AudioLane::Mixed)
+                .unwrap()
+                .len()
+        );
+    }
+    let lengths: Vec<usize> = [fixture(name), path]
+        .iter()
+        .map(|source| {
+            let to = directory.path().join("audio.wav");
+            SymphoniaAudioCodec::mixdown_path(source, &to).unwrap();
+            WavFile::read_16k_mono(&to).unwrap().len()
+        })
+        .collect();
+    assert_eq!(lengths[0], lengths[1]);
+}
+
+/// The mono fixture with its media timescale doubled (88 200, twice the
+/// sample rate): the `mdhd` timescale and duration, every `stts` delta and
+/// the edit list's start, in place. A damaged packet's duration is then
+/// 2 048 ticks, still 1 024 frames.
+fn at_double_timescale(bytes: &mut [u8]) {
+    let word = |bytes: &[u8], at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+    let track = [b"moov", b"trak"];
+    let mdhd = box_offset(bytes, &[track.as_slice(), &[b"mdia", b"mdhd"]].concat());
+    let elst = box_offset(bytes, &[track.as_slice(), &[b"edts", b"elst"]].concat());
+    let stts = box_offset(
+        bytes,
+        &[track.as_slice(), &[b"mdia", b"minf", b"stbl", b"stts"]].concat(),
+    );
+    assert_eq!(
+        (bytes[mdhd + 8], bytes[elst + 8]),
+        (0, 0),
+        "version 0 boxes"
+    );
+    let entries = word(bytes, stts + 12) as usize;
+    let deltas = (0..entries).map(|entry| stts + 20 + 8 * entry);
+    for at in [mdhd + 20, mdhd + 24, elst + 20].into_iter().chain(deltas) {
+        let doubled = word(bytes, at) * 2;
+        bytes[at..at + 4].copy_from_slice(&doubled.to_be_bytes());
+    }
+}
+
+/// A damaged packet's length goes through the track's time base: in a
+/// file whose timescale is twice its rate, the clean decode is the
+/// original's bit for bit, and packets 9, 10 and 15 zeroed are 1 024
+/// frames of silence each, so the decode keeps the clean length.
+#[test]
+fn a_damaged_packets_length_goes_through_the_time_base() {
+    let directory = tempfile::tempdir().unwrap();
+    let name = "tone-440-44k1-500ms.m4a";
+    let clean = SymphoniaAudioCodec::read_channel(&fixture(name), 0, AudioLane::Mixed).unwrap();
+    let rescaled = damaged_copy(directory.path(), name, |bytes, _| {
+        at_double_timescale(bytes);
+    });
+    let rescaled = SymphoniaAudioCodec::read_channel(&rescaled, 0, AudioLane::Mixed).unwrap();
+    assert!(same_bits(&rescaled.samples, &clean.samples));
+    let path = damaged_copy(directory.path(), name, |bytes, payloads| {
+        at_double_timescale(bytes);
+        for packet in [9, 10, 15] {
+            bytes[payloads[packet].clone()].fill(0);
+        }
+    });
+    let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
+    assert_eq!(damaged.damage.parts, 3);
+    assert!((damaged.damage.seconds - 3.0 * PACKET as f64 / 44_100.0).abs() < 1e-9);
+    assert_eq!(damaged.samples.len(), clean.samples.len());
+    let at = |packet: usize| (packet - 1) * PACKET;
+    assert!(damaged.samples[at(9)..at(11)].iter().all(|&s| s == 0.0));
+}
+
+/// A file with more damaged packets than clean ones fails rather than
 /// decode to more silence than sound (`MAX_DAMAGED_SHARE`, a half): 11 of
 /// the 23 packets damaged decode, with the count; 12, and every one, fail,
 /// in the lane, at the source rate and in the mixdown, which leaves no
 /// file.
 #[tokio::test]
-async fn a_file_with_more_damaged_packets_than_whole_ones_fails() {
+async fn a_file_with_more_damaged_packets_than_clean_ones_fails() {
     assert_eq!(steno_audio::codec::MAX_DAMAGED_SHARE, 0.5);
     let directory = tempfile::tempdir().unwrap();
     let path = with_zeroed_packets(directory.path(), 1..12);
     let decoded = SymphoniaAudioCodec::decode_path(&path, 0, AudioLane::Mixed).unwrap();
-    assert_eq!(decoded.damaged_parts, 11);
+    assert_eq!(decoded.damage.parts, 11);
     for packets in [1..13, 0..23] {
         let path = with_zeroed_packets(directory.path(), packets.clone());
         for error in [

@@ -212,7 +212,10 @@ fn api_key(
 /// is logged, and the passes are built with the key last read or written
 /// through `secrets` ([`KeepsApiKey`]), or without one: a keyring locked
 /// again while the app runs keeps the key a rebuild had, and a key the user
-/// removed or changed is never the one kept.
+/// removed or changed is never the one kept. The decode stage records
+/// what of each recording it replaced by silence in `damaged_audio`, the
+/// support directory's [`DamagedAudio`], which the detail and the
+/// retention rule read.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,
@@ -220,6 +223,7 @@ pub fn pipeline_dependencies(
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
+    damaged_audio: &Arc<DamagedAudio>,
 ) -> Result<BuiltPipeline, BuildError> {
     let settings = store.settings()?;
     let api_key = api_key(secrets, runtime).unwrap_or_else(|warning| {
@@ -245,7 +249,8 @@ pub fn pipeline_dependencies(
         store.clone(),
         events.clone(),
     )
-    .with_speech_engine(speech_engine);
+    .with_speech_engine(speech_engine)
+    .with_damaged_audio(damaged_audio.clone());
     let dependencies = match passes {
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
         None => dependencies,
@@ -260,8 +265,7 @@ pub fn pipeline_dependencies(
 }
 
 /// [`pipeline_dependencies`] over clones of its inputs, for the reloads,
-/// every build recording the damaged parts of a recording in
-/// `damaged_audio`.
+/// every build sharing `damaged_audio`.
 fn make_dependencies(
     store: &Arc<Store>,
     engines: &Arc<SpeechEngines>,
@@ -281,11 +285,15 @@ fn make_dependencies(
         damaged_audio.clone(),
     );
     Arc::new(move || {
-        let built = pipeline_dependencies(&store, &engines, &secrets, &codex, &events, &runtime)?;
-        Ok(BuiltPipeline {
-            dependencies: built.dependencies.with_damaged_audio(damaged_audio.clone()),
-            ..built
-        })
+        pipeline_dependencies(
+            &store,
+            &engines,
+            &secrets,
+            &codex,
+            &events,
+            &runtime,
+            &damaged_audio,
+        )
     })
 }
 
@@ -490,11 +498,13 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         &paths,
     )));
     let speech = engines.setup();
+    // What the decoder replaced by silence per meeting, in the support
+    // directory, which the detail reads through `HostPipeline`; a deleted
+    // meeting's entry goes at launch.
+    let damaged_audio = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
+    damaged_audio.retain(|meeting_id| store.meeting(meeting_id).map_or(true, |m| m.is_some()));
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
-    // The decoder's count of damaged parts per meeting, in the support
-    // directory, which the detail reads through `HostPipeline`.
-    let damaged_audio = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
     let make = make_dependencies(
         &store,
         &engines,
@@ -2675,6 +2685,7 @@ mod tests {
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
+            &Arc::new(DamagedAudio::in_memory()),
         )
         .expect("the graph builds without the key");
         assert!(built.dependencies.cleaner.is_none());
@@ -2682,6 +2693,31 @@ mod tests {
             api_key(&secrets, &tokio::runtime::Handle::current()).unwrap_err(),
             "Could not read the LLM API key from the secret store: no default keychain"
         );
+    }
+
+    /// Every build of the app's pipeline, the first and each reload, records
+    /// the decoder's damage in the one store the app reads it from.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_build_records_damage_in_the_apps_store() {
+        let (dir, store) = temp_store();
+        let paths = StenoPaths::new(dir.path().join("support"));
+        let damaged = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
+        let make = make_dependencies(
+            &store,
+            &Arc::new(SpeechEngines::new(SpeechSetup::new(
+                &store.settings().unwrap(),
+                &paths,
+            ))),
+            &Arc::new(KeepsApiKey::new(Arc::new(BrokenSecrets))),
+            &codex_store(),
+            &MeetingEventBus::new(),
+            &tokio::runtime::Handle::current(),
+            &damaged,
+        );
+        for _build in 0..2 {
+            let built = make().unwrap();
+            assert!(Arc::ptr_eq(&built.dependencies.damaged_audio, &damaged));
+        }
     }
 
     /// The Authorization header one build of the pipeline sends: builds it
@@ -2700,6 +2736,7 @@ mod tests {
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
+            &Arc::new(DamagedAudio::in_memory()),
         )
         .unwrap();
         let cleaner = built.dependencies.cleaner.expect("an endpoint is set");

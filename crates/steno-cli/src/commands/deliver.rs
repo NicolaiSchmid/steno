@@ -98,15 +98,18 @@ impl Deliver {
             Box::new(move |_| targets.clone()),
             Box::new(Utc::now),
         ));
-        let pipeline = ProcessingPipeline::new(crate::wiring::dependencies(
-            store.clone(),
-            &settings,
-            None,
-            None,
-            Some(dispatcher),
-            None,
-            MeetingEventBus::new(),
-        )?);
+        let pipeline = ProcessingPipeline::new(
+            crate::wiring::dependencies(
+                store.clone(),
+                &settings,
+                None,
+                None,
+                Some(dispatcher),
+                None,
+                MeetingEventBus::new(),
+            )?
+            .with_damaged_audio(self.database.damaged_audio()?),
+        );
         pipeline
             .redeliver(self.meeting_id)
             .await

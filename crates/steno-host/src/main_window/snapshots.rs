@@ -431,7 +431,7 @@ pub fn detail_snapshot(
         state: state(meeting.state.kind()),
         failure_reason: meeting.state.failure_reason().map(str::to_owned),
         end_reason: meeting.end_reason.as_ref().and_then(end_reason_sentence),
-        audio_warning: damaged_audio_warning(detail.damaged_audio_parts, meeting.source),
+        audio_warning: damaged_audio_warning(detail.damaged_audio, meeting.source),
         tags: meeting.tags.clone(),
         tab: detail.tab,
         retention: DetailRetention {

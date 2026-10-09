@@ -32,12 +32,13 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use steno_core::{
-    AudioAsset, AudioBuffer16k, AudioDecoder, AudioLane, AudioRetention, CleanupInput, Delivery,
-    DeliveryDispatcher, DeliveryStatus, Diarizer, LanguageTag, LlmUsage, Meeting, MeetingEvent,
-    MeetingOperation, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer,
-    Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
-    SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
-    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid,
+    AudioAsset, AudioBuffer16k, AudioDamage, AudioDecoder, AudioLane, AudioRetention, CleanupInput,
+    Delivery, DeliveryDispatcher, DeliveryStatus, Diarizer, LanguageTag, LlmUsage, Meeting,
+    MeetingEvent, MeetingOperation, MeetingSource, MeetingState, MeetingStateKind,
+    MeetingSummarizer, Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout,
+    Settings, Speaker, SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError,
+    SummaryInput, SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment,
+    derived_uuid,
     paths::{file_url, file_url_path},
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
 };
@@ -465,9 +466,9 @@ pub struct PipelineDependencies {
     /// A fresh in-flight set from [`new`](Self::new); clones share theirs,
     /// and [`with_in_flight`](Self::with_in_flight) shares the caller's.
     pub in_flight: InFlight,
-    /// Where the decode stage records the parts of each meeting's
-    /// recording replaced by silence; in memory only from
-    /// [`new`](Self::new), the app's file with
+    /// Where the decode stage records what of each meeting's recording was
+    /// replaced by silence: in memory only from [`new`](Self::new), for the
+    /// tests; the app and the CLI attach the support directory's file with
     /// [`with_damaged_audio`](Self::with_damaged_audio).
     pub damaged_audio: Arc<DamagedAudio>,
     /// Called at each step of a run's sample clips, for the tests that end
@@ -555,8 +556,8 @@ impl PipelineDependencies {
         self
     }
 
-    /// Records the damaged parts in `damaged_audio`, which the host reads
-    /// for the meeting's detail, instead of in memory.
+    /// Records the damage in `damaged_audio`, which the host reads for the
+    /// meeting's detail, instead of in memory.
     #[must_use]
     pub fn with_damaged_audio(mut self, damaged_audio: Arc<DamagedAudio>) -> Self {
         self.damaged_audio = damaged_audio;
@@ -2140,9 +2141,11 @@ impl ProcessingPipeline {
     /// Per lane: decode, then transcribe with the previous lane's dominant
     /// language as the hint. Each buffer goes out of scope before the next
     /// lane is decoded, except the last, which is returned for `diarize`.
-    /// The parts of the recording the decoder replaced by silence are
-    /// recorded for the meeting's detail ([`DamagedAudio`]): the most any
-    /// lane counted, as every lane of a master reads the same packets.
+    /// What of the recording the decoder replaced by silence is recorded
+    /// for the meeting's detail and the retention rule ([`DamagedAudio`]):
+    /// the most any lane counted, as every lane of a master reads the same
+    /// packets. A record that cannot be written fails the stage, so the
+    /// meeting fails and keeps its recording rather than lose the mark.
     async fn decode_and_transcribe(
         &self,
         asset: &AudioAsset,
@@ -2153,7 +2156,7 @@ impl ProcessingPipeline {
         let mut lanes: BTreeMap<AudioLane, Vec<RawSegment>> = BTreeMap::new();
         let mut hint: Option<LanguageTag> = None;
         let mut last: Option<DecodedLane> = None;
-        let mut damaged_parts = 0;
+        let mut damage = AudioDamage::default();
         for (index, lane) in ordered_lanes(&asset.lanes).into_iter().enumerate() {
             // Release the previous lane before decoding the next.
             drop(last.take());
@@ -2168,7 +2171,7 @@ impl ProcessingPipeline {
             } else {
                 attributing(PipelineStage::Decode, decoder.decode(asset, lane).await)?
             };
-            damaged_parts = damaged_parts.max(buffer.damaged_parts);
+            damage = damage.max(buffer.damage);
             let lane_hint = hint.clone();
             let segments = self
                 .run(
@@ -2182,17 +2185,24 @@ impl ProcessingPipeline {
             lanes.insert(lane, segments);
             last = Some(DecodedLane { lane, buffer });
         }
-        if damaged_parts > 0 {
+        if !damage.is_none() {
             tracing::warn!(
                 meeting = %meeting_id,
-                damaged_parts,
+                parts = damage.parts,
+                seconds = damage.seconds,
                 "parts of the recording did not decode and were replaced by silence"
             );
         }
-        self.inner
-            .dependencies
-            .damaged_audio
-            .record(meeting_id, damaged_parts);
+        attributing(
+            PipelineStage::Decode,
+            self.inner
+                .dependencies
+                .damaged_audio
+                .record(meeting_id, damage)
+                .map_err(|error| {
+                    format!("the recording's damaged parts could not be noted: {error}")
+                }),
+        )?;
         let language = elect_language(lanes.values().flatten());
         Ok((Transcription { lanes, language }, last))
     }

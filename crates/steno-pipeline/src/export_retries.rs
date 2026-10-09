@@ -43,7 +43,7 @@ use crate::files::MeetingCounts;
 /// ```
 #[derive(Debug)]
 pub struct ExportRetries {
-    counts: MeetingCounts,
+    counts: MeetingCounts<u32>,
 }
 
 impl ExportRetries {
@@ -86,7 +86,7 @@ impl ExportRetries {
     /// every row.
     #[must_use]
     pub fn count(&self, meeting_id: Uuid) -> u32 {
-        self.counts.get(meeting_id)
+        self.counts.get(meeting_id).unwrap_or(0)
     }
 
     /// Whether the launch stopped retrying `meeting_id`'s failed export:
@@ -99,14 +99,16 @@ impl ExportRetries {
     /// Starts `meeting_id`'s count again from 0: the user caused a
     /// re-export, or a launch re-export delivered every row.
     pub fn reset(&self, meeting_id: Uuid) {
-        self.counts
+        // A failed write is logged; the count stays in memory.
+        let _ = self
+            .counts
             .change(|counts| counts.remove(&meeting_id).is_some());
     }
 
     /// One more launch re-export of `meeting_id`, counted before it runs so
     /// an exit mid-export counts too.
     pub(crate) fn attempted(&self, meeting_id: Uuid) {
-        self.counts.change(|counts| {
+        let _ = self.counts.change(|counts| {
             let count = counts.entry(meeting_id).or_insert(0);
             *count = count.saturating_add(1);
             true
@@ -116,7 +118,7 @@ impl ExportRetries {
     /// Keeps only the counts of the meetings `keep` accepts. The launch
     /// drops a meeting that delivered every row since, or that was deleted.
     pub(crate) fn retain(&self, mut keep: impl FnMut(Uuid) -> bool) {
-        self.counts.change(|counts| {
+        let _ = self.counts.change(|counts| {
             let before = counts.len();
             counts.retain(|meeting_id, _| keep(*meeting_id));
             counts.len() != before

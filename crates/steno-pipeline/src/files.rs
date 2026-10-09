@@ -4,7 +4,8 @@
 //! power loss (the phone intake), creating folders whose entries survive
 //! one (a new meeting folder among them), and reading and writing a JSON
 //! file this process owns, set aside when it does not parse
-//! (`preferences.json`, `export-retries.json`, `damaged-audio.json`). The
+//! (`preferences.json`, `export-retries.json`; `damaged-audio.json` is
+//! left in place instead, see [`DamagedAudio`](crate::DamagedAudio)). The
 //! services and the CLI use these too, so there is one implementation. On
 //! Windows a folder flush alone does not make a rename durable (the FAT
 //! driver treats a flush of a folder other than the drive's root as a
@@ -404,7 +405,7 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
 /// not parse is moved aside ([`set_aside`]) and logged before the default
 /// is used; a file that cannot be read for another reason, or that cannot
 /// be moved aside, is left alone, logged, and must never be written
-/// (`false`). `preferences.json` and the `MeetingCounts` files read
+/// (`false`). `preferences.json` and `export-retries.json` read
 /// through this.
 pub fn read_json<T: DeserializeOwned + Default>(path: &Path) -> (T, bool) {
     let bytes = match std::fs::read(path) {
@@ -454,25 +455,32 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> std::io::Res
     replace_file(path, &data, Access::Default)
 }
 
-/// A count per meeting in a JSON file this process owns (meeting id to
-/// count): [`ExportRetries`](crate::ExportRetries) and
-/// [`DamagedAudio`](crate::DamagedAudio). Read with [`read_json`], so a
-/// missing or corrupt file counts 0 for every meeting, and replaced with
-/// [`write_json`] on every change; a file that may not be written keeps the
-/// counts of this run in memory only.
+/// A value per meeting in a JSON file this process owns (meeting id to
+/// value): [`ExportRetries`](crate::ExportRetries)'s counts and
+/// [`DamagedAudio`](crate::DamagedAudio)'s damage, read with [`read_json`]
+/// or as the owner reads it, and replaced with [`write_json`] on every
+/// change; a file that may not be written keeps the values of this run in
+/// memory only.
 #[derive(Debug)]
-pub(crate) struct MeetingCounts {
+pub(crate) struct MeetingCounts<V> {
     path: PathBuf,
-    counts: Mutex<BTreeMap<Uuid, u32>>,
+    counts: Mutex<BTreeMap<Uuid, V>>,
     /// False for [`in_memory`](Self::in_memory), and when the file on disk
     /// could not be read or set aside.
     writable: bool,
 }
 
-impl MeetingCounts {
-    /// The counts in `path`, read now.
+impl<V: Serialize + DeserializeOwned + Clone> MeetingCounts<V> {
+    /// The values in `path`, read now with [`read_json`]: a missing or
+    /// corrupt file holds none.
     pub(crate) fn new(path: PathBuf) -> Self {
         let (counts, writable) = read_json(&path);
+        Self::read(path, counts, writable)
+    }
+
+    /// `counts`, as read from `path`, written there on a change when
+    /// `writable`.
+    pub(crate) fn read(path: PathBuf, counts: BTreeMap<Uuid, V>, writable: bool) -> Self {
         MeetingCounts {
             path,
             counts: Mutex::new(counts),
@@ -480,34 +488,34 @@ impl MeetingCounts {
         }
     }
 
-    /// Counts that live in memory only and are never written.
+    /// Values that live in memory only and are never written.
     pub(crate) fn in_memory() -> Self {
-        MeetingCounts {
-            path: PathBuf::new(),
-            counts: Mutex::default(),
-            writable: false,
-        }
+        Self::read(PathBuf::new(), BTreeMap::new(), false)
     }
 
-    /// `meeting_id`'s count, 0 when it has none.
-    pub(crate) fn get(&self, meeting_id: Uuid) -> u32 {
-        self.lock().get(&meeting_id).copied().unwrap_or(0)
+    /// `meeting_id`'s value, if it has one.
+    pub(crate) fn get(&self, meeting_id: Uuid) -> Option<V> {
+        self.lock().get(&meeting_id).cloned()
     }
 
-    /// Runs `change` over the counts and replaces the file when it says it
-    /// changed them, logging a failure: the counts of this run stay in
-    /// memory then.
-    pub(crate) fn change(&self, change: impl FnOnce(&mut BTreeMap<Uuid, u32>) -> bool) {
+    /// Runs `change` over the values and replaces the file when it says it
+    /// changed them. A failed write is logged and returned; the values of
+    /// this run stay in memory then, as they do when the file may not be
+    /// written, which is no error.
+    pub(crate) fn change(
+        &self,
+        change: impl FnOnce(&mut BTreeMap<Uuid, V>) -> bool,
+    ) -> std::io::Result<()> {
         let mut counts = self.lock();
         if !change(&mut counts) || !self.writable {
-            return;
+            return Ok(());
         }
-        if let Err(error) = write_json(&self.path, &*counts) {
+        write_json(&self.path, &*counts).inspect_err(|error| {
             tracing::warn!("{} could not be written: {error}", self.path.display());
-        }
+        })
     }
 
-    fn lock(&self) -> MutexGuard<'_, BTreeMap<Uuid, u32>> {
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<Uuid, V>> {
         self.counts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
