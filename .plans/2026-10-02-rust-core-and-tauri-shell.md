@@ -69,8 +69,9 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
      (`FluidInference/parakeet-tdt-0.6b-v3-coreml` on Hugging Face) at a pinned commit,
      or all of them from the mirror the speech settings name; in the app only Settings
      and onboarding start a download, never a pipeline run (the app's engines are built
-     in `SpeechEngines::new` behind gates, with the sidecar's `install_models` off and
-     the diarizer on `steno_diarize::Install::Never`), while the `steno` command's
+     in `SpeechEngines::new` behind gates, with the sidecar's `SidecarConfig::install`
+     and the diarizer both on `steno_speech::Install::Never`, which steno-diarize
+     re-exports), while the `steno` command's
      engines, which it builds for itself in `crates/steno-cli/src/wiring.rs`, may
      download on first use for a command a user runs;
    - the Tauri updater, which fetches `latest.json` and the signed bundle from the
@@ -702,13 +703,16 @@ still has to draw the window side. `[ ]` is not ported yet.
   The app's speech engines and diarizer sit behind gates
   (`crates/steno-services/src/model_gate.rs`) that refuse a call while their models are
   missing, and the speech sidecar's own install is off in them
-  (`SidecarConfig::install_models`). The refusal is `PipelineFailure::models_missing`
+  (`SidecarConfig::install` is `steno_speech::Install::Never`). The refusal is `PipelineFailure::models_missing`
   (`FailureKind::ModelsMissing`): the meeting stays `queued` with no failure reason on
   its row, the `ModelsMissing` event gives its progress entry the stage
   `modelsMissing` and the title "Download the speech models in Settings", and a
-  download from Settings resumes the meetings runs left waiting since the last resume
-  (`ResumingSpeechModels`, `ModelWaits`, `resume_waiting`), never one a pipeline a
-  reload retired still runs; a run refused while such a resume ran goes again. Any
+  download from Settings or onboarding resumes the meetings runs left waiting since
+  the last resume (`ResumingSpeechModels`, `ModelWaits`, `resume_waiting`), never one a
+  pipeline a reload retired still runs; a run refused while such a resume ran goes
+  again. Every pipeline reload resumes them too, so models the `steno` command
+  installed are picked up at the next settings change or launch. A resume the store
+  refuses (busy) is logged, not retried. Any
   stored engine id other than `parakeet-v3` (Whisper, Ultra and DE from the Swift app)
   becomes `parakeet-v3` at launch (`Store::retire_speech_engine`), with a one-time
   notice in the setup banner's place whose pending flag is `steno.speechEngineNotice`
