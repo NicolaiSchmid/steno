@@ -9,7 +9,11 @@
 # crop per window and per panel (`magick` from ImageMagick 7, `convert`
 # from 6); the windows carry what the host's database holds (nothing on
 # a fresh runner). Xvfb has no compositor, so the panels' transparent
-# corners render black there.
+# corners render black there. After the run it checks the app's log and
+# the stop timeout drop-ins (stop_timeout.rs): the shutdown's duration at
+# warn, GNOME's scope drop-in in ~/.config/systemd/user, the autostart
+# unit's when the autostart entry is there, and a reload asked for after
+# a drop-in was written.
 #
 # Then two runs with the login item the system's (STENO_LOGIN_ITEM=managed,
 # packaged.rs), each in a throwaway HOME holding an autostart entry an
@@ -50,15 +54,23 @@ export WEBKIT_DISABLE_DMABUF_RENDERER=1
 export WEBKIT_DISABLE_COMPOSITING_MODE=1
 export LIBGL_ALWAYS_SOFTWARE=1
 export GDK_BACKEND=x11
+# The default filter, and the drop-ins' changes and reload.
+export RUST_LOG=warn,steno_desktop::stop_timeout=debug
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+log="$scratch/log"
 
 # 1120x720 main at the origin, Settings to its right, onboarding below.
 # STENO_SMOKE_DPI sets the X resolution (Xvfb's own default otherwise);
 # WebKitGTK's devicePixelRatio follows it, so 120 checks the panels at a
 # ratio of 1.25.
 server_args="-screen 0 2200x1500x24${STENO_SMOKE_DPI:+ -dpi $STENO_SMOKE_DPI}"
+status=0
 xvfb-run --auto-servernum --server-args="$server_args" bash -c '
   set -u
-  "$1" & app=$!
+  # The log goes to $4 for the checks below, and to stderr as it comes.
+  "$1" 2>"$4" & app=$!
+  tail -f --pid="$app" "$4" >&2 &
   if command -v import >/dev/null; then
     sleep "$(( $2 > 3 ? $2 - 3 : 1 ))"
     import -window root "$3/smoke-root.png" && echo "smoke: captured $3/smoke-root.png"
@@ -80,13 +92,28 @@ xvfb-run --auto-servernum --server-args="$server_args" bash -c '
       echo "smoke: cropped main, settings, onboarding, prompt and bubble with $crop"
     fi
   fi
-  wait "$app"
-' _ "$binary" "$seconds" "$screens"
+  wait "$app"; status=$?
+  wait
+  exit "$status"
+' _ "$binary" "$seconds" "$screens" "$log" || status=$?
+(( status == 0 )) || exit "$status"
 
 fail() { echo "smoke: $*" >&2; exit 1; }
+grep -qE 'WARN.*the shutdown ended' "$log" || fail "no warn line with the shutdown's duration"
+units="$HOME/.config/systemd/user"
+[[ -f "$units/app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf" ]] \
+  || fail "no stop timeout drop-in for GNOME's scope under $units"
+if [[ -f "$HOME/.config/autostart/steno-desktop.desktop" ]]; then
+  [[ -f "$units/app-steno\x2ddesktop@autostart.service.d/10-steno.conf" ]] \
+    || fail "the autostart entry is there without its stop timeout drop-in"
+fi
+if grep -qE 'drop-in changed.*on.*true' "$log"; then
+  grep -qE 'the systemd user manager (reloaded|did not reload)' "$log" \
+    || fail "a drop-in was written and no reload asked for"
+fi
+echo "smoke: the shutdown's duration logged at warn, the stop timeout drop-ins in place"
+
 entry() { echo "$1/.config/autostart/steno-desktop.desktop"; }
-scratch="$(mktemp -d)"
-trap 'rm -rf "$scratch"' EXIT
 
 # Runs "$@" in a cgroup named after the autostart unit, below a delegated
 # scope of the user manager's.
