@@ -188,8 +188,8 @@ pub enum ReprocessError {
         state: MeetingStateKind,
     },
     /// A run left the meeting `queued` for missing models, and it waits
-    /// for them ([`ModelWaits`]), not for a run: an install, the next
-    /// reload or the next launch starts it. The caller says what
+    /// for them ([`ModelWaits`]), not for a run: an install, a reload that
+    /// finds them installed or the next launch starts it. The caller says what
     /// [`PipelineFailure::MODELS_MISSING`] says.
     #[error("meeting {0} waits for its speech models")]
     WaitingForModels(Uuid),
@@ -1269,10 +1269,10 @@ impl ProcessingPipeline {
     /// once a model install finished, while other meetings may still run
     /// on a pipeline a reload retired. A waiting meeting another operation
     /// holds (a summary rerun, a re-export, or the brief claim of a
-    /// "Process again" from a stale detail, which then refuses it as
-    /// [`ReprocessError::WaitingForModels`]) stays waiting until the next
-    /// resume, a reload's or the launch's, and so do all of them when the
-    /// store fails.
+    /// "Process again" from a stale detail, which then refuses it) stays
+    /// waiting until the next resume (another install's, a reload's that
+    /// finds the models installed, or the launch's), and so do all of them
+    /// when the store fails.
     pub fn resume_waiting(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
@@ -3220,47 +3220,91 @@ mod tests {
         }
     }
 
+    /// A decoder for a test that never needs one: the run a wrongly
+    /// accepted "Process again" (or a resume) spawns fails at `decode`.
+    struct NoDecoder;
+
+    #[steno_core::async_trait]
+    impl AudioDecoder for NoDecoder {
+        async fn decode(
+            &self,
+            _asset: &AudioAsset,
+            _lane: AudioLane,
+        ) -> steno_core::protocols::BoundaryResult<AudioBuffer16k> {
+            Err("no decoder in this test".into())
+        }
+
+        fn mixdown_format(&self) -> steno_core::AudioFormat {
+            steno_core::AudioFormat::Wav16kInt16
+        }
+
+        async fn mixdown(
+            &self,
+            _asset: &AudioAsset,
+            _to: &Path,
+        ) -> steno_core::protocols::BoundaryResult<()> {
+            Err("no decoder in this test".into())
+        }
+    }
+
+    struct NoDispatcher;
+
+    #[steno_core::async_trait]
+    impl DeliveryDispatcher for NoDispatcher {
+        async fn deliver_all(&self, _meeting_id: Uuid) -> Vec<Delivery> {
+            Vec::new()
+        }
+    }
+
+    fn pipeline_over(store: &Arc<Store>) -> ProcessingPipeline {
+        ProcessingPipeline::new(PipelineDependencies::new(
+            Arc::new(NoDecoder),
+            Arc::new(steno_core::testing::FakeSpeechEngine::default()),
+            Arc::new(steno_core::testing::FakeDiarizer::default()),
+            Arc::new(steno_core::testing::InMemorySpeakerMemory::new(Vec::new())),
+            Arc::new(NoDispatcher),
+            store.clone(),
+            MeetingEventBus::new(),
+        ))
+    }
+
+    /// A waiting meeting whose asset another operation has claimed when an
+    /// install's resume runs (the brief claim of a "Process again" from a
+    /// stale detail) is put back, not dropped: it still waits, and the
+    /// next resume starts it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waiting_meeting_whose_asset_is_claimed_waits_for_the_next_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.id = Uuid::new_v4();
+        meeting.state = MeetingState::Queued;
+        let asset = crate::fixtures::two_lane_call(
+            &dir.path().join("audio"),
+            meeting.id,
+            AudioRetention::KeepForever,
+        )
+        .unwrap();
+        store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        let pipeline = pipeline_over(&store);
+        let waits = pipeline.dependencies().model_waits.clone();
+        waits.put_back([meeting.id]);
+
+        let claim = pipeline.claim_start(meeting.id, asset.id).unwrap();
+        assert_eq!(pipeline.resume_waiting().unwrap(), Vec::<Uuid>::new());
+        assert_eq!(waits.waiting(), [meeting.id]);
+        drop(claim);
+
+        assert_eq!(pipeline.resume_waiting().unwrap(), [meeting.id]);
+        assert_eq!(waits.waiting(), Vec::<Uuid>::new());
+        pipeline.wait_until_idle().await;
+    }
+
     /// `process_again` against a run that ends while it waits for its
     /// claim. Linux only: the test sees the caller park through `/proc`.
     #[cfg(target_os = "linux")]
     mod process_again_under_the_claim {
         use super::*;
-
-        /// A decoder for a test that never needs one: the run a wrongly
-        /// accepted "Process again" spawns fails at `decode`.
-        struct NoDecoder;
-
-        #[steno_core::async_trait]
-        impl AudioDecoder for NoDecoder {
-            async fn decode(
-                &self,
-                _asset: &AudioAsset,
-                _lane: AudioLane,
-            ) -> steno_core::protocols::BoundaryResult<AudioBuffer16k> {
-                Err("no decoder in this test".into())
-            }
-
-            fn mixdown_format(&self) -> steno_core::AudioFormat {
-                steno_core::AudioFormat::Wav16kInt16
-            }
-
-            async fn mixdown(
-                &self,
-                _asset: &AudioAsset,
-                _to: &Path,
-            ) -> steno_core::protocols::BoundaryResult<()> {
-                Err("no decoder in this test".into())
-            }
-        }
-
-        struct NoDispatcher;
-
-        #[steno_core::async_trait]
-        impl DeliveryDispatcher for NoDispatcher {
-            async fn deliver_all(&self, _meeting_id: Uuid) -> Vec<Delivery> {
-                Vec::new()
-            }
-        }
 
         /// Waits until the thread at `/proc/<task>` sleeps in `futex` (202
         /// on `x86_64`, 98 on `aarch64`) twice 50 ms apart: parked on a
@@ -3312,15 +3356,7 @@ mod tests {
             )
             .unwrap();
             store.save_meeting_with_asset(&meeting, &asset).unwrap();
-            let pipeline = ProcessingPipeline::new(PipelineDependencies::new(
-                Arc::new(NoDecoder),
-                Arc::new(steno_core::testing::FakeSpeechEngine::default()),
-                Arc::new(steno_core::testing::FakeDiarizer::default()),
-                Arc::new(steno_core::testing::InMemorySpeakerMemory::new(Vec::new())),
-                Arc::new(NoDispatcher),
-                store.clone(),
-                MeetingEventBus::new(),
-            ));
+            let pipeline = pipeline_over(&store);
 
             let held = pipeline.in_flight_set();
             let (tid_sender, tid) = std::sync::mpsc::channel();

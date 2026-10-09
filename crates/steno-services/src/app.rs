@@ -1556,6 +1556,60 @@ mod tests {
         assert_eq!(app.recorder.status().warning, None);
     }
 
+    /// The app's resumes ask the app's gates: a meeting a run left waiting
+    /// for models stays waiting through a reload while they are missing,
+    /// no run started, and the first reload once every model the gates
+    /// check is on disk (the `steno` command's install) starts it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_resumes_the_waiting_meetings_once_the_apps_gates_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        std::fs::create_dir_all(&support).unwrap();
+        // The sidecar on every platform; a closed port, should anything
+        // fetch.
+        std::fs::write(
+            support.join("speech.json"),
+            r#"{"onnxSidecarOnMac":true,"modelsMirror":"http://127.0.0.1:9"}"#,
+        )
+        .unwrap();
+        let app = build(options_under(&support)).unwrap();
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.id = uuid::Uuid::new_v4();
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            &dir.path().join("audio"),
+            meeting.id,
+            steno_core::AudioRetention::KeepForever,
+        )
+        .unwrap();
+        app.pipeline.current().enqueue(&meeting, &asset).unwrap();
+        app.pipeline.current().wait_until_idle().await;
+        let waiting = || app.pipeline.current().dependencies().model_waits.waiting();
+        assert_eq!(waiting(), [meeting.id]);
+        let mut events = app.events.subscribe();
+        let decodes = |events: &mut steno_pipeline::EventReceiver| {
+            std::iter::from_fn(|| events.try_recv().ok())
+                .filter(|event| {
+                    matches!(event, steno_core::MeetingEvent::Progress { progress, .. }
+                        if progress.stage == steno_core::PipelineStage::Decode)
+                })
+                .count()
+        };
+
+        app.pipeline.reload().unwrap();
+        app.pipeline.current().wait_until_idle().await;
+        assert_eq!(decodes(&mut events), 0, "no run started");
+        assert_eq!(waiting(), [meeting.id]);
+
+        crate::speech::testing::install_every_model(&crate::speech::testing::models_in(
+            &app.models_directory,
+        ));
+        app.pipeline.reload().unwrap();
+        assert_eq!(waiting(), Vec::<uuid::Uuid>::new());
+        assert!(decodes(&mut events) > 0, "the meeting started");
+        app.pipeline.quit();
+        app.pipeline.current().wait_until_idle().await;
+    }
+
     /// A stored engine the Rust app does not run (the Swift app's Whisper)
     /// is Parakeet v3 once the app is built, with the notice's pending flag
     /// in `preferences.json`, which the main window then shows.
