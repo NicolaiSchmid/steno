@@ -1639,6 +1639,26 @@ mod tests {
         assert_eq!(parakeet_size_text(&models), fp32_size_text());
     }
 
+    /// A row this version does not offer (a Swift app's model) is refused
+    /// by Download and Remove alike, with the one wording, and nothing is
+    /// fetched or touched.
+    #[test]
+    fn download_and_remove_refuse_a_retired_row_with_the_same_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = testing::models_in(dir.path());
+        for asset in [
+            ModelAsset::ParakeetUltra,
+            ModelAsset::ParakeetDe,
+            ModelAsset::WhisperLargeV3Turbo,
+        ] {
+            let download = models.download(asset, &mut |_, _| {}).unwrap_err();
+            let remove = models.remove(asset).unwrap_err();
+            let words = format!("{} is not part of this version", asset.as_str());
+            assert_eq!(download.to_string(), words);
+            assert_eq!(remove.to_string(), words);
+        }
+    }
+
     /// The Parakeet v3 row of Settings > Transcription before a download,
     /// "Not downloaded" and the size `models` expects.
     fn parakeet_size_text(models: &ModelStoreSpeechModels) -> String {

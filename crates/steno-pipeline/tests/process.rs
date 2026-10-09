@@ -4811,6 +4811,42 @@ async fn an_install_during_the_refusing_run_still_processes_the_meeting() {
     );
 }
 
+/// A refused run that must start its meeting again, with the newest
+/// pipeline built over its dependencies already gone: the run starts it
+/// on its own pipeline instead, so the meeting is still processed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_run_whose_newest_pipeline_is_gone_starts_its_meeting_again_itself() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let diarizer = Arc::new(HeldRefusingDiarizer {
+        installed: false.into(),
+        entered: tokio::sync::Notify::new(),
+        open: tokio::sync::Notify::new(),
+        inner: FakeDiarizer::default(),
+    });
+    let mut dependencies = with_engine(&world, Arc::new(FakeSpeechEngine::default()));
+    dependencies.diarizer = diarizer.clone();
+    let pipeline = ProcessingPipeline::new(dependencies);
+    drop(ProcessingPipeline::new(pipeline.dependencies().clone()));
+    let meeting = enqueue_call(&world, &pipeline);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        diarizer.entered.notified(),
+    )
+    .await
+    .unwrap();
+    diarizer
+        .installed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        pipeline.resume_waiting().unwrap(),
+        Vec::<Uuid>::new(),
+        "the meeting is in flight"
+    );
+    diarizer.open.notify_one();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+}
+
 /// Only a meeting a run left waiting is resumed by `resume_waiting`, once:
 /// a queued meeting no run refused stays for `resume_unfinished`, and a
 /// second resume finds nothing.

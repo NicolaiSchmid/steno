@@ -1,8 +1,8 @@
-//! A resume that lands while a refused run lets go of its meeting, and a
-//! refused run's restart. Their own test binary: the gates are log lines,
-//! seen by the binary's global subscriber (the first test, on a
-//! current-thread runtime) or by one its runtime's worker threads alone
-//! use (the second), which no other test shares.
+//! A resume that lands while a refused run lets go of its meeting, a
+//! refused run's restart, and the restart an exit stops. Their own test
+//! binary: the gates are log lines, seen by the binary's global subscriber
+//! (the first test, on a current-thread runtime) or by one its runtime's
+//! worker threads alone use (the others), which no other test shares.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,8 +13,8 @@ use steno_core::protocols::BoundaryResult;
 use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory, sample_data};
 use steno_core::{
     AudioAsset, AudioBuffer16k, AudioFormat, AudioLane, AudioRetention, Delivery,
-    DeliveryDispatcher, LanguageTag, MeetingState, PipelineStage, RawSegment, SpeechEngine, Store,
-    async_trait,
+    DeliveryDispatcher, LanguageTag, MeetingEvent, MeetingState, PipelineStage, RawSegment,
+    SpeechEngine, Store, async_trait,
 };
 use steno_pipeline::{
     BACKGROUND_RUN_LOG, MeetingEventBus, PipelineDependencies, PipelineFailure, ProcessingPipeline,
@@ -319,6 +319,83 @@ fn wait_until_idle_waits_for_a_refused_run_to_start_its_meeting_again() {
         assert_eq!(
             store.meeting(meeting_id).unwrap().unwrap().state,
             MeetingState::Ready
+        );
+        assert_eq!(
+            pipeline.dependencies().model_waits.waiting(),
+            Vec::<Uuid>::new()
+        );
+    });
+}
+
+/// The app quits after a refused run decided its meeting waits and while
+/// an install's resume had skipped it (it was in flight): the run neither
+/// starts the meeting again nor posts its progress, and the meeting stays
+/// `queued`, recorded nowhere, for the next launch's recovery. The gate is
+/// the run's "waits for the models" line, logged between the refusal and
+/// the restart, on a worker thread this test's runtime alone uses.
+#[test]
+fn a_refused_run_the_exit_overtakes_does_not_start_its_meeting_again() {
+    let quitting = Arc::new(std::sync::Mutex::new(None::<ProcessingPipeline>));
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .with_max_level(tracing::Level::INFO)
+            .finish()
+            .with(OnMessage({
+                let quitting = quitting.clone();
+                move |message: &str| {
+                    if message.contains("processing waits for the models")
+                        && let Some(pipeline) = quitting.lock().unwrap().take()
+                    {
+                        pipeline.quit();
+                    }
+                }
+            })),
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .on_thread_start(move || std::mem::forget(tracing::dispatcher::set_default(&dispatch)))
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(HeldRefusal::default());
+        let (store, audio, pipeline) = pipeline_over(dir.path(), engine.clone());
+        *quitting.lock().unwrap() = Some(pipeline.clone());
+        let meeting_id = enqueue_call(&audio, &pipeline);
+        tokio::time::timeout(PATIENCE, engine.entered.notified())
+            .await
+            .expect("the run is transcribing");
+        assert_eq!(
+            pipeline.resume_waiting().unwrap(),
+            Vec::<Uuid>::new(),
+            "the meeting is in flight"
+        );
+        let mut events = pipeline.dependencies().events.subscribe();
+        engine.open.notify_one();
+        tokio::time::timeout(PATIENCE, pipeline.wait_until_idle())
+            .await
+            .expect("every run is done");
+        assert!(quitting.lock().unwrap().is_none(), "the gate was reached");
+        let mut posted = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            posted.push(event);
+        }
+        assert!(
+            posted.contains(&MeetingEvent::ModelsMissing { meeting_id }),
+            "{posted:?}"
+        );
+        assert!(
+            !posted.iter().any(|event| matches!(
+                event,
+                MeetingEvent::Progress { progress, .. } if progress.stage == PipelineStage::Decode
+            )),
+            "the exit posted the meeting's progress again: {posted:?}"
+        );
+        assert_eq!(
+            store.meeting(meeting_id).unwrap().unwrap().state,
+            MeetingState::Queued
         );
         assert_eq!(
             pipeline.dependencies().model_waits.waiting(),
