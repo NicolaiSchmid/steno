@@ -722,19 +722,28 @@ fn orphan_master(layout: &RecordingLayout) -> Option<(AudioFormat, PathBuf, Syst
     })
 }
 
-/// Whether `folder` provably holds no master of meeting `meeting_id`: the
-/// folder is there, and each master is missing or empty. A folder or a
-/// master that cannot be read now (an unmounted volume, a permission) may
-/// still hold one.
+/// Whether audio folder `folder` provably holds no master of meeting
+/// `meeting_id`: its meeting folder is there and each master in it is
+/// missing or empty, or the meeting folder is missing while `folder` lists
+/// at least one entry. An empty audio folder (a volume's mount point while
+/// it is not mounted), a folder or a master that cannot be read now (a
+/// permission, an I/O error) may still hold one.
 fn holds_no_master(folder: &Path, meeting_id: Uuid) -> bool {
     let layout = RecordingLayout::new(folder, meeting_id);
-    folder.try_exists().is_ok_and(|exists| exists)
-        && AudioFormat::ALL
-            .iter()
-            .all(|&format| match std::fs::metadata(layout.master(format)) {
-                Ok(metadata) => metadata.is_file() && metadata.len() == 0,
-                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-            })
+    match std::fs::metadata(&layout.directory) {
+        Ok(metadata) if metadata.is_dir() => {
+            AudioFormat::ALL
+                .iter()
+                .all(|&format| match std::fs::metadata(layout.master(format)) {
+                    Ok(metadata) => metadata.is_file() && metadata.len() == 0,
+                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::read_dir(folder).is_ok_and(|mut entries| entries.any(|entry| entry.is_ok()))
+        }
+        _ => false,
+    }
 }
 
 /// The meeting folders in `folders` that hold a master, whose id no row
@@ -1459,19 +1468,24 @@ mod tests {
 
     /// A launch with no row left `recording` still forgets the entries of
     /// meetings that moved on: the reconcile one failed since, and the
-    /// adoption one with no row whose folder holds no master (a recording
-    /// that never wrote one). The reconcile keeps that one for the
-    /// adoption, since its master could have been there.
+    /// adoption each one with no row whose folder provably holds no master
+    /// (a recording that never wrote one): a meeting folder with no
+    /// master, and a meeting folder missing from an audio folder that
+    /// lists others. The reconcile keeps those for the adoption, since a
+    /// master could have been there.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_launch_with_no_row_left_recording_forgets_the_settled_entries() {
         let harness = Harness::new();
         let failed = harness.begin(MeetingSource::MacCall);
         harness.record(&failed, &harness.audio_folder());
         harness.intake().fail(failed.id, "refused").unwrap();
-        let gone = Uuid::new_v4();
-        std::fs::create_dir_all(harness.audio_folder()).unwrap();
-        crate::audio_folders::record(&harness.support_directory(), gone, &harness.audio_folder())
+        let (empty, missing) = (Uuid::new_v4(), Uuid::new_v4());
+        std::fs::create_dir_all(RecordingLayout::new(&harness.audio_folder(), empty).directory)
             .unwrap();
+        for id in [empty, missing] {
+            crate::audio_folders::record(&harness.support_directory(), id, &harness.audio_folder())
+                .unwrap();
+        }
 
         assert_eq!(
             harness.reconcile(&[], &an_hour_later()),
@@ -1479,7 +1493,10 @@ mod tests {
         );
         assert_eq!(
             crate::audio_folders::recorded(&harness.support_directory()).unwrap(),
-            BTreeMap::from([(gone, harness.audio_folder())])
+            BTreeMap::from([
+                (empty, harness.audio_folder()),
+                (missing, harness.audio_folder())
+            ])
         );
         assert_eq!(
             reconcile_at_launch(&harness, &[], &an_hour_later()),
