@@ -4496,6 +4496,12 @@ impl Uninstalled {
         })
     }
 
+    /// The models are installed from now on.
+    fn install(&self) {
+        self.installed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn check(
         &self,
         at: Refusal,
@@ -4592,8 +4598,7 @@ async fn a_run_refused_for_missing_models_stays_queued_and_resumes_once_they_are
         );
         assert!(pipeline.in_flight().is_empty(), "{refusal:?}");
 
-        gate.installed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        gate.install();
         assert_eq!(pipeline.resume_unfinished().unwrap(), [meeting]);
         pipeline.wait_until_idle().await;
         assert_eq!(
@@ -4628,6 +4633,7 @@ async fn process_returns_the_models_missing_refusal() {
 
 /// A diarizer whose gate decided "missing" and is held before it returns
 /// the refusal, so a test can finish the install and resume in between.
+#[derive(Default)]
 struct HeldRefusingDiarizer {
     installed: std::sync::atomic::AtomicBool,
     entered: tokio::sync::Notify,
@@ -4698,8 +4704,7 @@ async fn a_resumed_meeting_posts_progress_before_the_engines_load() {
     let meeting = enqueue_refused_call(&world, &pipeline).await;
 
     let mut events = world.events.subscribe();
-    gate.installed
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    gate.install();
     diarizer
         .hold
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -4750,9 +4755,7 @@ async fn a_resume_with_one_of_two_models_installed_waits_again() {
     };
     assert_eq!(missing(&drain(&mut events)), 1);
 
-    speech
-        .installed
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    speech.install();
     assert_eq!(pipeline.resume_waiting().unwrap(), [meeting]);
     pipeline.wait_until_idle().await;
     let row = world.store.meeting(meeting).unwrap().unwrap();
@@ -4761,9 +4764,7 @@ async fn a_resume_with_one_of_two_models_installed_waits_again() {
     assert_eq!(missing(&drain(&mut events)), 1, "one more refusal");
     assert_eq!(waits.waiting(), [meeting]);
 
-    diarization
-        .installed
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    diarization.install();
     assert_eq!(pipeline.resume_waiting().unwrap(), [meeting]);
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
@@ -4776,12 +4777,7 @@ async fn a_resume_with_one_of_two_models_installed_waits_again() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_install_during_the_refusing_run_still_processes_the_meeting() {
     let world = world(false, None, AudioRetention::KeepForever);
-    let diarizer = Arc::new(HeldRefusingDiarizer {
-        installed: false.into(),
-        entered: tokio::sync::Notify::new(),
-        open: tokio::sync::Notify::new(),
-        inner: FakeDiarizer::default(),
-    });
+    let diarizer = Arc::new(HeldRefusingDiarizer::default());
     let mut dependencies = with_engine(&world, Arc::new(FakeSpeechEngine::default()));
     dependencies.diarizer = diarizer.clone();
     let waits = dependencies.model_waits.clone();
@@ -4814,12 +4810,7 @@ async fn an_install_during_the_refusing_run_still_processes_the_meeting() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_run_whose_newest_pipeline_is_gone_starts_its_meeting_again_itself() {
     let world = world(false, None, AudioRetention::KeepForever);
-    let diarizer = Arc::new(HeldRefusingDiarizer {
-        installed: false.into(),
-        entered: tokio::sync::Notify::new(),
-        open: tokio::sync::Notify::new(),
-        inner: FakeDiarizer::default(),
-    });
+    let diarizer = Arc::new(HeldRefusingDiarizer::default());
     let mut dependencies = with_engine(&world, Arc::new(FakeSpeechEngine::default()));
     dependencies.diarizer = diarizer.clone();
     let pipeline = ProcessingPipeline::new(dependencies);
@@ -4859,8 +4850,7 @@ async fn resume_waiting_starts_only_the_meetings_runs_left_waiting() {
         .save_meeting_with_asset(&untouched, &asset)
         .unwrap();
 
-    gate.installed
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    gate.install();
     assert_eq!(pipeline.resume_waiting().unwrap(), [refused]);
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, refused), MeetingState::Ready);
@@ -4895,8 +4885,7 @@ async fn process_again_on_a_meeting_waiting_for_models_leaves_it_waiting() {
     assert_eq!(pipeline.dependencies().model_waits.waiting(), [refused]);
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
 
-    gate.installed
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    gate.install();
     assert_eq!(pipeline.resume_waiting().unwrap(), [refused]);
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, refused), MeetingState::Ready);
@@ -4940,8 +4929,7 @@ async fn process_again_with_models_missing_parks_the_failed_meeting_with_its_aud
         assert!(file_url_path(lane).unwrap().exists());
     }
 
-    gate.installed
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    gate.install();
     let mut resumed = pipeline.resume_waiting().unwrap();
     resumed.sort();
     assert_eq!(resumed, both);

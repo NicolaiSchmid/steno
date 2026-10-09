@@ -1519,7 +1519,7 @@ mod tests {
         current.reload().unwrap();
         let waiting = enqueue_call(dir.path(), &retired);
         eventually("the refused run left the meeting waiting", || {
-            current.current().dependencies().model_waits.waiting() == vec![waiting]
+            current.model_waits.waiting() == vec![waiting]
         })
         .await;
         assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
@@ -1566,10 +1566,7 @@ mod tests {
         current.reload().unwrap();
         current.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
-        assert_eq!(
-            current.current().dependencies().model_waits.waiting(),
-            Vec::<Uuid>::new()
-        );
+        assert_eq!(current.model_waits.waiting(), Vec::<Uuid>::new());
     }
 
     /// A settings save while the models are still missing leaves the
@@ -1613,10 +1610,7 @@ mod tests {
         }
         assert_eq!(progress, Vec::<PipelineStage>::new(), "no run started");
         assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
-        assert_eq!(
-            current.current().dependencies().model_waits.waiting(),
-            [waiting]
-        );
+        assert_eq!(current.model_waits.waiting(), [waiting]);
     }
 
     /// A meeting a run left waiting for models is not "already being
@@ -1641,15 +1635,7 @@ mod tests {
         );
         service.pipeline.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
-        assert_eq!(
-            service
-                .pipeline
-                .current()
-                .dependencies()
-                .model_waits
-                .waiting(),
-            [waiting]
-        );
+        assert_eq!(service.pipeline.model_waits.waiting(), [waiting]);
 
         installed.store(true, Ordering::SeqCst);
         service.pipeline.resume_waiting();
@@ -1846,10 +1832,7 @@ mod tests {
         let master = steno_core::paths::file_url_path(&audio.url).unwrap();
         let stored = store.meeting(meeting.id).unwrap().unwrap();
         assert_eq!(stored.state, MeetingState::Queued, "{removed:?}");
-        assert_eq!(
-            current.current().dependencies().model_waits.waiting(),
-            vec![meeting.id]
-        );
+        assert_eq!(current.model_waits.waiting(), vec![meeting.id]);
         assert_eq!(store.asset(meeting.id).unwrap().unwrap().expires_at, None);
         let swept = steno_pipeline::RetentionSweep::new(store.clone())
             .run(Utc::now() + chrono::Duration::days(365))
@@ -1995,10 +1978,7 @@ mod tests {
             meeting_state(&store, meeting) == MeetingState::Ready
         })
         .await;
-        assert_eq!(
-            current.current().dependencies().model_waits.waiting(),
-            Vec::<Uuid>::new()
-        );
+        assert_eq!(current.model_waits.waiting(), Vec::<Uuid>::new());
     }
 
     /// An install's resume starts only the meetings a run left waiting for
