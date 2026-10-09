@@ -802,9 +802,21 @@ impl CaptureBackend for LiveCaptureBackend {
     /// The IOProc runs on the aggregate's clock, silence included: in call
     /// mode from the start, its silent output driving the tap (A10; see the
     /// module doc). A call capture whose silent output did not start runs
-    /// only while another app plays, and is restarted as one that stalled.
+    /// only while another app plays, and is restarted as one that stalled,
+    /// on the microphone it recorded (`stall_may_be_the_microphone`).
     fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
         true
+    }
+
+    /// Only without the system lane: an in-person capture runs on the
+    /// microphone's clock, a call capture on the output's (the aggregate's
+    /// clock master), so a call capture that stops delivering says nothing
+    /// of the microphone, and one whose silent output did not start stops
+    /// until another app plays. The session then keeps a chosen
+    /// microphone through the restarts rather than giving it up for the
+    /// default input. Rust only.
+    fn stall_may_be_the_microphone(&self, lanes: &[AudioLane]) -> bool {
+        !lanes.contains(&AudioLane::System)
     }
 }
 

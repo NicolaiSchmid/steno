@@ -514,8 +514,15 @@ struct Outage {
 /// it. A Mac call capture runs on the output's clock (the aggregate's
 /// master) and a Linux one on the graph's driver, which may be the sink.
 /// The WASAPI rule is the one its `delivers_continuously` states
-/// (steno-audio `capture/live/wasapi`); a change there comes here too. Rust
-/// only.
+/// (steno-audio `capture/live/wasapi`); a change there comes here too. The
+/// session asks the backend the near question for its restarts
+/// ([`CaptureBackend::stall_may_be_the_microphone`]: whether a stall may be
+/// the microphone's, so that the default input in its place may help),
+/// which says "may" where this rule must be sure before it names a device:
+/// a Linux call answers `true` there and `false` here. A change to either
+/// goes to the other. Rust only.
+///
+/// [`CaptureBackend::stall_may_be_the_microphone`]: steno_audio::CaptureBackend::stall_may_be_the_microphone
 fn microphone_is_the_master(mode: CaptureMode) -> bool {
     mode == CaptureMode::InPerson || cfg!(windows)
 }

@@ -43,7 +43,11 @@
 //! graph did not run on the chosen microphone ([`CaptureError::DidNotRun`]),
 //! not after the last: the gap then stays under
 //! [`CaptureSession::MAXIMUM_GAP`] when that is the first restart, so the
-//! restarts take nothing from the master.
+//! restarts take nothing from the master. A graph that did not run says
+//! nothing of the microphone where a stall cannot be the microphone's
+//! ([`CaptureBackend::stall_may_be_the_microphone`]: a Mac call capture
+//! runs on the output's clock); there such a restart tries no default,
+//! and the chosen microphone stays through the restarts.
 //!
 //! A rebuild ends the recording in `Failed(DeviceLost)` only when its
 //! [`CaptureSession::RESTART_ATTEMPTS`] restarts, and the default after
@@ -108,10 +112,15 @@
 //! output drives the tap from the start (A10 of
 //! `.plans/2026-10-07-stable-promotion.md`), and one whose silent output
 //! did not start, which delivers only while another app plays, is
-//! restarted on the backoff above until something plays.
+//! restarted on the backoff above until something plays. Playback that
+//! begins while it waits between restarts is not recorded until the next
+//! start: up to [`CaptureSession::RESTART_BACKOFF_LONGEST`] and one start
+//! (its wait for a first frame) of the call's first audio, once for each
+//! change from quiet to playback; from that restart on nothing is lost.
 //! A chosen microphone that stalls again within 10 s of the rebuild that
 //! resumed on it is replaced by the default input at the next rebuild,
-//! rather than restarted to stall again.
+//! rather than restarted to stall again, where a stall may be the
+//! microphone's (not in a Mac call capture, above).
 //!
 //! A chosen microphone that does not open, which the session replaced
 //! with the default input, is asked for again in one of two ways, and
@@ -510,8 +519,15 @@ enum Restart {
 struct RestartPlan {
     /// The stream replaced was the default in the chosen one's place.
     on_the_fallback: bool,
-    /// Try the default before the chosen microphone.
+    /// Try the default before the chosen microphone: a chosen microphone
+    /// that stalled again soon after the last rebuild resumed on it, over a
+    /// capture whose stall may be the microphone's.
     default_first: bool,
+    /// A stall may be the microphone's
+    /// ([`CaptureBackend::stall_may_be_the_microphone`]): only then does a
+    /// restart that delivered nothing ([`CaptureError::DidNotRun`]) ask
+    /// for a try on the default input.
+    stall_may_be_the_microphone: bool,
     /// Restart until one runs or the stop, whatever the error.
     until_it_runs: bool,
     /// A start counts only once the sink saw a frame from it, within
@@ -879,7 +895,9 @@ impl Core {
     /// A stream that stalls again this soon after a rebuild resumed on it
     /// continues that rebuild's streak (`Streak`), and a chosen microphone
     /// that does is replaced by the default input at the next rebuild
-    /// instead of being restarted again (see `restart_backend`). A warning
+    /// instead of being restarted again (see `restart_backend`), where a
+    /// stall may be the microphone's
+    /// ([`CaptureBackend::stall_may_be_the_microphone`]). A warning
     /// that stands ends once audio has come for this long, so it does not
     /// go and come back with every resume of such a stream.
     const STALLED_AGAIN: Duration = Duration::from_secs(10);
@@ -1765,12 +1783,21 @@ impl Core {
                 )
             });
         // A chosen microphone the last rebuild resumed on that stalls again
-        // so soon would be restarted, and stall, over and over.
-        let stalled_again =
-            stalled && soon && !on_the_fallback && self.configuration.input_device_uid.is_some();
+        // so soon would be restarted, and stall, over and over; unless the
+        // stall cannot be the microphone's (a Mac call capture runs on the
+        // output's clock), where the default would stall just the same.
+        let stall_may_be_the_microphone = self
+            .backend
+            .stall_may_be_the_microphone(&self.configuration.lanes());
+        let stalled_again = stalled
+            && soon
+            && stall_may_be_the_microphone
+            && !on_the_fallback
+            && self.configuration.input_device_uid.is_some();
         RestartPlan {
             on_the_fallback,
             default_first: stalled_again,
+            stall_may_be_the_microphone,
             until_it_runs: matches!(
                 reason,
                 DeviceChangeReason::AudioServiceRestarted | DeviceChangeReason::DeliveryStalled
@@ -1792,10 +1819,15 @@ impl Core {
     /// moment ago, or the graph did not run on the chosen microphone
     /// ([`CaptureError::DidNotRun`]: on Linux each such attempt waits out
     /// the 3 s start deadline). That early try comes once, after the first
-    /// failure that calls for it; when it fails, the restarts go on. With
-    /// `plan.default_first` (a chosen microphone that stalled again soon
-    /// after the last rebuild resumed on it) the default is tried before
-    /// the chosen one, once. With `plan.awaits_delivery` a start whose
+    /// failure that calls for it; when it fails, the restarts go on. A
+    /// `DidNotRun` over a capture whose stall cannot be the microphone's
+    /// (`plan.stall_may_be_the_microphone` false: a Mac call capture) asks
+    /// for no default, early or after the last: the default would wait for
+    /// the same clock, and a restart on it that caught the first playback
+    /// would leave the chosen microphone for the rest of the recording.
+    /// With `plan.default_first` (a chosen microphone that stalled again
+    /// soon after the last rebuild resumed on it) the default is tried
+    /// before the chosen one, once. With `plan.awaits_delivery` a start whose
     /// stream delivers nothing within `STALL_TIMEOUT` is stopped and fails
     /// with `DidNotRun` (`try_start`), as on macOS and Windows a device that
     /// delivers nothing still starts. A last restart that fails with
@@ -1850,15 +1882,21 @@ impl Core {
                 Ok(restart) => return restart,
                 Err(error) => error,
             };
+            // A restart that delivered nothing over a capture whose stall
+            // cannot be the microphone's says nothing of the chosen one.
+            let did_not_run = matches!(error, CaptureError::DidNotRun(_));
             let early = !default_tried
-                && (plan.on_the_fallback || matches!(error, CaptureError::DidNotRun(_)));
-            if (early || last) && self.configuration.input_device_uid.is_some() {
+                && (plan.on_the_fallback || (did_not_run && plan.stall_may_be_the_microphone));
+            let default_may_help = !did_not_run || plan.stall_may_be_the_microphone;
+            if (early || (last && default_may_help))
+                && self.configuration.input_device_uid.is_some()
+            {
                 default_tried = true;
                 if let Ok(restart) = self.try_start(sink, true, attempt, plan, generation, cancel) {
                     return restart;
                 }
             }
-            if last && !plan.until_it_runs && !matches!(error, CaptureError::DidNotRun(_)) {
+            if last && !plan.until_it_runs && !did_not_run {
                 return Restart::Exhausted;
             }
             failure = error.to_string();

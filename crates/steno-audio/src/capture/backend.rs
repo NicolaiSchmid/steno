@@ -61,6 +61,27 @@ pub trait CaptureBackend: Send + Sync {
         false
     }
 
+    /// Whether a capture of `lanes` that stops delivering may have stopped
+    /// because of its microphone, so that the session's answer to such a
+    /// stall on a chosen microphone, the default input in its place, may
+    /// help. When `false` the session keeps the chosen microphone through
+    /// its restarts: a restart that delivered nothing
+    /// ([`CaptureError::DidNotRun`]) asks for no try on the default, and a
+    /// chosen microphone that stalls again soon after a resume is
+    /// restarted, not replaced (see `CaptureSession`). `true` by default,
+    /// and on Linux (the graph's driver may be the microphone) and Windows
+    /// (the microphone's stream is the master whenever a lane needs it);
+    /// `false` for a Mac call capture, which runs on the output's clock
+    /// (the aggregate's master), whatever the microphone does. The
+    /// recorder keeps its own rule for whether a stall's warning names the
+    /// microphone (steno-services `microphone_is_the_master`), which must
+    /// be sure where this one says "may": a Linux call answers `true` here
+    /// and `false` there. A change to either goes to the other. Rust only.
+    fn stall_may_be_the_microphone(&self, lanes: &[AudioLane]) -> bool {
+        let _ = lanes;
+        true
+    }
+
     /// Whether [`Self::probe_input`] can ask a microphone without
     /// touching the capture that records. The session asks for a chosen
     /// microphone it replaced with the default input again on a timer

@@ -148,9 +148,12 @@ pub enum CaptureError {
     /// restart whose stream offered no frame within
     /// `CaptureSession::STALL_TIMEOUT` over a watched backend. The session
     /// answers it on a chosen microphone by trying the default input at
-    /// once, and a rebuild's restarts that keep failing with it go on,
-    /// backing off up to `CaptureSession::RESTART_BACKOFF_LONGEST`, until
-    /// one runs. Rust only; reads as [`Self::BackendFailed`].
+    /// once, except where a stall cannot be the microphone's
+    /// (`CaptureBackend::stall_may_be_the_microphone`: a Mac call capture
+    /// keeps the chosen one), and a rebuild's restarts that keep failing
+    /// with it go on, backing off up to
+    /// `CaptureSession::RESTART_BACKOFF_LONGEST`, until one runs. Rust
+    /// only; reads as [`Self::BackendFailed`].
     #[error("capture backend failed: {0}")]
     DidNotRun(String),
     /// `start` while not idle, `stop` while not recording.
