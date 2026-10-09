@@ -14,8 +14,9 @@ publish.workspace = true
 default = ["onnx", "coreml"]
 # ONNX Runtime backend (pyannote segmentation 3.0 and WeSpeaker ResNet34-LM).
 # `steno-speech` for `onnx::init_environment`, the one place ONNX Runtime is
-# configured (telemetry off), and for its `ModelStore`, which installs the
-# two models.
+# configured (telemetry off), for its `ModelStore`, which installs the
+# two models, and for its sidecar client, whose child runs them
+# (`SidecarDiarizer`).
 onnx = ["dep:ort", "dep:steno-speech"]
 # CoreML backend over FluidAudio's compiled models; macOS only.
 coreml = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-core-ml"]
