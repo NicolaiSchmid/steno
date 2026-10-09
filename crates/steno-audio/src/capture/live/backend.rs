@@ -799,17 +799,12 @@ impl CaptureBackend for LiveCaptureBackend {
         drop(silent_output);
     }
 
-    /// The IOProc runs on the aggregate's clock, silence included (in call
-    /// mode only with the capture permission; see the module doc).
+    /// The IOProc runs on the aggregate's clock, silence included: in call
+    /// mode from the start, its silent output driving the tap (A10; see the
+    /// module doc). A call capture whose silent output did not start runs
+    /// only while another app plays, and is restarted as one that stalled.
     fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
         true
-    }
-
-    /// Every call capture, whose aggregate runs on the output's clock:
-    /// without the capture permission its IOProc runs only while something
-    /// plays, and the backend cannot tell whether it has the permission.
-    fn waits_for_playback(&self, lanes: &[AudioLane]) -> bool {
-        lanes.contains(&AudioLane::System)
     }
 }
 

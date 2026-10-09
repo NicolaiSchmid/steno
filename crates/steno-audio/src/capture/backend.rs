@@ -61,22 +61,6 @@ pub trait CaptureBackend: Send + Sync {
         false
     }
 
-    /// Whether a capture of `lanes` that delivers continuously may still
-    /// deliver nothing at all until something plays: every Mac call
-    /// capture, since the backend cannot tell whether it has the capture
-    /// permission, without which its IOProc runs only while another client
-    /// has the output open. Until the recording's first frame the watchdog
-    /// then takes no stream for stalled; after it, every stream that stops
-    /// is one, but a rebuild's restart is not held to deliver at once (a
-    /// stream that resumes and stalls again soon backs off as one streak
-    /// instead), and a chosen microphone that stalls again soon is not
-    /// given up for the default (see `CaptureSession`). `false` by default
-    /// and on Linux and Windows. Rust only.
-    fn waits_for_playback(&self, lanes: &[AudioLane]) -> bool {
-        let _ = lanes;
-        false
-    }
-
     /// Whether [`Self::probe_input`] can ask a microphone without
     /// touching the capture that records. The session asks for a chosen
     /// microphone it replaced with the default input again on a timer

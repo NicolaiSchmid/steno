@@ -326,28 +326,27 @@ pub enum CaptureNotice {
     /// session goes on restarting until one runs or the stop; nothing is
     /// recorded meanwhile, and the warning stands until `Delivering`. The
     /// restarts count across a streak of rebuilds, each resuming on a
-    /// stream that stalls again soon (over a backend whose streams may wait
-    /// for playback a restart that starts counts as run, so its streak is
-    /// one of rebuilds). Sent once until `Delivering`, then again when the
-    /// restarts go on once more; the stream is still the one that stopped.
-    /// Rust only.
+    /// stream that delivers a moment and stalls again soon, and the warning
+    /// stands through their resumes. Sent once until `Delivering`, then
+    /// again when the restarts go on once more; the stream is still the one
+    /// that stopped. Rust only.
     StillRestarting {
         /// The restarts so far.
         attempt: usize,
     },
     /// `attempt` is the restart that succeeded, counted from the first of
     /// its streak (1 when the first did); `gap_seconds` the silence written
-    /// for this gap. A stream that waits for playback may resume without
-    /// a frame, so this does not say audio arrives; `Delivering` does.
+    /// for this gap. A stream that resumes may stall again soon, so this
+    /// does not end the warning; `Delivering` does.
     DeviceResumed {
         /// Restarts it took.
         attempt: usize,
         /// Silence written for the gap, seconds.
         gap_seconds: f64,
     },
-    /// Audio arrives again after `StillRestarting`: the first frames of the
-    /// stream a rebuild resumed on (with that `DeviceResumed` over a
-    /// backend that is not watched), so the warning ends. Rust only.
+    /// Audio is back after `StillRestarting`: the stream a rebuild resumed
+    /// on has delivered for 10 s (with that `DeviceResumed` over a backend
+    /// that is not watched), so the warning ends. Rust only.
     Delivering,
 }
 

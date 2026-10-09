@@ -61,32 +61,36 @@
 //! between the first `RESTART_ATTEMPTS`, then 2 s, then every
 //! [`CaptureSession::RESTART_BACKOFF_LONGEST`] (4 s), with no limit. Once
 //! the devices are back, that costs the starts in flight (one deadline
-//! per device tried: 3 s each on Linux, a chosen microphone and then the
-//! default; up to 10 s on Windows), the wait and the first frame, filled
-//! with silence up to [`CaptureSession::MAXIMUM_GAP`]; past it the master
-//! falls short of wall time, and the recorder's note after the stop counts
-//! that time. `notices` carries `StillRestarting` once
-//! they pass `RESTART_ATTEMPTS`, for a warning, and `Delivering` once audio
-//! arrives after it. Over a watched backend (below) whose streams do not
-//! wait for playback, a restart that starts but whose stream offers no
-//! frame within [`CaptureSession::STALL_TIMEOUT`] is stopped and counts as
-//! one that did not run (on macOS and Windows a device that delivers
-//! nothing still starts); its gap runs to the last sample before the first
-//! frame (within [`CaptureSession::STALL_CHECK_INTERVAL`]).
+//! per device tried: 3.5 s each on Linux, 7.5 s for a thread that does
+//! not answer, a chosen microphone and then the default; up to 10 s on
+//! Windows), the wait and the first frame, filled with silence up to
+//! [`CaptureSession::MAXIMUM_GAP`]; past it the master falls short of wall
+//! time, and the recorder's note after the stop counts that time.
+//! `notices` carries `StillRestarting` once they pass `RESTART_ATTEMPTS`,
+//! for a warning, and `Delivering` once audio has come for 10 s after it
+//! (below). Over a watched backend (below), a restart that starts but
+//! whose stream offers no frame within [`CaptureSession::STALL_TIMEOUT`]
+//! is stopped and counts as one that did not run (on macOS and Windows a
+//! device that delivers nothing still starts); its gap runs to the last
+//! sample before the first frame (within
+//! [`CaptureSession::STALL_CHECK_INTERVAL`]). A restart whose stream
+//! offered frames before its start returned ends its gap at the clock's
+//! reading before the start, so the master may run short by the time to
+//! the first frame (on PipeWire the connect, the link and the first
+//! cycle); no audio is lost.
 //!
 //! A stream a rebuild resumed on that stalls again within 10 s, or before
 //! it delivered anything, continues that rebuild's streak: the next
 //! rebuild counts on from its restarts, waits the backoff step it reached
-//! and keeps its warning, so a stream that resumes and stalls over and
-//! over backs off as restarts that fail do. The known case is a Mac call
-//! capture whose output has no other client: its restarts start and wait
-//! for playback (below), so until call mode runs from its start (A10,
-//! #251) it resumes and stalls about every 6 s once the backoff is at its
-//! longest. The log says when a streak's first restart fails and then
-//! about once a minute, with the count; meanwhile the lines a try would
-//! log, the session's and the backends', go to `debug` (`start_log`). One
-//! `info` line says when audio arrives again, with the restarts and the
-//! silence written.
+//! and keeps its warning, so a stream that resumes, delivers a moment and
+//! stalls over and over backs off as restarts that fail do. The warning
+//! ends only once the stream has delivered for 10 s, so it does not go
+//! and come back with every resume. The log says when a streak's first
+//! restart fails and then about once a minute, with the count, across its
+//! resumes; meanwhile the lines a try would log, the session's and the
+//! backends', go to `debug` (`start_log`). Once audio has come for 10 s,
+//! one `info` line answers a streak that logged a failure, with the
+//! restarts and the silence written.
 //!
 //! A device that stops delivering without any notification (a driver or a
 //! source's owner that hangs, a graph that stops running) is caught by the
@@ -94,26 +98,20 @@
 //! continuously ([`CaptureBackend::delivers_continuously`]) a watch thread
 //! samples the sink's count of frames offered every
 //! [`CaptureSession::STALL_CHECK_INTERVAL`] on the clock, and a stream that
-//! delivered and then offered nothing for longer than
-//! [`CaptureSession::STALL_TIMEOUT`] is reported as
+//! offered nothing for longer than [`CaptureSession::STALL_TIMEOUT`], from
+//! its start or its last frame, is reported as
 //! [`DeviceChangeReason::DeliveryStalled`], so the rebuild above takes over.
 //! Silence, zeros included, is delivery. The gap of every rebuild then
 //! runs from the last frame that thread saw arrive, not from the report, so
 //! the time a backend spends coalescing a change is not lost from the
-//! master either.
-//!
-//! Over a backend that [`CaptureBackend::waits_for_playback`] (every Mac
-//! call capture: the backend cannot tell whether it has the capture
-//! permission, without which its IOProc runs only while something plays)
-//! a stream that delivers nothing is not stalled before the recording's
-//! first frame, so it is not rebuilt over and over before anything
-//! played; after it, a stream that stops is rebuilt, but a restart is not
-//! held to deliver at once (the streak above backs it off) and a chosen
-//! microphone is not given up for stalling, since the stall may only mean
-//! playback stopped.
-//! Elsewhere a chosen microphone that stalls again within 10 s of the
-//! rebuild that resumed on it is replaced by the default input at the next
-//! rebuild, rather than restarted to stall again.
+//! master either. A Mac call capture is held to this too: its silent
+//! output drives the tap from the start (A10 of
+//! `.plans/2026-10-07-stable-promotion.md`), and one whose silent output
+//! did not start, which delivers only while another app plays, is
+//! restarted on the backoff above until something plays.
+//! A chosen microphone that stalls again within 10 s of the rebuild that
+//! resumed on it is replaced by the default input at the next rebuild,
+//! rather than restarted to stall again.
 //!
 //! A chosen microphone that does not open, which the session replaced
 //! with the default input, is asked for again in one of two ways, and
@@ -207,7 +205,7 @@
 //! hangs there freezes the session's callers with it. Restarts that go on
 //! until one runs hold it for much of the time: on Linux, while a stopped
 //! source's owner holds the graph up, each attempt waits out the start
-//! deadline on the chosen microphone and again on the default (3 s each,
+//! deadline on the chosen microphone and again on the default (3.5 s each,
 //! 7.5 s for a thread that does not answer), up to 4 s apart, each start
 //! a hold of its own, so `state()`, `stream()` and `stop()` wait up to
 //! one start's deadline at a time. A restarted stream's wait for its first
@@ -368,24 +366,31 @@ struct Streak {
     /// Restarts so far, the one the latest rebuild resumed on included.
     attempts: usize,
     /// `StillRestarting` went out and no `Delivering` since: the warning
-    /// stands, across rebuilds, until audio arrives.
+    /// stands, across rebuilds and into a new streak, until audio has come
+    /// for `STALLED_AGAIN`.
     warned: bool,
-    /// When the streak's latest log line went out, on the clock; `None`
-    /// until its first restart failed, and again once audio arrived.
+    /// When the streak's latest `warn` line about its restarts went out, on
+    /// the clock (`restart_failed`); `None` until its first restart failed.
+    /// Kept when audio comes, so a stream that resumes and stalls again
+    /// soon still logs about once a minute.
     logged_at: Option<Duration>,
+    /// A `warn` line about the restarts went out and no line since that
+    /// says audio is back; kept into a new streak, as `warned` is.
+    unanswered: bool,
     /// Silence its rebuilds wrote, for the line that says audio is back.
     gap_seconds: f64,
 }
 
 impl Streak {
-    /// Audio arrived after the streak's restarts: one `info` line with the
-    /// count and the silence written when the streak logged a failure (so
-    /// its next failure logs at `warn` again), and whether the warning
-    /// stood (`StillRestarting`), which ends here.
+    /// Audio has come after the streak's restarts (for `STALLED_AGAIN` over
+    /// a watched backend, at the resume otherwise): one `info` line with
+    /// the count and the silence written when a `warn` line went out
+    /// unanswered, and whether the warning stood (`StillRestarting`), which
+    /// ends here.
     fn delivered(&mut self) -> bool {
-        if self.logged_at.take().is_some() {
+        if std::mem::take(&mut self.unanswered) {
             tracing::info!(
-                "the capture delivers again after {} restarts; {:.1} s of silence filled the gap",
+                "the capture delivers again after {} restarts; {:.1} s of silence filled the gaps",
                 self.attempts,
                 self.gap_seconds
             );
@@ -424,10 +429,6 @@ struct Watch {
     thread: JoinHandle<()>,
     /// What the thread last saw of the sink.
     progress: Progress,
-    /// Whether the recording may deliver nothing at all until something
-    /// plays ([`CaptureBackend::waits_for_playback`]): until its first
-    /// frame, a stream that delivers nothing is then not stalled.
-    waits_for_playback: bool,
     /// Whether the backend asks a microphone on a stream of its own
     /// ([`CaptureBackend::probes_inputs`]): only then does the thread ask
     /// for a chosen microphone the session replaced on a timer.
@@ -439,6 +440,10 @@ struct Watch {
     asked_after: Option<Duration>,
     /// When the latest rebuild resumed.
     resumed_at: Option<Duration>,
+    /// When the thread first saw frames after that resume (or the start),
+    /// on the clock: a warning that stands ends once they have come for
+    /// `STALLED_AGAIN`.
+    delivering_since: Option<Duration>,
 }
 
 impl Watch {
@@ -510,8 +515,7 @@ struct RestartPlan {
     /// Restart until one runs or the stop, whatever the error.
     until_it_runs: bool,
     /// A start counts only once the sink saw a frame from it, within
-    /// `STALL_TIMEOUT`: over a watched backend whose streams do not wait
-    /// for playback.
+    /// `STALL_TIMEOUT`: over a watched backend.
     awaits_delivery: bool,
     /// The restarts of the streak this rebuild continues, 0 for a new one:
     /// its first try comes after the backoff that follows them.
@@ -535,9 +539,9 @@ impl CaptureSession {
     /// The longest wait between two restarts that go on past
     /// `RESTART_ATTEMPTS` ([`Self::restart_backoff`]). Four seconds: the
     /// wait is audio lost once the devices are back, with the starts in
-    /// flight (one deadline per device tried: 3 s each on Linux, a chosen
-    /// microphone and then the default; up to 10 s on Windows) and the
-    /// first frame; past [`Self::MAXIMUM_GAP`] the master falls short of
+    /// flight (one deadline per device tried: 3.5 s each on Linux, 7.5 s
+    /// for a thread that does not answer, a chosen microphone and then the
+    /// default; up to 10 s on Windows) and the first frame; past [`Self::MAXIMUM_GAP`] the master falls short of
     /// wall time, and the recorder's note after the stop counts it. Each
     /// start holds the session's lock for up to its deadline, released
     /// between the starts and through the wait, so the callers wait for up
@@ -874,8 +878,9 @@ impl Core {
     /// A stream that stalls again this soon after a rebuild resumed on it
     /// continues that rebuild's streak (`Streak`), and a chosen microphone
     /// that does is replaced by the default input at the next rebuild
-    /// instead of being restarted again (see `restart_backend`), except
-    /// over a backend whose streams may wait for playback.
+    /// instead of being restarted again (see `restart_backend`). A warning
+    /// that stands ends once audio has come for this long, so it does not
+    /// go and come back with every resume of such a stream.
     const STALLED_AGAIN: Duration = Duration::from_secs(10);
     /// How often, at most, a streak's restarts that keep failing are
     /// logged above `debug`, with the count so far.
@@ -1139,11 +1144,11 @@ impl Core {
                 cancel,
                 thread,
                 progress: Progress { count: 0, at: now },
-                waits_for_playback: self.backend.waits_for_playback(&lanes),
                 probes,
                 recheck: None,
                 asked_after: None,
                 resumed_at: None,
+                delivering_since: None,
             };
             if probes && Self::replaced_the_chosen(&stream, on_the_default) {
                 watch.ask_again(now);
@@ -1465,9 +1470,10 @@ impl Core {
     /// that delivers continuously: every `STALL_CHECK_INTERVAL` on the
     /// clock it samples the sink's count of frames offered, and reports
     /// through the sink, as the backend's listeners do, a stream that
-    /// delivered and then stopped for longer than `STALL_TIMEOUT`
-    /// (`DeliveryStalled`); it tells the first frames after restarts that
-    /// sent `StillRestarting` (`Delivering`). While the stream is the
+    /// offered nothing for longer than `STALL_TIMEOUT`, from its start or
+    /// its last frame (`DeliveryStalled`); it tells audio that has come for
+    /// `STALLED_AGAIN` after restarts that sent `StillRestarting`
+    /// (`Delivering`). While the stream is the
     /// default input the session put in place of the chosen microphone,
     /// over a backend that probes, it asks on a `steno-probe` thread of its
     /// own whether the chosen one delivers (`CaptureBackend::probe_input`,
@@ -1508,16 +1514,18 @@ impl Core {
                 let count = active.sink.frames_offered();
                 let progress = &mut watched.progress;
                 let mut reason = None;
-                // Audio arrives: a warning about restarts that went on is
+                // Audio that has come for `STALLED_AGAIN` ends a streak of
+                // restarts: a stall after it begins a new one. Its warning is
                 // over, and stays so unless they start again.
                 let mut delivering = false;
                 if count != progress.count {
                     progress.count = count;
                     progress.at = now;
-                    delivering = active.streak.delivered();
-                } else if (count != 0 || !watched.waits_for_playback)
-                    && now.saturating_sub(progress.at) > CaptureSession::STALL_TIMEOUT
-                {
+                    let since = *watched.delivering_since.get_or_insert(now);
+                    if now.saturating_sub(since) >= Self::STALLED_AGAIN {
+                        delivering = active.streak.delivered();
+                    }
+                } else if now.saturating_sub(progress.at) > CaptureSession::STALL_TIMEOUT {
                     reason = Some(DeviceChangeReason::DeliveryStalled);
                 }
                 // A probe's answer counts only while the stream is still the
@@ -1636,10 +1644,11 @@ impl Core {
             }
             let plan = self.restart_plan(active, reason, now);
             if plan.continues == 0 {
-                // A new streak; a warning that stands holds until audio
-                // arrives.
+                // A new streak; a warning that stands, and a `warn` line no
+                // line answered, hold until audio has come.
                 active.streak = Streak {
                     warned: active.streak.warned,
+                    unanswered: active.streak.unanswered,
                     ..Streak::default()
                 };
                 if reason == DeviceChangeReason::DeliveryStalled {
@@ -1744,10 +1753,6 @@ impl Core {
             .as_ref()
             .is_some_and(|input| input.is_fallback);
         let watch = active.watch.as_ref();
-        // A stream that may only be waiting for playback (a Mac call capture
-        // without the capture permission) stops whenever playback does: no
-        // restart can make it deliver, and the microphone is not to blame.
-        let waits_for_playback = watch.is_some_and(|watch| watch.waits_for_playback);
         // The stream the last rebuild resumed on stalled soon after, or
         // before it delivered anything.
         let stalled = reason == DeviceChangeReason::DeliveryStalled;
@@ -1761,11 +1766,8 @@ impl Core {
             });
         // A chosen microphone the last rebuild resumed on that stalls again
         // so soon would be restarted, and stall, over and over.
-        let stalled_again = stalled
-            && soon
-            && !on_the_fallback
-            && !waits_for_playback
-            && self.configuration.input_device_uid.is_some();
+        let stalled_again =
+            stalled && soon && !on_the_fallback && self.configuration.input_device_uid.is_some();
         RestartPlan {
             on_the_fallback,
             default_first: stalled_again,
@@ -1773,7 +1775,7 @@ impl Core {
                 reason,
                 DeviceChangeReason::AudioServiceRestarted | DeviceChangeReason::DeliveryStalled
             ),
-            awaits_delivery: watch.is_some() && !waits_for_playback,
+            awaits_delivery: watch.is_some(),
             continues: if stalled && (soon || before_delivering) {
                 active.streak.attempts
             } else {
@@ -1824,10 +1826,7 @@ impl Core {
         let mut attempt = plan.continues;
         // What the restart before the next try failed with, for the log; a
         // streak's rebuild follows a stall of the stream it resumed on.
-        let mut failure = format!(
-            "the stream restart {} resumed on stopped delivering",
-            plan.continues
-        );
+        let mut failure = "its stream stopped delivering after it resumed".to_owned();
         loop {
             if attempt > 0 {
                 self.restart_failed(attempt, &failure, generation);
@@ -1870,8 +1869,10 @@ impl Core {
     /// failed with `failure`, and more follow. The log gets one line when
     /// the streak's first restart fails and one about every
     /// `RESTART_LOG_INTERVAL` after, with the count, and `debug` between
-    /// them; after that first line every try's own lines go to `debug` too
-    /// (`try_start`), until audio arrives (`Streak::delivered`).
+    /// them, also across the resumes of a stream that stalls again soon;
+    /// after that first line every try's own lines go to `debug` too
+    /// (`try_start`), until a new streak begins. Each `warn` line is
+    /// answered by one `info` line once audio has come (`Streak::delivered`).
     /// `notices` carries `StillRestarting` once the streak passed
     /// `RESTART_ATTEMPTS`, unless its warning already stands.
     fn restart_failed(&self, attempt: usize, failure: &str, generation: usize) {
@@ -1888,6 +1889,7 @@ impl Core {
             None => {
                 tracing::warn!("restart {attempt} of the capture failed ({failure}); trying again");
                 streak.logged_at = Some(now);
+                streak.unanswered = true;
             }
             Some(at) if now.saturating_sub(at) >= Self::RESTART_LOG_INTERVAL => {
                 tracing::warn!(
@@ -1895,6 +1897,7 @@ impl Core {
                      failed ({failure})"
                 );
                 streak.logged_at = Some(now);
+                streak.unanswered = true;
             }
             Some(_) => tracing::debug!("restart {attempt} of the capture failed ({failure})"),
         }
@@ -1916,8 +1919,10 @@ impl Core {
     /// last sample before the first frame (within `STALL_CHECK_INTERVAL`),
     /// not to the start's return. A start whose stream offered frames
     /// before it returned ends the gap at the clock's reading before the
-    /// start, so the master runs short of wall time by that start's latency
-    /// at most, never ahead (no audio is lost either way). A stream
+    /// start, so the master may run short of wall time by the time from
+    /// that reading to the first frame (on PipeWire the connect, the link
+    /// and the first cycle), never ahead; no audio is lost either way. A
+    /// stream
     /// that offered none `STALL_TIMEOUT` after its start is stopped and
     /// fails with `DidNotRun`; a change its listeners reported meanwhile
     /// is dropped with it, since the next start reads the devices as they
@@ -1936,7 +1941,7 @@ impl Core {
         generation: usize,
         cancel: &Cancel,
     ) -> Result<Restart, CaptureError> {
-        let (stream, mut at, started, offered) = {
+        let (stream, mut at, returned, offered) = {
             let inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
                 return Ok(Restart::Abandoned);
@@ -1963,8 +1968,8 @@ impl Core {
             })?;
             // Frames that came while `start` ran (a PipeWire start reads
             // its latency after the first cycle) end the gap at the reading
-            // before it: short of the first frame by that start's latency
-            // at most, where the return would hold that time twice.
+            // before it, where the return would hold that time twice: the
+            // master then runs short by the time to the first frame.
             let returned = self.clock.now();
             let at = if sink.frames_offered() == offered {
                 returned
@@ -1975,7 +1980,7 @@ impl Core {
         };
         while plan.awaits_delivery && sink.frames_offered() == offered {
             let now = self.clock.now();
-            if now.saturating_sub(started) >= CaptureSession::STALL_TIMEOUT {
+            if now.saturating_sub(returned) >= CaptureSession::STALL_TIMEOUT {
                 self.backend.stop();
                 if let Some(active) = self.lock().active.as_mut() {
                     active.pending_change = None;
@@ -2082,6 +2087,7 @@ impl Core {
             watch.progress.count = sink.frames_offered();
             watch.progress.at = now;
             watch.resumed_at = Some(now);
+            watch.delivering_since = None;
             watch.recheck = None;
             if watch.probes && Self::replaced_the_chosen(&stream, on_the_default) {
                 watch.ask_again(now);
@@ -2095,9 +2101,9 @@ impl Core {
         active.streak.attempts = attempt;
         active.streak.gap_seconds += gap_seconds;
         // Unwatched, nothing tells the first frame: the resume stands for
-        // it. A watched stream's first frame ends the warning on the watch
-        // thread, after this resume or never, as a stream that waits for
-        // playback may resume without one.
+        // it. Over a watched backend the watch thread ends the warning once
+        // the stream has delivered for `STALLED_AGAIN`, so one that resumes
+        // and stalls again soon keeps it.
         let delivering = active.watch.is_none() && active.streak.delivered();
         Self::emit(
             &mut inner,
