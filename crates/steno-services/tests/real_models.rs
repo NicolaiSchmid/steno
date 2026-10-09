@@ -61,7 +61,7 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
     let speech_store = setup.model_store();
     let sidecar = Arc::new(steno_services::speech::sidecar_engine(&setup));
     let engine =
-        steno_services::speech::speech_engine_with(&settings.speech_engine_id, &setup, &sidecar);
+        steno_services::speech::speech_engine_in(&settings.speech_engine_id, &setup, &sidecar);
     let diarizer = steno_services::speech::diarizer_in(sidecar, steno_diarize::Install::Allowed);
     let vault = dir.path().join("vault");
     let destination: Arc<dyn Destination> = Arc::new(FakeDestination::new(&vault));

@@ -1,7 +1,8 @@
 //! A meeting processed while the diarizer's models are missing, through the
-//! diarizer the app builds (`steno_services::speech::diarizer`) over a
-//! loopback mirror, in the real `steno-speech-sidecar` binary from the
-//! target directory (`cargo test --workspace` builds it). The speech engine
+//! diarizer the app builds (`steno_services::speech::diarizer_in` over a
+//! `sidecar_engine`) with a loopback mirror, in the real
+//! `steno-speech-sidecar` binary from the target directory (`cargo test
+//! --workspace` builds it). The speech engine
 //! is core's fake. No network beyond 127.0.0.1.
 //!
 //! - Under `Install::Allowed` (what `steno process` builds, and
@@ -234,7 +235,10 @@ fn world(mirror: &Mirror, install: Install) -> World {
     let pipeline = ProcessingPipeline::new(PipelineDependencies::new(
         Arc::new(SymphoniaAudioCodec::new()),
         Arc::new(FakeSpeechEngine::default()),
-        steno_services::speech::diarizer(&setup, install),
+        steno_services::speech::diarizer_in(
+            Arc::new(steno_services::speech::sidecar_engine(&setup)),
+            install,
+        ),
         Arc::new(StoreSpeakerMemory::new(store.clone())),
         dispatcher,
         store.clone(),

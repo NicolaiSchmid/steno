@@ -5,14 +5,17 @@
 //! Swift ran `FluidAudio` in its own process.
 //!
 //! The child runs the whole [`Pipeline::diarize`](crate::Pipeline::diarize)
-//! with [`DiarizerConfig::default`](crate::DiarizerConfig::default), the
-//! same code [`ModelDiarizer`](crate::ModelDiarizer) runs here, and sends
-//! the clusters back bit for bit
+//! with [`DiarizerConfig::default`](crate::DiarizerConfig::default) and
+//! sends the clusters back bit for bit
 //! (`steno_speech::sidecar::protocol::DiarizedCluster`). One request a
 //! lane, rather than one per segmentation window and embedding (some 5 000
-//! for an hour and the audio sent four times over): the protocol grows by
-//! two requests, and the calibration harness, which sweeps the clustering
-//! cut over one analysis, keeps the in-process [`Pipeline`](crate::Pipeline).
+//! for an hour and the audio sent four times over): the child runs the
+//! same code as [`ModelDiarizer`](crate::ModelDiarizer) in this process,
+//! so the clusters are the in-process ones bit for bit, and the protocol
+//! grows by two requests. `ModelDiarizer` and the in-process
+//! [`Pipeline`](crate::Pipeline) stay for the calibration harness, which
+//! sweeps the clustering cut over one analysis, and `steno dev
+//! diarize-sweep`.
 //!
 //! The models are installed in this process ([`crate::models::paths`] under
 //! the diarizer's [`Install`]); the child only loads the files it is
@@ -87,12 +90,6 @@ impl SidecarDiarizer {
             install,
             threads,
         }
-    }
-
-    /// The sidecar engine whose child diarizes.
-    #[must_use]
-    pub fn engine(&self) -> &Arc<SidecarSpeechEngine> {
-        &self.engine
     }
 
     /// The installed models, downloading them first where `install`

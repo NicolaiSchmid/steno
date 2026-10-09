@@ -234,14 +234,14 @@ pub fn coreml_model_directory(models_directory: &Path) -> PathBuf {
 /// relies on that.
 #[must_use]
 pub fn speech_engine(engine_id: &str, setup: &SpeechSetup) -> Arc<dyn SpeechEngine> {
-    speech_engine_with(engine_id, setup, &Arc::new(sidecar_engine(setup)))
+    speech_engine_in(engine_id, setup, &Arc::new(sidecar_engine(setup)))
 }
 
 /// [`speech_engine`] with `sidecar` as the engine where Parakeet runs in
 /// the speech sidecar, so a diarizer over the same engine
 /// ([`diarizer_in`]) shares its child.
 #[must_use]
-pub fn speech_engine_with(
+pub fn speech_engine_in(
     engine_id: &str,
     setup: &SpeechSetup,
     sidecar: &Arc<SidecarSpeechEngine>,
@@ -289,7 +289,7 @@ pub(crate) type BuildEngine = Box<dyn Fn(SpeechRuntime) -> Arc<dyn SpeechEngine>
 /// them in the same place. A changed setup takes a new value, at the next
 /// launch.
 ///
-/// The sidecar engine is built at its first use and kept for the app's
+/// The sidecar engine is built with this value and kept for the app's
 /// run. It holds a child only while a job needs one, and as the only
 /// sidecar engine it never runs two at once, also when a reload on the
 /// Mac goes to `CoreML` and back while a retired pipeline still
@@ -447,8 +447,8 @@ impl SpeechEngines {
         }
     }
 
-    /// The diarizer every pipeline runs, built over the setup's model
-    /// store ([`diarizer`]).
+    /// The diarizer every pipeline runs, in the child of this value's
+    /// sidecar engine ([`diarizer_in`]).
     #[must_use]
     pub fn diarizer(&self) -> Arc<dyn Diarizer> {
         self.diarizer.clone()
@@ -574,15 +574,6 @@ impl SpeechEngine for LanguageTaggingEngine {
     async fn release(&self) -> BoundaryResult<()> {
         self.inner.release().await
     }
-}
-
-/// The ONNX diarizer in the speech sidecar, over [`SpeechSetup::model_store`],
-/// the store and mirror the speech models install through, and its own
-/// sidecar engine started from [`SpeechSetup::sidecar`]
-/// ([`diarizer_in`] over a new [`sidecar_engine`]).
-#[must_use]
-pub fn diarizer(setup: &SpeechSetup, install: Install) -> Arc<dyn Diarizer> {
-    diarizer_in(Arc::new(sidecar_engine(setup)), install)
 }
 
 /// The ONNX diarizer in the child of `sidecar` (`SidecarDiarizer`), its

@@ -175,7 +175,8 @@ pub const ENGINE_IDS: [&str; 4] = [
 ];
 
 /// `--engine <id>`: without it the pipeline runs the fakes; with it
-/// Parakeet v3 where the flag's help says, the ONNX diarizer and cosine
+/// Parakeet v3 where the flag's help says, the ONNX diarizer in
+/// `steno-speech-sidecar` (on the Mac too, with `CoreML` speech) and cosine
 /// speaker memory over the store. The diarizer's models, and in the speech
 /// sidecar Parakeet's, download on first use (from their hosts or the
 /// mirror); the `CoreML` Parakeet must be installed.
@@ -184,7 +185,7 @@ pub struct SpeechOptions {
     #[arg(
         long,
         value_name = "engine",
-        help = "Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs Parakeet v3 in steno-speech-sidecar, which must sit beside steno, except parakeet-v3 on the Mac, which runs on CoreML unless speech.json chooses the sidecar."
+        help = "Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs Parakeet v3 in steno-speech-sidecar, which must sit beside steno, except parakeet-v3 on the Mac, which runs on CoreML unless speech.json chooses the sidecar. The diarizer runs in steno-speech-sidecar with every engine, so on the Mac it must sit beside steno too, or every meeting gets the fallback speakers."
     )]
     pub engine: Option<String>,
 }
@@ -351,7 +352,7 @@ pub fn dependencies(
             (
                 // The flag names the engine for this run, as the Swift CLI's
                 // `makeSpeechEngine(engine, ...)` did; the stored id does not.
-                steno_services::speech::speech_engine_with(engine, &speech, &sidecar),
+                steno_services::speech::speech_engine_in(engine, &speech, &sidecar),
                 process_diarizer(sidecar),
                 Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
             )
