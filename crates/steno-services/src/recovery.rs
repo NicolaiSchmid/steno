@@ -825,12 +825,11 @@ const UNRECORDED_IDS_LOGGED: usize = 3;
 
 /// The first [`UNRECORDED_IDS_LOGGED`] of `ids`, joined for a log line.
 fn first_ids(ids: &[Uuid]) -> String {
-    let first: Vec<String> = ids
-        .iter()
+    ids.iter()
         .take(UNRECORDED_IDS_LOGGED)
         .map(Uuid::to_string)
-        .collect();
-    first.join(", ")
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The meeting and asset an orphan's master gives: a CAF the Mac wrote is

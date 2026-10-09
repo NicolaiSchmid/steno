@@ -205,10 +205,7 @@ impl SymphoniaAudioCodec {
             .frames
             .zip(frames.rate.filter(|rate| *rate > 0))
             .map(|(declared, rate)| {
-                let presented = declared
-                    .saturating_sub(primed)
-                    .min(MAX_DECLARED_SECONDS * u64::from(rate));
-                presented as f64 / f64::from(rate)
+                capped(declared.saturating_sub(primed), rate) as f64 / f64::from(rate)
             }))
     }
 
@@ -261,8 +258,13 @@ fn frames_at_16k(frames: usize, rate: u32) -> usize {
     length_at_16k(frames, rate) + AudioBuffer16k::SAMPLE_RATE as usize
 }
 
-/// The longest length a container may declare, in seconds: five hours.
-const MAX_DECLARED_SECONDS: u64 = 5 * 3_600;
+/// `frames` a container declares at `rate`, capped at five hours: a
+/// corrupt header must not claim more.
+fn capped(frames: u64, rate: u32) -> u64 {
+    /// Five hours, in seconds.
+    const MAX_DECLARED_SECONDS: u64 = 5 * 3_600;
+    frames.min(MAX_DECLARED_SECONDS * u64::from(rate))
+}
 
 /// The frames to reserve for a stream: its length, but a length the
 /// container declares is capped at five hours at the stream's rate (a
@@ -273,12 +275,9 @@ const MAX_DECLARED_SECONDS: u64 = 5 * 3_600;
 fn reserved_frames(spec: Spec) -> usize {
     match spec.length {
         Length::Measured(frames) => frames,
-        Length::Declared(frames) => usize::try_from(
-            frames
-                .unwrap_or(0)
-                .min(MAX_DECLARED_SECONDS * u64::from(spec.rate)),
-        )
-        .unwrap_or(0),
+        Length::Declared(frames) => {
+            usize::try_from(capped(frames.unwrap_or(0), spec.rate)).unwrap_or(0)
+        }
     }
 }
 

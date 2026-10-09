@@ -77,13 +77,11 @@ pub(crate) fn forget(
         RECORDED_FILE,
         salvage_recorded,
         |recorded: &mut BTreeMap<Uuid, PathBuf>| {
-            recorded.retain(|id, folder| {
-                let kept = !meeting_ids.contains(id);
-                if !kept {
-                    forgotten.insert(*id, folder.clone());
-                }
-                kept
-            });
+            forgotten.extend(
+                meeting_ids
+                    .iter()
+                    .filter_map(|id| recorded.remove_entry(id)),
+            );
             !forgotten.is_empty()
         },
     )?;
