@@ -59,10 +59,11 @@ exits reach the shutdown these ways:
   nothing), so the app answers at once, records on, and saves at the end,
   which gnome-session waits about ten seconds for and xfce4-session
   seven. When xfce4-session tells the app to leave (Session settings'
-  Quit Program), the app saves and quits, since xfce4-session kills it 15
-  seconds later. xfce4-session also tells a client to leave right after
-  it dropped it, when a checkpoint (Save Session) has waited a minute,
-  with no logout to follow and no kill; the app then records on and
+  Quit Program), the app unregisters, which calls off the kill
+  xfce4-session would send 15 seconds later, then saves and quits.
+  xfce4-session also tells a client to leave right after it dropped it,
+  when a checkpoint (Save Session) has waited a minute, usually with no
+  logout to follow, and with no kill; the app then records on and
   registers again, so a later logout still reaches it. On Wayland
   xfce4-session quits right after it asked, with no end and no cancel to
   follow, so there the app saves when asked, answers, and ends with the
@@ -87,7 +88,8 @@ exits reach the shutdown these ways:
   again. Only a kill ends the save early: systemd's `SIGKILL` once a
   stop has waited out the unit's `TimeoutStopSec` (90 s unless the unit
   sets another), xfce4-session's `SIGKILL` 15 seconds after it told the
-  app to leave, which the save's ten seconds fit in, or a second SIGTERM.
+  app to leave, which the app calls off by unregistering first, or a
+  second SIGTERM.
 - While a recording runs the app holds the portal's logout inhibitor
   ("A meeting is being recorded") and releases it when the recording
   stops. GNOME then lists Steno in its logout dialog, also for
@@ -126,7 +128,7 @@ only a kill cuts it off on any of them:
 | GNOME (X11, Wayland) | `EndSession`, about ten seconds to answer; then the display closing holds the exit until the save has ended |
 | Xfce on X11 | `EndSession`, seven seconds to answer; then the display closing holds the exit until the save has ended |
 | Xfce on Wayland | `QueryEndSession`; xfce4-session quits at once, and the display closing holds the exit until the save has ended |
-| Xfce's Quit Program (Session settings) | `Stop`, 15 seconds before xfce4-session kills the app |
+| Xfce's Quit Program (Session settings) | `Stop`; the app unregisters first, so xfce4-session's kill 15 seconds later does not come |
 | KDE Plasma 6.6 (Wayland, X11) | the display closing |
 | A desktop whose portal reports the end | the portal's ending state, then the display closing |
 | wlroots and others | the display closing |

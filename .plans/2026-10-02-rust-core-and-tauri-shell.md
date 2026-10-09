@@ -1178,15 +1178,16 @@ still has to draw the window side. `[ ]` is not ported yet.
     still call an Xfce logout off after the query, after which xfce4-session sends
     the shell nothing, so the recording goes on until the end comes. gnome-session
     waits about ten seconds for the answer at the end, xfce4-session seven. `Stop`
-    saves and quits: xfce4-session sends it for Quit Program (Session settings) and
-    kills the process 15 s later. It also sends it to a client it has just dropped
+    unregisters (`UnregisterClient`), saves and quits: xfce4-session sends it for
+    Quit Program (Session settings) and kills the process 15 s later unless the
+    client unregistered. It also sends it to a client it has just dropped
     (`StateChanged` to disconnected) when a checkpoint (Save Session), or a query
-    whose answer it refused, has waited a minute, with no logout to follow and no
-    kill; that client records on and registers again (`Phase::Dropped`), so a later
-    logout still reaches it. On Wayland xfce4-session quits right after the
-    query, without `EndSession` and with no cancel to follow, so there the shell
-    saves at the query, answers and ends with the display
-    (`SessionApi::query_ends_on_wayland`). It tells Wayland from X11 by
+    whose answer it refused, has waited a minute, usually with no logout to follow,
+    and with no kill; that client records on and registers again (`Phase::Dropped`),
+    also after the save at a query, so a later logout still reaches it. On Wayland
+    xfce4-session quits right after the query, without `EndSession` and with no
+    cancel to follow, so there the shell saves at the query, answers and ends with
+    the display (`SessionApi::query_ends_on_wayland`). It tells Wayland from X11 by
     `XDG_SESSION_TYPE`, else by a `WAYLAND_DISPLAY` whose socket exists; should the
     session go on 30 s after that save (an X11 session taken for a Wayland one), the
     shell tells the user and relaunches, so the user can record again.
@@ -1218,10 +1219,10 @@ still has to draw the window side. `[ ]` is not ported yet.
     most `SHUTDOWN_PATIENCE` after it began, unless the process is killed first
     (systemd's `SIGKILL` once a stop has waited out the unit's `TimeoutStopSec`,
     90 s unless the unit sets another, xfce4-session's `SIGKILL` 15 s after its
-    `Stop`, which the save's ten seconds fit in, or a second SIGTERM). On KDE Plasma this is
-    the save: ksmserver speaks XSMP to X11 clients, which GTK 3 does not, and KWin
-    closes only native Wayland windows at a logout, not the shell's, which run
-    under XWayland.
+    `Stop`, which the shell calls off by unregistering first, or a second SIGTERM).
+    On KDE Plasma this is the save: ksmserver speaks XSMP to X11 clients, which
+    GTK 3 does not, and KWin closes only native Wayland windows at a logout, not
+    the shell's, which run under XWayland.
   - A system shutdown or reboot runs the shutdown while logind waits: the shell
     holds logind's `shutdown` delay lock and releases it after the save on
     `PrepareForShutdown(true)`; logind waits at most `InhibitDelayMaxSec` (five
