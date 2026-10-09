@@ -2280,7 +2280,7 @@ mod tests {
 
     /// A stop for the app's exit tries its commit once: with the database
     /// held past the busy timeout ([`QUIT_BUSY`]), quitting returns after
-    /// one wait, where three tries would take three (15 s at the product's
+    /// one wait, where three tries would take three waits (15 s at the product's
     /// 5 s timeout, past the exit's 10 s patience), and the meeting stays
     /// `recording` for the next launch, its folder still recorded.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
