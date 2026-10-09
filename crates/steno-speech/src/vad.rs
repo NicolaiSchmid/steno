@@ -15,7 +15,7 @@ use std::path::Path;
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
-use crate::backend::sample_count;
+use crate::backend::{FRAME_SAMPLES, sample_count};
 use crate::error::SpeechError;
 use crate::onnx::{OnnxOptions, open_session, outlet_tensor};
 
@@ -311,6 +311,56 @@ impl Default for EnergyVad {
     }
 }
 
+/// An [`EnergyVad`] whose threshold follows the recording's own level
+/// ([`adaptive_rms_threshold`]), so a quiet lane is not taken for
+/// silence. The `CoreML` engine runs it: Silero runs on ONNX Runtime,
+/// which the Mac app keeps out of its process (plan invariant 4).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AdaptiveEnergyVad {
+    pub config: VadConfig,
+}
+
+impl VoiceActivityDetector for AdaptiveEnergyVad {
+    fn speech_regions(&mut self, samples: &[f32]) -> Result<Vec<Range<usize>>, SpeechError> {
+        EnergyVad {
+            rms_threshold: adaptive_rms_threshold(samples),
+            config: self.config.clone(),
+        }
+        .speech_regions(samples)
+    }
+}
+
+/// [`adaptive_rms_threshold`]'s bounds and scale: about -66 and -42 dBFS,
+/// and 0.3 of the 75th percentile.
+const ADAPTIVE_RMS_FLOOR: f32 = 0.0005;
+const ADAPTIVE_RMS_CEILING: f32 = 0.008;
+const ADAPTIVE_RMS_SCALE: f32 = 0.3;
+const ADAPTIVE_RMS_PERCENTILE: f64 = 0.75;
+
+/// A speech threshold scaled to the recording's level: 0.3 of the 75th
+/// percentile of the per-frame (80 ms) RMS over the frames that are not
+/// digital silence, clamped to about -66 to -42 dBFS; the ceiling for a
+/// recording that is all silence.
+/// Swift: `FluidAudio`'s `ChunkProcessor.adaptiveSpeechRmsThreshold`.
+#[must_use]
+pub fn adaptive_rms_threshold(samples: &[f32]) -> f32 {
+    let mut frame_rms: Vec<f32> = samples
+        .as_chunks::<FRAME_SAMPLES>()
+        .0
+        .iter()
+        .map(|frame| frame.iter().map(|x| x * x).sum::<f32>() / FRAME_SAMPLES as f32)
+        .filter(|mean_square| *mean_square > 0.0)
+        .map(f32::sqrt)
+        .collect();
+    if frame_rms.is_empty() {
+        return ADAPTIVE_RMS_CEILING;
+    }
+    frame_rms.sort_by(f32::total_cmp);
+    let index =
+        ((frame_rms.len() as f64 * ADAPTIVE_RMS_PERCENTILE) as usize).min(frame_rms.len() - 1);
+    (frame_rms[index] * ADAPTIVE_RMS_SCALE).clamp(ADAPTIVE_RMS_FLOOR, ADAPTIVE_RMS_CEILING)
+}
+
 impl VoiceActivityDetector for EnergyVad {
     fn speech_regions(&mut self, samples: &[f32]) -> Result<Vec<Range<usize>>, SpeechError> {
         let probabilities: Vec<f32> = samples
@@ -403,5 +453,35 @@ mod tests {
         assert_eq!(regions.len(), 1);
         assert!(regions[0].start <= 4_000 && regions[0].start + WINDOW > 4_000);
         assert!(regions[0].end >= 8_000 && regions[0].end < 8_000 + WINDOW);
+    }
+
+    #[test]
+    fn the_adaptive_threshold_follows_the_level_within_its_bounds() {
+        // Speech at 0.004 RMS (about -48 dBFS, under the fixed 0.01) over
+        // digital silence, which the percentile skips.
+        let mut quiet = vec![0.0f32; 16_000];
+        for (i, x) in quiet[4_000..12_000].iter_mut().enumerate() {
+            *x = if i % 2 == 0 { 0.004 } else { -0.004 };
+        }
+        assert!((adaptive_rms_threshold(&quiet) - 0.0012).abs() < 1e-6);
+        let regions = AdaptiveEnergyVad {
+            config: VadConfig {
+                pad_seconds: 0.0,
+                ..VadConfig::default()
+            },
+        }
+        .speech_regions(&quiet)
+        .unwrap();
+        assert_eq!(regions.len(), 1, "{regions:?}");
+        assert!(regions[0].start <= 4_000 && regions[0].end >= 11_776);
+        assert!(
+            EnergyVad::default()
+                .speech_regions(&quiet)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(adaptive_rms_threshold(&vec![0.5; 16_000]), 0.008);
+        assert_eq!(adaptive_rms_threshold(&vec![0.0001; 16_000]), 0.0005);
+        assert_eq!(adaptive_rms_threshold(&[0.0; 4_000]), 0.008);
     }
 }
