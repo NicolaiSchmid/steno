@@ -334,14 +334,17 @@ mod tests {
         assert!(clip.exists());
     }
 
-    /// After the merge a confirmed speaker that the re-run dropped, or
-    /// whose new row has no clip, keeps every file it had and the clip its
-    /// row named under another speaker's id, and a speaker the merge did
-    /// not replace that this run gave no clip keeps its files; a confirmed
-    /// speaker given a new clip and an unconfirmed one lose their earlier
-    /// clips, and every clip a row names stays.
+    /// After the merge only the unnamed files of the sweep's owners go. A
+    /// confirmed speaker that the re-run dropped, or whose new row has no
+    /// clip, keeps every file it had and the clip its row named under
+    /// another speaker's id, and a speaker the merge did not replace that
+    /// this run gave no clip keeps its files. A confirmed speaker given a
+    /// new clip and an unconfirmed one lose their earlier clips, an
+    /// unconfirmed speaker the re-run drops loses its clip, a speaker new
+    /// in this run loses a crashed run's leftover, and every clip a row
+    /// names stays.
     #[test]
-    fn after_the_merge_a_confirmed_speaker_given_no_clip_keeps_its_files() {
+    fn after_the_merge_only_the_owners_unnamed_clips_go() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
         let meeting = sample_data::meeting();
@@ -356,13 +359,16 @@ mod tests {
             unconfirmed,
             merged_into,
             returned,
-        ] = [(); 6].map(|()| Uuid::new_v4());
+            gone,
+            fresh,
+        ] = [(); 8].map(|()| Uuid::new_v4());
         let before = |id| layout.run_sample_clip(id, earlier);
         let now = |id| layout.run_sample_clip(id, run);
         let dropped_leftover = layout.run_sample_clip(dropped, Uuid::new_v4());
         // The clip a merge moved from the unconfirmed speaker to a
         // confirmed one without a clip.
         let moved = layout.run_sample_clip(unconfirmed, Uuid::new_v4());
+        let fresh_leftover = layout.run_sample_clip(fresh, Uuid::new_v4());
         put(&[
             &before(clipless),
             &before(dropped),
@@ -373,6 +379,9 @@ mod tests {
             &now(unconfirmed),
             &moved,
             &before(returned),
+            &before(gone),
+            &fresh_leftover,
+            &now(fresh),
         ]);
         let replaced = [
             speaker(meeting.id, clipless, true, Some(&before(clipless))),
@@ -380,6 +389,8 @@ mod tests {
             speaker(meeting.id, renewed, true, Some(&before(renewed))),
             speaker(meeting.id, unconfirmed, false, Some(&before(unconfirmed))),
             speaker(meeting.id, merged_into, true, Some(&moved)),
+            // An unconfirmed speaker the re-run drops.
+            speaker(meeting.id, gone, false, Some(&before(gone))),
         ];
         // The rows the merge committed, as diarize wrote them.
         let committed = [
@@ -389,6 +400,8 @@ mod tests {
             speaker(meeting.id, merged_into, false, None),
             // A confirmed speaker an earlier re-run dropped, back unconfirmed.
             speaker(meeting.id, returned, false, None),
+            // A new speaker with a clip, and a crashed run's leftover.
+            speaker(meeting.id, fresh, false, Some(&now(fresh))),
         ];
         for row in &committed {
             store.save_speaker(row).unwrap();
@@ -403,7 +416,12 @@ mod tests {
         )
         .unwrap();
         removed.sort();
-        let mut expected = vec![before(renewed), before(unconfirmed)];
+        let mut expected = vec![
+            before(renewed),
+            before(unconfirmed),
+            before(gone),
+            fresh_leftover,
+        ];
         expected.sort();
         assert_eq!(removed, expected);
         for kept in [

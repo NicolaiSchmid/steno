@@ -636,7 +636,8 @@ fn replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices() {
 /// and range its row named, so the voice the user confirmed stays
 /// playable and no sweep takes the file for a leftover; one that comes
 /// back with a clip takes the new one, and an unconfirmed speaker takes
-/// what the re-run gave it, no clip included.
+/// what the re-run gave it, so one given no clip loses its earlier clip and
+/// range.
 #[test]
 fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_none() {
     let (store, meeting) = populated();
@@ -644,7 +645,15 @@ fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_
     store
         .confirm_speaker(speakers[0].id, &common::person())
         .unwrap();
+    let mut unconfirmed = speakers[1].clone();
+    unconfirmed.sample_clip_url = Some("file:///tmp/clip-2.wav".to_owned());
+    unconfirmed.sample_clip_range = Some(TimeRange {
+        lower: 3.0,
+        upper: 4.0,
+    });
+    store.save_speaker(&unconfirmed).unwrap();
     let earlier = store.speakers(meeting.id).unwrap();
+    assert!(earlier[1].sample_clip_url.is_some());
 
     let mut rerun = speakers.clone();
     for speaker in &mut rerun {
@@ -658,6 +667,7 @@ fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_
     assert_eq!(stored[0].sample_clip_url, earlier[0].sample_clip_url);
     assert_eq!(stored[0].sample_clip_range, earlier[0].sample_clip_range);
     assert_eq!(stored[1].sample_clip_url, None);
+    assert_eq!(stored[1].sample_clip_range, None);
 
     rerun[0].sample_clip_range = Some(TimeRange {
         lower: 1.0,
