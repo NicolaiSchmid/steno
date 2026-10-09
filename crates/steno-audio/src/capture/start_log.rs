@@ -1,12 +1,14 @@
-//! How loud a backend's `start` logs. While a rebuild's restarts go on
-//! (one streak, see `CaptureSession`) the session logs one line when the
-//! first of them fails and about one a minute after, with the count, and
-//! the lines a start would log on every try (a fallback, the start's
-//! timing, a start given up) go to `debug` instead: the session runs the
-//! try inside [`quietly`], and the backends log those lines through
-//! [`start_log!`]. A backend that starts on a thread of its own reads
-//! [`is_quiet`] before the spawn and runs its start there inside
-//! [`quietly`] too. Rust only.
+//! How loud a backend's `start` and `stop` log. While a rebuild's
+//! restarts go on (one streak, see `CaptureSession`) the session logs one
+//! line when the first of them fails and about one a minute after, with
+//! the count, and the lines a start or a stop would log on every try go to
+//! `debug` instead: a fallback, the start's timing, a start given up, the
+//! Mac's silent output (where it runs, or that it did not start) and the
+//! first callback's line its `stop` logs. The session runs each try, and
+//! the stop of a stream that delivered nothing, inside [`quietly`], and
+//! the backends log those lines through [`start_log!`]. A backend that
+//! starts on a thread of its own reads [`is_quiet`] before the spawn and
+//! runs its start there inside [`quietly`] too. Rust only.
 
 use std::cell::Cell;
 

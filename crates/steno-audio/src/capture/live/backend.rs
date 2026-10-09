@@ -34,7 +34,8 @@
 //! which only calls [`deliver`] and marks the first callback's host time
 //! ([`FirstCallback`]), and `silent_io_proc` (below), which only zeroes
 //! its output; `stop()` logs that callback's offset from the start
-//! at `info`, so a call recording shows whether the IOProc ran at once.
+//! at `info`, so a call recording shows whether the IOProc ran at once
+//! (at `debug` while the session's restarts go on, `start_log`).
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,
 //! `AudioDeviceDestroyIOProcID`, the callback context, listeners,
@@ -60,7 +61,9 @@
 //! IOProc's input streams are off. It is rebuilt with the capture, so a
 //! change of the system output moves it to the new clock master; one that
 //! does not start is logged, and the capture then records only while
-//! another app plays, as before A10. No in-app playback while recording,
+//! another app plays, as before A10: the session restarts it on its
+//! backoff until one runs, on the microphone it recorded, and logs that
+//! about once a minute (`CaptureSession`). No in-app playback while recording,
 //! enforced by [`Playback`](crate::playback::Playback): Steno's own output
 //! would land in the system lane, and the capture session holds that gate
 //! while it records. In-person mode has no tap and needs no output client.
@@ -176,24 +179,31 @@ unsafe extern "C-unwind" fn silent_io_proc(
 /// aggregate was built with as its main sub-device, when that read fails.
 /// The device it runs on is logged at `info` (its name read for the line
 /// alone), and a failure to start at `warn`: the capture then goes on
-/// without it, as it did before A10.
+/// without it, as it did before A10; both at `debug` while the session's
+/// restarts go on (`start_log`), so a call whose silent output keeps
+/// failing logs it once a streak, not at every restart.
 fn start_silent_output(aggregate: &AggregateDevice, requested: Id) -> Option<IoProc> {
     let device = aggregate.main_sub_device().unwrap_or_else(|error| {
-        tracing::warn!("the aggregate's clock master did not read ({error}); using {requested}");
+        start_log!(
+            warn,
+            "the aggregate's clock master did not read ({error}); using {requested}"
+        );
         requested
     });
     // SAFETY: `silent_io_proc` reads no client data, so a null client
     // stays valid for as long as the IOProc runs.
     match unsafe { IoProc::start_output_only(device, Some(silent_io_proc), std::ptr::null_mut()) } {
         Ok(io) => {
-            tracing::info!(
+            start_log!(
+                info,
                 "the silent output runs on {} (audio device {device}), the aggregate's clock master",
                 hal::name(device)
             );
             Some(io)
         }
         Err(error) => {
-            tracing::warn!(
+            start_log!(
+                warn,
                 "the silent output on audio device {device} did not start ({error}); \
                  the call capture runs only while another app plays"
             );
@@ -782,7 +792,8 @@ impl CaptureBackend for LiveCaptureBackend {
         } = active;
         drop(io_proc);
         // The IOProc is stopped: nothing writes the mark any more.
-        tracing::info!(
+        start_log!(
+            info,
             "{}",
             first_callback_line(
                 context

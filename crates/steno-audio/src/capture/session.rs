@@ -92,9 +92,16 @@
 //! and come back with every resume. The log says when a streak's first
 //! restart fails and then about once a minute, with the count, across its
 //! resumes; meanwhile the lines a try would log, the session's and the
-//! backends', go to `debug` (`start_log`). Once audio has come for 10 s,
-//! one `info` line answers a streak that logged a failure, with the
-//! restarts and the silence written.
+//! backends' at its start and at the stop of a stream that delivered
+//! nothing (the Mac's silent output and first callback lines included),
+//! go to `debug` (`start_log`). Once audio has come for 10 s, one `info`
+//! line answers a streak that logged a failure, with the restarts and the
+//! silence written. A stream whose stall comes 10 s or more after its
+//! resume begins a new streak each time, which resumes on its first
+//! restart: it never brings the warning up when none stands (the
+//! recorder's note after the stop counts the silence its gaps took), and
+//! while an earlier `warn` line stands unanswered its stall's own line
+//! goes to `debug` as well.
 //!
 //! A device that stops delivering without any notification (a driver or a
 //! source's owner that hangs, a graph that stops running) is caught by the
@@ -1631,6 +1638,8 @@ impl Core {
     /// the recording before this thread could fold it in, and the rate of a
     /// restarted stream that stop kept from its `resume`. The meter reads
     /// silence from the old stream's stop until the restarted one delivers.
+    /// The old backend's stop logs its lines at `debug` when this rebuild
+    /// continues a streak that logged a failure (`start_log`).
     fn rebuild_steps(
         self: &Arc<Self>,
         generation: usize,
@@ -1647,7 +1656,7 @@ impl Core {
         // `STALL_TIMEOUT`).
         let now = self.clock.now();
         let mut silent_from = now;
-        let (sink, relay, processing, plan) = {
+        let (sink, relay, processing, plan, quiet) = {
             let mut inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
                 return (0, 0.0, None);
@@ -1681,11 +1690,15 @@ impl Core {
                 Arc::clone(&active.relay),
                 active.processing.take(),
                 plan,
+                // A streak this rebuild continues logged its failure: the
+                // backend's lines at this stop go to `debug`, as its
+                // starts' do (`try_start`).
+                active.streak.logged_at.is_some(),
             )
         };
         // Whatever whole frames the rings hold are the old device's last
         // audio; the processing thread's stop drains them into the relay.
-        self.backend.stop();
+        start_log::quietly(quiet, || self.backend.stop());
         let mut canceller = None;
         let mut peak = 0.0f32;
         if let Some(mut processing) = processing {
@@ -1950,7 +1963,8 @@ impl Core {
     /// whose own error it logs; the caller keeps the chosen one's). Once
     /// the streak's first restart failed (`restart_failed`) the start's
     /// own lines, the session's and the backend's, go to `debug`
-    /// (`start_log`). The start holds the session's mutex; with
+    /// (`start_log`), and so do the backend's at the stop of a stream that
+    /// delivered nothing. The start holds the session's mutex; with
     /// `plan.awaits_delivery` the wait for its first frame does not: the
     /// sink's count of frames offered is sampled every
     /// `STALL_CHECK_INTERVAL` on the clock, and the gap then runs to the
@@ -1979,7 +1993,7 @@ impl Core {
         generation: usize,
         cancel: &Cancel,
     ) -> Result<Restart, CaptureError> {
-        let (stream, mut at, returned, offered) = {
+        let (stream, mut at, returned, offered, quiet) = {
             let inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
                 return Ok(Restart::Abandoned);
@@ -2014,12 +2028,12 @@ impl Core {
             } else {
                 before
             };
-            (stream, at, returned, offered)
+            (stream, at, returned, offered, quiet)
         };
         while plan.awaits_delivery && sink.frames_offered() == offered {
             let now = self.clock.now();
             if now.saturating_sub(returned) >= CaptureSession::STALL_TIMEOUT {
-                self.backend.stop();
+                start_log::quietly(quiet, || self.backend.stop());
                 if let Some(active) = self.lock().active.as_mut() {
                     active.pending_change = None;
                 }
