@@ -4295,6 +4295,155 @@ fn restarts_that_start_but_deliver_nothing_are_retried_until_one_does() {
     );
 }
 
+/// A restart whose stream delivers during its wait for a first frame ends
+/// the gap at the wait's last sample that saw nothing, not at the start's
+/// return: the gap is the time no audio came, to within a sample.
+#[test]
+fn a_restart_that_delivers_during_its_wait_ends_the_gap_at_its_last_empty_sample() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        stalling(1.0, 0.5).restarts_stall_after(0.0),
+    ));
+    let session = in_person_session(directory.path(), backend.clone(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    assert!(clock.wait_for_sleepers(2), "the first restart's wait");
+    assert_eq!(backend.starts(), 2);
+    // A second into the wait, well past the start's return.
+    for _ in 0..10 {
+        assert!(clock.wait_for_sleepers(2));
+        clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
+    }
+    assert!(clock.wait_for_sleepers(2));
+    let last_empty = clock.now();
+    resume_delivery_until_a_frame(&backend);
+    clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
+    // The watch thread last saw a frame at its first sample.
+    let gap = gap_seconds(last_empty.saturating_sub(CaptureSession::STALL_CHECK_INTERVAL));
+    let resumed = loop {
+        if let CaptureNotice::DeviceResumed { gap_seconds, .. } =
+            notices.recv_timeout(RECV).unwrap()
+        {
+            break gap_seconds;
+        }
+    };
+    assert_eq!(resumed, gap);
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.gap_seconds, gap);
+}
+
+/// A change reported while a restart waits for a first frame it never
+/// gets is dropped with that start, since the next start reads the devices
+/// as they are: the restart after it resumes, and no rebuild follows.
+#[test]
+fn a_change_during_a_restart_that_delivers_nothing_costs_no_extra_rebuild() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        stalling(1.0, 0.5).restarts_stall_after(0.0),
+    ));
+    let session = in_person_session(directory.path(), backend.clone(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    assert!(clock.wait_for_sleepers(2), "the first restart's wait");
+    assert_eq!(backend.starts(), 2);
+    session.device_changed(DeviceChangeReason::DefaultInputChanged);
+    settle();
+    advance_the_rebuild_until(&clock, 200, || backend.starts() == 3);
+    assert!(clock.wait_for_sleepers(2), "the second restart's wait");
+    resume_delivery_until_a_frame(&backend);
+    clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
+    loop {
+        if let CaptureNotice::DeviceResumed { attempt, .. } = notices.recv_timeout(RECV).unwrap() {
+            assert_eq!(attempt, 2);
+            break;
+        }
+    }
+    settle();
+    assert_eq!(backend.starts(), 3, "no rebuild after the resume");
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.device_changes, 1);
+}
+
+/// The synthetic backend, whose restarts return `start_takes` on `clock`
+/// after their first callback, as a PipeWire start reads its latency after
+/// the first cycle.
+struct SlowRestart {
+    inner: SyntheticCaptureBackend,
+    clock: Arc<ManualClock>,
+    start_takes: Duration,
+    starts: AtomicUsize,
+}
+
+impl CaptureBackend for SlowRestart {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        input_device_uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        let stream = self.inner.start(lanes, input_device_uid, sink)?;
+        if self.starts.fetch_add(1, Ordering::SeqCst) > 0 {
+            self.clock.advance(self.start_takes);
+        }
+        Ok(stream)
+    }
+
+    fn stop(&self) {
+        self.inner.stop();
+    }
+
+    fn delivers_continuously(&self, lanes: &[AudioLane]) -> bool {
+        self.inner.delivers_continuously(lanes)
+    }
+
+    fn waits_for_playback(&self, lanes: &[AudioLane]) -> bool {
+        self.inner.waits_for_playback(lanes)
+    }
+}
+
+/// Frames that arrive while a restart's `start` runs end the gap at the
+/// clock's reading before that start, not at its return: the gap is the
+/// time no audio came, and the master does not hold the start's latency
+/// twice.
+#[test]
+fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SlowRestart {
+        inner: SyntheticCaptureBackend::new(stalling(1.0, 0.5)),
+        clock: clock.clone(),
+        start_takes: Duration::from_millis(500),
+        starts: AtomicUsize::new(0),
+    });
+    let session = in_person_session(directory.path(), backend.clone(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.inner.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    // The restart starts at once, at the stall's report one sample past
+    // `STALL_TIMEOUT` after the last frame, which the first sample saw.
+    let gap = gap_seconds(CaptureSession::STALL_TIMEOUT + CaptureSession::STALL_CHECK_INTERVAL);
+    let resumed = loop {
+        if let CaptureNotice::DeviceResumed { gap_seconds, .. } =
+            notices.recv_timeout(RECV).unwrap()
+        {
+            break gap_seconds;
+        }
+    };
+    assert_eq!(resumed, gap, "not the start's 0.5 s on top");
+    backend.inner.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.gap_seconds, gap);
+    assert_eq!(result.statistics.duration, 0.5 + gap + 1.0);
+}
+
 /// A stall whose restarts fail with an error that is not `DidNotRun` (a
 /// Mac start while `coreaudiod` is still gone, a Bluetooth device still
 /// switching): the watchdog caught an outage the backend did not report,

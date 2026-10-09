@@ -465,9 +465,10 @@ enum Restart {
         started: Started,
         /// The restart that started it, 1 for the first.
         attempt: usize,
-        /// When its first frame arrived, as far as the wait for it saw
-        /// (else when the start returned), on the clock: the gap runs to
-        /// it.
+        /// Where the gap ends, on the clock: the last sample before the
+        /// first frame (within `STALL_CHECK_INTERVAL`), the reading before
+        /// the start when frames came during it, else the start's return
+        /// (`try_start`).
         at: Duration,
     },
     Abandoned,
@@ -1875,7 +1876,11 @@ impl Core {
     /// `plan.awaits_delivery` the wait for its first frame does not: the
     /// sink's count of frames offered is sampled every
     /// `STALL_CHECK_INTERVAL` on the clock, and the gap then runs to the
-    /// last sample that saw nothing, not to the start's return. A stream
+    /// last sample before the first frame (within `STALL_CHECK_INTERVAL`),
+    /// not to the start's return. A start whose stream offered frames
+    /// before it returned ends the gap at the clock's reading before the
+    /// start, so the master runs short of wall time by that start's latency
+    /// at most, never ahead (no audio is lost either way). A stream
     /// that offered none `STALL_TIMEOUT` after its start is stopped and
     /// fails with `DidNotRun`; a change its listeners reported meanwhile
     /// is dropped with it, since the next start reads the devices as they
@@ -1894,7 +1899,7 @@ impl Core {
         generation: usize,
         cancel: &Cancel,
     ) -> Result<Restart, CaptureError> {
-        let (stream, mut at, offered) = {
+        let (stream, mut at, started, offered) = {
             let inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
                 return Ok(Restart::Abandoned);
@@ -1906,6 +1911,7 @@ impl Core {
             // The old stream is stopped, so the count stays until this
             // start delivers.
             let offered = sink.frames_offered();
+            let before = self.clock.now();
             let stream = start_log::quietly(quiet, || {
                 if on_the_default {
                     self.start_on_the_default(sink)
@@ -1918,9 +1924,18 @@ impl Core {
                     )
                 }
             })?;
-            (stream, self.clock.now(), offered)
+            // Frames that came while `start` ran (a PipeWire start reads
+            // its latency after the first cycle) end the gap at the reading
+            // before it: short of the first frame by that start's latency
+            // at most, where the return would hold that time twice.
+            let returned = self.clock.now();
+            let at = if sink.frames_offered() == offered {
+                returned
+            } else {
+                before
+            };
+            (stream, at, returned, offered)
         };
-        let started = at;
         while plan.awaits_delivery && sink.frames_offered() == offered {
             let now = self.clock.now();
             if now.saturating_sub(started) >= CaptureSession::STALL_TIMEOUT {
