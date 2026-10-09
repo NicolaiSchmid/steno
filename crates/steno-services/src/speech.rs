@@ -278,9 +278,10 @@ pub(crate) type BuildEngine = Box<dyn Fn(SpeechRuntime) -> Arc<dyn SpeechEngine>
 /// The speech engines and the diarizer the app's pipelines share, so a
 /// pipeline reload (a Settings save of the engine or of the summaries)
 /// keeps the current engine with its claims ([`SharedSpeechEngine`]) and
-/// the diarizer: the `CoreML` model and the diarizer's models a
-/// recording's warm-up loaded stay loaded, and a job the reload retired
-/// and a job on the new pipeline share one speech sidecar child. Swift:
+/// the diarizer: the `CoreML` model a recording's warm-up loaded stays
+/// loaded (the diarizer's warm-up only checks its files), and a job the
+/// reload retired and a job on the new pipeline share one speech sidecar
+/// child. Swift:
 /// none; `reloadPipeline` built a new engine and diarizer every time.
 ///
 /// The setup (the models directory, the speech settings, how the sidecar
