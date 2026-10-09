@@ -20,8 +20,9 @@ fn launch_time() -> DateTime<Utc> {
 /// Answers the checks a test queued (none left: up to date) and counts
 /// every call; a check waits for `release` while `stalls` is set, a
 /// download with `busy_after_download` set leaves the gate busy (a
-/// recording started meanwhile), and an install records whether the
-/// gate's hold was alive.
+/// recording started meanwhile), and an install records the version it
+/// was given, whether a package came with it and whether the gate's hold
+/// was alive.
 #[derive(Default)]
 struct FakeSource {
     answers: Mutex<VecDeque<Result<Option<String>, String>>>,
@@ -30,9 +31,9 @@ struct FakeSource {
     release: tokio::sync::Notify,
     downloads: AtomicUsize,
     busy_after_download: AtomicBool,
-    dropped: AtomicUsize,
     download_fails: AtomicBool,
     installs: AtomicUsize,
+    installed: Mutex<Vec<(String, bool)>>,
     install_fails: AtomicBool,
     announced: Mutex<Vec<String>>,
     gate: Mutex<Option<Arc<FakeGate>>>,
@@ -63,7 +64,7 @@ impl UpdateSource for FakeSource {
         lock(&self.answers).pop_front().unwrap_or(Ok(None))
     }
 
-    async fn download(&self) -> Result<(), String> {
+    async fn download(&self, _version: &str) -> Result<Vec<u8>, String> {
         self.downloads.fetch_add(1, Ordering::SeqCst);
         if self.busy_after_download.load(Ordering::SeqCst)
             && let Some(gate) = lock(&self.gate).as_ref()
@@ -73,11 +74,16 @@ impl UpdateSource for FakeSource {
         if self.download_fails.load(Ordering::SeqCst) {
             return Err("the download broke off".into());
         }
-        Ok(())
+        Ok(vec![1, 2, 3])
     }
 
-    async fn install_and_relaunch(&self) -> Result<(), String> {
+    async fn install_and_relaunch(
+        &self,
+        version: &str,
+        package: Option<Vec<u8>>,
+    ) -> Result<(), String> {
         self.installs.fetch_add(1, Ordering::SeqCst);
+        lock(&self.installed).push((version.to_owned(), package.is_some()));
         let held = lock(&self.gate)
             .as_ref()
             .is_some_and(|gate| gate.alive.load(Ordering::SeqCst) > 0);
@@ -86,10 +92,6 @@ impl UpdateSource for FakeSource {
             return Err("the bundle could not be replaced".into());
         }
         Ok(())
-    }
-
-    fn drop_download(&self) {
-        self.dropped.fetch_add(1, Ordering::SeqCst);
     }
 
     fn announce(&self, version: &str) {
@@ -365,10 +367,10 @@ async fn nothing_downloads_while_the_app_is_busy() {
     assert_eq!(world.checks(), 1);
 }
 
-/// A download the app turned busy during is never installed while the
-/// gate says busy, and later ticks try the install again without a second
-/// download. Once the app is idle the next tick installs while it holds
-/// the gate.
+/// With a real gate that turns busy during the download, the download
+/// never installs while the gate says busy, and later ticks try the
+/// install again without a second download. Once the app is idle the next
+/// tick installs the kept package while it holds the gate.
 #[tokio::test]
 async fn a_download_never_installs_while_the_gate_says_busy() {
     let world = World::new();
@@ -399,6 +401,7 @@ async fn a_download_never_installs_while_the_gate_says_busy() {
     assert_eq!(world.installs(), 1);
     assert_eq!(world.downloads(), 1);
     assert_eq!(*lock(&world.source.held_while_installing), [true]);
+    assert_eq!(*lock(&world.source.installed), [("0.12.0".into(), true)]);
     assert_eq!(world.gate.alive.load(Ordering::SeqCst), 0, "released after");
     assert_eq!(world.source.announced(), ["0.12.0"]);
 }
@@ -436,8 +439,8 @@ async fn nothing_downloads_while_the_gate_is_the_stand_in() {
     assert_eq!(world.source.announced(), ["0.12.0"]);
 }
 
-/// Turning automatic downloads off frees the kept download, so an idle
-/// tick afterwards installs nothing.
+/// With a real gate, turning automatic downloads off frees the kept
+/// package, so an idle tick afterwards installs nothing.
 #[tokio::test]
 async fn turning_automatic_downloads_off_frees_the_download() {
     let world = World::new();
@@ -451,8 +454,9 @@ async fn turning_automatic_downloads_off_frees_the_download() {
     let schedule = world.schedule();
     schedule.tick().await;
     assert_eq!(world.downloads(), 1);
+    assert!(schedule.state().staged.is_some());
     schedule.set_automatically_downloads(false);
-    assert_eq!(world.source.dropped.load(Ordering::SeqCst), 1);
+    assert!(schedule.state().staged.is_none());
 
     world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
     world.gate.idle.store(true, Ordering::SeqCst);
@@ -487,9 +491,116 @@ async fn a_check_that_finds_no_update_forgets_the_download() {
     assert_eq!(world.installs(), 0);
 }
 
+/// With a real gate, busy at the check: a later check that finds no
+/// update forgets the version still to download, so the first idle tick
+/// downloads nothing.
+#[tokio::test]
+async fn a_check_that_finds_no_update_forgets_the_version_to_download() {
+    let world = World::new();
+    world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.source.answer(Ok(Some("0.12.0")));
+    world.source.answer(Ok(None));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    world.advance(CHECK_INTERVAL);
+    schedule.tick().await;
+    assert_eq!(world.checks(), 2);
+    assert_eq!(schedule.state().to_download, None);
+
+    world.gate.idle.store(true, Ordering::SeqCst);
+    world.advance(TimeDelta::hours(1));
+    schedule.tick().await;
+    assert_eq!(world.downloads(), 0);
+}
+
+/// Installing stops a recording that is starting, running or stopping,
+/// and only an idle recorder lets a yes install at once.
+#[test]
+fn only_an_idle_recorder_lets_an_install_through() {
+    assert!(!stops_a_recording(RecordingState::Idle));
+    for state in [
+        RecordingState::Starting,
+        RecordingState::Recording,
+        RecordingState::Stopping,
+    ] {
+        assert!(stops_a_recording(state), "{state:?}");
+    }
+}
+
+/// A dialog shown while idle and answered once a recording started: the
+/// schedule says a recording is under way, and after "Not Now" the first
+/// idle tick announces the version again, the user's check included.
+#[tokio::test]
+async fn a_yes_put_off_by_a_recording_is_announced_again() {
+    let world = World::new();
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    assert_eq!(world.source.announced(), ["0.12.0"]);
+    assert!(!schedule.recording_under_way());
+
+    world.recording(RecordingState::Recording);
+    assert!(schedule.recording_under_way());
+    schedule.announce_again("0.12.1");
+    schedule.announce_again("0.12.0");
+    world.advance(TimeDelta::hours(1));
+    schedule.tick().await;
+    assert_eq!(world.source.announced(), ["0.12.0"]);
+
+    world.recording(RecordingState::Idle);
+    world.advance(TimeDelta::hours(1));
+    schedule.tick().await;
+    world.advance(TimeDelta::hours(1));
+    schedule.tick().await;
+    assert_eq!(world.source.announced(), ["0.12.0", "0.12.0"]);
+
+    world.source.answer(Ok(Some("0.12.0")));
+    assert_eq!(schedule.check_on_request().await, Ok(Some("0.12.0".into())));
+    schedule.announce_again("0.12.0");
+    world.advance(TimeDelta::hours(1));
+    schedule.tick().await;
+    assert_eq!(world.source.announced(), ["0.12.0", "0.12.0", "0.12.0"]);
+}
+
+/// The user's install takes the package kept for the version the dialog
+/// named, and only for that version; a failed install is shown.
+#[tokio::test]
+async fn the_users_install_takes_the_package_kept_for_its_version() {
+    let world = World::new();
+    world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.gate.idle.store(true, Ordering::SeqCst);
+    world
+        .source
+        .busy_after_download
+        .store(true, Ordering::SeqCst);
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    assert_eq!(world.installs(), 0);
+
+    schedule.install_on_request("0.12.1").await;
+    assert!(
+        schedule.state().staged.is_some(),
+        "kept for its own version"
+    );
+    schedule.install_on_request("0.12.0").await;
+    assert!(schedule.state().staged.is_none());
+    assert_eq!(
+        *lock(&world.source.installed),
+        [("0.12.1".into(), false), ("0.12.0".into(), true)]
+    );
+
+    world.source.install_fails.store(true, Ordering::SeqCst);
+    schedule.install_on_request("0.12.0").await;
+    assert_eq!(
+        schedule.last_outcome(),
+        UpdateOutcome::Failed("the bundle could not be replaced".into())
+    );
+}
+
 /// While a recording starts, runs or stops, a found update is not
-/// announced, since one click on the dialog would end the recording; the
-/// first tick after it ends announces it, once.
+/// announced, since the dialog would offer to end the recording; the first
+/// tick after it ends announces it, once.
 #[tokio::test]
 async fn a_found_update_waits_for_the_recording_to_end() {
     let world = World::new();
@@ -587,8 +698,8 @@ async fn a_tick_behind_the_users_check_does_not_check_again() {
     assert_eq!(world.checks(), 1);
 }
 
-/// A failed install is shown and not retried; a failed download leaves the
-/// update to the announcement.
+/// With a real gate, idle: a failed install is shown and not retried; a
+/// failed download leaves the update to the announcement.
 #[tokio::test]
 async fn failed_downloads_and_installs_fall_back_to_the_announcement() {
     let world = World::new();

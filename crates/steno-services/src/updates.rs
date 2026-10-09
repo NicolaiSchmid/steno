@@ -26,19 +26,26 @@
 //! - **A found update** is announced once per version in a run
 //!   ([`UpdateSource::announce`]), as Sparkle's update alert, but not while
 //!   a recording starts, runs or stops; the first tick after it ends
-//!   announces it. The user installs it from there. Automatic downloads
-//!   wait for P25's [`InstallGate`] (stable plan): until it replaces
-//!   [`NeverIdle`], the flag is stored and shown but nothing downloads by
-//!   itself. With the gate, a found update is downloaded once the app is
-//!   idle ([`InstallGate::is_idle_now`]), and installed while the install
-//!   holds the gate's [`InstallHold`] through the install, the shutdown
-//!   and the relaunch; while the app is busy the download, and then the
-//!   install, wait for a later tick.
+//!   announces it. The user installs it from there; a yes given after a
+//!   recording has started asks once more, since installing stops and
+//!   saves it ([`stops_a_recording`], the shell's `offer`), and a "Not
+//!   Now" there leaves the version to announce again
+//!   ([`UpdateSchedule::announce_again`]).
+//! - **Automatic downloads** wait for P25's [`InstallGate`] (stable plan):
+//!   until it replaces [`NeverIdle`], the flag is stored and shown but
+//!   nothing downloads by itself. With the gate, a found update is
+//!   downloaded once the app is idle ([`InstallGate::is_idle_now`]), and
+//!   installed while the install holds the gate's [`InstallHold`] through
+//!   the install, the shutdown and the relaunch; while the app is busy the
+//!   download, and then the install, wait for a later tick. The schedule
+//!   keeps the downloaded package until an install takes it, and frees it
+//!   when a check finds another version, or none, and when automatic
+//!   downloads are turned off.
 //! - **Packaged installs** ([`updates_are_managed`], stable plan X5): no
 //!   schedule, and no check, the user's included.
 //!
-//! The network is the updater's: the schedule asks the same lane manifests
-//! the tray's Check for Updates asks, and sends nothing else.
+//! The network is the updater's: the schedule reads the same lane manifests
+//! as the tray's Check for Updates, and sends nothing else.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -124,6 +131,13 @@ pub trait InstallGate: Send + Sync {
     }
 }
 
+/// Whether installing now would stop a recording: one is starting, running
+/// or stopping. The announcement waits while it does, and the shell asks
+/// again before a yes given meanwhile installs.
+pub fn stops_a_recording(state: RecordingState) -> bool {
+    state != RecordingState::Idle
+}
+
 /// The gate until P25 builds the real one: never idle, so the schedule
 /// never downloads, installs or relaunches by itself, and a found update
 /// waits for the user to install it.
@@ -144,16 +158,21 @@ pub trait UpdateSource: Send + Sync {
     /// Reads the lanes' manifests: the newer version they offer, or `None`
     /// when this build is the newest.
     async fn check(&self) -> Result<Option<String>, String>;
-    /// Downloads and verifies the update the last check found and keeps it
-    /// for the install.
-    async fn download(&self) -> Result<(), String>;
-    /// Installs the update [`Self::download`] kept, runs the shutdown and
-    /// relaunches; returns only when the install failed.
-    async fn install_and_relaunch(&self) -> Result<(), String>;
-    /// Frees the update [`Self::download`] kept: automatic downloads were
-    /// turned off.
-    fn drop_download(&self);
-    /// Offers the found update to the user, who may install it then.
+    /// Downloads and verifies `version`, the update the last check found:
+    /// the package the schedule keeps for the install. Fails when the last
+    /// check found another version, or none.
+    async fn download(&self, version: &str) -> Result<Vec<u8>, String>;
+    /// Installs `version`, the update the last check found, from `package`
+    /// when [`Self::download`] fetched it, else downloading it now; runs the
+    /// shutdown and relaunches. Returns only when the install failed, or
+    /// was refused because the last check found another version, or none.
+    async fn install_and_relaunch(
+        &self,
+        version: &str,
+        package: Option<Vec<u8>>,
+    ) -> Result<(), String>;
+    /// Offers the found update to the user, who may install it then; the
+    /// shell confirms first when a recording has started since.
     /// Swift: Sparkle's update alert.
     fn announce(&self, version: &str);
 }
@@ -171,12 +190,34 @@ struct State {
     /// by the attempt, so a failed download or install waits for the next
     /// check.
     to_download: Option<String>,
-    /// The version [`UpdateSource::download`] kept.
-    staged: Option<String>,
+    /// The package [`UpdateSource::download`] fetched, until an install
+    /// takes it.
+    staged: Option<Staged>,
     /// The version last announced or shown to the user, so a later tick in
     /// this run does not ask again; a relaunch asks again, as Sparkle
     /// re-alerted at each scheduled check.
     announced: Option<String>,
+}
+
+/// A downloaded and verified package and its version.
+struct Staged {
+    version: String,
+    package: Vec<u8>,
+}
+
+impl std::fmt::Debug for Staged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Staged")
+            .field("version", &self.version)
+            .field("bytes", &self.package.len())
+            .finish()
+    }
+}
+
+impl State {
+    fn staged_version(&self) -> Option<&String> {
+        self.staged.as_ref().map(|staged| &staged.version)
+    }
 }
 
 /// The host's `Updater`: the daily schedule, the flags and the last check.
@@ -290,7 +331,7 @@ impl UpdateSchedule {
         }
         if self.automatically_downloads() {
             self.download_when_idle().await;
-            if self.state().staged.is_some() && self.install_when_idle().await {
+            if self.install_when_idle().await {
                 return;
             }
         }
@@ -341,8 +382,8 @@ impl UpdateSchedule {
         let Some(version) = self.state().to_download.take() else {
             return;
         };
-        match self.source.download().await {
-            Ok(()) => self.state().staged = Some(version),
+        match self.source.download(&version).await {
+            Ok(package) => self.state().staged = Some(Staged { version, package }),
             Err(error) => {
                 tracing::warn!(%version, "the update could not be downloaded: {error}");
             }
@@ -350,9 +391,9 @@ impl UpdateSchedule {
     }
 
     /// Checks, giving up after [`CHECK_TIMEOUT`]: records the outcome and,
-    /// when the check succeeded, the time and what it found; a kept
-    /// download of another version is forgotten, and a version not kept is
-    /// to download.
+    /// when the check succeeded, the time and what it found; a package kept
+    /// for another version is freed, and a found version not kept is to
+    /// download.
     async fn check_holding(
         &self,
         _one: tokio::sync::MutexGuard<'_, ()>,
@@ -370,10 +411,12 @@ impl UpdateSchedule {
                     state.outcome = found
                         .clone()
                         .map_or(UpdateOutcome::UpToDate, UpdateOutcome::Available);
-                    if state.staged != *found {
+                    if state.staged_version() != found.as_ref() {
                         state.staged = None;
-                        state.to_download.clone_from(found);
                     }
+                    state.to_download = found
+                        .clone()
+                        .filter(|found| state.staged_version() != Some(found));
                     state.found.clone_from(found);
                 }
                 Err(message) => state.outcome = UpdateOutcome::Failed(message.clone()),
@@ -394,13 +437,49 @@ impl UpdateSchedule {
         });
     }
 
-    /// Installs the kept download while holding the gate; true when the
+    /// The user's install of `version`, after the dialog's yes: from the
+    /// kept package when it is that version. Returns only when the install
+    /// failed or was refused, which the General section then shows.
+    pub async fn install_on_request(&self, version: &str) {
+        let package = {
+            let mut state = self.state();
+            state
+                .staged
+                .take_if(|staged| staged.version == version)
+                .map(|staged| staged.package)
+        };
+        if let Err(message) = self.source.install_and_relaunch(version, package).await {
+            self.install_failed(message);
+        }
+    }
+
+    /// Whether a recording is starting, running or stopping now
+    /// ([`stops_a_recording`]): a yes to the dialog then asks again first.
+    pub fn recording_under_way(&self) -> bool {
+        stops_a_recording(self.recorder.status().state)
+    }
+
+    /// The user put off installing `version` because a recording is under
+    /// way: the first idle tick after it ends announces it again.
+    pub fn announce_again(&self, version: &str) {
+        self.state()
+            .announced
+            .take_if(|announced| *announced == version);
+    }
+
+    /// Installs the kept package while holding the gate; true when the
     /// relaunch is under way.
     async fn install_when_idle(&self) -> bool {
         let Some(hold) = self.gate.try_hold() else {
             return false;
         };
-        let installed = self.source.install_and_relaunch().await;
+        let Some(staged) = self.state().staged.take() else {
+            return false;
+        };
+        let installed = self
+            .source
+            .install_and_relaunch(&staged.version, Some(staged.package))
+            .await;
         drop(hold);
         match installed {
             Ok(()) => true,
@@ -413,10 +492,10 @@ impl UpdateSchedule {
     }
 
     /// Announces the found update unless it was announced or shown in this
-    /// run, or the recorder is not idle: one click on the dialog would end
-    /// the recording, so a later tick announces it instead.
+    /// run, or a recording is under way: the dialog would offer to end the
+    /// recording, so a later tick announces it instead.
     fn announce_when_idle(&self) {
-        if self.recorder.status().state != RecordingState::Idle {
+        if self.recording_under_way() {
             return;
         }
         let mut state = self.state();
@@ -467,11 +546,11 @@ impl Updater for UpdateSchedule {
             .unwrap_or(AUTOMATIC_DOWNLOAD_DEFAULT)
     }
 
-    /// Turning automatic downloads off frees a kept download.
+    /// Turning automatic downloads off frees a kept package.
     fn set_automatically_downloads(&self, enabled: bool) {
         self.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, enabled);
-        if !enabled && self.state().staged.take().is_some() {
-            self.source.drop_download();
+        if !enabled {
+            self.state().staged = None;
         }
     }
 

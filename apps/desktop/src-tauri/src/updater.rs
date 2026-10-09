@@ -21,11 +21,15 @@
 //! endpoint. The matching private key is the `TAURI_SIGNING_PRIVATE_KEY`
 //! secret and lives nowhere in the repository.
 //!
-//! Swift: `UpdaterController.swift`, `UpdateChannels.swift`.
+//! Swift: `apps/macos/Steno/Services/UpdaterController.swift`,
+//! `apps/macos/Steno/Services/UpdateChannels.swift`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use steno_services::updates::{UpdateSchedule, UpdateSource};
+use steno_services::updates::{
+    CHECK_TIMED_OUT, CHECK_TIMEOUT, MANAGED_CHECK, UpdateSchedule, UpdateSource,
+};
 use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind,
@@ -63,25 +67,14 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry, tauri_plugin_updater::
     tauri_plugin_updater::Builder::new().build()
 }
 
-/// The update source the schedule drives, kept as Tauri managed state: the
-/// update the last check found and, once downloaded, its verified bytes,
-/// which an install the user agrees to uses instead of downloading again.
-/// Nothing is downloaded before the user's yes until P25's install gate
-/// lets the schedule download.
+/// The update source the schedule drives, kept as Tauri managed state:
+/// the update the last check found, which the schedule's download and
+/// install name by version. The schedule keeps the downloaded package.
 pub struct ShellUpdates {
     app: AppHandle,
     found: Mutex<Option<Update>>,
-    /// The version and the bytes [`UpdateSource::download`] kept.
-    downloaded: Mutex<Option<Download>>,
-}
-
-/// A verified package and its version.
-type Download = (String, Vec<u8>);
-
-/// Frees `downloaded` unless it holds `version`: a check found another
-/// update, or none.
-fn keep_only(downloaded: &Mutex<Option<Download>>, version: Option<&str>) {
-    lock(downloaded).take_if(|(kept, _)| Some(kept.as_str()) != version);
+    /// One install at a time ([`OneInstall`]).
+    installing: AtomicBool,
 }
 
 impl ShellUpdates {
@@ -89,16 +82,40 @@ impl ShellUpdates {
         ShellUpdates {
             app,
             found: Mutex::new(None),
-            downloaded: Mutex::new(None),
+            installing: AtomicBool::new(false),
         }
+    }
+
+    /// The found update when it is `version`; the error says why not.
+    fn found(&self, version: &str) -> Result<Update, String> {
+        lock(&self.found)
+            .clone()
+            .filter(|update| update.version == version)
+            .ok_or_else(|| format!("Steno {version} is no longer the update on offer."))
+    }
+}
+
+/// An install under way: while it lives a second one returns at once, so
+/// two dialogs answered yes do not write two packages.
+struct OneInstall<'a>(&'a AtomicBool);
+
+impl<'a> OneInstall<'a> {
+    /// `None` while another install runs.
+    fn start(installing: &'a AtomicBool) -> Option<Self> {
+        (!installing.swap(true, Ordering::SeqCst)).then_some(OneInstall(installing))
+    }
+}
+
+impl Drop for OneInstall<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
 #[async_trait::async_trait]
 impl UpdateSource for ShellUpdates {
     /// Asks the lanes. The update itself, when there is one, is kept for
-    /// the download and the install; a package kept for another version is
-    /// freed.
+    /// the download and the install.
     async fn check(&self) -> Result<Option<String>, String> {
         let version = self.app.package_info().version.to_string();
         let handle = self.app.clone();
@@ -115,31 +132,21 @@ impl UpdateSource for ShellUpdates {
             .await
             .map_err(|error| error.to_string())?;
         let version = update.as_ref().map(|update| update.version.clone());
-        keep_only(&self.downloaded, version.as_deref());
         *lock(&self.found) = update;
         Ok(version)
     }
 
-    async fn download(&self) -> Result<(), String> {
-        let Some(update) = lock(&self.found).clone() else {
-            return Err("No update was found to download.".to_owned());
-        };
-        if lock(&self.downloaded)
-            .as_ref()
-            .is_some_and(|(version, _)| *version == update.version)
-        {
-            return Ok(());
-        }
-        let bytes = update
+    async fn download(&self, version: &str) -> Result<Vec<u8>, String> {
+        self.found(version)?
             .download(|_, _| {}, || {})
             .await
-            .map_err(|error| error.to_string())?;
-        *lock(&self.downloaded) = Some((update.version, bytes));
-        Ok(())
+            .map_err(|error| error.to_string())
     }
 
-    /// Installs the found update (from the kept bytes when they are its
-    /// version, else downloading it now), runs the shutdown and relaunches.
+    /// Installs `version` (from `package` when the schedule kept one, else
+    /// downloading it now), runs the shutdown and relaunches; a second
+    /// install while one runs returns at once, and a version the last check
+    /// no longer found is refused with a message.
     /// The relaunch bypasses the exit request, so the shutdown runs first
     /// (`shut_down_before_exit`), as Sparkle's relaunch went through
     /// `applicationShouldTerminate`; on Windows the installer's own exit
@@ -147,17 +154,24 @@ impl UpdateSource for ShellUpdates {
     /// shutdown ran (Windows: the installer did not launch) ends the app
     /// once its message is closed: the recorder and the pipeline start
     /// nothing after a shutdown, and the next Quit would run none.
-    async fn install_and_relaunch(&self) -> Result<(), String> {
+    async fn install_and_relaunch(
+        &self,
+        version: &str,
+        package: Option<Vec<u8>>,
+    ) -> Result<(), String> {
         let app = &self.app;
-        let Some(update) = lock(&self.found).clone() else {
-            return Err("No update was found to install.".to_owned());
+        let Some(_one) = OneInstall::start(&self.installing) else {
+            return Ok(());
         };
-        let kept = lock(&self.downloaded)
-            .take_if(|(version, _)| *version == update.version)
-            .map(|(_, bytes)| bytes);
-        let installed = match kept {
-            Some(bytes) => update.install(bytes),
-            None => update.download_and_install(|_, _| {}, || {}).await,
+        let installed = match self.found(version) {
+            Ok(update) => match package {
+                Some(bytes) => update.install(bytes).map_err(|error| error.to_string()),
+                None => update
+                    .download_and_install(|_, _| {}, || {})
+                    .await
+                    .map_err(|error| error.to_string()),
+            },
+            Err(refused) => Err(refused),
         };
         match installed {
             Ok(()) => {
@@ -181,13 +195,9 @@ impl UpdateSource for ShellUpdates {
                         handle.exit(0);
                     }
                 });
-                Err(error.to_string())
+                Err(error)
             }
         }
-    }
-
-    fn drop_download(&self) {
-        lock(&self.downloaded).take();
     }
 
     fn announce(&self, version: &str) {
@@ -213,11 +223,14 @@ fn schedule(app: &AppHandle) -> Option<Arc<UpdateSchedule>> {
 
 /// The user's check of the lanes; through the schedule when there is one,
 /// so the General section shows the outcome and the time and the schedule
-/// does not announce the same version again.
+/// does not announce the same version again. Either way it gives up after
+/// [`CHECK_TIMEOUT`].
 async fn check_on_request(app: &AppHandle) -> Result<Option<String>, String> {
     match schedule(app) {
         Some(schedule) => schedule.check_on_request().await,
-        None => source(app).check().await,
+        None => tokio::time::timeout(CHECK_TIMEOUT, source(app).check())
+            .await
+            .unwrap_or_else(|_| Err(CHECK_TIMED_OUT.to_owned())),
     }
 }
 
@@ -230,13 +243,45 @@ fn dialog(
     app.dialog().message(message).title("Steno").kind(kind)
 }
 
+/// Shows a two-button question and waits for the answer: true for `yes`;
+/// `no`, or a dialog closed without an answer, is false.
+async fn ask(
+    app: &AppHandle,
+    kind: MessageDialogKind,
+    message: String,
+    yes: &str,
+    no: &str,
+) -> bool {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    dialog(app, kind, message)
+        .buttons(MessageDialogButtons::OkCancelCustom(yes.into(), no.into()))
+        .show(move |agreed| {
+            let _ = sender.send(agreed);
+        });
+    receiver.await == Ok(true)
+}
+
+/// Whether a recording is starting, running or stopping now: the host's
+/// recorder when the host runs the schedule, else (the fixture host, a
+/// smoke run) the state the shell follows.
+fn recording_under_way(app: &AppHandle) -> bool {
+    match schedule(app) {
+        Some(schedule) => schedule.recording_under_way(),
+        None => steno_services::updates::stops_a_recording(crate::panels::recording(app)),
+    }
+}
+
 /// The tray's Check for Updates: checks, then asks before installing,
-/// as Sparkle's standard driver does.
+/// as Sparkle's standard driver does. On a packaged install it says who
+/// delivers the updates instead.
 pub async fn check_and_offer(app: &AppHandle) {
     match check_on_request(app).await {
         Ok(Some(version)) => offer(app, &version).await,
         Ok(None) => {
             dialog(app, MessageDialogKind::Info, "Steno is up to date.").show(|_| {});
+        }
+        Err(message) if message == MANAGED_CHECK => {
+            dialog(app, MessageDialogKind::Info, message).show(|_| {});
         }
         Err(message) => {
             dialog(
@@ -249,30 +294,34 @@ pub async fn check_and_offer(app: &AppHandle) {
     }
 }
 
-/// Asks whether to install `version` now, and installs and relaunches when
-/// the user agrees: after the tray's check, and when the schedule found an
-/// update it does not install by itself (Sparkle's update alert).
+/// Asks whether to install `version` now and, when the user agrees,
+/// installs and relaunches: after the tray's check, and when the schedule
+/// found an update it does not install by itself (Sparkle's update alert).
+/// The dialog may have been open since before a recording started, so when
+/// the recorder is no longer idle by the yes it asks again first
+/// ("Installing stops and saves the recording in progress."); "Not Now",
+/// or closing that dialog, leaves the version for the schedule to announce
+/// once the recording has ended.
 async fn offer(app: &AppHandle, version: &str) {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    dialog(
-        app,
-        MessageDialogKind::Info,
-        format!("Steno {version} is available. Install it and relaunch?"),
-    )
-    .buttons(MessageDialogButtons::OkCancelCustom(
-        "Install and Relaunch".into(),
-        "Later".into(),
-    ))
-    .show(move |agreed| {
-        let _ = sender.send(agreed);
-    });
-    if receiver.await != Ok(true) {
+    const INSTALL: &str = "Install and Relaunch";
+    let message = format!("Steno {version} is available. Install it and relaunch?");
+    if !ask(app, MessageDialogKind::Info, message, INSTALL, "Later").await {
         return;
     }
-    if let Err(message) = source(app).install_and_relaunch().await
-        && let Some(schedule) = schedule(app)
-    {
-        schedule.install_failed(message);
+    if recording_under_way(app) {
+        let message = "Installing stops and saves the recording in progress.".to_owned();
+        if !ask(app, MessageDialogKind::Warning, message, INSTALL, "Not Now").await {
+            if let Some(schedule) = schedule(app) {
+                schedule.announce_again(version);
+            }
+            return;
+        }
+    }
+    match schedule(app) {
+        Some(schedule) => schedule.install_on_request(version).await,
+        None => {
+            let _ = source(app).install_and_relaunch(version, None).await;
+        }
     }
 }
 
@@ -308,18 +357,16 @@ mod tests {
         }
     }
 
-    /// A check that finds another version, or none, frees the package kept
-    /// for the old one; the same version keeps it.
+    /// While one install runs a second does not start; once it ends, the
+    /// next may.
     #[test]
-    fn a_kept_package_is_freed_when_the_check_finds_another_version() {
-        let downloaded = Mutex::new(Some(("0.12.0".to_owned(), vec![1, 2, 3])));
-        keep_only(&downloaded, Some("0.12.0"));
-        assert!(lock(&downloaded).is_some());
-        keep_only(&downloaded, Some("0.12.1"));
-        assert!(lock(&downloaded).is_none());
-        *lock(&downloaded) = Some(("0.12.1".to_owned(), vec![4]));
-        keep_only(&downloaded, None);
-        assert!(lock(&downloaded).is_none());
+    fn one_install_at_a_time() {
+        let installing = AtomicBool::new(false);
+        let first = OneInstall::start(&installing);
+        assert!(first.is_some());
+        assert!(OneInstall::start(&installing).is_none());
+        drop(first);
+        assert!(OneInstall::start(&installing).is_some());
     }
 
     #[test]

@@ -1797,13 +1797,16 @@ mod tests {
             async fn check(&self) -> Result<Option<String>, String> {
                 Ok(None)
             }
-            async fn download(&self) -> Result<(), String> {
+            async fn download(&self, _version: &str) -> Result<Vec<u8>, String> {
+                Ok(Vec::new())
+            }
+            async fn install_and_relaunch(
+                &self,
+                _version: &str,
+                _package: Option<Vec<u8>>,
+            ) -> Result<(), String> {
                 Ok(())
             }
-            async fn install_and_relaunch(&self) -> Result<(), String> {
-                Ok(())
-            }
-            fn drop_download(&self) {}
             fn announce(&self, _version: &str) {}
         }
         let dir = tempfile::tempdir().unwrap();
