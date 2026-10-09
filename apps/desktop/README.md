@@ -168,16 +168,19 @@ candidate: speaker diarization runs in the app's process, so while it
 runs, or under pressure that lasts after the sidecar is gone, oomd can
 take the app.
 
-Stopping the app's unit also stops the sidecar's scope. The app asks over
-the user bus's Unix socket in `$XDG_RUNTIME_DIR`, with the sidecar's pid,
-the unit names and the scope's fixed settings, nothing else, and waits
-about two seconds for the sidecar to be in its scope. A start the manager
-has not carried out by then is called off, and the sidecar stays in the
-app's cgroup; a sidecar that joined its scope just before stays in it.
-Without a user manager, a user bus or a unit (a plain shell, a
-container), or when the manager refuses, the sidecar stays in the app's
-cgroup. A manager that answers only after the wait may still move the
-sidecar, which then stays in its scope.
+The app asks the user manager for the scope over the user bus's Unix
+socket in `$XDG_RUNTIME_DIR`, sending the sidecar's pid, the unit names
+and the scope's fixed settings, nothing else, and waits about two seconds
+for the sidecar to be in it. A start the manager has not carried out by
+then is called off and the sidecar stays in the app's cgroup; a sidecar
+that joined its scope just before, or that a late manager moves
+afterwards, stays in its scope. Without a user manager, a user bus or a
+unit (a plain shell, a container), or when the manager refuses, the
+sidecar stays in the app's cgroup. Stopping the app's unit also stops the
+sidecar's scope. The log says which happened: `speech sidecar in a scope
+of its own`, `the speech sidecar stays in the app's cgroup`, or, when
+nothing tells whether the manager moved it, `the speech sidecar stays
+where the user manager put it`.
 
 Snapshots reach the windows, the tray and the panels from the main thread
 (`WindowSink` in `host.rs`): the host emits under its `publishing` lock,
