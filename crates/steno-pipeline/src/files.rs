@@ -405,8 +405,8 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
 /// not parse is moved aside ([`set_aside`]) and logged before the default
 /// is used; a file that cannot be read for another reason, or that cannot
 /// be moved aside, is left alone, logged, and must never be written
-/// (`false`). `preferences.json` and `export-retries.json` read
-/// through this.
+/// (`false`). `preferences.json` and `export-retries.json` read through
+/// this.
 pub fn read_json<T: DeserializeOwned + Default>(path: &Path) -> (T, bool) {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -513,6 +513,16 @@ impl<V: Serialize + DeserializeOwned + Clone> MeetingCounts<V> {
         write_json(&self.path, &*counts).inspect_err(|error| {
             tracing::warn!("{} could not be written: {error}", self.path.display());
         })
+    }
+
+    /// Keeps only the values of the meetings `keep` accepts, replacing the
+    /// file when that drops any; a failed write is logged.
+    pub(crate) fn retain(&self, mut keep: impl FnMut(Uuid) -> bool) {
+        let _ = self.change(|counts| {
+            let before = counts.len();
+            counts.retain(|meeting_id, _| keep(*meeting_id));
+            counts.len() != before
+        });
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeMap<Uuid, V>> {

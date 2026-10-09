@@ -117,12 +117,8 @@ impl ExportRetries {
 
     /// Keeps only the counts of the meetings `keep` accepts. The launch
     /// drops a meeting that delivered every row since, or that was deleted.
-    pub(crate) fn retain(&self, mut keep: impl FnMut(Uuid) -> bool) {
-        let _ = self.counts.change(|counts| {
-            let before = counts.len();
-            counts.retain(|meeting_id, _| keep(*meeting_id));
-            counts.len() != before
-        });
+    pub(crate) fn retain(&self, keep: impl FnMut(Uuid) -> bool) {
+        self.counts.retain(keep);
     }
 }
 

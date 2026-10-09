@@ -150,12 +150,8 @@ impl DamagedAudio {
 
     /// Keeps only the damage of the meetings `keep` accepts: the launch
     /// drops the meetings that were deleted. A failed write is logged.
-    pub fn retain(&self, mut keep: impl FnMut(Uuid) -> bool) {
-        let _ = self.damage.change(|all| {
-            let before = all.len();
-            all.retain(|meeting_id, _| keep(*meeting_id));
-            all.len() != before
-        });
+    pub fn retain(&self, keep: impl FnMut(Uuid) -> bool) {
+        self.damage.retain(keep);
     }
 }
 
