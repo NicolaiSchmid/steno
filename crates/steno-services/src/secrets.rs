@@ -36,9 +36,9 @@ pub use secret_service::SecretServiceStore;
 /// `Steno <key>`; the `keyring` crate cannot set a label (the Keychain
 /// then shows the service), and lookups match on service and account only.
 /// The Secret Service item carries the label (`SecretServiceStore` on
-/// Linux), the Windows credential its comment. On Windows the credential's
-/// target name is `<key>.<service>`, as the `keyring` crate filed it
-/// (`credentials`).
+/// Linux), and a Windows credential Steno writes carries it as its
+/// comment. On Windows the credential's target name is `<key>.<service>`,
+/// as the `keyring` crate filed it (`credentials`).
 pub const KEYRING_SERVICE: &str = "uno.schmid.steno.mac";
 
 /// The platform keyring when `keyring` is set: the Keychain on macOS, the

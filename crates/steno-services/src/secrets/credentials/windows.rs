@@ -376,7 +376,7 @@ mod tests {
 
     /// A move under `CRED_PRESERVE_CREDENTIAL_BLOB` keeps the blob the
     /// credential manager holds and never brings back a deleted credential,
-    /// as the in-memory set's does.
+    /// as the in-memory set's move does.
     #[test]
     fn on_windows_a_move_keeps_the_stored_blob_and_never_brings_back_a_deleted_credential() {
         let key = TestKey::new();

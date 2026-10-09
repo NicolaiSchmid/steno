@@ -31,10 +31,13 @@
 //! fails with `ERROR_NOT_FOUND` and writes nothing. The move is read back
 //! and logged, and nothing is written after it: the read-back reads the
 //! credential manager's set, so a credential it does not find was removed
-//! there, and writing it back would bring a removed credential back. A
-//! failed move is logged, the value read is still returned, and the next
-//! read tries again. Either persistence reads through the crate too, so a
-//! build from before the move still finds its secrets.
+//! there, and writing it back would bring a removed credential back. That
+//! holds when the roaming profile's sync made the removal in that moment
+//! too: a removal wins, and for the identity #221's guard then reports the
+//! handover unavailable. A failed move is logged, the value read is still
+//! returned, and the next read tries again. Either persistence reads
+//! through the crate too, so a build from before the move still finds its
+//! secrets.
 //!
 //! Microsoft documents what `CredWriteW` replaces, not how or in which
 //! order the credential manager writes it to disk, and local and roaming
@@ -113,7 +116,8 @@ impl std::fmt::Debug for Credential {
 pub(super) trait CredentialSet {
     /// The credential filed under `target_name`, `None` when there is none.
     fn read(&mut self, target_name: &str) -> io::Result<Option<Credential>>;
-    /// Writes `credential`, replacing the one with the same target name.
+    /// Writes `credential`, replacing the one with the same target name and
+    /// type.
     fn write(&mut self, credential: &Credential) -> io::Result<()>;
     /// Writes `credential` with local persistence, keeping the blob the
     /// credential filed under its target name holds (`credential.blob` is
@@ -262,8 +266,9 @@ mod tests {
     type Meddling = fn(&mut BTreeMap<String, Credential>);
 
     /// An in-memory credential set, keyed by the target name as Windows
-    /// keys it (case-insensitively), that records every call and fails,
-    /// loses or changes what a test asks it to.
+    /// keys it (case-insensitively), that records every call, fails the
+    /// reads, writes and moves a test asks it to, and makes another
+    /// program's changes around a move.
     #[derive(Default)]
     struct FakeSet {
         credentials: BTreeMap<String, Credential>,
