@@ -681,7 +681,8 @@ fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
 /// `steno process --meeting <id>` processes a stored failed meeting again
 /// from its recording: refused while the master is gone, and once the
 /// broken lane is replaced the run ends ready and prints the id. A ready
-/// meeting is refused unless `--allow-ready` asks for it.
+/// meeting is refused unless `--allow-ready` asks for it, its master on
+/// disk or not.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
@@ -774,6 +775,19 @@ fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
         ready.stderr
     );
     assert_eq!(ready.stdout, "");
+    // The rule comes before the files: a ready meeting whose master is
+    // gone still asks for --allow-ready.
+    std::fs::rename(&master, &aside).unwrap();
+    let swept = steno(&["process", "--meeting", &meeting_id, "--db", db], home);
+    assert_eq!(swept.status, 2, "{}", swept.stderr);
+    assert!(
+        swept.stderr.contains(&format!(
+            "Meeting {meeting_id} is ready; pass --allow-ready to process it again."
+        )),
+        "{}",
+        swept.stderr
+    );
+    std::fs::rename(&aside, &master).unwrap();
     let allowed = steno(
         &[
             "process",

@@ -980,7 +980,9 @@ impl ProcessingPipeline {
     }
 
     /// [`reprocess`](Self::reprocess) for a finished meeting `offered`
-    /// accepts, checked under the same read as the rest.
+    /// accepts. The asset is claimed first and the meeting read and checked
+    /// under the claim, so the meeting read is the one the run starts from:
+    /// a run that ends just before the claim has saved its row by then.
     fn reprocess_if(
         &self,
         meeting_id: Uuid,
@@ -989,6 +991,14 @@ impl ProcessingPipeline {
         if self.quitting() {
             return Err(ReprocessError::Quitting);
         }
+        let asset = attributing(PipelineStage::Decode, self.store().asset(meeting_id))?;
+        let claim = match &asset {
+            Some(asset) => Some(
+                self.claim_start(meeting_id, asset.id)
+                    .ok_or(ReprocessError::Busy(meeting_id))?,
+            ),
+            None => None,
+        };
         let meeting = attributing(PipelineStage::Decode, self.store().meeting(meeting_id))?
             .ok_or(ReprocessError::MeetingNotFound(meeting_id))?;
         let state = meeting.state.kind();
@@ -998,16 +1008,14 @@ impl ProcessingPipeline {
         if !offered(&meeting) {
             return Err(ReprocessError::NotOffered(meeting_id));
         }
-        let mut asset = attributing(PipelineStage::Decode, self.store().asset(meeting_id))?
+        let (mut asset, claim) = asset
+            .zip(claim)
             .ok_or(ReprocessError::NoAsset(meeting_id))?;
         // The persist stage mixes the master down, so sidecars alone would
         // fail the run at its end.
         if !file_url_path(&asset.url).is_some_and(|master| master.exists()) {
             return Err(ReprocessError::AudioGone(meeting_id));
         }
-        let claim = self
-            .claim_start(meeting_id, asset.id)
-            .ok_or(ReprocessError::Busy(meeting_id))?;
         asset.expires_at = None;
         Ok(self.enqueue_claimed(&meeting, &asset, claim, Store::save_meeting_with_asset)?)
     }
@@ -2752,5 +2760,150 @@ mod tests {
             PipelineFailure::wrapping(&other, PipelineStage::Decode),
             PipelineFailure::new(PipelineStage::Decode, "no such file")
         );
+    }
+
+    /// `process_again` against a run that ends while it waits for its
+    /// claim. Linux only: the test sees the caller park through `/proc`.
+    #[cfg(target_os = "linux")]
+    mod process_again_under_the_claim {
+        use super::*;
+
+        /// A decoder for a test that never needs one: the run a wrongly
+        /// accepted "Process again" spawns fails at `decode`.
+        struct NoDecoder;
+
+        #[steno_core::async_trait]
+        impl AudioDecoder for NoDecoder {
+            async fn decode(
+                &self,
+                _asset: &AudioAsset,
+                _lane: AudioLane,
+            ) -> steno_core::protocols::BoundaryResult<AudioBuffer16k> {
+                Err("no decoder in this test".into())
+            }
+
+            fn mixdown_format(&self) -> steno_core::AudioFormat {
+                steno_core::AudioFormat::Wav16kInt16
+            }
+
+            async fn mixdown(
+                &self,
+                _asset: &AudioAsset,
+                _to: &Path,
+            ) -> steno_core::protocols::BoundaryResult<()> {
+                Err("no decoder in this test".into())
+            }
+        }
+
+        struct NoDispatcher;
+
+        #[steno_core::async_trait]
+        impl DeliveryDispatcher for NoDispatcher {
+            async fn deliver_all(&self, _meeting_id: Uuid) -> Vec<Delivery> {
+                Vec::new()
+            }
+        }
+
+        /// Waits until the thread at `/proc/<task>` sleeps in `futex` (202
+        /// on `x86_64`, 98 on `aarch64`) twice 50 ms apart: parked on a
+        /// contended lock.
+        fn parked_on_a_lock(task: &std::path::Path) {
+            let syscall = std::path::Path::new("/proc").join(task).join("syscall");
+            let in_futex = || {
+                let line = std::fs::read_to_string(&syscall).unwrap_or_default();
+                matches!(line.split_whitespace().next(), Some("202" | "98"))
+            };
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if in_futex() {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    if in_futex() {
+                        return;
+                    }
+                }
+                assert!(Instant::now() < deadline, "never parked on a lock");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        /// `reprocess_if` claims the asset before it reads the meeting, since
+        /// it saves the row it read: a Try again re-run that turns the
+        /// failed meeting ready with a new summary just before the claim
+        /// must not be queued again over its new row.
+        ///
+        /// The hook: the in-flight set's lock, which `claim_start` takes. The
+        /// test holds it, waits until the call is parked on it, writes what the
+        /// re-run writes (ready, a summary), and lets the claim through. A call
+        /// that read the meeting before the claim would queue the stale failed
+        /// row over the summary; one that reads under the claim sees ready.
+        /// Deterministic, and Linux only for `/proc/thread-self`.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn process_again_checks_the_rule_under_its_claim() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+            let mut meeting = steno_core::testing::sample_data::meeting();
+            meeting.id = Uuid::new_v4();
+            meeting.state = MeetingState::Failed {
+                reason: "summarize: the endpoint did not answer".to_owned(),
+            };
+            meeting.summary = None;
+            let asset = crate::fixtures::two_lane_call(
+                &dir.path().join("audio"),
+                meeting.id,
+                AudioRetention::KeepForever,
+            )
+            .unwrap();
+            store.save_meeting_with_asset(&meeting, &asset).unwrap();
+            let pipeline = ProcessingPipeline::new(PipelineDependencies::new(
+                Arc::new(NoDecoder),
+                Arc::new(steno_core::testing::FakeSpeechEngine::default()),
+                Arc::new(steno_core::testing::FakeDiarizer::default()),
+                Arc::new(steno_core::testing::InMemorySpeakerMemory::new(Vec::new())),
+                Arc::new(NoDispatcher),
+                store.clone(),
+                MeetingEventBus::new(),
+            ));
+
+            let held = pipeline.in_flight_set();
+            let (tid_sender, tid) = std::sync::mpsc::channel();
+            let runtime = tokio::runtime::Handle::current();
+            let caller = pipeline.clone();
+            let id = meeting.id;
+            let click = std::thread::spawn(move || {
+                tid_sender
+                    .send(std::fs::read_link("/proc/thread-self").unwrap())
+                    .unwrap();
+                let _runtime = runtime.enter();
+                caller.process_again(id)
+            });
+            parked_on_a_lock(&tid.recv().unwrap());
+
+            // The re-run ends inside the window: the summary saved, ready.
+            let mut rerun = store.meeting(id).unwrap().unwrap();
+            rerun.state = MeetingState::Ready;
+            rerun.summary = Some(steno_core::SummaryDocument {
+                template_id: "default".to_owned(),
+                language: None,
+                sections: Vec::new(),
+            });
+            store.save_meeting(&rerun).unwrap();
+            drop(held);
+
+            let outcome = click.join().unwrap();
+            let stored = store.meeting(id).unwrap().unwrap();
+            pipeline.wait_until_idle().await;
+            let after_run = store.meeting(id).unwrap().unwrap();
+            assert!(
+                outcome == Err(ReprocessError::NotOffered(id))
+                    && stored.state == MeetingState::Ready
+                    && stored.summary.is_some(),
+                "outcome {outcome:?}; at return state {:?}, summary kept {}; after the run \
+                 state {:?}, summary kept {}",
+                stored.state,
+                stored.summary.is_some(),
+                after_run.state,
+                after_run.summary.is_some(),
+            );
+        }
     }
 }

@@ -863,6 +863,9 @@ mod tests {
 
     /// "Process again" is for a meeting it is offered for: a ready one is
     /// refused below the host too, so a stale detail cannot run it again.
+    /// A ready meeting whose recording was swept is refused as not offered
+    /// too, not as one whose recording is gone: the rule is checked before
+    /// the files.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_refuses_a_ready_meeting() {
         let (dir, store) = temp_store();
@@ -872,8 +875,15 @@ mod tests {
             process_again(&service, ready.id),
             Err(ProcessAgainRefusal::NotOffered)
         );
+        let (swept, asset) = recorded_meeting(&store, dir.path(), MeetingState::Ready);
+        std::fs::remove_file(steno_core::paths::file_url_path(&asset.url).unwrap()).unwrap();
+        assert_eq!(
+            process_again(&service, swept.id),
+            Err(ProcessAgainRefusal::NotOffered)
+        );
         service.pipeline.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, ready.id), MeetingState::Ready);
+        assert_eq!(meeting_state(&store, swept.id), MeetingState::Ready);
     }
 
     /// A queued or processing meeting is already being processed; a
