@@ -45,6 +45,10 @@ const FIXTURES: &[(&str, Reencode)] = &[
         "meeting.detail.damagedAudio",
         reencode::<MeetingDetailSnapshot>,
     ),
+    (
+        "meeting.detail.keptIncomplete",
+        reencode::<MeetingDetailSnapshot>,
+    ),
     ("settings.general", reencode::<GeneralSettingsSnapshot>),
     ("settings.recording", reencode::<RecordingSettingsSnapshot>),
     (

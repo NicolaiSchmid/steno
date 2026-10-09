@@ -241,10 +241,12 @@ function bareDetail(
  * `processing` (a meeting in the progress entry, selected), `export-failed`
  * (the selected meeting's export failed), `damaged-audio`
  * (`meeting.detail.damagedAudio`: parts of the recording replaced by
- * silence), `summary-key-withheld` (the selected meeting's summary skipped
- * while the API key was withheld, from `meeting.detail.keyWithheld`).
- * `tab=` picks the detail tab. Without either, the fixtures pass through
- * unchanged.
+ * silence), `kept-incomplete` (`meeting.detail.keptIncomplete`: the
+ * recording kept because the speakers or the transcript may be
+ * incomplete), `summary-key-withheld` (the selected meeting's summary
+ * skipped while the API key was withheld, from
+ * `meeting.detail.keyWithheld`). `tab=` picks the detail tab. Without
+ * either, the fixtures pass through unchanged.
  */
 export function applyScenario(
 	snapshots: FixtureMap,
@@ -303,6 +305,10 @@ export function applyScenario(
 	const damagedAudio = snapshots["meeting.detail.damagedAudio"];
 	if (scenario === "damaged-audio" && damagedAudio) {
 		result["meeting.detail"] = damagedAudio;
+	}
+	const keptIncomplete = snapshots["meeting.detail.keptIncomplete"];
+	if (scenario === "kept-incomplete" && keptIncomplete) {
+		result["meeting.detail"] = keptIncomplete;
 	}
 
 	const keyWithheld = snapshots["meeting.detail.keyWithheld"] as
@@ -377,12 +383,14 @@ export function applyScenario(
 	applyOnboardingScenario(result, snapshots, scenario);
 
 	// `recording.live`, `meeting.detail.damagedAudio`,
-	// `settings.summaries.codex`, `settings.summaries.fileKey`,
-	// `settings.iphone.pairing`, `onboarding.setup`, `onboarding.import` and
+	// `meeting.detail.keptIncomplete`, `settings.summaries.codex`,
+	// `settings.summaries.fileKey`, `settings.iphone.pairing`,
+	// `onboarding.setup`, `onboarding.import` and
 	// `meeting.detail.keyWithheld` are fixtures, not topics; the page never
 	// sees them by those names.
 	delete result["recording.live"];
 	delete result["meeting.detail.damagedAudio"];
+	delete result["meeting.detail.keptIncomplete"];
 	delete result["settings.summaries.codex"];
 	delete result["settings.summaries.fileKey"];
 	delete result["settings.iphone.pairing"];

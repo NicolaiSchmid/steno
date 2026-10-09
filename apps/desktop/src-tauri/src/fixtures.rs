@@ -26,6 +26,7 @@ fixtures![
     "meetings.list",
     "meeting.detail",
     "meeting.detail.damagedAudio",
+    "meeting.detail.keptIncomplete",
     "settings.general",
     "settings.recording",
     "settings.transcription",
@@ -196,6 +197,7 @@ mod tests {
         for key in [
             "recording.live",
             "meeting.detail.damagedAudio",
+            "meeting.detail.keptIncomplete",
             "settings.summaries.codex",
             "settings.summaries.fileKey",
             "settings.iphone.pairing",
