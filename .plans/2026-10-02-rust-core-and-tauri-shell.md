@@ -1758,10 +1758,11 @@ parity item until a plan says otherwise:
   its own process from the tap, records nothing until another app plays
   (`.plans/spikes/2026-10-01-spike-rust-capture.md`), and keeps that until
   the handoff. Rust includes its own process in the tap and starts a
-  silent output IOProc on the default output before the aggregate, so the
-  first callback comes within 100 ms of the start with nothing playing
-  (`tests/live.rs`). No in-app playback while recording, enforced by
-  `steno_audio::Playback`.
+  silent output IOProc, input streams off, on the aggregate's clock master
+  (the system output, read from the aggregate) before the aggregate's
+  IOProc, so with nothing playing the first callback comes within 100 ms
+  of `start` returning and 200 ms of the call to `start` (`tests/live.rs`).
+  No in-app playback while recording, enforced by `steno_audio::Playback`.
 - **The files are synced while recording, the relay holds 20 s, and the
   warnings are joined** (stable plan rows P21 and P23,
   `.plans/2026-10-07-stable-promotion.md`). The writer thread syncs every
@@ -1983,7 +1984,8 @@ item to settle before the Linux release:
   take 1 to 2 s to start. The Mac's returns before any callback, WASAPI's
   once both streams started (at most 10 s). Linking the sink's monitor keeps
   the sink running, so cycles arrive with nothing playing (the Mac's call
-  mode keeps its tap aggregate running with a silent output of its own, A10). The cost, measured on the private
+  mode keeps its tap aggregate running with a silent output of its own,
+  A10). The cost, measured on the private
   daemon over the 24 starts of one run of the live tests at a load
   average of 9: the first cycle comes 2 to 43 ms after the links, and the
   whole `start` (connection, two roundtrips, links, first cycle,

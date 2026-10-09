@@ -436,8 +436,8 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A6 | Devices that will not run at 48 kHz, and a headset's switch mid-call | #198 |
 | A7 | The Linux input device list and the device UID fallback | #222 |
 | A8 | Meeting detection on Linux, over PipeWire's streams | #222 |
-| A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; call mode without an output client checked on the Mac | audio |
-| A10 | Call mode without an output client: the tap includes Steno, and the capture starts a silent output IOProc of its own, so the tap and the microphone run from the start with nothing playing; no in-app playback while recording, enforced by `Playback` | audio |
+| A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; the call-mode start is A10's, whose step 2 runs the tone check on the Mac | audio |
+| A10 | Call mode without an output client: the tap includes Steno, and the capture starts a silent output IOProc of its own on the aggregate's clock master, so with nothing playing the first callback comes within 100 ms of `start` returning and 200 ms of the call to `start`; no in-app playback while recording, enforced by `Playback` | audio |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -666,8 +666,8 @@ Every package is written in parallel except where a dependency is named:
     `apps/macos/`, so `swift-ci` runs on it.
   - A manual run with `platforms=macos` passes. It signs no handoff item, so the
     first tagged candidate's item is what R2 rehearses.
-  - The PR deletes the **WP9b.** item on the other Swift fixes, apart from call
-    mode, which A9 deletes.
+  - The PR deletes the **WP9b.** item on the other Swift fixes (A10 has taken
+    call mode out of it).
 - **S8 Site and README** (`docs/stable-release-pages`). Written during the
   candidates and merged after R8 passes.
 - **S9 Swift removal.** Cutover step 7, after the rollback window: the web app
@@ -707,21 +707,11 @@ Each lands before `0.11.0-rc.1`.
     8 kHz, and speech recorded at 48 kHz and resampled from 44.1 kHz gives the
     48 kHz path's word error rate within 0.1 points.
   - The 2 ms sidecar lag stays pinned by `tests/codec.rs`.
-  - **Nicolai**, on his Mac in a GUI session with every permission granted, with
-    the Rust app built from A9's branch and speakers, not headphones: start a
-    call recording while no app plays audio, and play a short tone at 10 s.
-    Pass when the tone's onset in the system channel and its residual in the
-    echo-cancelled mic channel lie within 50 ms (if the cancellation hides the
-    residual, a second take with `steno record --keep-raw-mic --out ~/a9-raw`
-    from A9's branch keeps the raw mic as `mic.raw.caf`), and
-    the tap's first callback comes within 100 ms of the capture's start. A9 adds
-    an `info` line with that callback's offset from the capture's start, stored
-    by the IOProc in an atomic and logged off the audio thread. Nicolai quits
-    every Steno, the Swift app included, creates the log (`: > ~/a9.log`) and
-    runs `open --env RUST_LOG=info --stderr ~/a9.log
-    ~/Applications/Steno.app`, so Launch Services starts it under its own grants.
-    If either bound is missed, the remedy becomes an A-package before the first
-    candidate.
+  - **The call-mode start is A10's.** Its step 2 is this package's tone check
+    on the Mac: the first callback within 100 ms of `start` returning and
+    200 ms of the call to `start`, and the tone's onset in the system channel
+    and its residual in the echo-cancelled mic channel within 50 ms. A9
+    supplies the `info` line that step reads.
 - **A10 Call mode without an output client.**
   - **The defect.** In call mode the aggregate holds the output device (its
     clock master), the microphone and the process tap. With nothing playing,
@@ -747,16 +737,40 @@ Each lands before `0.11.0-rc.1`.
     The tap aggregate runs only while a process the tap includes drives the
     output. The aggregate's output streams were in place and enabled for the
     IOProc (`kAudioDevicePropertyIOProcStreamUsage`) throughout.
+
+    Which device the silent IOProc must run on (Forge, a public aggregate
+    over the speakers as the default output, the system output left on the
+    speakers, Steno not excluded, 1.5 s per run):
+
+    | Silent IOProc on | First callback after `start` returned |
+    |---|---|
+    | The system output (the clock master) alone | 56 to 65 ms; the default output never ran |
+    | The default output alone | 60 to 67 ms; the HAL ran it on the speakers' hardware, the clock master's |
+    | Both | 67 ms |
+    | Neither | none; the speakers did not run either |
+
+    So the gate does not follow the default output. Whether output on
+    another physical device than the clock master (a headset) would open it
+    stays open: Nicolai's step 4.
   - **The remedy.**
     - The tap includes Steno's own process (the global tap, no exclusion).
-    - The call capture owns a silent IOProc on the default output device
-      (the system output when that does not resolve). It starts once the
-      aggregate is built and before the aggregate's IOProc, and is stopped
-      and destroyed last, after the tap. Started before the aggregate is
-      built, it made `start` about 300 ms slower.
-    - It is rebuilt with the capture on every device change, so it follows
-      the default output. One that does not start is logged and the capture
-      goes on as before.
+    - The call capture owns a silent IOProc on the aggregate's clock master,
+      the system output, read once from the aggregate itself (its main
+      sub-device), never on the default output. The `info` line `the silent
+      output runs on <name> (audio device <id>), the aggregate's clock
+      master` names it. Its input streams are off
+      (`kAudioDevicePropertyIOProcStreamUsage`), so it opens no input of its
+      own.
+    - It starts once the aggregate is built and before the aggregate's
+      IOProc, and is stopped and destroyed last, after the tap, on a `start`
+      that fails part way too. Started before the aggregate is built, it
+      made `start` about 300 ms slower.
+    - It is rebuilt with the capture on every device change, so a new system
+      output moves it to the new clock master. The system output is read
+      again once the listeners are in place, so a switch while the aggregate
+      was built is reported as a change too, as the rate already was. One
+      that does not start is logged at `warn`, and the capture then records
+      only while another app plays, as before A10.
     - Its body writes zeros over its output buffers (the HAL has zeroed them
       already): no allocation, lock or syscall.
     - The clock master, the drift compensation, the latency arithmetic of A6
@@ -786,37 +800,91 @@ Each lands before `0.11.0-rc.1`.
       allocator).
     - Unit: the gate, alone and in the capture session: refused while
       recording and across a rebuild, held at every backend start and stop,
-      released after a failed or panicking start, running playback stopped,
-      two sessions.
-    - Forge, live, one test at a time: `call_capture_runs_from_its_start_with_nothing_playing`
-      fails on main (0 callbacks) and passes on the branch. The bound is
-      timed from `start` returning, which starts the aggregate's IOProc last:
-      over five runs the first callback came 25 to 64 ms after it, and 89 to
-      154 ms after `start` was called, whose tap, aggregate and rate settle
-      take 54 to 100 ms on main too. 3.96 to 3.99 s of frames in 4 s; the
-      system lane all zeros, which over SSH proves nothing about its content.
-      A stop and start as a rebuild runs them gets its first callback within
-      the bound each time, and a silent `afplay` playing meanwhile changes
-      nothing. Without the silent output (a mutation) the test fails with 0
-      callbacks. Forge has only built-in speakers, so a default-output change
-      is not exercised.
-  - **Nicolai**, on a build of A10's branch, in a GUI session with the
-    capture permission granted, on speakers:
-    1. Nothing playing: run the branch's CLI, `cargo run --release -p
-       steno-cli -- dev capture-spike --lanes call --seconds 20 --out ~/a10`,
-       from a terminal that has the permission, and play nothing. Pass when
-       it prints `nonzero system: 0 of 960000 samples` (digital silence).
-    2. A9's tone step: start the call recording in silence and play a tone at
-       10 s. Pass when the first callback comes within 100 ms of the start
-       (of `start` returning, as above) and the tone's onset lies within
-       50 ms in both channels.
-    3. A hands-free headset: pair a Bluetooth headset as the output and run
-       step 1's command with nothing playing. Pass when the headset stays in
-       its stereo profile and the output's rate stays at 44.1 or 48 kHz, not
-       16 or 24 (`system_profiler SPAudioDataType`, the headset's
-       "Current SampleRate", read while it records). Opening the output is not
-       expected to switch the profile; only opening its microphone does, and
-       the call capture opens the default input as before.
+      released after a failed or panicking start and after a device loss,
+      running playback stopped, two sessions; a session made without a gate
+      of its own holds the process's (`Playback::global`).
+    - Unit: a system output that switched before its listener is judged as
+      a change; the stream usage the silent IOProc writes names its proc,
+      with every stream off.
+    - Forge, live, one test at a time. Two bounds, both from the first
+      callback: 100 ms from `start` returning, always asserted (what A10
+      changes), and 200 ms from the call to `start`, always printed and
+      asserted while the one-minute load is under 4 (`start`'s own tap,
+      aggregate and rate settle take 54 to 100 ms on a quiet Mac and up to
+      844 ms on a busy one). `call_capture_runs_from_its_start_with_nothing_playing`
+      fails on main (0 callbacks, 0.00 s in 4 s) and passes on the branch:
+      first callbacks 23 to 64 ms after `start` returned, 77 to 204 ms after
+      it was called (asserted at load 2: 77 and 111 ms; the 204 ms run was at
+      load 16); 3.96 to 3.99 s of frames in 4 s; the system lane all
+      zeros, which over SSH proves nothing about its content. A stop and
+      start as a rebuild runs them passes both bounds each time. With the
+      default output on another device than the system output, it passes at
+      49 ms, with the default output not running. The silent output's
+      `info` line names the speakers. An output-only IOProc on the
+      microphone reads its input usage back as off. A call test whose
+      `start` fails fails. Mutations, each failing a test: no silent output
+      (0 callbacks), the input usage not written, the system output's
+      re-read never reporting, the zero-fill skipping the last buffer.
+    - Not exercised on Forge (built-in speakers only): a system output that
+      changes mid-call, and a headset. Nicolai's steps 4 and 5.
+  - **Nicolai**, on his Mac in a GUI session, with A10's branch checked out
+    and its CLI built (`cargo build --release -p steno-cli`; the commands run
+    from the checkout's root). Before every step: the terminal app has
+    Privacy & Security, Screen & System Audio Recording and Microphone,
+    turned on; Do Not Disturb is on, so no alert sound plays; no app plays
+    audio; and the built-in microphone stays the input (System Settings,
+    Sound, Input), since macOS moves the input to a headset as it connects.
+    Steps 1 to 3 run on the Mac's speakers.
+    1. Nothing playing: `target/release/steno dev capture-spike --lanes call
+       --seconds 20 --out ~/a10`. Pass when it prints `nonzero system: 0 of N
+       samples`, with N about 960000 (20 s at 48 kHz; the spike stops on a
+       timer, so N is not exact): digital silence.
+    2. Both bounds, then the tone.
+       - `cargo test --release -p steno-audio --test live
+         call_capture_runs_from_its_start_with_nothing_playing -- --ignored
+         --nocapture`. Pass when it passes and prints `first callback A after
+         start returned (bound 100ms), B after start was called (bound
+         200ms)` with A at most 100 ms and B at most 200 ms. At a load of 4 or
+         more it prints `end-to-end bound not checked: load N`; B is then
+         read against 200 ms by eye.
+       - The tone, once #246 has merged and A10 is rebased onto it (#246
+         adds the `info` line; its description has the full take): with the
+         Rust app built from A10's branch in `~/Applications`, quit every
+         Steno, the Swift app included, run `: > ~/a10.log` and
+         `open --env RUST_LOG=info --stderr ~/a10.log ~/Applications/Steno.app`,
+         start a call recording, play a short tone at 10 s
+         (`sleep 10; afplay /System/Library/Sounds/Glass.aiff`), and stop
+         5 s later. Pass when `grep "first callback" ~/a10.log` prints
+         `the capture's first callback (system tap) came N ms after its
+         start` with N at most 100 (its start is the aggregate's
+         `AudioDeviceStart`, the last HAL step of `start`), and
+         `target/release/steno dev onsets <the meeting's recording.caf>`
+         puts the tone's onset in the system channel and its residual in the
+         echo-cancelled mic channel within 50 ms (if the cancellation hides
+         the residual, a second take with `steno record --mode call
+         --keep-raw-mic --out ~/a10-raw` keeps the raw mic as `mic.raw.caf`).
+    3. A hands-free headset: pair a Bluetooth headset as the output, keep the
+       built-in microphone as the input, and run step 1's command. Pass when
+       the headset stays in its stereo profile and the output's rate stays at
+       44.1 or 48 kHz, not 16 or 24 (`system_profiler SPAudioDataType`, the
+       headset's "Current SampleRate", read while it records).
+    4. Alerts on the speakers, the output on a headset: in System Settings,
+       Sound, set "Play sound effects through" to the Mac's speakers and the
+       output to a headset, then run step 2's `cargo test` command with
+       nothing playing. Pass on both bounds, as in step 2.
+    5. The output switched mid-call, with "Play sound effects through" on
+       "Selected sound output device": `RUST_LOG=info target/release/steno
+       dev capture-spike --lanes call --seconds 60 --out ~/a10-switch 2>
+       ~/a10-switch.log`; at about 20 s switch the output from the speakers
+       to a headset (or AirPlay), at about 40 s back, and speak now and
+       then. Pass when `grep -E "device|silent output" ~/a10-switch.log`
+       shows, for each switch, `device change: DefaultOutputChanged,
+       reconnecting`, then `device resumed: attempt 1, gap G s` with G under
+       1, then `the silent output runs on <the new device>`, and no `did not
+       start` line; when the `mic ... dBFS  system ... dBFS` lines go on
+       after each `device resumed`; and when the summary prints `duration`
+       within 1 s of 60 and the same N in `nonzero mic: X of N` and
+       `nonzero system: Y of N` (both lanes the full length).
   - Owner: audio. It lands before `0.11.0-rc.1`, with its own pipeline.
 
 ### P: no data lost (D3)
@@ -1656,8 +1724,8 @@ removed.
     opening line (the new identifier); WP9's cutover paragraph; the "Updates"
     and "Pending speaker reviews" lines under "Beyond the bridge"; seam (4); the
     first **WP9b.** item; the Shell section's login-item line (D4); the
-    **WP9b.** item on the other Swift fixes (D9; S7 deletes it, apart from call
-    mode, which A9 deletes).
+    **WP9b.** item on the other Swift fixes (D9; S7 deletes it; A10 took call
+    mode out of it).
   - The closed **WP9b.** item about the first `desktop-v*` tag is deleted. The
     other items stay until the pull requests that fix them delete them; the
     packages named here take them over.
