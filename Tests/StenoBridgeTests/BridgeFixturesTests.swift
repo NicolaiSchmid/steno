@@ -20,6 +20,12 @@ import Testing
     ProcessInfo.processInfo.environment["STENO_RECORD_FIXTURES"] == "1"
   }
 
+  /// Fixtures the Rust bridge alone owns (`crates/steno-bridge/tests/fixtures.rs`),
+  /// listed at the end of `index.json`: the import step of the Tauri app,
+  /// which the Swift app never shows, and a summary skipped while the import
+  /// withheld the API key, which the Swift app never skips.
+  static let rustOnly = ["onboarding.import", "meeting.detail.keyWithheld"]
+
   static func url(_ name: String) -> URL {
     fixturesDirectory.appendingPathComponent("\(name).json")
   }
@@ -53,6 +59,7 @@ import Testing
         try fixture.fileData().write(to: Self.url(fixture.name))
         index.append(fixture.name)
       }
+      index += Self.rustOnly
       let manifest = try BridgeJSON.encode(index) + Data([0x0A])
       try manifest.write(to: directory.appendingPathComponent("index.json"))
       return
@@ -66,7 +73,7 @@ import Testing
     }
     let manifest = try Data(contentsOf: directory.appendingPathComponent("index.json"))
     let names = try BridgeJSON.decode([String].self, from: manifest)
-    #expect(names == BridgeSamples.fixtures.map(\.name))
+    #expect(names == BridgeSamples.fixtures.map(\.name) + Self.rustOnly)
   }
 
   /// "Process again" takes no params; its request decodes and encodes back

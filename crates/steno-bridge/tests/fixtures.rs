@@ -1,6 +1,8 @@
 //! Every fixture in `apps/macos/web/fixtures/bridge/` decodes into its Rust
 //! type and re-encodes byte for byte. The mapping from file name to type
-//! mirrors `BridgeSamples.fixtures` in `Sources/StenoBridge/BridgeSamples.swift`;
+//! mirrors `BridgeSamples.fixtures` in `Sources/StenoBridge/BridgeSamples.swift`,
+//! followed by the fixtures the Rust bridge alone owns (the import step,
+//! a summary skipped for a withheld API key);
 //! `contract.ts` is checked for every string enum the crate spells, top level
 //! and nested. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 
@@ -110,6 +112,12 @@ const FIXTURES: &[(&str, Reencode)] = &[
     ),
     ("reply.confirm", reencode::<ConfirmReply>),
     ("reply.chosenPath", reencode::<ChosenPathReply>),
+    // Rust only, after Swift's list (`BridgeFixturesTests.rustOnly`).
+    ("onboarding.import", reencode::<OnboardingSnapshot>),
+    (
+        "meeting.detail.keyWithheld",
+        reencode::<MeetingDetailSnapshot>,
+    ),
 ];
 
 fn index() -> Vec<String> {
@@ -377,6 +385,13 @@ fn contract_ts_nested_enums_match() {
         ]),
         raw(PhoneListenerState::ALL)
     );
+}
+
+/// As [`contract_ts_nested_enums_match`], for onboarding and the speaker
+/// options.
+#[test]
+fn contract_ts_nested_onboarding_enums_match() {
+    let nested = |anchors: &[&str]| contract_ts_strings(anchors);
     let onboarding = "export const onboardingSnapshot = z";
     assert_eq!(
         nested(&[onboarding, "page: z.enum(["]),
@@ -389,6 +404,10 @@ fn contract_ts_nested_enums_match() {
     assert_eq!(
         nested(&[onboarding, "setup: z.array(", "state: z.enum(["]),
         raw(OnboardingSetupStepState::ALL)
+    );
+    assert_eq!(
+        nested(&[onboarding, "swiftImport: z", "state: z.enum(["]),
+        raw(OnboardingImportState::ALL)
     );
     assert_eq!(
         nested(&["export const speakerOption = z", "kind: z.enum(["]),

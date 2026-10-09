@@ -323,6 +323,78 @@ What a package sets:
   no `STENO_EXEC_PATH`; it still needs `STENO_DISTRIBUTION=aur`, from a
   wrapper or from the build's environment.
 
+## The update from the Swift app (macOS)
+
+The first launch after Sparkle replaced the Swift app with this one brings
+over what the Swift app kept outside the shared database
+(`steno_services::swift_import`, plan
+`.plans/2026-10-07-stable-promotion.md`, S6). Nothing else needs moving:
+meetings, audio and models stay in the same support directory.
+
+- **Preferences.** While the services graph is built, once it holds the
+  database's lock (so a second app the lock refuses touches nothing) and
+  while `preferences.json` holds no onboarding flag, the shell reads the
+  Swift domain with `/usr/bin/defaults export uno.schmid.steno.mac -` and
+  copies `steno.onboardingCompleted`, and Sparkle's
+  `SUEnableAutomaticChecks` and `SUAutomaticallyUpdate` as
+  `steno.updates.automaticChecks` and `steno.updates.automaticDownload`
+  (the updater's schedule reads those). The login item flag stays behind,
+  so this app registers its own login item; the panel's position stays
+  behind too.
+- **The API key and the phone pairing.** When the login keychain holds the
+  Swift app's handover certificate (labelled `Steno handover identity`),
+  onboarding opens on an import step first, and until it ran the app reads
+  no API key and starts no handover listener, and the meetings the Swift
+  app left queued or interrupted wait, so none is processed without the
+  key. The step says how many times
+  macOS may ask for the login password, at most three: the API key (one
+  item, whether the Swift app or a beta build under
+  `uno.schmid.steno.desktop` stored it), the pairing, and the pairing entry
+  such a beta left behind (found by attributes, which asks nothing). Always
+  Allow is the answer. It reads the key, which stays
+  shared with the Swift app, and exports the handover identity as PKCS#12
+  into the `handover-identity` entry, replacing the one a beta build
+  stored. Paired phones keep uploading without pairing again.
+- **A denied prompt.** A denied key leaves the key empty; Settings asks for
+  it, and no later launch asks the keychain for it until a key is saved.
+  A denied or failed export never creates a new identity and never
+  replaces the stored one: phone handover waits, the step offers Try
+  again (which repeats only the write when the export got through), and
+  it comes back at the next launch. Not now, or closing the window over
+  the step, brings up no prompt: what the step has not read yet stays
+  unread for this launch, and the step comes back with the same prompts at
+  the next launch. While the key stays unread (or refused) and the
+  summaries come from an endpoint that needs it, meetings are processed
+  as without a summaries service: the cleanup is skipped too, so they
+  complete with their raw transcript and no summary, and the summary can
+  be run again once the key is in place; Process again on a failed
+  meeting waits for the key as well. ChatGPT summaries need no key and
+  keep running. Closing the window while a prompt is up leaves that
+  prompt to the user; its answer still counts.
+
+Once the identity is stored the import also writes the keychain entry
+`swift-import-done` (service `uno.schmid.steno.mac`, an item of this
+app's own, so it never prompts). From then on the import never touches
+the stored identity again, even when a damaged `preferences.json` was set
+aside; Pair again in Settings must leave that entry in place. A launch
+that cannot look the entry up replaces nothing and waits with Try again.
+
+`preferences.json` keeps the import's progress in flags:
+`steno.swiftImportRan` marks the import as over (the identity is in place,
+or there was none), after which it never runs again;
+`steno.swiftImportKeyRead` says the step read the key or was refused, so a
+later step asks for the pairing alone; `steno.swiftImportKeyDenied` says
+it was refused, until a key is saved in this app. That flag survives a
+rollback: a key saved in the Swift app, or in an older build, does not
+clear it, so after the next update the key stays hidden until it is saved
+in Settings once more. A smoke run (`STENO_SMOKE_SECONDS`)
+and a launch whose `HOME` is not the account's home directory skip the
+import, so neither touches the user's keychain.
+`STENO_KEYCHAIN_TESTS=1 cargo test -p steno-services --test swift_keychain`
+runs the export against a throwaway keychain on a Mac. Every event, what
+it opens and what it writes is one table in the module doc of
+`crates/steno-services/src/swift_import/mod.rs`.
+
 ## Run
 
 `cargo tauri dev` from `apps/desktop/src-tauri` (`pnpm dlx

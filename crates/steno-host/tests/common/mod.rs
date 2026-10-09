@@ -135,6 +135,20 @@ impl HarnessBuilder {
         self
     }
 
+    /// Adds a pending Swift import whose step brings up `prompts` prompts.
+    pub fn with_swift_import(mut self, prompts: u8) -> Self {
+        self.fakes.swift_import = Some(Arc::new(steno_host::fakes::FakeSwiftImport::new(prompts)));
+        self
+    }
+
+    /// Adds a gate over the API key that withholds it while `withheld`.
+    pub fn with_withheld_api_key(mut self, withheld: bool) -> Self {
+        self.fakes.withheld_api_key = Some(Arc::new(steno_host::fakes::FakeWithheldApiKey {
+            withheld: std::sync::Mutex::new(withheld),
+        }));
+        self
+    }
+
     /// What the destructive prompt answers.
     pub fn confirm(mut self, confirmed: bool) -> Self {
         self.confirm = confirmed;
@@ -654,6 +668,14 @@ pub fn populate_sample(store: &Store, fakes: &FakeServices) {
             None,
         ))
         .unwrap();
+}
+
+/// The sample meeting as processed without the LLM passes: no summary, no
+/// tasks, no decisions.
+pub fn drop_sample_summary(store: &Store) {
+    let mut bare = sample_meeting();
+    bare.summary = None;
+    store.replace_summary(&bare, &[], &[], &[]).unwrap();
 }
 
 /// The settings with an LM Studio endpoint configured, no vault.

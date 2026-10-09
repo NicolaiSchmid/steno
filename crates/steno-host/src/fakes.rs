@@ -21,7 +21,8 @@ use crate::services::{
     FileSystem, FolderUsage, Handover, INSTALLING_UPDATE, InputDevice, LeftRecording,
     ListenerState, LlmService, LoginItem, LoginItemStatus, Opener, PairingCode, Permissions,
     Pipeline, Preferences, ProcessAgainRefusal, QrEncoder, Recorder, RecorderStatus, Services,
-    SpeechModels, StartHold, UpdateOutcome, Updater, permission_is_required,
+    SpeechModels, StartHold, SwiftImport, SwiftImportStage, SwiftImportStatus, UpdateOutcome,
+    Updater, WithheldApiKey, permission_is_required,
 };
 use crate::speech::ModelAsset;
 
@@ -1080,6 +1081,92 @@ impl Preferences for FakePreferences {
     }
 }
 
+/// The import step: `Pending` until a run or a skip, then the outcome a
+/// test set for runs (`Done` by default) or `Waiting` for a skip; counts
+/// the runs and the skips.
+pub struct FakeSwiftImport {
+    pub status: Mutex<SwiftImportStatus>,
+    /// What [`SwiftImport::run`] moves to.
+    pub run_outcome: Mutex<SwiftImportStatus>,
+    pub runs: Mutex<usize>,
+    pub skips: Mutex<usize>,
+    /// Called once inside the next run, as if while its prompts are up.
+    pub during_run: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl std::fmt::Debug for FakeSwiftImport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeSwiftImport")
+            .field("status", &self.status)
+            .field("runs", &self.runs)
+            .field("skips", &self.skips)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FakeSwiftImport {
+    /// Pending, with `prompts` prompts; a run brings the identity over.
+    #[must_use]
+    pub fn new(prompts: u8) -> Self {
+        let status = |stage| SwiftImportStatus {
+            stage,
+            prompts,
+            error: None,
+        };
+        FakeSwiftImport {
+            status: Mutex::new(status(SwiftImportStage::Pending)),
+            run_outcome: Mutex::new(status(SwiftImportStage::Done)),
+            runs: Mutex::new(0),
+            skips: Mutex::new(0),
+            during_run: Mutex::new(None),
+        }
+    }
+
+    /// A run leaves the identity behind with `error`.
+    pub fn deny_export(&self, error: &str) {
+        let mut outcome = lock(&self.run_outcome);
+        outcome.stage = SwiftImportStage::Waiting;
+        outcome.error = Some(error.to_owned());
+    }
+}
+
+impl SwiftImport for FakeSwiftImport {
+    fn status(&self) -> SwiftImportStatus {
+        lock(&self.status).clone()
+    }
+
+    fn run(&self) -> SwiftImportStatus {
+        *lock(&self.runs) += 1;
+        let during = lock(&self.during_run).take();
+        if let Some(during) = during {
+            during();
+        }
+        let outcome = lock(&self.run_outcome).clone();
+        lock(&self.status).clone_from(&outcome);
+        outcome
+    }
+
+    fn skip(&self) -> SwiftImportStatus {
+        *lock(&self.skips) += 1;
+        let mut status = lock(&self.status);
+        status.stage = SwiftImportStage::Waiting;
+        status.clone()
+    }
+}
+
+/// A [`WithheldApiKey`] a test sets: withholds the key while `withheld`,
+/// whatever the settings.
+#[derive(Debug, Default)]
+pub struct FakeWithheldApiKey {
+    pub withheld: Mutex<bool>,
+}
+
+impl WithheldApiKey for FakeWithheldApiKey {
+    fn withheld(&self, _settings: &Settings) -> bool {
+        *lock(&self.withheld)
+    }
+}
+
 /// Every fake at once, with a handle on each: what a test without a shell builds
 /// its [`Services`] from. Swift: `AppEnvironment.preview()`.
 pub struct FakeServices {
@@ -1102,6 +1189,8 @@ pub struct FakeServices {
     pub preferences: Arc<FakePreferences>,
     /// The core's own fake, behind the one core boundary the host consumes.
     pub secrets: Arc<InMemorySecretStore>,
+    pub swift_import: Option<Arc<FakeSwiftImport>>,
+    pub withheld_api_key: Option<Arc<FakeWithheldApiKey>>,
 }
 
 impl FakeServices {
@@ -1131,6 +1220,8 @@ impl FakeServices {
             opener: Arc::new(FakeOpener::default()),
             preferences: Arc::new(FakePreferences::default()),
             secrets: Arc::new(InMemorySecretStore::new()),
+            swift_import: None,
+            withheld_api_key: None,
         }
     }
 
@@ -1170,6 +1261,14 @@ impl FakeServices {
             opener: self.opener.clone(),
             preferences: self.preferences.clone(),
             secrets: self.secrets.clone(),
+            swift_import: self
+                .swift_import
+                .clone()
+                .map(|import| import as Arc<dyn SwiftImport>),
+            withheld_api_key: self
+                .withheld_api_key
+                .clone()
+                .map(|withheld| withheld as Arc<dyn WithheldApiKey>),
         }
     }
 }

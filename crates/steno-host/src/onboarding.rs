@@ -1,5 +1,9 @@
 //! Onboarding in two pages, after `Onboarding/OnboardingViewModel.swift`
-//! and `Web/OnboardingSnapshots.swift`. Page 1, permissions: microphone,
+//! and `Web/OnboardingSnapshots.swift`, with an import step before them on
+//! the Mac's first launch after the update from the Swift app (Rust only,
+//! [`SwiftImport`](crate::services::SwiftImport)): it explains the
+//! keychain prompts, runs the import and offers Try again while the
+//! handover identity has not come over. Page 1, permissions: microphone,
 //! system audio (both required), then calendar and local network
 //! (optional), as far as the platform has them
 //! (`PermissionKind::for_platform`: all four on the Mac, fewer on Windows
@@ -13,15 +17,18 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use steno_bridge::{
-    OnboardingPage, OnboardingPermissionStep, OnboardingSetupStep, OnboardingSetupStepKind,
-    OnboardingSetupStepState, OnboardingSnapshot, OnboardingVault, PermissionKind, PermissionState,
-    Platform,
+    OnboardingImport, OnboardingImportState, OnboardingPage, OnboardingPermissionStep,
+    OnboardingSetupStep, OnboardingSetupStepKind, OnboardingSetupStepState, OnboardingSnapshot,
+    OnboardingVault, PermissionKind, PermissionState, Platform,
 };
 use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, Settings, Store};
 
 use crate::labels::retention_footnote;
-use crate::services::{CodexModel, CodexModelsError, Services, permission_is_required};
+use crate::services::{
+    CodexModel, CodexModelsError, Services, SwiftImportStage, SwiftImportStatus,
+    permission_is_required,
+};
 use crate::settings::llm::{CodexStatus, KeyRead, LlmPreset, LlmSettingsViewModel, url_host};
 use crate::settings::obsidian::ObsidianSettingsViewModel;
 use crate::settings::snapshots as settings_snapshots;
@@ -79,6 +86,11 @@ pub struct OnboardingViewModel {
     pub retention_sentence: Option<String>,
     pub llm: LlmSettingsViewModel,
     pub obsidian: ObsidianSettingsViewModel,
+    /// The import step's status, from the first `load` on, when the
+    /// services had an import with work left; `None` without a step.
+    pub import: Option<SwiftImportStatus>,
+    /// The import's keychain prompts are up.
+    pub importing: bool,
     loaded: bool,
 }
 
@@ -115,6 +127,8 @@ impl OnboardingViewModel {
             retention_sentence: None,
             llm: LlmSettingsViewModel::new(),
             obsidian: ObsidianSettingsViewModel::default(),
+            import: None,
+            importing: false,
             loaded: false,
         }
     }
@@ -123,8 +137,13 @@ impl OnboardingViewModel {
     /// missing, or this install has not finished the two pages yet. An
     /// install with the flag unset whose endpoint and vault are already in
     /// the settings has nothing left to ask: the flag is written and the
-    /// window stays closed. Swift: `OnboardingViewModel.shouldOpen`.
+    /// window stays closed. Swift: `OnboardingViewModel.shouldOpen`. The
+    /// import step opens it too, whatever the flag says, until the
+    /// identity came over (Rust only).
     pub fn should_open(store: &Store, services: &Services, platform: Platform) -> bool {
+        if import_open(services).is_some() {
+            return true;
+        }
         if PermissionKind::for_platform(platform)
             .iter()
             .filter(|kind| permission_is_required(**kind))
@@ -174,6 +193,12 @@ impl OnboardingViewModel {
                 SetupState::Saved(Self::saved_line_vault(&self.obsidian)),
             );
         }
+        // The import step comes first while it has work left.
+        self.import = import_open(services);
+        if self.import.is_some() {
+            self.page = OnboardingPage::Import;
+            return;
+        }
         // An install that has the permissions but never saw page 2 starts
         // there; a fresh install starts on page 1.
         if self.is_complete() {
@@ -194,6 +219,55 @@ impl OnboardingViewModel {
             }
         };
         format!("{rule} Change this any time in Settings > Recording.")
+    }
+
+    // The import step
+
+    /// The keychain prompts are about to come up; the host publishes, runs
+    /// [`SwiftImport::run`](crate::services::SwiftImport::run) with its
+    /// lock released, then calls [`Self::finish_import`]. `false` while a
+    /// run is already under way, which the host then leaves to itself.
+    pub fn begin_import(&mut self) -> bool {
+        !std::mem::replace(&mut self.importing, true)
+    }
+
+    /// The run's or the skip's outcome. A finished import, or a skip,
+    /// moves on to page 1 (or page 2 when the permissions are already
+    /// granted); a run that left the identity behind stays on the step
+    /// with Try again. `key` is the API key as the secret store reads it
+    /// now, which the import may have just brought over: the Summaries
+    /// row loads again with it.
+    pub fn finish_import(
+        &mut self,
+        status: SwiftImportStatus,
+        skipped: bool,
+        store: &Store,
+        services: &Services,
+        key: KeyRead,
+    ) {
+        self.importing = false;
+        let leave = skipped || status.stage == SwiftImportStage::Done;
+        self.import = Some(status);
+        if !leave || self.page != OnboardingPage::Import {
+            return;
+        }
+        if !self
+            .setup_state(OnboardingSetupStepKind::Summaries)
+            .is_handled()
+        {
+            self.llm.load(store, services, key);
+            if self.llm.is_configured {
+                self.setup_states.insert(
+                    OnboardingSetupStepKind::Summaries,
+                    SetupState::Saved(Self::saved_line_llm(&self.llm)),
+                );
+            }
+        }
+        self.page = OnboardingPage::Permissions;
+        if self.is_complete() {
+            self.page = OnboardingPage::Setup;
+            self.finish_if_setup_handled(services);
+        }
     }
 
     // Page 1
@@ -433,6 +507,34 @@ impl OnboardingViewModel {
     }
 }
 
+/// The import's status while it has work left (pending or waiting).
+fn import_open(services: &Services) -> Option<SwiftImportStatus> {
+    services
+        .swift_import
+        .as_ref()
+        .map(|import| import.status())
+        .filter(|status| status.stage != SwiftImportStage::Done)
+}
+
+/// The import step as the page shows it.
+fn import_snapshot(model: &OnboardingViewModel) -> Option<OnboardingImport> {
+    let status = model.import.as_ref()?;
+    let state = if model.importing {
+        OnboardingImportState::Importing
+    } else {
+        match status.stage {
+            SwiftImportStage::Pending => OnboardingImportState::Pending,
+            SwiftImportStage::Waiting => OnboardingImportState::Waiting,
+            SwiftImportStage::Done => OnboardingImportState::Done,
+        }
+    };
+    Some(OnboardingImport {
+        state,
+        prompts: i64::from(status.prompts),
+        error: status.error.clone(),
+    })
+}
+
 /// The onboarding window's topic. Page 2 only carries the Summaries form
 /// (the Settings snapshot without a sidebar subtitle) and the vault row.
 #[must_use]
@@ -482,6 +584,7 @@ pub fn snapshot(model: &OnboardingViewModel) -> OnboardingSnapshot {
             }
         }),
         retention_sentence: model.retention_sentence.clone(),
+        swift_import: import_snapshot(model),
         finished: model.finished,
     }
 }

@@ -1,7 +1,7 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
-//! old, and the waits that fail a test instead of hanging it.
+//! old, a paired phone, and the waits that fail a test instead of hanging it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,6 +163,8 @@ pub fn app_over_fakes(
         services,
         updates: None,
         handover: None,
+        gated_handover: None,
+        import_gate: None,
         recorder,
         models_directory: root.join("models"),
         zone,
@@ -184,6 +186,21 @@ pub fn an_hour_later() -> crate::recovery::LiveRecordingCheck {
         wait: Arc::new(|_| panic!("an old master is not waited for")),
         ..crate::recovery::LiveRecordingCheck::default()
     }
+}
+
+/// Saves a paired phone in `store`, the evidence that an identity existed.
+pub fn pair_a_phone(store: &Store) {
+    store
+        .save_paired_device(
+            &steno_core::PairedDevice {
+                id: uuid::Uuid::new_v4(),
+                name: "Phone".to_owned(),
+                paired_at: chrono::Utc::now(),
+                last_seen_at: None,
+            },
+            &[1; 32],
+        )
+        .unwrap();
 }
 
 /// Waits until `done` holds, failing the test with `what` after

@@ -1,5 +1,5 @@
 //! The bridge host over the real store: one [`Host`] owns every view model
-//! of the three windows and answers all 75 methods, after
+//! of the three windows and answers all 77 methods, after
 //! `Web/{MainWindowBridge,SettingsBridge,OnboardingBridge}.swift` and the
 //! controller state of `AppController.swift` the bridges read. Commands
 //! map one to one onto the view models' methods, so no rule lives here;
@@ -578,6 +578,7 @@ impl Host {
             }
             BridgeTopic::MeetingDetail => {
                 self.sync_detail(inner);
+                self.follow_key_withheld(inner);
                 let playing = inner
                     .detail
                     .as_ref()
@@ -941,6 +942,15 @@ impl Host {
     /// opened again begins on page 1, not finished.
     pub fn onboarding_window_closed(&self) {
         OnboardingViewModel::mark_completed(&self.shared.services);
+        // Closing the window over the import step skips it: phone
+        // handover waits, and the step returns at the next launch. This
+        // runs on the main thread, so the skip never waits: a run whose
+        // prompt is up is left to end by itself.
+        if let Some(import) = &self.shared.services.swift_import
+            && import.status().stage == crate::services::SwiftImportStage::Pending
+        {
+            import.skip();
+        }
         let key = self.read_key();
         {
             let mut inner = self.lock();
@@ -1089,7 +1099,32 @@ impl Host {
                 self.reload_sections(inner);
             }
         }
+        // A key saved, or the import's step over, may release a withheld
+        // key without a settings change: the detail follows it as well.
+        if self.follow_key_withheld(inner) {
+            inner.publisher.schedule(BridgeTopic::MeetingDetail);
+        }
         self.refresh_subtitles(inner);
+    }
+
+    /// Sets the open detail's `key_withheld` to whether the API key is
+    /// withheld for the stored endpoint now
+    /// ([`WithheldApiKey`](crate::services::WithheldApiKey)), as the
+    /// pipeline asks it; true when that changed it.
+    fn follow_key_withheld(&self, inner: &mut Inner) -> bool {
+        let withheld = self
+            .shared
+            .services
+            .withheld_api_key
+            .as_ref()
+            .zip(inner.app.stored_settings.as_ref())
+            .is_some_and(|(withheld, settings)| withheld.withheld(settings));
+        let Some(detail) = inner.detail.as_mut() else {
+            return false;
+        };
+        let changed = detail.key_withheld != withheld;
+        detail.key_withheld = withheld;
+        changed
     }
 
     /// Every Settings section's `load`, as `SettingsBridge.load()` ran them
@@ -1131,14 +1166,15 @@ impl Host {
     /// and Export sections show, so those reload when it did. The exit is
     /// the model's: the command that sets `finished` closes the window, as
     /// `OnboardingWindow` did on that change, after the page saw it.
-    fn onboarding_command(&self, body: impl FnOnce(&mut Inner)) {
-        let finished = {
+    /// Answers what `body` answered.
+    fn onboarding_command<R>(&self, body: impl FnOnce(&mut Inner) -> R) -> R {
+        let (answer, finished) = {
             let mut inner = self.lock();
             let was_finished = inner.onboarding.finished;
-            body(&mut inner);
+            let answer = body(&mut inner);
             inner.publisher.schedule(BridgeTopic::Onboarding);
             self.follow_settings(&mut inner, true);
-            !was_finished && inner.onboarding.finished
+            (answer, !was_finished && inner.onboarding.finished)
         };
         self.publish();
         self.run_pending_probe(BridgeWindow::Onboarding);
@@ -1148,6 +1184,7 @@ impl Host {
                 .opener
                 .close_window(BridgeWindow::Onboarding);
         }
+        answer
     }
 
     fn command(&self, topics: &[BridgeTopic], body: impl FnOnce(&mut Inner)) {
@@ -1309,6 +1346,24 @@ impl Host {
         };
         self.publish();
         outcome
+    }
+
+    /// The import's outcome on the step, and everything it may have
+    /// changed: the API key the Summaries sections read and the listener
+    /// the Phones section and the main window's phone card show.
+    fn finish_swift_import(&self, status: crate::services::SwiftImportStatus, skipped: bool) {
+        let (store, services) = (&self.shared.store, &self.shared.services);
+        self.onboarding_command(|inner| {
+            let key = self.read_key();
+            inner
+                .onboarding
+                .finish_import(status, skipped, store, services, key);
+            self.reload_sections(inner);
+            inner.phones.load(services);
+            inner.phones.refresh(services);
+            inner.app.phone = Self::phone_card(services);
+            inner.publisher.schedule(BridgeTopic::App);
+        });
     }
 
     /// Page 1 moves on by itself once every step is handled, as the Swift
@@ -2284,6 +2339,37 @@ impl BridgeHost for Host {
 
     fn onboarding_finish(&self) -> Outcome<()> {
         self.onboarding_command(|inner| inner.onboarding.finish(&self.shared.services));
+        Ok(())
+    }
+
+    /// Three steps, as [`Self::onboarding_request`]: the page sees
+    /// `importing` while the keychain prompts are up, the import runs with
+    /// the lock released, then the outcome. A second Continue or Try again
+    /// while a run is under way does nothing: that run publishes the
+    /// outcome.
+    fn onboarding_import(&self) -> Outcome<()> {
+        let Some(import) = self.shared.services.swift_import.clone() else {
+            return Ok(());
+        };
+        if !self.onboarding_command(|inner| inner.onboarding.begin_import()) {
+            return Ok(());
+        }
+        let status = import.run();
+        self.finish_swift_import(status, false);
+        Ok(())
+    }
+
+    /// Not now while a run's prompts are up does nothing: that run
+    /// publishes the outcome, and its Try again stays on the step.
+    fn onboarding_skip_import(&self) -> Outcome<()> {
+        let Some(import) = self.shared.services.swift_import.clone() else {
+            return Ok(());
+        };
+        if self.lock().onboarding.importing {
+            return Ok(());
+        }
+        let status = import.skip();
+        self.finish_swift_import(status, true);
         Ok(())
     }
 

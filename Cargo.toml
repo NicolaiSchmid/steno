@@ -228,6 +228,21 @@ x509-parser = { version = "0.18", features = ["verify"] }
 qrcode = { version = "0.14", default-features = false }
 png = "0.18"
 rqrr = { version = "0.11", default-features = false }
+# The import of the Swift app's preferences, API key and handover identity
+# (`steno-services`' `swift_import`, macOS only, plan
+# `.plans/2026-10-07-stable-promotion.md` S6): the keychain through
+# `security-framework`'s safe wrappers, and through `steno-macos` where it
+# has none (the sys crate and `core-foundation`, both the versions
+# `security-framework` already locks); the Swift defaults domain as a
+# property list; the exported PKCS#12, which `p12-keystore` decodes with
+# Apple's legacy encryption (3DES and RC2); the account's home directory
+# (`getpwuid` through `nix`, already in the lock).
+security-framework = "3"
+security-framework-sys = "2.17"
+core-foundation = "0.10"
+plist = "1"
+p12-keystore = "0.3"
+nix = { version = "0.31", default-features = false, features = ["user"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -148,6 +148,7 @@ export const scenarios = [
 	"failed",
 	"processing",
 	"export-failed",
+	"summary-key-withheld",
 	// Settings
 	"settings-error",
 	"download-failed",
@@ -166,6 +167,8 @@ export const scenarios = [
 	"onboarding-setup-open",
 	"onboarding-codex",
 	"onboarding-vault-saved",
+	"onboarding-import",
+	"onboarding-import-waiting",
 ] as const;
 
 /**
@@ -236,7 +239,9 @@ function bareDetail(
  * recording, started 12:34 ago, its auto-stop counting down), `denied` (idle
  * with the microphone denied), `failed` (the failed meeting selected),
  * `processing` (a meeting in the progress entry, selected), `export-failed`
- * (the selected meeting's export failed). `tab=` picks the detail tab.
+ * (the selected meeting's export failed), `summary-key-withheld` (the
+ * selected meeting's summary skipped while the API key was withheld, from
+ * `meeting.detail.keyWithheld`). `tab=` picks the detail tab.
  * Without either, the fixtures pass through unchanged.
  */
 export function applyScenario(
@@ -291,6 +296,13 @@ export function applyScenario(
 				canReveal: false,
 			},
 		} satisfies MeetingDetailSnapshot;
+	}
+
+	const keyWithheld = snapshots["meeting.detail.keyWithheld"] as
+		| MeetingDetailSnapshot
+		| undefined;
+	if (scenario === "summary-key-withheld" && keyWithheld) {
+		result["meeting.detail"] = keyWithheld;
 	}
 
 	if (scenario === "failed" && list && detail) {
@@ -358,14 +370,17 @@ export function applyScenario(
 	applyOnboardingScenario(result, snapshots, scenario);
 
 	// `recording.live`, `settings.summaries.codex`,
-	// `settings.summaries.fileKey`, `settings.iphone.pairing` and
-	// `onboarding.setup` are fixtures, not topics; the page never sees them
-	// by those names.
+	// `settings.summaries.fileKey`, `settings.iphone.pairing`,
+	// `onboarding.setup`, `onboarding.import` and
+	// `meeting.detail.keyWithheld` are fixtures, not topics; the page never
+	// sees them by those names.
 	delete result["recording.live"];
 	delete result["settings.summaries.codex"];
 	delete result["settings.summaries.fileKey"];
 	delete result["settings.iphone.pairing"];
 	delete result["onboarding.setup"];
+	delete result["onboarding.import"];
+	delete result["meeting.detail.keyWithheld"];
 	return result;
 }
 
@@ -377,7 +392,9 @@ export function applyScenario(
  * vault chosen but refused), `onboarding-setup-open` (page 2 with both rows
  * open), `onboarding-codex` (page 2 with ChatGPT chosen and its consent
  * card), `onboarding-vault-saved` (page 2 with the vault saved and the
- * Summaries form open).
+ * Summaries form open), `onboarding-import` (the import step before page 1,
+ * not run yet, two prompts) and `onboarding-import-waiting` (the step after
+ * a denied export, from `onboarding.import`, with Try again).
  */
 function applyOnboardingScenario(
 	result: FixtureMap,
@@ -386,8 +403,22 @@ function applyOnboardingScenario(
 ) {
 	const onboarding = snapshots.onboarding as OnboardingSnapshot | undefined;
 	const setup = snapshots["onboarding.setup"] as OnboardingSnapshot | undefined;
+	const importStep = snapshots["onboarding.import"] as
+		| OnboardingSnapshot
+		| undefined;
 	if (!onboarding || !setup) {
 		return;
+	}
+
+	if (scenario === "onboarding-import-waiting" && importStep) {
+		result.onboarding = importStep;
+	}
+
+	if (scenario === "onboarding-import" && importStep) {
+		result.onboarding = {
+			...importStep,
+			swiftImport: { state: "pending", prompts: 2 },
+		} satisfies OnboardingSnapshot;
 	}
 	const untouched = onboarding.permissions.map((step) => ({
 		...step,

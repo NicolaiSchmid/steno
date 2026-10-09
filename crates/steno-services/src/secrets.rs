@@ -39,6 +39,8 @@ pub use secret_service::SecretServiceStore;
 /// Linux), and a Windows credential Steno writes carries it as its
 /// comment. On Windows the credential's target name is `<key>.<service>`,
 /// as the `keyring` crate filed it (`credentials`).
+/// It is a literal, not the app's identifier, which changes at the Mac
+/// cutover while the entries stay where they are.
 pub const KEYRING_SERVICE: &str = "uno.schmid.steno.mac";
 
 /// The platform keyring when `keyring` is set: the Keychain on macOS, the
@@ -907,6 +909,14 @@ mod tests {
     fn swift_source(path: &str) -> String {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|error| panic!("{path}: {error}"))
+    }
+
+    /// The service stays the Swift app's bundle identifier as a literal,
+    /// whatever this app's own identifier becomes: the API key the Swift
+    /// app stored, and every entry this app stored since, live under it.
+    #[test]
+    fn the_keyring_service_is_the_swift_app_s_literal() {
+        assert_eq!(KEYRING_SERVICE, "uno.schmid.steno.mac");
     }
 
     #[test]

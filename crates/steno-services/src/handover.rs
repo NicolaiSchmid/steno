@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::block_on;
 use crate::files::{Access, replace_file};
+use crate::swift_import::HandoverGate;
 
 /// The handover identity's fingerprint in `handover-identity.json` under
 /// the support directory, as `{"steno.handoverIdentityFingerprint": "<hex>"}`,
@@ -257,9 +258,183 @@ impl Handover for ListenerHandover {
     }
 }
 
+/// What `start` and `revoke` answer while the import waits, before a
+/// listener build failed.
+pub const WAITING_FOR_IMPORT: &str = "Phones can upload again once Steno has brought over this Mac's phone pairing from the previous version. This happens in the welcome step when Steno next starts.";
+
+/// The host's `Handover` while the Swift import is pending
+/// (`crate::swift_import`): no listener and no identity read until the
+/// gate opens, then the listener built once the gate opens, which every
+/// call goes to. Until then the paired phones come from the store, the
+/// listener reads as stopped, and starting it or revoking a phone says
+/// that it waits.
+pub struct GatedHandover {
+    store: Arc<Store>,
+    gate: tokio::sync::watch::Receiver<HandoverGate>,
+    make: MakeListener,
+    listener: std::sync::OnceLock<Arc<ListenerHandover>>,
+    /// Why the last build failed, until one succeeds.
+    failure: tokio::sync::watch::Sender<Option<String>>,
+}
+
+/// Builds the listener once the gate opened: loads the identity the
+/// import stored, as the graph's build does without an import.
+pub type MakeListener = Box<dyn Fn() -> Result<Arc<ListenerHandover>, String> + Send + Sync>;
+
+impl GatedHandover {
+    #[must_use]
+    pub fn new(
+        store: Arc<Store>,
+        gate: tokio::sync::watch::Receiver<HandoverGate>,
+        make: MakeListener,
+    ) -> Self {
+        GatedHandover {
+            store,
+            gate,
+            make,
+            listener: std::sync::OnceLock::new(),
+            failure: tokio::sync::watch::Sender::new(None),
+        }
+    }
+
+    /// Why the last build of the listener failed (a guard refused to
+    /// mint), `None` before the first build and once one succeeded.
+    #[must_use]
+    pub fn failure(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.failure.subscribe()
+    }
+
+    /// Waits for the gate to say [`HandoverGate::Ready`], then builds the
+    /// listener, starts it when a phone is paired (as the launch does) and
+    /// calls `changed`. Never builds a listener while the gate waits, so
+    /// no identity is read or minted before the import put one in place.
+    /// A build that fails (a guard refused to mint) waits for the gate to
+    /// say ready again and builds again, so whatever puts the identity in
+    /// place opens the listener by setting the gate once more. Returns once
+    /// the listener is open, or when the gate is gone.
+    pub async fn follow(self: Arc<Self>, changed: impl FnOnce() + Send + 'static) {
+        let mut gate = self.gate.clone();
+        let listener = loop {
+            // `wait_for` marks the value it accepted as seen, so the
+            // `changed` below waits for the next one.
+            if gate.wait_for(|gate| gate.opens_listener()).await.is_err() {
+                return;
+            }
+            let this = self.clone();
+            let built = tokio::task::spawn_blocking(move || (this.make)()).await;
+            match built.unwrap_or_else(|error| Err(error.to_string())) {
+                Ok(listener) => break listener,
+                Err(error) => {
+                    tracing::warn!(%error, "phone handover is unavailable");
+                    self.failure.send_replace(Some(error));
+                    if gate.changed().await.is_err() {
+                        return;
+                    }
+                }
+            }
+        };
+        self.failure.send_replace(None);
+        let service = listener.listener().cloned();
+        let _ = self.listener.set(listener);
+        if let Some(service) = service {
+            start_if_paired(&service).await;
+        }
+        changed();
+    }
+
+    /// The listener's service, once open.
+    #[must_use]
+    pub fn service(&self) -> Option<Arc<HandoverService>> {
+        self.listener
+            .get()
+            .and_then(|listener| listener.listener().cloned())
+    }
+
+    /// What `start` and `revoke` answer without a listener: why the last
+    /// build failed, once the gate opened and a guard refused to mint (the
+    /// import is over by then), else that the handover waits for the
+    /// import.
+    fn waiting(&self) -> steno_core::BoxError {
+        self.failure
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| WAITING_FOR_IMPORT.to_owned())
+            .into()
+    }
+}
+
+impl Handover for GatedHandover {
+    fn state(&self) -> ListenerState {
+        self.listener
+            .get()
+            .map_or(ListenerState::Stopped, |listener| listener.state())
+    }
+
+    fn mac_id(&self) -> String {
+        self.listener
+            .get()
+            .map(|listener| listener.mac_id())
+            .unwrap_or_default()
+    }
+
+    fn paired_devices(&self) -> BoundaryResult<Vec<PairedDevice>> {
+        match self.listener.get() {
+            Some(listener) => listener.paired_devices(),
+            None => Ok(self.store.paired_devices()?),
+        }
+    }
+
+    fn start(&self) -> BoundaryResult<()> {
+        self.listener.get().ok_or_else(|| self.waiting())?.start()
+    }
+
+    fn stop(&self) {
+        if let Some(listener) = self.listener.get() {
+            listener.stop();
+        }
+    }
+
+    fn begin_pairing(&self) -> PairingCode {
+        match self.listener.get() {
+            Some(listener) => listener.begin_pairing(),
+            // Unreachable from the Phones section, which starts the
+            // listener first: a code that has already run out.
+            None => PairingCode {
+                expires_at: chrono::DateTime::UNIX_EPOCH,
+                url_string: String::new(),
+            },
+        }
+    }
+
+    fn cancel_pairing(&self) {
+        if let Some(listener) = self.listener.get() {
+            listener.cancel_pairing();
+        }
+    }
+
+    fn revoke(&self, device_id: Uuid) -> BoundaryResult<()> {
+        self.listener
+            .get()
+            .ok_or_else(|| self.waiting())?
+            .revoke(device_id)
+    }
+
+    fn receipts(&self) -> Vec<HandoverReceipt> {
+        self.listener
+            .get()
+            .map(|listener| listener.receipts())
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use steno_core::testing::FakeHandoverIntake;
+
     use super::*;
+    use crate::swift_import::WaitReason;
 
     #[test]
     fn the_fingerprint_file_records_and_reads_back() {
@@ -277,5 +452,82 @@ mod tests {
         );
         std::fs::write(dir.path().join("support/handover-identity.json"), b"{").unwrap();
         assert!(file.recorded().is_err(), "a damaged record is no empty one");
+    }
+
+    /// Only a gate that says ready opens the listener.
+    #[test]
+    fn only_a_ready_gate_opens_the_listener() {
+        assert!(HandoverGate::Ready.opens_listener());
+        assert!(!HandoverGate::Pending.opens_listener());
+        assert!(!HandoverGate::Waiting(WaitReason::ImportDenied).opens_listener());
+    }
+
+    /// A build that fails is tried again at the next ready, not dropped:
+    /// whatever puts the identity in place opens the listener by setting
+    /// the gate once more. Until then starting the listener or revoking a
+    /// phone answers why the build failed, not that the import waits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_build_is_tried_again_at_the_next_ready() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (gate, receiver) = tokio::sync::watch::channel(HandoverGate::Pending);
+        let (called, mut calls) = tokio::sync::mpsc::unbounded_channel();
+        let attempts = AtomicUsize::new(0);
+        let runtime = tokio::runtime::Handle::current();
+        let listener_store = store.clone();
+        let gated = Arc::new(GatedHandover::new(
+            store,
+            receiver,
+            Box::new(move || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                called.send(attempt).unwrap();
+                if attempt == 0 {
+                    return Err("refused to mint".to_owned());
+                }
+                let identity =
+                    HandoverIdentity::mint("Steno on a test", chrono::Utc::now()).unwrap();
+                let mac_id = identity.mac_id();
+                Ok(Arc::new(ListenerHandover::over(
+                    Arc::new(service(
+                        HandoverConfiguration::default(),
+                        listener_store.clone(),
+                        Arc::new(FakeHandoverIntake::default()),
+                        identity,
+                    )),
+                    mac_id,
+                    listener_store.clone(),
+                    runtime.clone(),
+                )))
+            }),
+        ));
+        let (opened, mut was_opened) = tokio::sync::oneshot::channel();
+        let mut follow = tokio::spawn(gated.clone().follow(move || {
+            let _ = opened.send(());
+        }));
+
+        assert_eq!(
+            gated.start().unwrap_err().to_string(),
+            WAITING_FOR_IMPORT,
+            "before the gate opened"
+        );
+        gate.send_replace(HandoverGate::Ready);
+        assert_eq!(calls.recv().await, Some(0));
+        let mut failure = gated.failure();
+        failure.wait_for(Option::is_some).await.unwrap();
+        assert!(gated.service().is_none());
+        // The import is over: the answer is why the build failed.
+        assert_eq!(gated.start().unwrap_err().to_string(), "refused to mint");
+        assert_eq!(
+            gated.revoke(Uuid::nil()).unwrap_err().to_string(),
+            "refused to mint"
+        );
+        gate.send_replace(HandoverGate::Ready);
+        tokio::select! {
+            call = calls.recv() => assert_eq!(call, Some(1)),
+            ended = &mut follow => panic!("follow ended after the failed build: {ended:?}"),
+        }
+        (&mut was_opened).await.unwrap();
+        follow.await.unwrap();
+        assert!(gated.service().is_some());
+        assert_eq!(*gated.failure().borrow(), None);
     }
 }

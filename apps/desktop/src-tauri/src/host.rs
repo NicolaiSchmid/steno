@@ -578,7 +578,16 @@ impl Host {
                     .clone(),
             );
         }
-        let graph = runtime.block_on(async { steno_services::build(options) })?;
+        // The Swift import's launch half (macOS), under the database's
+        // lock and before the graph reads a preference or a secret.
+        let graph = runtime.block_on(async {
+            steno_services::build_with_import(options, |preferences| {
+                steno_services::swift_import::launch_on_this_mac(
+                    preferences,
+                    crate::smoke::SECONDS_VARIABLE,
+                )
+            })
+        })?;
         for warning in &graph.startup_warnings {
             tracing::warn!("{warning}");
         }

@@ -343,6 +343,10 @@ pub enum ProcessAgainRefusal {
     /// The meeting is queued or processing, or another operation holds
     /// it.
     Busy,
+    /// The detail's own, never the pipeline's: the API key is withheld
+    /// ([`WithheldApiKey`]), so the run would complete with no cleanup and
+    /// no summary, and Process again would be gone once a key is saved.
+    KeyWithheld,
     /// The app is exiting; the next launch can process the meeting again.
     Quitting,
     /// The store failed reading the meeting or saving it queued: the
@@ -576,6 +580,68 @@ pub trait Preferences: Send + Sync {
     fn set_flag(&self, key: &str, value: bool);
 }
 
+/// Where the import of the Swift app's keychain items stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwiftImportStage {
+    /// The onboarding step has not run at this launch.
+    Pending,
+    /// The handover identity did not come over (denied, failed or
+    /// skipped): phone handover waits until the step runs again, with
+    /// Try again or at the next launch.
+    Waiting,
+    /// The identity is in place, the key read or left empty.
+    Done,
+}
+
+/// The import step's state for the onboarding page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwiftImportStatus {
+    pub stage: SwiftImportStage,
+    /// The keychain prompts a run may bring up, at most three: one per item
+    /// it reads (the API key until it was read, whether the Swift app or a
+    /// desktop-id build stored it, the handover identity until its export
+    /// got through, and a desktop-id build's stored identity it replaces).
+    pub prompts: u8,
+    /// Why the last run left the identity behind, for the step's line.
+    pub error: Option<String>,
+}
+
+/// The second half of the import of the Swift app's API key and handover
+/// identity on the Mac's first launch after the update (plan
+/// `.plans/2026-10-07-stable-promotion.md`, S6), behind the onboarding
+/// step. `None` in [`Services`] when nothing is to be imported: the
+/// launch half found no Swift handover certificate, or the import ran
+/// before. The fake answers the outcome a test set and counts the runs.
+/// Rust only: the Swift app had no such step.
+pub trait SwiftImport: Send + Sync {
+    fn status(&self) -> SwiftImportStatus;
+    /// Reads the key (once) and exports the identity. Blocks on the
+    /// keychain prompts, so the host calls it with its lock released, as
+    /// it does the permission prompts. While another run is under way it
+    /// answers the status at once and reads nothing.
+    fn run(&self) -> SwiftImportStatus;
+    /// Not now, or the window closed over the step: no prompt comes up,
+    /// what the step has not read yet stays unread for this launch, and
+    /// phone handover waits until the step comes back at the next launch.
+    /// Never waits: while a run is under way it answers the status at once
+    /// and leaves the stage to that run.
+    fn skip(&self) -> SwiftImportStatus;
+}
+
+/// Whether the API key is withheld from the pipeline now: the Swift
+/// import's gate before its step ran, after Not now or after a refused
+/// keychain read, until a key is saved (plan
+/// `.plans/2026-10-07-stable-promotion.md`, S6). `None` in [`Services`]
+/// without such a gate. Rust only: the Swift app read its key itself.
+pub trait WithheldApiKey: Send + Sync {
+    /// Whether the key is withheld for an endpoint that needs it, which
+    /// then runs no summary: the pipeline asks the same. The meeting
+    /// detail then says why a summary was skipped, and offers no re-run
+    /// and no Process again until the key is there. `ChatGPT` summaries
+    /// (the Codex backend) need no key, so for them this is false.
+    fn withheld(&self, settings: &Settings) -> bool;
+}
+
 /// Everything the host is handed at construction, one `Arc` each so a test
 /// keeps a handle on the fake it reads back. Swift: `AppEnvironment`.
 #[derive(Clone)]
@@ -600,6 +666,10 @@ pub struct Services {
     pub opener: Arc<dyn Opener>,
     pub preferences: Arc<dyn Preferences>,
     pub secrets: Arc<dyn steno_core::SecretStore>,
+    /// The onboarding step of the Swift import, while it has work to do.
+    pub swift_import: Option<Arc<dyn SwiftImport>>,
+    /// What may withhold the API key, while there is such a gate.
+    pub withheld_api_key: Option<Arc<dyn WithheldApiKey>>,
 }
 
 /// `std::fs` as the [`FileSystem`]: the product's implementation, which

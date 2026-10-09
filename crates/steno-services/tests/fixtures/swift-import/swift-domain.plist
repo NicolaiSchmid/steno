@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSSplitView Subview Frames main, SidebarNavigationSplitView</key>
+	<array>
+		<string>0.000000, 0.000000, 148.000000, 680.000000, NO, NO</string>
+		<string>0.000000, 0.000000, 528.000000, 680.000000, NO, NO</string>
+	</array>
+	<key>NSWindow Frame com_apple_SwiftUI_Settings_window</key>
+	<string>376 182 760 608 0 0 1512 949 </string>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUHasLaunchedBefore</key>
+	<true/>
+	<key>SULastCheckTime</key>
+	<date>2026-10-06T08:12:40Z</date>
+	<key>steno.floatingPanel.anchor</key>
+	<data>
+	eyJlZGdlIjoidHJhaWxpbmciLCJvZmZzZXQiOjAuMjUsInNjcmVlbiI6IkJ1aWx0LWluIERpc3BsYXkifQ==
+	</data>
+	<key>steno.loginItemRegistered</key>
+	<true/>
+	<key>steno.onboardingCompleted</key>
+	<true/>
+	<key>steno.systemAudioGranted</key>
+	<true/>
+</dict>
+</plist>

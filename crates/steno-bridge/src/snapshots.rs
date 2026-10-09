@@ -491,9 +491,44 @@ impl Snapshot for Option<MeetingDetailSnapshot> {
 string_enum! {
     /// Swift: `OnboardingSnapshot.Page`.
     pub enum OnboardingPage {
+        /// Before page 1, on the Mac's first launch after the update from
+        /// the Swift app while that app's handover identity has not been
+        /// brought over ([`OnboardingImport`]). Rust only.
+        Import = "import",
         Permissions = "permissions",
         Setup = "setup",
     }
+}
+
+string_enum! {
+    /// Where the import step stands. Rust only.
+    pub enum OnboardingImportState {
+        /// Not run yet: the step explains the prompts and offers Continue.
+        Pending = "pending",
+        /// The keychain prompts are up.
+        Importing = "importing",
+        /// The export was denied, failed or skipped: phone handover waits
+        /// until the step runs again, with Try again or at the next launch.
+        Waiting = "waiting",
+        /// The identity is in place; the step is over.
+        Done = "done",
+    }
+}
+
+/// The import step: what the new app brings over from the Swift app's
+/// keychain items, behind one login-password prompt each. Rust only: the
+/// Swift app has no such step (plan `.plans/2026-10-07-stable-promotion.md`,
+/// S6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingImport {
+    pub state: OnboardingImportState,
+    /// How many login-password prompts the step may bring up, one per
+    /// keychain item it reads.
+    pub prompts: i64,
+    /// Why the last export did not bring the identity over, in a sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Swift: `OnboardingSnapshot.PermissionStep`.
@@ -571,6 +606,10 @@ pub struct OnboardingSnapshot {
     pub vault: Option<OnboardingVault>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_sentence: Option<String>,
+    /// The import step, present while [`OnboardingPage::Import`] is or
+    /// was current. Rust only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swift_import: Option<OnboardingImport>,
     /// Set once onboarding is over; the page closes the window.
     pub finished: bool,
 }

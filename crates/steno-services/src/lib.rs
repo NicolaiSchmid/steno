@@ -1,14 +1,16 @@
 //! The composition root of the Rust app: one function, [`build`], turns
 //! the stored settings into the real object graph and the
-//! [`steno_host::Services`] the host runs on. The Tauri shell and the
-//! `steno` CLI both call it; nothing here contains logic the other would
-//! not also need. Swift: `apps/macos/Steno/AppEnvironment.swift` and
+//! [`steno_host::Services`] the host runs on. The `steno` CLI calls it,
+//! the Tauri shell calls [`build_with_import`], which is [`build`] with the
+//! Mac's import of the Swift app ([`swift_import`]); apart from the
+//! import, nothing here contains logic the other would not also need.
+//! Swift: `apps/macos/Steno/AppEnvironment.swift` and
 //! `Sources/steno/Wiring.swift`.
 //! Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md` (`WP6b`).
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()`, `launch()`, `launch_finished()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`], [`open_store`], [`lock_database`] with [`LOCK_PATIENCE`](app::LOCK_PATIENCE) |
+//! | [`app`] | [`AppOptions`], [`build`], [`build_with_import`], [`App`] with `host()`, `launch()`, `launch_finished()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`], [`open_store`], [`lock_database`] with [`LOCK_PATIENCE`](app::LOCK_PATIENCE), [`GraphSecrets`](app::GraphSecrets), the graph's secret store in its three layers (the platform store, `KeepsApiKey`, the import's gate) |
 //! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) with the [`BuiltEngine`](pipeline::BuiltEngine) it was built with, and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
 //! | [`audio_folders`] | Where recordings were written, beside the database: each recording's and phone upload's folder, for crash recovery and the adoption of a master with no meeting, and the known folders |
@@ -16,13 +18,14 @@
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels`, and [`SpeechEngines`](speech::SpeechEngines), the engines and the diarizer the pipelines share across reloads |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
 //! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`LOG_FILTER`], [`flush_logs`] |
-//! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, and the host's `Handover` over the listener |
+//! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, the host's `Handover` over the listener, and [`GatedHandover`](handover::GatedHandover), the one that waits for the import's gate |
 //! | [`secrets`] | The platform keyring, the Secret Service on Linux and the 0600 secrets file behind `SecretStore`, and [`KeepsApiKey`](secrets::KeepsApiKey), the app's store that keeps the API key for the pipeline's rebuilds; its Windows credential store module is the one place in the crate allowed `unsafe` |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
 //! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json`, `audio-folders.json` and `update-check.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the flags in `preferences.json` |
 //! | [`updates`] | The host's `Updater`: the daily update schedule over the shell's updater, its flags, the last check time, the install gate and the packaged-install switch |
 //! | [`qr`] | The host's `QrEncoder`: the pairing code as a PNG |
+//! | [`swift_import`] | The Mac's import of the Swift app's preferences, API key and handover identity, at the first launch after the update: the launch half, the onboarding step's half and the handover gate |
 //!
 //! What stays a fake here is named in [`build`]'s doc: the platform
 //! services the shell does not supply yet (permissions, clip player; the
@@ -99,11 +102,12 @@ pub mod recorder;
 pub mod recovery;
 pub mod secrets;
 pub mod speech;
+pub mod swift_import;
 #[cfg(test)]
 mod testing;
 pub mod updates;
 
-pub use app::{App, AppOptions, BuildError, build, lock_database, open_store};
+pub use app::{App, AppOptions, BuildError, build, build_with_import, lock_database, open_store};
 pub use logs::{LOG_FILTER, flush_logs, log_to_stderr};
 pub use secrets::{
     FileSecretStore, KeyringSecretStore, KeyringUnavailable, secret_store, secret_store_with_unlock,

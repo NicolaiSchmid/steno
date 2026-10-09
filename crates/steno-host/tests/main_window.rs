@@ -1568,6 +1568,110 @@ fn the_detail_footer_and_summary_rows_follow_the_store() {
     );
 }
 
+/// A meeting processed while the API key was withheld (the Swift import's
+/// gate) has no summary though an endpoint is set: while the gate still
+/// withholds the key the row says so in plain words and opens Settings,
+/// with no re-run on offer; once a key is saved it is the runnable row.
+#[test]
+fn a_summary_skipped_for_a_withheld_key_says_so_until_the_key_is_saved() {
+    let harness = Harness::builder()
+        .with_withheld_api_key(true)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            configure_llm(store, "qwen3-8b");
+            drop_sample_summary(store);
+        })
+        .build();
+    let _ = harness.snapshot(BridgeTopic::MeetingsList);
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    let status = &detail["summaryStatus"];
+    assert_eq!(status["kind"], "skippedUnconfigured", "{status}");
+    assert_eq!(status["title"], "Summary skipped");
+    assert_eq!(
+        status["body"],
+        steno_host::setup::copy::SUMMARY_KEY_WITHHELD_BODY
+    );
+    assert!(
+        status["body"]
+            .as_str()
+            .unwrap()
+            .starts_with("Steno can't use your API key yet")
+    );
+    assert_eq!(status["actionTitle"], "Set up summaries");
+    assert_eq!(detail["canRerunSummary"], false, "no key, no re-run");
+
+    *harness
+        .fakes
+        .withheld_api_key
+        .as_ref()
+        .unwrap()
+        .withheld
+        .lock()
+        .unwrap() = false;
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["summaryStatus"]["kind"], "skippedRunnable");
+    assert_eq!(detail["summaryStatus"]["actionTitle"], "Run summary");
+    assert_eq!(detail["canRerunSummary"], true);
+}
+
+/// A withheld key released without a settings change, by a key-only
+/// Summaries save or by the import's step, publishes the open detail
+/// again: its Run summary appears with the command, not with the next
+/// store poll.
+#[test]
+fn the_detail_goes_out_again_once_a_key_write_or_the_import_releases_the_key() {
+    for release in ["a key-only save", "the import's step"] {
+        let harness = Harness::builder()
+            .with_withheld_api_key(true)
+            .with_swift_import(1)
+            .seed(|store, fakes| {
+                populate_sample(store, fakes);
+                configure_llm(store, "qwen3-8b");
+                drop_sample_summary(store);
+            })
+            .build();
+        let _ = harness.snapshot(BridgeTopic::MeetingsList);
+        assert_eq!(
+            harness.snapshot(BridgeTopic::MeetingDetail)["canRerunSummary"],
+            false
+        );
+        harness.sink.clear();
+        // The real gate opens on the key's write and at the step's end.
+        *harness
+            .fakes
+            .withheld_api_key
+            .as_ref()
+            .unwrap()
+            .withheld
+            .lock()
+            .unwrap() = false;
+        if release == "a key-only save" {
+            let settings = harness.host.for_window(BridgeWindow::Settings);
+            settings
+                .settings_summaries_update(steno_bridge::SummariesUpdateParams {
+                    base_url: None,
+                    model: None,
+                    context_tokens: None,
+                    api_key: Some("sk-typed".to_owned()),
+                })
+                .unwrap();
+            settings.settings_summaries_save().unwrap();
+        } else {
+            harness.host.onboarding_import().unwrap();
+        }
+        let detail = harness
+            .sink
+            .last(BridgeTopic::MeetingDetail)
+            .unwrap_or_else(|| panic!("{release}: the detail did not go out"));
+        assert_eq!(detail["canRerunSummary"], true, "{release}");
+        assert_eq!(
+            detail["summaryStatus"]["kind"], "skippedRunnable",
+            "{release}"
+        );
+    }
+}
+
 /// Swift: `openURLAcceptsOnlyWebAndMailLinks`, `theAppPublishCarryingADeepLinkConsumesIt`.
 #[test]
 fn open_url_takes_https_and_mail_links_and_only_onboarding_closes_itself() {
@@ -2112,6 +2216,60 @@ fn process_again_words_a_gone_recording_through_the_detail() {
     assert_eq!(
         harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"],
         "The recording is no longer on this Mac, so the meeting cannot be processed again."
+    );
+}
+
+/// While the API key is withheld for the stored endpoint (the Swift
+/// import's gate), a failed meeting with its recording on disk is not
+/// offered "Process again": the run would complete with no cleanup and no
+/// summary, and the button would then be gone for good. A stale click is
+/// refused before the pipeline is asked, in plain words. Once a key is
+/// saved it is offered and reaches the pipeline.
+#[test]
+fn process_again_waits_for_a_withheld_key() {
+    let harness = Harness::builder()
+        .with_withheld_api_key(true)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            configure_llm(store, "qwen3-8b");
+            give_the_failed_meeting_a_recording(store, fakes);
+        })
+        .build();
+    let pipeline = &harness.fakes.pipeline;
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(MEETING_FAILED),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        false
+    );
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"],
+        "Steno can't use your API key yet. Enter your API key in Settings, then process the meeting again."
+    );
+    assert!(pipeline.processed_again.lock().unwrap().is_empty());
+
+    *harness
+        .fakes
+        .withheld_api_key
+        .as_ref()
+        .unwrap()
+        .withheld
+        .lock()
+        .unwrap() = false;
+    harness.host.store_changed();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        true
+    );
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        *pipeline.processed_again.lock().unwrap(),
+        [uuid(MEETING_FAILED)]
     );
 }
 
