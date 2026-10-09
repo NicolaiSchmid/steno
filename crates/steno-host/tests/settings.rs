@@ -19,7 +19,7 @@ use steno_bridge::{
     SetTemplateParams, SummariesUpdateParams,
 };
 use steno_core::paths::file_url;
-use steno_core::protocols::{SecretKey, SecretStore};
+use steno_core::protocols::{BoundaryResult, SecretKey, SecretStore};
 use steno_core::{AudioRetention, LlmProvider};
 use steno_host::services::{CodexModel, LoginItemStatus};
 use steno_host::settings::{KeyRead, LlmSettingsViewModel};
@@ -1146,58 +1146,63 @@ struct HeldReads {
 
 #[derive(Default)]
 struct Hold {
-    /// Armed, holding, released.
-    state: Mutex<(bool, bool, bool)>,
+    state: Mutex<Phases>,
     changed: Condvar,
+}
+
+/// Where the armed read is.
+#[derive(Default)]
+struct Phases {
+    armed: bool,
+    holding: bool,
+    released: bool,
 }
 
 impl Hold {
     fn arm(&self) {
-        *self.state.lock().unwrap() = (true, false, false);
+        *self.state.lock().unwrap() = Phases {
+            armed: true,
+            ..Phases::default()
+        };
     }
 
     fn until_holding(&self) {
         let state = self.state.lock().unwrap();
         let (_state, timeout) = self
             .changed
-            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| !state.1)
+            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| {
+                !state.holding
+            })
             .unwrap();
         assert!(!timeout.timed_out(), "no read was held");
     }
 
     fn release(&self) {
-        self.state.lock().unwrap().2 = true;
+        self.state.lock().unwrap().released = true;
         self.changed.notify_all();
     }
 }
 
 #[steno_core::async_trait]
 impl SecretStore for HeldReads {
-    async fn secret(
-        &self,
-        key: &SecretKey,
-    ) -> steno_core::protocols::BoundaryResult<Option<String>> {
+    async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
         let read = self.inner.secret(key).await;
         let mut state = self.hold.state.lock().unwrap();
-        if state.0 {
-            state.0 = false;
-            state.1 = true;
+        if state.armed {
+            state.armed = false;
+            state.holding = true;
             self.hold.changed.notify_all();
             drop(
                 self.hold
                     .changed
-                    .wait_while(state, |state| !state.2)
+                    .wait_while(state, |state| !state.released)
                     .unwrap(),
             );
         }
         read
     }
 
-    async fn set_secret(
-        &self,
-        key: &SecretKey,
-        value: Option<&str>,
-    ) -> steno_core::protocols::BoundaryResult<()> {
+    async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
         self.inner.set_secret(key, value).await
     }
 }
