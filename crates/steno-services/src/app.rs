@@ -953,6 +953,14 @@ impl App {
             .launch_work
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(work);
+        self.start_alongside(host);
+        host.store_changed();
+    }
+
+    /// The launch's step 5: the login item registered the first time, the
+    /// handover listener started when a phone is already paired, and the
+    /// update schedule started.
+    fn start_alongside(&self, host: &Arc<Host>) {
         host.register_login_item_on_first_launch();
         if let Some(handover) = self
             .handover
@@ -966,7 +974,6 @@ impl App {
             let updates_host = host.clone();
             updates.start(Arc::new(move || updates_host.updates_changed()));
         }
-        host.store_changed();
     }
 
     /// The launch's crash recovery: meetings left queued or processing
