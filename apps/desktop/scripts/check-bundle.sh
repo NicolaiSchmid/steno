@@ -42,7 +42,7 @@ fi
 bundle="${1:?bundle directory, e.g. target/release/bundle}"
 types="${2:?bundle types, e.g. deb,appimage}"
 sidecar_name=steno-speech-sidecar
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+linux="$(cd "$(dirname "${BASH_SOURCE[0]}")/../src-tauri/linux" && pwd)"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
@@ -93,7 +93,7 @@ side_by_side() {
 # the unpacked .deb holds that file there, byte for byte.
 drop_in() {
   local target="usr/lib/systemd/user/$1"
-  cmp -s "$scratch/deb/$target" "$root/apps/desktop/src-tauri/linux/$2" \
+  cmp -s "$scratch/deb/$target" "$linux/$2" \
     || die "the .deb does not install linux/$2 as /$target"
   echo "ok: the .deb installs /$target"
 }
@@ -111,7 +111,7 @@ check_deb() {
   dpkg-deb -e "$deb" "$scratch/deb-control"
   [[ -x "$scratch/deb-control/postinst" ]] \
     || die "the .deb has no executable postinst"
-  cmp -s "$scratch/deb-control/postinst" "$root/apps/desktop/src-tauri/linux/deb-postinst.sh" \
+  cmp -s "$scratch/deb-control/postinst" "$linux/deb-postinst.sh" \
     || die "the .deb's postinst is not linux/deb-postinst.sh"
   echo "ok: the .deb's postinst reloads the user managers"
 }
