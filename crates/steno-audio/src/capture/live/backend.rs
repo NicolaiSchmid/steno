@@ -28,7 +28,8 @@
 //! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
 //! `start` again. Nothing here runs on the IO thread except `io_proc`,
 //! which only calls [`deliver`] and marks the first callback's host time
-//! ([`FirstCallback`]); `stop()` logs that callback's offset from the start
+//! ([`FirstCallback`]), and `silent_io_proc` (below), which only zeroes
+//! its output; `stop()` logs that callback's offset from the start
 //! at `info`, so a call recording shows whether the IOProc ran at once.
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,

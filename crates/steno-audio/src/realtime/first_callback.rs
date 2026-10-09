@@ -1,10 +1,12 @@
 //! When a capture's first callback came, against the capture's start
-//! (stable plan A9). On the Mac the aggregate's IOProc may not run until
-//! another client opens the output device (the call mode without an
-//! output client), and a call's first seconds would then be missing from
-//! the recording. The IO thread stores the first callback's host time once;
-//! the backend reads it off that thread when the capture stops and logs
-//! the offset at `info`. No Swift equivalent.
+//! (stable plan A9; A10's step 2 reads it). On the Mac a call capture's
+//! aggregate runs only while a process its tap includes drives the
+//! output, so the capture starts a silent output of its own first (A10);
+//! should that output not start, the IOProc waits for another app to play
+//! and a call's first seconds are missing from the recording. The IO
+//! thread stores the first callback's host time once; the backend reads
+//! it off that thread when the capture stops and logs the offset at
+//! `info`. No Swift equivalent.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -70,7 +72,8 @@ impl FirstCallback {
 
 /// The `info` line for a capture that ran for `ran`: the first callback's
 /// `offset` from its start, or that none came; `tap` says whether the
-/// capture had the system lane, whose tap is what may hold the IOProc back.
+/// capture had the system lane, whose IOProc waits on the silent output
+/// having started.
 #[must_use]
 pub fn first_callback_line(offset: Option<Duration>, ran: Duration, tap: bool) -> String {
     let what = if tap {

@@ -16,12 +16,12 @@
 //! above. The output is cut into 100 ms windows (100 Hz of the sweep each)
 //! and each window's level is read against the sweep's.
 //!
-//! Measured: the capture path leaves nothing above -60 dB anywhere below
-//! 8 kHz (-88 dB in the window from 8.0 to 8.1 kHz, then below the 16-bit
-//! FIR's floor). The decoder's sinc keeps aliases under -60 dB wherever
-//! they land below 7 kHz (-67 dB at 6.9 to 7.0 kHz, under -90 dB below
-//! 6.8 kHz), but its transition band (cutoff 0.45 of 16 kHz, 64 taps)
-//! folds 8 to 9 kHz into 7 to 8 kHz at -21 to -58 dB. That band is above
+//! Measured, by where the aliases land: the capture path leaves nothing
+//! above -60 dB anywhere below 8 kHz (-88 dB at 7.9 to 8.0 kHz, then
+//! below the 16-bit FIR's floor). The decoder's sinc keeps aliases under
+//! -60 dB wherever they land below 7 kHz (-67 dB at 6.9 to 7.0 kHz, under
+//! -90 dB below 6.8 kHz), but its transition band (cutoff 0.45 of 16 kHz,
+//! 64 taps) folds 8 to 9 kHz of input into 7 to 8 kHz at -21 to -58 dB. That band is above
 //! the flat passband (0.3 dB to 6 kHz). What the fold costs a transcript
 //! is unmeasured: `steno-speech`'s
 //! `fleurs_wer_from_44k1_is_at_most_a_tenth_of_a_point_over_48k` starts
