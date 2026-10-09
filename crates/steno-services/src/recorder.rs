@@ -2517,15 +2517,7 @@ mod tests {
         })
         .await;
         assert_eq!(status().warning, None);
-        let deadline = std::time::Instant::now() + patience;
-        while status().warning.as_deref() != Some(warning) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the warning once the restarts pass the attempts: {:?}",
-                status().warning
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        until_the_warning(harness, warning, patience).await;
         let mic = status().levels.map(|levels| levels.mic);
         assert!(
             mic.is_some_and(|mic| mic < 1e-6),
@@ -2554,6 +2546,20 @@ mod tests {
         })
         .await;
         seconds
+    }
+
+    /// Waits up to `patience` for the recorder to show `warning`, as it
+    /// does once the restarts pass the attempts.
+    async fn until_the_warning(harness: &Harness, warning: &str, patience: Duration) {
+        let deadline = std::time::Instant::now() + patience;
+        while harness.recorder.status().warning.as_deref() != Some(warning) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the warning once the restarts pass the attempts: {:?}",
+                harness.recorder.status().warning
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Seconds of tone before the device stops delivering: long enough for
@@ -2632,15 +2638,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
-        let deadline = std::time::Instant::now() + STILL_TRYING_WITHIN;
-        while harness.recorder.status().warning.as_deref() != Some(warning) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the warning: {:?}",
-                harness.recorder.status().warning
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        until_the_warning(&harness, warning, STILL_TRYING_WITHIN).await;
         stop(&harness.recorder).await;
         let note = harness.recorder.status().warning.unwrap_or_default();
         assert!(note.contains("of the recording are missing"), "{note}");

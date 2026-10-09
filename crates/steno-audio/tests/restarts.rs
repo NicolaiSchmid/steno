@@ -14,7 +14,6 @@
     clippy::too_many_lines
 )]
 
-use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -29,6 +28,7 @@ use steno_audio::writer::CafFile;
 use steno_audio::{Clock, SAMPLE_RATE};
 use steno_core::AudioLane;
 use steno_core::paths::file_url_path;
+use tempfile::TempDir;
 use uuid::Uuid;
 
 const RECV: Duration = Duration::from_secs(10);
@@ -182,18 +182,22 @@ fn one_at_a_time() -> (MutexGuard<'static, ()>, &'static Log) {
     (guard, log)
 }
 
-/// A session in `mode` over `backend` on `clock`, with 160 s of relay:
-/// the writer runs on wall time, so a relay that filled would hold the
-/// rebuild in its waits for room while the test moves the clock on.
-fn session(
-    mode: CaptureMode,
-    directory: &Path,
-    backend: Arc<Pushed>,
-    clock: Arc<ManualClock>,
-) -> CaptureSession {
-    let mut configuration = CaptureConfiguration::new(mode, directory);
+/// A recording in `mode`, started over a `Pushed` device on a manual
+/// clock, with 160 s of relay: the writer runs on wall time, so a relay
+/// that filled would hold the rebuild in its waits for room while the test
+/// moves the clock on. The directory holds the recording's files.
+fn record(mode: CaptureMode) -> (TempDir, CaptureSession, Drive) {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Pushed::new(clock.clone());
+    let mut configuration = CaptureConfiguration::new(mode, directory.path());
     configuration.echo_cancellation = false;
-    CaptureSession::with_backend(configuration, backend, None, 16_000, clock).unwrap()
+    let session =
+        CaptureSession::with_backend(configuration, backend.clone(), None, 16_000, clock.clone())
+            .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    let drive = Drive::new(clock, backend, &session);
+    (directory, session, drive)
 }
 
 /// The test's side of a recording: moves the clock a `STEP` at a time once
@@ -308,8 +312,16 @@ fn steps_in(duration: Duration) -> usize {
     (duration.as_millis() / STEP.as_millis()) as usize
 }
 
-fn resumed(notice: &CaptureNotice) -> bool {
+fn is_resumed(notice: &CaptureNotice) -> bool {
     matches!(notice, CaptureNotice::DeviceResumed { .. })
+}
+
+fn is_still_restarting(notice: &CaptureNotice) -> bool {
+    matches!(notice, CaptureNotice::StillRestarting { .. })
+}
+
+fn is_delivering(notice: &CaptureNotice) -> bool {
+    *notice == CaptureNotice::Delivering
 }
 
 fn master_frames(result: &CaptureResult) -> usize {
@@ -354,26 +366,16 @@ fn assert_nothing_lost(result: &CaptureResult, backend: &Pushed) {
 #[test]
 fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
     let (_one, log) = one_at_a_time();
-    let directory = tempfile::tempdir().unwrap();
-    let clock = Arc::new(ManualClock::new());
-    let backend = Pushed::new(clock.clone());
-    let session = session(
-        CaptureMode::InPerson,
-        directory.path(),
-        backend.clone(),
-        clock.clone(),
-    );
-    session.start(Uuid::new_v4()).unwrap();
-    let mut drive = Drive::new(clock.clone(), backend.clone(), &session);
+    let (_directory, session, mut drive) = record(CaptureMode::InPerson);
     drive.run(5, true);
     let end = Duration::from_secs(120);
-    while clock.now() < end {
+    while drive.clock.now() < end {
         // Stalls, then a restart delivers at its first sample, and
         // delivers 0.8 s more after the resume.
         drive.run_until(steps_in(Duration::from_secs(10)), false, |notice| {
             *notice == CaptureNotice::DeviceChanged(DeviceChangeReason::DeliveryStalled)
         });
-        drive.run_until(steps_in(Duration::from_secs(10)), true, resumed);
+        drive.run_until(steps_in(Duration::from_secs(10)), true, is_resumed);
         drive.run(8, true);
     }
     let resumes: Vec<usize> = drive
@@ -392,7 +394,7 @@ fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
     );
     // Each restart waits the backoff after the restarts before it, from
     // the stall's report, to the step.
-    let starts = backend.starts();
+    let starts = drive.backend.starts();
     let stalls: Vec<Duration> = drive
         .seen
         .iter()
@@ -418,17 +420,17 @@ fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
         "the backoff reached its longest"
     );
     assert_eq!(
-        drive.count(|notice| matches!(notice, CaptureNotice::StillRestarting { .. })),
+        drive.count(is_still_restarting),
         1,
         "the warning comes once: {:?}",
         drive.seen
     );
     assert_eq!(
-        drive.count(|notice| *notice == CaptureNotice::Delivering),
+        drive.count(is_delivering),
         0,
         "and stands through the resumes"
     );
-    assert_about_once_a_minute(log, clock.now());
+    assert_about_once_a_minute(log, drive.clock.now());
     assert_eq!(log.count("INFO", "delivers again"), 0);
 
     // The device delivers for good: the warning ends once it has for
@@ -436,25 +438,19 @@ fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
     drive.run_until(steps_in(Duration::from_secs(10)), false, |notice| {
         matches!(notice, CaptureNotice::DeviceChanged(_))
     });
-    let resumed_at = drive.run_until(steps_in(Duration::from_secs(10)), true, resumed);
-    let delivering = drive.run_until(steps_in(Duration::from_secs(12)), true, |notice| {
-        *notice == CaptureNotice::Delivering
-    });
+    let resumed_at = drive.run_until(steps_in(Duration::from_secs(10)), true, is_resumed);
+    let delivering = drive.run_until(steps_in(Duration::from_secs(12)), true, is_delivering);
     let after = delivering.saturating_sub(resumed_at);
     assert!(
         after >= STALLED_AGAIN && after <= STALLED_AGAIN + 2 * STEP,
         "{after:?} after the resume"
     );
     drive.run(steps_in(Duration::from_secs(5)), true);
-    assert_eq!(
-        drive.count(|notice| *notice == CaptureNotice::Delivering),
-        1,
-        "once"
-    );
+    assert_eq!(drive.count(is_delivering), 1, "once");
     assert_eq!(log.count("INFO", "delivers again"), 1);
     let result = session.stop().unwrap();
     assert!(!result.statistics.ended_on_device_loss);
-    assert_nothing_lost(&result, &backend);
+    assert_nothing_lost(&result, &drive.backend);
 }
 
 /// A Mac call capture whose silent output did not start (A10 logs it at
@@ -468,17 +464,7 @@ fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
 #[test]
 fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_loses_nothing_once_it_plays() {
     let (_one, log) = one_at_a_time();
-    let directory = tempfile::tempdir().unwrap();
-    let clock = Arc::new(ManualClock::new());
-    let backend = Pushed::new(clock.clone());
-    let session = session(
-        CaptureMode::Call,
-        directory.path(),
-        backend.clone(),
-        clock.clone(),
-    );
-    session.start(Uuid::new_v4()).unwrap();
-    let mut drive = Drive::new(clock.clone(), backend.clone(), &session);
+    let (_directory, session, mut drive) = record(CaptureMode::Call);
     drive.run_to(Duration::from_secs(120), false);
     assert_eq!(
         drive.seen.first(),
@@ -488,12 +474,13 @@ fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_loses_nothing
         )),
         "nothing from the start is a stall"
     );
-    assert_eq!(drive.count(resumed), 0, "no restart counts without a frame");
     assert_eq!(
-        drive.count(|notice| matches!(notice, CaptureNotice::StillRestarting { .. })),
-        1
+        drive.count(is_resumed),
+        0,
+        "no restart counts without a frame"
     );
-    let starts = backend.starts();
+    assert_eq!(drive.count(is_still_restarting), 1);
+    let starts = drive.backend.starts();
     let apart: Vec<Duration> = starts
         .windows(2)
         .map(|pair| pair[1].saturating_sub(pair[0]))
@@ -511,10 +498,10 @@ fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_loses_nothing
         at_the_longest.iter().all(|gap| *gap >= longest),
         "about every 6 s, never more often: {apart:?}"
     );
-    assert_about_once_a_minute(log, clock.now());
+    assert_about_once_a_minute(log, drive.clock.now());
 
     // Something plays from here on: the next restart delivers.
-    let resumed_at = drive.run_until(steps_in(Duration::from_secs(10)), true, resumed);
+    let resumed_at = drive.run_until(steps_in(Duration::from_secs(10)), true, is_resumed);
     let gap = drive
         .seen
         .iter()
@@ -524,15 +511,13 @@ fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_loses_nothing
         })
         .unwrap();
     assert_eq!(gap, CaptureSession::MAXIMUM_GAP.as_secs_f64(), "capped");
-    let delivering = drive.run_until(steps_in(Duration::from_secs(12)), true, |notice| {
-        *notice == CaptureNotice::Delivering
-    });
+    let delivering = drive.run_until(steps_in(Duration::from_secs(12)), true, is_delivering);
     assert!(delivering.saturating_sub(resumed_at) >= STALLED_AGAIN);
     assert_eq!(log.count("INFO", "delivers again"), 1);
     let result = session.stop().unwrap();
     assert!(!result.statistics.ended_on_device_loss);
     assert_eq!(result.statistics.device_changes, 1);
-    assert_nothing_lost(&result, &backend);
+    assert_nothing_lost(&result, &drive.backend);
 }
 
 /// A warning that stands when a new streak begins (a device change after
@@ -542,31 +527,21 @@ fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_loses_nothing
 #[test]
 fn a_warning_that_stands_into_a_new_streak_ends_once_its_stream_delivers() {
     let (_one, _log) = one_at_a_time();
-    let directory = tempfile::tempdir().unwrap();
-    let clock = Arc::new(ManualClock::new());
-    let backend = Pushed::new(clock.clone());
-    let session = session(
-        CaptureMode::InPerson,
-        directory.path(),
-        backend.clone(),
-        clock.clone(),
-    );
-    session.start(Uuid::new_v4()).unwrap();
-    let mut drive = Drive::new(clock.clone(), backend.clone(), &session);
+    let (_directory, session, mut drive) = record(CaptureMode::InPerson);
     drive.run(5, true);
-    drive.run_until(steps_in(Duration::from_secs(30)), false, |notice| {
-        matches!(notice, CaptureNotice::StillRestarting { .. })
-    });
-    drive.run_until(steps_in(Duration::from_secs(10)), true, resumed);
+    drive.run_until(
+        steps_in(Duration::from_secs(30)),
+        false,
+        is_still_restarting,
+    );
+    drive.run_until(steps_in(Duration::from_secs(10)), true, is_resumed);
     drive.run(10, true);
     session.device_changed(DeviceChangeReason::DefaultInputChanged);
     drive.run_until(steps_in(Duration::from_secs(10)), true, |notice| {
         matches!(notice, CaptureNotice::DeviceResumed { attempt: 1, .. })
     });
     let streak = drive.seen.len();
-    drive.run_until(steps_in(Duration::from_secs(12)), true, |notice| {
-        *notice == CaptureNotice::Delivering
-    });
+    drive.run_until(steps_in(Duration::from_secs(12)), true, is_delivering);
     drive.run(steps_in(Duration::from_secs(5)), true);
     assert_eq!(
         drive.seen[streak..]
@@ -577,5 +552,5 @@ fn a_warning_that_stands_into_a_new_streak_ends_once_its_stream_delivers() {
         "one Delivering, and nothing after it"
     );
     let result = session.stop().unwrap();
-    assert_nothing_lost(&result, &backend);
+    assert_nothing_lost(&result, &drive.backend);
 }

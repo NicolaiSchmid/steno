@@ -541,11 +541,12 @@ impl CaptureSession {
     /// wait is audio lost once the devices are back, with the starts in
     /// flight (one deadline per device tried: 3.5 s each on Linux, 7.5 s
     /// for a thread that does not answer, a chosen microphone and then the
-    /// default; up to 10 s on Windows) and the first frame; past [`Self::MAXIMUM_GAP`] the master falls short of
-    /// wall time, and the recorder's note after the stop counts it. Each
-    /// start holds the session's lock for up to its deadline, released
-    /// between the starts and through the wait, so the callers wait for up
-    /// to one deadline at a time. Rust only.
+    /// default; up to 10 s on Windows) and the first frame; past
+    /// [`Self::MAXIMUM_GAP`] the master falls short of wall time, and the
+    /// recorder's note after the stop counts it. Each start holds the
+    /// session's lock for up to its deadline, released between the starts
+    /// and through the wait, so the callers wait for up to one deadline at
+    /// a time. Rust only.
     pub const RESTART_BACKOFF_LONGEST: Duration = Duration::from_secs(4);
 
     /// The wait after the failed restart numbered `attempt` (1 for the
@@ -1473,17 +1474,16 @@ impl Core {
     /// offered nothing for longer than `STALL_TIMEOUT`, from its start or
     /// its last frame (`DeliveryStalled`); it tells audio that has come for
     /// `STALLED_AGAIN` after restarts that sent `StillRestarting`
-    /// (`Delivering`). While the stream is the
-    /// default input the session put in place of the chosen microphone,
-    /// over a backend that probes, it asks on a `steno-probe` thread of its
-    /// own whether the chosen one delivers (`CaptureBackend::probe_input`,
-    /// seconds at most, so the sampling goes on meanwhile), and only when
-    /// it did reports `ChosenInputRecheck`, whose rebuild returns to it; a
-    /// probe that finds nothing costs the recording nothing. Judges nothing
-    /// while a rebuild runs; ends with the recording, leaving a probe still
-    /// running to end on its own. Never on a real-time thread: the
-    /// producer's only share is the one store per callback the count
-    /// takes.
+    /// (`Delivering`). While the stream is the default input the session
+    /// put in place of the chosen microphone, over a backend that probes,
+    /// it asks on a `steno-probe` thread of its own whether the chosen one
+    /// delivers (`CaptureBackend::probe_input`, seconds at most, so the
+    /// sampling goes on meanwhile), and only when it did reports
+    /// `ChosenInputRecheck`, whose rebuild returns to it; a probe that finds
+    /// nothing costs the recording nothing. Judges nothing while a rebuild
+    /// runs; ends with the recording, leaving a probe still running to end
+    /// on its own. Never on a real-time thread: the producer's only share
+    /// is the one store per callback the count takes.
     fn watch(self: &Arc<Self>, recording: usize, cancel: &Cancel) {
         let mut probe: Option<JoinHandle<bool>> = None;
         while self
@@ -1922,11 +1922,11 @@ impl Core {
     /// start, so the master may run short of wall time by the time from
     /// that reading to the first frame (on PipeWire the connect, the link
     /// and the first cycle), never ahead; no audio is lost either way. A
-    /// stream
-    /// that offered none `STALL_TIMEOUT` after its start is stopped and
-    /// fails with `DidNotRun`; a change its listeners reported meanwhile
-    /// is dropped with it, since the next start reads the devices as they
-    /// are, and the sink's latch opens again for that start's listeners.
+    /// stream that offered none `STALL_TIMEOUT` after its start is stopped
+    /// and fails with `DidNotRun`; a change its listeners reported
+    /// meanwhile is dropped with it, since the next start reads the devices
+    /// as they are, and the sink's latch opens again for that start's
+    /// listeners.
     /// A stop during the wait answers `Started`: the stream is running and
     /// is the stop's to tear down, so the rebuild's next steps give up on
     /// it and `finish()` stops it. `Started`, or `Abandoned` when the
