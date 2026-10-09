@@ -242,7 +242,7 @@ impl SymphoniaAudioCodec {
         let primed = frames.priming.map_or(0, |trim| trim.frames);
         Ok(frames
             .frames
-            .zip(frames.rate.filter(|rate| *rate > 0))
+            .zip(frames.params.sample_rate.filter(|rate| *rate > 0))
             .map(|(declared, rate)| {
                 capped(declared.saturating_sub(primed), rate) as f64 / f64::from(rate)
             }))
@@ -445,20 +445,14 @@ struct SymphoniaFrames {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
     /// The track's codec parameters, which a fresh decoder is made from
-    /// after a damaged packet.
+    /// after a damaged packet; their rate (when declared) and time base
+    /// give a damaged packet's length.
     params: CodecParameters,
     track_id: u32,
     /// The track's frame count, as its header declares it.
     frames: Option<u64>,
     /// The encoder priming to drop: AAC in MP4 only.
     priming: Option<Trim>,
-    /// The track's rate in hertz, as its header declares it.
-    rate: Option<u32>,
-    /// The track's rate as its header declares it (0 when it does not),
-    /// for the length of a damaged packet before any packet decoded.
-    declared_rate: u32,
-    /// The packets' timestamp unit, which their durations are in.
-    time_base: Option<TimeBase>,
     /// The frames of the last packet that decoded, the length of a damaged
     /// packet whose container gives none.
     last_frames: Option<usize>,
@@ -636,23 +630,8 @@ fn emit_silence(
     Ok(seconds)
 }
 
-/// Why a packet did not decode: symphonia's error, or a panic inside its
-/// decoder.
-enum PacketFailure {
-    Error(SymphoniaError),
-    Panic(String),
-}
-
-impl std::fmt::Display for PacketFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Error(error) => write!(f, "{error}"),
-            Self::Panic(message) => write!(f, "the decoder panicked: {message}"),
-        }
-    }
-}
-
-/// `packet` through `decoder`, a panic inside it caught as a failure. The
+/// `packet` through `decoder`, a panic inside it caught as a failure, or
+/// why it did not decode: symphonia's error, or the panic's message. The
 /// caller replaces the decoder after any failure, so the state a panic
 /// left half-written is never used again; the decoder holds no state
 /// shared with anything else (symphonia's AAC tables are immutable once
@@ -660,21 +639,22 @@ impl std::fmt::Display for PacketFailure {
 fn decode_packet<'d>(
     decoder: &'d mut Box<dyn Decoder>,
     packet: &Packet,
-) -> Result<AudioBufferRef<'d>, PacketFailure> {
+) -> Result<AudioBufferRef<'d>, String> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let decoder = decoder;
         decoder.decode(packet)
     }));
     match outcome {
         Ok(Ok(audio)) => Ok(audio),
-        Ok(Err(error)) => Err(PacketFailure::Error(error)),
-        Err(panic) => Err(PacketFailure::Panic(
-            panic
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(panic) => {
+            let message = panic
                 .downcast_ref::<&str>()
                 .map(|text| (*text).to_owned())
                 .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_default(),
-        )),
+                .unwrap_or_default();
+            Err(format!("the decoder panicked: {message}"))
+        }
     }
 }
 
@@ -713,9 +693,6 @@ impl SymphoniaFrames {
             track_id,
             frames: params.n_frames,
             priming: Trim::for_track(path, &params),
-            rate: params.sample_rate,
-            declared_rate: params.sample_rate.unwrap_or(0),
-            time_base: params.time_base,
             last_frames: None,
             damage: Damage::default(),
             params,
@@ -812,11 +789,11 @@ impl SymphoniaFrames {
             // In the shape this packet gives, at the rate their frames
             // were counted at.
             let held = Spec {
-                rate: if self.declared_rate > 0 {
-                    self.declared_rate
-                } else {
-                    shape.rate
-                },
+                rate: self
+                    .params
+                    .sample_rate
+                    .filter(|&rate| rate > 0)
+                    .unwrap_or(shape.rate),
                 ..shape
             };
             let primed = self.primed(run.ts, run.frames);
@@ -845,7 +822,7 @@ impl SymphoniaFrames {
         stream: &mut Stream,
         packet: &Packet,
         index: u64,
-        failure: &PacketFailure,
+        failure: &str,
         each: &mut impl FnMut(Event<'_>) -> Result<(), CodecError>,
     ) -> Result<(), CodecError> {
         // A fresh decoder, not a reset. A reset keeps the channel layout
@@ -866,8 +843,8 @@ impl SymphoniaFrames {
         let fallback = self.last_frames.unwrap_or(FALLBACK_PACKET_FRAMES);
         match stream.spec {
             None => {
-                let frames =
-                    packet_frames(packet.dur(), self.time_base, self.declared_rate, fallback);
+                let rate = self.params.sample_rate.unwrap_or(0);
+                let frames = packet_frames(packet.dur(), self.params.time_base, rate, fallback);
                 stream
                     .leading
                     .get_or_insert(Leading {
@@ -877,7 +854,8 @@ impl SymphoniaFrames {
                     .frames += frames;
             }
             Some(shape) => {
-                let frames = packet_frames(packet.dur(), self.time_base, shape.rate, fallback);
+                let frames =
+                    packet_frames(packet.dur(), self.params.time_base, shape.rate, fallback);
                 let primed = self.primed(packet.ts(), frames);
                 self.damage.seconds += emit_silence(
                     each,
