@@ -828,10 +828,11 @@ impl ImportStep {
     }
 
     /// Stores the identity a failed store kept, or else the one an export
-    /// brings now, then writes the [`IMPORT_DONE_ENTRY`] marker. A store that fails keeps the bundle for Try again; while
-    /// a stored entry is being replaced its failure counts as the prompt
-    /// for that entry denied (the `keyring` crate keeps the status in its
-    /// text only), which Always Allow fixes.
+    /// brings now, then writes the [`IMPORT_DONE_ENTRY`] marker. A store
+    /// that fails keeps the bundle for Try again; while a stored entry is
+    /// being replaced its failure counts as the prompt for that entry
+    /// denied (the `keyring` crate keeps the status in its text only),
+    /// which Always Allow fixes.
     fn import_identity(&self) -> Result<(), &'static str> {
         if self.state().marker_unknown {
             // Only a clean not-found is a first run: a marker that cannot
