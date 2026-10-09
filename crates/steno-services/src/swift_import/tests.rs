@@ -2253,10 +2253,9 @@ async fn app_behind_a_pending_import(
 /// recording (the recovery's intake) wait until the step ran, then run on
 /// the pipeline the step reloaded with the key. The retention sweep waits
 /// with them, so it follows the resume: a ready meeting's expired audio
-/// stays until the step ran. A meeting that failed for
-/// want of the key before the step processes again with it
-/// (`ProcessingPipeline::reprocess`, the one reprocess entry point on
-/// main).
+/// stays until the step ran. A meeting that failed for want of the key
+/// before the step processes again with it, through the app's Process
+/// again (`ProcessingPipeline::process_again`, #240).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn meetings_left_at_the_first_launch_wait_for_the_step_and_run_with_its_key() {
     use steno_audio::writer::RecordingWriting as _;
@@ -2357,7 +2356,7 @@ async fn meetings_left_at_the_first_launch_wait_for_the_step_and_run_with_its_ke
     );
 
     // Process again, with the key now.
-    app.pipeline.current().reprocess(keyless.id).unwrap();
+    app.pipeline.current().process_again(keyless.id).unwrap();
     app.pipeline.current().wait_until_idle().await;
     assert_eq!(state(&keyless), MeetingState::Ready);
     app.shutdown();
