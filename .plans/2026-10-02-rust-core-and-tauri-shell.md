@@ -2651,6 +2651,20 @@ touch and admission lines; each fix is ported to Swift before cutover.
   so the approval copy stays reachable; with the new identifier the app registers
   itself, and the Swift entry is handled as `.plans/2026-10-07-stable-promotion.md`
   (D4, S6) says.
+- Packaged installs (stable plan X5, Rust only): `STENO_DISTRIBUTION=aur` or `=nix`
+  (the environment first, then the value the build was given;
+  `steno_services::updates::updates_are_managed`) turns the update check off, and
+  Settings > General says "Updates come from your package manager." in its place
+  (`HostConfig::updates_managed`, the contract's `updates.managedNote`).
+  `STENO_LOGIN_ITEM=managed`, which the NixOS module sets, makes the login item
+  `LoginItemStatus::Managed`: the app never writes, rewrites or removes the autostart
+  entry, the first launch registers nothing, Settings shows the switch on and locked
+  (`loginItemNote`), and at launch an entry an earlier build wrote into `/nix/store` is
+  removed. Otherwise the Linux entry names a stable path (`$APPIMAGE`,
+  `STENO_EXEC_PATH`, or the first of `/usr/bin` and the Nix profiles that resolves into
+  the running binary's directory), never `current_exe()`
+  (`apps/desktop/src-tauri/src/packaged.rs`, `apps/desktop/README.md` "Packaged
+  installs").
 - The menu bar on macOS carries the application, Edit and Window menus; the Swift
   Record menu (`⌘⇧R`, Record In Person) and Find Meetings (`⌘F`) are not in it yet.
   The page answers the shortcuts it shows itself (`useShortcut` in
