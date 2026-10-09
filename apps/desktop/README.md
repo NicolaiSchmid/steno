@@ -344,7 +344,9 @@ meetings, audio and models stay in the same support directory.
 - **The API key and the phone pairing.** When the login keychain holds the
   Swift app's handover certificate (labelled `Steno handover identity`),
   onboarding opens on an import step first, and until it ran the app reads
-  no API key and starts no handover listener. The step says how many times
+  no API key and starts no handover listener, and the meetings the Swift
+  app left queued or interrupted wait, so none is processed without the
+  key. The step says how many times
   macOS may ask for the login password, at most three: the API key (one
   item, whether the Swift app or a beta build under
   `uno.schmid.steno.desktop` stored it), the pairing, and the pairing entry
@@ -361,8 +363,18 @@ meetings, audio and models stay in the same support directory.
   it comes back at the next launch. Not now, or closing the window over
   the step, brings up no prompt: what the step has not read yet stays
   unread for this launch, and the step comes back with the same prompts at
-  the next launch. Closing the window while a prompt is up leaves that
+  the next launch. While the key stays unread (or refused), meetings are
+  processed as without a summaries service: they complete with their
+  transcript and no summary, and the summary can be run again once the
+  key is in place. Closing the window while a prompt is up leaves that
   prompt to the user; its answer still counts.
+
+Once the identity is stored the import also writes the keychain entry
+`swift-import-done` (service `uno.schmid.steno.mac`, an item of this
+app's own, so it never prompts). From then on the import never touches
+the stored identity again, even when a damaged `preferences.json` was set
+aside; Pair again in Settings must leave that entry in place. A launch
+that cannot look the entry up replaces nothing and waits with Try again.
 
 `preferences.json` keeps the import's progress in flags:
 `steno.swiftImportRan` marks the import as over (the identity is in place,
@@ -376,7 +388,9 @@ in Settings once more. A smoke run (`STENO_SMOKE_SECONDS`)
 and a launch whose `HOME` is not the account's home directory skip the
 import, so neither touches the user's keychain.
 `STENO_KEYCHAIN_TESTS=1 cargo test -p steno-services --test swift_keychain`
-runs the export against a throwaway keychain on a Mac.
+runs the export against a throwaway keychain on a Mac. Every event, what
+it opens and what it writes is one table in the module doc of
+`crates/steno-services/src/swift_import/mod.rs`.
 
 ## Run
 

@@ -617,9 +617,21 @@ Every package is written in parallel except where a dependency is named:
     identifier paragraph follows. The PR creates `steno-macos`, makes the
     `AGENTS.md` change (D10), and adds `security-framework`, `plist` and the
     PKCS#12 crate to `[workspace.dependencies]`.
-  - **The import, in two halves** (macOS only, in `steno-services`). It sets
-    `steno.swiftImportRan` in `preferences.json` once both halves are done (or
-    the second is skipped), and never runs again. Its sources (the defaults domain and the keychain) are
+  - **The import, in two halves** (macOS only, in `steno-services`;
+    `feat/swift-import`, #236). It sets `steno.swiftImportRan` in
+    `preferences.json` once the identity is in place (or there was no Swift
+    certificate), and never runs again. Right after it stores the identity,
+    and before that flag, it adds its own keychain entry `swift-import-done`
+    under the service `uno.schmid.steno.mac` (an item of this app's own, found
+    by an attribute query, so neither prompts). Once that entry or the flag
+    exists the import never touches `handover-identity` again, so a
+    `preferences.json` set aside cannot bring the Swift identity back over
+    one Pair again stored; Pair again keeps the entry. Without either, the
+    first run's replace of a desktop-id identity still applies. A crash
+    between the identity and the entry leaves a rerun that stores the same
+    Swift identity again. A lookup of the entry that fails is not a first
+    run: the import replaces nothing and waits with Try again until a lookup
+    answers. Its sources (the defaults domain and the keychain) are
     traits. It is skipped under `STENO_SMOKE_SECONDS` and whenever `HOME` is not
     the account's home.
     - **At launch,** first in the shell's `setup`, before `Host::real` builds the
@@ -662,10 +674,17 @@ Every package is written in parallel except where a dependency is named:
       when the user chooses Pair again there, which says that every phone must
       pair again, is a new identity minted: Pair again removes the paired phones
       and the recorded fingerprint, then mints through `HandoverIdentity::store`.
-      S6 adds both as bridge methods, a waiting state for the listener with its
-      fixtures, and a test that a refused read mints nothing. Then the pipeline starts, and the
-      listener once the identity is in place. Skipping the step counts as a
-      denied read and a denied export. The same rule holds outside the import:
+      That waiting state in Settings, with both bridge methods, its fixtures
+      and a test that a refused read mints nothing, is the follow-up
+      `feat/handover-waiting`; until it lands, Try again is on the onboarding
+      step. Then the pipeline starts, and the listener once the identity is in
+      place: the meetings the Swift app left queued or interrupted are resumed
+      and recovered only once the step ran or was skipped, on the pipeline
+      reloaded with what it read. Not now leaves both unread for that launch
+      (handover waits), writes no flag, and the step returns at the next
+      launch. While the key stays unread or refused, the pipeline runs as
+      without a summaries service: meetings complete without a summary, which
+      can be run again once a key is saved. The same rule holds outside the import:
       when an existing `handover-identity` cannot be read (a denied prompt, a
       locked keychain), `handover_listener` waits with Try again and never mints
       over it; it mints only where #221's guard allows (no identity, no recorded
@@ -1519,10 +1538,12 @@ except case e.
 - **Dogfood** (**Nicolai**, his own account). After R1 to R6 pass:
   1. Re-pair the phone with his daily install.
   2. Check whether his account holds a desktop-id identity
-     (`security find-generic-password -s uno.schmid.steno.mac -a handover-identity`)
-     and whether `~/Library/Application Support/Steno/preferences.json` holds
-     `steno.swiftImportRan`. If the latter does, the dogfood does not test the
-     import, and R3 is its only proof. No desktop-id install in this account is
+     (`security find-generic-password -s uno.schmid.steno.mac -a handover-identity`),
+     whether `~/Library/Application Support/Steno/preferences.json` holds
+     `steno.swiftImportRan`, and whether the import's own entry exists
+     (`security find-generic-password -s uno.schmid.steno.mac -a swift-import-done`).
+     If either of the latter does, the dogfood does not test the import, and
+     R3 is its only proof. No desktop-id install in this account is
      updated before the dogfood.
   3. His daily install takes the candidate through the local feed, as in R3, and
      the `SUFeedURL` default is deleted afterwards.
