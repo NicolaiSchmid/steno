@@ -2794,12 +2794,15 @@ touch and admission lines; each fix is ported to Swift before cutover.
 
 ### Shell
 
-- Launch at login is a Launch Agent through `tauri-plugin-autostart`, where the Swift
-  app registers with `SMAppService`; the `requiresApproval` state never occurs on the
-  Rust side. On macOS the cutover moves the Rust app onto `SMAppService.mainApp` too,
-  so the approval copy stays reachable; with the new identifier the app registers
-  itself, and the Swift entry is handled as `.plans/2026-10-07-stable-promotion.md`
-  (D4, S6) says.
+- Launch at login on macOS is `SMAppService.mainApp`, as in the Swift app, through
+  `smappservice-rs` (`autostart/main_app.rs`), so `requiresApproval` occurs and the
+  approval copy is reachable; Linux and Windows keep `tauri-plugin-autostart`. Under
+  the new identifier, `com.nicolaischmid.steno.desktop`, the app registers itself at
+  launch while the stored `launch_at_login` setting is on and the item is neither
+  enabled nor awaiting approval, whatever `steno.loginItemRegistered` says, after it
+  removed the Launch Agent a build under `uno.schmid.steno.desktop` left behind
+  (`~/Library/LaunchAgents/Steno.plist`). The Swift entry is left to macOS, and R3 of
+  `.plans/2026-10-07-stable-promotion.md` finds out what it does (D4, S6).
 - Packaged installs (stable plan X5, Rust only): `STENO_DISTRIBUTION=aur` or `=nix`
   (the environment first, then the value the build was given;
   `steno_services::updates::updates_are_managed`) turns the update check off, and
@@ -3264,12 +3267,13 @@ PR off `main`.
 | The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | open |
 | Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | open |
-| The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | open |
-| An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | open |
-| The panels under Hyprland: a `GDK_BACKEND` list keeps them on XWayland, they carry their own titles on Linux, and the Hyprland window rules ship in `apps/desktop/src-tauri/linux/hyprland-steno.lua` (X2 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-panels` | #267 | open |
-| Stable plan X6: the AUR package `steno-desktop-bin` (`packaging/aur/`), repackaging the release `.deb` verified against the release key, the binary and the sidecar in `/usr/lib/steno-desktop/` behind a `/usr/bin` wrapper that sets `STENO_DISTRIBUTION=aur` and `STENO_EXEC_PATH`, P5's drop-ins (copies until the pinned `.deb` ships them), no install script, pinned to rc.3 until a release contains #227 and #261; checked in an Arch container by `packaging/check-aur.sh` (`aur-ci.yml`) | `feat/aur-steno-desktop-bin` | #265 | open |
+| The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | merged |
+| An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | merged |
+| The panels under Hyprland: a `GDK_BACKEND` list keeps them on XWayland, they carry their own titles on Linux, and the Hyprland window rules ship in `apps/desktop/src-tauri/linux/hyprland-steno.lua` (X2 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-panels` | #267 | merged |
+| Stable plan X6: the AUR package `steno-desktop-bin` (`packaging/aur/`), repackaging the release `.deb` verified against the release key, the binary and the sidecar in `/usr/lib/steno-desktop/` behind a `/usr/bin` wrapper that sets `STENO_DISTRIBUTION=aur` and `STENO_EXEC_PATH`, P5's drop-ins (copies until the pinned `.deb` ships them), no install script, pinned to rc.3 until a release contains #227 and #261; checked in an Arch container by `packaging/check-aur.sh` (`aur-ci.yml`) | `feat/aur-steno-desktop-bin` | #265 | merged |
 | Tests never write placeholder models into a models directory `STENO_MODELS_DIR` names: the reload test that installed them into the app's resolved directory (and so over a developer's real models) pins its own in the settings, the CLI tests clear the variable, `steno-services`' model writers panic outside the temp directory or inside the named one, and a child-process test proves the named directory is left alone | `fix/test-models-dir-guard` | #273 | open |
 | S2: meeting detection on every platform (`steno_services::detection`: one prompt at a time for 60 s through the shell's panel, none while recording or with detection off, its Record attributed to the prompt's app through `recordFromPrompt`, the setting read every two seconds, which retries a detector that could not start) and the auto-stop after a call (`steno_services::auto_stop`: the 90-second grace, Keep recording, the call resuming, the Stop path with `callEnded`) (`steno-services`, desktop shell, web prompt) | `feat/rust-recorder-policy` | #271 | open |
+| S6, the identifier half: `com.nicolaischmid.steno.desktop` on every platform, the Swift `SUPublicEDKey` in `Info.plist` (checked in the built bundle), `panel-anchor.json` in the support directory and read once from the earlier identifier's config directory, and the macOS login item on `SMAppService.mainApp`, which removes the earlier build's Launch Agent and registers itself while `launch_at_login` is on (S6 of `.plans/2026-10-07-stable-promotion.md`; desktop shell) | `feat/desktop-identifier` | #268 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
