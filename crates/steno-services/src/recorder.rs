@@ -1479,7 +1479,8 @@ mod tests {
     use crate::app::BuildError;
     use crate::pipeline::{BuiltEngine, BuiltPipeline, MakeDependencies};
     use crate::testing::{
-        PATIENCE, eventually, fake_dependencies, on_own_thread, synthetic_capture, temp_store,
+        PATIENCE, eventually, eventually_within, fake_dependencies, on_own_thread,
+        synthetic_capture, temp_store,
     };
     use steno_audio::testing::synthetic::SyntheticOptions;
     use steno_audio::writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
@@ -2815,10 +2816,17 @@ mod tests {
         );
     }
 
+    /// How long [`ended_on_its_own`] waits. An ending takes its own time
+    /// before the save (a lost device's restarts back off for about two
+    /// seconds, a failed write waits for the watcher's tick), which a
+    /// loaded Windows runner stretched past [`PATIENCE`]; a recorder that
+    /// never ends still fails the test.
+    const ENDING_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
+
     /// Waits until the recorder is idle again after a recording that ended
     /// on its own, and returns the saved meeting.
     async fn ended_on_its_own(harness: &Harness, meeting_id: Uuid) -> steno_core::Meeting {
-        eventually("the recording ended on its own", || {
+        eventually_within(ENDING_PATIENCE, "the recording ended on its own", || {
             harness.recorder.status().state == RecordingState::Idle
         })
         .await;
