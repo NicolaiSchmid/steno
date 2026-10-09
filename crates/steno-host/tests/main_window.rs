@@ -1338,11 +1338,7 @@ fn an_incomplete_meeting_says_why_its_recording_is_kept() {
     let harness = Harness::builder()
         .seed(|store, fakes| {
             populate_sample(store, fakes);
-            set_retention(store, AudioRetention::DeleteAfterProcessing);
-            let mut asset = store.asset(uuid(MEETING)).unwrap().unwrap();
-            asset.retention = AudioRetention::DeleteAfterProcessing;
-            asset.expires_at = None;
-            store.save_asset(&asset).unwrap();
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
         })
         .build();
     assert_eq!(
@@ -1351,17 +1347,7 @@ fn an_incomplete_meeting_says_why_its_recording_is_kept() {
     );
 
     // The mic lane of the 45-minute call came out empty.
-    let export = harness.store.export(uuid(MEETING)).unwrap();
-    let system: Vec<_> = export
-        .segments
-        .iter()
-        .filter(|segment| segment.lane != steno_core::AudioLane::Mic)
-        .cloned()
-        .collect();
-    harness
-        .store
-        .replace_transcript(&export.meeting, &system, &export.speakers)
-        .unwrap();
+    empty_the_mic_lane(&harness.store);
     harness.host.store_changed();
     let detail = harness.snapshot(BridgeTopic::MeetingDetail);
     assert_eq!(detail["retention"]["kind"], "keptIncomplete");
@@ -2481,19 +2467,40 @@ fn the_engine_notice_shows_once_in_the_banners_place() {
     assert_eq!(after.get("isNotice"), None, "the setup banner is no notice");
 }
 
-/// The stored shape the fix leaves: a room row beside diarized speakers,
-/// owning one tap segment, every lane transcribed, delivered, no stamp.
-/// The detail reads keptIncomplete from the room arm alone.
+/// Sets the default retention to "delete after processing" and the
+/// sample recording's rule to `retention`, with no stamp.
+fn unstamped(store: &steno_core::Store, retention: AudioRetention) {
+    set_retention(store, AudioRetention::DeleteAfterProcessing);
+    let mut asset = store.asset(uuid(MEETING)).unwrap().unwrap();
+    asset.retention = retention;
+    asset.expires_at = None;
+    store.save_asset(&asset).unwrap();
+}
+
+/// Drops the sample's mic segments, as if that lane came out empty.
+fn empty_the_mic_lane(store: &steno_core::Store) {
+    let export = store.export(uuid(MEETING)).unwrap();
+    let system: Vec<_> = export
+        .segments
+        .iter()
+        .filter(|segment| segment.lane != steno_core::AudioLane::Mic)
+        .cloned()
+        .collect();
+    store
+        .replace_transcript(&export.meeting, &system, &export.speakers)
+        .unwrap();
+}
+
+/// The stored shape a diarizer fallback on a re-run leaves: a room row
+/// beside diarized speakers, owning one tap segment, every lane
+/// transcribed, delivered, no stamp. The detail reads keptIncomplete from
+/// the room arm alone.
 #[test]
 fn a_room_row_beside_diarized_speakers_reads_kept_incomplete() {
     let harness = Harness::builder()
         .seed(|store, fakes| {
             populate_sample(store, fakes);
-            set_retention(store, AudioRetention::DeleteAfterProcessing);
-            let mut asset = store.asset(uuid(MEETING)).unwrap().unwrap();
-            asset.retention = AudioRetention::DeleteAfterProcessing;
-            asset.expires_at = None;
-            store.save_asset(&asset).unwrap();
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
         })
         .build();
     assert_eq!(
@@ -2538,30 +2545,11 @@ fn a_room_row_beside_diarized_speakers_reads_kept_incomplete() {
 /// kept when the sweep is about to delete it, or already did.
 #[test]
 fn kept_incomplete_never_hides_another_status() {
-    fn incomplete(store: &steno_core::Store) {
-        let export = store.export(uuid(MEETING)).unwrap();
-        let system: Vec<_> = export
-            .segments
-            .iter()
-            .filter(|segment| segment.lane != steno_core::AudioLane::Mic)
-            .cloned()
-            .collect();
-        store
-            .replace_transcript(&export.meeting, &system, &export.speakers)
-            .unwrap();
-    }
-    fn unstamped(store: &steno_core::Store, retention: AudioRetention) {
-        set_retention(store, AudioRetention::DeleteAfterProcessing);
-        let mut asset = store.asset(uuid(MEETING)).unwrap().unwrap();
-        asset.retention = retention;
-        asset.expires_at = None;
-        store.save_asset(&asset).unwrap();
-    }
     let kind = |seed: fn(&steno_core::Store, &steno_host::fakes::FakeServices)| {
         let harness = Harness::builder()
             .seed(move |store, fakes| {
                 populate_sample(store, fakes);
-                incomplete(store);
+                empty_the_mic_lane(store);
                 seed(store, fakes);
             })
             .build();
