@@ -3819,11 +3819,18 @@ fn drive_into_a_stall(clock: &ManualClock, notices: &Receiver<CaptureNotice>) {
 }
 
 /// Moves the watch thread on, a sample at a time, until it reports a
-/// stall, within `STALL_TIMEOUT` and a few samples.
+/// stall, within `STALL_TIMEOUT` and a few samples. The watch thread sends
+/// a sample's notice before it sleeps again, so once a sleep is pending
+/// after the advance, that sample's notice is there or none came.
 fn advance_until_stalled(clock: &ManualClock, notices: &Receiver<CaptureNotice>) {
     for _ in 0..30 {
         advance_watch(clock, CaptureSession::STALL_CHECK_INTERVAL);
-        if let Ok(notice) = notices.recv_timeout(Duration::from_millis(20)) {
+        let deadline = Instant::now() + RECV;
+        while clock.pending_sleepers() == 0 {
+            assert!(Instant::now() < deadline, "the watch thread samples");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if let Ok(notice) = notices.try_recv() {
             assert_eq!(
                 notice,
                 CaptureNotice::DeviceChanged(DeviceChangeReason::DeliveryStalled)
@@ -4801,7 +4808,6 @@ fn an_ask_that_finds_the_chosen_microphone_delivering_returns_to_it() {
     let notices = session.notices();
     let input = || session.stream().and_then(|stream| stream.input);
     let delivered = || backend.inner.frames_delivered();
-    let started = Instant::now();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(input(), ChosenOrDefault::fallback());
     backend.opens.store(true, Ordering::Relaxed);
@@ -4833,14 +4839,20 @@ fn an_ask_that_finds_the_chosen_microphone_delivering_returns_to_it() {
     assert!(clock.wait_for_sleepers(1));
     assert_no_notice(&notices, "on the chosen microphone nothing asks");
     assert_eq!(backend.probed.load(Ordering::SeqCst), 1);
-    let wall = started.elapsed().as_secs_f64();
     let result = session.stop().unwrap();
-    assert_eq!(result.statistics.device_changes, 1);
-    assert!(!result.statistics.ended_on_device_loss);
-    assert!(
-        (result.statistics.duration - wall).abs() < 0.1,
-        "the master through the return: {} s against {wall} s of wall time",
-        result.statistics.duration
+    let statistics = &result.statistics;
+    assert_eq!(statistics.device_changes, 1);
+    assert!(!statistics.ended_on_device_loss);
+    assert!(statistics.dropped_frames.is_empty());
+    // The rebuild's dead time passes in wall time but not on the manual
+    // clock the gap is measured on, so the master is checked against what
+    // both starts delivered, plus the gap's silence.
+    let delivered = backend.inner.frames_delivered();
+    let gap = (statistics.gap_seconds * SAMPLE_RATE).round() as usize;
+    assert_eq!(
+        master_of(&result).frame_count(),
+        delivered - delivered % FRAME_SIZE + gap,
+        "every whole frame delivered through the return, and the gap"
     );
 }
 
