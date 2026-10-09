@@ -6,8 +6,8 @@
 //! onboarding installed the models ([`ResumingSpeechModels`] then resumes
 //! it), or at the next pipeline reload or launch when the `steno` command
 //! installed them ([`CurrentPipeline::resume_waiting`], which starts the
-//! waiting meetings only once every model the gates check is installed). The speech
-//! sidecar and the diarizer never download either
+//! waiting meetings only once every model the gates check is installed).
+//! The speech sidecar and the diarizer never download either
 //! ([`Install::Never`](steno_speech::Install::Never)), so a file removed
 //! between the gate's check and the load is refused too, never fetched; an
 //! engine's error while its models are gone is the same refusal. The
