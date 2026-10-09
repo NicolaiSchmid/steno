@@ -686,9 +686,15 @@ Each lands before `0.11.0-rc.1`.
   sidecar together). Decoded samples equal today's. The soak's bound is 6 GiB
   (#228); on atlas, `steno process` with the diarizer peaked at 4.26 GiB on a
   two-hour two-lane recording.
-- **A2 CoreML on the shared chunker.** The CoreML backend moves onto the shared
+- **A2 CoreML on the shared chunker** (#263). The CoreML backend moves onto the shared
   chunker, merge and decoder settings, settling the unticked WP4 integration
   notes. Parity: FLEURS and the Swift fixtures hold within today's tolerance.
+  Measured: FLEURS German `cat/` through CoreML 4.87 % mean WER, from 5.46 %
+  (the ONNX engine 4.88 %); against the Swift transcripts of the calibration
+  corpus 8.46 % mean per-file WER, from 0.00 %, outside the old 2 % gate: the
+  windows are laid out differently. The parity test's gate is 10 %; that
+  needs Nicolai's confirmation. The numbers per item are in the port plan's WP4
+  integration notes.
 - **A3 The diarizer on `ModelStore` and in the sidecar.** Its models come
   through `steno_speech::ModelStore` (resume, lock, mirror), and its inference
   runs in the speech sidecar through a request of its own. Parity: the
