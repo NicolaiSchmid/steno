@@ -187,9 +187,11 @@ fn exec_value(path: &str) -> String {
     quoted
 }
 
-/// Writes the autostart entry of `app_name` naming [`launcher_path`].
-/// With no such path it writes nothing and fails with [`NO_STABLE_PATH`],
-/// so the setting is not saved and the General section says why.
+/// Writes the autostart entry of `app_name` naming [`launcher_path`],
+/// atomically (`stop_timeout::install`), so a reload of the user manager
+/// never reads a half-written entry. With no such path it writes nothing
+/// and fails with [`NO_STABLE_PATH`], so the setting is not saved and the
+/// General section says why.
 pub fn write_entry(app_name: &str) -> io::Result<()> {
     let path = entry_path_here(app_name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
@@ -203,10 +205,7 @@ fn write_entry_at(path: &Path, app_name: &str, exec: Option<&Path>) -> io::Resul
         );
         return Err(io::Error::new(io::ErrorKind::NotFound, NO_STABLE_PATH));
     };
-    if let Some(directory) = path.parent() {
-        std::fs::create_dir_all(directory)?;
-    }
-    std::fs::write(path, entry(app_name, exec))
+    crate::stop_timeout::install(path, &entry(app_name, exec)).map(|_| ())
 }
 
 /// An entry's `Exec` value, without the spaces around it.

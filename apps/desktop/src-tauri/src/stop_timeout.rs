@@ -224,8 +224,9 @@ fn change(drop_in: &DropIn, home: &Path, on: bool) -> bool {
 
 /// Writes `contents` at `path` unless it already holds them; true when it
 /// wrote. Atomic: a temporary file in the same directory (`temporary`),
-/// renamed over the old one.
-fn install(path: &Path, contents: &str) -> io::Result<bool> {
+/// renamed over the old one. The drop-ins and the autostart entry
+/// (`packaged::write_entry`) are written this way.
+pub(crate) fn install(path: &Path, contents: &str) -> io::Result<bool> {
     if std::fs::read(path).is_ok_and(|current| current == contents.as_bytes()) {
         return Ok(false);
     }
@@ -243,7 +244,8 @@ fn install(path: &Path, contents: &str) -> io::Result<bool> {
 }
 
 /// The temporary file `install` renames to `path`: beside it, hidden, and
-/// not ending in `.conf`, so systemd never reads it as a drop-in.
+/// ending in `.tmp`, so systemd never reads it as a drop-in, nor its
+/// autostart generator as an entry.
 fn temporary(path: &Path) -> PathBuf {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
