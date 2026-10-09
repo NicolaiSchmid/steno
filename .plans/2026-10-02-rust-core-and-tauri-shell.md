@@ -907,7 +907,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   during the other's release
   (`a_job_on_another_pipeline_that_starts_during_a_release_prepares_after_it`). Jobs
   across a reload queue on the one diarizer, as jobs on one pipeline do. The sidecar
-  engine is built at its first use and kept for the run; it holds a child only while a
+  engine is built with `SpeechEngines` and kept for the run; it holds a child only while a
   job needs one and never runs two, also when a reload on the Mac goes to `CoreML` and
   back while a retired job transcribes
   (`a_reload_while_a_job_transcribes_keeps_one_sidecar_child`,
@@ -951,8 +951,13 @@ still has to draw the window side. `[ ]` is not ported yet.
   4.3 h of a dense group call (measured on a synthetic six-voice lane: 3.94 GB at 3 h);
   a longer call diarized while another job holds speech overruns it, and that job
   keeps its transcript with the fallback speakers. A child that only diarizes peaked
-  at 286 MB for 30 min. The models install in the app's process (`Install` as before) and a load the child
-  refuses is checked against the manifest there. The sidecar's clusters equal the
+  at 286 MB for 30 min. The models install in the app's process (`Install` as before:
+  `Install::Never` behind the gate in the app, `Install::Allowed` in `steno process`)
+  and a load the child refuses is checked against the manifest there; a file that
+  fails it is deleted and the call is `DiarizeError::NotInstalled`, which the app's
+  gate takes as the models-missing refusal, so the meeting waits with its audio
+  instead of falling back (`files_the_apps_diarizer_cannot_load_in_its_child_park_the_job`
+  in `crates/steno-services/tests/diarizer_models.rs`). The sidecar's clusters equal the
   in-process pipeline's bit for bit on the two-voice fixture, once and tiled to 75 s
   (`crates/steno-speech-sidecar/tests/diarize.rs`, model gated). `ModelDiarizer` keeps
   the in-process path for `steno dev diarize-sweep`, the calibration harness and the
