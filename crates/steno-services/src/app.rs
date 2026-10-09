@@ -514,7 +514,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let runtime = options.runtime;
     let zone = local_zone();
 
-    let preferences = preferences_retiring_the_engine(&store, &paths, &mut warnings);
+    // The one `preferences.json` the update schedule and the host share.
+    let preferences: Arc<dyn Preferences> =
+        preferences_retiring_the_engine(&store, &paths, &mut warnings);
     // The speech settings and the models directory are read once, here:
     // the pipeline (and every reload, which keeps its engine when it runs
     // where the last one did) and the model service share them.
@@ -568,9 +570,6 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         .ok();
 
     let clock = Arc::new(WallClock);
-    let preferences: Arc<dyn Preferences> = Arc::new(FilePreferences::new(
-        paths.support_directory.join("preferences.json"),
-    ));
     let updates = options.update_source.map(|source| {
         UpdateSchedule::new(ScheduleParts {
             source,
