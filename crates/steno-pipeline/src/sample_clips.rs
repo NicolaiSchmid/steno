@@ -33,8 +33,9 @@
 //!   sweep's. A speaker the merge did not replace that this run gave no
 //!   clip keeps its files in this run; a later run or retention sweeps
 //!   them.
-//! - No speaker row of any meeting names it, matched by file name, so a URL
-//!   that spells the folder another way still keeps its clip.
+//! - No speaker row of any meeting names it, matched by file name in any
+//!   ASCII case, so a URL that spells the folder another way still keeps
+//!   its clip.
 //! - Its speaker is not a confirmed one this run gave no clip, and it is
 //!   not the clip such a speaker's earlier row named. A confirmed speaker
 //!   that comes back without a clip keeps naming its earlier clip, so the
@@ -157,19 +158,21 @@ pub(crate) fn sweep_after_merge(
 
 /// Removes every clip file in `directory` of one of `owners`, by the
 /// speaker id its name starts with, that none of the `named` URLs names, by
-/// file name, and returns the files removed: WAV files and the temporaries
-/// of an unfinished write. On Windows a file another handle holds is tried
-/// again for a moment ([`busy_file::retried`]); a file that cannot be
-/// removed is skipped and left for the next sweep.
+/// file name in any ASCII case, and returns the files removed: WAV files
+/// and the temporaries of an unfinished write. On Windows a file another
+/// handle holds is tried again for a moment ([`busy_file::retried`]); a
+/// file that cannot be removed is skipped and left for the next sweep.
 pub(crate) fn sweep(
     directory: &Path,
     owners: &BTreeSet<Uuid>,
     named: &[String],
     probe: Option<&ClipProbe>,
 ) -> Vec<PathBuf> {
+    // Both apps spell the ids in upper case, but a file system that
+    // ignores case plays a URL in any case, so such a URL keeps its file.
     let named: BTreeSet<OsString> = named
         .iter()
-        .filter_map(|url| file_url_path(url)?.file_name().map(ToOwned::to_owned))
+        .filter_map(|url| Some(file_url_path(url)?.file_name()?.to_ascii_uppercase()))
         .collect();
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
@@ -178,7 +181,7 @@ pub(crate) fn sweep(
     for entry in entries.flatten() {
         let name = entry.file_name();
         if !clip_speaker(&name).is_some_and(|id| owners.contains(&id))
-            || named.contains(&name)
+            || named.contains(&name.to_ascii_uppercase())
             || !entry.file_type().is_ok_and(|kind| kind.is_file())
         {
             continue;
@@ -306,7 +309,8 @@ mod tests {
     }
 
     /// A URL that spells the folder another way, through a link, still
-    /// keeps the clip it names: the sweep matches by file name.
+    /// keeps the clip it names: the sweep matches by file name in any
+    /// ASCII case.
     #[cfg(unix)]
     #[test]
     fn a_url_through_another_spelling_of_the_folder_keeps_its_clip() {
@@ -328,6 +332,29 @@ mod tests {
             &layout.speakers_directory(),
             &BTreeSet::from([id]),
             &[url(&spelled)],
+            None,
+        );
+        assert!(removed.is_empty(), "{removed:?}");
+        assert!(clip.exists());
+    }
+
+    /// A URL that spells the clip's name in another case keeps the clip:
+    /// a file system that ignores case plays it.
+    #[test]
+    fn a_url_in_another_case_keeps_its_clip() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RecordingLayout::new(dir.path(), Uuid::new_v4());
+        layout.create_directories(true).unwrap();
+        let id = Uuid::new_v4();
+        let clip = layout.run_sample_clip(id, Uuid::new_v4());
+        put(&[&clip]);
+        let lower = clip.with_file_name(file_name(&clip).to_lowercase());
+        assert_ne!(lower, clip);
+
+        let removed = sweep(
+            &layout.speakers_directory(),
+            &BTreeSet::from([id]),
+            &[url(&lower)],
             None,
         );
         assert!(removed.is_empty(), "{removed:?}");
