@@ -142,6 +142,42 @@ fn the_writer_creates_the_meeting_folder_and_refuses_one_that_exists() {
     assert_eq!(std::fs::read_dir(&empty.directory).unwrap().count(), 0);
 }
 
+/// A file the writer cannot create (here the master, whose path is longer
+/// than the system takes while its folder's is not) removes the folder the
+/// writer made and keeps its parents, so a retry with the meeting's id is
+/// not refused as an existing folder.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_writer_whose_files_cannot_be_created_removes_the_folder_it_made() {
+    // The longest path the system takes, without the terminating NUL.
+    let longest = if cfg!(target_os = "linux") {
+        4095
+    } else {
+        1023
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let meeting_id = Uuid::new_v4();
+    // The meeting folder's path a few bytes short of the longest, so that
+    // of `recording.caf` in it is too long.
+    let folder = longest - 4 - "/".len() - meeting_id.to_string().len();
+    let mut audio = directory.path().to_path_buf();
+    while audio.as_os_str().len() + 1 < folder {
+        let room = folder - audio.as_os_str().len() - 1;
+        audio.push("a".repeat(room.min(200)));
+    }
+    std::fs::create_dir_all(&audio).unwrap();
+    let layout = RecordingLayout::new(&audio, meeting_id);
+    let length = layout.directory.as_os_str().len();
+    assert!((longest - 6..=longest).contains(&length), "{length}");
+
+    for _ in 0..2 {
+        let error = RecordingWriter::new(&layout, &[AudioLane::Mixed], false).unwrap_err();
+        assert!(matches!(error, CaptureError::WriterFailed(_)), "{error:?}");
+        assert!(!layout.directory.exists());
+    }
+    assert!(audio.is_dir(), "its parents stay");
+}
+
 #[test]
 fn raw_mic_lane_is_written_beside_the_master() {
     let directory = tempfile::tempdir().unwrap();

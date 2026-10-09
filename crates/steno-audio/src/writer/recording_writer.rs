@@ -109,7 +109,9 @@ impl RecordingWriter {
     /// Creates `layout.directory`, its parents when needed, and refuses
     /// one that exists ([`CaptureError::RecordingExists`]): a meeting's
     /// folder holds one recording, and `File::create` would empty its
-    /// files. Rust only: Swift created the folder if needed.
+    /// files. A file that cannot be created removes the folder again, so
+    /// a retry with the meeting's id finds none. Rust only: Swift created
+    /// the folder if needed.
     pub fn new(
         layout: &RecordingLayout,
         lanes: &[AudioLane],
@@ -126,6 +128,20 @@ impl RecordingWriter {
             std::io::ErrorKind::AlreadyExists => CaptureError::RecordingExists(directory.clone()),
             _ => failed(e),
         })?;
+        let opened = Self::open(layout, lanes, keep_raw_mic);
+        if opened.is_err() {
+            // Created just above, so it holds only what `open` wrote.
+            let _ = std::fs::remove_dir_all(directory);
+        }
+        opened
+    }
+
+    /// Creates the files in `layout.directory`, which `new` created.
+    fn open(
+        layout: &RecordingLayout,
+        lanes: &[AudioLane],
+        keep_raw_mic: bool,
+    ) -> Result<Self, CaptureError> {
         let master = CafStreamWriter::create(
             &layout.master(AudioFormat::Caf48kFloat32),
             SAMPLE_RATE,
