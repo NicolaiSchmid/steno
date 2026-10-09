@@ -29,11 +29,13 @@
 //!   meeting whose master lies in this folder are never the sweep's.
 //! - No speaker row of any meeting names it, matched by file name, so a URL
 //!   that spells the folder another way still keeps its clip.
-//! - Its speaker is not a confirmed one this run gave no clip: a confirmed
-//!   speaker the re-run drops, or whose new row has no clip, keeps every
-//!   file it had. Its row is gone or names no clip, as before per-run names,
-//!   so the file stays on the disk, unnamed and not played, until the
-//!   meeting is deleted.
+//! - Its speaker is not a confirmed one this run gave no clip, and it is
+//!   not the clip such a speaker's earlier row named: a confirmed speaker
+//!   the re-run drops, or whose new row has no clip, keeps every file it
+//!   had. Its row is gone or names no clip, as before per-run names, so the
+//!   file stays on the disk, unnamed and not played; retention removes it
+//!   with the audio while the meeting still has that speaker, and deleting
+//!   the meeting removes it.
 //!
 //! The sweep runs only inside a run, after its merge, on the meeting's own
 //! folder ([`RecordingLayout::own_folder`]), while the run holds the meeting
@@ -112,9 +114,11 @@ pub(crate) fn write(
 
 /// The sweep of a run, once its merge committed `committed`, the rows this
 /// run wrote, in place of `replaced`, the rows `Store::replace_transcript`
-/// returned: [`sweep`] over the speakers of either, except a confirmed
-/// speaker this run gave no clip (see the module doc), keeping every clip a
-/// row now names. Reads the rows first and removes nothing when that read
+/// returned: [`sweep`] over the speakers of either, keeping every clip a
+/// row now names. A confirmed speaker this run gave no clip keeps every
+/// file of its own and the clip its earlier row named, which a merge into a
+/// row without a clip may have left under another speaker's id (see the
+/// module doc). Reads the rows first and removes nothing when that read
 /// fails. The caller holds the meeting in the in-flight set.
 pub(crate) fn sweep_after_merge(
     store: &Store,
@@ -123,22 +127,26 @@ pub(crate) fn sweep_after_merge(
     committed: &[Speaker],
     probe: Option<&ClipProbe>,
 ) -> Result<Vec<PathBuf>, StoreError> {
-    let named = store.sample_clip_urls()?;
-    let confirmed: BTreeSet<Uuid> = replaced
-        .iter()
-        .filter(|speaker| speaker.assignment.is_confirmed())
-        .map(|speaker| speaker.id)
-        .collect();
+    let mut named = store.sample_clip_urls()?;
     let given_a_clip: BTreeSet<Uuid> = committed
         .iter()
         .filter(|speaker| speaker.sample_clip_url.is_some())
         .map(|speaker| speaker.id)
         .collect();
+    let keeping: Vec<&Speaker> = replaced
+        .iter()
+        .filter(|speaker| speaker.assignment.is_confirmed() && !given_a_clip.contains(&speaker.id))
+        .collect();
+    named.extend(
+        keeping
+            .iter()
+            .filter_map(|speaker| speaker.sample_clip_url.clone()),
+    );
     let owners: BTreeSet<Uuid> = replaced
         .iter()
         .chain(committed)
         .map(|speaker| speaker.id)
-        .filter(|id| !confirmed.contains(id) || given_a_clip.contains(id))
+        .filter(|id| keeping.iter().all(|speaker| speaker.id != *id))
         .collect();
     Ok(sweep(directory, &owners, &named, probe))
 }
@@ -323,9 +331,10 @@ mod tests {
     }
 
     /// After the merge a confirmed speaker that the re-run dropped, or
-    /// whose new row has no clip, keeps every file it had; a confirmed
-    /// speaker given a new clip and an unconfirmed one lose their earlier
-    /// clips, and every clip a row names stays.
+    /// whose new row has no clip, keeps every file it had and the clip its
+    /// row named under another speaker's id; a confirmed speaker given a new
+    /// clip and an unconfirmed one lose their earlier clips, and every clip
+    /// a row names stays.
     #[test]
     fn after_the_merge_a_confirmed_speaker_given_no_clip_keeps_its_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -335,10 +344,14 @@ mod tests {
         let layout = RecordingLayout::new(&dir.path().join("audio"), meeting.id);
         layout.create_directories(true).unwrap();
         let (earlier, run) = (Uuid::new_v4(), Uuid::new_v4());
-        let [clipless, dropped, renewed, unconfirmed] = [(); 4].map(|()| Uuid::new_v4());
+        let [clipless, dropped, renewed, unconfirmed, merged_into] =
+            [(); 5].map(|()| Uuid::new_v4());
         let before = |id| layout.run_sample_clip(id, earlier);
         let now = |id| layout.run_sample_clip(id, run);
         let dropped_leftover = layout.run_sample_clip(dropped, Uuid::new_v4());
+        // The clip a merge moved from the unconfirmed speaker to a
+        // confirmed one without a clip.
+        let moved = layout.run_sample_clip(unconfirmed, Uuid::new_v4());
         put(&[
             &before(clipless),
             &before(dropped),
@@ -347,18 +360,21 @@ mod tests {
             &before(unconfirmed),
             &now(renewed),
             &now(unconfirmed),
+            &moved,
         ]);
         let replaced = [
             speaker(meeting.id, clipless, true, Some(&before(clipless))),
             speaker(meeting.id, dropped, true, Some(&before(dropped))),
             speaker(meeting.id, renewed, true, Some(&before(renewed))),
             speaker(meeting.id, unconfirmed, false, Some(&before(unconfirmed))),
+            speaker(meeting.id, merged_into, true, Some(&moved)),
         ];
         // The rows the merge committed, as diarize wrote them.
         let committed = [
             speaker(meeting.id, clipless, false, None),
             speaker(meeting.id, renewed, false, Some(&now(renewed))),
             speaker(meeting.id, unconfirmed, false, Some(&now(unconfirmed))),
+            speaker(meeting.id, merged_into, false, None),
         ];
         for row in &committed {
             store.save_speaker(row).unwrap();
@@ -382,6 +398,7 @@ mod tests {
             dropped_leftover,
             now(renewed),
             now(unconfirmed),
+            moved,
         ] {
             assert!(kept.exists(), "{}", kept.display());
         }
