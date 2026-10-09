@@ -1752,4 +1752,28 @@ mod tests {
         current.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
     }
+
+    /// An install's resume starts only the meetings a run left waiting for
+    /// models: a queued meeting no run refused stays queued for the
+    /// launch's recovery, which then processes it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_install_resumes_no_queued_meeting_a_run_did_not_leave_waiting() {
+        let (dir, store) = temp_store();
+        let current = current_pipeline(fake_dependencies(&store, "fake-engine"));
+        let mut meeting = sample_data::meeting();
+        meeting.id = Uuid::new_v4();
+        meeting.state = MeetingState::Queued;
+        let asset =
+            steno_pipeline::fixtures::two_lane_call(dir.path(), meeting.id, AudioRetention::KeepForever)
+                .unwrap();
+        store.save_meeting_with_asset(&meeting, &asset).unwrap();
+
+        current.resume_waiting();
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, meeting.id), MeetingState::Queued);
+
+        assert_eq!(current.current().resume_unfinished().unwrap(), [meeting.id]);
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, meeting.id), MeetingState::Ready);
+    }
 }
