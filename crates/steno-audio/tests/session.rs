@@ -4297,6 +4297,20 @@ fn restarts_that_start_but_deliver_nothing_are_retried_until_one_does() {
     );
 }
 
+/// The attempt and gap of the next `DeviceResumed`, past the notices
+/// before it.
+fn next_resume(notices: &Receiver<CaptureNotice>) -> (usize, f64) {
+    loop {
+        if let CaptureNotice::DeviceResumed {
+            attempt,
+            gap_seconds,
+        } = notices.recv_timeout(RECV).unwrap()
+        {
+            return (attempt, gap_seconds);
+        }
+    }
+}
+
 /// A restart whose stream delivers during its wait for a first frame ends
 /// the gap at the wait's last sample that saw nothing, not at the start's
 /// return: the gap is the time no audio came, to within a sample.
@@ -4325,14 +4339,7 @@ fn a_restart_that_delivers_during_its_wait_ends_the_gap_at_its_last_empty_sample
     clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
     // The watch thread last saw a frame at its first sample.
     let gap = gap_seconds(last_empty.saturating_sub(CaptureSession::STALL_CHECK_INTERVAL));
-    let resumed = loop {
-        if let CaptureNotice::DeviceResumed { gap_seconds, .. } =
-            notices.recv_timeout(RECV).unwrap()
-        {
-            break gap_seconds;
-        }
-    };
-    assert_eq!(resumed, gap);
+    assert_eq!(next_resume(&notices).1, gap);
     backend.wait_until_finished();
     let result = session.stop().unwrap();
     assert_eq!(result.statistics.gap_seconds, gap);
@@ -4361,12 +4368,7 @@ fn a_change_during_a_restart_that_delivers_nothing_costs_no_extra_rebuild() {
     assert!(clock.wait_for_sleepers(2), "the second restart's wait");
     resume_delivery_until_a_frame(&backend);
     clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
-    loop {
-        if let CaptureNotice::DeviceResumed { attempt, .. } = notices.recv_timeout(RECV).unwrap() {
-            assert_eq!(attempt, 2);
-            break;
-        }
-    }
+    assert_eq!(next_resume(&notices).0, 2);
     settle();
     assert_eq!(backend.starts(), 3, "no rebuild after the resume");
     let result = session.stop().unwrap();
@@ -4380,7 +4382,6 @@ struct SlowRestart {
     inner: SyntheticCaptureBackend,
     clock: Arc<ManualClock>,
     start_takes: Duration,
-    starts: AtomicUsize,
 }
 
 impl CaptureBackend for SlowRestart {
@@ -4391,7 +4392,7 @@ impl CaptureBackend for SlowRestart {
         sink: Arc<LaneFrameSink>,
     ) -> Result<CaptureStream, CaptureError> {
         let stream = self.inner.start(lanes, input_device_uid, sink)?;
-        if self.starts.fetch_add(1, Ordering::SeqCst) > 0 {
+        if self.inner.starts() > 1 {
             self.clock.advance(self.start_takes);
         }
         Ok(stream)
@@ -4422,7 +4423,6 @@ fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
         inner: SyntheticCaptureBackend::new(stalling(1.0, 0.5)),
         clock: clock.clone(),
         start_takes: Duration::from_millis(500),
-        starts: AtomicUsize::new(0),
     });
     let session = in_person_session(directory.path(), backend.clone(), clock.clone());
     let notices = session.notices();
@@ -4432,14 +4432,7 @@ fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
     // The restart starts at once, at the stall's report one sample past
     // `STALL_TIMEOUT` after the last frame, which the first sample saw.
     let gap = gap_seconds(CaptureSession::STALL_TIMEOUT + CaptureSession::STALL_CHECK_INTERVAL);
-    let resumed = loop {
-        if let CaptureNotice::DeviceResumed { gap_seconds, .. } =
-            notices.recv_timeout(RECV).unwrap()
-        {
-            break gap_seconds;
-        }
-    };
-    assert_eq!(resumed, gap, "not the start's 0.5 s on top");
+    assert_eq!(next_resume(&notices).1, gap, "not the start's 0.5 s on top");
     backend.inner.wait_until_finished();
     let result = session.stop().unwrap();
     assert_eq!(result.statistics.gap_seconds, gap);

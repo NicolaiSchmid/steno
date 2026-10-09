@@ -1636,9 +1636,12 @@ impl Core {
             }
             let plan = self.restart_plan(active, reason, now);
             if plan.continues == 0 {
-                active.streak.attempts = 0;
-                active.streak.logged_at = None;
-                active.streak.gap_seconds = 0.0;
+                // A new streak; a warning that stands holds until audio
+                // arrives.
+                active.streak = Streak {
+                    warned: active.streak.warned,
+                    ..Streak::default()
+                };
                 if reason == DeviceChangeReason::DeliveryStalled {
                     tracing::warn!(
                         "the capture delivered nothing for over {} ms; restarting it",
