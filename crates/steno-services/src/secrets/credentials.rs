@@ -52,10 +52,6 @@ pub(super) use windows::credential_set;
 /// `CRED_PERSIST_LOCAL_MACHINE`: kept for every later logon of this user
 /// on this computer, and on no other computer.
 pub(super) const LOCAL_MACHINE: u32 = 2;
-/// `CRED_PERSIST_ENTERPRISE`: kept as [`LOCAL_MACHINE`], and also with the
-/// user's roaming profile. The `keyring` crate's persistence.
-#[cfg(test)]
-const ENTERPRISE: u32 = 3;
 
 /// The most bytes a credential's blob holds
 /// (`CRED_MAX_CREDENTIAL_BLOB_SIZE`): 1,280 UTF-16 code units.
@@ -231,6 +227,10 @@ mod tests {
 
     use super::*;
 
+    /// `CRED_PERSIST_ENTERPRISE`: kept as [`LOCAL_MACHINE`], and also with
+    /// the user's roaming profile. The `keyring` crate's persistence.
+    const ENTERPRISE: u32 = 3;
+
     /// What a [`FakeSet`] was asked to do, in order.
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Call {
@@ -246,10 +246,10 @@ mod tests {
     struct FakeSet {
         credentials: BTreeMap<String, Credential>,
         calls: Vec<Call>,
-        /// The next writes fail, one per entry, front first.
-        fail_writes: Vec<bool>,
-        /// The next reads, one per entry, front first: `Some(Err)` fails,
-        /// `Some(Ok(()))` finds nothing whatever is stored.
+        /// How many of the next writes fail.
+        failing_writes: usize,
+        /// The next reads, one per entry, front first: `None` reads what is
+        /// stored, `Some(Ok(()))` finds nothing, `Some(Err)` fails.
         odd_reads: Vec<Option<io::Result<()>>>,
     }
 
@@ -269,10 +269,12 @@ mod tests {
     impl CredentialSet for FakeSet {
         fn read(&mut self, target_name: &str) -> io::Result<Option<Credential>> {
             self.calls.push(Call::Read(target_name.to_owned()));
-            match (!self.odd_reads.is_empty()).then(|| self.odd_reads.remove(0)) {
-                Some(Some(Err(error))) => return Err(error),
-                Some(Some(Ok(()))) => return Ok(None),
-                Some(None) | None => {}
+            if !self.odd_reads.is_empty() {
+                match self.odd_reads.remove(0) {
+                    Some(Err(error)) => return Err(error),
+                    Some(Ok(())) => return Ok(None),
+                    None => {}
+                }
             }
             Ok(self.stored(target_name).cloned())
         }
@@ -282,7 +284,8 @@ mod tests {
                 credential.target_name.clone(),
                 credential.persist,
             ));
-            if !self.fail_writes.is_empty() && self.fail_writes.remove(0) {
+            if self.failing_writes > 0 {
+                self.failing_writes -= 1;
                 return Err(io::Error::other("the credential manager refused"));
             }
             self.credentials
@@ -308,7 +311,7 @@ mod tests {
             target_name: TARGET.to_owned(),
             user_name: "llm-api-key".to_owned(),
             comment: "keyring v3.6.3".to_owned(),
-            blob: value.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            blob: blob(value).unwrap(),
             persist: ENTERPRISE,
         }
     }
@@ -389,7 +392,7 @@ mod tests {
     fn a_refused_move_keeps_the_roaming_entry_and_still_reads_it() {
         let roaming = written_by_the_keyring_crate("sk-1");
         let mut set = FakeSet::with(roaming.clone());
-        set.fail_writes = vec![true];
+        set.failing_writes = 1;
         assert_eq!(
             read_secret(&mut set, &SecretKey::llm_api_key())
                 .unwrap()
