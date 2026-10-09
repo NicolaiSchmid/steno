@@ -296,9 +296,10 @@ the page's `page.ready`.
 
 ### Launch at login under systemd
 
-Two drop-ins set `TimeoutStopSec=20s`: the shutdown's ten seconds and
-the two the process may take to end after it, with room to spare, and
-still short enough that a hung app does not hold a logout for long.
+systemd gives the autostart unit and GNOME's app scope 5 s to stop (see
+the exits above). Two drop-ins raise that to 20 s: the shutdown's ten
+seconds and the process's two more, with room to spare, and still short
+enough that a hung app does not hold a logout for long.
 
 | File in `linux/` | Unit | Name in the unit's `.d` directory |
 |---|---|---|
@@ -308,8 +309,10 @@ still short enough that a hung app does not hold a logout for long.
 They reach the user manager two ways:
 
 - The `.deb` installs both under `/usr/lib/systemd/user/`
-  (`bundle.linux.deb.files` in `tauri.conf.json`; `check-bundle.sh`
-  checks they are there).
+  (`bundle.linux.deb.files` in `tauri.conf.json`), and its `postinst`
+  (`linux/deb-postinst.sh`) has every running user manager reload its
+  units, so a Steno autostarted before an upgrade gets the 20 s too
+  (`check-bundle.sh` checks all three files).
 - The app writes the same files under the same names into
   `~/.config/systemd/user/`, whatever `XDG_CONFIG_HOME` says: the
   autostart entry is always under `~/.config/autostart`, so only a user
@@ -322,17 +325,24 @@ They reach the user manager two ways:
   Launch at login on before the drop-ins existed. A directory it cannot
   write is logged, and the unit keeps 5 s.
 
-Turning Launch at login off removes the entry and the autostart unit's
-drop-in, and asks for no reload. While the app runs as the autostart
-unit, the entry stays until the app exits: without it, any reload of the
-user manager (a package install, another app, `nixos-rebuild switch`)
-unloads the running unit, and the session's end then stops the app
-without a SIGTERM, before its save. Settings and the tray show the
-switch off at once; the app marks the choice in its config directory
+A reload while the autostart entry is gone unloads the running
+autostart unit, and the session's end then stops the app without a
+SIGTERM, before its save. So the app, while it runs as the autostart
+unit, asks for a reload only while the entry stands, and the `postinst`
+skips a user whose Steno runs as that unit without its entry. Turning
+Launch at login off removes the entry and the autostart unit's drop-in,
+and asks for no reload. While the app runs as the autostart unit, the
+entry stays until the app exits, since any other reload of the user
+manager (a package install, another app, `nixos-rebuild switch`) would
+unload the unit. Settings and the tray show the switch off at once; the
+app marks the choice in its config directory
 (`launch-at-login-off-at-exit`) and removes the entry and the drop-in
 after the exit's save. A mark left by a kill or a crash is applied at the
-next launch that does not run as the unit; an update's relaunch keeps
-it.
+next launch that does not run as the unit, so the next login still
+autostarts the app once; an update's relaunch keeps it.
+
+The user's copies stay after the package is removed. They name only
+Steno's units and change nothing once the app is gone.
 
 A package for another distribution installs the same files under its
 `lib/systemd/user/` (stable promotion plan, X6 and X7).
@@ -347,10 +357,14 @@ machine's log shows how long a save takes. In a container limited to one
 CPU, under a real systemd user manager: without the drop-ins, the
 autostart unit and GNOME's scope killed a stand-in that needs 8 s to
 save, 5 s after SIGTERM; with them, it finished. A debug build with 8 s
-added before its save wrote the drop-ins at launch, the running unit and
-scope took 20 s, and stopped there it saved, the meeting `queued` with
-its duration; so it did after Launch at login was turned off
-mid-recording and the user manager reloaded.
+added before its save wrote the drop-ins at launch, and the running unit
+and scope took 20 s. Stopped in either, it saved, and the meeting was
+`queued` with its duration. It saved the same way when Launch at login
+was turned off mid-recording and the user manager reloaded after that.
+With the stand-in autostarted before the drop-ins existed, installing
+them and running the `postinst` gave the running unit and scope 20 s,
+and the session's end let it finish; without the `postinst` the unit
+kept 5 s and killed it.
 
 At a reboot the save runs inside logind's delay (above), before systemd
 stops anything. On Omarchy logind waits up to 15 s (`InhibitDelayMaxSec`),
