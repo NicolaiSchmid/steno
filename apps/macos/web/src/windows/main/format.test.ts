@@ -124,6 +124,20 @@ describe("words", () => {
 				now,
 			),
 		).toBe("Recording kept");
+		expect(
+			formatRetention(
+				{
+					kind: "keptIncomplete",
+					keepsAudio: false,
+					showsKeepToggle: true,
+					filesExist: true,
+				},
+				f,
+				now,
+			),
+		).toBe(
+			"Recording kept because the speakers or the transcript may be incomplete. Process again, or delete the recording",
+		);
 	});
 
 	it("takes the first sentence of a failure reason", () => {

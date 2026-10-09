@@ -399,7 +399,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P11 | Speaker names confirmed while the meeting processes: the cleanup updates text by id, and `replace_transcript` keeps Confirmed assignments (calibration WP4) | pipeline, store and export (`wp-pse-*`) |
 | P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | pipeline, store and export (`wp-pse-*`) |
 | P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a guard on resume attempts stops the loop | pipeline, store and export (`wp-pse-*`) (the panic wrap); audio (the crash-loop guard, #228) |
-| P14 | Audio deleted by the retention sweep before its stamp is durable: the stamp commits durably first, and a meeting with no segments that is over 30 s long gets no stamp | pipeline, store and export (`wp-pse-*`) |
+| P14 | Audio deleted by the retention sweep before its stamp is durable: every retention write commits durably, and the automatic retention leaves a meeting unstamped while its diarizer fell back or a recorded lane has no segment over 30 s or without a duration (#241) | pipeline, store and export (`wp-pse-*`) |
 | P15 | Anything two processes write at once: one exclusive lock beside the database for the app's lifetime (#225). A second app instance that the single-instance guard does not hand over is refused with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run without migrating, and refuse beside an older app. On the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs in the same login session (`NSRunningApplication`); a Swift app started after the Rust app is not kept out, and its launch fails every `recording` row, the one the Rust app is still recording among them, so that recording's stop cannot save it and its folder stays on disk unlisted (a known limit, accepted because the handoff runs one app at a time) | capture and recovery (`wp-cap-*`, #225) |
 | P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
 | P17 | A local recording's folder: a save that fails leaves the meeting `recording` with its folder on disk, and the next launch's recovery (P3) rebuilds the asset row from the master and queues the meeting, so the folder is not orphaned (#233); a panic in the session's rebuild ends the recording saved, as a lost device (#230) | capture and recovery (`wp-cap-*`) |
@@ -1771,6 +1771,14 @@ is offered.
 **An install of `desktop-v0.1.0-rc.*`** that meets a v5 database exits at launch
 and cannot update itself; the release notes say to install the current build by
 hand. The database is untouched (R6).
+
+**Retention during a rollback.** P14's guard is Rust only. Swift's `redeliver`
+and `resummarize` call `stampDeferredRetention` once every delivery succeeded, so
+an Export again, a speaker rename or a summary re-run in the Swift app stamps a
+meeting the Rust app kept unstamped (a diarizer fallback, an empty lane), and
+Swift's sweep can then delete its recording. Swift is not changed for this. The
+stamps that rc builds before #241 wrote on fallback meetings also still expire,
+in either app: nothing clears them.
 
 **The database.** Migrations only add (Tags and versions), v5 lands before the
 first candidate, every migration until S9 is mirrored in `Migrations.swift`, and

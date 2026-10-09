@@ -1199,19 +1199,42 @@ still has to draw the window side. `[ ]` is not ported yet.
   pipelines is refused too (`a_reprocess_is_refused_while_a_retired_pipeline_runs_the_meeting`).
   Swift kept it per pipeline.
 - The automatic retention keeps a recording whose results could still need it (P14 of
-  `.plans/2026-10-07-stable-promotion.md`): a ready meeting whose diarizer failed, so its
-  room is one unknown "Speaker 1", or whose transcript is empty although the recording
-  runs longer than 30 s, is not stamped after its run or a re-export, even under "delete
-  after processing". A later run that finds the speakers (Process again) stamps it, and a
-  rule the user applies is stamped as chosen
+  `.plans/2026-10-07-stable-promotion.md`), even under "delete after processing":
+  after a run, a re-export or a summary re-run, a ready meeting is not stamped while
+  `steno_core::results_need_the_audio` holds over its stored rows, or while the run's
+  own diarizer fell back. The rule: the room fell back to the one unknown room speaker
+  (`room_speaker_id`), or a lane the asset recorded (system and mic for a call, the one
+  lane of an in-person or phone meeting) has no segment while the meeting runs longer
+  than `EMPTY_LANE_MAXIMUM_SECONDS` (30 s) or has no positive duration. It errs towards
+  keeping: a call whose mic stayed muted is kept too. A phone meeting whose metadata
+  announced no duration gets the length the run decoded
+  (`a_phone_meeting_without_a_duration_gets_the_decoded_length`). A re-run whose
+  diarizer fails on a meeting with diarized speakers keeps those speakers and leaves no
+  room speaker, so only the run's mark (`Stamp::Automatic { fell_back }`) keeps that
+  recording; the mark lives for the run only, and a later re-export, summary re-run or
+  launch re-export reads the stored rows and stamps it
+  (`a_rerun_whose_diarizer_fails_keeps_the_recording_of_diarized_speakers`). A run
+  whose diarizer works and whose lanes all have segments stamps the meeting; a re-run
+  on the same silent audio keeps it again, so for an empty lane only a rule the user
+  applies, stamped as chosen, releases it. The meeting detail says "Recording kept
+  because the speakers or the transcript may be incomplete" (`keptIncomplete`) over the
+  same rule; a re-run whose diarizer fell back with stored speakers reads "kept while
+  processing" there
   (`a_diarizer_fallback_keeps_the_recording_until_a_run_finds_the_speakers`,
   `a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed`,
-  `a_long_recording_with_no_transcript_keeps_its_recording`). The stamp itself commits
-  with `Store::save_asset_durably` (`synchronous = FULL` and `fullfsync`), which also
-  syncs the transcript and summary committed before it, so a power loss can never leave
-  the recording swept and its results rolled back
-  (`the_retention_stamp_commits_durably`). Rust only: Swift stamps once every delivery
-  succeeded, at its store's default level, and its diarizer failure fails the meeting.
+  `a_long_recording_with_no_transcript_keeps_its_recording`,
+  `a_call_with_an_empty_mic_lane_keeps_its_recording_past_the_bound`,
+  `the_empty_lane_bound_is_exclusive`, the re-export, launch re-export, summary re-run
+  and failure-after-ready tests beside them, `an_incomplete_meeting_says_why_its_recording_is_kept`).
+  Every retention write commits with `Store::save_asset_durably` or `write_durably`
+  (`synchronous = FULL` and `fullfsync`): the stamp, which also syncs the transcript
+  and summary committed before it, so a power loss can never leave the recording swept
+  and its results rolled back (`the_retention_stamp_commits_durably`), and the keep that
+  clears a stamp, per meeting and Settings' Keep forever, so a power loss never brings
+  the stamp back (`the_keep_that_clears_a_stamp_commits_durably`,
+  `keep_forever_for_every_recording_commits_durably`). Rust only: Swift stamps once
+  every delivery succeeded, at its store's default level, and its diarizer failure fails
+  the meeting; the rollback consequence is in the stable plan's Rollback section.
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file

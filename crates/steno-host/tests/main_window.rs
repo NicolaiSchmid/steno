@@ -1013,6 +1013,45 @@ fn keep_audio_goes_through_the_pipeline_and_asks_before_deleting_now() {
     );
 }
 
+/// A ready, exported meeting without a stamp whose speakers or transcript
+/// may be incomplete ([`steno_core::results_need_the_audio`]) says why the
+/// recording is kept; with every lane transcribed it reads as on its way
+/// to the retention stage. Rust only.
+#[test]
+fn an_incomplete_meeting_says_why_its_recording_is_kept() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            set_retention(store, AudioRetention::DeleteAfterProcessing);
+            let mut asset = store.asset(uuid(MEETING)).unwrap().unwrap();
+            asset.retention = AudioRetention::DeleteAfterProcessing;
+            asset.expires_at = None;
+            store.save_asset(&asset).unwrap();
+        })
+        .build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["retention"]["kind"],
+        "keptWhileProcessing"
+    );
+
+    // The mic lane of the 45-minute call came out empty.
+    let export = harness.store.export(uuid(MEETING)).unwrap();
+    let system: Vec<_> = export
+        .segments
+        .iter()
+        .filter(|segment| segment.lane != steno_core::AudioLane::Mic)
+        .cloned()
+        .collect();
+    harness
+        .store
+        .replace_transcript(&export.meeting, &system, &export.speakers)
+        .unwrap();
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["retention"]["kind"], "keptIncomplete");
+    assert_eq!(detail["retention"]["filesExist"], true);
+}
+
 /// `ui.confirmDestructive` hands the page's prompt to the shell's dialog
 /// as sent and replies with the answer, a decline included.
 #[test]

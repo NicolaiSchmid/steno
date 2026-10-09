@@ -245,6 +245,8 @@ export function formatRetention(
 			return "Recording kept until the export succeeds";
 		case "keptProcessingFailed":
 			return "Recording kept because processing failed";
+		case "keptIncomplete":
+			return "Recording kept because the speakers or the transcript may be incomplete. Process again, or delete the recording";
 		case "keptWhileProcessing":
 			return "Recording kept while processing";
 		case "keptForever":

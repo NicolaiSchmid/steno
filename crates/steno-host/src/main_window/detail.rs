@@ -8,7 +8,7 @@ use steno_bridge::DetailTab;
 use steno_core::protocols::{BoundaryResult, BoxError};
 use steno_core::{
     AudioRetention, Delivery, Meeting, MeetingExport, MeetingOperation, MeetingStateKind, Platform,
-    Settings, Store, StoreError, SummaryTemplate, paths::file_url_path,
+    Settings, Store, StoreError, SummaryTemplate, paths::file_url_path, results_need_the_audio,
 };
 use uuid::Uuid;
 
@@ -29,6 +29,11 @@ pub enum RecordingStatus {
     KeptUntilExportSucceeds,
     /// A finite rule, no stamp, meeting failed: re-processing needs the audio.
     KeptProcessingFailed,
+    /// A finite rule, no stamp, meeting ready and delivered, but its
+    /// speakers or transcript may be incomplete
+    /// ([`steno_core::results_need_the_audio`]), so the automatic retention
+    /// keeps the recording. Rust only.
+    KeptIncomplete,
     /// A finite rule, no stamp, meeting still on its way to the retention stage.
     KeptWhileProcessing,
 }
@@ -326,10 +331,17 @@ impl MeetingDetailViewModel {
         }
         Some(match export.meeting.state.kind() {
             MeetingStateKind::Ready => {
-                if all_delivered(&self.deliveries) {
-                    RecordingStatus::KeptWhileProcessing
-                } else {
+                if !all_delivered(&self.deliveries) {
                     RecordingStatus::KeptUntilExportSucceeds
+                } else if results_need_the_audio(
+                    &export.meeting,
+                    &export.speakers,
+                    &export.segments,
+                    asset,
+                ) {
+                    RecordingStatus::KeptIncomplete
+                } else {
+                    RecordingStatus::KeptWhileProcessing
                 }
             }
             MeetingStateKind::Failed => RecordingStatus::KeptProcessingFailed,
