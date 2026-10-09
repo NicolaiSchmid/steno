@@ -223,6 +223,16 @@ fn preferences(dir: &tempfile::TempDir) -> Arc<FilePreferences> {
     Arc::new(FilePreferences::in_support_directory(dir.path()))
 }
 
+/// The launch half at the user's home against the Swift domain fixture.
+fn launch_at_home(preferences: Arc<FilePreferences>, keychain: Arc<dyn SwiftKeychain>) -> Launch {
+    launch(
+        &at_home(),
+        preferences,
+        &FakeDefaults::new(fixture("swift-domain.plist")),
+        keychain,
+    )
+}
+
 fn pending(launch: Launch) -> PendingImport {
     match launch {
         Launch::Pending(pending) => pending,
@@ -485,13 +495,7 @@ fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) ->
                 .unwrap();
         }
     });
-    let defaults = FakeDefaults::new(fixture("swift-domain.plist"));
-    let pending = pending(launch(
-        &at_home(),
-        preferences.clone(),
-        &defaults,
-        keychain.clone(),
-    ));
+    let pending = pending(launch_at_home(preferences.clone(), keychain.clone()));
     let graph = GraphImport::new(pending, raw.clone());
     let reloads = Arc::new(AtomicUsize::new(0));
     let counted = reloads.clone();
@@ -712,12 +716,7 @@ fn a_failed_certificate_query_leaves_the_import_pending() {
     let preferences = preferences(&dir);
     let keychain = Arc::new(FakeKeychain::swift_app());
     *keychain.certificate_error.lock().unwrap() = Some("errSecInteractionNotAllowed".to_owned());
-    let launched = launch(
-        &at_home(),
-        preferences.clone(),
-        &FakeDefaults::new(fixture("swift-domain.plist")),
-        keychain,
-    );
+    let launched = launch_at_home(preferences.clone(), keychain);
     assert!(matches!(launched, Launch::Pending(_)), "{launched:?}");
     assert!(!preferences.flag(IMPORT_RAN_KEY));
     assert!(!preferences.contains(IMPORT_RAN_KEY));
@@ -809,12 +808,7 @@ fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
 
     // The next launch: still pending, the key stays unread.
     let keychain = Arc::new(FakeKeychain::denying_the_key());
-    let again = pending(launch(
-        &at_home(),
-        first.preferences.clone(),
-        &FakeDefaults::new(fixture("swift-domain.plist")),
-        keychain.clone(),
-    ));
+    let again = pending(launch_at_home(first.preferences.clone(), keychain.clone()));
     assert_eq!(again.key, LaunchKey::Denied);
     let graph = GraphImport::new(again, first.raw.clone());
     first.raw.reads.lock().unwrap().clear();
@@ -1084,17 +1078,7 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
         }
         let keychain = Arc::new(FakeKeychain::swift_app());
         let app = build_over(paths, keychain.clone());
-        app.store
-            .save_paired_device(
-                &steno_core::PairedDevice {
-                    id: uuid::Uuid::new_v4(),
-                    name: "Phone".to_owned(),
-                    paired_at: chrono::Utc::now(),
-                    last_seen_at: None,
-                },
-                &[1; 32],
-            )
-            .unwrap();
+        crate::testing::pair_a_phone(&app.store);
         std::fs::remove_file(dir.path().join("support/preferences.json")).unwrap();
         *keychain.certificate.lock().unwrap() = None;
         let step = app.services.swift_import.clone().unwrap();
@@ -1147,12 +1131,7 @@ fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
 /// fixture and `keychain`, which must leave the import pending.
 fn build_over(paths: steno_core::StenoPaths, keychain: Arc<FakeKeychain>) -> crate::App {
     crate::build_with_import(test_options(paths), |preferences| {
-        Some(pending(launch(
-            &at_home(),
-            preferences,
-            &FakeDefaults::new(fixture("swift-domain.plist")),
-            keychain,
-        )))
+        Some(pending(launch_at_home(preferences, keychain)))
     })
     .unwrap()
 }
@@ -1369,12 +1348,7 @@ fn failed_attribute_queries_count_as_items_that_may_prompt() {
         stored_identity: Err("errSecInteractionNotAllowed".to_owned()),
         ..FakeKeychain::swift_app()
     });
-    let pending = pending(launch(
-        &at_home(),
-        preferences(&dir),
-        &FakeDefaults::new(fixture("swift-domain.plist")),
-        keychain.clone(),
-    ));
+    let pending = pending(launch_at_home(preferences(&dir), keychain.clone()));
     assert_eq!(pending.key, LaunchKey::Unread(ApiKeyItem::Other));
     assert!(pending.replaces_identity);
     let graph = GraphImport::new(pending, Arc::new(CountingSecrets::default()));
@@ -1422,12 +1396,7 @@ fn the_marker_comes_after_the_identity_and_a_crash_between_them_stores_the_same_
         .block_on(store_imported_identity(&*raw, &bundle))
         .unwrap();
     let graph = GraphImport::new(
-        pending(launch(
-            &at_home(),
-            preferences(&dir),
-            &FakeDefaults::new(fixture("swift-domain.plist")),
-            keychain.clone(),
-        )),
+        pending(launch_at_home(preferences(&dir), keychain.clone())),
         raw.clone(),
     );
     let rerun = graph.step(RUNTIME.handle().clone(), Box::new(|| {}));
@@ -1491,12 +1460,7 @@ fn after_the_import_a_set_aside_preferences_file_brings_no_replace_and_no_prompt
 
     let fresh = preferences(&step.dir);
     assert!(matches!(
-        launch(
-            &at_home(),
-            fresh.clone(),
-            &FakeDefaults::new(fixture("swift-domain.plist")),
-            step.keychain.clone(),
-        ),
+        launch_at_home(fresh.clone(), step.keychain.clone()),
         Launch::Done
     ));
     assert_eq!(step.keychain.calls(), ["marker"], "a prompt may come up");
@@ -1569,10 +1533,8 @@ async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
     settings.llm_model = Some("model".to_owned());
     store.save_settings(&settings).unwrap();
     let graph_for = |keychain: FakeKeychain| {
-        let launched = launch(
-            &at_home(),
+        let launched = launch_at_home(
             Arc::new(FilePreferences::in_support_directory(dir.path())),
-            &FakeDefaults::new(fixture("swift-domain.plist")),
             Arc::new(keychain),
         );
         let secrets = Arc::new(InMemorySecretStore::new());
@@ -1686,10 +1648,8 @@ async fn app_behind_a_pending_import(
     let support = dir.path().join("support");
     std::fs::create_dir_all(&support).unwrap();
     let graph = GraphImport::new(
-        pending(launch(
-            &at_home(),
+        pending(launch_at_home(
             Arc::new(FilePreferences::in_support_directory(&support)),
-            &FakeDefaults::new(fixture("swift-domain.plist")),
             Arc::new(FakeKeychain::swift_app()),
         )),
         secrets,

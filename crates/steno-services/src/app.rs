@@ -2384,18 +2384,7 @@ mod tests {
         let support = dir.path().join("support");
         let first = build(options_under(&support)).unwrap();
         assert!(first.handover.is_some());
-        first
-            .store
-            .save_paired_device(
-                &PairedDevice {
-                    id: uuid::Uuid::new_v4(),
-                    name: "Phone".to_owned(),
-                    paired_at: chrono::Utc::now(),
-                    last_seen_at: None,
-                },
-                &[1; 32],
-            )
-            .unwrap();
+        crate::testing::pair_a_phone(&first.store);
         first.shutdown();
         drop(first);
         let secrets = support.join("secrets.json");
@@ -2991,17 +2980,7 @@ mod tests {
         assert_eq!(listener(&minting).unwrap(), minted, "the stored one");
         assert_eq!(minting.reads.load(Ordering::SeqCst), 2, "one read each");
 
-        app.store
-            .save_paired_device(
-                &PairedDevice {
-                    id: uuid::Uuid::new_v4(),
-                    name: "Phone".to_owned(),
-                    paired_at: chrono::Utc::now(),
-                    last_seen_at: None,
-                },
-                &[1; 32],
-            )
-            .unwrap();
+        crate::testing::pair_a_phone(&app.store);
         let lost = Arc::new(CountingIdentityReads::default());
         let refused = listener(&lost).unwrap_err();
         assert!(refused.contains("pair again"), "{refused}");
