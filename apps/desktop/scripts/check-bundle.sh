@@ -18,7 +18,10 @@
 #             byte for byte apps/desktop/src-tauri/linux/hyprland-steno.lua
 #   appimage  appimage/*.AppImage, unpacked with --appimage-extract, into
 #             usr/bin/
-#   app       macos/*.app, into Contents/MacOS/. With --signed, also the
+#   app       macos/*.app, into Contents/MacOS/; also the bundle id and
+#             the Swift app's SUPublicEDKey, as tauri.conf.json and
+#             Info.plist give them, in the merged Info.plist. With
+#             --signed, also the
 #             Developer ID signature, hardened runtime, timestamp and team
 #             of the app, its executable and the sidecar, the two
 #             entitlements, the stapled ticket and Gatekeeper's verdict
@@ -163,11 +166,27 @@ release_signature() {
   sed -n 's/^TeamIdentifier=//p' <<< "$details"
 }
 
+# info_is <Info.plist> <key> <expected>: the plist holds <expected>, not
+# empty, under <key>.
+info_is() {
+  local got
+  got="$(/usr/libexec/PlistBuddy -c "Print :$2" "$1" 2>/dev/null || true)"
+  [[ -n "$3" && "$got" == "$3" ]] || die "$1 holds $2 '$got', expected '$3'"
+  echo "ok: $1 holds $2 $got"
+}
+
 check_app() {
-  local app executable team item item_team entitlements count
+  local app executable team item item_team entitlements count src_tauri
   app="$(one "$bundle/macos/*.app")"
   executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
   side_by_side "$app/Contents/MacOS" "$executable" "$sidecar_name"
+  # The identifier, and the Swift app's Sparkle key, without which the
+  # Swift app's last update cannot install this bundle (stable plan S6).
+  src_tauri="$(cd "$(dirname "${BASH_SOURCE[0]}")/../src-tauri" && pwd)"
+  info_is "$app/Contents/Info.plist" CFBundleIdentifier \
+    "$(plutil -extract identifier raw -o - "$src_tauri/tauri.conf.json")"
+  info_is "$app/Contents/Info.plist" SUPublicEDKey \
+    "$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$src_tauri/Info.plist")"
   [[ "$signed" == true ]] || return 0
 
   codesign --verify --deep --strict --verbose=2 "$app"

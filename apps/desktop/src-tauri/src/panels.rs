@@ -19,7 +19,7 @@
 //! Both panels hang from one anchor, the top-centre point of the frame, so
 //! the prompt turns into the bubble without moving; the user drags a
 //! panel by its background (`data-tauri-drag-region` in the page), the
-//! anchor follows and is saved. A saved anchor on a screen that is gone
+//! anchor follows and is saved (`panel_anchor`). A saved anchor on a screen that is gone
 //! falls back to the default: top centre of the main screen, 8 pt under
 //! its top edge. The page measures itself and reports its size in device
 //! pixels through `panel_call("resize")` (`bridge::ResizeParams::logical`
@@ -30,7 +30,10 @@
 //! Swift: `FloatingPanel.swift`, `FloatingPanelModel.swift`,
 //! `FloatingContent.swift`.
 
-use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
 
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PixelUnit, Url, WebviewUrl,
@@ -40,6 +43,7 @@ use tauri::{
 use crate::{
     bridge::{BridgeError, failed},
     navigation,
+    panel_anchor::AnchorFile,
     panel_geometry::{
         PROBE_SIZE, PanelAnchor, Rect, accepted_size, fitted, frame_hanging_from, is_size,
         same_point, same_size,
@@ -460,13 +464,16 @@ impl Panels {
     }
 }
 
-const ANCHOR_FILE: &str = "panel-anchor.json";
-
-fn anchor_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|dir| dir.join(ANCHOR_FILE))
+/// The anchor's file in the support directory (`panel_anchor`), one per
+/// process.
+fn anchor_file(app: &AppHandle) -> &'static AnchorFile {
+    static FILE: OnceLock<AnchorFile> = OnceLock::new();
+    FILE.get_or_init(|| {
+        AnchorFile::new(
+            &steno_core::StenoPaths::default_support_directory(),
+            app.path().config_dir().ok().as_deref(),
+        )
+    })
 }
 
 /// The screens' work areas in logical points, the primary first.
@@ -499,21 +506,11 @@ fn fallback_screen(screens: &[Rect]) -> Rect {
 }
 
 fn load_anchor(app: &AppHandle) -> Option<PanelAnchor> {
-    anchor_path(app)
-        .and_then(|path| fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    anchor_file(app).load()
 }
 
 fn save_anchor(app: &AppHandle, anchor: PanelAnchor) {
-    let Some(path) = anchor_path(app) else {
-        return;
-    };
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
-    if let Ok(json) = serde_json::to_vec(&anchor) {
-        let _ = fs::write(path, json);
-    }
+    anchor_file(app).save_in_background(anchor);
 }
 
 /// The window's inner size in logical points.

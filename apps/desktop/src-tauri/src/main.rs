@@ -83,10 +83,12 @@ mod display_lost;
 #[cfg(feature = "fixture-host")]
 mod fixtures;
 mod host;
+mod identifier;
 #[cfg(target_os = "macos")]
 mod menu;
 mod navigation;
 mod packaged;
+mod panel_anchor;
 mod panel_geometry;
 mod panels;
 mod permissions;
