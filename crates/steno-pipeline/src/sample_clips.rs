@@ -31,8 +31,8 @@
 //!   replaced. Speaker ids derive from their meeting's id, so the clips of
 //!   another meeting whose master lies in this folder are never the
 //!   sweep's. A speaker the merge did not replace that this run gave no
-//!   clip keeps its files until a later run gives it a clip or retention
-//!   runs.
+//!   clip keeps its files in this run; a later run or retention sweeps
+//!   them.
 //! - No speaker row of any meeting names it, matched by file name, so a URL
 //!   that spells the folder another way still keeps its clip.
 //! - Its speaker is not a confirmed one this run gave no clip, and it is
@@ -41,8 +41,10 @@
 //!   clip is kept by name and still plays, and retention removes it with
 //!   the audio ([`steno_core::ExpiredAsset::confirmed_with_clips`]). A
 //!   confirmed speaker the re-run drops loses its row but keeps every file
-//!   it had: the files stay on the disk, unnamed and not played, past the
-//!   retention period until the meeting is deleted, as in Swift.
+//!   it had: the files stay, unnamed and not played, until a later run or
+//!   retention finds the speaker id their name starts with among the
+//!   meeting's speakers or gives it a clip; if none does, they stay past
+//!   the retention period until the meeting is deleted, as in Swift.
 //!
 //! The sweep runs only inside a run, after its merge, on the meeting's own
 //! folder ([`RecordingLayout::own_folder`]), while the run holds the meeting

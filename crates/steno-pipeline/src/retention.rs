@@ -33,11 +33,11 @@ fn listed(failures: &[(PathBuf, std::io::Error)]) -> String {
 /// meeting's confirmed speakers. Unconfirmed speakers keep their clips
 /// until confirmation or deletion. The clip files of the meeting's speakers
 /// that no row names, left by a run that ended before its sweep, go too
-/// ([`sample_clips`]). A file of a speaker the meeting no longer has, a
-/// confirmed speaker a re-run dropped, stays past the retention period
-/// until the meeting is deleted, as in Swift. The asset row keeps its URLs
-/// and loses `expires_at` once every file is gone, so a sweep runs once per
-/// expiry.
+/// ([`sample_clips`]). A clip file whose name starts with the id of no
+/// current speaker of the meeting, such as a confirmed speaker's a re-run
+/// dropped, stays past the retention period until the meeting is deleted,
+/// as in Swift. The asset row keeps its URLs and loses `expires_at` once
+/// every file is gone, so a sweep runs once per expiry.
 /// A missing file is skipped; a file that cannot be removed leaves the
 /// stamp in place for the next sweep and never stops the sweep from
 /// reaching the other assets. Each asset is checked again in the write that
