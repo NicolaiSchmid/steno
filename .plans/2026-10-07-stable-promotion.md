@@ -1077,10 +1077,17 @@ The table above names each package and its owner. Their tests:
   `validpgpkeys` set to the release key
   (`048B527950E4F609B90E63495F8810A6E6D4DB46`), depends on `webkit2gtk-4.1`,
   `gtk3`, `glib2`, `libsoup3`, `libayatana-appindicator`, `pipewire` and
-  `dbus`, and ships P5's two drop-ins (the `.deb`'s `/usr/lib/systemd/user/`,
-  with a `post_upgrade` that reloads the running user managers as the `.deb`'s
-  `postinst` does), X4's `ufw` profile and a `/usr/bin` wrapper
-  that sets X5's flag and the path the autostart entry names. The first stable
+  `dbus`, and ships P5's two drop-ins (the `.deb`'s `/usr/lib/systemd/user/`),
+  X4's `ufw` profile and a `/usr/bin` wrapper
+  that sets X5's flag and the path the autostart entry names. It needs no
+  `post_upgrade`: Arch's `systemd` package ships the pacman hook
+  `30-systemd-daemon-reload-user.hook`, which reloads every running user
+  manager (`systemctl reload 'user@*.service'`) after any package installs,
+  upgrades or removes a file under `usr/lib/systemd/user/`, with no condition
+  a package could add. So on Arch only the autostart entry the app keeps until
+  its exit (P5) protects a running autostart unit from that reload, and the
+  kept entry is a D3 requirement for Omarchy: X6 is accepted only with step 8
+  of the Omarchy gate passing. The first stable
   push is by hand; then **Nicolai** adds
   `AUR_SSH_PRIVATE_KEY`, and `publish` pushes from the second stable release
   on. A candidate is installed with `makepkg -si` from `packaging/aur/`, with
@@ -1092,7 +1099,13 @@ The table above names each package and its owner. Their tests:
   tray library's `dlopen` path patched, `STENO_DISTRIBUTION=nix`, and P5's
   two drop-ins under `lib/systemd/user/`, which on NixOS reach the user
   manager only through `systemd.packages`, so the module adds the package
-  there; without the module the app's own copies cover them. Built from
+  there; without the module the app's own copies cover them. `nixos-rebuild
+  switch` and `home-manager switch` reload the user managers too, so without
+  the module (a profile or home-manager install with launch at login on) only
+  the autostart entry the app keeps until its exit (P5) protects a running
+  autostart unit; with it, Steno runs as `steno.service`, whose unit file the
+  package keeps. The kept entry is a D3 requirement for NixOS: X7 is accepted
+  only with step 7 of the NixOS gate passing. Built from
   `self` with every hash in the tree, so any tag builds as it is. Without
   the module, the autostart entry names, as an absolute path, the
   first of `$HOME/.nix-profile/bin/steno-desktop` and
@@ -1749,6 +1762,15 @@ interrupted" after one. On the GNOME machine,
   7. In the Steno that a login started, Settings says updates come from the
      package manager (X5), and `~/.config/autostart/steno-desktop.desktop`'s
      `Exec` names `/usr/bin/steno-desktop`.
+  8. The kept entry (P5, D3). With launch at login on, log out and in, so
+     Steno runs as `app-steno\x2ddesktop@autostart.service` (as in step 5 of
+     the GNOME gate), and start a recording. Turn launch at login off in
+     Settings: `~/.config/autostart/steno-desktop.desktop` stays. Run
+     `makepkg -si` in `packaging/aur/` again, which runs systemd's reload
+     hook: `systemctl --user show 'app-steno\x2ddesktop@autostart.service' -p
+     LoadState -p TimeoutStopUSec` still shows `loaded` and 20 s. Log out:
+     after logging back in, `q` shows the meeting with its full length and
+     `quit` as `endReason`, and the entry is gone.
 - **NixOS** (x86_64-linux, GNOME, and Hyprland with `withUWSM = true` if
   Nicolai runs it).
   1. Step 0 uses a flake input at the previous candidate's tag
@@ -1801,6 +1823,9 @@ interrupted" after one. On the GNOME machine,
      `nix profile install github:NicolaiSchmid/steno/v0.11.0-rc.N#steno`);
      `nix-collect-garbage -d` as that user; log out and in: Steno starts once,
      as the new version, and its file chooser opens.
+  7. The kept entry (P5, D3), in step 6's package-only install: step 8 of the
+     Omarchy gate, with `nixos-rebuild switch` (and `home-manager switch` where
+     Nicolai uses home-manager) as the reload in place of `makepkg -si`.
 
 **The Windows gate** (before the site lists Windows): a Windows machine runs the
 `--ignored` WASAPI tests, one real call, a logoff during a recording of at least
