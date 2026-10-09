@@ -295,8 +295,20 @@ pub struct FakeRecorder {
     pub remembered: Mutex<Vec<PathBuf>>,
     /// What `left_recording` answers per meeting; the default otherwise.
     pub left: Mutex<BTreeMap<Uuid, LeftRecording>>,
-    /// Every meeting `forget_recording` was given, in order.
+    /// Every meeting `left_recording` was asked about, in order.
+    pub asked: Mutex<Vec<Uuid>>,
+    /// Every meeting `forget_recording` forgot, in order.
     pub forgotten: Mutex<Vec<Uuid>>,
+    /// The recorder's entries: `forget_recording` takes one out and
+    /// returns it, `restore_recording` puts it back.
+    pub recorded: Mutex<BTreeMap<Uuid, PathBuf>>,
+    /// `forget_recording` fails, as the support folder can when it is
+    /// read-only or full.
+    pub forget_fails: Mutex<bool>,
+    /// Runs once inside the next `restore_recording`, before it records
+    /// the entry: a test's moment between the guard's read of the row and
+    /// its restore.
+    pub before_restore: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl FakeRecorder {
@@ -313,6 +325,10 @@ impl FakeRecorder {
             remembered: Mutex::new(Vec::new()),
             left: Mutex::new(BTreeMap::new()),
             forgotten: Mutex::new(Vec::new()),
+            recorded: Mutex::new(BTreeMap::new()),
+            forget_fails: Mutex::new(false),
+            asked: Mutex::new(Vec::new()),
+            before_restore: Mutex::new(None),
         }
     }
 
@@ -416,14 +432,27 @@ impl Recorder for FakeRecorder {
     }
 
     fn left_recording(&self, meeting_id: Uuid) -> LeftRecording {
+        lock(&self.asked).push(meeting_id);
         lock(&self.left)
             .get(&meeting_id)
             .cloned()
             .unwrap_or_default()
     }
 
-    fn forget_recording(&self, meeting_id: Uuid) {
+    fn forget_recording(&self, meeting_id: Uuid) -> std::io::Result<Option<PathBuf>> {
+        if *lock(&self.forget_fails) {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
         lock(&self.forgotten).push(meeting_id);
+        Ok(lock(&self.recorded).remove(&meeting_id))
+    }
+
+    fn restore_recording(&self, meeting_id: Uuid, folder: &Path) {
+        let hook = lock(&self.before_restore).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        lock(&self.recorded).insert(meeting_id, folder.to_path_buf());
     }
 }
 

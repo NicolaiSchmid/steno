@@ -729,7 +729,10 @@ impl Core {
             Err(error) => {
                 let mut writer = writer;
                 let _ = writer.finish();
-                let _ = std::fs::remove_dir_all(&layout.directory);
+                // Only a folder this start made: never a meeting's files.
+                if writer.created_directory() {
+                    let _ = std::fs::remove_dir_all(&layout.directory);
+                }
                 self.set_state(
                     &mut inner,
                     &CaptureState::Failed {
@@ -1507,10 +1510,11 @@ impl Core {
 }
 
 /// `error` as a `WriterFailed`: one that already is passes through, so its
-/// `Display` says "writing the recording failed" once.
+/// `Display` says "writing the recording failed" once. A `RecordingExists`
+/// passes through too: it wrote nothing, and its `Display` names the folder.
 fn as_writer_failure(error: CaptureError) -> CaptureError {
     match error {
-        CaptureError::WriterFailed(_) => error,
+        CaptureError::WriterFailed(_) | CaptureError::RecordingExists(_) => error,
         other => CaptureError::WriterFailed(other.to_string()),
     }
 }

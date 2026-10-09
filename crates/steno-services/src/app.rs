@@ -31,7 +31,7 @@ use crate::pipeline::{
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::qr::PngQrEncoder;
 use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
-use crate::recovery::{Interrupted, LiveRecordingCheck, reconcile_interrupted};
+use crate::recovery::{Interrupted, LiveRecordingCheck, adopt_orphans, reconcile_interrupted};
 use crate::secrets::{KeepsApiKey, KeyringUnavailable, SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 use crate::updates::{InstallGate, NeverIdle, ScheduleParts, UpdateSchedule, UpdateSource};
@@ -282,11 +282,15 @@ fn make_dependencies(
 /// arrives, so a reload is not bypassed. The intake commits the meeting
 /// with its receipt and the pipeline only processes it
 /// ([`steno_pipeline::ProcessingPipeline::enqueue_saved`]), as in
-/// `RecordingIntake::over`. Swift: `AppEnvironment.makeIntake`.
+/// `RecordingIntake::over`. Each copy's folder is noted in the record
+/// under `support_directory` until its admission commits
+/// ([`crate::audio_folders`]), so the launch adopts a copy left with no
+/// meeting. Swift: `AppEnvironment.makeIntake`.
 pub fn handover_intake(
     store: Arc<Store>,
     pipeline: Arc<CurrentPipeline>,
     zone: FixedOffset,
+    support_directory: &std::path::Path,
 ) -> RecordingIntake {
     let now = pipeline.current().dependencies().now.clone();
     RecordingIntake::new(
@@ -298,6 +302,9 @@ pub fn handover_intake(
         now,
         zone,
     )
+    .noting_folders_in(Arc::new(crate::audio_folders::AdmissionRecord {
+        support_directory: support_directory.to_path_buf(),
+    }))
 }
 
 /// The handover over the listener on a loaded or minted identity, whose
@@ -356,7 +363,12 @@ fn listener_over_identity(
             chrono::Utc::now(),
         ),
     )?;
-    let intake = Arc::new(handover_intake(store.clone(), pipeline.clone(), zone));
+    let intake = Arc::new(handover_intake(
+        store.clone(),
+        pipeline.clone(),
+        zone,
+        &paths.support_directory,
+    ));
     let mac_id = identity.mac_id();
     let service = Arc::new(crate::handover::service(
         listener_configuration(paths),
@@ -573,8 +585,10 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
 /// cannot be read, or failed ([`reconcile_interrupted`]). It comes last, so
 /// a folder that is slow to answer (a network volume) or a fresh master it
 /// watches delays nothing else. A panic in it is caught and logged, and the
-/// rows it had not reached stay `recording` for the next launch. Blocks, so
-/// [`App::launch`] runs it on a blocking task.
+/// rows it had not reached stay `recording` for the next launch. Then the
+/// recordings in the audio folders that have no meeting at all are adopted
+/// ([`adopt_orphans`]), also after such a panic; their ids are returned.
+/// Blocks, so [`App::launch`] runs it on a blocking task.
 pub(crate) fn reconcile_at_launch(
     store: &Arc<Store>,
     pipeline: &CurrentPipeline,
@@ -582,9 +596,9 @@ pub(crate) fn reconcile_at_launch(
     check: &LiveRecordingCheck,
     zone: FixedOffset,
     runtime: &tokio::runtime::Handle,
-) {
-    let intake =
-        steno_pipeline::LocalRecordingIntake::over(store.clone(), pipeline.current(), zone);
+) -> Vec<uuid::Uuid> {
+    let current = pipeline.current();
+    let intake = steno_pipeline::LocalRecordingIntake::over(store.clone(), current.clone(), zone);
     let reconciled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         reconcile_interrupted(store, &intake, interrupted, check, runtime)
     }));
@@ -593,6 +607,15 @@ pub(crate) fn reconcile_at_launch(
             "the recovery of interrupted recordings panicked; the next launch tries again"
         );
     }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        adopt_orphans(store, &current, interrupted, check, zone, runtime)
+    }))
+    .unwrap_or_else(|_| {
+        tracing::warn!(
+            "the recovery of recordings with no meeting panicked; the next launch tries again"
+        );
+        Vec::new()
+    })
 }
 
 /// How long an exit waits for [`App::shutdown`] before the process ends
@@ -829,7 +852,11 @@ impl App {
     ///    and the retention sweep runs.
     /// 4. On a blocking task (`reconcile_at_launch`, which may wait up to
     ///    10 s for a master that is still written): those recordings are
-    ///    recovered, left alone or failed, and the list is refreshed.
+    ///    recovered, left alone or failed; a master this install wrote
+    ///    that has no meeting at all is adopted as one, and the main window
+    ///    says "Recovered a recording that was missing from your list. It
+    ///    is being processed." under the Record control
+    ///    (`CaptureRecorder::note_adopted`); the list is refreshed.
     /// 5. Meanwhile the login item is registered the first time, the
     ///    handover listener starts when a phone is already paired, and the
     ///    update schedule starts with its launch tick
@@ -910,21 +937,8 @@ impl App {
             }
         });
 
-        let interrupted = Interrupted::list(&self.store, &self.paths.support_directory);
         let recover = self.recover_unfinished();
-        let reconcile = {
-            let (store, pipeline) = (self.store.clone(), self.pipeline.clone());
-            let (check, zone, runtime) = (
-                self.live_recording_check.clone(),
-                self.zone,
-                self.runtime.clone(),
-            );
-            let host = host.clone();
-            move || {
-                reconcile_at_launch(&store, &pipeline, &interrupted, &check, zone, &runtime);
-                host.store_changed();
-            }
-        };
+        let reconcile = self.reconcile_listed(host);
         let unlocked = self
             .secrets_unlocked
             .lock()
@@ -1023,6 +1037,27 @@ impl App {
         }
     }
 
+    /// The launch's reconcile of the recordings it lists now
+    /// ([`reconcile_at_launch`]): the main window says when one with no
+    /// meeting was adopted (`CaptureRecorder::note_adopted`), and the list
+    /// is refreshed.
+    fn reconcile_listed(&self, host: &Arc<Host>) -> impl FnOnce() + Send + 'static {
+        let interrupted = Interrupted::list(&self.store, &self.paths.support_directory);
+        let (store, pipeline) = (self.store.clone(), self.pipeline.clone());
+        let (check, zone, runtime) = (
+            self.live_recording_check.clone(),
+            self.zone,
+            self.runtime.clone(),
+        );
+        let (host, recorder) = (host.clone(), self.recorder.clone());
+        move || {
+            let adopted =
+                reconcile_at_launch(&store, &pipeline, &interrupted, &check, zone, &runtime);
+            recorder.note_adopted(adopted.len());
+            host.store_changed();
+        }
+    }
+
     /// What [`App::launch`] runs once the keyring answered: the pipeline
     /// built again, the API key read again, and the listener of a waiting
     /// handover made and started.
@@ -1113,7 +1148,8 @@ mod tests {
             make,
             tokio::runtime::Handle::current(),
         ));
-        let intake = handover_intake(store.clone(), current.clone(), local_zone());
+        let support = dir.path().join("support");
+        let intake = handover_intake(store.clone(), current.clone(), local_zone(), &support);
 
         current.reload().unwrap();
         assert_eq!(
@@ -1144,11 +1180,12 @@ mod tests {
             format: AudioFormat::Wav16kInt16,
             device_name: "Phone".to_owned(),
         };
-        // The level and the meeting's state of each commit that holds a
-        // phone meeting. The intake's commit is the first, and the only one
-        // with the meeting `queued`: the enqueue writes nothing.
-        let commits: Arc<std::sync::Mutex<Vec<(i64, String)>>> = Arc::default();
-        let seen = commits.clone();
+        // The level, the meeting's state and the folders noted for the
+        // launch's adoption of each commit that holds a phone meeting. The
+        // intake's commit is the first, and the only one with the meeting
+        // `queued`: the enqueue writes nothing.
+        let commits: Arc<std::sync::Mutex<Vec<(i64, String, usize)>>> = Arc::default();
+        let (seen, noted) = (commits.clone(), support.clone());
         store.probe_commits(move |connection| {
             let state: Option<String> = connection
                 .query_row(
@@ -1161,10 +1198,15 @@ mod tests {
                 let level = connection
                     .query_row("PRAGMA synchronous", [], |row| row.get(0))
                     .unwrap();
-                seen.lock().unwrap().push((level, state));
+                let noted = crate::audio_folders::recorded(&noted).unwrap().len();
+                seen.lock().unwrap().push((level, state, noted));
             }
         });
         let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
+        assert!(
+            crate::audio_folders::recorded(&support).unwrap().is_empty(),
+            "the copy's folder is forgotten once its admission committed"
+        );
         // The retired pipeline never saw the meeting; the current one did.
         let current_pipeline = current.current();
         current_pipeline.wait_until_idle().await;
@@ -1173,12 +1215,12 @@ mod tests {
         let commits = commits.lock().unwrap().clone();
         let queued: Vec<_> = commits
             .iter()
-            .filter(|(_, state)| state == "queued")
+            .filter(|(_, state, _)| state == "queued")
             .collect();
         assert_eq!(
             queued,
-            [&(2, "queued".to_owned())],
-            "the intake's commit under FULL is the only one with the meeting queued: {commits:?}"
+            [&(2, "queued".to_owned(), 1)],
+            "the intake's commit under FULL is the only one with the meeting queued, its folder noted: {commits:?}"
         );
         assert_eq!(
             store
@@ -1374,6 +1416,49 @@ mod tests {
         );
         assert_eq!(recovered.duration, 1.0);
         assert_eq!(store.asset(meeting.id).unwrap().unwrap().lanes, lanes);
+    }
+
+    /// `App::launch` itself: a call master in the audio folder with no
+    /// meeting (a row a power loss took before it was durable), whose
+    /// folder the recorder recorded before its row, is adopted on the
+    /// launch's blocking task and processed, and the main window says so
+    /// under the Record control until the user dismisses it. Its folder
+    /// stays recorded until a later launch finds the row durable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_adopts_a_recording_with_no_meeting_and_says_so() {
+        use steno_host::services::Recorder as _;
+
+        let (dir, store) = crate::testing::temp_store();
+        let mut app = recording_app(&dir, &store);
+        app.live_recording_check = crate::testing::an_hour_later();
+        let meeting_id = uuid::Uuid::new_v4();
+        let audio = dir.path().join("audio");
+        crate::audio_folders::record(&app.paths.support_directory, meeting_id, &audio).unwrap();
+        let layout = steno_core::RecordingLayout::new(&audio, meeting_id);
+        let lanes = [steno_core::AudioLane::Mic, steno_core::AudioLane::System];
+        let mut writer = steno_audio::RecordingWriter::new(&layout, &lanes, false).unwrap();
+        crate::testing::write_frames(&mut writer, 100);
+        drop(writer);
+
+        let host = Arc::new(app.host().unwrap());
+        app.launch(&host);
+        app.launch_finished().await;
+        app.pipeline.current().wait_until_idle().await;
+        let adopted = store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(adopted.state, steno_core::MeetingState::Ready);
+        assert_eq!(adopted.source, steno_core::MeetingSource::MacCall);
+        assert_eq!(adopted.duration, 1.0);
+        assert_eq!(
+            app.recorder.status().warning.as_deref(),
+            Some("Recovered a recording that was missing from your list. It is being processed.")
+        );
+        assert!(
+            crate::audio_folders::recorded(&app.paths.support_directory)
+                .unwrap()
+                .contains_key(&meeting_id)
+        );
+        app.recorder.clear_messages();
+        assert_eq!(app.recorder.status().warning, None);
     }
 
     /// The models directory is decided once, when the app is built: a

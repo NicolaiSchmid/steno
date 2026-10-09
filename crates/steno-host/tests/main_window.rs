@@ -10,6 +10,7 @@ mod common;
 use steno_host::services::Recorder as _;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::*;
@@ -293,6 +294,26 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         .build();
     let _ = confirming.snapshot(BridgeTopic::MeetingsList);
     confirming.sink.clear();
+    // Whether each commit saw the entry already forgotten: the delete's
+    // commit must, since the launch's adoption reads the entries after the
+    // rows.
+    let forgotten_at_commit: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let (seen, recorder) = (
+        forgotten_at_commit.clone(),
+        confirming.fakes.recorder.clone(),
+    );
+    confirming.store.probe_commits(move |_| {
+        let forgotten = recorder.forgotten.lock().unwrap().contains(&uuid(MEETING));
+        seen.lock().unwrap().push(forgotten);
+    });
+    let audio = confirming.audio_folder();
+    confirming
+        .fakes
+        .recorder
+        .recorded
+        .lock()
+        .unwrap()
+        .insert(uuid(MEETING), audio);
     let reply = confirming
         .host
         .meetings_delete(MeetingIdParams {
@@ -303,13 +324,34 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
     assert!(confirming.store.meeting(uuid(MEETING)).unwrap().is_none());
     assert!(confirming.store.asset(uuid(MEETING)).unwrap().is_none());
     assert_eq!(confirming.store.persons().unwrap().len(), 3, "people stay");
-    // The meeting folder goes whole, through the file system seam.
+    // The meeting folder goes whole, through the file system seam. An
+    // asset names it, so the recorder is not asked where else it may be;
+    // it forgets what it kept for the meeting's recovery.
     let folder = confirming
         .audio_folder()
         .join(steno_core::json::uuid_string(uuid(MEETING)));
     assert_eq!(
         *confirming.fakes.file_system.removed.lock().unwrap(),
         vec![folder.clone()]
+    );
+    assert_eq!(
+        *confirming.fakes.recorder.asked.lock().unwrap(),
+        Vec::<uuid::Uuid>::new()
+    );
+    assert_eq!(
+        *confirming.fakes.recorder.forgotten.lock().unwrap(),
+        [uuid(MEETING)]
+    );
+    assert_eq!(*forgotten_at_commit.lock().unwrap(), [true]);
+    assert!(
+        confirming
+            .fakes
+            .recorder
+            .recorded
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "a delete that went through does not record the entry again"
     );
     assert!(
         !confirming
@@ -362,6 +404,8 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         json!([]),
         "the progress entry goes with the meeting"
     );
+    // No asset names its files: the recorder says where its folder may be.
+    assert_eq!(*queued.fakes.recorder.asked.lock().unwrap(), [uuid(0x88)]);
     assert_eq!(queued.sink.count(BridgeTopic::Progress), 1);
 }
 
@@ -434,6 +478,227 @@ fn a_delete_reports_files_that_stay_and_a_refusal_keeps_the_progress_entry() {
         id(0x88),
         "the refused meeting keeps its progress entry"
     );
+}
+
+/// A confirmed delete the store refuses (the pipeline took the meeting up
+/// while the prompt was open) records the entry the recorder forgot for
+/// it again: the row stays, and until it is durable that entry is what
+/// lets a launch adopt its master. One whose entry cannot be forgotten is
+/// refused before any row goes.
+#[test]
+fn a_delete_that_does_not_go_through_keeps_the_recorders_entry() {
+    let refused = Harness::builder()
+        .confirm_with(|host, _| {
+            let mut meeting = host.store().meeting(uuid(MEETING)).unwrap().unwrap();
+            meeting.state = MeetingState::Processing;
+            host.store().save_meeting(&meeting).unwrap();
+            true
+        })
+        .seed(populate_sample)
+        .build();
+    let audio = refused.audio_folder();
+    refused
+        .fakes
+        .recorder
+        .recorded
+        .lock()
+        .unwrap()
+        .insert(uuid(MEETING), audio.clone());
+    let reply = refused
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap();
+    assert!(reply.confirmed);
+    assert!(refused.store.meeting(uuid(MEETING)).unwrap().is_some());
+    assert_eq!(
+        *refused.fakes.recorder.forgotten.lock().unwrap(),
+        [uuid(MEETING)]
+    );
+    assert_eq!(
+        refused
+            .fakes
+            .recorder
+            .recorded
+            .lock()
+            .unwrap()
+            .get(&uuid(MEETING)),
+        Some(&audio),
+        "the entry is recorded again"
+    );
+
+    let unforgotten = Harness::builder()
+        .confirm(true)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            *fakes.recorder.forget_fails.lock().unwrap() = true;
+        })
+        .build();
+    let error = unforgotten
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, BridgeErrorCode::Failed);
+    assert_eq!(error.message, "Steno could not delete this meeting.");
+    assert!(unforgotten.store.meeting(uuid(MEETING)).unwrap().is_some());
+    assert!(unforgotten.store.asset(uuid(MEETING)).unwrap().is_some());
+    assert!(
+        unforgotten
+            .fakes
+            .file_system
+            .removed
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A delete that a panic unwinds before its commit (here inside the
+/// write, as the commit runs) keeps the row, and the recorder's entry is
+/// recorded again as the drop guard unwinds.
+#[test]
+fn a_delete_unwound_before_its_commit_keeps_the_recorders_entry() {
+    let armed = Arc::new(AtomicBool::new(false));
+    let arm = armed.clone();
+    let harness = Harness::builder()
+        .confirm_with(move |_, _| {
+            arm.store(true, Ordering::SeqCst);
+            true
+        })
+        .seed(populate_sample)
+        .build();
+    harness.store.probe_commits(move |_| {
+        assert!(
+            !armed.swap(false, Ordering::SeqCst),
+            "a panic before the delete's commit"
+        );
+    });
+    let audio = harness.audio_folder();
+    harness
+        .fakes
+        .recorder
+        .recorded
+        .lock()
+        .unwrap()
+        .insert(uuid(MEETING), audio.clone());
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        harness.host.meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+    }));
+    assert!(unwound.is_err());
+    assert!(harness.store.meeting(uuid(MEETING)).unwrap().is_some());
+    assert_eq!(
+        harness
+            .fakes
+            .recorder
+            .recorded
+            .lock()
+            .unwrap()
+            .get(&uuid(MEETING)),
+        Some(&audio),
+        "the entry is recorded again"
+    );
+}
+
+/// Two delete prompts for one meeting: the second, answered after the
+/// first deleted the meeting, finds no row and records no entry for a
+/// meeting that is gone.
+#[test]
+fn a_second_delete_prompt_records_no_entry_for_a_deleted_meeting() {
+    let harness = Harness::builder()
+        .confirm_with(|host, _| {
+            // The first prompt's delete, done while this one is open.
+            host.store().delete_meeting(uuid(MEETING)).unwrap();
+            true
+        })
+        .seed(populate_sample)
+        .build();
+    let audio = harness.audio_folder();
+    harness
+        .fakes
+        .recorder
+        .recorded
+        .lock()
+        .unwrap()
+        .insert(uuid(MEETING), audio);
+    let reply = harness
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap();
+    assert!(reply.confirmed);
+    assert!(harness.store.meeting(uuid(MEETING)).unwrap().is_none());
+    assert_eq!(
+        *harness.fakes.recorder.forgotten.lock().unwrap(),
+        [uuid(MEETING)]
+    );
+    assert!(harness.fakes.recorder.recorded.lock().unwrap().is_empty());
+}
+
+/// A refused delete reads the row and restores its entry under the host
+/// lock: a second prompt's delete, begun between the two, waits for the
+/// restore and then forgets that entry with the rows, so the deleted
+/// meeting keeps no entry.
+#[test]
+fn a_second_delete_waits_for_a_refused_deletes_restore() {
+    let first = Arc::new(AtomicBool::new(true));
+    let harness = Harness::builder()
+        .confirm_with(move |host, _| {
+            if first.swap(false, Ordering::SeqCst) {
+                // The pipeline takes the meeting up while the first prompt
+                // is open.
+                let mut meeting = host.store().meeting(uuid(MEETING)).unwrap().unwrap();
+                meeting.state = MeetingState::Processing;
+                host.store().save_meeting(&meeting).unwrap();
+            }
+            true
+        })
+        .seed(populate_sample)
+        .build();
+    let audio = harness.audio_folder();
+    harness
+        .fakes
+        .recorder
+        .recorded
+        .lock()
+        .unwrap()
+        .insert(uuid(MEETING), audio);
+    let host = harness.host.clone();
+    let second = Arc::new(Mutex::new(None));
+    let spawned = second.clone();
+    *harness.fakes.recorder.before_restore.lock().unwrap() = Some(Box::new(move || {
+        // The pipeline is done with it, and a second prompt deletes it.
+        let mut meeting = host.store().meeting(uuid(MEETING)).unwrap().unwrap();
+        meeting.state = MeetingState::Ready;
+        host.store().save_meeting(&meeting).unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        *spawned.lock().unwrap() = Some(std::thread::spawn(move || {
+            host.store_changed();
+            let reply = host.meetings_delete(MeetingIdParams {
+                meeting_id: uuid(MEETING),
+            });
+            let _ = done.send(());
+            reply
+        }));
+        // Long enough for that delete to finish if nothing held it back.
+        let _ = finished.recv_timeout(std::time::Duration::from_millis(500));
+    }));
+    let reply = harness
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap();
+    assert!(reply.confirmed);
+    let second = second.lock().unwrap().take().expect("a second prompt");
+    assert!(second.join().unwrap().unwrap().confirmed);
+    assert!(harness.store.meeting(uuid(MEETING)).unwrap().is_none());
+    assert!(harness.fakes.recorder.recorded.lock().unwrap().is_empty());
 }
 
 /// The detail heading derives the title as the list does (Swift:

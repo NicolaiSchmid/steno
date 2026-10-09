@@ -99,6 +99,86 @@ fn two_lanes_round_trip_sample_accurately_with_sidecars() {
     );
 }
 
+/// The writer makes the meeting's folder and its parents, and refuses one
+/// that exists, empty or holding a recording, leaving its files as they
+/// were.
+#[test]
+fn the_writer_creates_the_meeting_folder_and_refuses_one_that_exists() {
+    let directory = tempfile::tempdir().unwrap();
+    let audio = directory.path().join("not yet").join("audio");
+    let layout = RecordingLayout::new(&audio, Uuid::new_v4());
+    let mut writer = RecordingWriter::new(&layout, &[AudioLane::Mixed], false).unwrap();
+    assert!(writer.created_directory());
+    write_lanes(&mut writer, &[&AudioFixtures::tone(500.0, 0.5, 0.5)]);
+    let files = writer.finish().unwrap();
+    let master = std::fs::read(&files.master).unwrap();
+    let sidecar = std::fs::read(&files.sidecars_16k[&AudioLane::Mixed]).unwrap();
+
+    for keep_raw in [false, true] {
+        let refused = RecordingWriter::new(&layout, &[AudioLane::Mic], keep_raw).unwrap_err();
+        assert_eq!(
+            refused,
+            CaptureError::RecordingExists(layout.directory.clone())
+        );
+        assert!(
+            refused
+                .to_string()
+                .contains("already exists, so nothing was recorded")
+        );
+    }
+    assert_eq!(std::fs::read(&files.master).unwrap(), master);
+    assert_eq!(
+        std::fs::read(&files.sidecars_16k[&AudioLane::Mixed]).unwrap(),
+        sidecar
+    );
+    assert_eq!(std::fs::read_dir(&layout.directory).unwrap().count(), 2);
+
+    let empty = RecordingLayout::new(&audio, Uuid::new_v4());
+    std::fs::create_dir(&empty.directory).unwrap();
+    assert!(matches!(
+        RecordingWriter::new(&empty, &[AudioLane::Mixed], false),
+        Err(CaptureError::RecordingExists(_))
+    ));
+    assert_eq!(std::fs::read_dir(&empty.directory).unwrap().count(), 0);
+}
+
+/// A file the writer cannot create (here the master, whose path is longer
+/// than the system takes while its folder's is not) removes the folder the
+/// writer made and keeps its parents, so a retry with the meeting's id is
+/// not refused as an existing folder.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_writer_whose_files_cannot_be_created_removes_the_folder_it_made() {
+    // The longest path the system takes, without the terminating NUL.
+    let longest = if cfg!(target_os = "linux") {
+        4095
+    } else {
+        1023
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let meeting_id = Uuid::new_v4();
+    // The audio folder's length that puts the meeting folder's path a few
+    // bytes short of the longest, so that of `recording.caf` in it is too
+    // long.
+    let audio_length = longest - 4 - "/".len() - meeting_id.to_string().len();
+    let mut audio = directory.path().to_path_buf();
+    while audio.as_os_str().len() + 1 < audio_length {
+        let room = audio_length - audio.as_os_str().len() - 1;
+        audio.push("a".repeat(room.min(200)));
+    }
+    std::fs::create_dir_all(&audio).unwrap();
+    let layout = RecordingLayout::new(&audio, meeting_id);
+    let length = layout.directory.as_os_str().len();
+    assert!((longest - 6..=longest).contains(&length), "{length}");
+
+    for _ in 0..2 {
+        let error = RecordingWriter::new(&layout, &[AudioLane::Mixed], false).unwrap_err();
+        assert!(matches!(error, CaptureError::WriterFailed(_)), "{error:?}");
+        assert!(!layout.directory.exists());
+    }
+    assert!(audio.is_dir(), "its parents stay");
+}
+
 #[test]
 fn raw_mic_lane_is_written_beside_the_master() {
     let directory = tempfile::tempdir().unwrap();
@@ -155,7 +235,7 @@ fn in_person_writes_one_channel_and_the_mixed_sidecar() {
 fn wrong_frame_shape_and_double_finish_fail() {
     let directory = tempfile::tempdir().unwrap();
     let mut writer = RecordingWriter::new(
-        &RecordingLayout::from_directory(directory.path()),
+        &RecordingLayout::from_directory(directory.path().join("meeting")),
         &[AudioLane::Mixed],
         false,
     )

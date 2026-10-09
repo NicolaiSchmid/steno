@@ -349,6 +349,10 @@ const SECTION_TOPICS: [BridgeTopic; 6] = [
 /// Swift host said for a recording row.
 const STILL_RECORDING: &str = "This meeting is still recording.";
 
+/// A confirmed delete refused because what the recorder kept for the
+/// meeting's recovery could not be forgotten. Rust only.
+const COULD_NOT_DELETE: &str = "Steno could not delete this meeting.";
+
 /// Swift: `MainWindowBridge.deleteMeetingMessage`.
 pub const DELETE_MEETING_MESSAGE: &str = "The transcript, summary, tasks and the recording on this Mac are removed. Files already exported to Obsidian stay. People stay.";
 
@@ -1421,6 +1425,41 @@ fn wire_option(option: &ModelOption) -> SpeakerOption {
     }
 }
 
+/// The entry a confirmed delete forgot
+/// ([`Recorder::forget_recording`](crate::services::Recorder::forget_recording)),
+/// recorded again when dropped unless the rows went (`folder` taken): a
+/// delete refused (the pipeline took the meeting up while the prompt was
+/// open), not committed, or unwound by a panic keeps its row, and until
+/// the row is durable its entry is what lets a launch adopt the master.
+/// Unless the row is gone: a second prompt for the meeting, answered
+/// after the first one deleted it, records nothing again, and a row that
+/// cannot be read keeps its entry. The read and the restore hold the host
+/// lock, which every delete commits under, so no other prompt's delete
+/// lands between them. Dropped with the lock released: after
+/// [`Host::command`] returns, or as a panic unwinds past its guard. Rust
+/// only.
+struct ForgottenEntry<'a> {
+    host: &'a Host,
+    meeting_id: Uuid,
+    folder: Option<PathBuf>,
+}
+
+impl Drop for ForgottenEntry<'_> {
+    fn drop(&mut self) {
+        let Some(folder) = self.folder.take() else {
+            return;
+        };
+        let _inner = self.host.lock();
+        let shared = &self.host.shared;
+        if !matches!(shared.store.meeting(self.meeting_id), Ok(None)) {
+            shared
+                .services
+                .recorder
+                .restore_recording(self.meeting_id, &folder);
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 impl BridgeHost for Host {
     fn page_ready(&self) -> Outcome<()> {
@@ -1504,39 +1543,62 @@ impl BridgeHost for Host {
             };
             (prompt, recording)
         };
-        // A row left `recording` may be one another process still records
-        // (the Swift app started after this one): its master on disk says
-        // so. Read with the lock released.
-        let left = if recording {
-            let left = self
+        // Where the meeting's folder may be, for a meeting left `recording`
+        // or one whose files no asset names; one an asset names needs none
+        // of it. A row left `recording` may be one another process still
+        // records (the Swift app started after this one): its master on
+        // disk says so. Read with the lock released.
+        let named = !recording && matches!(self.shared.store.asset(params.meeting_id), Ok(Some(_)));
+        let left = (!named).then(|| {
+            self.shared
+                .services
+                .recorder
+                .left_recording(params.meeting_id)
+        });
+        if recording && left.as_ref().is_some_and(|left| left.still_written) {
+            return Err(BridgeError::failed(STILL_RECORDING));
+        }
+        let confirmed = self.confirm(&prompt);
+        if confirmed {
+            // Before the rows go, so the launch's adoption, which reads the
+            // entries after the rows, never finds the meeting gone and its
+            // master still there (a removal not done yet, or one that
+            // failed). An entry that stays would bring the meeting back at
+            // the next launch: the delete is refused before any row goes.
+            let Ok(folder) = self
                 .shared
                 .services
                 .recorder
-                .left_recording(params.meeting_id);
-            if left.still_written {
-                return Err(BridgeError::failed(STILL_RECORDING));
-            }
-            Some(left)
-        } else {
-            None
-        };
-        let confirmed = self.confirm(&prompt);
-        if confirmed {
+                .forget_recording(params.meeting_id)
+            else {
+                tracing::warn!(
+                    meeting_id = %params.meeting_id,
+                    "a meeting was not deleted: its recording's folder could not be forgotten"
+                );
+                return Err(BridgeError::failed(COULD_NOT_DELETE));
+            };
+            let mut forgotten = ForgottenEntry {
+                host: self,
+                meeting_id: params.meeting_id,
+                folder,
+            };
             let now = self.now();
-            let mut deleted = false;
             self.command(
                 &[BridgeTopic::MeetingsList, BridgeTopic::Progress],
                 |inner| {
-                    deleted = inner.list.delete(
+                    let deleted = inner.list.delete(
                         params.meeting_id,
                         &self.shared.store,
                         &*self.shared.services.file_system,
                         left.as_ref(),
+                        recording,
                     );
                     inner.list.reload(&self.shared.store);
                     // The store's `deleted` event, posted only when the rows
-                    // went: a queued meeting's progress entry goes with it.
+                    // went: a queued meeting's progress entry goes with it,
+                    // and the forgotten entry is not recorded again.
                     if deleted {
+                        forgotten.folder = None;
                         inner.progress.apply(
                             &MeetingEvent::Deleted {
                                 meeting_id: params.meeting_id,
@@ -1546,12 +1608,6 @@ impl BridgeHost for Host {
                     }
                 },
             );
-            if deleted && left.is_some() {
-                self.shared
-                    .services
-                    .recorder
-                    .forget_recording(params.meeting_id);
-            }
         }
         Ok(ConfirmReply { confirmed })
     }

@@ -13,7 +13,7 @@
 //! | [`run`] | One run's progress state with the monotonic clamp |
 //! | [`crash_loop`] | Launch recovery's guard against a crash loop: the runs that ended with the app, counted in the meeting's folder |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
-//! | [`intake`] | The phone intake ([`RecordingIntake`]) and the Mac one ([`LocalRecordingIntake`]) |
+//! | [`intake`] | The phone intake ([`RecordingIntake`], which notes its copies' folders in [`AdmissionFolders`]) and the Mac one ([`LocalRecordingIntake`]) |
 //! | [`lane_merger`] | The lanes into one ordered transcript |
 //! | [`speaker_memory`] | The store-backed cosine `SpeakerMemory` |
 //! | [`retention`] | [`RetentionSweep`] over expired assets |
@@ -84,7 +84,8 @@ pub use estimator::{ProcessingEstimator, StageRates, StageSample};
 pub use events::{EventReceiver, MeetingEventBus};
 pub use export_retries::ExportRetries;
 pub use intake::{
-    Attendee, LocalRecordingIntake, LocalRecordingIntakeError, RecordingIntake, RecordingResult,
+    AdmissionFolders, Attendee, LocalRecordingIntake, LocalRecordingIntakeError, RecordingIntake,
+    RecordingResult,
 };
 pub use lane_merger::LaneMerger;
 pub use pipeline::{

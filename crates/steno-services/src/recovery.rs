@@ -34,6 +34,28 @@
 //! ahead) counts as still written: its row stays `recording` until the
 //! clock passes that time, and a later launch recovers it.
 //!
+//! A recording can also be left with no row at all: a phone upload copied
+//! into its meeting folder before a crash or a failed commit (the phone's
+//! retry admits it into a new folder), a row a power loss took before it
+//! was durable, a local recording whose meeting was deleted while it
+//! recorded. After the rows left `recording`, the launch adopts each such
+//! master where it is, as a meeting with its folder's id (`adopt_orphans`),
+//! and the main window says so. Only a master this install wrote is
+//! adopted: the record in [`crate::audio_folders`] names it from before
+//! its row until a launch finds that row durable, so a meeting folder
+//! another install put into a shared audio folder (a second computer
+//! syncing it, a second database over it) is left alone. So is one the
+//! Swift app or an earlier release wrote, which kept no record: the
+//! launch logs how many it left. Nothing in the handover inbox is
+//! adopted: it holds files, not meeting folders, a receipt accounts for
+//! each, and the phone still has its copy.
+//!
+//! During the rollback window a recording can come back once: a Rust
+//! recording is killed, the Swift app's launch fails its row, and the user
+//! deletes it there. The Swift app removes only what an asset names, so
+//! the master stays, and its entry too; the next launch here adopts it
+//! again. A delete here removes it for good.
+//!
 //! | Item | What it does |
 //! |------|--------------|
 //! | `Interrupted` | What the launch lists before anything can record: the rows left `recording`, the recorded and the known folders |
@@ -42,17 +64,19 @@
 //! | `queue_upload` | Queues a phone meeting left `recording` with its stored asset |
 //! | `other_folders`, `find_master` | Where else a master may be, and which folder holds it (`Lookup`) |
 //! | `salvage` | The asset a master's header and sidecars give, as its capture would have handed it over |
+//! | `adopt_orphans`, `orphans` | The launch's adoption of the masters in the audio folders that have no row and that the record names |
+//! | `meeting_folders` | The audio folders a meeting's folder may be in, which a delete removes it from when no asset names it |
 //! | [`LiveRecordingCheck`] | When a master counts as still written; the app's field, so tests inject the clock, and the recorder's check before a delete |
 //!
 //! All but [`LiveRecordingCheck`] are this crate's own.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
-use steno_audio::writer::{CafHeader, CafReadError, WavStreamWriter};
+use steno_audio::writer::{CafHeader, CafReadError, CafStreamWriter, WavStreamWriter};
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, Meeting, MeetingSource, RecordingEndReason,
     RecordingLayout, Store, StoreError,
@@ -125,6 +149,29 @@ pub(crate) fn distinct(
     distinct
 }
 
+/// The audio folders the folder of meeting `meeting_id` may be in, each
+/// once: the one it was recorded into ([`crate::audio_folders::recorded`]),
+/// the settings' one and the known ones. A record, settings or list that
+/// cannot be read gives none. A delete removes the meeting's folder in
+/// each when no asset names it (a meeting left `recording`, one that
+/// failed before its asset was saved), so the launch does not adopt its
+/// master again (`Recorder::left_recording`).
+pub(crate) fn meeting_folders(
+    store: &Store,
+    support_directory: &Path,
+    meeting_id: Uuid,
+) -> Vec<PathBuf> {
+    let recorded = crate::audio_folders::recorded(support_directory)
+        .ok()
+        .and_then(|mut recorded| recorded.remove(&meeting_id));
+    let current = store
+        .settings()
+        .ok()
+        .and_then(|settings| file_url_path(&settings.audio_folder));
+    let known = crate::audio_folders::known(support_directory).unwrap_or_default();
+    distinct(recorded.into_iter().chain(current).chain(known), &[])
+}
+
 /// The folders a master may be in besides the two that decide a meeting
 /// (the recorded one and the settings'), each once: the `known` folders
 /// ([`crate::audio_folders::known`]), then the folder of each stored asset
@@ -176,7 +223,7 @@ pub(crate) fn find_master(deciding: &[PathBuf], others: &[PathBuf], meeting_id: 
     }
 }
 
-/// The recording the master of `meeting_id` in `audio_folder` holds, as
+/// The recording the master of `meeting_id` in `layout` holds, as
 /// its capture would have handed it over: the asset rebuilt from the
 /// master's header alone (whole frames only) with the lanes `source`
 /// records, the default retention (`complete` sets the real one), and the
@@ -187,12 +234,11 @@ pub(crate) fn find_master(deciding: &[PathBuf], others: &[PathBuf], meeting_id: 
 /// one that cannot be is left out, and the decoder rebuilds that lane
 /// from the master.
 pub(crate) fn salvage(
-    audio_folder: &Path,
+    layout: &RecordingLayout,
     meeting_id: Uuid,
     source: MeetingSource,
 ) -> Result<RecordingResult, RecoveryError> {
     let lanes = lanes(source);
-    let layout = RecordingLayout::new(audio_folder, meeting_id);
     let master = layout.master(AudioFormat::Caf48kFloat32);
     let header = CafHeader::read(&master).map_err(|error| match error {
         CafReadError::Io(_) if master.try_exists().is_ok_and(|exists| !exists) => {
@@ -266,7 +312,11 @@ async fn queue(
     meeting_id: Uuid,
     source: MeetingSource,
 ) -> Result<Meeting, RecoveryError> {
-    let result = salvage(audio_folder, meeting_id, source)?;
+    let result = salvage(
+        &RecordingLayout::new(audio_folder, meeting_id),
+        meeting_id,
+        source,
+    )?;
     Ok(intake.complete(meeting_id, result, None).await?)
 }
 
@@ -472,8 +522,9 @@ pub(crate) struct Reconciled {
 /// left alone; one with a master is recovered and queued through `intake`;
 /// the rest are failed with [`Store::INTERRUPTED_RECORDING_REASON`] through
 /// [`Store::fail_recordings`], which skips a row another process has moved
-/// on meanwhile. The record forgets every listed entry whose meeting is no
-/// longer left `recording`, also when no row was left `recording`. Blocks
+/// on meanwhile. The record forgets every listed entry whose meeting has a
+/// row no longer left `recording`, once a durable checkpoint has run
+/// (`forget_settled`), also when no row was left `recording`. Blocks
 /// for up to [`LiveRecordingCheck::fresh_within`] when a master is fresh,
 /// so the caller runs it off the main thread. Swift:
 /// `MeetingStore.failInterruptedRecordings` in `AppController.launch`, the
@@ -486,7 +537,7 @@ pub(crate) fn reconcile_interrupted(
     runtime: &tokio::runtime::Handle,
 ) -> Reconciled {
     let reconciled = reconcile_listed(store, intake, interrupted, check, runtime);
-    forget_settled(interrupted, &reconciled);
+    forget_settled(store, interrupted, &reconciled);
     reconciled
 }
 
@@ -607,10 +658,18 @@ fn reconcile_listed(
 }
 
 /// Forgets the recorded folder of every meeting in `interrupted`'s record
-/// that `reconciled` did not leave `recording`: recovered, failed, or
-/// moved on before the launch. An entry recorded since the launch listed
-/// the record stays.
-fn forget_settled(interrupted: &Interrupted, reconciled: &Reconciled) {
+/// that `reconciled` did not leave `recording` and that has a row:
+/// recovered, failed, adopted by an earlier launch, or saved or moved on
+/// before the launch. Only after a durable checkpoint
+/// ([`Store::checkpoint_durably`]): a row commits under `synchronous =
+/// NORMAL`, so until then a power loss can still take it, and the entry
+/// is what lets a later launch adopt its master. A checkpoint that fails
+/// (another connection holds the WAL) forgets nothing; a later launch
+/// tries again. An entry with no row stays for the launch's adoption
+/// ([`adopt_orphans`]), since its master may still be on disk, and so
+/// does one whose row cannot be read or that was recorded since the
+/// launch listed the record.
+fn forget_settled(store: &Store, interrupted: &Interrupted, reconciled: &Reconciled) {
     let Some(recorded) = &interrupted.recorded else {
         return;
     };
@@ -619,8 +678,13 @@ fn forget_settled(interrupted: &Interrupted, reconciled: &Reconciled) {
         .keys()
         .copied()
         .filter(|id| !left.iter().any(|ids| ids.contains(id)))
+        .filter(|id| store.meeting(*id).is_ok_and(|row| row.is_some()))
         .collect();
     if settled.is_empty() {
+        return;
+    }
+    if let Err(error) = store.checkpoint_durably() {
+        tracing::debug!(%error, "settled recording folders kept: the store is not checkpointed");
         return;
     }
     if let Err(error) = crate::audio_folders::forget(&interrupted.support_directory, &settled) {
@@ -628,11 +692,399 @@ fn forget_settled(interrupted: &Interrupted, reconciled: &Reconciled) {
     }
 }
 
+/// A meeting folder the launch found in an audio folder with a master, no
+/// meeting row, and an entry in the record of recording folders.
+#[derive(Debug, Clone)]
+struct Orphan {
+    meeting_id: Uuid,
+    layout: RecordingLayout,
+    master: PathBuf,
+    format: AudioFormat,
+    modified: SystemTime,
+}
+
+/// The meeting id a folder named `name` stands for: a hyphenated UUID, in
+/// any case ([`RecordingLayout`] spells it in uppercase).
+fn meeting_folder_id(name: &std::ffi::OsStr) -> Option<Uuid> {
+    let name = name.to_str().filter(|name| name.len() == 36)?;
+    Uuid::try_parse(name).ok()
+}
+
+/// The master in `layout` that may hold audio, the first of the formats
+/// the store knows that is there, with its modification time.
+fn orphan_master(layout: &RecordingLayout) -> Option<(AudioFormat, PathBuf, SystemTime)> {
+    AudioFormat::ALL.iter().find_map(|&format| {
+        let master = layout.master(format);
+        let metadata = std::fs::metadata(&master).ok().filter(|metadata| {
+            metadata.is_file() && may_hold_audio(format, &master, metadata.len())
+        })?;
+        Some((format, master, metadata.modified().ok()?))
+    })
+}
+
+/// Whether `master`, in `format` and `len` bytes long, may hold audio: a
+/// whole frame for a CAF. A CAF shorter than the header
+/// [`CafStreamWriter`] writes and one whole frame holds none (a kill right
+/// after its creation cuts it inside the header, one before the first
+/// frame was whole leaves part of it): no CAF with a sample is that
+/// short. The frame is the header's channel count of samples, one sample
+/// when the header cannot be read. Any other format holds none only when
+/// empty.
+fn may_hold_audio(format: AudioFormat, master: &Path, len: u64) -> bool {
+    match format {
+        AudioFormat::Caf48kFloat32 => {
+            let header = CafStreamWriter::HEADER_SIZE as u64;
+            let sample = CafStreamWriter::BYTES_PER_SAMPLE as u64;
+            // The header is read only once it is whole and a sample follows.
+            len >= header + sample && {
+                let channels = CafHeader::read(master).map_or(1, |caf| caf.channel_count);
+                len >= header + channels as u64 * sample
+            }
+        }
+        AudioFormat::M4aAac | AudioFormat::Wav16kInt16 => len > 0,
+    }
+}
+
+/// Whether audio folder `folder` provably holds no master of meeting
+/// `meeting_id`: its meeting folder is there and each master in it is
+/// missing or too short to hold a frame ([`may_hold_audio`]), or the
+/// meeting folder is missing while `folder` lists at least one entry. An
+/// empty audio folder (a volume's mount point while it is not mounted), a
+/// folder or a master that cannot be read now (a permission, an I/O
+/// error) may still hold one.
+fn holds_no_master(folder: &Path, meeting_id: Uuid) -> bool {
+    let layout = RecordingLayout::new(folder, meeting_id);
+    match std::fs::metadata(&layout.directory) {
+        Ok(metadata) if metadata.is_dir() => AudioFormat::ALL.iter().all(|&format| {
+            let master = layout.master(format);
+            match std::fs::metadata(&master) {
+                Ok(metadata) => {
+                    metadata.is_file() && !may_hold_audio(format, &master, metadata.len())
+                }
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            }
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::read_dir(folder).is_ok_and(|mut entries| entries.any(|entry| entry.is_ok()))
+        }
+        _ => false,
+    }
+}
+
+/// The meeting folders in `folders` that hold a master, whose id no row
+/// has (`ids`) and the record of recording folders names (`recorded`),
+/// each id once, first folder first. A folder that is missing or cannot be
+/// read is skipped, and only a folder whose id has no row is looked into.
+/// A master that neither a row nor the record names is another install's
+/// (a second computer syncing the same folder, a second database over it)
+/// or written before this version kept the record (the Swift app, an
+/// earlier release): it is left alone, and the launch logs one line with
+/// their count and the first few ids.
+fn orphans(
+    folders: &[PathBuf],
+    ids: &HashSet<Uuid>,
+    recorded: &BTreeMap<Uuid, PathBuf>,
+) -> Vec<Orphan> {
+    let mut seen = HashSet::new();
+    let mut found = Vec::new();
+    let mut unrecorded = Vec::new();
+    for folder in folders {
+        let entries = match std::fs::read_dir(folder) {
+            Ok(entries) => entries,
+            Err(error) => {
+                // The error can name the user's folder: debug alone.
+                tracing::debug!(%error, "an audio folder was not searched for recordings");
+                continue;
+            }
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let Some(meeting_id) = meeting_folder_id(&entry.file_name()) else {
+                continue;
+            };
+            if ids.contains(&meeting_id) || seen.contains(&meeting_id) {
+                continue;
+            }
+            let layout = RecordingLayout::from_directory(entry.path());
+            let Some((format, master, modified)) = orphan_master(&layout) else {
+                continue;
+            };
+            seen.insert(meeting_id);
+            if recorded.contains_key(&meeting_id) {
+                found.push(Orphan {
+                    meeting_id,
+                    layout,
+                    master,
+                    format,
+                    modified,
+                });
+            } else {
+                unrecorded.push(meeting_id);
+            }
+        }
+    }
+    if !unrecorded.is_empty() {
+        tracing::warn!(
+            count = unrecorded.len(),
+            first = %first_ids(&unrecorded),
+            "recordings with no meeting that this install has no record of are left alone"
+        );
+    }
+    found
+}
+
+/// How many ids each of the launch's two summary lines names: the masters
+/// it leaves alone, and the ones it could not recover.
+const IDS_LOGGED: usize = 3;
+
+/// The first [`IDS_LOGGED`] of `ids`, joined for a log line.
+fn first_ids(ids: &[Uuid]) -> String {
+    ids.iter()
+        .take(IDS_LOGGED)
+        .map(Uuid::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The meeting and asset an orphan's master gives: a CAF the Mac wrote is
+/// [salvaged](salvage) as a call (two channels) or an in-person recording
+/// (one) with the end reason `failed`, as an interrupted recording is; an
+/// m4a or a WAV is a phone recording, with the length its container
+/// declares and no end reason. It started its length before the master was
+/// last modified (for a phone recording, when its upload was copied in,
+/// not when the phone recorded it), and gets the source's default title,
+/// the settings' template, `queued`, and the retention Keep forever: the
+/// master outlived its row, so it is one the user kept, and a shorter
+/// default would delete it once processed. The user can change it.
+fn adopted(
+    orphan: &Orphan,
+    settings: &steno_core::Settings,
+    zone: chrono::FixedOffset,
+    now: chrono::DateTime<Utc>,
+) -> Result<(Meeting, AudioAsset), RecoveryError> {
+    let Orphan {
+        meeting_id,
+        layout,
+        master,
+        format,
+        modified,
+    } = orphan;
+    let (source, asset, duration, end_reason) = match format {
+        AudioFormat::Caf48kFloat32 => {
+            // One channel is an in-person recording; the salvage as a call
+            // fails any other count and a header it cannot read.
+            let source = match CafHeader::read(master) {
+                Ok(header) if header.channel_count == 1 => MeetingSource::MacInPerson,
+                _ => MeetingSource::MacCall,
+            };
+            let result = salvage(layout, *meeting_id, source)?;
+            (
+                source,
+                result.asset,
+                result.duration,
+                Some(result.end_reason),
+            )
+        }
+        AudioFormat::M4aAac | AudioFormat::Wav16kInt16 => {
+            let duration = steno_audio::SymphoniaAudioCodec::declared_duration(master)
+                .inspect_err(|error| {
+                    tracing::debug!(%meeting_id, %error, "an adopted recording's length is not known");
+                })
+                .ok()
+                .flatten()
+                .unwrap_or(0.0);
+            let asset = AudioAsset {
+                id: Uuid::new_v4(),
+                meeting_id: *meeting_id,
+                url: file_url(master, false),
+                format: *format,
+                lanes: vec![AudioLane::Mixed],
+                sidecars_16k: BTreeMap::new(),
+                mixdown_url: None,
+                retention: AudioRetention::KeepForever,
+                expires_at: None,
+            };
+            (MeetingSource::Phone, asset, duration, None)
+        }
+    };
+    let ended = chrono::DateTime::<Utc>::from(*modified);
+    let started_at = Duration::try_from_secs_f64(duration)
+        .ok()
+        .and_then(|length| chrono::Duration::from_std(length).ok())
+        .and_then(|length| ended.checked_sub_signed(length))
+        .unwrap_or(ended);
+    let meeting = Meeting {
+        id: *meeting_id,
+        title: steno_pipeline::intake::default_title(source, started_at, zone),
+        started_at,
+        duration,
+        language: None,
+        source,
+        calendar_event_id: None,
+        tags: Vec::new(),
+        state: steno_core::MeetingState::Queued,
+        end_reason,
+        title_origin: steno_core::TitleOrigin::Default,
+        template_id: settings.default_template_id.clone(),
+        summary: None,
+        scratchpad: String::new(),
+        llm_usage: None,
+        created_at: now,
+        updated_at: now,
+    };
+    Ok((meeting, asset))
+}
+
+/// The launch's adoption of recordings with no meeting, after the rows
+/// left `recording` are reconciled. A meeting folder (named by a UUID) in
+/// the settings' audio folder, a folder a recording was recorded into, a
+/// known folder or a stored asset's folder is adopted when it holds a
+/// master that may hold audio, has no row, and is named in the record of
+/// recording folders. Each is adopted where it is, as a `queued` meeting
+/// with that id ([`adopted`]), its meeting and asset inserted in one
+/// transaction that fails when a row with the id was written meanwhile,
+/// and processed
+/// ([`ProcessingPipeline::enqueue_new`](steno_pipeline::ProcessingPipeline::enqueue_new)).
+/// Returns the ids adopted.
+///
+/// The record ([`crate::audio_folders`]) is the evidence that a master is
+/// this install's: a recording's start and a phone upload's copy write
+/// their entry before the row. An entry counts only when it is both in
+/// the launch's listing and in a read after the rows. A delete forgets its
+/// entry before its rows go, and records it again when it does not go
+/// through (refused, its commit failed or a panic unwound it), so a
+/// meeting deleted while the launch ran is not adopted back, and one whose
+/// delete was refused keeps its evidence. A master the record does not
+/// name is left alone ([`orphans`]), and nothing in the handover inbox is
+/// adopted: it holds files, not meeting folders.
+///
+/// An adopted master's entry stays: the insert commits under
+/// `synchronous = NORMAL`, so a power loss can still take it, and a later
+/// launch forgets the entry once its row is durable (`forget_settled`).
+/// An entry with no row is forgotten here only when its folder provably
+/// holds no master (`holds_no_master`, which counts a CAF short of one
+/// whole frame as none) or its master is a header with no audio
+/// ([`Unrecoverable::Empty`]); the file stays either way. One whose audio
+/// folder is empty, missing or unreadable stays, and is logged at debug.
+/// A master modified within [`LiveRecordingCheck::fresh_within`] is left
+/// for the next launch: another process (a phone upload still being
+/// admitted, the Swift app) may be writing it. One that cannot be read
+/// (a channel count the salvage does not take) or whose rows cannot be
+/// saved keeps its entry for the next launch too, and the launch names
+/// them all in one line. Rust only: Swift had no recovery.
+pub(crate) fn adopt_orphans(
+    store: &Store,
+    pipeline: &steno_pipeline::ProcessingPipeline,
+    interrupted: &Interrupted,
+    check: &LiveRecordingCheck,
+    zone: chrono::FixedOffset,
+    runtime: &tokio::runtime::Handle,
+) -> Vec<Uuid> {
+    // `None`: the record or the rows left `recording` could not be read,
+    // so no master can be told this install's.
+    let Some(listed_at_launch) = &interrupted.recorded else {
+        return Vec::new();
+    };
+    let listed = store
+        .settings()
+        .and_then(|settings| Ok((settings, store.meeting_ids()?)));
+    let (settings, ids) = match listed {
+        Ok((settings, ids)) => (settings, ids.into_iter().collect::<HashSet<_>>()),
+        Err(error) => {
+            tracing::warn!(%error, "recordings with no meeting were not looked for");
+            return Vec::new();
+        }
+    };
+    // Only an entry in the launch's listing and in a read after the rows
+    // is evidence: a delete forgets its entry before its rows go, so a
+    // meeting deleted since the listing is not in this read, and one
+    // started since is not in the listing.
+    let read_again = match crate::audio_folders::recorded(&interrupted.support_directory) {
+        Ok(read_again) => read_again,
+        Err(error) => {
+            tracing::debug!(%error, "recording folders not read again; none adopted");
+            return Vec::new();
+        }
+    };
+    let mut recorded = listed_at_launch.clone();
+    recorded.retain(|meeting_id, _| read_again.contains_key(meeting_id));
+    let others = other_folders(store, &interrupted.known_folders).unwrap_or_else(|error| {
+        tracing::debug!(%error, "the stored assets' folders were not listed");
+        interrupted.known_folders.clone()
+    });
+    let folders = distinct(
+        file_url_path(&settings.audio_folder)
+            .into_iter()
+            .chain(recorded.values().cloned())
+            .chain(others),
+        &[],
+    );
+    let found = orphans(&folders, &ids, &recorded);
+    let _entered = runtime.enter();
+    let mut adopted_ids = Vec::new();
+    // No master to lose: forgotten whether or not the store is durable.
+    let mut gone = Vec::new();
+    // Kept with their entries, and warned about in one line.
+    let mut unrecovered = Vec::new();
+    for orphan in &found {
+        let meeting_id = orphan.meeting_id;
+        if check.is_fresh(&orphan.master) {
+            tracing::warn!(%meeting_id, "a recording with no meeting is still written; the next launch looks again");
+            continue;
+        }
+        let rows = adopted(orphan, &settings, zone, (pipeline.dependencies().now)());
+        let saved = rows.and_then(|(meeting, asset)| {
+            pipeline
+                .enqueue_new(&meeting, &asset)
+                .map_err(|failure| RecoveryError::NotSaved(failure.into()))
+        });
+        // Warn names the meeting; an error, which can name its folder,
+        // goes to debug.
+        match saved {
+            Ok(()) => {
+                tracing::warn!(%meeting_id, "a recording with no meeting was recovered");
+                adopted_ids.push(meeting_id);
+            }
+            // A header and no audio: it holds no master either.
+            Err(RecoveryError::Unrecoverable(Unrecoverable::Empty)) => {
+                tracing::debug!(%meeting_id, "a recording with no meeting holds no audio; its entry is forgotten");
+                gone.push(meeting_id);
+            }
+            Err(error) => {
+                tracing::debug!(%meeting_id, %error, "recording with no meeting not recovered");
+                unrecovered.push(meeting_id);
+            }
+        }
+    }
+    if !unrecovered.is_empty() {
+        tracing::warn!(
+            count = unrecovered.len(),
+            first = %first_ids(&unrecovered),
+            "recordings with no meeting could not be recovered; they stay on disk for the next launch"
+        );
+    }
+    for (&meeting_id, folder) in &recorded {
+        if ids.contains(&meeting_id) || found.iter().any(|orphan| orphan.meeting_id == meeting_id) {
+            continue;
+        }
+        if holds_no_master(folder, meeting_id) {
+            gone.push(meeting_id);
+        } else {
+            tracing::debug!(%meeting_id, "a recording with no meeting whose folder cannot be told empty is kept for the next launch");
+        }
+    }
+    if !gone.is_empty()
+        && let Err(error) = crate::audio_folders::forget(&interrupted.support_directory, &gone)
+    {
+        tracing::debug!(%error, "recording folders with no master not forgotten");
+    }
+    adopted_ids
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
-    use steno_audio::writer::{CafStreamWriter, RecordingWriter, RecordingWriting as _, WavFile};
+    use steno_audio::writer::{RecordingWriter, RecordingWriting as _, WavFile};
     use steno_audio::{FRAME_SIZE, SAMPLE_RATE};
     use steno_core::testing::WriteLockHold;
     use steno_core::{MeetingState, MeetingStateKind};
@@ -808,7 +1260,11 @@ mod tests {
     }
 
     /// The launch's background half over `harness`'s pipeline.
-    fn reconcile_at_launch(harness: &Harness, meetings: &[Meeting], check: &LiveRecordingCheck) {
+    fn reconcile_at_launch(
+        harness: &Harness,
+        meetings: &[Meeting],
+        check: &LiveRecordingCheck,
+    ) -> Vec<Uuid> {
         crate::app::reconcile_at_launch(
             &harness.store,
             &harness.pipeline,
@@ -816,7 +1272,7 @@ mod tests {
             check,
             chrono::FixedOffset::east_opt(0).unwrap(),
             &tokio::runtime::Handle::current(),
-        );
+        )
     }
 
     /// A kill inside a write leaves part of a frame: whole frames are
@@ -1099,20 +1555,40 @@ mod tests {
     }
 
     /// A launch with no row left `recording` still forgets the entries of
-    /// meetings that moved on: one failed since, and one that is gone.
+    /// meetings that moved on: the reconcile one failed since, and the
+    /// adoption each one with no row whose folder provably holds no master
+    /// (a recording that never wrote one): a meeting folder with no
+    /// master, and a meeting folder missing from an audio folder that
+    /// lists others. The reconcile keeps those for the adoption, since a
+    /// master could have been there.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_launch_with_no_row_left_recording_forgets_the_settled_entries() {
         let harness = Harness::new();
         let failed = harness.begin(MeetingSource::MacCall);
         harness.record(&failed, &harness.audio_folder());
         harness.intake().fail(failed.id, "refused").unwrap();
-        let gone = Uuid::new_v4();
-        crate::audio_folders::record(&harness.support_directory(), gone, &harness.audio_folder())
+        let (empty, missing) = (Uuid::new_v4(), Uuid::new_v4());
+        std::fs::create_dir_all(RecordingLayout::new(&harness.audio_folder(), empty).directory)
             .unwrap();
+        for id in [empty, missing] {
+            crate::audio_folders::record(&harness.support_directory(), id, &harness.audio_folder())
+                .unwrap();
+        }
 
         assert_eq!(
             harness.reconcile(&[], &an_hour_later()),
             Reconciled::default()
+        );
+        assert_eq!(
+            crate::audio_folders::recorded(&harness.support_directory()).unwrap(),
+            BTreeMap::from([
+                (empty, harness.audio_folder()),
+                (missing, harness.audio_folder())
+            ])
+        );
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
         );
         assert!(
             crate::audio_folders::recorded(&harness.support_directory())
@@ -1183,12 +1659,7 @@ mod tests {
         let layout = RecordingLayout::new(&harness.audio_folder(), uploaded.id);
         std::fs::create_dir_all(&layout.directory).unwrap();
         let upload = layout.master(AudioFormat::M4aAac);
-        std::fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../Tests/Fixtures/audio/tone-440-44k1-500ms.m4a"),
-            &upload,
-        )
-        .unwrap();
+        std::fs::copy(audio_fixture("tone-440-44k1-500ms.m4a"), &upload).unwrap();
         let asset = AudioAsset {
             id: Uuid::new_v4(),
             meeting_id: uploaded.id,
@@ -1390,6 +1861,460 @@ mod tests {
         assert_eq!(harness.state(&meeting), MeetingState::Recording);
     }
 
+    /// A master `recording.<ext>` with no row, as `write` leaves it in the
+    /// meeting folder it makes under the audio folder, its folder recorded
+    /// first as the recorder and the phone intake record it; returns its
+    /// id.
+    fn orphan(harness: &Harness, write: impl FnOnce(&RecordingLayout)) -> Uuid {
+        let meeting_id = Uuid::new_v4();
+        crate::audio_folders::record(
+            &harness.support_directory(),
+            meeting_id,
+            &harness.audio_folder(),
+        )
+        .unwrap();
+        write(&RecordingLayout::new(&harness.audio_folder(), meeting_id));
+        meeting_id
+    }
+
+    /// The audio fixture `name` from `Tests/Fixtures/audio`.
+    fn audio_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Tests/Fixtures/audio")
+            .join(name)
+    }
+
+    /// A Mac master of `lanes` with `frames` frames, its writer dropped
+    /// as a crash leaves it.
+    fn mac_orphan(harness: &Harness, lanes: &[AudioLane], frames: usize) -> Uuid {
+        orphan(harness, |layout| {
+            let mut writer = RecordingWriter::new(layout, lanes, false).unwrap();
+            write_frames(&mut writer, frames);
+            drop(writer);
+        })
+    }
+
+    /// The fixture `name` copied in as a phone's master in `format`.
+    fn phone_orphan(harness: &Harness, name: &str, format: AudioFormat) -> Uuid {
+        orphan(harness, |layout| {
+            std::fs::create_dir_all(&layout.directory).unwrap();
+            std::fs::copy(audio_fixture(name), layout.master(format)).unwrap();
+        })
+    }
+
+    /// Every file under `folder`, recursively, with its bytes.
+    fn files_in(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(files_in(&path));
+            } else {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+        files
+    }
+
+    fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
+        ids.sort();
+        ids
+    }
+
+    /// Asserts that `meeting` started its length before the master of
+    /// `format` in its folder was last modified, to the millisecond.
+    fn assert_started_before_the_master_ended(
+        harness: &Harness,
+        meeting: &Meeting,
+        format: AudioFormat,
+    ) {
+        let master = RecordingLayout::new(&harness.audio_folder(), meeting.id).master(format);
+        let modified =
+            chrono::DateTime::<Utc>::from(std::fs::metadata(master).unwrap().modified().unwrap());
+        let ended = meeting.started_at
+            + chrono::Duration::from_std(Duration::from_secs_f64(meeting.duration)).unwrap();
+        assert!(
+            (ended - modified).num_milliseconds().abs() <= 1,
+            "{ended} against {modified}"
+        );
+    }
+
+    /// A call master and an in-person master with no row (a row a power
+    /// loss took before it was durable, a meeting deleted while it
+    /// recorded) are adopted at launch where they are: a meeting with the
+    /// folder's id, the source the channels say, the master's length, the
+    /// end reason `failed`, the default title, started that long before
+    /// the master was last modified, its asset rebuilt with the sidecars,
+    /// and processed. Their entries stay until the second launch, which
+    /// adopts nothing and forgets them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mac_master_with_no_meeting_is_adopted_and_processed() {
+        let harness = Harness::new();
+        let call = mac_orphan(&harness, &[AudioLane::Mic, AudioLane::System], 150);
+        let in_person = mac_orphan(&harness, &[AudioLane::Mixed], 50);
+
+        let adopted = reconcile_at_launch(&harness, &[], &an_hour_later());
+        assert_eq!(sorted(adopted), sorted(vec![call, in_person]));
+        let zone = chrono::FixedOffset::east_opt(0).unwrap();
+        for (meeting_id, source, lanes, duration) in [
+            (
+                call,
+                MeetingSource::MacCall,
+                vec![AudioLane::Mic, AudioLane::System],
+                1.5,
+            ),
+            (
+                in_person,
+                MeetingSource::MacInPerson,
+                vec![AudioLane::Mixed],
+                0.5,
+            ),
+        ] {
+            let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+            assert_ne!(meeting.state.kind(), MeetingStateKind::Failed);
+            assert_eq!(meeting.source, source);
+            assert_eq!(meeting.duration, duration);
+            assert_eq!(meeting.end_reason, Some(RecordingEndReason::Failed));
+            assert_started_before_the_master_ended(&harness, &meeting, AudioFormat::Caf48kFloat32);
+            assert_eq!(
+                meeting.title,
+                steno_pipeline::intake::default_title(source, meeting.started_at, zone)
+            );
+            let asset = harness.store.asset(meeting_id).unwrap().unwrap();
+            assert_eq!(
+                asset.url,
+                file_url(&master_path(&harness.audio_folder(), meeting_id), false)
+            );
+            assert_eq!(asset.format, AudioFormat::Caf48kFloat32);
+            assert_eq!(
+                asset.sidecars_16k.keys().copied().collect::<Vec<_>>(),
+                lanes
+            );
+            assert_eq!(asset.lanes, lanes);
+            assert_eq!(asset.retention, AudioRetention::KeepForever);
+        }
+        harness.pipeline.current().wait_until_idle().await;
+        for meeting_id in [call, in_person] {
+            assert_eq!(
+                harness.store.meeting(meeting_id).unwrap().unwrap().state,
+                MeetingState::Ready
+            );
+        }
+
+        assert_eq!(
+            sorted(
+                crate::audio_folders::recorded(&harness.support_directory())
+                    .unwrap()
+                    .into_keys()
+                    .collect()
+            ),
+            sorted(vec![call, in_person]),
+            "an adopted recording's folder stays until its row is durable"
+        );
+        let assets = harness.store.asset_urls().unwrap().len();
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        assert_eq!(harness.store.asset_urls().unwrap().len(), assets);
+        assert!(
+            crate::audio_folders::recorded(&harness.support_directory())
+                .unwrap()
+                .is_empty(),
+            "the second launch forgets them"
+        );
+        harness.pipeline.current().wait_until_idle().await;
+    }
+
+    /// A phone upload copied into its meeting folder whose row never
+    /// committed (a crash between the copy and the commit, a commit and
+    /// its `failed` save both failing) is adopted as a phone recording
+    /// with no end reason, the length its container declares, a plain
+    /// asset in its format, and processed; a WAV master too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_phone_master_with_no_meeting_is_adopted_as_a_phone_recording() {
+        let harness = Harness::new();
+        let m4a = phone_orphan(&harness, "tone-440-44k1-500ms.m4a", AudioFormat::M4aAac);
+        let wav = phone_orphan(
+            &harness,
+            "conversation-mic-6s.wav",
+            AudioFormat::Wav16kInt16,
+        );
+
+        let adopted = reconcile_at_launch(&harness, &[], &an_hour_later());
+        assert_eq!(sorted(adopted), sorted(vec![m4a, wav]));
+        for (meeting_id, format, seconds) in [
+            (m4a, AudioFormat::M4aAac, 0.5..0.6),
+            (wav, AudioFormat::Wav16kInt16, 5.99..6.01),
+        ] {
+            let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+            assert_eq!(meeting.source, MeetingSource::Phone);
+            assert_eq!(meeting.end_reason, None);
+            assert!(seconds.contains(&meeting.duration), "{}", meeting.duration);
+            assert_started_before_the_master_ended(&harness, &meeting, format);
+            assert!(
+                meeting.title.starts_with("Phone recording "),
+                "{}",
+                meeting.title
+            );
+            let asset = harness.store.asset(meeting_id).unwrap().unwrap();
+            let master = RecordingLayout::new(&harness.audio_folder(), meeting_id).master(format);
+            assert_eq!(asset.url, file_url(&master, false));
+            assert_eq!(asset.format, format);
+            assert_eq!(asset.lanes, vec![AudioLane::Mixed]);
+            assert!(asset.sidecars_16k.is_empty());
+            assert_eq!(asset.retention, AudioRetention::KeepForever);
+        }
+        harness.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            harness.store.meeting(m4a).unwrap().unwrap().state,
+            MeetingState::Ready
+        );
+    }
+
+    /// Only a meeting folder with a master and no row that the record
+    /// names is adopted: an empty master, a folder not named by a UUID, a
+    /// master the record does not name (another install's, or one from
+    /// before the record), and a folder whose meeting has a row in any
+    /// state (here `recording` as well, left to the reconcile) are left as
+    /// they are.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_master_with_no_meeting_is_adopted() {
+        let harness = Harness::new();
+        let empty = orphan(&harness, |layout| {
+            std::fs::create_dir_all(&layout.directory).unwrap();
+            std::fs::write(layout.master(AudioFormat::Caf48kFloat32), b"").unwrap();
+        });
+        let unrecorded = Uuid::new_v4();
+        let mut writer = RecordingWriter::new(
+            &RecordingLayout::new(&harness.audio_folder(), unrecorded),
+            &[AudioLane::Mixed],
+            false,
+        )
+        .unwrap();
+        write_frames(&mut writer, 10);
+        drop(writer);
+        let unrecorded_files =
+            files_in(&RecordingLayout::new(&harness.audio_folder(), unrecorded).directory);
+        let not_a_meeting = harness.audio_folder().join("not-a-meeting");
+        std::fs::create_dir_all(&not_a_meeting).unwrap();
+        std::fs::copy(
+            audio_fixture("tone-440-44k1-500ms.m4a"),
+            not_a_meeting.join("recording.m4a"),
+        )
+        .unwrap();
+        let mut rows = Vec::new();
+        for state in [
+            MeetingState::Recording,
+            MeetingState::Queued,
+            MeetingState::Ready,
+            MeetingState::Failed {
+                reason: "refused".to_owned(),
+            },
+        ] {
+            let meeting = harness.begin(MeetingSource::MacInPerson);
+            let mut writer = harness.writer(&meeting);
+            write_frames(&mut writer, 10);
+            drop(writer);
+            harness
+                .store
+                .set_state(meeting.id, state.clone(), Utc::now())
+                .unwrap();
+            rows.push((meeting.id, state));
+        }
+
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        assert!(harness.store.meeting(empty).unwrap().is_none());
+        assert!(harness.store.meeting(unrecorded).unwrap().is_none());
+        assert_eq!(
+            files_in(&RecordingLayout::new(&harness.audio_folder(), unrecorded).directory),
+            unrecorded_files
+        );
+        for (meeting_id, state) in rows {
+            assert_eq!(
+                harness.store.meeting(meeting_id).unwrap().unwrap().state,
+                state
+            );
+            assert!(harness.store.asset(meeting_id).unwrap().is_none());
+        }
+        assert!(not_a_meeting.join("recording.m4a").is_file());
+    }
+
+    /// A master modified just now may be one another process is writing
+    /// (a phone upload being admitted, the Swift app): it is left for the
+    /// next launch, which adopts it once it is old.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_master_modified_just_now_is_left_for_the_next_launch() {
+        let harness = Harness::new();
+        let fresh = mac_orphan(&harness, &[AudioLane::Mixed], 10);
+        let now = LiveRecordingCheck {
+            wait: Arc::new(|_| panic!("an orphan is not waited for")),
+            ..LiveRecordingCheck::default()
+        };
+
+        assert_eq!(reconcile_at_launch(&harness, &[], &now), Vec::<Uuid>::new());
+        assert!(harness.store.meeting(fresh).unwrap().is_none());
+        assert!(master_path(&harness.audio_folder(), fresh).is_file());
+
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [fresh]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+    }
+
+    /// The handover inbox holds uploads a receipt accounts for, which the
+    /// phone still has: its files are left as they are, even with the
+    /// inbox and the support directory listed as known audio folders.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_handover_inbox_is_left_alone() {
+        let harness = Harness::new();
+        let inbox = harness.support_directory().join("handover-inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let recording_id = Uuid::new_v4().hyphenated().to_string();
+        let files = [
+            format!("{recording_id}.m4a"),
+            format!("{recording_id}.partial"),
+            format!("{recording_id}.metadata.json"),
+        ]
+        .map(|name| inbox.join(name));
+        for file in &files {
+            std::fs::copy(audio_fixture("tone-440-44k1-500ms.m4a"), file).unwrap();
+        }
+        for folder in [&harness.support_directory(), &inbox] {
+            crate::audio_folders::remember(&harness.support_directory(), folder).unwrap();
+        }
+
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        assert_eq!(harness.store.all_meetings().unwrap(), Vec::<Meeting>::new());
+        for file in &files {
+            assert!(file.is_file(), "{}", file.display());
+        }
+    }
+
+    /// An adopted master is kept whatever the default retention: it
+    /// outlived its row, so the user kept it, and a default that deletes
+    /// after processing would remove it once processed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_adopted_master_is_kept_whatever_the_default_retention() {
+        let harness = Harness::new();
+        let mut settings = harness.store.settings().unwrap();
+        settings.default_retention = AudioRetention::DeleteAfterProcessing;
+        harness.store.save_settings(&settings).unwrap();
+        let call = mac_orphan(&harness, &[AudioLane::Mic, AudioLane::System], 150);
+        let phone = phone_orphan(&harness, "tone-440-44k1-500ms.m4a", AudioFormat::M4aAac);
+
+        let adopted = reconcile_at_launch(&harness, &[], &an_hour_later());
+        assert_eq!(sorted(adopted), sorted(vec![call, phone]));
+        harness.pipeline.current().wait_until_idle().await;
+        steno_pipeline::RetentionSweep::new(harness.store.clone())
+            .run(Utc::now() + chrono::Duration::days(1))
+            .unwrap();
+        for (meeting_id, format) in [
+            (call, AudioFormat::Caf48kFloat32),
+            (phone, AudioFormat::M4aAac),
+        ] {
+            assert_eq!(
+                harness.store.asset(meeting_id).unwrap().unwrap().retention,
+                AudioRetention::KeepForever
+            );
+            let master = RecordingLayout::new(&harness.audio_folder(), meeting_id).master(format);
+            assert!(master.is_file(), "{}", master.display());
+        }
+    }
+
+    /// Two databases over one audio folder (two computers syncing it, a
+    /// second database the CLI was pointed at): the second one's launch
+    /// adopts nothing of the first's, neither a processed meeting nor one
+    /// still recording, and touches none of their files, so neither its
+    /// retention nor a delete can remove them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_meeting_folder_of_another_database_is_left_untouched() {
+        let first = Harness::new();
+        let done = first.begin(MeetingSource::MacCall);
+        first.record(&done, &first.audio_folder());
+        let mut writer = first.writer(&done);
+        write_frames(&mut writer, 150);
+        drop(writer);
+        reconcile_at_launch(&first, std::slice::from_ref(&done), &an_hour_later());
+        first.pipeline.current().wait_until_idle().await;
+        assert_eq!(first.state(&done), MeetingState::Ready);
+        let live = first.begin(MeetingSource::MacCall);
+        first.record(&live, &first.audio_folder());
+        let mut writer = first.writer(&live);
+        write_frames(&mut writer, 50);
+        drop(writer);
+        let files = files_in(&first.audio_folder());
+
+        let second = Harness::new();
+        second.set_folder(&first.audio_folder());
+        let mut settings = second.store.settings().unwrap();
+        settings.default_retention = AudioRetention::DeleteAfterProcessing;
+        second.store.save_settings(&settings).unwrap();
+        assert_eq!(
+            reconcile_at_launch(&second, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        second.pipeline.current().wait_until_idle().await;
+        steno_pipeline::RetentionSweep::new(second.store.clone())
+            .run(Utc::now() + chrono::Duration::days(1))
+            .unwrap();
+
+        assert_eq!(second.store.all_meetings().unwrap(), Vec::<Meeting>::new());
+        assert_eq!(files_in(&first.audio_folder()), files);
+    }
+
+    /// A meeting with no asset (here one whose master has the wrong
+    /// channels, failed at launch) keeps its master in its folder. Its
+    /// delete removes that folder in each audio folder it may be in, so
+    /// the next launch does not bring the meeting back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deleted_meeting_with_no_asset_does_not_come_back() {
+        let harness = Harness::new();
+        let meeting = harness.begin(MeetingSource::MacCall);
+        harness.record(&meeting, &harness.audio_folder());
+        let layout = RecordingLayout::new(&harness.audio_folder(), meeting.id);
+        let mut writer = RecordingWriter::new(&layout, &[AudioLane::Mixed], false).unwrap();
+        write_frames(&mut writer, 50);
+        drop(writer);
+        reconcile_at_launch(&harness, std::slice::from_ref(&meeting), &an_hour_later());
+        assert!(matches!(
+            harness.state(&meeting),
+            MeetingState::Failed { .. }
+        ));
+        assert!(harness.store.asset(meeting.id).unwrap().is_none());
+        assert!(layout.master(AudioFormat::Caf48kFloat32).is_file());
+
+        let left = steno_host::services::LeftRecording {
+            folders: meeting_folders(&harness.store, &harness.support_directory(), meeting.id),
+            still_written: false,
+        };
+        let mut list = steno_host::main_window::MeetingListViewModel::new(
+            chrono::FixedOffset::east_opt(0).unwrap(),
+        );
+        assert!(list.delete(
+            meeting.id,
+            &harness.store,
+            &steno_host::services::RealFileSystem,
+            Some(&left),
+            false,
+        ));
+        assert_eq!(list.error, None);
+        assert!(!layout.directory.exists());
+
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        assert!(harness.store.meeting(meeting.id).unwrap().is_none());
+    }
+
     /// A recovery that panics (here the live check's wait) is caught: the
     /// launch's task returns, the row it had not finished stays
     /// `recording`, and the next launch recovers it.
@@ -1410,5 +2335,547 @@ mod tests {
         reconcile_at_launch(&harness, std::slice::from_ref(&fresh), &an_hour_later());
         harness.pipeline.current().wait_until_idle().await;
         assert_eq!(harness.state(&fresh), MeetingState::Ready);
+    }
+
+    /// A power loss before any WAL frame reached the disk: the database
+    /// comes back from its file alone (as the last checkpoint left it),
+    /// opened by a new launch over the same support and audio folders.
+    fn power_loss(harness: Harness) -> Harness {
+        let Harness {
+            dir,
+            store,
+            pipeline,
+        } = harness;
+        let after = dir.path().join("after-power-loss.sqlite");
+        std::fs::copy(dir.path().join("steno.sqlite"), &after).unwrap();
+        drop((pipeline, store));
+        let store = Arc::new(Store::open(&after).unwrap());
+        let pipeline = current_pipeline(fake_dependencies(&store, "fake-engine"));
+        Harness {
+            dir,
+            store,
+            pipeline,
+        }
+    }
+
+    /// The adoption's insert commits under `synchronous = NORMAL`: a power
+    /// loss before a checkpoint takes its row, but not the entry, so the
+    /// next launch adopts the master again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_power_loss_after_an_adoption_leaves_the_master_to_the_next_launch() {
+        let harness = Harness::new();
+        harness.store.checkpoint_durably().unwrap();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 50);
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [orphan]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+
+        let after = power_loss(harness);
+        assert!(after.store.meeting(orphan).unwrap().is_none());
+        assert_eq!(reconcile_at_launch(&after, &[], &an_hour_later()), [orphan]);
+        after.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            after.store.meeting(orphan).unwrap().unwrap().state,
+            MeetingState::Ready
+        );
+    }
+
+    /// The launch that forgets an adopted meeting's entry checkpoints the
+    /// store first (`forget_settled`): a power loss after it keeps the
+    /// row, so the master is never left with neither a row nor an entry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_power_loss_after_the_forgetting_launch_keeps_the_meeting() {
+        let harness = Harness::new();
+        harness.store.checkpoint_durably().unwrap();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 50);
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [orphan]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        assert!(
+            !crate::audio_folders::recorded(&harness.support_directory())
+                .unwrap()
+                .contains_key(&orphan),
+            "the second launch forgets the entry"
+        );
+
+        let after = power_loss(harness);
+        assert!(after.store.meeting(orphan).unwrap().is_some());
+    }
+
+    /// A delete the store refuses after its entry was forgotten (the
+    /// pipeline took the meeting up while the prompt was open) records the
+    /// entry again, as the host does: a power loss before a checkpoint then
+    /// takes the adoption's row, and the next launch adopts the master
+    /// back instead of leaving it with neither a row nor an entry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_delete_then_a_power_loss_leaves_the_master_to_the_next_launch() {
+        let harness = Harness::new();
+        harness.store.checkpoint_durably().unwrap();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 50);
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [orphan]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+        let mut meeting = harness.store.meeting(orphan).unwrap().unwrap();
+        meeting.state = MeetingState::Processing;
+        harness.store.save_meeting(&meeting).unwrap();
+
+        // The host's order: the entry, then the rows, refused; the entry
+        // the forget returned is recorded again.
+        let support = harness.support_directory();
+        let forgotten = crate::audio_folders::forget(&support, &[orphan]).unwrap();
+        assert!(harness.store.delete_meeting(orphan).is_err());
+        crate::audio_folders::record(&support, orphan, &forgotten[&orphan]).unwrap();
+
+        let after = power_loss(harness);
+        assert!(after.store.meeting(orphan).unwrap().is_none());
+        assert!(master_path(&after.audio_folder(), orphan).is_file());
+        assert_eq!(reconcile_at_launch(&after, &[], &an_hour_later()), [orphan]);
+        after.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            after.store.meeting(orphan).unwrap().unwrap().state,
+            MeetingState::Ready
+        );
+    }
+
+    /// A meeting deleted while the launch runs, after the launch listed its
+    /// entry and with its master still there (a removal not done yet, or
+    /// one that failed), is not adopted back: the delete forgets the entry
+    /// before its rows go, and the adoption reads the entries again after
+    /// the rows, both between the forget and the commit and after the
+    /// commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_meeting_deleted_while_the_launch_runs_is_not_adopted_back() {
+        let harness = Harness::new();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 50);
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [orphan]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+        // The next launch lists the entry, kept until a launch finds the
+        // row durable.
+        let launch = harness.interrupted(&[]);
+        assert!(launch.recorded.as_ref().unwrap().contains_key(&orphan));
+        let adopt = || {
+            adopt_orphans(
+                &harness.store,
+                &harness.pipeline.current(),
+                &launch,
+                &an_hour_later(),
+                chrono::FixedOffset::east_opt(0).unwrap(),
+                &tokio::runtime::Handle::current(),
+            )
+        };
+
+        // The delete in the host's order: the entry, the rows, the files.
+        crate::audio_folders::forget(&harness.support_directory(), &[orphan]).unwrap();
+        assert_eq!(adopt(), Vec::<Uuid>::new());
+        harness.store.delete_meeting(orphan).unwrap();
+        assert_eq!(adopt(), Vec::<Uuid>::new());
+        harness.pipeline.current().wait_until_idle().await;
+        assert!(harness.store.meeting(orphan).unwrap().is_none());
+        assert!(master_path(&harness.audio_folder(), orphan).is_file());
+    }
+
+    /// A recorded master that is a header with no audio (a crash before
+    /// the first frame) holds no master: nothing is adopted, its entry is
+    /// forgotten so later launches do not warn about it again, and its
+    /// file stays as it is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_header_only_master_with_no_meeting_is_forgotten() {
+        let harness = Harness::new();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 0);
+        let master = master_path(&harness.audio_folder(), orphan);
+        assert_eq!(CafHeader::read(&master).unwrap().frame_count, 0);
+        let header = std::fs::read(&master).unwrap();
+
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        assert!(harness.store.meeting(orphan).unwrap().is_none());
+        assert!(
+            !crate::audio_folders::recorded(&harness.support_directory())
+                .unwrap()
+                .contains_key(&orphan)
+        );
+        assert_eq!(std::fs::read(&master).unwrap(), header);
+    }
+
+    /// A recorded master of two channels with only part of its first
+    /// frame on disk (a kill while that frame was written) holds no
+    /// master, as a header-only one: its entry is forgotten and its file
+    /// stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_master_with_part_of_one_frame_is_forgotten() {
+        let harness = Harness::new();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mic, AudioLane::System], 0);
+        let master = master_path(&harness.audio_folder(), orphan);
+        let mut partial = std::fs::read(&master).unwrap();
+        partial.extend_from_slice(&[0; CafStreamWriter::BYTES_PER_SAMPLE + 1]);
+        std::fs::write(&master, &partial).unwrap();
+
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        assert!(
+            !crate::audio_folders::recorded(&harness.support_directory())
+                .unwrap()
+                .contains_key(&orphan)
+        );
+        assert_eq!(std::fs::read(&master).unwrap(), partial);
+    }
+
+    /// A recorded master cut inside its header (a kill right after its
+    /// creation) holds no master, as a header-only one: its entry is
+    /// forgotten, its file stays, and later launches do not count it among
+    /// the masters left alone. A master of three channels holds audio the
+    /// salvage cannot read: it keeps its entry, and each launch names it
+    /// in one line with every other it could not recover.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_master_cut_in_its_header_is_forgotten_and_unreadable_ones_are_counted() {
+        let harness = Harness::new();
+        let cut = orphan(&harness, |layout| {
+            let mut writer = RecordingWriter::new(layout, &[AudioLane::Mixed], false).unwrap();
+            write_frames(&mut writer, 0);
+            drop(writer);
+            let master = layout.master(AudioFormat::Caf48kFloat32);
+            let bytes = std::fs::read(&master).unwrap();
+            std::fs::write(&master, &bytes[..30]).unwrap();
+        });
+        let three_channels = || {
+            orphan(&harness, |layout| {
+                std::fs::create_dir_all(&layout.directory).unwrap();
+                let master = layout.master(AudioFormat::Caf48kFloat32);
+                let mut writer = CafStreamWriter::create(&master, 48_000.0, 3).unwrap();
+                writer.write(&[0.25; 3 * 480], 480).unwrap();
+            })
+        };
+        let unreadable = [three_channels(), three_channels()];
+        let cut_master = master_path(&harness.audio_folder(), cut);
+        let cut_bytes = std::fs::read(&cut_master).unwrap();
+
+        for launch in 1..=2 {
+            let (adopted, logged) =
+                warnings(|| reconcile_at_launch(&harness, &[], &an_hour_later()));
+            assert_eq!(adopted, Vec::<Uuid>::new());
+            let recorded = crate::audio_folders::recorded(&harness.support_directory()).unwrap();
+            assert!(!recorded.contains_key(&cut), "launch {launch}");
+            assert!(unreadable.iter().all(|id| recorded.contains_key(id)));
+            let lines: Vec<&str> = logged
+                .lines()
+                .filter(|line| line.contains("recordings with no meeting"))
+                .collect();
+            let [line] = lines.as_slice() else {
+                panic!("launch {launch}, one line: {logged}");
+            };
+            assert!(line.contains("could not be recovered"), "{line}");
+            assert!(line.contains("count=2"), "{line}");
+            assert!(!logged.contains(&cut.to_string()), "{logged}");
+        }
+        assert_eq!(std::fs::read(&cut_master).unwrap(), cut_bytes);
+    }
+
+    /// An entry with no row whose folder cannot be told empty stays: an
+    /// audio folder that is empty (a volume's mount point while it is not
+    /// mounted) or missing, and one that cannot be read. Once the volume is
+    /// back with the master, the launch adopts it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_entry_whose_folder_cannot_be_told_empty_stays_recorded() {
+        let harness = Harness::new();
+        let mount = harness.dir.path().join("volume");
+        std::fs::create_dir_all(&mount).unwrap();
+        let unmounted = Uuid::new_v4();
+        let gone = Uuid::new_v4();
+        crate::audio_folders::record(&harness.support_directory(), unmounted, &mount).unwrap();
+        crate::audio_folders::record(
+            &harness.support_directory(),
+            gone,
+            &harness.dir.path().join("gone"),
+        )
+        .unwrap();
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        let recorded = crate::audio_folders::recorded(&harness.support_directory()).unwrap();
+        assert!(recorded.contains_key(&unmounted) && recorded.contains_key(&gone));
+
+        #[cfg(unix)]
+        {
+            let locked = harness.dir.path().join("locked");
+            std::fs::create_dir_all(locked.join("other")).unwrap();
+            let unreadable = Uuid::new_v4();
+            crate::audio_folders::record(&harness.support_directory(), unreadable, &locked)
+                .unwrap();
+            if lock_out(&locked, || std::fs::read_dir(&locked).is_ok()) {
+                let adopted = reconcile_at_launch(&harness, &[], &an_hour_later());
+                set_mode(&locked, 0o755);
+                assert_eq!(adopted, Vec::<Uuid>::new());
+                assert!(
+                    crate::audio_folders::recorded(&harness.support_directory())
+                        .unwrap()
+                        .contains_key(&unreadable)
+                );
+            }
+        }
+
+        let layout = RecordingLayout::new(&mount, unmounted);
+        let mut writer = RecordingWriter::new(&layout, &[AudioLane::Mixed], false).unwrap();
+        write_frames(&mut writer, 50);
+        drop(writer);
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [unmounted]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+    }
+
+    /// A `Write` into a shared buffer, for a test's log subscriber.
+    #[derive(Clone, Default)]
+    struct Logged(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logged {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// What `run` returns, and the warnings it logged on this thread.
+    fn warnings<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let logged = Logged::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let logged = logged.clone();
+                move || logged.clone()
+            })
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, run);
+        let logged = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
+        (value, logged)
+    }
+
+    /// The masters the record does not name are logged in one line with
+    /// their count and the first few ids, and a folder whose id has a row
+    /// is not looked into, even when the record names it: it is neither
+    /// adopted nor logged.
+    #[test]
+    fn unrecorded_masters_are_logged_once_and_a_rows_folder_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("audio");
+        let master = |id: Uuid| {
+            let layout = RecordingLayout::new(&audio, id);
+            std::fs::create_dir_all(&layout.directory).unwrap();
+            std::fs::write(layout.master(AudioFormat::Caf48kFloat32), [1; 100]).unwrap();
+        };
+        let unrecorded: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+        unrecorded.iter().copied().for_each(master);
+        let (row, orphan) = (Uuid::new_v4(), Uuid::new_v4());
+        master(row);
+        master(orphan);
+        let recorded = BTreeMap::from([(row, audio.clone()), (orphan, audio.clone())]);
+
+        let (found, logged) = warnings(|| {
+            orphans(
+                std::slice::from_ref(&audio),
+                &HashSet::from([row]),
+                &recorded,
+            )
+        });
+
+        let ids: Vec<Uuid> = found.iter().map(|orphan| orphan.meeting_id).collect();
+        assert_eq!(ids, [orphan]);
+        let lines: Vec<&str> = logged.lines().collect();
+        let [line] = lines.as_slice() else {
+            panic!("one line: {logged}");
+        };
+        assert!(line.contains("count=5"), "{line}");
+        let named = unrecorded
+            .iter()
+            .filter(|id| line.contains(&id.to_string()))
+            .count();
+        assert_eq!(named, IDS_LOGGED, "{line}");
+        assert!(!line.contains(&row.to_string()), "{line}");
+    }
+
+    /// Files the record does not name that hold no audio stay out of the
+    /// line about the masters left alone: a CAF of two channels with part
+    /// of its first frame, an empty m4a and an empty WAV. A CAF with one
+    /// whole frame is counted.
+    #[test]
+    fn unrecorded_files_with_no_audio_are_not_logged() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("audio");
+        let caf = |id: Uuid, extra: usize| {
+            let layout = RecordingLayout::new(&audio, id);
+            std::fs::create_dir_all(&layout.directory).unwrap();
+            let master = layout.master(AudioFormat::Caf48kFloat32);
+            drop(CafStreamWriter::create(&master, 48_000.0, 2).unwrap());
+            let mut bytes = std::fs::read(&master).unwrap();
+            assert_eq!(bytes.len(), CafStreamWriter::HEADER_SIZE);
+            bytes.extend(std::iter::repeat_n(0, extra));
+            std::fs::write(&master, bytes).unwrap();
+        };
+        caf(Uuid::new_v4(), 2 * CafStreamWriter::BYTES_PER_SAMPLE - 1);
+        let whole = Uuid::new_v4();
+        caf(whole, 2 * CafStreamWriter::BYTES_PER_SAMPLE);
+        for format in [AudioFormat::M4aAac, AudioFormat::Wav16kInt16] {
+            let layout = RecordingLayout::new(&audio, Uuid::new_v4());
+            std::fs::create_dir_all(&layout.directory).unwrap();
+            std::fs::File::create(layout.master(format)).unwrap();
+        }
+
+        let (found, logged) = warnings(|| {
+            orphans(
+                std::slice::from_ref(&audio),
+                &HashSet::new(),
+                &BTreeMap::new(),
+            )
+        });
+
+        assert!(found.is_empty());
+        let lines: Vec<&str> = logged.lines().collect();
+        let [line] = lines.as_slice() else {
+            panic!("one line: {logged}");
+        };
+        assert!(line.contains("count=1"), "{line}");
+        assert!(line.contains(&whole.to_string()), "{line}");
+    }
+
+    /// Meeting folders with masters and sidecars that the record does not
+    /// name, as the Swift app or an earlier release leaves them: a killed
+    /// call, a killed in-person recording and a finished call, a phone
+    /// m4a and WAV in the audio folder, and a killed one in a known
+    /// folder. Returns every file of theirs with its bytes, each time it
+    /// is called.
+    fn unrecorded_orphans(harness: &Harness) -> impl Fn() -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut folders = Vec::new();
+        for (lanes, finish) in [
+            (vec![AudioLane::Mic, AudioLane::System], false),
+            (vec![AudioLane::Mixed], false),
+            (vec![AudioLane::Mic, AudioLane::System], true),
+        ] {
+            let layout = RecordingLayout::new(&harness.audio_folder(), Uuid::new_v4());
+            let mut writer = RecordingWriter::new(&layout, &lanes, false).unwrap();
+            write_frames(&mut writer, 40);
+            if finish {
+                writer.finish().unwrap();
+            }
+            folders.push(layout.directory);
+        }
+        for (name, format) in [
+            ("tone-440-44k1-500ms.m4a", AudioFormat::M4aAac),
+            ("conversation-mic-6s.wav", AudioFormat::Wav16kInt16),
+        ] {
+            let layout = RecordingLayout::new(&harness.audio_folder(), Uuid::new_v4());
+            std::fs::create_dir_all(&layout.directory).unwrap();
+            std::fs::copy(audio_fixture(name), layout.master(format)).unwrap();
+            folders.push(layout.directory);
+        }
+        let known = harness.dir.path().join("known");
+        crate::audio_folders::remember(&harness.support_directory(), &known).unwrap();
+        let layout = RecordingLayout::new(&known, Uuid::new_v4());
+        let mut writer = RecordingWriter::new(&layout, &[AudioLane::Mixed], false).unwrap();
+        write_frames(&mut writer, 40);
+        drop(writer);
+        folders.push(layout.directory);
+        move || folders.iter().flat_map(|folder| files_in(folder)).collect()
+    }
+
+    /// Masters this install has no record of (the Swift app's, an earlier
+    /// release's, another install's), each with its sidecars, a killed one
+    /// among them, are never deleted or changed: not by a launch, nor by a
+    /// retention sweep that deletes after processing, nor by the delete of
+    /// another meeting with an asset or without one, nor by the next
+    /// launch. Every one of their files stays byte for byte.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unadopted_orphans_are_never_deleted_or_changed() {
+        let harness = Harness::new();
+        let mut settings = harness.store.settings().unwrap();
+        settings.default_retention = AudioRetention::DeleteAfterProcessing;
+        harness.store.save_settings(&settings).unwrap();
+        let snapshot = unrecorded_orphans(&harness);
+        let before = snapshot();
+        assert!(
+            before.keys().any(|path| path.ends_with("mic.wav")),
+            "{:?}",
+            before.keys()
+        );
+
+        // A meeting saved as a stop saves it, and one failed with no asset.
+        let saved = harness.begin(MeetingSource::MacInPerson);
+        harness.record(&saved, &harness.audio_folder());
+        let mut writer = harness.writer(&saved);
+        write_frames(&mut writer, 30);
+        let files = writer.finish().unwrap();
+        let mut result = finished(&saved, &files);
+        result.asset.retention = AudioRetention::DeleteAfterProcessing;
+        harness
+            .intake()
+            .complete(saved.id, result, None)
+            .await
+            .unwrap();
+        let failed = harness.begin(MeetingSource::MacInPerson);
+        harness.record(&failed, &harness.audio_folder());
+        harness.intake().fail(failed.id, "refused").unwrap();
+
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        harness.pipeline.current().wait_until_idle().await;
+        steno_pipeline::RetentionSweep::new(harness.store.clone())
+            .run(Utc::now() + chrono::Duration::days(1))
+            .unwrap();
+        assert_eq!(snapshot(), before);
+
+        let mut list = steno_host::main_window::MeetingListViewModel::new(
+            chrono::FixedOffset::east_opt(0).unwrap(),
+        );
+        assert!(list.delete(
+            saved.id,
+            &harness.store,
+            &steno_host::services::RealFileSystem,
+            None,
+            false,
+        ));
+        let left = steno_host::services::LeftRecording {
+            folders: meeting_folders(&harness.store, &harness.support_directory(), failed.id),
+            still_written: false,
+        };
+        assert!(left.folders.contains(&harness.dir.path().join("known")));
+        assert!(list.delete(
+            failed.id,
+            &harness.store,
+            &steno_host::services::RealFileSystem,
+            Some(&left),
+            false,
+        ));
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            Vec::<Uuid>::new()
+        );
+        harness.pipeline.current().wait_until_idle().await;
+
+        assert_eq!(harness.store.all_meetings().unwrap(), Vec::<Meeting>::new());
+        assert_eq!(snapshot(), before);
     }
 }

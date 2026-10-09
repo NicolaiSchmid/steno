@@ -395,6 +395,60 @@ fn a_stereo_wav_decodes_each_channel_on_its_own() {
     ));
 }
 
+/// The phone's m4a and a 16 kHz WAV declare their length in their
+/// headers: half a second without the AAC priming, which the decode
+/// drops too (it keeps the encoder's padding, under a packet), and six
+/// seconds. A header that declares more than five hours is capped there.
+#[test]
+fn a_containers_declared_duration_is_read_without_decoding() {
+    let path = fixture("tone-440-44k1-500ms.m4a");
+    let m4a = SymphoniaAudioCodec::declared_duration(&path)
+        .unwrap()
+        .unwrap();
+    let decoded = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
+    let measured = decoded.samples.len() as f64 / f64::from(decoded.sample_rate);
+    assert!((m4a - 0.5).abs() < 1.0e-3, "{m4a}");
+    let padding = measured - m4a;
+    assert!(
+        (0.0..1_024.0 / 44_100.0).contains(&padding),
+        "declared {m4a}, decoded {measured}"
+    );
+    let wav = SymphoniaAudioCodec::declared_duration(&fixture("conversation-mic-6s.wav"))
+        .unwrap()
+        .unwrap();
+    assert!((wav - 6.0).abs() < 0.01, "{wav}");
+    let dir = tempfile::tempdir().unwrap();
+    let junk = dir.path().join("recording.m4a");
+    std::fs::write(&junk, b"not audio").unwrap();
+    assert!(SymphoniaAudioCodec::declared_duration(&junk).is_err());
+    let corrupt = dir.path().join("recording.wav");
+    std::fs::write(&corrupt, wav_declaring(0x7FFF_FFF0)).unwrap();
+    let capped = SymphoniaAudioCodec::declared_duration(&corrupt)
+        .unwrap()
+        .unwrap();
+    assert!((capped - 5.0 * 3_600.0).abs() < 1.0e-6, "{capped}");
+}
+
+/// A 16 kHz mono Int16 WAV whose data chunk claims `data_bytes` and holds
+/// a hundred frames of silence.
+fn wav_declaring(data_bytes: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&data_bytes.saturating_add(36).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&16_000u32.to_le_bytes());
+    bytes.extend_from_slice(&32_000u32.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+    bytes.extend_from_slice(&[0; 200]);
+    bytes
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../Tests/Fixtures/audio")

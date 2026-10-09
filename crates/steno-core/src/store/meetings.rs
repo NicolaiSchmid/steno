@@ -89,6 +89,16 @@ pub(super) fn fetch(connection: &Connection, id: Uuid) -> Result<Option<Meeting>
         .optional()?)
 }
 
+/// Whether a row has the meeting id `id`.
+fn has_row(connection: &Connection, id: Uuid) -> Result<bool> {
+    Ok(connection
+        .query_row("SELECT 1 FROM meeting WHERE id = ?1", [DbUuid(id)], |_| {
+            Ok(())
+        })
+        .optional()?
+        .is_some())
+}
+
 /// The row as it is now, for a read-modify-write inside a transaction;
 /// `MeetingNotFound` when there is none, since every caller needs one.
 pub(super) fn current(connection: &Connection, id: Uuid) -> Result<Meeting> {
@@ -175,6 +185,22 @@ impl Store {
         })
     }
 
+    /// A meeting with its asset, in one transaction, only while no row has
+    /// the meeting's id: the launch's adoption of a recording that has no
+    /// meeting (`steno_services`' recovery). A row written meanwhile (a
+    /// phone admission that committed) fails with
+    /// [`StoreError::MeetingExists`] and nothing is written, so it is never
+    /// overwritten and gets no second asset. Rust only.
+    pub fn insert_meeting_with_asset(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
+        self.write(|transaction| {
+            if has_row(transaction, meeting.id)? {
+                return Err(StoreError::MeetingExists(meeting.id));
+            }
+            save(transaction, meeting)?;
+            assets::save(transaction, asset)
+        })
+    }
+
     /// A stopped recording's commit (`LocalRecordingIntake::complete`,
     /// through `ProcessingPipeline::enqueue_stopped_recording`), in one
     /// transaction and only while the stored row is still `recording`: the
@@ -221,6 +247,17 @@ impl Store {
     /// The meeting with `id`.
     pub fn meeting(&self, id: Uuid) -> Result<Option<Meeting>> {
         self.read(|connection| fetch(connection, id))
+    }
+
+    /// Every meeting's id, in no particular order, without reading the
+    /// rows: the launch's check for recordings that have no meeting. Rust
+    /// only.
+    pub fn meeting_ids(&self) -> Result<Vec<Uuid>> {
+        self.read(|connection| {
+            query_all(connection, "SELECT id FROM meeting", [], |row| {
+                Ok(row.get::<_, DbUuid>(0)?.0)
+            })
+        })
     }
 
     /// Every meeting, newest first by `startedAt`: the list column's source.

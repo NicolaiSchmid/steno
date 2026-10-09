@@ -189,6 +189,26 @@ impl SymphoniaAudioCodec {
         })
     }
 
+    /// Seconds in the file at `path` as its container declares them (an
+    /// m4a's track header, a WAV's data chunk), read without decoding it;
+    /// `None` when the container does not say. Without the AAC priming the
+    /// decode drops, so it matches the decode up to the encoder's padding
+    /// at the end (under a packet), and capped at five hours, as
+    /// `reserved_frames` caps a declared length, so a corrupt header cannot
+    /// move a start absurdly far back. For a recording that has no stored
+    /// duration, such as one the launch adopts from the audio folder. Rust
+    /// only.
+    pub fn declared_duration(path: &Path) -> Result<Option<f64>, CodecError> {
+        let frames = SymphoniaFrames::open(path)?;
+        let primed = frames.priming.map_or(0, |trim| trim.frames);
+        Ok(frames
+            .frames
+            .zip(frames.rate.filter(|rate| *rate > 0))
+            .map(|(declared, rate)| {
+                capped(declared.saturating_sub(primed), rate) as f64 / f64::from(rate)
+            }))
+    }
+
     /// `samples` at `rate` to 16 kHz in one pass: exact length `round(len *
     /// 16000 / rate)`, trimmed or zero-padded so the 16 kHz lane lasts
     /// exactly as long as the master and segment counts stay stable.
@@ -238,6 +258,14 @@ fn frames_at_16k(frames: usize, rate: u32) -> usize {
     length_at_16k(frames, rate) + AudioBuffer16k::SAMPLE_RATE as usize
 }
 
+/// `frames` a container declares at `rate`, capped at five hours: a
+/// corrupt header must not claim more.
+fn capped(frames: u64, rate: u32) -> u64 {
+    /// Five hours, in seconds.
+    const MAX_DECLARED_SECONDS: u64 = 5 * 3_600;
+    frames.min(MAX_DECLARED_SECONDS * u64::from(rate))
+}
+
 /// The frames to reserve for a stream: its length, but a length the
 /// container declares is capped at five hours at the stream's rate (a
 /// corrupt header must not reserve gigabytes, and a failed allocation
@@ -245,16 +273,11 @@ fn frames_at_16k(frames: usize, rate: u32) -> usize {
 /// 16 kHz whatever the rate. A length measured from the file is not
 /// capped.
 fn reserved_frames(spec: Spec) -> usize {
-    /// Five hours, in seconds.
-    const MAX_DECLARED_SECONDS: u64 = 5 * 3_600;
     match spec.length {
         Length::Measured(frames) => frames,
-        Length::Declared(frames) => usize::try_from(
-            frames
-                .unwrap_or(0)
-                .min(MAX_DECLARED_SECONDS * u64::from(spec.rate)),
-        )
-        .unwrap_or(0),
+        Length::Declared(frames) => {
+            usize::try_from(capped(frames.unwrap_or(0), spec.rate)).unwrap_or(0)
+        }
     }
 }
 
@@ -375,6 +398,8 @@ struct SymphoniaFrames {
     frames: Option<u64>,
     /// The encoder priming to drop: AAC in MP4 only.
     priming: Option<Trim>,
+    /// The track's rate in hertz, as its header declares it.
+    rate: Option<u32>,
 }
 
 /// The frames before a track's first presented sample, and how to place a
@@ -455,6 +480,7 @@ impl SymphoniaFrames {
         let track_id = track.id;
         let frames = track.codec_params.n_frames;
         let priming = Trim::for_track(path, &track.codec_params);
+        let rate = track.codec_params.sample_rate;
         let decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
             .map_err(|e| CodecError::UnsupportedFormat(e.to_string()))?;
@@ -465,6 +491,7 @@ impl SymphoniaFrames {
             track_id,
             frames,
             priming,
+            rate,
         })
     }
 

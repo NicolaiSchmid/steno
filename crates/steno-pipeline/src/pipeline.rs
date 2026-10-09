@@ -894,6 +894,16 @@ impl ProcessingPipeline {
         self.enqueue_claimed(meeting, asset, claim, Store::save_meeting_with_asset)
     }
 
+    /// [`ProcessingPipeline::enqueue`] of a meeting that has no row yet,
+    /// the launch's adoption of a recording found with none: the rows are
+    /// written through [`Store::insert_meeting_with_asset`], so a row with
+    /// the id written meanwhile fails the enqueue and is left as it is.
+    /// Rust only.
+    pub fn enqueue_new(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
+        let claim = self.claim_or_refuse(meeting, asset)?;
+        self.enqueue_claimed(meeting, asset, claim, Store::insert_meeting_with_asset)
+    }
+
     /// [`ProcessingPipeline::enqueue`] of a Mac recording that stopped, the
     /// local intake's: the rows are written through
     /// [`Store::save_stopped_recording`], so only while the meeting is

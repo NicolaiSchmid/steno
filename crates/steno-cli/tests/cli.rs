@@ -1269,6 +1269,72 @@ fn record_with_the_synthetic_backend_writes_a_meeting_folder() {
     assert!(result.stdout.contains("gap filled: 0.00 s"));
 }
 
+/// Every file in `folder`, by name, with its bytes.
+fn files_in(folder: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files: Vec<_> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn record_refuses_a_meeting_folder_that_holds_a_recording() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let out = home.join("audio");
+    let id = uuid::Uuid::new_v4();
+    let id_text = id.to_string();
+    let record = || {
+        steno(
+            &[
+                "record",
+                "--backend",
+                "synthetic",
+                "--mode",
+                "call",
+                "--seconds",
+                "0.5",
+                "--out",
+                out.to_str().unwrap(),
+                "--meeting-id",
+                &id_text,
+                "--quiet",
+            ],
+            home,
+        )
+    };
+    let first = record();
+    assert_eq!(first.status, 0, "{}", first.stderr);
+    let folder = steno_core::RecordingLayout::new(&out, id).directory;
+    let before = files_in(&folder);
+    assert!(
+        before
+            .iter()
+            .any(|(path, bytes)| path.ends_with("recording.caf") && bytes.len() > 4_096),
+        "a master with audio in {}",
+        folder.display()
+    );
+
+    let again = record();
+    assert_ne!(again.status, 0, "{}", again.stdout);
+    let folder_name = folder.file_name().unwrap().to_str().unwrap();
+    assert!(
+        again
+            .stderr
+            .contains("already exists, so nothing was recorded")
+            && again.stderr.contains(folder_name),
+        "{}",
+        again.stderr
+    );
+    assert!(files_in(&folder) == before, "every file is as it was");
+}
+
 #[test]
 fn bakeoff_with_fake_engines_reports_one_segment_per_second() {
     let home = tempfile::tempdir().unwrap();

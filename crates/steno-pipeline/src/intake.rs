@@ -67,6 +67,32 @@ pub fn default_title(
     )
 }
 
+/// Where the phone intake notes the meeting folder it copies an upload
+/// into, from before the copy until the admission commits or the copy is
+/// gone. A copy left with no meeting (a crash before the commit, a commit
+/// and its `failed` save both failing) is then one this install wrote,
+/// which the launch adopts, unlike a meeting folder another install wrote
+/// into a shared audio folder (`steno_services`' recovery). The app's
+/// notes go into the record of recording folders beside the database;
+/// `()` notes nothing. Rust only.
+pub trait AdmissionFolders: Send + Sync {
+    /// Before the copy of meeting `meeting_id`'s upload into
+    /// `audio_folder`. An error refuses the admission before anything is
+    /// copied or committed; the phone keeps its copy and tries again.
+    fn copying(&self, meeting_id: Uuid, audio_folder: &Path) -> std::io::Result<()>;
+    /// The admission of `meeting_id` committed, or its copy is gone. A
+    /// failure is the implementation's to log.
+    fn settled(&self, meeting_id: Uuid);
+}
+
+impl AdmissionFolders for () {
+    fn copying(&self, _: Uuid, _: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn settled(&self, _: Uuid) {}
+}
+
 /// Admits a fully received phone recording: copies the file into the
 /// audio folder (`RecordingLayout`), commits the `HandoverReceipt` as
 /// complete together with a `phone` meeting `queued` with a `mixed`
@@ -92,13 +118,15 @@ pub fn default_title(
 /// with it, the copy goes, and nothing is enqueued.
 /// The enqueue after the commit is [`ProcessingPipeline::enqueue_saved`]
 /// in [`RecordingIntake::over`]; its failure does not undo the admission,
-/// the meeting waits `queued` for the next launch's resume.
+/// the meeting waits `queued` for the next launch's resume. The copy's
+/// folder is noted before the copy ([`AdmissionFolders`], Rust only).
 /// Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
 pub struct RecordingIntake {
     store: Arc<Store>,
     enqueue: Enqueue,
     now: Now,
     zone: FixedOffset,
+    folders: Arc<dyn AdmissionFolders>,
 }
 
 impl RecordingIntake {
@@ -109,7 +137,15 @@ impl RecordingIntake {
             enqueue,
             now,
             zone,
+            folders: Arc::new(()),
         }
+    }
+
+    /// The intake noting each copy's folder in `folders`. Rust only.
+    #[must_use]
+    pub fn noting_folders_in(mut self, folders: Arc<dyn AdmissionFolders>) -> Self {
+        self.folders = folders;
+        self
     }
 
     /// The production wiring over `pipeline`, which processes the
@@ -168,7 +204,9 @@ impl HandoverIntake for RecordingIntake {
         let layout = RecordingLayout::new(&audio_folder, meeting_id);
         // The copy and its folder are on the disk before the receipt says
         // complete: the phone deletes its own copy on that answer.
-        let destination = copy_into_new_folder(file, &layout, metadata.format)?;
+        self.folders.copying(meeting_id, &audio_folder)?;
+        let destination = copy_into_new_folder(file, &layout, metadata.format)
+            .inspect_err(|_| self.folders.settled(meeting_id))?;
 
         let meeting = Meeting {
             id: meeting_id,
@@ -218,23 +256,29 @@ impl HandoverIntake for RecordingIntake {
             .store
             .save_admission_durably(&receipt, &meeting, &asset)
         {
-            Ok(admitted) => admitted,
+            Ok(admitted) => {
+                self.folders.settled(meeting_id);
+                admitted
+            }
             Err(error) => {
                 if matches!(error, StoreError::ReceiptOfAnotherUpload(_)) {
                     // The refusal wrote nothing, and another upload's
                     // receipt is left as it is.
                     let _ = std::fs::remove_file(&destination);
+                    self.folders.settled(meeting_id);
                 } else {
                     // A failed commit is not proof that nothing committed: a
                     // WAL sync that fails leaves the commit's frames in the
                     // WAL, and recovery after a crash replays them. The
                     // durable `failed` save writes over them, or voids them
                     // when the WAL restarts, so the copy goes only once that
-                    // save is on the disk; otherwise it stays, an orphan at
-                    // worst, and a replayed admission still finds its master.
+                    // save is on the disk; otherwise it stays, still noted,
+                    // so the next launch adopts it unless a replay brings
+                    // its meeting back.
                     receipt.state = HandoverState::Failed(format!("admit: {error}"));
                     if self.store.save_handover_receipt_durably(&receipt).is_ok() {
                         let _ = std::fs::remove_file(&destination);
+                        self.folders.settled(meeting_id);
                     }
                 }
                 return Err(error.into());
@@ -1108,6 +1152,76 @@ mod tests {
         ));
         assert_eq!(store.all_meetings().unwrap().len(), 1);
         assert_eq!(admitted.lock().unwrap().len(), 1, "nothing is enqueued");
+    }
+
+    /// [`AdmissionFolders`] that lists each call: for `copying`, how many
+    /// files the audio folder held then, and `None` for `settled`.
+    /// `copying` fails while `refuse` is set.
+    #[derive(Default)]
+    struct NotedFolders {
+        calls: Mutex<Vec<(Uuid, Option<usize>)>>,
+        refuse: AtomicBool,
+    }
+
+    impl AdmissionFolders for NotedFolders {
+        fn copying(&self, meeting_id: Uuid, audio_folder: &Path) -> std::io::Result<()> {
+            if self.refuse.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("read-only"));
+            }
+            let files = files_under(audio_folder).len();
+            self.calls.lock().unwrap().push((meeting_id, Some(files)));
+            Ok(())
+        }
+
+        fn settled(&self, meeting_id: Uuid) {
+            self.calls.lock().unwrap().push((meeting_id, None));
+        }
+    }
+
+    /// The copy's folder is noted before the copy and settled once the
+    /// admission commits. A failed commit whose `failed` save fails too
+    /// keeps the note with its copy, so the launch adopts the copy as this
+    /// install's; a note that cannot be written refuses the admission
+    /// before anything is copied. Rust only.
+    #[tokio::test]
+    async fn a_copys_folder_is_noted_from_before_the_copy_until_its_admission_settles() {
+        for (refuse_note, refuse_commit) in [(false, false), (false, true), (true, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store_with_audio_folder(dir.path());
+            let now = Utc::now();
+            let (enqueue, _) = recording_enqueue();
+            let folders = Arc::new(NotedFolders::default());
+            folders.refuse.store(refuse_note, Ordering::SeqCst);
+            let intake = phone_intake(&store, enqueue, Arc::new(move || now))
+                .noting_folders_in(folders.clone());
+            let (device, metadata) = paired_phone(&store, now);
+            let upload = upload_in(dir.path());
+            if refuse_commit {
+                refuse_writes(&store, true);
+            }
+
+            let admitted = intake.admit(&upload, &metadata, &device).await;
+            let calls = folders.calls.lock().unwrap().clone();
+            let copies = files_under(&dir.path().join("audio"));
+            match (refuse_note, refuse_commit) {
+                (false, false) => {
+                    let meeting_id = admitted.unwrap();
+                    assert_eq!(calls, [(meeting_id, Some(0)), (meeting_id, None)]);
+                }
+                (false, true) => {
+                    admitted.unwrap_err();
+                    assert!(matches!(calls[..], [(_, Some(0))]), "{calls:?}");
+                    assert_eq!(copies.len(), 1, "the noted copy stays");
+                }
+                _ => {
+                    admitted.unwrap_err();
+                    assert!(calls.is_empty(), "{calls:?}");
+                    assert!(copies.is_empty(), "nothing is copied");
+                    assert!(upload.exists(), "the upload stays for the retry");
+                    assert_eq!(store.all_meetings().unwrap(), []);
+                }
+            }
+        }
     }
 
     /// A failed admission commit leaves no `complete` receipt behind, also

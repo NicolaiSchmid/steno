@@ -239,12 +239,31 @@ pub trait Recorder: Send + Sync {
     /// its end. A failure is logged, never refused. Rust only: Swift had no
     /// recovery.
     fn remember_audio_folder(&self, folder: &Path);
-    /// What deleting meeting `meeting_id`, left `recording`, needs to know
-    /// ([`LeftRecording`]). Rust only: Swift refused every recording row.
+    /// What deleting meeting `meeting_id` needs to know ([`LeftRecording`]):
+    /// the audio folders its folder may be in, and for one left
+    /// `recording` whether its master is still written. The host asks only
+    /// for a meeting left `recording` or one whose files no asset names.
+    /// Rust only: Swift refused every recording row and removed only what
+    /// an asset named.
     fn left_recording(&self, meeting_id: Uuid) -> LeftRecording;
-    /// The rows of meeting `meeting_id`, left `recording`, are gone: what
-    /// the recorder kept for its recovery goes too. Rust only.
-    fn forget_recording(&self, meeting_id: Uuid);
+    /// The rows of meeting `meeting_id` are about to go (any confirmed
+    /// delete, asked before its rows go): what the recorder kept for its
+    /// recovery goes first, so the launch does not adopt a master whose
+    /// removal failed or is not done yet. Returns the folder it forgot,
+    /// which the host records again ([`Self::restore_recording`]) when the
+    /// delete does not go through: one refused, one whose commit fails or
+    /// one a panic unwinds. On an error the host refuses the delete before
+    /// any row goes; the entry stays, or, when the write failed after its
+    /// rename, the store is checkpointed durably, so the row no longer
+    /// needs it. Rust only.
+    fn forget_recording(&self, meeting_id: Uuid) -> std::io::Result<Option<PathBuf>>;
+    /// Records `folder` again as the one meeting `meeting_id` was recorded
+    /// into, after [`Self::forget_recording`] forgot it for a delete that
+    /// did not go through: the row stays, and until it is durable a power
+    /// loss can still take it, so the entry is what lets the next launch
+    /// adopt its master. On a failure the store is checkpointed durably,
+    /// so the row no longer needs the entry; both are logged. Rust only.
+    fn restore_recording(&self, meeting_id: Uuid, folder: &Path);
 }
 
 /// What [`Recorder::hold_starts`] returns: recording starts are refused
@@ -255,13 +274,16 @@ pub type StartHold = Box<dyn Send>;
 /// It promises no time: the hold can span the updater's password prompt.
 pub const INSTALLING_UPDATE: &str = "Steno is installing an update. You can record again once it relaunches, or if you cancel the install.";
 
-/// A meeting left `recording`, as [`Recorder::left_recording`] finds it
+/// A meeting about to be deleted, as [`Recorder::left_recording`] finds it
 /// on disk.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LeftRecording {
     /// The audio folders its files may be in, each once: the one it was
-    /// recorded into and the settings' one. A delete removes the meeting's
-    /// folder in each.
+    /// recorded into, the settings' one and the known ones. A delete
+    /// removes the meeting's folder in each when no asset names it (a
+    /// meeting left `recording`, one that failed before its asset was
+    /// saved), so the next launch does not adopt its master as a recording
+    /// with no meeting.
     pub folders: Vec<PathBuf>,
     /// Its master in one of them was written within the last seconds, or
     /// at a time ahead of the clock: another process (the Swift app

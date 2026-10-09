@@ -27,6 +27,7 @@ thiserror.workspace = true
 # doc), so it owns one current-thread runtime to wait on them, with the
 # timer and I/O drivers a real secret store may need.
 tokio = { workspace = true, features = ["net", "rt", "time"] }
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

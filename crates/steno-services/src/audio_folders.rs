@@ -8,7 +8,7 @@
 //!
 //! | File | What it holds | Written by | Read by |
 //! |------|---------------|------------|---------|
-//! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written until the meeting completes, fails or is deleted | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first ([`crate::recovery`]) |
+//! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written: a recording's from its start until its start fails (nothing was recorded), it is deleted (forgotten before its rows go, and recorded again when the delete is refused, its commit fails or a panic unwinds it) or a launch finds its row durable and no longer `recording`; a phone upload's from before its copy until its admission commits durably or its copy is gone (`AdmissionRecord`); one with no row until a launch adopts its master (from then on as any row's) or finds that its folder holds none (no master, a CAF short of one whole frame, or a header with no audio) | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first, and adopts only a recording with no meeting that this record names ([`crate::recovery`]) |
 //! | `KNOWN_FILE` | Every audio folder a recording was written to or the setting left, oldest first | `remember` | `known`: crash recovery looks in these folders after the two that decide a meeting ([`crate::recovery`]) |
 //!
 //! A reader returns the error of a file that cannot be read or does not
@@ -22,6 +22,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use steno_pipeline::AdmissionFolders;
 use uuid::Uuid;
 
 use crate::files;
@@ -64,18 +65,52 @@ pub(crate) fn record(
 }
 
 /// Drops the entries of `meeting_ids`: their meetings completed, failed or
-/// went.
-pub(crate) fn forget(support_directory: &Path, meeting_ids: &[Uuid]) -> std::io::Result<()> {
+/// went. Returns the entries it dropped, so a delete that does not go
+/// through can record its entry again.
+pub(crate) fn forget(
+    support_directory: &Path,
+    meeting_ids: &[Uuid],
+) -> std::io::Result<BTreeMap<Uuid, PathBuf>> {
+    let mut forgotten = BTreeMap::new();
     change(
         support_directory,
         RECORDED_FILE,
         salvage_recorded,
         |recorded: &mut BTreeMap<Uuid, PathBuf>| {
-            let before = recorded.len();
-            recorded.retain(|id, _| !meeting_ids.contains(id));
-            recorded.len() != before
+            forgotten.extend(
+                meeting_ids
+                    .iter()
+                    .filter_map(|id| recorded.remove_entry(id)),
+            );
+            !forgotten.is_empty()
         },
-    )
+    )?;
+    Ok(forgotten)
+}
+
+/// The phone intake's notes of the folder each upload is copied into
+/// ([`AdmissionFolders`]), in the record under the support directory
+/// (`record`, `forget`). Rust only.
+pub(crate) struct AdmissionRecord {
+    pub(crate) support_directory: PathBuf,
+}
+
+impl AdmissionFolders for AdmissionRecord {
+    fn copying(&self, meeting_id: Uuid, audio_folder: &Path) -> std::io::Result<()> {
+        record(&self.support_directory, meeting_id, audio_folder).inspect_err(|error| {
+            // The admission is refused; the error can name the user's
+            // folder: debug alone.
+            tracing::warn!(%meeting_id, "a phone upload's folder could not be noted; the upload is refused for now");
+            tracing::debug!(%meeting_id, %error, "an admission's folder not noted");
+        })
+    }
+
+    fn settled(&self, meeting_id: Uuid) {
+        if let Err(error) = forget(&self.support_directory, &[meeting_id]) {
+            // The next launch forgets an entry whose meeting has a row.
+            tracing::debug!(%meeting_id, %error, "an admission's folder not forgotten");
+        }
+    }
 }
 
 /// The known folders under `support_directory`, oldest first.
@@ -259,7 +294,7 @@ mod tests {
     }
 
     /// A recording's folder is recorded until its meeting is forgotten;
-    /// forgetting one leaves the others.
+    /// forgetting one returns its entry and leaves the others.
     #[test]
     fn a_recordings_folder_is_kept_until_it_is_forgotten() {
         let dir = tempfile::tempdir().unwrap();
@@ -267,10 +302,33 @@ mod tests {
         assert!(recorded(dir.path()).unwrap().is_empty());
         record(dir.path(), first, Path::new("/a")).unwrap();
         record(dir.path(), second, Path::new("/b")).unwrap();
-        forget(dir.path(), &[first]).unwrap();
+        assert_eq!(
+            forget(dir.path(), &[first]).unwrap(),
+            BTreeMap::from([(first, PathBuf::from("/a"))])
+        );
+        assert!(forget(dir.path(), &[first]).unwrap().is_empty());
         assert_eq!(
             recorded(dir.path()).unwrap(),
             BTreeMap::from([(second, PathBuf::from("/b"))])
+        );
+    }
+
+    /// Writers on many threads at once (phone admissions on several
+    /// connections, the recorder) each keep their entry: every change
+    /// holds one lock from its read to its write.
+    #[test]
+    fn entries_recorded_at_once_are_all_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids: Vec<Uuid> = (0..16).map(|_| Uuid::new_v4()).collect();
+        std::thread::scope(|scope| {
+            for id in &ids {
+                scope.spawn(|| record(dir.path(), *id, Path::new("/a")).unwrap());
+            }
+        });
+        let recorded = recorded(dir.path()).unwrap();
+        assert!(
+            ids.iter().all(|id| recorded.contains_key(id)),
+            "{recorded:?}"
         );
     }
 
