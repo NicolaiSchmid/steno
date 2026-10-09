@@ -958,20 +958,22 @@ still has to draw the window side. `[ ]` is not ported yet.
     rows' `sampleClipURL`s to the new files in the transaction that keeps the
     confirmations, commits durably (`synchronous = FULL`) and returns the rows it
     replaced; a confirmed speaker the run gives no clip keeps the clip and range its
-    row named. Only then does the run sweep the meeting's own folder: it removes a clip
-    file of one of the meeting's speakers (by the speaker id the file name starts
-    with: one this run gave a clip or one the merge replaced) that no speaker row of
-    any meeting names, matched by file name. That takes the earlier clips and the
-    files of a run that ended before its commit; a speaker the merge did not replace
-    that this run gave no clip keeps its files until a later run gives it a clip or
-    retention runs. So a run that ends at any point leaves each row naming a whole
+    row named, when the row names one. Only then does the run sweep the meeting's own
+    folder: it removes a clip file of one of the meeting's speakers (by the speaker id
+    the file name starts with: one this run gave a clip or one the merge replaced)
+    that no speaker row of any meeting names, matched by file name in any ASCII case.
+    That takes the earlier clips and the files of a run that ended before its commit;
+    a speaker the merge did not replace that this run gave no clip keeps its files in
+    this run, and a later run or retention sweeps them. So a run that ends at any point leaves each row naming a whole
     clip, of the run that wrote the row or, for a confirmed speaker that run gave no
     clip, the one its row named before, and a confirmed speaker's earlier clip goes
     only once a durable commit names the new one. A confirmed speaker that comes back
     without a clip keeps naming and playing its clip, which retention removes with
     the audio. A confirmed speaker the re-run drops loses its row but keeps every
-    clip file it had: the files stay on the disk, unnamed and not played, past the
-    retention period until the meeting is deleted, as in Swift. The sweep runs while
+    clip file it had: the files stay, unnamed and not played, until a later run or
+    retention finds the speaker id their name starts with among the meeting's
+    speakers or gives it a clip; if none does, they stay past the retention period
+    until the meeting is deleted, as in Swift. The sweep runs while
     the run holds the meeting in the in-flight set, so no other run of the meeting
     has uncommitted clips in that folder, and speaker ids derive from the meeting id,
     so another meeting's clips are never the sweep's. Clips are written only into the
@@ -991,7 +993,8 @@ still has to draw the window side. `[ ]` is not ported yet.
     `a_confirmation_during_a_rerun_keeps_the_speakers_clip`,
     `retention_during_a_held_rerun_removes_nothing`,
     `sample_clips::the_sweep_removes_only_this_meetings_clips_no_row_names`,
-    `sample_clips::after_the_merge_a_confirmed_speaker_given_no_clip_keeps_its_files`,
+    `sample_clips::after_the_merge_only_the_owners_unnamed_clips_go`,
+    `sample_clips::a_url_in_another_case_keeps_its_clip`,
     `retention::the_sweep_removes_the_run_clip_a_confirmed_row_names`,
     `retention::the_sweep_removes_the_clips_no_row_names_of_the_meetings_speakers`,
     `confirming_after_the_audio_is_gone_removes_the_run_clip_the_row_names`). On
@@ -1023,12 +1026,14 @@ still has to draw the window side. `[ ]` is not ported yet.
     sample clips above), so a confirmed speaker never plays the clip of a run that did
     not map its voice onto it; before, a clip write that failed partway left a kept
     speaker playing another voice (found: #231, #256). A kept confirmation whose new
-    row has no clip keeps its earlier clip and range, an extension of decision 5 in
-    Rust, so the speaker plays the voice the user confirmed or merged onto it, from an
-    earlier run than its embedding
-    (`replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_none`).
-    A confirmed speaker whose id does not come back loses its row, as before, and its
-    clip file stays on the disk, unnamed and not played. Swift replaces the
+    row has no clip keeps its earlier clip and range when its stored row names one, an
+    extension of decision 5 in Rust, so the speaker plays the voice the user confirmed
+    or merged onto it, from an earlier run than its embedding; the kept clip follows
+    the confirmation, not the cluster
+    (`replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_none`,
+    `a_confirmed_speaker_without_a_clip_takes_the_reruns_range`). A confirmed speaker
+    whose id does not come back loses its row, as in Swift, and its clip file stays on
+    the disk, unnamed and not played (see the sample clips above). Swift replaces the
     assignments and the clips and drops the suggestions.
   - Cleanup: the pass writes each segment's text by id and leaves the speakers alone,
     and summarize reads the speakers and segments as stored then, so a speaker named
