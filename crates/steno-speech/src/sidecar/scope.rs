@@ -136,7 +136,7 @@ fn proc_cgroup(pid: u32) -> std::io::Result<String> {
 fn proc_ended(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
         stat.rsplit_once(')')
-            .is_some_and(|(_, rest)| matches!(rest.trim_start().chars().next(), Some('Z' | 'X')))
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with(['Z', 'X']))
     })
 }
 
@@ -518,11 +518,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert!(!proc_ended(child.id()));
         drop(child.stdin.take());
-        let started = Instant::now();
-        while !proc_ended(child.id()) {
-            assert!(started.elapsed() < Duration::from_secs(10), "never ended");
-            std::thread::sleep(POLL_INTERVAL);
-        }
+        wait_until(|| proc_ended(child.id()));
         // A zombie stays one until it is reaped.
         std::thread::sleep(Duration::from_millis(100));
         assert!(proc_ended(child.id()));
@@ -718,13 +714,18 @@ mod tests {
         value.try_clone().unwrap()
     }
 
-    /// Waits until the request's thread cleared `in_flight`.
-    fn wait_until_ended(in_flight: &AtomicBool) {
-        let asked = Instant::now();
-        while in_flight.load(Ordering::SeqCst) {
-            assert!(asked.elapsed() < Duration::from_secs(10), "still waiting");
+    /// Waits up to ten seconds until `done`.
+    fn wait_until(done: impl Fn() -> bool) {
+        let started = Instant::now();
+        while !done() {
+            assert!(started.elapsed() < Duration::from_secs(10), "never done");
             std::thread::sleep(POLL_INTERVAL);
         }
+    }
+
+    /// Waits until the request's thread cleared `in_flight`.
+    fn wait_until_ended(in_flight: &AtomicBool) {
+        wait_until(|| !in_flight.load(Ordering::SeqCst));
     }
 
     #[test]
