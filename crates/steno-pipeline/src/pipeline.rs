@@ -1581,7 +1581,9 @@ impl ProcessingPipeline {
     /// committed the rows this run wrote ([`sample_clips::sweep_after_merge`]):
     /// the clips the earlier rows named, and those of an earlier run that
     /// ended before its commit. A confirmed speaker this run gave no clip
-    /// keeps its files. Three guards keep every uncommitted clip:
+    /// keeps its files, and one that comes back also keeps naming its
+    /// earlier clip (`Store::replace_transcript`). Three guards keep every
+    /// uncommitted clip:
     /// - only files of this meeting's speakers go, and speaker ids derive
     ///   from the meeting id, so another meeting's clips are never removed;
     /// - the run holds the meeting in the in-flight set until the sweep

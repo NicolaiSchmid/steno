@@ -632,6 +632,44 @@ fn replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices() {
     assert_eq!(voice(&store).sample_count, 0);
 }
 
+/// A confirmed speaker whose id comes back without a clip keeps the clip
+/// and range its row named, so the voice the user confirmed stays
+/// playable and no sweep takes the file for a leftover; one that comes
+/// back with a clip takes the new one, and an unconfirmed speaker takes
+/// what the re-run gave it, no clip included.
+#[test]
+fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_none() {
+    let (store, meeting) = populated();
+    let speakers = common::speakers(meeting.id);
+    store
+        .confirm_speaker(speakers[0].id, &common::person())
+        .unwrap();
+    let earlier = store.speakers(meeting.id).unwrap();
+
+    let mut rerun = speakers.clone();
+    for speaker in &mut rerun {
+        speaker.assignment = SpeakerAssignment::Unknown;
+        speaker.sample_clip_range = None;
+        speaker.sample_clip_url = None;
+    }
+    store.replace_transcript(&meeting, &[], &rerun).unwrap();
+    let stored = store.speakers(meeting.id).unwrap();
+    assert!(stored[0].assignment.is_confirmed());
+    assert_eq!(stored[0].sample_clip_url, earlier[0].sample_clip_url);
+    assert_eq!(stored[0].sample_clip_range, earlier[0].sample_clip_range);
+    assert_eq!(stored[1].sample_clip_url, None);
+
+    rerun[0].sample_clip_range = Some(TimeRange {
+        lower: 1.0,
+        upper: 2.0,
+    });
+    rerun[0].sample_clip_url = Some("file:///tmp/clip-1-again.wav".to_owned());
+    store.replace_transcript(&meeting, &[], &rerun).unwrap();
+    let stored = store.speakers(meeting.id).unwrap();
+    assert_eq!(stored[0].sample_clip_url, rerun[0].sample_clip_url);
+    assert_eq!(stored[0].sample_clip_range, rerun[0].sample_clip_range);
+}
+
 /// A re-run's transcript keeps the model's name suggestion for a speaker
 /// whose id comes back, so a run without a summarizer keeps it too; a
 /// speaker that does not come back takes its suggestion with it.

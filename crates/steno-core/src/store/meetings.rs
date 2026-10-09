@@ -13,8 +13,8 @@ use super::convert::{DbDate, DbEnum, DbJson, DbUuid, RowExt as _};
 use super::{Result, Store, StoreError, assets, people, query_all, tasks, transcript, upsert_sql};
 use crate::model::{
     AudioAsset, Decision, LanguageTag, Meeting, MeetingState, MeetingStateKind, MeetingTask,
-    Participant, Speaker, SpeakerAssignment, SpeakerNameSuggestion, SummaryDocument, TitleOrigin,
-    TranscriptSegment, derived_uuid,
+    Participant, Speaker, SpeakerNameSuggestion, SummaryDocument, TitleOrigin, TranscriptSegment,
+    derived_uuid,
 };
 use crate::paths::file_url_path;
 
@@ -365,13 +365,19 @@ impl Store {
     ///
     /// The `sampleClipURL`s of `speakers` are written in the same
     /// transaction, so a kept confirmation and the clip of the run that
-    /// produced the row switch together, and every call commits so that
-    /// the commit is on the disk when it returns ([`Store::write_durably`],
-    /// one WAL sync per processing run): the pipeline removes the
-    /// clips the earlier rows named once it has returned, and a power loss
-    /// must not bring those rows back. Returns the rows it replaced, as
-    /// that transaction read them, for that removal. Rust only: Swift
-    /// commits with `synchronous = NORMAL` and writes its clips in place.
+    /// produced the row switch together. A kept confirmation whose new row
+    /// has no clip keeps its earlier `sampleClipURL` and `sampleClipRange`
+    /// (an extension of decision 5), so the clip the user confirmed stays
+    /// playable and no sweep or retention pass takes it for a leftover; that
+    /// clip can come from an earlier run than the row's embedding (the "me"
+    /// row has none). Every call commits so that the commit is on the disk
+    /// when it returns ([`Store::write_durably`], one WAL sync per
+    /// processing run): the pipeline removes the clips the earlier rows
+    /// named once it has returned, and a power loss must not bring those
+    /// rows back. Returns the rows it replaced, as that transaction read
+    /// them, for that removal. Rust only: Swift commits with `synchronous =
+    /// NORMAL`, writes its clips in place and writes each new row's clip as
+    /// the run gave it, none included.
     pub fn replace_transcript(
         &self,
         meeting: &Meeting,
@@ -381,14 +387,17 @@ impl Store {
         self.write_durably(|transaction| {
             write_processing_results(transaction, meeting)?;
             let replaced = people::speakers_of_meeting(transaction, meeting.id)?;
-            let confirmed: BTreeMap<Uuid, SpeakerAssignment> = replaced
+            // The stored confirmed rows, by id. A row this run writes under
+            // one of their ids takes the stored confirmation, and the stored
+            // clip and range only when this run gives it none.
+            let confirmed: BTreeMap<Uuid, &Speaker> = replaced
                 .iter()
                 .filter(|speaker| speaker.assignment.is_confirmed())
-                .map(|speaker| (speaker.id, speaker.assignment.clone()))
+                .map(|speaker| (speaker.id, speaker))
                 .collect();
             let voices: BTreeSet<Uuid> = confirmed
                 .values()
-                .filter_map(SpeakerAssignment::person_id)
+                .filter_map(|speaker| speaker.person_id())
                 .collect();
             // Deleting the speakers cascades to their suggestions.
             let suggestions = people::name_suggestions_of_meeting(transaction, meeting.id)?;
@@ -403,8 +412,12 @@ impl Store {
             for speaker in speakers {
                 let mut speaker = speaker.clone();
                 speaker.meeting_id = meeting.id;
-                if let Some(assignment) = confirmed.get(&speaker.id) {
-                    speaker.assignment = assignment.clone();
+                if let Some(kept) = confirmed.get(&speaker.id) {
+                    speaker.assignment = kept.assignment.clone();
+                    if speaker.sample_clip_url.is_none() {
+                        speaker.sample_clip_url.clone_from(&kept.sample_clip_url);
+                        speaker.sample_clip_range = kept.sample_clip_range;
+                    }
                 }
                 people::insert_speaker(transaction, &speaker)?;
             }

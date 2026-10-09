@@ -1918,8 +1918,9 @@ fn whole_clip_samples(path: &Path) -> u32 {
 
 /// Asserts that "Speaker 1" is still confirmed as Anna and that every
 /// speaker row of `meeting_id` with a clip names a whole WAV whose length
-/// is the row's clip range, the clip of the run that wrote the row. Returns
-/// the file names the rows name.
+/// is the row's clip range: the clip of the run that wrote the row, or the
+/// earlier clip a confirmed row given none kept. Returns the file names the
+/// rows name.
 fn assert_each_row_names_its_own_clip(store: &Store, meeting_id: Uuid) -> BTreeSet<OsString> {
     let speakers = store.speakers(meeting_id).unwrap();
     assert_eq!(
@@ -2114,8 +2115,8 @@ async fn a_meeting_whose_master_lies_in_another_meetings_folder_leaves_its_clips
     let speakers = world.store.speakers(guest.id).unwrap();
     assert!(speakers.iter().all(|row| row.sample_clip_url.is_none()));
     assert_eq!(clip_files(&owners), before, "the guest wrote no clip here");
-    // A clip of the guest's speaker that no row names, as the writer
-    // before per-run names left it.
+    // A clip of the guest's speaker that no row names, a fixed-name clip
+    // as Swift writes it.
     let layout = RecordingLayout::from_asset(&owners).unwrap();
     let guests_clip = layout.sample_clip(speaker(&speakers, "Speaker 1").id);
     std::fs::write(&guests_clip, b"the guest's earlier clip").unwrap();
@@ -2146,9 +2147,10 @@ async fn a_meeting_whose_master_lies_in_another_meetings_folder_leaves_its_clips
     assert_eq!(clip_files(&owners), expected);
 }
 
-/// A confirmed speaker that a re-run drops, or whose new row gets no clip,
-/// keeps its clip file through that re-run and the next: its row is gone
-/// or names no clip, as before per-run names, and the file stays.
+/// A confirmed speaker that a re-run gives no clip keeps naming its
+/// earlier clip, which stays whole and playable, and a confirmed speaker
+/// the re-run drops keeps its file with no row naming it, through that
+/// re-run and the next.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_confirmed_speaker_a_rerun_gives_no_clip_keeps_its_clip_file() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2159,30 +2161,153 @@ async fn a_confirmed_speaker_a_rerun_gives_no_clip_keeps_its_clip_file() {
         .store
         .confirm_speaker(ben, &sample_data::person(1, "Ben"))
         .unwrap();
+    let annas_clip = speaker(&world.store.speakers(meeting).unwrap(), "Speaker 1")
+        .sample_clip_url
+        .clone()
+        .unwrap();
     let earlier = clip_files(&asset);
     assert_eq!(earlier.len(), 2);
     // One cluster without a clip: "Speaker 1" comes back without one, and
     // "Speaker 2" is dropped.
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.diarizer = Arc::new(FakeDiarizer::answering(|audio| {
-        let mut result = FakeDiarizer::round_robin(audio.duration(), 1, 1.0);
-        for cluster in &mut result.clusters {
-            cluster.sample_clip_range = None;
-        }
-        result
-    }));
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let pipeline = rerun_with_clipless(&world, 1, &["Speaker 1"], 1.0);
 
     for run in 0..2 {
         pipeline.process(asset.id).await.unwrap();
+        let named = assert_each_row_names_its_own_clip(&world.store, meeting);
         let speakers = world.store.speakers(meeting).unwrap();
         let kept = speaker(&speakers, "Speaker 1");
         assert_eq!(kept.id, anna);
-        assert!(kept.assignment.is_confirmed(), "run {run}");
-        assert_eq!(kept.sample_clip_url, None, "run {run}");
+        assert_eq!(
+            kept.sample_clip_url.as_ref(),
+            Some(&annas_clip),
+            "run {run}"
+        );
+        assert_eq!(named.len(), 1, "run {run}: Anna still plays her clip");
         assert!(speakers.iter().all(|row| row.id != ben), "run {run}");
         assert_eq!(clip_files(&asset), earlier, "run {run}: both clips stay");
     }
+}
+
+/// A pipeline over the world's dependencies whose diarizer gives
+/// `clusters` speakers of `turn`-second turns, and no clip to the ones
+/// labelled in `clipless`.
+fn rerun_with_clipless(
+    world: &World,
+    clusters: usize,
+    clipless: &'static [&'static str],
+    turn: f64,
+) -> ProcessingPipeline {
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.diarizer = Arc::new(FakeDiarizer::answering(move |audio| {
+        let mut result = FakeDiarizer::round_robin(audio.duration(), clusters, turn);
+        for cluster in &mut result.clusters {
+            if clipless.contains(&cluster.label.as_str()) {
+                cluster.sample_clip_range = None;
+            }
+        }
+        result
+    }));
+    ProcessingPipeline::new(dependencies)
+}
+
+/// Confirming a speaker as the person of a confirmed speaker without a clip
+/// merges it into that row, which takes the merged speaker's clip under
+/// that speaker's id. Re-runs that again give the confirmed row no clip,
+/// and the merged speaker's id a clip of its own, leave the row naming the
+/// clip it took, whole and playable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_into_a_confirmed_speaker_without_a_clip_keeps_its_clip_through_reruns() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let first = rerun_with_clipless(&world, 2, &["Speaker 1"], 1.5);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    first.enqueue(&meeting, &asset).unwrap();
+    first.wait_until_idle().await;
+    let speakers = world.store.speakers(meeting.id).unwrap();
+    let (kept, merged) = (
+        speaker(&speakers, "Speaker 1").id,
+        speaker(&speakers, "Speaker 2").id,
+    );
+    let anna = sample_data::person(0, "Anna");
+    world.store.confirm_speaker(kept, &anna).unwrap();
+    world.store.confirm_speaker(merged, &anna).unwrap();
+    let took = world
+        .store
+        .speakers(meeting.id)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == kept)
+        .unwrap()
+        .sample_clip_url
+        .unwrap();
+    let took_path = file_url_path(&took).unwrap();
+    assert!(
+        took_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&merged.to_string().to_uppercase()),
+        "the clip stays under the merged speaker's id"
+    );
+
+    let rerun = rerun_with_clipless(&world, 2, &["Speaker 1"], 1.0);
+    for run in 1..=2 {
+        rerun.process(asset.id).await.unwrap();
+        assert_each_row_names_its_own_clip(&world.store, meeting.id);
+        let rows = world.store.speakers(meeting.id).unwrap();
+        let row = rows.iter().find(|row| row.id == kept).unwrap();
+        assert_eq!(row.sample_clip_url.as_ref(), Some(&took), "run {run}");
+        assert!(rows.iter().any(|row| row.id == merged), "run {run}");
+        assert_eq!(whole_clip_samples(&took_path), 24_000, "run {run}");
+    }
+}
+
+/// A confirmed speaker a re-run drops keeps its file, and so it does when
+/// a later re-run brings its id back unconfirmed and without a clip: only
+/// a speaker the merge replaced or this run gave a clip has its files
+/// swept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_confirmed_speaker_that_comes_back_without_a_clip_keeps_its_file() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let (asset, _) = confirmed_call(&world).await;
+    let meeting = asset.meeting_id;
+    let speakers = world.store.speakers(meeting).unwrap();
+    let ben = speaker(&speakers, "Speaker 2").id;
+    world
+        .store
+        .confirm_speaker(ben, &sample_data::person(1, "Ben"))
+        .unwrap();
+    let bens_clip = file_url_path(
+        speaker(&speakers, "Speaker 2")
+            .sample_clip_url
+            .as_ref()
+            .unwrap(),
+    )
+    .unwrap()
+    .file_name()
+    .unwrap()
+    .to_owned();
+
+    rerun_with_clipless(&world, 1, &[], 1.0)
+        .process(asset.id)
+        .await
+        .unwrap();
+    let rows = world.store.speakers(meeting).unwrap();
+    assert!(rows.iter().all(|row| row.id != ben), "the re-run drops Ben");
+    assert!(clip_files(&asset).contains(&bens_clip));
+
+    rerun_with_clipless(&world, 2, &["Speaker 2"], 1.0)
+        .process(asset.id)
+        .await
+        .unwrap();
+    let rows = world.store.speakers(meeting).unwrap();
+    let back = rows.iter().find(|row| row.id == ben).unwrap();
+    assert!(!back.assignment.is_confirmed());
+    assert_eq!(back.sample_clip_url, None);
+    assert!(
+        clip_files(&asset).contains(&bens_clip),
+        "the file of the confirmed speaker stays"
+    );
 }
 
 /// A call whose tap carried no conversation diarizes its mic lane, which

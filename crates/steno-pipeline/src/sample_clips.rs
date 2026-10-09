@@ -7,13 +7,16 @@
 //! syncs it and the folder before the merge (`write`). The merge's
 //! `Store::replace_transcript` switches the speaker rows' `sampleClipURL`s
 //! to the new files in the transaction that keeps their confirmations,
-//! commits durably and returns the rows it replaced. Only after that commit
-//! does `sweep_after_merge` remove the clip files of the meeting's speakers
-//! that no speaker row names: the clips the earlier rows named, and the
-//! files of a run that ended before its commit (a crash, a failed write, a
-//! failed merge). So at every point each speaker row names a whole clip of
-//! the run that wrote the row, and a confirmed speaker's earlier clip is
-//! removed only once a durable commit names the new one:
+//! commits durably and returns the rows it replaced. A confirmed speaker
+//! the run gives no clip keeps the clip and range its row named. Only after
+//! that commit does `sweep_after_merge` remove the clip files of the
+//! meeting's speakers that no speaker row names: the clips the earlier rows
+//! named, and the files of a run that ended before its commit (a crash, a
+//! failed write, a failed merge). So at every point each speaker row names
+//! a whole clip of the run that wrote the row or, for a confirmed speaker
+//! that run gave no clip, the clip its row named before, and a confirmed
+//! speaker's earlier clip is removed only once a durable commit names the
+//! new one:
 //!
 //! | The run ends | The rows name | Left over, for a later sweep |
 //! |--------------|---------------|------------------------------|
@@ -24,18 +27,22 @@
 //!
 //! A sweep removes a clip file only when all of these hold:
 //! - The file belongs to one of the meeting's speakers, by the speaker id
-//!   its name starts with: one this run wrote or one the merge replaced.
-//!   Speaker ids derive from their meeting's id, so the clips of another
-//!   meeting whose master lies in this folder are never the sweep's.
+//!   its name starts with: one this run gave a clip or one the merge
+//!   replaced. Speaker ids derive from their meeting's id, so the clips of
+//!   another meeting whose master lies in this folder are never the
+//!   sweep's. A speaker the merge did not replace that this run gave no
+//!   clip keeps its files until a later run gives it a clip or retention
+//!   runs.
 //! - No speaker row of any meeting names it, matched by file name, so a URL
 //!   that spells the folder another way still keeps its clip.
 //! - Its speaker is not a confirmed one this run gave no clip, and it is
-//!   not the clip such a speaker's earlier row named: a confirmed speaker
-//!   the re-run drops, or whose new row has no clip, keeps every file it
-//!   had. Its row is gone or names no clip, as before per-run names, so the
-//!   file stays on the disk, unnamed and not played; retention removes it
-//!   with the audio while the meeting still has that speaker, and deleting
-//!   the meeting removes it.
+//!   not the clip such a speaker's earlier row named. A confirmed speaker
+//!   that comes back without a clip keeps naming its earlier clip, so the
+//!   clip is kept by name and still plays, and retention removes it with
+//!   the audio ([`steno_core::ExpiredAsset::confirmed_with_clips`]). A
+//!   confirmed speaker the re-run drops loses its row but keeps every file
+//!   it had: the files stay on the disk, unnamed and not played, past the
+//!   retention period until the meeting is deleted, as in Swift.
 //!
 //! The sweep runs only inside a run, after its merge, on the meeting's own
 //! folder ([`RecordingLayout::own_folder`]), while the run holds the meeting
@@ -113,13 +120,15 @@ pub(crate) fn write(
 }
 
 /// The sweep of a run, once its merge committed `committed`, the rows this
-/// run wrote, in place of `replaced`, the rows `Store::replace_transcript`
-/// returned: [`sweep`] over the speakers of either, keeping every clip a
-/// row now names. A confirmed speaker this run gave no clip keeps every
-/// file of its own and the clip its earlier row named, which a merge into a
-/// row without a clip may have left under another speaker's id (see the
-/// module doc). Reads the rows first and removes nothing when that read
-/// fails. The caller holds the meeting in the in-flight set.
+/// run wrote as `diarize` built them (before the store restored the kept
+/// confirmations and clips), in place of `replaced`, the rows
+/// `Store::replace_transcript` returned: [`sweep`] over the speakers the
+/// merge replaced and those this run gave a clip, keeping every clip a row
+/// now names. A confirmed speaker this run gave no clip keeps every file of
+/// its own and the clip its earlier row named: a dropped confirmed speaker's
+/// earlier clip, which a merge may have left under another speaker's id
+/// (see the module doc). Reads the rows first and removes nothing when that
+/// read fails. The caller holds the meeting in the in-flight set.
 pub(crate) fn sweep_after_merge(
     store: &Store,
     directory: &Path,
@@ -133,17 +142,13 @@ pub(crate) fn sweep_after_merge(
         .filter(|speaker| speaker.sample_clip_url.is_some())
         .map(|speaker| speaker.id)
         .collect();
-    let mut owners: BTreeSet<Uuid> = replaced
-        .iter()
-        .chain(committed)
-        .map(|speaker| speaker.id)
-        .collect();
-    for kept in replaced
-        .iter()
-        .filter(|speaker| speaker.assignment.is_confirmed() && !given_a_clip.contains(&speaker.id))
-    {
-        owners.remove(&kept.id);
-        named.extend(kept.sample_clip_url.clone());
+    let mut owners = given_a_clip.clone();
+    for speaker in replaced {
+        if speaker.assignment.is_confirmed() && !given_a_clip.contains(&speaker.id) {
+            named.extend(speaker.sample_clip_url.clone());
+        } else {
+            owners.insert(speaker.id);
+        }
     }
     Ok(sweep(directory, &owners, &named, probe))
 }
@@ -329,9 +334,10 @@ mod tests {
 
     /// After the merge a confirmed speaker that the re-run dropped, or
     /// whose new row has no clip, keeps every file it had and the clip its
-    /// row named under another speaker's id; a confirmed speaker given a new
-    /// clip and an unconfirmed one lose their earlier clips, and every clip
-    /// a row names stays.
+    /// row named under another speaker's id, and a speaker the merge did
+    /// not replace that this run gave no clip keeps its files; a confirmed
+    /// speaker given a new clip and an unconfirmed one lose their earlier
+    /// clips, and every clip a row names stays.
     #[test]
     fn after_the_merge_a_confirmed_speaker_given_no_clip_keeps_its_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -341,8 +347,14 @@ mod tests {
         let layout = RecordingLayout::new(&dir.path().join("audio"), meeting.id);
         layout.create_directories(true).unwrap();
         let (earlier, run) = (Uuid::new_v4(), Uuid::new_v4());
-        let [clipless, dropped, renewed, unconfirmed, merged_into] =
-            [(); 5].map(|()| Uuid::new_v4());
+        let [
+            clipless,
+            dropped,
+            renewed,
+            unconfirmed,
+            merged_into,
+            returned,
+        ] = [(); 6].map(|()| Uuid::new_v4());
         let before = |id| layout.run_sample_clip(id, earlier);
         let now = |id| layout.run_sample_clip(id, run);
         let dropped_leftover = layout.run_sample_clip(dropped, Uuid::new_v4());
@@ -358,6 +370,7 @@ mod tests {
             &now(renewed),
             &now(unconfirmed),
             &moved,
+            &before(returned),
         ]);
         let replaced = [
             speaker(meeting.id, clipless, true, Some(&before(clipless))),
@@ -372,6 +385,8 @@ mod tests {
             speaker(meeting.id, renewed, false, Some(&now(renewed))),
             speaker(meeting.id, unconfirmed, false, Some(&now(unconfirmed))),
             speaker(meeting.id, merged_into, false, None),
+            // A confirmed speaker an earlier re-run dropped, back unconfirmed.
+            speaker(meeting.id, returned, false, None),
         ];
         for row in &committed {
             store.save_speaker(row).unwrap();
@@ -396,6 +411,7 @@ mod tests {
             now(renewed),
             now(unconfirmed),
             moved,
+            before(returned),
         ] {
             assert!(kept.exists(), "{}", kept.display());
         }
