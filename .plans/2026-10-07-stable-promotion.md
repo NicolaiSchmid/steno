@@ -491,8 +491,9 @@ A for the audio path, P for the other data-loss fixes, X for the Linux targets.
 Every package is written in parallel except where a dependency is named:
 
 - S3 on S6's `steno-macos` (D10); S4's packaged-install message on X5; A8 on S2's
-  controller; X6 on X5 and P5 (X2's and X4's files join it in their PRs); X7 on X4, X5 and P5; P5's save logging on
-  P3's recoverable save; S1's queued refusal on P9's queue.
+  controller; X6 on X5 and P5 (X2's and X4's files join it in their PRs); X7
+  on X4, X5 and P5; P5's save logging on P3's recoverable save; S1's queued
+  refusal on P9's queue.
 
 ### S: the Mac and the release
 
@@ -1097,22 +1098,27 @@ The table above names each package and its owner. Their tests:
   which `vercmp` ranks below `0.11.0`).
   - As built (`packaging/aur/`, #265): pinned to `0.1.0rc3` as a build
     vehicle until a release contains #227 and #261; the first AUR push is a
-    release with both, so #265 merges after #227 and #261. Two drop-ins (the
-    autostart service's and GNOME's scope's), copied from #227 until the
-    `.deb` installs them; `package()` keeps the `.deb`'s copy when it has one.
+    release with both, so #265 merges after #227 (#261 is on main). Two
+    drop-ins (the autostart service's and GNOME's scope's), copied from #227
+    until the `.deb` installs them; `package()` keeps the `.deb`'s copy when
+    it has one.
     No install script: Arch's `30-systemd-daemon-reload-user.hook` reloads
     the user managers. X4's `ufw` profile and X2's window rules are `TODO`
     lines in `package()`, so X6 lands before X2 and X4 and gains them in their
-    PRs. `depends` adds what namcap finds linked (`cairo`, `gdk-pixbuf2`,
-    `glibc`, `hicolor-icon-theme`, `libgcc`, `libpipewire`, `libstdc++`).
+    PRs. An autostart entry a candidate without X5 wrote survives the upgrade
+    and bypasses the wrapper; Omarchy step 1 rewrites it. `depends` adds
+    what namcap finds linked (`cairo`, `gdk-pixbuf2`, `glibc`,
+    `hicolor-icon-theme`, `libgcc`, `libpipewire`, `libstdc++`).
     The release key is also committed as
     `packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`;
     publishing it to keyserver.ubuntu.com, which yay and paru query for a
     missing `validpgpkeys` key, is **Nicolai**'s. The repository gains a root
-    `LICENSE`, which the package's copy must match. `packaging/check-aur.sh`
-    (`aur-ci.yml`, also weekly) builds, verifies and installs it in an Arch
-    container, and fails when the signature check is skipped or the wrapper
-    runs anything but its three lines.
+    `LICENSE`, which the package's copy must match; the package also carries
+    the vendored SpeexDSP's BSD notice, which the binary compiles in.
+    `packaging/check-aur.sh` (`aur-ci.yml`, also weekly) builds, verifies and
+    installs it in an Arch container, and fails when the checksum or signature
+    check is skipped, or the wrapper is not executable or runs anything but
+    its three lines.
 - **X7 Nix on Linux.** `flake.nix` gains `packages.x86_64-linux.steno`, built
   from source with `rustPlatform` and `cargo-tauri.hook`, `wrapGAppsHook3`,
   `ORT_LIB_LOCATION` against nixpkgs' `onnxruntime` with
@@ -1699,11 +1705,11 @@ the target, from `0.11.0-rc.2` on (`rc.1` has no previous candidate). Step 0 on
 each target installs the previous candidate (`rc.<N-1>`), opens the firewall
 where there is one, pairs the phone, records a one-minute meeting and turns on
 launch at login (on NixOS the module's `steno.service` does), then upgrades to
-the
-candidate under test: `sudo apt install ./<new>.deb` on GNOME; `makepkg -si` in
+the candidate under test: `sudo apt install ./<new>.deb` on GNOME; `makepkg -si` in
 `packaging/aur/` after the README's Bump steps 1 to 5 for the new tag (the
-PKGBUILD at the tag still names the previous release) on Omarchy; the flake input moved to the new
-tag, `nixos-rebuild switch` and `sudo nix-collect-garbage -d` on NixOS. Step 0
+PKGBUILD at the tag still names the previous release) on Omarchy; the flake
+input moved to the new tag, `nixos-rebuild switch` and `sudo
+nix-collect-garbage -d` on NixOS. Step 0
 passes when the meeting and the pairing are kept and, after a logout and login,
 Steno starts once, as the new version. Each target's step 1 sets up its step 0;
 steps 2 onward run on the candidate under test. On `v0.11.0`, R8 repeats step 0
@@ -1762,9 +1768,14 @@ interrupted" after one. On the GNOME machine,
      rules to `~/.config/hypr/` and reload Hyprland. In step 0, `sudo ufw allow
      Steno` runs right after the install and before the pairing, and the
      upgrade runs while the previous candidate, started at login, records;
-     then stop the recording: the meeting processes. From `v0.11.0` on, step 0
-     installs with `yay -S steno-desktop-bin`, which verifies with the
-     imported key (and imports it itself once it is on keyserver.ubuntu.com).
+     then stop the recording: the meeting processes. When the previous
+     candidate predates X5, the autostart entry its first launch wrote names
+     `/usr/lib/steno-desktop/steno-desktop` and survives the upgrade: right
+     after step 0, quit Steno, start it from the Omarchy launcher and turn
+     Launch at login off and on, so step 7 finds `/usr/bin/steno-desktop`.
+     From `v0.11.0` on, step 0 installs with `yay -S steno-desktop-bin`, which
+     verifies with the imported key (and imports it itself once it is on
+     keyserver.ubuntu.com).
   2. Start Steno from the Omarchy launcher. `cat /proc/$(pidof -s
      steno-desktop)/cgroup` names an `app-…scope` (not Hyprland's unit). The
      tray icon is in the bar's drawer; a right click opens the menu, and every

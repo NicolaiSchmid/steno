@@ -39,14 +39,22 @@ nor #261. It builds and checks this directory; it is not a release to
 publish:
 
 - rc.3 ignores `STENO_DISTRIBUTION` and `STENO_EXEC_PATH` (X5, #261): its
-  in-app updater stays on, and its autostart entry names
-  `/usr/lib/steno-desktop/steno-desktop`, not the wrapper.
+  in-app updater stays on, and the autostart entry its first launch
+  writes names `/usr/lib/steno-desktop/steno-desktop`, not the wrapper.
 - rc.3 removes its autostart entry as soon as launch at login is turned off
   (P5, #227). The reload during any install that touches
   `usr/lib/systemd/user/` (this package's, or `pipewire`'s or `systemd`'s)
   then unloads a running, autostarted Steno's unit, and the end of the
   session stops it without SIGTERM, so it cannot save the recording: P3
   salvages the meeting as `failed`, without its unsaved tail.
+- That entry survives the upgrade to a release that contains #261, and
+  every login then starts the new binary without the wrapper: the in-app
+  updater stays on and the entry keeps the binary's path. Once on such a
+  release, quit Steno, start it from the launcher and turn Launch at
+  login off and on; the entry then names `/usr/bin/steno-desktop`. In a
+  Steno a login started, turning it on fails with "Steno can't open at
+  login from where it's installed now", and launch at login stays off
+  until it is turned on from the launcher.
 
 The first AUR push is a release that contains both #227 and #261.
 
@@ -80,7 +88,7 @@ check" when a checksum is wrong.
 
 An upgrade replaces the files under a running Steno: it keeps running the
 old binary, but starts the new sidecar for the next meeting it processes.
-Once no recording runs, quit Steno and start it again.
+Once no recording runs, quit Steno and start it again from the launcher.
 
 Quit Steno before `pacman -R steno-desktop-bin`: the removal takes the
 drop-ins away, so a running, autostarted Steno has the generator's 5 s stop
