@@ -133,10 +133,10 @@ default and the feature is opt-in, for UI work without a database.
 
 Platform backends behind traits, two implementations before generalising: `Capture`
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
-`SecretStore` (Keychain and the Windows credential store via `keyring`; the Secret
-Service over `zbus` on Linux, a 0600 file where no provider runs or the keyring stays
-locked before the first move), `Updater` (Tauri updater on every platform; Sparkle
-retires at cutover).
+`SecretStore` (Keychain via `keyring`, the Windows credential store over `windows-sys`;
+the Secret Service over `zbus` on Linux, a 0600 file where no provider runs or the
+keyring stays locked before the first move), `Updater` (Tauri updater on every
+platform; Sparkle retires at cutover).
 
 ## Transition
 
@@ -923,13 +923,38 @@ still has to draw the window side. `[ ]` is not ported yet.
   only if it ships another release. Without `--title` both store the file name as the
   default title; Rust does so for a blank `--title` too, as the intake treats one.
 - The CLI's secret store is the 0600 `secrets.json` under the support directory
-  (`STENO_<KEY>` wins, as in Swift); the app's is the platform keyring on macOS and
-  Windows, filed as the Swift app files it: service `uno.schmid.steno.mac`, account the
-  key's raw value (`crates/steno-services/src/secrets.rs` pins both against the Swift
-  sources), so the Rust app reads the API key the Swift app stored. The `keyring`
-  crate sets no label, where Swift wrote "Steno <key>"; lookups ignore it. The CLI and
-  the app do not read each other on macOS and Windows, as Keychain and the file did
-  not. On Linux the app keeps its secrets in the Secret Service (`SecretServiceStore`:
+  (`STENO_<KEY>` wins, as in Swift); the app's is the platform keyring. On macOS it is
+  filed as the Swift app files it: service `uno.schmid.steno.mac`, account the key's
+  raw value (`crates/steno-services/src/secrets.rs` pins both against the Swift
+  sources), so the Rust app reads the API key the Swift app stored. On macOS the
+  `keyring` crate sets no label, where Swift wrote "Steno <key>"; lookups ignore it.
+  The CLI and the app do not read each other on macOS and Windows, as Keychain and the
+  file did not.
+- On Windows the app writes the credential store itself (`secrets::credentials`, over
+  `CredReadW`, `CredWriteW` and `CredDeleteW`), as the `keyring` crate keeps every
+  credential with the roaming profile (`CRED_PERSIST_ENTERPRISE`), where a domain
+  profile's sync can remove it or bring back an older one. Each credential is kept on
+  this computer (`CRED_PERSIST_LOCAL_MACHINE`), filed as the crate filed it: target
+  name `<key>.uno.schmid.steno.mac`, user name the key, the value in UTF-16
+  little-endian, so the crate, and a build from before, reads it too. A credential
+  Steno writes carries the comment "Steno <key>"; a moved one keeps the crate's.
+  `CredWriteW` replaces the credential of the same target name and type, so a
+  write never deletes first. Only a credential that does not exist reads as none;
+  every other failed read is an error, so the identity's load reports it unreadable
+  (#221). A credential the crate wrote moves on its first read, at launch: after the
+  read it is written again with local persistence and its user name and comment as
+  read, under `CRED_PRESERVE_CREDENTIAL_BLOB`, so the credential manager keeps the
+  blob it holds. The move carries no value, so it never writes an old one over a newer
+  one, and a credential removed since the read is not found and stays removed. A
+  removal wins, also one the profile's sync made in that moment. The move is read back
+  and logged, and nothing is written after it. A failed move is logged and the value
+  read is still used. Microsoft documents nothing about how the credential manager
+  writes the move to disk, where local and roaming credentials live in different
+  folders; should a power loss during that write lose the identity, the next launch
+  reports the handover unavailable rather than minting a new identity (#221). No
+  backup credential covers that moment: every `CredWriteW` has it, including the
+  mint's, and a backup would be a second copy that a removal must also delete.
+- On Linux the app keeps its secrets in the Secret Service (`SecretServiceStore`:
   attributes `service` and `username`, label "Steno <key>"):
   - The choice is made once per process, on a thread of the store's own. A read never
     asks the user; one made while a prompt is up fails, and once the choice is made
@@ -3075,6 +3100,7 @@ PR off `main`.
 | The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | open |
 | On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
 | Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
+| On Windows the credential store keeps the API key and the handover identity on this computer (`CRED_PERSIST_LOCAL_MACHINE`) instead of with the roaming profile, and moves the `keyring` crate's roaming credentials there on their first read, keeping the stored blob under `CRED_PRESERVE_CREDENTIAL_BLOB` (`steno-services`) | `fix/windows-credential-persist` | #262 | open |
 | A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
 | Stable plan A9: the AAC priming trimmed from the edit list, the gapless tag or, in the phone recorder's layout alone, AVFoundation's default; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | open |
 | S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | open |

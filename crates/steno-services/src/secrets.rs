@@ -1,10 +1,10 @@
-//! `SecretStore` implementations: the platform keyring (the Keychain, the
-//! Windows credential store) through the `keyring` crate, the Secret
-//! Service on Linux (`secret_service::SecretServiceStore`), and the 0600
-//! JSON file the Swift CLI used where no keyring is reachable
-//! (`STENO_<KEY>` wins over the file and over the Secret Service); and
-//! [`KeepsApiKey`], the app's store over them, which keeps the API key for
-//! the pipeline's rebuilds.
+//! `SecretStore` implementations: the platform keyring (the Keychain
+//! through the `keyring` crate, the Windows credential store through
+//! `credentials`, kept on this computer), the Secret Service on Linux
+//! (`secret_service::SecretServiceStore`), and the 0600 JSON file the
+//! Swift CLI used where no keyring is reachable (`STENO_<KEY>` wins over
+//! the file and over the Secret Service); and [`KeepsApiKey`], the app's
+//! store over them, which keeps the API key for the pipeline's rebuilds.
 //! Swift: `apps/macos/Steno/Services/KeychainSecretStore.swift`,
 //! `Sources/StenoCore/Testing/FileSecretStore.swift`.
 
@@ -19,6 +19,8 @@ use steno_core::{
 
 use crate::files::{Access, replace_file, restrict_new_file};
 
+#[cfg(any(windows, test))]
+mod credentials;
 #[cfg(all(test, target_os = "linux"))]
 mod fake_service;
 #[cfg(target_os = "linux")]
@@ -34,7 +36,9 @@ pub use secret_service::SecretServiceStore;
 /// `Steno <key>`; the `keyring` crate cannot set a label (the Keychain
 /// then shows the service), and lookups match on service and account only.
 /// The Secret Service item carries the label (`SecretServiceStore` on
-/// Linux).
+/// Linux), and a Windows credential Steno writes carries it as its
+/// comment. On Windows the credential's target name is `<key>.<service>`,
+/// as the `keyring` crate filed it (`credentials`).
 pub const KEYRING_SERVICE: &str = "uno.schmid.steno.mac";
 
 /// The platform keyring when `keyring` is set: the Keychain on macOS, the
@@ -122,19 +126,20 @@ fn plain_name(key: &str) -> &'static str {
     }
 }
 
-/// The platform keyring.
+/// The platform keyring: the Keychain through the `keyring` crate, and on
+/// Windows the credential store through `credentials`, which keeps every
+/// credential on this computer and moves the crate's roaming ones there on
+/// their first read.
 #[derive(Debug, Default)]
 pub struct KeyringSecretStore;
 
+#[cfg(not(windows))]
 impl KeyringSecretStore {
     fn entry(key: &SecretKey) -> Result<keyring::Entry, keyring::Error> {
         keyring::Entry::new(KEYRING_SERVICE, key.as_str())
     }
-}
 
-#[async_trait]
-impl SecretStore for KeyringSecretStore {
-    async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
+    fn read(key: &SecretKey) -> BoundaryResult<Option<String>> {
         match Self::entry(key)?.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -142,8 +147,7 @@ impl SecretStore for KeyringSecretStore {
         }
     }
 
-    /// `None` and an empty value remove the entry, as in Swift.
-    async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+    fn write(key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
         let entry = Self::entry(key)?;
         match value.filter(|value| !value.is_empty()) {
             Some(value) => entry.set_password(value)?,
@@ -153,6 +157,36 @@ impl SecretStore for KeyringSecretStore {
             },
         }
         Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl KeyringSecretStore {
+    fn read(key: &SecretKey) -> BoundaryResult<Option<String>> {
+        Ok(credentials::read_secret(
+            &mut *credentials::credential_set(),
+            key,
+        )?)
+    }
+
+    fn write(key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+        Ok(credentials::write_secret(
+            &mut *credentials::credential_set(),
+            key,
+            value,
+        )?)
+    }
+}
+
+#[async_trait]
+impl SecretStore for KeyringSecretStore {
+    async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
+        Self::read(key)
+    }
+
+    /// `None` and an empty value remove the entry, as in Swift.
+    async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+        Self::write(key, value)
     }
 
     fn place(&self) -> Option<SecretPlace> {
