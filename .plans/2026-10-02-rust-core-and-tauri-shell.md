@@ -1772,11 +1772,12 @@ parity item until a plan says otherwise:
   D9).
 - **A damaged packet becomes silence: Rust only.** AVFoundation conceals a
   packet its decoder cannot read and says nothing; symphonia returns an
-  error, which stopped the whole decode. The decoder writes silence of the
-  packet's container duration in its place, counts it
-  (`AudioBuffer16k::damaged_parts`) and the meeting's detail says how many
-  parts were replaced; a file with more than half of its packets damaged
-  fails (stable plan A12).
+  error (or panics), which stopped the whole decode. The decoder writes
+  silence of the packet's container duration in its place, goes on with a
+  fresh decoder, counts the packet and the silence's length
+  (`AudioBuffer16k::damage`), and the meeting's detail says how long the
+  silence lasts; a file with more than half of its packets damaged fails
+  (stable plan A12).
 - **AAC-LC only.** AVFoundation also decoded HE-AAC; symphonia decodes
   AAC-LC alone. The iOS recorder writes AAC-LC, so nothing is lost today; a
   plan adds HE-AAC if an import needs it.
@@ -3157,7 +3158,7 @@ PR off `main`.
 | Stable plan A9: the AAC priming trimmed from the edit list, the gapless tag or, in the phone recorder's layout alone, AVFoundation's default; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | open |
 | S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | open |
 | The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | open |
-| Stable plan A12: an undecodable AAC packet becomes silence of its length, counted (`AudioBuffer16k::damaged_parts`), recorded in `damaged-audio.json` and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
+| Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length and a fresh decoder, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

@@ -317,7 +317,7 @@ why and the alternative.
     | Sidecar's 2 ms lag | Final, accepted | Far below a word; Swift had the same relationship. `tests/codec.rs` pins both onsets and the 32 samples between them. |
     | AAC priming (23 to 48 ms late on phone recordings) | Fixed (A9, #246) | The decoder reads the edit list (ffmpeg's files), else iTunes' gapless tag (`AVAudioFile`, so the Swift app's mixdowns: 2 112 samples), else the 2 112 AVFoundation assumes, but only in the layout of the phone's `AVAudioRecorder`, which writes neither box (major brand `M4A `, `mp42`, no `udta`, and an `esds` with ES_ID 0 and stream byte 0x14). Any other file that declares neither keeps every sample: Android's recorder primes 1 024 and declares nothing, and 25 ms of priming is harmless where 25 ms of speech is not. It drops exactly that many frames, so the decode starts where AVFoundation's did (checked on files from Apple's encoder in both layouts); every other input decodes bit for bit as before. |
     | Call mode without an output client (the tap's IOProc runs only once another client opens the output) | Fixed first (A10) | Forge reproduces the loss over SSH: 0 callbacks while nothing plays. The tap aggregate runs only while a process the tap includes drives the output. The Swift app shares the defect and keeps its exclusion of its own process until the handoff, so this is not a regression, but D3 makes the loss blocking. The fix includes Steno in the tap, so the rule is: no in-app playback while recording, enforced by `Playback`. |
-    | A damaged AAC packet (AVFoundation conceals it; symphonia stopped the whole decode) | Fixed (A12) | Under D3 one bad packet must not lose a phone recording. The packet becomes silence of its container duration, so later audio keeps its time; the meeting says how many parts were replaced. A file in which more than half of the packets fail is an error, never a meeting of silence. |
+    | A damaged AAC packet (AVFoundation conceals it; symphonia stopped the whole decode) | Fixed (A12, #264) | Under D3 one bad packet must not lose a phone recording. The packet becomes silence of its container duration, so later audio keeps its time; the meeting says how long the silence lasts. A file in which more than half of the packets fail is an error, never a meeting of silence. |
 
   - The Swift defects under "Store", "Adapters", "Handover", "LLM" and "Audio"
     and the CLI's `--title`, and the parity notes' other "before cutover" ports
@@ -440,7 +440,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A8 | Meeting detection on Linux, over PipeWire's streams | #222 |
 | A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; the call-mode start is A10's, whose step 2 runs the tone check on the Mac | audio (#246) |
 | A10 | Call mode without an output client: the tap includes Steno, and the capture starts a silent output IOProc of its own on the aggregate's clock master, so with nothing playing the first callback comes within 100 ms of `start` returning and 200 ms of the call to `start`; no in-app playback while recording, enforced by `Playback` | audio |
-| A12 | An undecodable AAC packet becomes silence of its length, counted and shown on the meeting | audio |
+| A12 | An undecodable AAC packet becomes silence of its length, counted and shown on the meeting | audio (#264) |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -956,35 +956,55 @@ Each lands before `0.11.0-rc.1`.
        within 1 s of 60.
   - Owner: audio. It lands before `0.11.0-rc.1`, with its own pipeline.
 - **A12 An undecodable AAC packet becomes silence.** A packet the decoder
-  cannot read (corrupt payload: symphonia's invalid data, or an element its
-  AAC decoder does not support) stopped the whole decode, so one bad packet
-  in a phone recording lost all of it. The decoder now writes silence of the
-  packet's length (its duration from the container's timing, 1 024 frames
-  for AAC) in its place, clears the decoder's overlap, logs the packet's
-  index and timestamp at `warn`, and counts it
-  (`AudioBuffer16k::damaged_parts`). The priming trim (A9) cuts a damaged
-  packet like any other, and the streamed decoder (A1) keeps its bound.
+  cannot read (corrupt payload: symphonia's invalid data, an element its
+  AAC decoder does not support, now and then a panic inside it) stopped
+  the whole decode, so one bad packet in a phone recording lost all of it.
+  The decoder now writes silence of the packet's length in its place: its
+  duration from the container's timing, 1 024 frames for AAC, the last
+  decoded packet's length when the container gives none, and at most
+  8 192 frames, so a corrupt duration cannot grow the lane. It logs the
+  first ten such packets (index and timestamp) at `warn` and one line with
+  the total, and counts them with the silence's length
+  (`AudioBuffer16k::damage`).
+  - After a damaged packet the decoder is a fresh one, not a reset:
+    symphonia's AAC decoder fixes its channel layout at its first packet
+    before checking it, so a reset after a corrupt first packet failed
+    every packet after it. A panic is caught and treated the same way.
+  - Damaged packets before the first one that decodes wait for it, since
+    symphonia's MP4 reader declares no channel count for AAC. The priming
+    trim (A9) then cuts them by timestamp like any packet, and the
+    streamed decoder (A1) keeps its bound.
   - A file with more than half of its packets damaged fails
     (`codec::MAX_DAMAGED_SHARE`), and so does a container that cannot be
-    read; a failure keeps the recording with "Processing failed", where a
-    meeting of silence would let retention delete it.
-  - The count reaches the meeting through `damaged-audio.json` in the
+    read; a failure keeps the recording with "Processing failed" and offers
+    Process again, where a meeting of silence is of no use.
+  - The damage reaches the meeting through `damaged-audio.json` in the
     support directory (no migration; the Swift app ignores it) and the
-    detail's `audioWarning`, Rust only: "3 damaged parts of the phone
-    recording were replaced by silence." The count and the warning are
-    the decoder's, not AAC's, so a later salvage that replaces lost audio
-    by silence reports through them too.
+    detail's `audioWarning`, Rust only: "About 0.1 seconds of the phone
+    recording could not be read and was replaced by silence." The app,
+    `steno process` and `steno deliver` write the same file; a write that
+    fails fails the meeting at decode, which keeps its recording. A file
+    that cannot be read or does not parse stays as it is, unwritten, and
+    every meeting then counts as possibly damaged
+    (`DamagedAudio::may_be_damaged`), for the retention rule to keep its
+    recording once #241 lands. The damage and the warning are the
+    decoder's, not AAC's, so a later salvage that replaces lost audio by
+    silence reports through them too.
   - Tests: `Tests/Fixtures/audio/tone-440-44k1-500ms-damaged.m4a` (three
     packets overwritten; the command is in `Tests/Fixtures/README.md`)
     decodes to the clean length, its damaged packets exact silence, the
     audio before them bit for bit, the first packet after each from a
-    cleared overlap (no louder than the clean decode), the rest within
-    2 * 10^-3 (the noise generator of the encoder's noise substitution
-    moves on), and the count 3. 11 of 23 packets damaged decode; 12, and all
-    23, fail; a truncated container fails as before
+    fresh decoder (no louder than the clean decode), the rest within
+    2 * 10^-3 (the decoder's noise-substitution generator starts over), and
+    the count 3 with its 3 * 1 024 frames. A stereo file is silent in both
+    channels; packets 0 to 3 damaged keep the clean length and alignment;
+    a mono file's first packet read as a channel pair costs that packet
+    only; a packet that panics the decoder becomes silence; a timescale
+    twice the rate gives the same lengths. 11 of 23 packets damaged
+    decode; 12, and all 23, fail; a truncated container fails
     (`tests/codec_streaming.rs`). `steno-services` runs the damaged file
-    through the pipeline to the host's count, and `steno-host` shows the
-    warning.
+    through the pipeline to the host, and a failed write to a failed
+    meeting; `steno-host` shows the warning.
   - Owner: audio.
 
 ### P: no data lost (D3)
