@@ -2659,10 +2659,15 @@ touch and admission lines; each fix is ported to Swift before cutover.
   `STENO_LOGIN_ITEM=managed`, which the NixOS module sets, makes the login item
   `LoginItemStatus::Managed`: the app never writes, rewrites or removes the autostart
   entry, the first launch registers nothing, Settings shows the switch on and locked
-  (`loginItemNote`), and at launch an entry an earlier build wrote into `/nix/store` is
-  removed. Otherwise the Linux entry names a stable path (`$APPIMAGE`,
-  `STENO_EXEC_PATH`, or the first of `/usr/bin` and the Nix profiles that resolves into
-  the running binary's directory), never `current_exe()`
+  (`loginItemNote`). The one entry the app removes is an earlier build's, whose `Exec`
+  starts a program in `/nix/store` or names one of the profile paths: at launch, or,
+  while the app runs as the unit systemd made from that entry, at the exit after the
+  save, so a reload of the user manager cannot leave the recorder in a unit no logout
+  stops. Otherwise the Linux entry names a stable path (`$APPIMAGE`,
+  `STENO_EXEC_PATH`, or the first of `/usr/bin`, `/usr/local/bin` and the Nix profiles
+  that resolves into the running binary's directory), never `current_exe()`; with none,
+  turning launch at login on fails with "Steno can't open at login from where it's
+  installed now." and the setting is not saved
   (`apps/desktop/src-tauri/src/packaged.rs`, `apps/desktop/README.md` "Packaged
   installs").
 - The menu bar on macOS carries the application, Edit and Window menus; the Swift

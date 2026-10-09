@@ -21,7 +21,7 @@ Everything the Swift app does outside its three windows, per OS:
 | Tray (`tray.rs`) | Menu bar extra with a template icon | Status notifier item (libayatana-appindicator) | Notification area icon |
 | Floating panels (`panels.rs`) | Non-activating `NSPanel`s on every space (`tauri-nspanel`) | Always-on-top undecorated windows, under XWayland on a Wayland session (see below) | Always-on-top undecorated windows |
 | Launch at login (`autostart.rs`, `packaged.rs`) | Launch Agent | `~/.config/autostart` entry naming a stable path (see Packaged installs) | Run registry key |
-| Updates (`updater.rs`) | signed manifest per lane | same | same |
+| Updates (`updater.rs`) | signed manifest per lane | same; off on a packaged install (see Packaged installs) | same |
 | Permissions (`permissions.rs`) | microphone TCC status and prompt; system audio and calendar deferred to the host's probes | unknown (nothing to query before capture; the portal asks when the stream opens) | unknown (the privacy switch decides at capture time) |
 | Deep links (`deep_links.rs`) | `steno:` through `CFBundleURLTypes`, written into the bundle by the deep-link plugin from `plugins.deep-link` | the `.deb`'s desktop entry from `linux/` (`Exec=… %u`, the `x-scheme-handler/steno` MIME type); an AppImage and a debug build register at start | registry (debug builds register at start) |
 | Single instance | Unix socket | session bus name (skipped without a session bus, as in the headless smoke) | named mutex |
@@ -262,7 +262,7 @@ login itself. Two environment variables tell the app (stable plan X5,
 | Variable | Set by | What the app does |
 |---|---|---|
 | `STENO_DISTRIBUTION=aur` or `=nix` | the Nix package at build time (`env`) and in its wrapper; the AUR package's `/usr/bin` wrapper | Checks for no update: the tray's Check for Updates says "Updates come from your package manager.", and Settings > General shows that line in place of the check and the two switches. A value in the environment wins over the one the build was given (`steno_services::updates::updates_are_managed`) |
-| `STENO_LOGIN_ITEM=managed` | the NixOS module, for its user service and the session (`environment.sessionVariables`) | Leaves launch at login to the system: it never writes, rewrites or removes the autostart entry, the first launch registers nothing, Settings shows the switch on and locked with "Your system opens Steno when you log in and manages this setting.", and the tray's item is checked and disabled. At launch it removes an entry an earlier build wrote whose `Exec` starts a program in `/nix/store`, and only such an entry |
+| `STENO_LOGIN_ITEM=managed` | the NixOS module, for its user service and the session (`environment.sessionVariables`) | Leaves launch at login to the system: it never writes, rewrites or removes the autostart entry, the first launch registers nothing, Settings shows the switch on and locked with "Your system opens Steno when you log in and manages this setting.", and the tray's item is checked and disabled. The one entry it removes is one an earlier build wrote: its `Exec` starts a program in `/nix/store`, or names one of the paths in step 3 below. That entry goes at launch, unless the app runs as the unit systemd made from it (`app-steno\x2ddesktop@autostart.service`): then it goes when Steno exits, after the save, since a reload of the user manager without the entry would leave the recorder in a unit no logout stops |
 
 Without `STENO_LOGIN_ITEM=managed`, the entry the app writes on Linux
 (`~/.config/autostart/steno-desktop.desktop`, the plugin's file and form)
@@ -272,19 +272,29 @@ Nix is `<out>/bin/.steno-desktop-wrapped` in the store
 
 1. An AppImage names `$APPIMAGE`, as the plugin does.
 2. `STENO_EXEC_PATH`, when a package's wrapper sets it to an absolute
-   file outside `/nix/store`: for a launcher that is not beside the binary
-   it runs, such as a `/usr/bin` wrapper over `/usr/lib/steno-desktop/`.
+   path outside `/nix/store` of a file anyone may run: for a launcher
+   that is not beside the binary it runs, such as a `/usr/bin` wrapper
+   over `/usr/lib/steno-desktop/`.
 3. Else the first of `/usr/bin/steno-desktop`,
+   `/usr/local/bin/steno-desktop`,
    `/run/current-system/sw/bin/steno-desktop`,
-   `/etc/profiles/per-user/$USER/bin/steno-desktop` and
-   `~/.nix-profile/bin/steno-desktop` that, with its links resolved, lies
-   in the directory the running binary lies in. Nix's wrapper and the
-   binary it runs share `<out>/bin`, so a profile counts while it links
-   to this build; the `.deb` names `/usr/bin/steno-desktop` itself.
+   `/etc/profiles/per-user/$USER/bin/steno-desktop`,
+   `~/.nix-profile/bin/steno-desktop` and, with Nix's
+   `use-xdg-base-directories`,
+   `${XDG_STATE_HOME:-~/.local/state}/nix/profile/bin/steno-desktop` that,
+   with its links resolved, lies in the directory the running binary lies
+   in. Nix's wrapper and the binary it runs share `<out>/bin`, so a
+   profile counts while it links to this build; the `.deb` names
+   `/usr/bin/steno-desktop` itself.
 
-With none of these, turning launch at login on writes nothing, logs a
-warning, and the switch shows off again. A development build from
-`target/` is such a case.
+A path with a control character, `%` or `\` is never named: systemd's
+XDG autostart generator would skip the entry. With none of these paths,
+turning launch at login on writes nothing, the switch turns back off,
+and Settings says "Opening Steno at login could not be changed." with
+the reason "Steno can't open at login from where it's installed now."
+The setting is not saved, and the first launch, which registers the
+login item by itself, tries again at the next launch. A development
+build from `target/` is such a case.
 
 What a package sets:
 
@@ -295,8 +305,10 @@ What a package sets:
   the module, the profile's path is found by itself.
 - **AUR** (stable plan X6): `STENO_DISTRIBUTION=aur` in the `/usr/bin`
   wrapper, and `STENO_EXEC_PATH=/usr/bin/steno-desktop` when the wrapper
-  runs a binary elsewhere (`/usr/lib/steno-desktop/`); a package that puts
-  the binary itself at `/usr/bin/steno-desktop` needs only the first.
+  runs a binary elsewhere (`/usr/lib/steno-desktop/`). A package whose
+  `/usr/bin/steno-desktop` is the binary itself, or a link to it, needs
+  no `STENO_EXEC_PATH`, but still a wrapper that sets
+  `STENO_DISTRIBUTION=aur`, or the build's value.
 
 ## Run
 
@@ -904,7 +916,8 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items and their words per platform, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/platform.rs` | The initialization script that tells every page its platform |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
-| `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call. `packaged.rs`: launch at login on a packaged install (see Packaged installs) |
+| `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
+| `apps/desktop/src-tauri/src/packaged.rs`, `packaged/linux.rs` | The Linux autostart entry's stable path, and the login item a package leaves to the system (see Packaged installs) |
 | `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. On Linux a closed Settings or onboarding window is kept, without its page, and loads afresh when opened again (`Kept`, against the fd leak of a destroyed webview). New windows from the page are denied. `Pages` holds the requests a window is owed until its page mounts |
 | `apps/desktop/src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window; a finished `onboarding` snapshot closes the onboarding window, a `recording` snapshot to main moves the tray and the panels. `window.open` (typed: one of the six sections, a UUID meeting id), `window.close` (the onboarding window, from itself), `system.openURL` (`https:` and `mailto:` only) and the shell's own methods listed above are the shell's; everything else goes to the host. `panel_call(action, params)` is the panels' own command |
 | `apps/desktop/src-tauri/src/host.rs` | The real host: `steno_host::Host` over `steno_services::build`, the window sink that delivers on the main thread, the `Opener`, the alert and the chosen folder, the exits' `shutdown_action` |
