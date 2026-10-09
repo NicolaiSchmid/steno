@@ -237,7 +237,7 @@ fn setup(
         windows::open(handle, windows::BridgeWindow::Onboarding, None, None)?;
     }
     #[cfg(target_os = "linux")]
-    autostart::remove_earlier_entry(handle);
+    autostart::at_launch(handle);
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle);
@@ -557,9 +557,9 @@ fn onboarding_closed(app: &tauri::AppHandle) {
 /// if the save ends before the process does. After it, on Linux, Launch
 /// at login turned off while the app ran as the autostart unit goes off
 /// (`autostart::turn_off_at_exit`), and an autostart entry an earlier
-/// build wrote that waited for the exit goes
-/// (`autostart::remove_earlier_entry_at_exit`): only once the save is
-/// over, since until then the unit the app runs as needs the entry.
+/// build wrote that waited for the exit goes (`autostart::at_exit`): only
+/// once the save is over, since until then the unit the app runs as needs
+/// the entry.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
     let shutdown = host::host(app).shutdown_action();
     #[cfg(target_os = "linux")]
@@ -568,7 +568,7 @@ fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
         #[cfg(target_os = "linux")]
         {
             autostart::turn_off_at_exit(&app);
-            autostart::remove_earlier_entry_at_exit(&app);
+            autostart::at_exit(&app);
         }
     })
 }

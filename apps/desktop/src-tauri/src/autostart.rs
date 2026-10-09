@@ -13,7 +13,7 @@
 //! (`STENO_LOGIN_ITEM=managed`, `packaged`), the status is `Managed` and
 //! nothing here changes the registration; only an entry an earlier build
 //! wrote goes, at launch, or at the exit while the app runs as the unit
-//! made from it (`remove_earlier_entry`, `remove_earlier_entry_at_exit`).
+//! made from it (`at_launch`, `at_exit`).
 //!
 //! On Linux, with the systemd side in `stop_timeout`:
 //!
@@ -160,7 +160,7 @@ fn writes_own_entry(appimage: Option<&std::ffi::OsStr>) -> bool {
 /// entry an earlier build wrote goes, now or at the exit
 /// (`packaged::remove_earlier_entry`).
 #[cfg(target_os = "linux")]
-pub fn remove_earlier_entry(app: &AppHandle) {
+pub fn at_launch(app: &AppHandle) {
     packaged::remove_earlier_entry(&app.package_info().name);
 }
 
@@ -237,7 +237,7 @@ fn defers_off(enabled: bool, as_autostart_unit: bool) -> bool {
 
 /// The file that marks Launch at login to go off at the exit, in the
 /// app's config directory. A file rather than a flag, so the choice
-/// outlives a kill or a crash before the exit (`at_launch`). Read only on
+/// outlives a kill or a crash before the exit (`launch_step`). Read only on
 /// Linux.
 const OFF_AT_EXIT: &str = "launch-at-login-off-at-exit";
 
@@ -347,7 +347,7 @@ fn clear_mark(mark: &std::path::Path) {
 /// goes now (`packaged::remove_earlier_entry_at_exit`). Not for an
 /// update's relaunch; an Xfce query's relaunch never runs as that unit.
 #[cfg(target_os = "linux")]
-pub fn remove_earlier_entry_at_exit(app: &AppHandle) {
+pub fn at_exit(app: &AppHandle) {
     packaged::remove_earlier_entry_at_exit(
         &app.package_info().name,
         RELAUNCHING.load(std::sync::atomic::Ordering::Relaxed),
@@ -379,7 +379,7 @@ enum AtLaunch {
 /// The step for the plugin's `status`, whether the entry is `marked` to go
 /// at the exit, and whether the app runs as the autostart unit.
 #[cfg(target_os = "linux")]
-fn at_launch(status: LoginItemStatus, marked: bool, as_autostart_unit: bool) -> AtLaunch {
+fn launch_step(status: LoginItemStatus, marked: bool, as_autostart_unit: bool) -> AtLaunch {
     match status {
         LoginItemStatus::Enabled if marked && !as_autostart_unit => AtLaunch::TurnOff,
         LoginItemStatus::Enabled => AtLaunch::Keep,
@@ -405,7 +405,7 @@ fn login_item_after(step: AtLaunch, switch: impl FnOnce(bool) -> bool) -> Option
 }
 
 /// At launch, on Linux: the drop-ins follow the login item as it stands
-/// (`at_launch`), so an entry written before the drop-ins existed, or by
+/// (`launch_step`), so an entry written before the drop-ins existed, or by
 /// an older release, gets them too, and one the user removed loses its
 /// own, unless the app runs as its unit (`AtLaunch::Restore`). While the
 /// system manages the login item, only GNOME's drop-in.
@@ -423,13 +423,13 @@ pub fn sync_at_launch(app: &AppHandle) {
     stop_timeout::sync(login_item, config_dir(app).as_deref());
 }
 
-/// The launch's step (`at_launch`) on `entry`, with the mark at `mark`,
+/// The launch's step (`launch_step`) on `entry`, with the mark at `mark`,
 /// for an app that runs as the autostart unit or not (`as_unit`): the
 /// login item the drop-ins then follow (`login_item_after`). A mark left
 /// where no entry is is cleared.
 #[cfg(target_os = "linux")]
 fn launch(entry: &impl Entry, mark: Option<&std::path::Path>, as_unit: bool) -> Option<bool> {
-    let step = at_launch(
+    let step = launch_step(
         status_from_plugin(entry.is_enabled()),
         mark.is_some_and(std::path::Path::exists),
         as_unit,
@@ -636,17 +636,17 @@ mod tests {
     fn the_launch_follows_the_entry_and_its_mark() {
         use LoginItemStatus::{Enabled, NotFound, NotRegistered};
         for as_unit in [false, true] {
-            assert_eq!(at_launch(Enabled, false, as_unit), AtLaunch::Keep);
+            assert_eq!(launch_step(Enabled, false, as_unit), AtLaunch::Keep);
             for marked in [false, true] {
-                assert_eq!(at_launch(NotFound, marked, as_unit), AtLaunch::Unread);
+                assert_eq!(launch_step(NotFound, marked, as_unit), AtLaunch::Unread);
             }
         }
         for marked in [false, true] {
-            assert_eq!(at_launch(NotRegistered, marked, false), AtLaunch::Gone);
-            assert_eq!(at_launch(NotRegistered, marked, true), AtLaunch::Restore);
+            assert_eq!(launch_step(NotRegistered, marked, false), AtLaunch::Gone);
+            assert_eq!(launch_step(NotRegistered, marked, true), AtLaunch::Restore);
         }
-        assert_eq!(at_launch(Enabled, true, true), AtLaunch::Keep);
-        assert_eq!(at_launch(Enabled, true, false), AtLaunch::TurnOff);
+        assert_eq!(launch_step(Enabled, true, true), AtLaunch::Keep);
+        assert_eq!(launch_step(Enabled, true, false), AtLaunch::TurnOff);
     }
 
     /// Only `TurnOff` removes the entry and only `Restore` brings it back;
