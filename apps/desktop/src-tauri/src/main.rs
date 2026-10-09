@@ -38,15 +38,16 @@
 //! relaunch bypasses the request, so both run the same shutdown first
 //! (`shut_down_before_exit`). The one exception: a second SIGTERM or a
 //! second SIGINT ends the process at once, unsaved (`forced_exit`). On
-//! Linux a logout on GNOME, and on Xfce under X11, and a system shutdown
-//! or reboot run the same shutdown before they let the app go, over D-Bus
-//! (`session_end`), and an exit that went through ends the process
-//! `EXIT_GRACE` later at the latest (`end_within`). Open: the Windows
-//! logoff is untested on hardware, and Windows' end-session timeout (about
-//! five seconds) is shorter than `SHUTDOWN_PATIENCE` (WP10); a logout on
-//! KDE Plasma, or on Xfce under Wayland, saves only when systemd signals
-//! the app (`session_end`), and none of the Linux paths is tested on a
-//! real desktop (before the first Linux release).
+//! Linux a logout on GNOME or Xfce, through the session manager, a logout
+//! where the desktop portal reports the session's end, and a system
+//! shutdown or reboot run the same shutdown before they let the app go,
+//! over D-Bus (`session_end`); the display closing under the app at the end
+//! of any session runs it before GDK ends the process (`display_lost`);
+//! and an exit that went through ends the process `EXIT_GRACE` later at the
+//! latest (`end_within`). Open: the Windows logoff is untested on hardware,
+//! and Windows' end-session timeout (about five seconds) is shorter than
+//! `SHUTDOWN_PATIENCE` (WP10); the Linux paths have not run on a real
+//! GNOME or KDE Plasma session (before the first Linux release).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // The fixture host leaves the real host's seams (the login item, the
@@ -75,6 +76,8 @@ mod deep_links;
 mod dialogs;
 #[cfg(target_os = "linux")]
 mod display;
+#[cfg(target_os = "linux")]
+mod display_lost;
 #[cfg(feature = "fixture-host")]
 mod fixtures;
 mod host;
@@ -107,7 +110,10 @@ fn main() {
         None,
     );
     #[cfg(target_os = "linux")]
-    display::choose();
+    {
+        display::choose();
+        display_lost::watch();
+    }
     // Before the app is built: GTK unsets it when it starts.
     #[cfg(target_os = "linux")]
     let startup_id = session_end::startup_id();
@@ -162,6 +168,7 @@ fn main() {
         .manage(smoke::Smoke::default())
         .manage(panels::Panels::default())
         .manage(windows::Pages::default())
+        .manage(windows::Kept::default())
         .manage(updater::Updates::default())
         .manage(TrayAtClose::default())
         .manage(steno_services::app::ExitGate::default())
@@ -172,7 +179,10 @@ fn main() {
         .setup(move |app| {
             if setup(app.handle(), runtime)? {
                 #[cfg(target_os = "linux")]
-                session_end::watch(app.handle(), startup_id);
+                {
+                    session_end::watch(app.handle(), startup_id);
+                    display_lost::arm(app.handle());
+                }
             }
             Ok(())
         })
@@ -440,12 +450,10 @@ fn on_exit_signal(
 /// shutdown runs first: a plain `kill`, Ctrl-C in a terminal, a closed
 /// terminal, systemd at a shutdown. A logout on Linux saves here when
 /// logind ends the session's processes (with `KillUserProcesses=yes`,
-/// systemd stops the scope with SIGTERM, then SIGHUP); on GNOME, and on
-/// Xfce under X11, the session manager's `EndSession` saves first
-/// (`session_end`). On KDE Plasma, or on Xfce under Wayland, without
-/// `KillUserProcesses`, nothing signals the app, and when the display
-/// connection closes first, GDK ends the process unsaved. On macOS a
-/// logout goes through `RunEvent::Exit` instead.
+/// systemd stops the scope with SIGTERM, then SIGHUP); on GNOME and Xfce
+/// the session manager's end saves first (`session_end`), and on every
+/// desktop the display closing does (`display_lost`). On macOS a logout
+/// goes through `RunEvent::Exit` instead.
 /// Each signal quits the pipeline here, off the main thread, before it asks
 /// for the exit (`Host::quit_pipeline`), so a job a busy main thread would
 /// let fail first stays resumable. A second SIGTERM or a second SIGINT
@@ -512,6 +520,25 @@ fn shut_down_before_exit(app: &tauri::AppHandle) {
     steno_services::flush_logs();
 }
 
+/// The save before an end that no exit request announced, on Linux: the
+/// pipeline quits first, as for an exit signal (`Host::quit_pipeline`),
+/// then the shutdown runs on the calling thread's behalf
+/// (`shut_down_before_exit`). The logout and shutdown clients
+/// (`session_end`) and the lost display (`display_lost`) call it.
+#[cfg(target_os = "linux")]
+fn save_before_end(app: &tauri::AppHandle) {
+    host::host(app).quit_pipeline();
+    shut_down_before_exit(app);
+}
+
+/// The onboarding window closed, kept or destroyed: the host counts its
+/// pages as seen (`Host::onboarding_window_closed`), and a smoke run counts
+/// the close.
+fn onboarding_closed(app: &tauri::AppHandle) {
+    app.state::<smoke::Smoke>().note_onboarding_closed();
+    host::host(app).onboarding_window_closed();
+}
+
 /// One turn of the run loop; nothing for an app that refused to start
 /// (`refuse_to_start`), which has no host and ends without a shutdown.
 fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
@@ -570,16 +597,45 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 }
             }
         }
+        // Settings or onboarding closes on Linux: kept, not destroyed
+        // (`windows::keeps_on_close`, #160); the host hears of
+        // onboarding's close as it does of a destroyed window. A window
+        // that could not be kept is destroyed, so the close still happens.
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } if windows::keeps_on_close(&label) => {
+            api.prevent_close();
+            let Some(window) = app.get_webview_window(&label) else {
+                return;
+            };
+            match windows::keep(app, &window) {
+                Ok(true) if label == BridgeWindow::Onboarding.as_str() => onboarding_closed(app),
+                Ok(_) => {}
+                Err(error) => {
+                    stderr_line!(
+                        "[steno-desktop] keeping the {label} window failed, so it closes: {error}"
+                    );
+                    if let Err(error) = window.destroy() {
+                        stderr_line!("[steno-desktop] closing the {label} window failed: {error}");
+                    }
+                }
+            }
+        }
         // A window is gone: its page no longer listens; a destroyed main
-        // window with no tray ends the process (`exits_when_destroyed`).
+        // window with no tray ends the process (`exits_when_destroyed`). A
+        // kept window (`windows::Kept`) is destroyed only as the app ends,
+        // and the host heard of its close when it was kept.
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::Destroyed,
             ..
         } => {
             app.state::<windows::Pages>().gone(&label);
-            if label == BridgeWindow::Onboarding.as_str() {
-                host::host(app).onboarding_window_closed();
+            let kept = app.state::<windows::Kept>().forget(&label);
+            if label == BridgeWindow::Onboarding.as_str() && !kept {
+                onboarding_closed(app);
             }
             if exits_when_destroyed(&label, || tray_at_close(app)) {
                 actions::quit(app);
@@ -680,7 +736,8 @@ fn tray_at_close(app: &tauri::AppHandle) -> bool {
 /// Whether closing the window of `label` hides it instead: the main window
 /// while a tray can bring it back, as the Swift main window closes behind
 /// the menu bar item (and the tray's recorder commands keep a window to go
-/// through). Every other close destroys the window.
+/// through). Settings and onboarding are kept on Linux
+/// (`windows::keeps_on_close`); every other close destroys the window.
 fn hides_on_close(label: &str, has_tray: bool) -> bool {
     label == BridgeWindow::Main.as_str() && has_tray
 }

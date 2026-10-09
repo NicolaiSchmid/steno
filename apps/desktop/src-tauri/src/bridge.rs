@@ -72,6 +72,8 @@ pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), B
     if let Some(state) = recording {
         tray::note_recording(window.app_handle(), state);
         panels::note_recording(window.app_handle(), state);
+        #[cfg(target_os = "linux")]
+        crate::session_end::note_recording(window.app_handle(), state);
     }
     Ok(())
 }

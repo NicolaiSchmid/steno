@@ -1166,33 +1166,77 @@ still has to draw the window side. `[ ]` is not ported yet.
     second SIGTERM or a second SIGINT ends the process at once, unsaved, and a SIGHUP
     never does; a signal the app inherited ignored (`nohup`, a background job's SIGINT)
     stays ignored.
-  - A logout on GNOME, and on Xfce under X11, runs the shutdown before the session
-    ends: the shell registers with the first session manager on the session bus,
-    GNOME's `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager` (the same
-    client protocol under names of its own), answers `QueryEndSession` at once and
-    `EndSession` only after the save, then quits
-    (`apps/desktop/src-tauri/src/session_end.rs`). It finds the manager's unique name
-    with `GetNameOwner`, so it starts none, and takes the client signals from that name
-    only. After `EndSession` gnome-session waits about ten seconds for the answer
-    (older releases ninety) and xfce4-session seven, on current releases both no more
-    than `SHUTDOWN_PATIENCE`, so a save that needs all of its patience can be cut off
-    when the session ends. A system shutdown or reboot runs the shutdown while logind
-    waits: the shell holds logind's `shutdown` delay lock and releases it after the
-    save on `PrepareForShutdown(true)`; logind waits at most `InhibitDelayMaxSec` (five
-    seconds by default) and then goes ahead, and the SIGTERM that follows waits for the
-    save in progress. The display closes then too, and GDK ends the process when it
-    does, so a save that outlasts logind's wait can be cut off as well. logind has no
-    logout signal, and its session `Lock` is the screen lock, which, like sleep, does
-    not stop a recording. A logout on KDE Plasma, or on Xfce under Wayland, saves only
-    when systemd signals the app (with `KillUserProcesses=yes`, systemd stops the scope
-    with SIGTERM, then SIGHUP), and when the display connection closes first, GDK ends
-    the process unsaved: Plasma before 6.6 serves no session-manager client API on
-    D-Bus, and from 6.6 its portal's session monitor waits about 1.5 s at the query and
-    not at the end, too short for the save; xfce4-session on Wayland quits after the
-    save phase without sending `EndSession`. The logind lock works on both. Without a
-    session bus, a session manager or logind, or with the lock denied, a logout or a
-    shutdown saves only when a signal reaches the app. The tests run both clients
-    against fakes on a private `dbus-daemon`; none of it has run on a real desktop.
+  - A logout on GNOME or Xfce runs the shutdown before the session manager lets
+    the app go: the shell registers with the first session manager on the session
+    bus, GNOME's `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager`
+    (the same client protocol under names of its own), finds its unique name with
+    `GetNameOwner`, so it starts none, and takes the client signals from that name
+    only (`apps/desktop/src-tauri/src/session_end.rs`). It answers
+    `QueryEndSession` at once and `EndSession` only after the save, then quits:
+    gnome-session asks before the confirmation dialog the user can still cancel
+    (`CancelEndSession`), with one second to answer, and on X11 another client can
+    still call an Xfce logout off after the query, after which xfce4-session sends
+    the shell nothing, so the recording goes on until the end comes. gnome-session
+    waits about ten seconds for the answer at the end, xfce4-session seven. `Stop`
+    unregisters (`UnregisterClient`), saves and quits: xfce4-session sends it for
+    Quit Program (Session settings) and kills the process 15 s later unless the
+    client unregistered. It also sends it to a client it has just dropped
+    (`StateChanged` to disconnected) when a checkpoint (Save Session), or a query
+    whose answer it refused, has waited a minute, usually with no logout to follow,
+    and with no kill; that client records on and registers again (`Phase::Dropped`),
+    also after the save at a query, so a later logout still reaches it. On Wayland
+    xfce4-session quits right after the query, without `EndSession` and with no
+    cancel to follow, so there the shell saves at the query, answers and ends with
+    the display (`SessionApi::query_ends_on_wayland`). It tells Wayland from X11 by
+    `XDG_SESSION_TYPE`, else by a `WAYLAND_DISPLAY` whose socket exists; should the
+    session go on 30 s after that save (an X11 session taken for a Wayland one), the
+    shell tells the user and relaunches, so the user can record again.
+  - Where no session manager runs (KDE Plasma, wlroots desktops), the shell opens
+    the desktop portal's session monitor (`CreateMonitor` on
+    `org.freedesktop.portal.Inhibit`), answers query-end at once
+    (`QueryEndResponse`: xdg-desktop-portal gives about a second and Plasma 6.6's
+    portal 1.5 s, and the user can still call the logout off, where a desktop may
+    wait on the shell's own inhibitor) and at ending saves and quits. Plasma 6.6's
+    portal serves the monitor, but nothing in Plasma 6.6 asks it, so it never
+    reports the end there; Plasma before 6.6 has no monitor, and the GTK portal
+    outside GNOME reports no end. While a recording runs the shell holds the
+    portal's logout inhibitor (the `Logout` flag, "A meeting is being recorded")
+    and closes its request when the recorder turns idle: on GNOME the GTK portal
+    passes it to gnome-session, which then shows its logout dialog, even for
+    `--no-prompt`; Plasma 6.6's portal records it for its session monitor, which
+    nothing in Plasma asks yet; the GTK portal outside GNOME (Xfce, wlroots)
+    refuses it.
+  - Every logout ends the display server, and a shutdown does once logind goes
+    ahead; GTK 3 then ends the process with `_exit(1)`. Each of GDK's lost-display
+    paths first logs one line through GLib (X11's `gdk_x_io_error`, Wayland's event
+    source), and GTK 3 logs structured, so the line reaches the process's log
+    writer, synchronously, on the thread that hit the loss. The shell's writer
+    (`apps/desktop/src-tauri/src/display_lost.rs`, glib's safe
+    `log_set_writer_func`) runs the shutdown there, on that thread's behalf, and
+    only then writes the line and lets GDK end the process; on X11 the main thread
+    and tao's device thread both hit the loss and both wait for the one shutdown.
+    So a save that outlasts a session manager's or logind's wait still ends, at
+    most `SHUTDOWN_PATIENCE` after it began, unless the process is killed first
+    (systemd's `SIGKILL` once a stop has waited out the unit's `TimeoutStopSec`,
+    90 s unless the unit sets another, xfce4-session's `SIGKILL` 15 s after its
+    `Stop`, which the shell calls off by unregistering first, or a second SIGTERM).
+    On KDE Plasma this is the save: ksmserver speaks XSMP to X11 clients, which
+    GTK 3 does not, and KWin closes only native Wayland windows at a logout, not
+    the shell's, which run under XWayland.
+  - A system shutdown or reboot runs the shutdown while logind waits: the shell
+    holds logind's `shutdown` delay lock and releases it after the save on
+    `PrepareForShutdown(true)`; logind waits at most `InhibitDelayMaxSec` (five
+    seconds by default) and then goes ahead, and the SIGTERM that follows and the
+    display closing both wait for the save in progress. logind has no logout
+    signal, and its session `Lock` is the screen lock, which, like sleep, does not
+    stop a recording. Without a session bus, a session manager, a portal or
+    logind, or with the lock denied, a logout or a shutdown saves when a signal
+    reaches the app or the display closes. The session clients, the portal's
+    monitor and inhibitor and the lock are tested against fakes on a private
+    `dbus-daemon`; the lost display under Xvfb (in CI too:
+    `apps/desktop/scripts/lost-display-linux.sh`) and headless sway with a recording
+    running; a real xfce4-session 4.20.4 logout on X11 and on Wayland (labwc 0.9.7),
+    and its Quit Program and Save Session under a recording on X11, in a container.
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -1227,9 +1271,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   - Open: the Windows logoff is untested on hardware and can outlast the end-session
     timeout, and whether a logoff ends the speech sidecar before `RunEvent::Exit` quits
     the pipeline (which would mark its meeting `failed`) is unverified (WP10); the Linux
-    logout and shutdown are untested on a real desktop, and a logout on KDE Plasma, or on
-    Xfce under Wayland, saves only when systemd signals the app (before the first Linux
-    release).
+    logout and shutdown have not run on a real GNOME or KDE Plasma session (before the
+    first Linux release).
 - The host emits under its `publishing` lock, the main thread can be waiting for a
   thread that holds it (a Stop from the tray joins the recorder's level thread, which
   publishes), and the tray's setters wait for the main thread when called from
@@ -2700,21 +2743,26 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   jobs can run at once; only both READMEs state the one-at-a-time rule, until
   `release.yml` retires at the cutover. Where: `.github/workflows/release.yml`,
   `.github/workflows/desktop-release.yml`. Found: #184.
-- **First Linux release.** A logout on KDE Plasma, or on Xfce under Wayland, saves
-  the recording only when systemd ends the session's processes with a signal; when
-  nothing signals the app, or the display connection closes first, GDK ends the
-  process unsaved. Plasma before 6.6 serves no session-manager client API on D-Bus,
-  and from 6.6 its portal's session monitor waits about 1.5 s at the query and not at
-  the end, too short for the save; xfce4-session on Wayland quits after the save phase
-  without sending `EndSession`. Ways to close the gap: the portal's session monitor
-  (`CreateMonitor`), perhaps with a logout inhibitor held while recording; XSMP, which
-  GTK 3 does not speak; or a handler for the lost X connection that saves before GDK's
-  ends the process. The GNOME and Xfce logout and the logind shutdown lock
-  (`session_end.rs`) ran only against fakes on a private bus, not on a real desktop,
-  and a save that outlasts the session manager's wait (gnome-session ten seconds,
-  xfce4-session seven) or logind's (five) can be cut off. Where:
-  `apps/desktop/src-tauri/src/session_end.rs`; the shutdown items under "Pipeline and
-  services (WP6b)". Found: #185, #203.
+- **First Linux release.** No real GNOME or KDE Plasma session has logged out or shut
+  down under the app: the session clients ran against fakes on a private bus, the lost
+  display under Xvfb and headless sway, and real logouts only in xfce4-session 4.20.4
+  (X11, and Wayland under labwc); GNOME's logout dialog for the inhibitor is read from
+  gnome-session's source only. The writer recognises GDK's lost-display lines by GTK
+  3.24.52's wording; a GTK that rewords them falls back to the unsaved exit. Where:
+  `apps/desktop/src-tauri/src/session_end.rs`,
+  `apps/desktop/src-tauri/src/display_lost.rs`; the shutdown items under "Pipeline and
+  services (WP6b)". Found: #185, #203, #220.
+- **First Linux release.** Every destroyed webview leaks a file descriptor on Linux
+  (issue #160): wry's IPC handler (`attach_ipc_handler` in wry 0.57's
+  `src/webkitgtk/mod.rs`) holds the webview it belongs to, a reference cycle
+  through the view's user content manager, so the view is never finalised and
+  WebKitGTK never frees its memfd. The app works around it on Linux by destroying
+  no window while it runs (a closed Settings or onboarding window is kept and loads
+  afresh when opened again, #220); the cycle itself is not fixed and not yet
+  reported to wry. To do: report it there with the reproduction outside the app,
+  and drop the workaround once a fixed wry ships. Where:
+  `apps/desktop/src-tauri/src/windows.rs` (`Kept`), `apps/desktop/README.md`.
+  Found: #172.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included; leaving it out
   was weighed and not done, see the note).
@@ -2738,8 +2786,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   services (the controller of S2 in `.plans/2026-10-07-stable-promotion.md`) must
   retry it when PipeWire comes up after Steno (autostart at login). Where: "Meeting
   detection" in the Linux list under "Audio". Found: #222.
-- **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
-  (issue #160). Where: `apps/desktop/README.md`. Found: #172.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
   measured DirectML's speed (at least three times the CPU's on an integrated GPU), so
   `directmlOnWindows` stays off by default (`SpeechSettings` in
@@ -2885,6 +2931,7 @@ PR off `main`.
 | The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | open |
 | On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
 | Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
+| A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

@@ -24,7 +24,10 @@ name: Rust CI
 # Linux also builds the web UI (its bridge transports are the shell's other
 # half), checks it, runs the Tauri shell's headless smoke under Xvfb
 # (apps/desktop/scripts/smoke-linux.sh; the screenshots are uploaded as
-# `desktop-smoke-screens`), and bundles a `.deb` with the speech sidecar
+# `desktop-smoke-screens`), ends the Xvfb server under a recording and
+# requires the recording saved
+# (apps/desktop/scripts/lost-display-linux.sh), and bundles a `.deb` with
+# the speech sidecar
 # (apps/desktop/scripts/check-bundle.sh finds it beside the app) so a
 # packaging regression (the bundle config, the icons, the plists, the
 # release profile, the sidecar) fails here and not in desktop-release.yml.
@@ -369,6 +372,17 @@ jobs:
         run: |
           cargo build -p steno-desktop --locked
           apps/desktop/scripts/smoke-linux.sh target/debug/steno-desktop 15
+      # The smoke's binary again, recording inside the headless PipeWire:
+      # the Xvfb server ends under the recording, and the step fails unless
+      # the app saved it before GDK ended the process (the meeting `queued`
+      # with a duration), which only the log writer in `display_lost.rs`
+      # does.
+      - name: Desktop lost display
+        if: matrix.name == 'linux'
+        timeout-minutes: 5
+        run: |
+          scripts/pipewire-headless.sh \
+            apps/desktop/scripts/lost-display-linux.sh target/debug/steno-desktop
       # The same smoke on macOS, after the tests so they build as before.
       # It shows the windows on the runner's screen for 15 s and runs with a
       # fresh HOME; the script waits for another runner's smoke to end.
