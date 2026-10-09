@@ -441,6 +441,79 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
     }
 }
 
+/// The secret store the graph reads through: the import's gate over
+/// `secrets` (the app's [`KeepsApiKey`], so a write the gate swallows
+/// never reaches it) while an import is pending, `secrets` itself
+/// otherwise.
+fn gated_secrets(
+    pending: Option<crate::swift_import::PendingImport>,
+    secrets: Arc<dyn SecretStore>,
+) -> (Option<GraphImport>, Arc<dyn SecretStore>) {
+    match pending {
+        Some(pending) => {
+            let import = GraphImport::new(pending, secrets);
+            let gated = import.secrets.clone();
+            (Some(import), gated)
+        }
+        None => (None, secrets),
+    }
+}
+
+/// The handover while an import is pending: its listener, over the
+/// identity the import stores, comes once the import's gate opens.
+fn gated_handover(
+    import: &GraphImport,
+    store: &Arc<Store>,
+    pipeline: &Arc<CurrentPipeline>,
+    secrets: &Arc<dyn SecretStore>,
+    paths: &StenoPaths,
+    zone: FixedOffset,
+    runtime: &tokio::runtime::Handle,
+) -> Arc<GatedHandover> {
+    let (store, pipeline, secrets, paths, runtime) = (
+        store.clone(),
+        pipeline.clone(),
+        secrets.clone(),
+        paths.clone(),
+        runtime.clone(),
+    );
+    Arc::new(GatedHandover::new(
+        store.clone(),
+        import.gate.subscribe(),
+        Box::new(move || handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)),
+    ))
+}
+
+/// The host's handover: the gated one while an import is pending, else the
+/// listener built at launch, if any.
+fn host_handover(
+    gated: Option<&Arc<GatedHandover>>,
+    listener: Option<&Arc<ListenerHandover>>,
+) -> Option<Arc<dyn steno_host::services::Handover>> {
+    if let Some(gated) = gated {
+        return Some(gated.clone());
+    }
+    listener.map(|listener| listener.clone() as Arc<dyn steno_host::services::Handover>)
+}
+
+/// The import's onboarding step, which reloads the pipeline whenever the
+/// key gate opens, so the passes get the key it read.
+fn import_step(
+    import: &GraphImport,
+    pipeline: &Arc<CurrentPipeline>,
+    runtime: &tokio::runtime::Handle,
+) -> Arc<dyn steno_host::services::SwiftImport> {
+    let pipeline = pipeline.clone();
+    Arc::new(import.step(
+        runtime.clone(),
+        Box::new(move || {
+            if let Err(error) = pipeline.reload() {
+                tracing::warn!(%error, "the pipeline did not reload with the imported key");
+            }
+        }),
+    ))
+}
+
 /// Builds the graph. First the database's lock ([`DatabaseLock`]): while
 /// another process holds it past [`AppOptions::lock_patience`] the build
 /// fails with [`BuildError::Lock`] before the database is opened; on a
@@ -481,10 +554,7 @@ pub fn build_with_import(
     let store = open_store(&database_path)?;
     let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
     let kept = Arc::new(KeepsApiKey::new(secrets));
-    let import = pending.map(|pending| GraphImport::new(pending, kept.clone()));
-    let secrets: Arc<dyn SecretStore> = import
-        .as_ref()
-        .map_or_else(|| kept.clone() as Arc<dyn SecretStore>, |import| import.secrets.clone());
+    let (import, secrets) = gated_secrets(pending, kept.clone());
     let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
@@ -520,20 +590,9 @@ pub fn build_with_import(
     // The save writes to the database's volume too.
     recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
 
-    let gated_handover = import.as_ref().map(|import| {
-        let (store, pipeline, secrets, paths, runtime) = (
-            store.clone(),
-            pipeline.clone(),
-            secrets.clone(),
-            paths.clone(),
-            runtime.clone(),
-        );
-        Arc::new(GatedHandover::new(
-            store.clone(),
-            import.gate.subscribe(),
-            Box::new(move || handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)),
-        ))
-    });
+    let gated_handover = import
+        .as_ref()
+        .map(|import| gated_handover(import, &store, &pipeline, &secrets, &paths, zone, &runtime));
     let handover = if gated_handover.is_some() {
         None
     } else {
@@ -541,17 +600,9 @@ pub fn build_with_import(
             .inspect_err(|error| warnings.push(format!("Phone handover is unavailable: {error}")))
             .ok()
     };
-    let swift_import = import.as_ref().map(|import| {
-        let pipeline = pipeline.clone();
-        Arc::new(import.step(
-            runtime.clone(),
-            Box::new(move || {
-                if let Err(error) = pipeline.reload() {
-                    tracing::warn!(%error, "the pipeline did not reload with the imported key");
-                }
-            }),
-        ))
-    });
+    let swift_import = import
+        .as_ref()
+        .map(|import| import_step(import, &pipeline, &runtime));
 
     let clock = Arc::new(WallClock);
     let preferences: Arc<dyn Preferences> = match &import {
@@ -592,12 +643,7 @@ pub fn build_with_import(
         speech_models,
         llm: Arc::new(ClientLlmService { codex }),
         export_validator: Arc::new(crate::export::ObsidianExportValidator),
-        handover: match &gated_handover {
-            Some(gated) => Some(gated.clone() as Arc<dyn steno_host::services::Handover>),
-            None => handover
-                .clone()
-                .map(|handover| handover as Arc<dyn steno_host::services::Handover>),
-        },
+        handover: host_handover(gated_handover.as_ref(), handover.as_ref()),
         qr: Arc::new(PngQrEncoder),
         audio_devices: Arc::new(PlatformAudioDevices),
         folder_usage: Arc::new(DiskFolderUsage),
@@ -606,9 +652,7 @@ pub fn build_with_import(
         opener: options.opener,
         preferences,
         secrets: secrets.clone(),
-        swift_import: swift_import
-            .clone()
-            .map(|step| step as Arc<dyn steno_host::services::SwiftImport>),
+        swift_import,
     };
 
     Ok(App {

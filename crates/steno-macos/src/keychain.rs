@@ -290,10 +290,9 @@ pub mod fixture {
 
     /// Deletes `keychain`'s file and removes it from the search list, so a
     /// test leaves nothing behind.
-    pub fn delete_keychain(keychain: SecKeychain) -> Result<(), KeychainError> {
-        // SAFETY: `keychain` is a live `SecKeychainRef`, owned by this
-        // function until it drops at the end, after the call;
-        // `SecKeychainDelete` does not release it.
+    pub fn delete_keychain(keychain: &SecKeychain) -> Result<(), KeychainError> {
+        // SAFETY: `keychain` is a live `SecKeychainRef` the borrow keeps
+        // alive for the whole call; `SecKeychainDelete` does not release it.
         let status = unsafe { SecKeychainDelete(keychain.as_concrete_TypeRef()) };
         KeychainError::check("SecKeychainDelete", status)
     }

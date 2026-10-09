@@ -495,17 +495,21 @@ impl ImportStep {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The key as the step leaves it: read (or refused) when it was the
-    /// Swift one, else the store answers.
-    fn settle_key(&self, read: Option<Option<String>>) {
-        let mut key = self.gate.key();
-        match read {
-            Some(value) => *key = KeyGate::Read(value),
-            None if *key == KeyGate::Closed => *key = KeyGate::Open,
-            None => return,
-        }
-        drop(key);
+    /// The key the step read, or `None` when it was refused or skipped,
+    /// is what the graph reads from now on, without asking again.
+    fn key_read(&self, value: Option<String>) {
+        *self.gate.key() = KeyGate::Read(value);
         (self.reload)();
+    }
+
+    /// The step had no Swift key to read: the store answers from now on.
+    fn open_key(&self) {
+        let mut key = self.gate.key();
+        if *key == KeyGate::Closed {
+            *key = KeyGate::Open;
+            drop(key);
+            (self.reload)();
+        }
     }
 
     /// Exports, decodes and stores the Swift identity; `Ok` also when the
@@ -567,9 +571,9 @@ impl SwiftImport for ImportStep {
             });
             self.preferences.set_flag(KEY_READ_KEY, true);
             self.state().read_key = false;
-            self.settle_key(Some(key));
+            self.key_read(key);
         } else {
-            self.settle_key(None);
+            self.open_key();
         }
         let outcome = self.export();
         {
@@ -601,7 +605,11 @@ impl SwiftImport for ImportStep {
             return self.status();
         }
         let read_key = self.state().read_key;
-        self.settle_key(read_key.then_some(None));
+        if read_key {
+            self.key_read(None);
+        } else {
+            self.open_key();
+        }
         self.state().stage = SwiftImportStage::Waiting;
         self.gate
             .set_handover(HandoverGate::Waiting(WaitReason::ImportDenied));

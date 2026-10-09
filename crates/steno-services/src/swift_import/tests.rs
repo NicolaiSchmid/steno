@@ -251,7 +251,7 @@ fn without_a_swift_certificate_the_import_is_over_at_launch_and_a_second_launch_
         Launch::Done
     ));
     assert_eq!(second.reads.load(Ordering::SeqCst), 0);
-    assert!(keychain.calls().is_empty(), "{:?}", keychain.calls());
+    assert_eq!(keychain.calls(), Vec::<&str>::new());
     assert_eq!(
         std::fs::read(dir.path().join("preferences.json")).unwrap(),
         before
@@ -300,7 +300,7 @@ fn a_smoke_run_and_a_foreign_home_skip_the_import_and_touch_nothing() {
             "{context:?}: {outcome:?}"
         );
         assert_eq!(defaults.reads.load(Ordering::SeqCst), 0);
-        assert!(keychain.calls().is_empty());
+        assert_eq!(keychain.calls(), Vec::<&str>::new());
         assert!(!dir.path().join("preferences.json").exists());
     }
     assert_eq!(at_home().skip_reason(), None);
@@ -340,7 +340,7 @@ struct Step {
     keychain: Arc<FakeKeychain>,
     raw: Arc<CountingSecrets>,
     graph: GraphImport,
-    step: ImportStep,
+    import: ImportStep,
     reloads: Arc<AtomicUsize>,
 }
 
@@ -382,7 +382,7 @@ fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) ->
     let graph = GraphImport::new(pending, raw.clone());
     let reloads = Arc::new(AtomicUsize::new(0));
     let counted = reloads.clone();
-    let step = graph.step(
+    let import = graph.step(
         RUNTIME.handle().clone(),
         Box::new(move || {
             counted.fetch_add(1, Ordering::SeqCst);
@@ -394,7 +394,7 @@ fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) ->
         keychain,
         raw,
         graph,
-        step,
+        import,
         reloads,
     }
 }
@@ -420,8 +420,8 @@ fn while_pending_the_graph_reads_no_api_key() {
         "the keychain was asked"
     );
     assert_eq!(step.graph.gate.handover(), HandoverGate::Pending);
-    assert_eq!(step.step.status().stage, SwiftImportStage::Pending);
-    assert_eq!(step.step.status().prompts, 2);
+    assert_eq!(step.import.status().stage, SwiftImportStage::Pending);
+    assert_eq!(step.import.status().prompts, 2);
 }
 
 #[test]
@@ -429,7 +429,7 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
     let desktop =
         HandoverIdentity::mint("Steno on a desktop-id build", chrono::Utc::now()).unwrap();
     let step = step(FakeKeychain::swift_app(), Some(&desktop));
-    let status = step.step.run();
+    let status = step.import.run();
     assert_eq!(status.stage, SwiftImportStage::Done);
     assert_eq!(status.failure, None);
     assert_eq!(
@@ -461,7 +461,11 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
     );
     assert!(step.raw.reads.lock().unwrap().is_empty());
     assert_eq!(step.reloads.load(Ordering::SeqCst), 1);
-    assert_eq!(step.step.run().stage, SwiftImportStage::Done, "a no-op now");
+    assert_eq!(
+        step.import.run().stage,
+        SwiftImportStage::Done,
+        "a no-op now"
+    );
 }
 
 #[test]
@@ -472,7 +476,7 @@ fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_agai
         let step = step(FakeKeychain::swift_app(), existing);
         let before = read(&*step.raw, &HandoverIdentity::secret_key());
         step.keychain.deny_export();
-        let status = step.step.run();
+        let status = step.import.run();
         assert_eq!(status.stage, SwiftImportStage::Waiting);
         assert_eq!(status.failure.as_deref(), Some(DENIED_EXPORT));
         assert_eq!(
@@ -492,7 +496,7 @@ fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_agai
         // Try again asks for the identity alone: the key was read.
         assert_eq!(status.prompts, 1);
         step.keychain.allow_export();
-        assert_eq!(step.step.run().stage, SwiftImportStage::Done);
+        assert_eq!(step.import.run().stage, SwiftImportStage::Done);
         assert_eq!(
             step.keychain
                 .calls()
@@ -510,7 +514,7 @@ fn an_export_of_another_certificate_is_refused() {
     let step = step(FakeKeychain::swift_app(), None);
     let other = HandoverIdentity::mint("Another", chrono::Utc::now()).unwrap();
     *step.keychain.certificate.lock().unwrap() = Some(other.certificate_der().to_vec());
-    let status = step.step.run();
+    let status = step.import.run();
     assert_eq!(status.stage, SwiftImportStage::Waiting);
     assert_eq!(status.failure.as_deref(), Some(FAILED_EXPORT));
     assert_eq!(read(&*step.raw, &HandoverIdentity::secret_key()), None);
@@ -528,7 +532,7 @@ fn a_denied_key_read_leaves_the_key_empty_and_the_identity_still_comes_over() {
         },
         None,
     );
-    assert_eq!(step.step.run().stage, SwiftImportStage::Done);
+    assert_eq!(step.import.run().stage, SwiftImportStage::Done);
     assert_eq!(read(&*step.graph.secrets, &SecretKey::llm_api_key()), None);
     assert!(step.preferences.flag(KEY_READ_KEY));
     // A key the user saves in Settings is read from the store again.
@@ -548,7 +552,7 @@ fn a_denied_key_read_leaves_the_key_empty_and_the_identity_still_comes_over() {
 #[test]
 fn skipping_the_step_counts_as_both_denied_and_the_next_launch_asks_again() {
     let step = step(FakeKeychain::swift_app(), None);
-    let status = step.step.skip();
+    let status = step.import.skip();
     assert_eq!(status.stage, SwiftImportStage::Waiting);
     assert_eq!(read(&*step.graph.secrets, &SecretKey::llm_api_key()), None);
     assert!(

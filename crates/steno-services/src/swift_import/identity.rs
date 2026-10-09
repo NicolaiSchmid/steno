@@ -89,12 +89,13 @@ pub async fn store_imported_identity(
 }
 
 fn pem_block(tag: &str, der: &[u8]) -> String {
+    use std::fmt::Write as _;
     let body = base64::engine::general_purpose::STANDARD.encode(der);
     let mut text = format!("-----BEGIN {tag}-----\n");
     for line in body.as_bytes().chunks(64) {
         text.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
         text.push('\n');
     }
-    text.push_str(&format!("-----END {tag}-----\n"));
+    let _ = writeln!(text, "-----END {tag}-----");
     text
 }

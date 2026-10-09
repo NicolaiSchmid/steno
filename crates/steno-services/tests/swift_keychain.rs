@@ -53,7 +53,7 @@ struct Throwaway(Option<SecKeychain>);
 impl Drop for Throwaway {
     fn drop(&mut self) {
         if let Some(keychain) = self.0.take() {
-            fixture::delete_keychain(keychain).expect("the test keychain is deleted");
+            fixture::delete_keychain(&keychain).expect("the test keychain is deleted");
         }
     }
 }

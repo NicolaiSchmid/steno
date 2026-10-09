@@ -10,7 +10,7 @@
 //! and Windows the crate is empty and its docs list nothing. Each `unsafe`
 //! block sits in a safe function and carries a `SAFETY:` comment for every
 //! invariant it relies on; nothing else in the workspace calls these
-//! frameworks raw. The calendar's EventKit lookup (S3) joins as a module of
+//! frameworks raw. The calendar's `EventKit` lookup (S3) joins as a module of
 //! its own.
 
 #![deny(unsafe_code)]
