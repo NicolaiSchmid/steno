@@ -192,6 +192,29 @@ fn the_first_launch_registers_the_login_item_unless_the_system_manages_it() {
             .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
     );
     assert_eq!(harness.fakes.login_item.status(), LoginItemStatus::Managed);
+
+    // A registration that fails (on Linux, no launcher at a stable path)
+    // does not count the launch, so the next one tries again.
+    let harness = Harness::builder().seed(seed_launch_at_login).build();
+    harness.fakes.login_item.fail_changes(Some(
+        "Steno can't open at login from where it's installed now.",
+    ));
+    harness.host.register_login_item_on_first_launch();
+    assert!(
+        !harness
+            .fakes
+            .preferences
+            .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
+    );
+    harness.fakes.login_item.fail_changes(None);
+    harness.host.register_login_item_on_first_launch();
+    assert_eq!(*harness.fakes.login_item.changes.lock().unwrap(), [true]);
+    assert!(
+        harness
+            .fakes
+            .preferences
+            .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
+    );
 }
 
 /// A login item the system manages shows on, with the line that says so,
@@ -228,6 +251,36 @@ fn a_login_item_the_system_manages_shows_on_and_does_not_switch() {
             .get("loginItemNote")
             .is_none()
     );
+
+    // The system takes the login item over after the section was read:
+    // the switch asks again before it changes anything.
+    plain.snapshot(BridgeTopic::SettingsGeneral);
+    plain.fakes.login_item.set_status(LoginItemStatus::Managed);
+    plain
+        .host
+        .settings_general_set_launch_at_login(SetBoolParams { value: true })
+        .unwrap();
+    assert!(plain.fakes.login_item.changes.lock().unwrap().is_empty());
+    assert!(!plain.store.settings().unwrap().launch_at_login);
+}
+
+/// A login item that cannot be registered (on Linux, no launcher at a
+/// path that outlives an upgrade) leaves the setting off and the section
+/// says why. Rust only (stable plan X5).
+#[test]
+fn a_login_item_that_cannot_be_registered_says_why_and_is_not_saved() {
+    let reason = "Steno can't open at login from where it's installed now.";
+    let harness = Harness::builder()
+        .seed(move |_, fakes| fakes.login_item.fail_changes(Some(reason)))
+        .build();
+    harness
+        .host
+        .settings_general_set_launch_at_login(SetBoolParams { value: true })
+        .unwrap();
+    assert!(!harness.store.settings().unwrap().launch_at_login);
+    let general = harness.snapshot(BridgeTopic::SettingsGeneral);
+    assert_eq!(general["loginItem"], "notRegistered");
+    assert_eq!(general["errorDetails"], reason);
 }
 
 /// On a packaged install (stable plan X5) the Updates row says where

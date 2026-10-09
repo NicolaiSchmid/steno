@@ -901,8 +901,11 @@ impl Host {
     /// The first launch registers the login item when the setting says so;
     /// a login item the system manages is left alone, and the first launch
     /// is not counted, so a later install that leaves launch at login to the
-    /// app still registers it once.
-    /// Swift: `AppController.registerLoginItemOnFirstLaunch`.
+    /// app still registers it once. Nor is a launch counted whose
+    /// registration failed (on Linux, no launcher at a path that outlives
+    /// an upgrade), so a later launch tries again; the failure is not
+    /// shown. Swift: `AppController.registerLoginItemOnFirstLaunch`, which
+    /// counts the launch before it registers.
     pub fn register_login_item_on_first_launch(&self) {
         let preferences = &self.shared.services.preferences;
         if preferences.flag(LOGIN_ITEM_REGISTERED_KEY)
@@ -916,11 +919,11 @@ impl Host {
         if !settings.launch_at_login {
             return;
         }
-        preferences.set_flag(LOGIN_ITEM_REGISTERED_KEY, true);
-        if self.shared.services.login_item.status()
-            == crate::services::LoginItemStatus::NotRegistered
-        {
-            let _ = self.shared.services.login_item.set_enabled(true);
+        let registered = self.shared.services.login_item.status()
+            != crate::services::LoginItemStatus::NotRegistered
+            || self.shared.services.login_item.set_enabled(true).is_ok();
+        if registered {
+            preferences.set_flag(LOGIN_ITEM_REGISTERED_KEY, true);
         }
         let mut inner = self.lock();
         inner.general.login_item = self.shared.services.login_item.status();
