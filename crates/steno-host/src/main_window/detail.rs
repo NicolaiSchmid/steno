@@ -194,8 +194,9 @@ impl MeetingDetailViewModel {
     }
 
     /// "Process again": the meeting is one it is offered for
-    /// ([`Meeting::offers_process_again`]), its recording is on disk, and
-    /// the API key is not withheld ([`key_withheld`](Self::key_withheld)).
+    /// ([`Meeting::offers_process_again`] over the export's rows: failed,
+    /// or ready and kept incomplete), its recording is on disk, and the API
+    /// key is not withheld ([`key_withheld`](Self::key_withheld)).
     /// The snapshot's `canProcessAgain`, and the guard of
     /// [`process_again`](Self::process_again), so the button and the action
     /// cannot drift apart.
@@ -208,7 +209,14 @@ impl MeetingDetailViewModel {
     /// one it is offered for, its recording is gone, or the API key is
     /// withheld.
     fn process_again_refusal(&self) -> Option<ProcessAgainRefusal> {
-        if !self.meeting().is_some_and(Meeting::offers_process_again) {
+        let offered = self.export.as_ref().is_some_and(|export| {
+            export.meeting.offers_process_again(
+                &export.speakers,
+                &export.segments,
+                export.audio.as_ref(),
+            )
+        });
+        if !offered {
             Some(ProcessAgainRefusal::NotOffered)
         } else if !self.recording_files_exist {
             Some(ProcessAgainRefusal::RecordingGone)
@@ -490,7 +498,8 @@ pub fn process_again_refusal_line(
     Some(match refusal {
         ProcessAgainRefusal::MeetingGone => "This meeting no longer exists.".to_owned(),
         ProcessAgainRefusal::NotOffered => {
-            "Only a failed meeting can be processed again.".to_owned()
+            "Only a failed meeting, or one whose results may be incomplete, can be processed again."
+                .to_owned()
         }
         ProcessAgainRefusal::RecordingGone => platform
             .mac_or(
