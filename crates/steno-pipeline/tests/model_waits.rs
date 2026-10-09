@@ -1,6 +1,8 @@
-//! A resume that lands while a refused run lets go of its meeting. Its own
-//! test binary: the gate is a log line, and the subscriber that runs the
-//! resume at it is the binary's global one, which no other test shares.
+//! A resume that lands while a refused run lets go of its meeting, and a
+//! refused run's restart. Their own test binary: the gates are log lines,
+//! seen by the binary's global subscriber (the first test, on a
+//! current-thread runtime) or by one its runtime's worker threads alone
+//! use (the second), which no other test shares.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -94,6 +96,83 @@ impl SpeechEngine for Uninstalled {
     }
 }
 
+/// A speech engine whose first transcription decides its model is
+/// missing, then waits at a gate (`entered`, then `open`) before it
+/// returns the refusal, so a test can install and resume in between; every
+/// later call transcribes.
+#[derive(Default)]
+struct HeldRefusal {
+    refused: AtomicBool,
+    entered: tokio::sync::Notify,
+    open: tokio::sync::Notify,
+    inner: FakeSpeechEngine,
+}
+
+#[async_trait]
+impl SpeechEngine for HeldRefusal {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn supported_languages(&self) -> &std::collections::BTreeSet<LanguageTag> {
+        self.inner.supported_languages()
+    }
+
+    async fn prepare(&self) -> BoundaryResult<()> {
+        self.inner.prepare().await
+    }
+
+    async fn transcribe(
+        &self,
+        audio: &AudioBuffer16k,
+        hint: Option<&LanguageTag>,
+    ) -> BoundaryResult<Vec<RawSegment>> {
+        if !self.refused.swap(true, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.open.notified().await;
+            return Err(Box::new(PipelineFailure::models_missing(
+                PipelineStage::Transcribe,
+            )));
+        }
+        self.inner.transcribe(audio, hint).await
+    }
+}
+
+/// A store with an audio folder in `dir`, and a pipeline over it with
+/// `engine`.
+fn pipeline_over(
+    dir: &Path,
+    engine: Arc<dyn SpeechEngine>,
+) -> (Arc<Store>, std::path::PathBuf, ProcessingPipeline) {
+    let audio = dir.join("audio");
+    let store = Arc::new(Store::open(dir.join("steno.sqlite")).unwrap());
+    let mut settings = store.settings().unwrap();
+    settings.audio_folder = file_url(&audio, true);
+    store.save_settings(&settings).unwrap();
+    let pipeline = ProcessingPipeline::new(PipelineDependencies::new(
+        Arc::new(WavDecoder),
+        engine,
+        Arc::new(FakeDiarizer::default()),
+        Arc::new(InMemorySpeakerMemory::new(Vec::new())),
+        Arc::new(NoDestinations),
+        store.clone(),
+        MeetingEventBus::new(),
+    ));
+    (store, audio, pipeline)
+}
+
+/// Enqueues a two-lane call in `audio` on `pipeline`; its meeting id.
+fn enqueue_call(audio: &Path, pipeline: &ProcessingPipeline) -> Uuid {
+    let mut meeting = sample_data::meeting();
+    meeting.id = Uuid::new_v4();
+    meeting.state = MeetingState::Recording;
+    let asset =
+        steno_pipeline::fixtures::two_lane_call(audio, meeting.id, AudioRetention::KeepForever)
+            .unwrap();
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    meeting.id
+}
+
 /// A layer that hands every event of the background runs' target to
 /// `on_message`, on the thread that logs it.
 struct OnMessage<F>(F);
@@ -132,21 +211,8 @@ where
 #[tokio::test(flavor = "current_thread")]
 async fn a_resume_while_a_refused_run_lets_go_of_its_meeting_still_starts_it() {
     let dir = tempfile::tempdir().unwrap();
-    let audio = dir.path().join("audio");
-    let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
-    let mut settings = store.settings().unwrap();
-    settings.audio_folder = file_url(&audio, true);
-    store.save_settings(&settings).unwrap();
     let engine = Arc::new(Uninstalled::default());
-    let pipeline = ProcessingPipeline::new(PipelineDependencies::new(
-        Arc::new(WavDecoder),
-        engine.clone(),
-        Arc::new(FakeDiarizer::default()),
-        Arc::new(InMemorySpeakerMemory::new(Vec::new())),
-        Arc::new(NoDestinations),
-        store.clone(),
-        MeetingEventBus::new(),
-    ));
+    let (store, audio, pipeline) = pipeline_over(dir.path(), engine.clone());
     let gated = Arc::new(tokio::sync::Notify::new());
     let resumed = Arc::new(AtomicBool::new(false));
     tracing::subscriber::set_global_default(
@@ -169,19 +235,88 @@ async fn a_resume_while_a_refused_run_lets_go_of_its_meeting_still_starts_it() {
     )
     .unwrap();
 
-    let mut meeting = sample_data::meeting();
-    meeting.id = Uuid::new_v4();
-    meeting.state = MeetingState::Recording;
-    let asset =
-        steno_pipeline::fixtures::two_lane_call(&audio, meeting.id, AudioRetention::KeepForever)
-            .unwrap();
-    pipeline.enqueue(&meeting, &asset).unwrap();
+    let meeting_id = enqueue_call(&audio, &pipeline);
     tokio::time::timeout(std::time::Duration::from_secs(10), gated.notified())
         .await
         .expect("the gate was reached");
     pipeline.wait_until_idle().await;
     assert_eq!(
-        store.meeting(meeting.id).unwrap().unwrap().state,
+        store.meeting(meeting_id).unwrap().unwrap().state,
         MeetingState::Ready
     );
+}
+
+/// An install's resume while a run is being refused skips the meeting,
+/// which is in flight, so the run starts it again instead of leaving it
+/// waiting. The restart's log line is the gate: it holds the run's worker
+/// thread there until the test lets go. `wait_until_idle` called then
+/// does not return, as the refused run is still among the background
+/// runs until it has started the meeting again, and once let go it waits
+/// for the restart too: the meeting is ready when it returns.
+#[test]
+fn wait_until_idle_waits_for_a_refused_run_to_start_its_meeting_again() {
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let (open, opened) = std::sync::mpsc::channel::<()>();
+    let opened = std::sync::Mutex::new(opened);
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .with_max_level(tracing::Level::INFO)
+            .finish()
+            .with(OnMessage({
+                let reached = reached.clone();
+                move |message: &str| {
+                    if message.contains("a resume ran during the refused run") {
+                        reached.notify_one();
+                        // Ends when the test lets go or drops `open`.
+                        let _ = opened.lock().unwrap().recv();
+                    }
+                }
+            })),
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .on_thread_start(move || std::mem::forget(tracing::dispatcher::set_default(&dispatch)))
+        .build()
+        .unwrap();
+    // Dropped before the runtime, so a failing assert unblocks the gate.
+    let open = open;
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(HeldRefusal::default());
+        let (store, audio, pipeline) = pipeline_over(dir.path(), engine.clone());
+        let meeting_id = enqueue_call(&audio, &pipeline);
+        tokio::time::timeout(std::time::Duration::from_secs(10), engine.entered.notified())
+            .await
+            .expect("the run is transcribing");
+        assert_eq!(
+            pipeline.resume_waiting().unwrap(),
+            Vec::<Uuid>::new(),
+            "the meeting is in flight"
+        );
+        engine.open.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified())
+            .await
+            .expect("the refused run is starting its meeting again");
+
+        let mut idle = std::pin::pin!(pipeline.wait_until_idle());
+        let pending = std::future::poll_fn(|context| {
+            std::task::Poll::Ready(idle.as_mut().poll(context).is_pending())
+        })
+        .await;
+        assert!(
+            pending,
+            "wait_until_idle returned while the refused run was starting its meeting again"
+        );
+        open.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), idle)
+            .await
+            .expect("every run is done");
+        assert_eq!(
+            store.meeting(meeting_id).unwrap().unwrap().state,
+            MeetingState::Ready
+        );
+        assert_eq!(pipeline.dependencies().model_waits.waiting(), Vec::<Uuid>::new());
+    });
 }

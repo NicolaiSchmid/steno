@@ -354,18 +354,23 @@ impl InFlight {
 /// The meetings runs left `queued` for missing models since the last
 /// resume, and how many resumes ran, shared by every pipeline built over
 /// dependencies that carry it ([`PipelineDependencies::with_model_waits`];
-/// the services' reloads share the app's). A resume
-/// ([`ProcessingPipeline::resume_unfinished`],
-/// [`ProcessingPipeline::resume_waiting`]) counts itself and takes the
-/// waiting meetings. A run refused for missing models records its meeting
-/// only once nothing holds it any more (the run's mark and its background
-/// task's), so a resume never finds a waiting meeting held and skips it;
-/// when a resume ran since the run started, which skipped the meeting
-/// because it was in flight and may have followed the install of its
-/// models, the meeting starts again instead of waiting. So
-/// [`ProcessingPipeline::resume_waiting`] starts only meetings no run
-/// holds, on any pipeline sharing the value. Rust only: the Swift
-/// pipeline downloaded inside the run.
+/// the services' pipelines share one, and one [`InFlight`] set with it).
+/// Rust only: the Swift pipeline downloaded inside the run. Three rules
+/// keep a waiting meeting from being skipped or run twice:
+///
+/// 1. A refused run records its meeting as waiting only once it holds the
+///    meeting no more: its mark in [`InFlight`] and its asset claim are
+///    released first. So a resume never finds a waiting meeting held. The
+///    run's background entry stays until the record (or the restart of
+///    rule 3), so [`ProcessingPipeline::wait_until_idle`] waits for it.
+/// 2. A resume ([`ProcessingPipeline::resume_unfinished`],
+///    [`ProcessingPipeline::resume_waiting`]) counts itself and takes the
+///    waiting meetings. It starts those no run holds on any pipeline
+///    sharing the [`InFlight`] set and puts the others back.
+/// 3. A refused run that finds another count than when it started records
+///    nothing: that resume skipped its meeting, which was in flight, and
+///    may have followed the install of its models. The meeting starts
+///    again at once instead.
 #[derive(Debug, Clone, Default)]
 pub struct ModelWaits(Arc<Mutex<Waits>>);
 
@@ -389,10 +394,10 @@ impl ModelWaits {
     }
 
     /// Records `meeting_id` as waiting and returns true, unless a resume
-    /// ran since the count was `seen`: then nothing is recorded. The check
-    /// and the record are one step, and the caller holds the meeting no
-    /// more, so a resume either comes after the record and starts the
-    /// meeting, or before it and the caller starts it again.
+    /// ran since the count was `seen`: then nothing is recorded (rules 1
+    /// and 3 on [`ModelWaits`]). The check and the record are one step, so
+    /// a resume either comes after the record and starts the meeting, or
+    /// before it and the caller starts it again.
     fn wait_unless_resumed(&self, meeting_id: Uuid, seen: u64) -> bool {
         let mut waits = self.lock();
         if waits.resumes != seen {
@@ -715,8 +720,11 @@ impl PipelineDependencies {
 #[derive(Default)]
 struct State {
     runs: HashMap<Uuid, ProcessingRun>,
-    /// The background runs started by `enqueue` and `resume_unfinished`,
-    /// by asset id, and by `redeliver_unfinished`, by a key of their own.
+    /// The background runs started by `enqueue`, the resumes and a
+    /// refused run's restart, by asset id, and by `redeliver_unfinished`,
+    /// by a key of their own. A refused run's entry stays until its
+    /// meeting waits or starts again (rule 1 on [`ModelWaits`]); a restart
+    /// under the same asset id replaces it ([`Running`]).
     running: HashMap<Uuid, JoinHandle<()>>,
 }
 
@@ -1492,12 +1500,13 @@ impl ProcessingPipeline {
 
     /// Spawns `work` among the background runs
     /// [`wait_until_idle`](Self::wait_until_idle) waits for, under `key`,
-    /// holding `claim` until it ends. The state lock is held from the spawn
-    /// to the insert, so the task cannot finish and remove its entry before
-    /// the entry exists; the task's [`Running`] mark removes the entry and
-    /// then releases the claim however the task ends, a panic included.
-    /// A run `work` hands a refusal for missing models is recorded as
-    /// waiting only after that ([`wait_for_models`](Self::wait_for_models)).
+    /// holding `claim` until `work` ends. The state lock is held from the
+    /// spawn to the insert, so the task cannot finish and remove its entry
+    /// before the entry exists. A refusal for missing models `work` hands
+    /// back goes to [`wait_for_models`](Self::wait_for_models) after the
+    /// claim is released and before the entry goes (rule 1 on
+    /// [`ModelWaits`]). The task's [`Running`] mark removes the entry
+    /// however the task ends, a panic included.
     fn spawn_tracked(
         &self,
         key: Uuid,
@@ -1507,18 +1516,17 @@ impl ProcessingPipeline {
         let pipeline = self.clone();
         let mut state = self.state();
         let handle = tokio::spawn(async move {
-            let running = Running {
+            let mut running = Running {
                 pipeline: pipeline.clone(),
                 key,
-                _claim: claim,
+                claim,
             };
             let refused = work.await;
-            // The mark and the claim go before a refused meeting is
-            // recorded as waiting, so a resume from then on can start it.
-            drop(running);
+            drop(running.claim.take());
             if let Some(refused) = refused {
                 pipeline.wait_for_models(refused);
             }
+            drop(running);
         });
         state.running.insert(key, handle);
     }
@@ -1604,10 +1612,11 @@ impl ProcessingPipeline {
         tracing::debug!(target: BACKGROUND_RUN_LOG, %asset_id, %failure, "processing failure");
     }
 
-    /// Waits for every background task: the processing `enqueue` and
-    /// `resume_unfinished` started and the re-exports of
-    /// `redeliver_unfinished`; the CLI and the tests call it before
-    /// reading results.
+    /// Waits for every background task: the processing `enqueue`, the
+    /// resumes and a refused run's restart started, and the re-exports of
+    /// `redeliver_unfinished`. A refused run is waited for until its
+    /// meeting waits or starts again (rule 1 on [`ModelWaits`]). The CLI
+    /// and the tests call it before reading results.
     pub async fn wait_until_idle(&self) {
         loop {
             let handle = {
@@ -1676,9 +1685,8 @@ impl ProcessingPipeline {
     /// ([`PipelineFailure::is_models_missing`]) leaves the meeting `queued`
     /// instead, waiting for a resume ([`ModelWaits`]), and the call returns
     /// the refusal; when a resume ran during the run, the meeting starts
-    /// again in the background.
-    /// A failing `diarize` or
-    /// `match_speakers` does not fail it: the transcript is kept with the
+    /// again in the background. A failing `diarize` or `match_speakers`
+    /// does not fail it: the transcript is kept with the
     /// speakers stored for the meeting, or, when none are stored, one
     /// unknown speaker for the diarized lane. Once `persist` has marked the
     /// meeting `ready` nothing downgrades it, not an error or a panic later
@@ -1781,11 +1789,9 @@ impl ProcessingPipeline {
     }
 
     /// Once nothing holds a refused run's meeting, records it as waiting
-    /// for its models ([`ModelWaits`]), unless a resume ran since the run
-    /// started: that resume skipped the meeting, which was in flight, and
-    /// may have followed the install of its models, so the meeting starts
-    /// again now, in the background. Once the pipeline quits, the next
-    /// launch's resume processes it.
+    /// for its models, or, when a resume ran since the run started, starts
+    /// it again in the background (rules 1 and 3 on [`ModelWaits`]). Once the pipeline quits, the next launch's resume
+    /// processes it.
     fn wait_for_models(&self, refused: Refused) {
         let Refused {
             meeting_id,
@@ -3027,13 +3033,15 @@ impl Drop for AssetClaim {
 }
 
 /// A background run's entry in `running` (by asset id, or a key of its
-/// own for a re-export); dropping it removes the entry and then releases
-/// the processing run's claim, so a new claim of the asset never finds the
-/// old run's entry.
+/// own for a re-export) and the processing run's claim, which
+/// [`ProcessingPipeline::spawn_tracked`] releases first. Dropping the mark
+/// removes the entry only while it is the task's own: a restart of a
+/// refused meeting under the same asset id may have replaced it, and that
+/// entry is the restart's.
 struct Running {
     pipeline: ProcessingPipeline,
     key: Uuid,
-    _claim: Option<AssetClaim>,
+    claim: Option<AssetClaim>,
 }
 
 /// A run refused for missing models, for
@@ -3047,7 +3055,14 @@ struct Refused {
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.pipeline.state().running.remove(&self.key);
+        let mut state = self.pipeline.state();
+        let own = state
+            .running
+            .get(&self.key)
+            .is_some_and(|handle| tokio::task::try_id() == Some(handle.id()));
+        if own {
+            state.running.remove(&self.key);
+        }
     }
 }
 
