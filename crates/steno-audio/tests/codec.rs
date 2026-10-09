@@ -1094,7 +1094,8 @@ fn largest_difference(a: &[f32], b: &[f32], frames: std::ops::Range<usize>) -> f
 /// clean one at the source rate and at 16 kHz, and so is the mixdown;
 /// the damaged packets read as exact silence; everything before the first
 /// is the clean decode bit for bit; the first packet after each damaged
-/// run starts from a cleared overlap and is not compared; the rest is the
+/// run starts from a cleared overlap, so it is no louder than the clean
+/// decode there (the stale overlap would click above it); the rest is the
 /// clean decode within 2 * 10^-3, the noise the encoder substituted in a few
 /// bands coming from a generator that has moved on (most of it within
 /// 10^-5); and the three are counted.
@@ -1125,6 +1126,17 @@ async fn a_damaged_packet_becomes_silence_of_its_length() {
     for after in [at(12)..at(15), at(17)..a.len()] {
         let largest = largest_difference(a, b, after.clone());
         assert!(largest < 2e-3, "{after:?}: {largest}");
+    }
+    // The cleared overlap: the stale tail of the packet before the damage
+    // would add to the first one after it, peaking 0.17 over the tone.
+    let peak = |samples: &[f32], frames: std::ops::Range<usize>| {
+        samples[frames]
+            .iter()
+            .fold(0.0f32, |peak, s| peak.max(s.abs()))
+    };
+    for first in [at(11)..at(12), at(16)..at(17)] {
+        let (damaged, clean) = (peak(a, first.clone()), peak(b, first.clone()));
+        assert!(damaged <= clean + 0.01, "{first:?}: {damaged} over {clean}");
     }
     let quiet =
         largest_difference(a, b, at(12)..at(15)).max(largest_difference(a, b, at(17)..at(21)));
