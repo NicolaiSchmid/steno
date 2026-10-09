@@ -2715,6 +2715,50 @@ mod tests {
         assert!(!line.contains(&row.to_string()), "{line}");
     }
 
+    /// Files the record does not name that hold no audio stay out of the
+    /// line about the masters left alone: a CAF of two channels with part
+    /// of its first frame, an empty m4a and an empty WAV. A CAF with one
+    /// whole frame is counted.
+    #[test]
+    fn unrecorded_files_with_no_audio_are_not_logged() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("audio");
+        let caf = |id: Uuid, extra: usize| {
+            let layout = RecordingLayout::new(&audio, id);
+            std::fs::create_dir_all(&layout.directory).unwrap();
+            let master = layout.master(AudioFormat::Caf48kFloat32);
+            drop(CafStreamWriter::create(&master, 48_000.0, 2).unwrap());
+            let mut bytes = std::fs::read(&master).unwrap();
+            assert_eq!(bytes.len(), CafStreamWriter::HEADER_SIZE);
+            bytes.extend(std::iter::repeat_n(0, extra));
+            std::fs::write(&master, bytes).unwrap();
+        };
+        caf(Uuid::new_v4(), 2 * CafStreamWriter::BYTES_PER_SAMPLE - 1);
+        let whole = Uuid::new_v4();
+        caf(whole, 2 * CafStreamWriter::BYTES_PER_SAMPLE);
+        for format in [AudioFormat::M4aAac, AudioFormat::Wav16kInt16] {
+            let layout = RecordingLayout::new(&audio, Uuid::new_v4());
+            std::fs::create_dir_all(&layout.directory).unwrap();
+            std::fs::File::create(layout.master(format)).unwrap();
+        }
+
+        let (found, logged) = warnings(|| {
+            orphans(
+                std::slice::from_ref(&audio),
+                &HashSet::new(),
+                &BTreeMap::new(),
+            )
+        });
+
+        assert!(found.is_empty());
+        let lines: Vec<&str> = logged.lines().collect();
+        let [line] = lines.as_slice() else {
+            panic!("one line: {logged}");
+        };
+        assert!(line.contains("count=1"), "{line}");
+        assert!(line.contains(&whole.to_string()), "{line}");
+    }
+
     /// Meeting folders with masters and sidecars that the record does not
     /// name, as the Swift app or an earlier release leaves them: a killed
     /// call, a killed in-person recording and a finished call, a phone
