@@ -246,7 +246,8 @@ pub trait Recorder: Send + Sync {
 pub type StartHold = Box<dyn Send>;
 
 /// The error a start refused under a [`StartHold`] leaves in the status.
-pub const INSTALLING_UPDATE: &str = "Steno is installing an update and relaunches in a moment.";
+/// It promises no time: the hold can span the updater's password prompt.
+pub const INSTALLING_UPDATE: &str = "Steno is installing an update. You can record again once it relaunches, or if you cancel the install.";
 
 /// A meeting left `recording`, as [`Recorder::left_recording`] finds it
 /// on disk.

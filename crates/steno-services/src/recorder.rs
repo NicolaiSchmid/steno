@@ -2165,8 +2165,8 @@ mod tests {
         assert_eq!(harness.store.all_meetings().unwrap(), []);
     }
 
-    /// While an install holds starts off, a start (the sidebar's, the
-    /// tray's or the prompt's Record) records nothing and says why; a
+    /// While an install holds starts off, a start (the sidebar's or the
+    /// tray's Record) records nothing and says why; a
     /// recording under way when the hold was taken goes on. Dropping the
     /// hold clears the message, and the next start records.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2192,6 +2192,97 @@ mod tests {
         let hold = harness.recorder.hold_starts();
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
         drop(hold);
+        quit(&harness.recorder);
+        assert_eq!(harness.store.all_meetings().unwrap().len(), 1);
+    }
+
+    /// An update whose install waits on a password prompt until the test
+    /// cancels it, as the updater's prompt for a `.deb` does.
+    #[derive(Default)]
+    struct PasswordPromptSource {
+        prompt_up: tokio::sync::Notify,
+        cancel: tokio::sync::Notify,
+        relaunches: AtomicUsize,
+        told: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::updates::UpdateSource for PasswordPromptSource {
+        async fn check(&self) -> Result<Option<String>, String> {
+            Ok(Some("0.12.0".into()))
+        }
+
+        async fn download(&self, _version: &str) -> Result<Vec<u8>, String> {
+            Ok(vec![1, 2, 3])
+        }
+
+        async fn install(&self, _version: &str, _package: Vec<u8>) -> Result<(), String> {
+            self.prompt_up.notify_one();
+            self.cancel.notified().await;
+            Err("User canceled.".into())
+        }
+
+        async fn relaunch(&self) {
+            self.relaunches.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn ask(&self, _question: crate::updates::Question<'_>) -> bool {
+            true
+        }
+
+        fn tell_install_failed(&self, message: &str) {
+            self.told.lock().unwrap().push(message.to_owned());
+        }
+
+        fn announce(&self, _version: &str) {}
+    }
+
+    /// The harness's recorder after a start on a thread of its own.
+    fn status_after_a_start(harness: &Harness) -> RecorderStatus {
+        let starter = harness.recorder.clone();
+        on_own_thread(PATIENCE, "the start returned", move || {
+            starter.start(CaptureMode::InPerson, None);
+        });
+        harness.recorder.status()
+    }
+
+    /// A start under a hold the install keeps through a password prompt is
+    /// refused; cancelling the prompt fails the install, and the next start
+    /// records.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_password_prompt_lets_recording_start_again() {
+        let harness = harness(&[]);
+        let source = Arc::new(PasswordPromptSource::default());
+        let schedule = crate::updates::UpdateSchedule::new(crate::updates::ScheduleParts {
+            source: source.clone(),
+            preferences: Arc::new(steno_host::fakes::FakePreferences::default()),
+            clock: Arc::new(steno_host::fakes::FakeClock::new(chrono::Utc::now())),
+            gate: Arc::new(crate::updates::NeverIdle),
+            recorder: harness.recorder.clone(),
+            support_directory: harness.dir.path().to_owned(),
+            managed: false,
+            runtime: tokio::runtime::Handle::current(),
+        });
+        schedule.check_on_request().await.unwrap();
+        let offer = {
+            let schedule = schedule.clone();
+            tokio::spawn(async move { schedule.offer("0.12.0").await })
+        };
+        source.prompt_up.notified().await;
+        let status = status_after_a_start(&harness);
+        assert_eq!(status.state, RecordingState::Idle);
+        assert_eq!(status.error.as_deref(), Some(INSTALLING_UPDATE));
+        assert_eq!(harness.store.all_meetings().unwrap(), []);
+
+        source.cancel.notify_one();
+        offer.await.unwrap();
+        assert_eq!(*source.told.lock().unwrap(), ["User canceled."]);
+        assert_eq!(source.relaunches.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.recorder.status().error, None);
+        assert_eq!(
+            status_after_a_start(&harness).state,
+            RecordingState::Recording
+        );
         quit(&harness.recorder);
         assert_eq!(harness.store.all_meetings().unwrap().len(), 1);
     }

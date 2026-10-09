@@ -930,7 +930,8 @@ async fn a_second_yes_during_an_install_does_nothing() {
 /// The user's install takes the package kept for the version the dialog
 /// named, and only for that version: a yes for a version the last check
 /// replaced installs nothing, since the newer one has its own dialog. A
-/// failed install is shown and told.
+/// failed install is shown and told, and a Record after the failed
+/// install records.
 #[tokio::test]
 async fn the_users_install_takes_the_package_kept_for_its_version() {
     let world = World::new();
@@ -973,6 +974,8 @@ async fn the_users_install_takes_the_package_kept_for_its_version() {
     );
     assert_eq!(*lock(&world.source.told), [failed]);
     assert_eq!(world.recorder.status().error, None, "the hold is gone");
+    world.recorder.start(CaptureMode::InPerson, None);
+    assert_eq!(world.recorder.status().state, RecordingState::Recording);
 }
 
 /// A yes for a version no check found any more fails with a message, and

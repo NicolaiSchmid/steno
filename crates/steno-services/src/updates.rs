@@ -35,9 +35,9 @@
 //!   holds recording starts off ([`Recorder::hold_starts`]) through the
 //!   install, the shutdown and the relaunch; a Record meanwhile is refused
 //!   and says [`INSTALLING_UPDATE`](steno_host::services::INSTALLING_UPDATE).
-//!   A recording the user did not agree to stop, one that started during
-//!   the download, puts the install off: the package is kept and the
-//!   version announced again, and the next yes installs it without a
+//!   A recording the user did not agree to stop, such as one that started
+//!   during the download, puts the install off: the package is kept and
+//!   the version announced again, and the next yes installs it without a
 //!   second download. One install runs at a time, and only of the version
 //!   the last check found.
 //! - **Automatic downloads** wait for P25's [`InstallGate`] (stable plan):
@@ -173,8 +173,8 @@ enum Installed {
     PutOff,
     /// The install, or its download, failed; the user is told.
     Failed,
-    /// Another install runs, or the last check found another version or
-    /// none, so nothing was installed.
+    /// Another install runs, or the last check found another version,
+    /// whose own dialog asks, so nothing was installed.
     Skipped,
 }
 
@@ -556,7 +556,10 @@ impl UpdateSchedule {
     /// installer ends the process itself. A recording under way once the
     /// hold is taken, other than that of meeting `agreed_to_stop`, puts the
     /// install off: the package goes back to the schedule ([`Self::keep`])
-    /// and the version is announced again.
+    /// and the version is announced again. The hold spans the updater's
+    /// password prompt where it asks one (a `.deb` install always does),
+    /// so recording stays refused until the user answers or cancels it; a
+    /// cancel fails the install, which drops the hold.
     async fn install_now(
         &self,
         version: &str,
