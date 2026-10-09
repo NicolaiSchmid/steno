@@ -1,9 +1,11 @@
 # The flake (flake.nix, nix/): every output evaluates on both systems, the
 # web UI's pnpm hash matches its lockfile, and the Linux package and its
 # checks build (X7 of .plans/2026-10-07-stable-promotion.md). A pull request
-# runs it when the flake or the web UI's dependencies change; main also
-# after any change to what the package builds, so a tag never finds the
-# package broken first.
+# runs it when the flake, the web UI's dependencies, a Cargo manifest, the
+# lockfile, a build script, the Tauri configuration, the sidecar staging or
+# the release's Tauri CLI pin changes: what can break the Nix build alone.
+# Main also runs it after any change to what the package builds, so a tag
+# never finds the package broken first.
 name: Nix CI
 
 on:
@@ -15,6 +17,12 @@ on:
       - 'apps/macos/web/package.json'
       - 'apps/macos/web/pnpm-lock.yaml'
       - 'apps/macos/web/pnpm-workspace.yaml'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '**/build.rs'
+      - 'apps/desktop/src-tauri/tauri*.json'
+      - 'apps/desktop/scripts/stage-sidecar.sh'
+      - '.github/workflows/desktop-release.yml'
       - '.github/workflows/nix-ci.yml'
   push:
     branches: ['main']
@@ -28,6 +36,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Sources/StenoCore/Resources/**'
+      - '.github/workflows/desktop-release.yml'
       - '.github/workflows/nix-ci.yml'
   workflow_dispatch:
 
