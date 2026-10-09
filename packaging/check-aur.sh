@@ -35,7 +35,7 @@ cp -r "$root/packaging/aur" "$work"
 chown -R builder: "$work"
 as_builder() { su builder -c "cd $work && $1"; }
 
-su builder -c 'gpg --batch --import' < "$root/apps/desktop/release-signing-key.asc"
+as_builder 'gpg --batch --import' < "$root/apps/desktop/release-signing-key.asc"
 
 as_builder 'makepkg --printsrcinfo' > /tmp/srcinfo
 diff -u "$work/.SRCINFO" /tmp/srcinfo \
@@ -45,8 +45,7 @@ echo "ok: .SRCINFO matches the PKGBUILD"
 as_builder 'makepkg -si --noconfirm'
 echo "ok: built, verified against the release key and installed"
 
-package="$(ls "$work"/*.pkg.tar.zst)"
-namcap "$work/PKGBUILD" "$package" | tee /tmp/namcap
+namcap "$work/PKGBUILD" "$work"/*.pkg.tar.zst | tee /tmp/namcap
 ! grep -q ' E: ' /tmp/namcap || die "namcap reports an error"
 echo "ok: namcap reports no error"
 
@@ -67,11 +66,10 @@ done
 [[ ! -e /usr/bin/steno-speech-sidecar ]] || die "the sidecar is still in /usr/bin"
 echo "ok: the binary and the sidecar sit side by side in /usr/lib/steno-desktop"
 
-wrapper=/usr/bin/steno-desktop
 for line in 'export STENO_DISTRIBUTION=aur' \
   'export STENO_EXEC_PATH=/usr/bin/steno-desktop' \
   'exec /usr/lib/steno-desktop/steno-desktop "$@"'; do
-  grep -qxF "$line" "$wrapper" || die "the wrapper lacks the line: $line"
+  grep -qxF "$line" /usr/bin/steno-desktop || die "the wrapper lacks the line: $line"
 done
 echo "ok: the wrapper sets STENO_DISTRIBUTION and STENO_EXEC_PATH"
 
