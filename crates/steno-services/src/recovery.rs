@@ -76,7 +76,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
-use steno_audio::writer::{CafHeader, CafReadError, WavStreamWriter};
+use steno_audio::writer::{CafHeader, CafReadError, CafStreamWriter, WavStreamWriter};
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, Meeting, MeetingSource, RecordingEndReason,
     RecordingLayout, Store, StoreError,
@@ -710,24 +710,36 @@ fn meeting_folder_id(name: &std::ffi::OsStr) -> Option<Uuid> {
     Uuid::try_parse(name).ok()
 }
 
-/// The non-empty master in `layout`, the first of the formats the store
-/// knows that is there, with its modification time.
+/// The master in `layout` that may hold audio, the first of the formats
+/// the store knows that is there, with its modification time.
 fn orphan_master(layout: &RecordingLayout) -> Option<(AudioFormat, PathBuf, SystemTime)> {
     AudioFormat::ALL.iter().find_map(|&format| {
         let master = layout.master(format);
         let metadata = std::fs::metadata(&master)
             .ok()
-            .filter(|metadata| metadata.is_file() && metadata.len() > 0)?;
+            .filter(|metadata| metadata.is_file() && may_hold_audio(format, metadata.len()))?;
         Some((format, master, metadata.modified().ok()?))
     })
 }
 
+/// Whether a master in `format` of `len` bytes may hold a sample. A CAF
+/// no longer than the header [`CafStreamWriter`] writes holds none (a kill
+/// right after its creation cuts it inside the header): no CAF with a
+/// sample is that short. Any other format holds none only when empty.
+fn may_hold_audio(format: AudioFormat, len: u64) -> bool {
+    match format {
+        AudioFormat::Caf48kFloat32 => len > CafStreamWriter::HEADER_SIZE as u64,
+        AudioFormat::M4aAac | AudioFormat::Wav16kInt16 => len > 0,
+    }
+}
+
 /// Whether audio folder `folder` provably holds no master of meeting
 /// `meeting_id`: its meeting folder is there and each master in it is
-/// missing or empty, or the meeting folder is missing while `folder` lists
-/// at least one entry. An empty audio folder (a volume's mount point while
-/// it is not mounted), a folder or a master that cannot be read now (a
-/// permission, an I/O error) may still hold one.
+/// missing or too short to hold a sample ([`may_hold_audio`]), or the
+/// meeting folder is missing while `folder` lists at least one entry. An
+/// empty audio folder (a volume's mount point while it is not mounted), a
+/// folder or a master that cannot be read now (a permission, an I/O
+/// error) may still hold one.
 fn holds_no_master(folder: &Path, meeting_id: Uuid) -> bool {
     let layout = RecordingLayout::new(folder, meeting_id);
     match std::fs::metadata(&layout.directory) {
@@ -735,7 +747,7 @@ fn holds_no_master(folder: &Path, meeting_id: Uuid) -> bool {
             AudioFormat::ALL
                 .iter()
                 .all(|&format| match std::fs::metadata(layout.master(format)) {
-                    Ok(metadata) => metadata.is_file() && metadata.len() == 0,
+                    Ok(metadata) => metadata.is_file() && !may_hold_audio(format, metadata.len()),
                     Err(error) => error.kind() == std::io::ErrorKind::NotFound,
                 })
         }
@@ -798,23 +810,28 @@ fn orphans(
         }
     }
     if !unrecorded.is_empty() {
-        let first: Vec<String> = unrecorded
-            .iter()
-            .take(UNRECORDED_IDS_LOGGED)
-            .map(Uuid::to_string)
-            .collect();
         tracing::warn!(
             count = unrecorded.len(),
-            first = %first.join(", "),
+            first = %first_ids(&unrecorded),
             "recordings with no meeting that this install has no record of are left alone"
         );
     }
     found
 }
 
-/// How many ids of the masters [`orphans`] leaves alone its one log line
-/// names.
+/// How many ids of the masters a launch leaves alone, or could not
+/// recover, its one log line names.
 const UNRECORDED_IDS_LOGGED: usize = 3;
+
+/// The first [`UNRECORDED_IDS_LOGGED`] of `ids`, joined for a log line.
+fn first_ids(ids: &[Uuid]) -> String {
+    let first: Vec<String> = ids
+        .iter()
+        .take(UNRECORDED_IDS_LOGGED)
+        .map(Uuid::to_string)
+        .collect();
+    first.join(", ")
+}
 
 /// The meeting and asset an orphan's master gives: a CAF the Mac wrote is
 /// [salvaged](salvage) as a call (two channels) or an in-person recording
@@ -984,6 +1001,8 @@ pub(crate) fn adopt_orphans(
     let mut adopted_ids = Vec::new();
     // No master to lose: forgotten whether or not the store is durable.
     let mut gone = Vec::new();
+    // Kept with their entries, and warned about in one line.
+    let mut unrecovered = Vec::new();
     for orphan in &found {
         let meeting_id = orphan.meeting_id;
         if check.is_fresh(&orphan.master) {
@@ -1009,10 +1028,17 @@ pub(crate) fn adopt_orphans(
                 gone.push(meeting_id);
             }
             Err(error) => {
-                tracing::warn!(%meeting_id, "a recording with no meeting could not be recovered; it stays on disk");
                 tracing::debug!(%meeting_id, %error, "recording with no meeting not recovered");
+                unrecovered.push(meeting_id);
             }
         }
+    }
+    if !unrecovered.is_empty() {
+        tracing::warn!(
+            count = unrecovered.len(),
+            first = %first_ids(&unrecovered),
+            "recordings with no meeting could not be recovered; they stay on disk for the next launch"
+        );
     }
     for (&meeting_id, folder) in &recorded {
         if ids.contains(&meeting_id) || found.iter().any(|orphan| orphan.meeting_id == meeting_id) {
@@ -1036,7 +1062,7 @@ pub(crate) fn adopt_orphans(
 mod tests {
     use std::sync::Mutex;
 
-    use steno_audio::writer::{CafStreamWriter, RecordingWriter, RecordingWriting as _, WavFile};
+    use steno_audio::writer::{RecordingWriter, RecordingWriting as _, WavFile};
     use steno_audio::{FRAME_SIZE, SAMPLE_RATE};
     use steno_core::testing::WriteLockHold;
     use steno_core::{MeetingState, MeetingStateKind};
@@ -2464,6 +2490,56 @@ mod tests {
         assert_eq!(std::fs::read(&master).unwrap(), header);
     }
 
+    /// A recorded master cut inside its header (a kill right after its
+    /// creation) holds no master, as a header-only one: its entry is
+    /// forgotten, its file stays, and later launches do not count it among
+    /// the masters left alone. A master of three channels holds audio the
+    /// salvage cannot read: it keeps its entry, and each launch names it
+    /// in one line with every other it could not recover.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_master_cut_in_its_header_is_forgotten_and_unreadable_ones_are_counted() {
+        let harness = Harness::new();
+        let cut = orphan(&harness, |layout| {
+            let mut writer = RecordingWriter::new(layout, &[AudioLane::Mixed], false).unwrap();
+            write_frames(&mut writer, 0);
+            drop(writer);
+            let master = layout.master(AudioFormat::Caf48kFloat32);
+            let bytes = std::fs::read(&master).unwrap();
+            std::fs::write(&master, &bytes[..30]).unwrap();
+        });
+        let three_channels = || {
+            orphan(&harness, |layout| {
+                std::fs::create_dir_all(&layout.directory).unwrap();
+                let master = layout.master(AudioFormat::Caf48kFloat32);
+                let mut writer = CafStreamWriter::create(&master, 48_000.0, 3).unwrap();
+                writer.write(&[0.25; 3 * 480], 480).unwrap();
+            })
+        };
+        let unreadable = [three_channels(), three_channels()];
+        let cut_master = master_path(&harness.audio_folder(), cut);
+        let cut_bytes = std::fs::read(&cut_master).unwrap();
+
+        for launch in 1..=2 {
+            let (adopted, logged) =
+                warnings(|| reconcile_at_launch(&harness, &[], &an_hour_later()));
+            assert_eq!(adopted, Vec::<Uuid>::new());
+            let recorded = crate::audio_folders::recorded(&harness.support_directory()).unwrap();
+            assert!(!recorded.contains_key(&cut), "launch {launch}");
+            assert!(unreadable.iter().all(|id| recorded.contains_key(id)));
+            let lines: Vec<&str> = logged
+                .lines()
+                .filter(|line| line.contains("recordings with no meeting"))
+                .collect();
+            let [line] = lines.as_slice() else {
+                panic!("launch {launch}, one line: {logged}");
+            };
+            assert!(line.contains("could not be recovered"), "{line}");
+            assert!(line.contains("count=2"), "{line}");
+            assert!(!logged.contains(&cut.to_string()), "{logged}");
+        }
+        assert_eq!(std::fs::read(&cut_master).unwrap(), cut_bytes);
+    }
+
     /// An entry with no row whose folder cannot be told empty stays: an
     /// audio folder that is empty (a volume's mount point while it is not
     /// mounted) or missing, and one that cannot be read. Once the volume is
@@ -2534,6 +2610,22 @@ mod tests {
         }
     }
 
+    /// What `run` returns, and the warnings it logged on this thread.
+    fn warnings<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let logged = Logged::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let logged = logged.clone();
+                move || logged.clone()
+            })
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, run);
+        let logged = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
+        (value, logged)
+    }
+
     /// The masters the record does not name are logged in one line with
     /// their count and the first few ids, and a folder whose id has a row
     /// is not looked into, even when the record names it: it is neither
@@ -2545,7 +2637,7 @@ mod tests {
         let master = |id: Uuid| {
             let layout = RecordingLayout::new(&audio, id);
             std::fs::create_dir_all(&layout.directory).unwrap();
-            std::fs::write(layout.master(AudioFormat::Caf48kFloat32), b"audio").unwrap();
+            std::fs::write(layout.master(AudioFormat::Caf48kFloat32), [1; 100]).unwrap();
         };
         let unrecorded: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
         unrecorded.iter().copied().for_each(master);
@@ -2554,16 +2646,7 @@ mod tests {
         master(orphan);
         let recorded = BTreeMap::from([(row, audio.clone()), (orphan, audio.clone())]);
 
-        let logged = Logged::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer({
-                let logged = logged.clone();
-                move || logged.clone()
-            })
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let found = tracing::subscriber::with_default(subscriber, || {
+        let (found, logged) = warnings(|| {
             orphans(
                 std::slice::from_ref(&audio),
                 &HashSet::from([row]),
@@ -2573,7 +2656,6 @@ mod tests {
 
         let ids: Vec<Uuid> = found.iter().map(|orphan| orphan.meeting_id).collect();
         assert_eq!(ids, [orphan]);
-        let logged = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
         let lines: Vec<&str> = logged.lines().collect();
         let [line] = lines.as_slice() else {
             panic!("one line: {logged}");
