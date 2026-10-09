@@ -1888,6 +1888,114 @@ async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
     assert_eq!(passes(&built_over(&store, &paths, &codex)), (true, true));
 }
 
+/// A meeting processed while the key is withheld runs neither LLM pass:
+/// no request reaches the endpoint, the transcript stays raw (no cleanup)
+/// and the meeting is ready without a summary, never failed. Once a key is
+/// saved, the summary runs again from the stored transcript, with the
+/// recording gone (retention may have removed it), and the endpoint gets
+/// the saved key. The re-run summarises only, so the transcript stays raw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_meeting_under_a_withheld_key_stays_raw_and_its_summary_runs_later_without_its_audio() {
+    use steno_core::{AudioRetention, MeetingState};
+    use steno_llm::testing::{Scripts, StubChatServer};
+
+    let (dir, store) = crate::testing::temp_store();
+    let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+    let server = StubChatServer::start().await.unwrap();
+    let summary =
+        std::fs::read_to_string(repository().join("Tests/Fixtures/llm/responses/e2e-summary.json"))
+            .unwrap();
+    let usage = steno_core::LlmUsage {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        requests: 1,
+    };
+    let echo = Scripts.cleanup_echo(usage, |_, text| Some(text.to_uppercase()));
+    server.respond(Arc::new(move |request| {
+        if request.purpose.as_deref() == Some("summary") {
+            Some(Scripts.text(&summary))
+        } else {
+            echo(request)
+        }
+    }));
+    let mut settings = store.settings().unwrap();
+    settings.llm_provider = steno_core::LlmProvider::Endpoint;
+    settings.llm_base_url = Some(server.base_url().to_string());
+    settings.llm_model = Some("stub-model".to_owned());
+    store.save_settings(&settings).unwrap();
+    let graph = GraphImport::new(
+        pending(launch_at_home(
+            Arc::new(FilePreferences::in_support_directory(dir.path())),
+            Arc::new(FakeKeychain::swift_app()),
+        )),
+        Arc::new(InMemorySecretStore::new()),
+        record_in(dir.path()),
+    );
+    assert!(graph.gate.key_withheld());
+    // The passes the graph builds now, on core's fakes for the rest.
+    let pipeline_now = || {
+        let built = built_over(&store, &paths, &graph).dependencies;
+        steno_pipeline::ProcessingPipeline::new(
+            crate::testing::fake_dependencies(&store, "fake-engine")
+                .with_llm(built.cleaner, built.summarizer),
+        )
+    };
+
+    let pipeline = pipeline_now();
+    let mut meeting = steno_core::testing::sample_data::meeting();
+    meeting.state = MeetingState::Recording;
+    meeting.summary = None;
+    let audio = dir.path().join("recordings");
+    let asset =
+        steno_pipeline::fixtures::two_lane_call(&audio, meeting.id, AudioRetention::KeepForever)
+            .unwrap();
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+    let stored = store.meeting(meeting.id).unwrap().unwrap();
+    assert_eq!(stored.state, MeetingState::Ready, "{:?}", stored.state);
+    assert!(stored.summary.is_none());
+    let segments = store.export(meeting.id).unwrap().segments;
+    assert_ne!(segments.len(), 0);
+    assert!(
+        segments
+            .iter()
+            .all(|segment| segment.text == segment.raw_text),
+        "the cleanup ran under a withheld key"
+    );
+    assert_eq!(
+        server.request_count(),
+        0,
+        "a request went out without a key"
+    );
+
+    std::fs::remove_dir_all(&audio).unwrap();
+    graph
+        .secrets
+        .set_secret(&SecretKey::llm_api_key(), Some("sk-saved"))
+        .await
+        .unwrap();
+    pipeline_now()
+        .rerun_summary(meeting.id, &stored.template_id)
+        .await
+        .unwrap();
+    let stored = store.meeting(meeting.id).unwrap().unwrap();
+    assert_eq!(stored.state, MeetingState::Ready);
+    assert!(stored.summary.is_some(), "the summary ran again");
+    assert_eq!(store.export(meeting.id).unwrap().segments, segments);
+    let requests = server.requests();
+    let purposes: Vec<_> = requests
+        .iter()
+        .map(|request| request.purpose.as_deref())
+        .collect();
+    assert_eq!(purposes, [Some("summary")]);
+    assert_eq!(requests[0].authorization(), Some("Bearer sk-saved"));
+    assert!(
+        requests[0].body_text().contains(&segments[0].raw_text),
+        "the summary read the stored transcript"
+    );
+    server.stop();
+}
+
 /// The pipeline the M1 test builds: core's fakes, with a cleaner that
 /// fails as a server refuses a request without a key (a 401) whenever the
 /// gated store answered none when it was built.
