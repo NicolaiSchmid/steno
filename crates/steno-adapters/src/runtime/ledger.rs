@@ -33,11 +33,19 @@ pub struct DeliveryLedger {
 
 impl DeliveryLedger {
     /// The ledger for `root`; `previous` applies only when it is from this
-    /// root and stays inside it.
+    /// root and stays inside it. Its root is this one when it is another
+    /// spelling of it ([`Self::same_root`]) or when `is_root` says the file
+    /// system resolves it to this one (a symlink, another case on a
+    /// case-insensitive disk), the destination's I/O answer
+    /// ([`LocalFolderSink::is_root`](crate::fs::LocalFolderSink::is_root)).
     #[must_use]
-    pub fn new(previous: Option<&DeliveryReceipt>, root: &str) -> Self {
+    pub fn new(
+        previous: Option<&DeliveryReceipt>,
+        root: &str,
+        is_root: impl Fn(&str) -> bool,
+    ) -> Self {
         let previous = previous
-            .filter(|receipt| Self::same_root(&receipt.root, root))
+            .filter(|receipt| Self::same_root(&receipt.root, root) || is_root(&receipt.root))
             .filter(|receipt| Self::stays_inside_root(receipt))
             .cloned();
         // Files from the previous receipt stay listed unless rewritten or
@@ -184,28 +192,61 @@ impl DeliveryLedger {
             .map(|file| file.sha256.as_slice())
     }
 
-    /// The copy an earlier delivery wrote beside `path` because the note
-    /// there had been edited (`<stem> (Steno <time>).<extension>`), when the
-    /// previous receipt lists one; the newest by name.
-    #[must_use]
-    pub fn copy_beside(&self, path: &str) -> Option<&DeliveredFile> {
-        let (stem, extension) = split_extension(path);
-        let prefix = format!("{stem} (Steno ");
-        let suffix = format!("){extension}");
-        self.previous_files()
-            .filter(|file| {
-                file.ownership == FileOwnership::Owned
-                    && file.relative_path.starts_with(&prefix)
-                    && file.relative_path.ends_with(&suffix)
-            })
-            .max_by_key(|file| &file.relative_path)
+    /// Keeps the receipt's entry for `path`, a file the user edited that
+    /// this delivery left alone: the hash Steno last wrote there when the
+    /// receipt carries one, else this render's; never the user's bytes, so
+    /// the next delivery still sees the edit, and never no entry, so the
+    /// path stays Steno's to write once the user takes Steno's version.
+    pub fn keep(&mut self, path: &str, data: &[u8]) {
+        self.files
+            .entry(path.to_owned())
+            .or_insert_with(|| DeliveredFile {
+                relative_path: path.to_owned(),
+                ownership: FileOwnership::Owned,
+                sha256: sha256(data),
+            });
     }
 
-    /// The path of a new copy beside `path`, stamped `stamp`.
+    /// The newest copy an earlier delivery wrote beside `path` because the
+    /// note there had been edited, when the previous receipt lists one:
+    /// ordered by date, then number ([`Self::copy_stamp`]).
     #[must_use]
-    pub fn new_copy_beside(path: &str, stamp: &str) -> String {
+    pub fn listed_copy(&self, path: &str) -> Option<&str> {
+        self.previous_files()
+            .filter(|file| file.ownership == FileOwnership::Owned)
+            .filter_map(|file| Some((Self::copy_stamp(path, &file.relative_path)?, file)))
+            .max_by_key(|(stamp, _)| *stamp)
+            .map(|(_, file)| file.relative_path.as_str())
+    }
+
+    /// The path of a copy beside `path`: `<stem> (Steno <date>).<extension>`
+    /// for the first of the day, `<stem> (Steno <date> <number>).<extension>`
+    /// from 2 on.
+    #[must_use]
+    pub fn copy_beside_path(path: &str, date: &str, number: u32) -> String {
         let (stem, extension) = split_extension(path);
-        format!("{stem} (Steno {stamp}){extension}")
+        if number == 1 {
+            format!("{stem} (Steno {date}){extension}")
+        } else {
+            format!("{stem} (Steno {date} {number}){extension}")
+        }
+    }
+
+    /// The date and number of `copy` when it is a copy beside `path`
+    /// ([`Self::copy_beside_path`]), 1 for the unnumbered one. The dates are
+    /// ISO, so they order as strings.
+    #[must_use]
+    pub fn copy_stamp<'a>(path: &str, copy: &'a str) -> Option<(&'a str, u32)> {
+        let (stem, extension) = split_extension(path);
+        let stamp = copy
+            .strip_prefix(stem)?
+            .strip_prefix(" (Steno ")?
+            .strip_suffix(extension)?
+            .strip_suffix(')')?;
+        match stamp.split_once(' ') {
+            Some((date, number)) => Some((date, number.parse().ok()?)),
+            None => Some((stamp, 1)),
+        }
     }
 
     /// Adds `warning` to the receipt this delivery returns.

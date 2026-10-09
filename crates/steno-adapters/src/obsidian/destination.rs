@@ -84,6 +84,11 @@ fn folder_slug(folder: &str) -> String {
     )
 }
 
+/// The last component of the vault-relative `path`.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 /// An audio copy's file name: `audio` or `audio.<ext>`.
 fn is_audio(name: &str) -> bool {
     name == "audio" || name.starts_with("audio.")
@@ -260,8 +265,9 @@ impl ObsidianFolderDestination {
     /// [`Destination::deliver`] without the boundary error wrapper and on
     /// the calling thread, where the tests call it. Blocks while another
     /// delivery into the same vault runs in this process (`vault_lock`). A
-    /// delivery without the audio it should copy succeeds and says so in
-    /// the receipt's `warnings` ([`Self::NO_AUDIO_WARNING`]).
+    /// delivery that kept a note the user edited ([`Self::write_note`]) or
+    /// went without the audio it should copy ([`Self::NO_AUDIO_WARNING`])
+    /// succeeds and says so in the receipt's `warnings`.
     pub fn deliver_meeting(
         &self,
         meeting: &MeetingExport,
@@ -280,7 +286,9 @@ impl ObsidianFolderDestination {
             }
         };
         self.check_vault()?;
-        let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path);
+        let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path, |root| {
+            self.sink.is_root(root)
+        });
         let (folder, created) = self.folder_for(meeting, &mut ledger)?;
         let written = self.write_meeting(meeting, &folder, &mut ledger);
         if written.is_err() && created {
@@ -458,55 +466,91 @@ impl ObsidianFolderDestination {
     }
 
     /// [`write_owned`](Self::write_owned) for a note the user may edit in
-    /// the vault (every rendered file but the audio copy). When the file on
-    /// disk no longer has the hash the previous delivery wrote, the user
-    /// changed it: it is left as it is, the new render goes beside it
-    /// (`<name> (Steno <date>).md`, the same copy again while that copy is
-    /// unedited), and the receipt carries a warning that says so. The
-    /// receipt keeps the note's old hash, so the next delivery sees the edit
-    /// too. Rust only: Swift overwrites the note.
+    /// the vault (every rendered file but the audio copy). A note the user
+    /// edited ([`Self::is_edited`]) is left as it is: the new render goes
+    /// beside it ([`Self::copy_path`]), the receipt keeps the note's entry
+    /// ([`DeliveryLedger::keep`]) so the next delivery sees the edit too,
+    /// and the receipt carries a warning that names both files and how to
+    /// get Steno's version. Rust only: Swift overwrites the note.
     fn write_note(
         &self,
         ledger: &mut DeliveryLedger,
         path: &str,
         data: &[u8],
     ) -> Result<(), ObsidianError> {
-        if let Some(delivered) = ledger.delivered_hash(path)
-            && let Some(on_disk) = self.reading(path, || self.sink.read(path))?
-            && sha256(&on_disk) != delivered
-        {
-            let beside = self.copy_beside(ledger, path)?;
-            self.writing(&beside, || self.sink.write(data, &beside))?;
-            ledger.record(&beside, FileOwnership::Owned, data);
-            ledger.warn(format!(
-                "{path} was edited in the vault, so it was kept; the new version is {beside}."
-            ));
-            return Ok(());
+        if !self.is_edited(ledger, path, data)? {
+            return self.write_owned(ledger, path, data);
         }
-        self.write_owned(ledger, path, data)
+        let copy = self.copy_path(ledger, path, data)?;
+        self.writing(&copy, || self.sink.write(data, &copy))?;
+        ledger.record(&copy, FileOwnership::Owned, data);
+        ledger.keep(path, data);
+        let (name, copy_name) = (file_name(path), file_name(&copy));
+        ledger.warn(format!(
+            "Kept your changes to {name} and put Steno's version beside it as {copy_name}; \
+             to use Steno's, delete {name} and export again"
+        ));
+        Ok(())
     }
 
-    /// Where the new render of the edited note at `path` goes: the copy an
-    /// earlier delivery wrote beside it while that copy is unchanged, else
-    /// a new one dated today, numbered when that name is taken.
-    fn copy_beside(&self, ledger: &DeliveryLedger, path: &str) -> Result<String, ObsidianError> {
-        if let Some(copy) = ledger.copy_beside(path) {
-            let unchanged = self
-                .reading(&copy.relative_path, || self.sink.read(&copy.relative_path))?
-                .is_none_or(|bytes| sha256(&bytes) == copy.sha256);
-            if unchanged {
-                return Ok(copy.relative_path.clone());
+    /// Whether what is at `path` is the user's to keep: a directory (or a
+    /// link to one), or a file whose bytes are neither this render nor what
+    /// Steno last wrote there ([`DeliveryLedger::delivered_hash`]). Without
+    /// a delivered hash (no receipt applies, or it does not list the path)
+    /// any other bytes count as edited, so an unedited note of an earlier
+    /// render gets a copy too. A file that already holds this render is
+    /// not edited: a delivery that failed or was not saved after writing
+    /// heals on the next one, and so does a user who moved the copy over
+    /// the note. Nothing there is not edited.
+    fn is_edited(
+        &self,
+        ledger: &DeliveryLedger,
+        path: &str,
+        data: &[u8],
+    ) -> Result<bool, ObsidianError> {
+        if self.sink.is_directory(path) {
+            return Ok(true);
+        }
+        let Some(on_disk) = self.reading(path, || self.sink.read(path))? else {
+            return Ok(false);
+        };
+        Ok(on_disk != data
+            && ledger
+                .delivered_hash(path)
+                .is_none_or(|delivered| delivered != sha256(&on_disk)))
+    }
+
+    /// Where the new render `data` of the edited note at `path` goes: the
+    /// newest copy an earlier delivery wrote beside it
+    /// ([`DeliveryLedger::listed_copy`]) while that copy is there and not
+    /// edited; else a new one dated today in the destination's time zone,
+    /// numbered from 2 while anything (a dangling link too) holds the name.
+    /// A listed copy the user deleted leaves the receipt, so it is not
+    /// written again under its old date.
+    fn copy_path(
+        &self,
+        ledger: &mut DeliveryLedger,
+        path: &str,
+        data: &[u8],
+    ) -> Result<String, ObsidianError> {
+        if let Some(copy) = ledger.listed_copy(path).map(str::to_owned) {
+            if self.sink.exists(&copy) {
+                if !self.is_edited(ledger, &copy, data)? {
+                    return Ok(copy);
+                }
+            } else if !self.sink.entry_exists(&copy) {
+                ledger.forget(&copy);
             }
         }
-        let date = (self.now)()
+        let today = (self.now)()
             .with_timezone(&self.time_zone)
             .format("%Y-%m-%d")
             .to_string();
-        let mut candidate = DeliveryLedger::new_copy_beside(path, &date);
-        let mut number = 2;
-        while self.sink.exists(&candidate) {
-            candidate = DeliveryLedger::new_copy_beside(path, &format!("{date} {number}"));
+        let mut number = 1;
+        let mut candidate = DeliveryLedger::copy_beside_path(path, &today, number);
+        while self.sink.entry_exists(&candidate) {
             number += 1;
+            candidate = DeliveryLedger::copy_beside_path(path, &today, number);
         }
         Ok(candidate)
     }

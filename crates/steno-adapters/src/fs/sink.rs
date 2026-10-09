@@ -110,31 +110,44 @@ impl LocalFolderSink {
     /// (parity note in the plan).
     #[must_use]
     pub fn same_file(&self, left: &str, right: &str) -> bool {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            match (
-                fs::metadata(self.path(left)),
-                fs::metadata(self.path(right)),
-            ) {
-                (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
-                _ => false,
-            }
+        same_entry(&self.path(left), &self.path(right))
+    }
+
+    /// Whether `other` names this sink's root under another spelling: a
+    /// symlink to it, or another case on a case-insensitive file system
+    /// ([`Self::same_file`]'s rule). False when either is missing, so a
+    /// receipt whose root is gone falls back to the lexical
+    /// [`DeliveryLedger::same_root`](crate::runtime::DeliveryLedger::same_root).
+    /// Swift: none; Swift compares the standardized paths only.
+    #[must_use]
+    pub fn is_root(&self, other: &str) -> bool {
+        same_entry(&self.root, Path::new(other))
+    }
+}
+
+/// [`LocalFolderSink::same_file`] on two absolute paths.
+fn same_entry(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match (fs::metadata(left), fs::metadata(right)) {
+            (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+            _ => false,
         }
-        #[cfg(not(unix))]
-        {
-            use std::io::ErrorKind;
-            use unicode_normalization::UnicodeNormalization as _;
-            let folded = |path: &str| path.nfc().collect::<String>().to_lowercase();
-            match (
-                fs::canonicalize(self.path(left)),
-                fs::canonicalize(self.path(right)),
-            ) {
-                (Ok(left), Ok(right)) => left == right,
-                // Either path missing gives false, whatever the other gave.
-                (Err(error), _) | (_, Err(error)) if error.kind() == ErrorKind::NotFound => false,
-                _ => folded(left) == folded(right),
-            }
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::ErrorKind;
+        use unicode_normalization::UnicodeNormalization as _;
+        let folded = |path: &Path| {
+            let text: &str = &path.to_string_lossy();
+            text.nfc().collect::<String>().to_lowercase()
+        };
+        match (fs::canonicalize(left), fs::canonicalize(right)) {
+            (Ok(left), Ok(right)) => left == right,
+            // Either path missing gives false, whatever the other gave.
+            (Err(error), _) | (_, Err(error)) if error.kind() == ErrorKind::NotFound => false,
+            _ => folded(left) == folded(right),
         }
     }
 }
