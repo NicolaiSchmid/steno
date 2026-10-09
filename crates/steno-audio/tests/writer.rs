@@ -120,7 +120,11 @@ fn the_writer_creates_the_meeting_folder_and_refuses_one_that_exists() {
             refused,
             CaptureError::RecordingExists(layout.directory.clone())
         );
-        assert!(refused.to_string().contains("already holds a recording"));
+        assert!(
+            refused
+                .to_string()
+                .contains("already exists, so nothing was recorded")
+        );
     }
     assert_eq!(std::fs::read(&files.master).unwrap(), master);
     assert_eq!(

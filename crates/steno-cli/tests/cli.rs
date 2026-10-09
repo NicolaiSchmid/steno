@@ -1325,7 +1325,10 @@ fn record_refuses_a_meeting_folder_that_holds_a_recording() {
     assert_ne!(again.status, 0, "{}", again.stdout);
     let folder_name = folder.file_name().unwrap().to_str().unwrap();
     assert!(
-        again.stderr.contains("already holds a recording") && again.stderr.contains(folder_name),
+        again
+            .stderr
+            .contains("already exists, so nothing was recorded")
+            && again.stderr.contains(folder_name),
         "{}",
         again.stderr
     );

@@ -131,7 +131,7 @@ pub enum CaptureError {
     WriterFailed(String),
     /// The meeting's folder already exists: a start with the id of a
     /// meeting that has one, which never writes over its files. Rust only.
-    #[error("the folder {} already holds a recording, so nothing was recorded", .0.display())]
+    #[error("the folder {} already exists, so nothing was recorded", .0.display())]
     RecordingExists(PathBuf),
     /// A backend error that is none of the above (its description).
     #[error("capture backend failed: {0}")]

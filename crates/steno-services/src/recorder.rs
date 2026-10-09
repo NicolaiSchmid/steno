@@ -231,6 +231,7 @@ fn failure_kind(failure: &CaptureError) -> &'static str {
     match failure {
         CaptureError::DeviceLost => "device lost",
         CaptureError::WriterFailed(_) => "write failed",
+        CaptureError::RecordingExists(_) => "folder exists",
         CaptureError::InputDeviceUnavailable => "no input device",
         CaptureError::OutputDeviceUnavailable => "no output device",
         CaptureError::UnsupportedSampleRate { .. } => "sample rate",
