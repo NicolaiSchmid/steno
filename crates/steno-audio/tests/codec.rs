@@ -38,7 +38,7 @@ use steno_audio::writer::{
 };
 use steno_core::paths::file_url;
 use steno_core::{
-    AudioAsset, AudioDecoder, AudioFormat, AudioLane, AudioRetention, RecordingLayout,
+    AudioAsset, AudioDamage, AudioDecoder, AudioFormat, AudioLane, AudioRetention, RecordingLayout,
 };
 use uuid::Uuid;
 
@@ -1044,24 +1044,40 @@ async fn a_master_that_fails_falls_back_to_the_sidecar_that_disagreed() {
     );
 }
 
-/// The payload of each AAC packet of an ffmpeg fixture, in file order:
-/// the `stsz` sizes from the one chunk `stco` names (ffmpeg writes a
-/// short file as one chunk).
+/// The payload of each AAC packet of a fixture's one track, in file
+/// order: the `stsz` sizes, laid out from each chunk's `stco` offset, with
+/// as many packets per chunk as `stsc` says (ffmpeg writes a short file
+/// as one chunk, Apple's encoder as several).
 fn packet_payloads(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
     let table = [b"moov", b"trak", b"mdia", b"minf", b"stbl"];
     let word = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-    let stco = box_offset(bytes, &[table.as_slice(), &[b"stco"]].concat());
-    assert_eq!(word(stco + 12), 1, "one chunk");
-    let stsz = box_offset(bytes, &[table.as_slice(), &[b"stsz"]].concat());
-    assert_eq!(word(stsz + 12), 0, "a size per packet");
-    let mut at = word(stco + 16);
-    (0..word(stsz + 16))
-        .map(|packet| {
-            let size = word(stsz + 20 + 4 * packet);
-            at += size;
-            at - size..at
+    let child = |kind: &[u8; 4]| box_offset(bytes, &[table.as_slice(), &[kind]].concat());
+    let (offsets, sizes_box, runs_box) = (child(b"stco"), child(b"stsz"), child(b"stsc"));
+    assert_eq!(word(sizes_box + 12), 0, "a size per packet");
+    // Each `stsc` run: the 1-based chunk it starts at, and its packets per chunk.
+    let runs: Vec<(usize, usize)> = (0..word(runs_box + 12))
+        .map(|run| {
+            (
+                word(runs_box + 16 + 12 * run),
+                word(runs_box + 20 + 12 * run),
+            )
         })
-        .collect()
+        .collect();
+    let mut sizes = (0..word(sizes_box + 16)).map(|packet| word(sizes_box + 20 + 4 * packet));
+    let mut payloads = Vec::new();
+    for chunk in 0..word(offsets + 12) {
+        let (_, per_chunk) = *runs
+            .iter()
+            .rfind(|(first, _)| *first <= chunk + 1)
+            .expect("a run for every chunk");
+        let mut at = word(offsets + 16 + 4 * chunk);
+        for size in sizes.by_ref().take(per_chunk) {
+            payloads.push(at..at + size);
+            at += size;
+        }
+    }
+    assert_eq!(sizes.next(), None, "every packet in a chunk");
+    payloads
 }
 
 /// The fixture `name` with `change` applied to its bytes, given the
@@ -1189,8 +1205,9 @@ async fn a_damaged_packet_becomes_silence_of_its_length() {
 
 /// A damaged packet inside the encoder priming is trimmed with it: packet
 /// 0 is all priming (1 024 frames), so its silence is cut whole, the decode
-/// keeps its length and no second of it is silent, and from the second
-/// packet after it is the clean decode within the noise generator's drift.
+/// keeps its length, no second of it is silent and no part is counted, as
+/// none of the recording was lost; from the second packet after it is the
+/// clean decode within the noise generator's drift.
 #[test]
 fn a_damaged_packet_in_the_priming_is_trimmed_with_it() {
     let directory = tempfile::tempdir().unwrap();
@@ -1199,8 +1216,8 @@ fn a_damaged_packet_in_the_priming_is_trimmed_with_it() {
             .unwrap();
     let path = with_zeroed_packets(directory.path(), [0]);
     let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
-    assert_eq!(damaged.damage.parts, 1);
-    assert_eq!(damaged.damage.seconds, 0.0, "the priming took all of it");
+    assert_eq!(damaged.damage.parts, 0, "the priming took all of it");
+    assert_eq!(damaged.damage.seconds, 0.0);
     assert_eq!(damaged.samples.len(), clean.samples.len());
     let largest = largest_difference(
         &damaged.samples,
@@ -1210,11 +1227,42 @@ fn a_damaged_packet_in_the_priming_is_trimmed_with_it() {
     assert!(largest < 2e-3, "{largest}");
 }
 
+/// A damaged packet after one that decoded is trimmed by its own
+/// timestamp too. Apple's encoder primes 2 112 frames, two packets and 64
+/// frames: packet 1, after a decoded packet 0, is all priming, so it costs
+/// no frame and is not counted; packet 2 loses its first 64 frames to the
+/// priming and leaves 960 frames of silence. Either way the decode keeps
+/// the clean length, so the audio after it keeps its time.
+#[test]
+fn a_damaged_packet_after_a_decoded_one_is_trimmed_by_its_timestamp() {
+    let name = "tone-440-44k1-onset-200ms-apple.m4a";
+    let clean = SymphoniaAudioCodec::read_channel(&fixture(name), 0, AudioLane::Mixed).unwrap();
+    for (packet, parts, frames) in [(1, 0, 0), (2, 1, 960)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = damaged_copy(directory.path(), name, |bytes, payloads| {
+            bytes[payloads[packet].clone()].fill(0xAA);
+        });
+        let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
+        assert_eq!(damaged.damage.parts, parts, "packet {packet}");
+        assert!(
+            (damaged.damage.seconds - f64::from(frames) / 44_100.0).abs() < 1e-9,
+            "packet {packet}: {}",
+            damaged.damage.seconds
+        );
+        assert_eq!(
+            damaged.samples.len(),
+            clean.samples.len(),
+            "packet {packet}"
+        );
+    }
+}
+
 /// A damaged run from the first packet, before any packet gave the
 /// stream's shape (symphonia's MP4 reader declares no channel count for
 /// AAC), is held until the first packet that decodes, then becomes
 /// silence of its length less the priming: packets 0 to 3 zeroed are
-/// three packets of silence after the 1 024 frames of priming, the decode
+/// three packets of silence after the 1 024 frames of priming (three
+/// parts counted, as packet 0 costs no audio), the decode
 /// keeps the clean length at the source rate and at 16 kHz, and the audio
 /// after it sits where the clean decode has it.
 #[test]
@@ -1224,7 +1272,7 @@ fn a_damaged_run_from_the_first_packet_keeps_its_length() {
     let clean = SymphoniaAudioCodec::read_channel(&clean_path, 0, AudioLane::Mixed).unwrap();
     let path = with_zeroed_packets(directory.path(), 0..4);
     let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
-    assert_eq!(damaged.damage.parts, 4);
+    assert_eq!(damaged.damage.parts, 3);
     let silent = 3 * PACKET;
     assert!((damaged.damage.seconds - silent as f64 / 44_100.0).abs() < 1e-9);
     assert_eq!(damaged.samples.len(), clean.samples.len());
@@ -1261,7 +1309,8 @@ fn a_first_packet_read_as_a_channel_pair_costs_only_itself() {
         },
     );
     let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
-    assert_eq!(damaged.damage.parts, 1);
+    // Packet 0 is all priming, so it costs no part of the recording.
+    assert_eq!(damaged.damage, AudioDamage::default());
     assert_eq!(damaged.samples.len(), clean.samples.len());
 }
 
@@ -1273,11 +1322,17 @@ fn a_first_packet_read_as_a_channel_pair_costs_only_itself() {
 /// zeros but for a 4 at byte 6, then panics the fresh decoder. Packet 22
 /// is the last, whose container duration is 546 frames where its decode
 /// gives 1 024, so the decode is 478 frames shorter than the clean one.
+/// With the app's crash-log hook installed, the caught panic writes no
+/// crash log and the one already in the folder stays.
 #[test]
 fn a_packet_that_panics_the_decoder_becomes_silence() {
     thread_local! {
         static PANICS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
+    let support = tempfile::tempdir().unwrap();
+    let earlier = support.path().join("crash-2026-10-01T12-00-00.000Z.log");
+    std::fs::write(&earlier, "an earlier crash").unwrap();
+    steno_core::crash_log::install_crash_log_hook(support.path().to_path_buf(), None);
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
         PANICS.with(|count| count.set(count.get() + 1));
@@ -1293,7 +1348,14 @@ fn a_packet_that_panics_the_decoder_becomes_silence() {
         bytes[panicking.start + 6] = 4;
     });
     let damaged = SymphoniaAudioCodec::read_channel(&path, 1, AudioLane::Mixed).unwrap();
+    // The default hook again, for the assertions below and the other tests.
+    drop(std::panic::take_hook());
     assert_eq!(PANICS.with(std::cell::Cell::get), 1, "the decoder panicked");
+    let logs: Vec<_> = std::fs::read_dir(support.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(logs, [earlier], "no crash log for a caught panic");
     assert_eq!(damaged.damage.parts, 2);
     assert_eq!(damaged.samples.len(), clean.samples.len() - (PACKET - 546));
     assert!(same_bits(

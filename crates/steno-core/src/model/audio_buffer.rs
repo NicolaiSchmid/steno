@@ -24,7 +24,8 @@ pub struct AudioBuffer16k {
 /// [`AudioBuffer16k::damage`]. Rust only.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct AudioDamage {
-    /// The packets that did not decode.
+    /// The packets that did not decode, less those the encoder priming
+    /// trims whole, which cost no audio.
     pub parts: u32,
     /// The silence they became, in seconds of the recording (less any of
     /// it the encoder priming trims).

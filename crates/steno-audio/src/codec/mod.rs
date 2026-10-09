@@ -55,9 +55,10 @@
 //!   frames for AAC; the last decoded packet's length when the container
 //!   gives none; at most 8 192 frames), so the audio after it keeps its
 //!   time. It logs the first ten (index, timestamp and the error, never the
-//!   content) and one line with the total, and counts them with the
-//!   silence's length: [`AudioBuffer16k::damage`], which the meeting's
-//!   detail shows. Damaged packets before the first one that decodes wait
+//!   content) and one line with the total; a panic is caught as
+//!   [`crash_log::expected`], so it writes no crash log. It counts the
+//!   ones whose silence outlasts the priming trim, with the silence's
+//!   length: [`AudioBuffer16k::damage`], which the meeting's detail shows. Damaged packets before the first one that decodes wait
 //!   for it, as symphonia's MP4 reader declares no channel count for AAC
 //!   and their silence needs one; the priming trim cuts them by timestamp
 //!   like any packet. After each damaged packet the decoder is a fresh
@@ -85,7 +86,7 @@ use std::path::{Path, PathBuf};
 
 use steno_core::{
     AudioAsset, AudioBuffer16k, AudioDamage, AudioDecoder, AudioFormat, AudioLane, BoundaryResult,
-    async_trait, paths::file_url_path,
+    async_trait, crash_log, paths::file_url_path,
 };
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{CODEC_TYPE_AAC, CodecParameters, Decoder, DecoderOptions};
@@ -432,7 +433,7 @@ impl Frames {
         match self {
             Self::Caf { .. } => AudioDamage::default(),
             Self::Symphonia(frames) => AudioDamage {
-                parts: u32::try_from(frames.damage.damaged).unwrap_or(u32::MAX),
+                parts: u32::try_from(frames.damage.parts).unwrap_or(u32::MAX),
                 seconds: frames.damage.seconds,
             },
         }
@@ -466,6 +467,10 @@ struct SymphoniaFrames {
 struct Damage {
     packets: u64,
     damaged: u64,
+    /// The damaged packets some of whose silence the priming trim left:
+    /// the parts of the recording lost. A damaged packet inside the
+    /// priming costs no audio, so only the threshold counts it.
+    parts: u64,
     /// Seconds of silence emitted for the damaged packets, after the
     /// priming trim.
     seconds: f64,
@@ -634,27 +639,27 @@ fn emit_silence(
 /// why it did not decode: symphonia's error, or the panic's message. The
 /// caller replaces the decoder after any failure, so the state a panic
 /// left half-written is never used again; the decoder holds no state
-/// shared with anything else (symphonia's AAC tables are immutable once
-/// built, and built before a packet's data is read).
+/// shared with anything else (symphonia's AAC tables are immutable
+/// statics, built from constants whatever the packet holds). The panic is
+/// [`crash_log::expected`]: the caller logs it with the packet at `warn`,
+/// so the app's panic hooks write no crash log for it and prune none.
 fn decode_packet<'d>(
     decoder: &'d mut Box<dyn Decoder>,
     packet: &Packet,
 ) -> Result<AudioBufferRef<'d>, String> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let decoder = decoder;
-        decoder.decode(packet)
+        crash_log::expected(move || {
+            let decoder = decoder;
+            decoder.decode(packet)
+        })
     }));
     match outcome {
         Ok(Ok(audio)) => Ok(audio),
         Ok(Err(error)) => Err(error.to_string()),
-        Err(panic) => {
-            let message = panic
-                .downcast_ref::<&str>()
-                .map(|text| (*text).to_owned())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_default();
-            Err(format!("the decoder panicked: {message}"))
-        }
+        Err(panic) => Err(format!(
+            "the decoder panicked: {}",
+            crash_log::panic_message(panic.as_ref())
+        )),
     }
 }
 
@@ -845,6 +850,10 @@ impl SymphoniaFrames {
             None => {
                 let rate = self.params.sample_rate.unwrap_or(0);
                 let frames = packet_frames(packet.dur(), self.params.time_base, rate, fallback);
+                // Placed by its own timestamp, as the held run is.
+                if self.primed(packet.ts(), frames) < frames {
+                    self.damage.parts += 1;
+                }
                 stream
                     .leading
                     .get_or_insert(Leading {
@@ -857,6 +866,9 @@ impl SymphoniaFrames {
                 let frames =
                     packet_frames(packet.dur(), self.params.time_base, shape.rate, fallback);
                 let primed = self.primed(packet.ts(), frames);
+                if primed < frames {
+                    self.damage.parts += 1;
+                }
                 self.damage.seconds += emit_silence(
                     each,
                     &mut stream.spec,
@@ -1173,13 +1185,48 @@ mod tests {
         );
     }
 
+    /// Silence is handed on at most [`MAX_PACKET_FRAMES`] at a time, so a
+    /// long held run never needs more zeros than that: a run of three
+    /// blocks and a few frames, in stereo, comes out as four pieces, after
+    /// one `Start`, with every frame and the seconds they last.
+    #[test]
+    fn silence_goes_out_in_capped_blocks() {
+        let shape = spec(44_100, 2);
+        let frames = 3 * MAX_PACKET_FRAMES + 5;
+        let (mut starts, mut pieces) = (0, Vec::new());
+        let mut each = |event: Event<'_>| {
+            match event {
+                Event::Start(_) => starts += 1,
+                Event::Frames(_, samples) => {
+                    assert!(samples.iter().all(|&s| s == 0.0));
+                    pieces.push(samples.len());
+                }
+            }
+            Ok(())
+        };
+        let (mut current, mut zeros) = (None, Vec::new());
+        let seconds = emit_silence(&mut each, &mut current, shape, frames, &mut zeros).unwrap();
+        assert_eq!(starts, 1);
+        assert_eq!(
+            pieces,
+            [
+                MAX_PACKET_FRAMES * 2,
+                MAX_PACKET_FRAMES * 2,
+                MAX_PACKET_FRAMES * 2,
+                10
+            ]
+        );
+        assert_eq!(zeros.len(), MAX_PACKET_FRAMES * 2, "the zeros stay capped");
+        assert!((seconds - frames as f64 / 44_100.0).abs() < 1e-12);
+    }
+
     /// Exactly half the packets damaged still decodes; one more fails.
     #[test]
     fn half_the_packets_damaged_is_not_too_much() {
         let damage = |damaged| Damage {
             packets: 24,
             damaged,
-            seconds: 0.0,
+            ..Damage::default()
         };
         assert!(!damage(12).too_much());
         assert!(damage(13).too_much());
