@@ -236,19 +236,6 @@ pub struct GraphSecrets {
     pub key_gate: Option<Arc<ImportGate>>,
 }
 
-impl GraphSecrets {
-    /// `platform` behind the app's [`KeepsApiKey`] and no gate.
-    #[must_use]
-    pub fn ungated(platform: Arc<dyn SecretStore>) -> Self {
-        let kept = Arc::new(KeepsApiKey::new(platform));
-        GraphSecrets {
-            secrets: kept.clone(),
-            kept,
-            key_gate: None,
-        }
-    }
-}
-
 /// The dependencies of one pipeline from the stored settings, the API key
 /// and `engines`, shared by the first build and every reload, with the
 /// speech engine and the diarizer `engines` keeps: the engine for the
@@ -1041,21 +1028,6 @@ impl App {
         {
             block_on(&self.runtime, handover.stop());
         }
-    }
-
-    /// The handover listener, if it runs: the one built at launch, or the
-    /// gated one once its gate opened.
-    #[must_use]
-    pub fn handover_service(&self) -> Option<Arc<HandoverService>> {
-        self.handover
-            .as_deref()
-            .and_then(ListenerHandover::listener)
-            .cloned()
-            .or_else(|| {
-                self.gated_handover
-                    .as_ref()
-                    .and_then(|gated| gated.service())
-            })
     }
 
     /// Everything that happens once at launch, in order:
@@ -3037,7 +3009,7 @@ mod tests {
         let built = pipeline_dependencies(
             &store,
             &SpeechEngines::new(SpeechSetup::new(&store.settings().unwrap(), &paths)),
-            &GraphSecrets::ungated(Arc::new(BrokenSecrets)),
+            &ungated(Arc::new(BrokenSecrets)),
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
@@ -3048,6 +3020,16 @@ mod tests {
             api_key(&secrets, &tokio::runtime::Handle::current()).unwrap_err(),
             "Could not read the LLM API key from the secret store: no default keychain"
         );
+    }
+
+    /// `platform` behind the app's [`KeepsApiKey`] and no gate.
+    fn ungated(platform: Arc<dyn SecretStore>) -> GraphSecrets {
+        let kept = Arc::new(KeepsApiKey::new(platform));
+        GraphSecrets {
+            secrets: kept.clone(),
+            kept,
+            key_gate: None,
+        }
     }
 
     /// The Authorization header one build of the pipeline sends: builds it
@@ -3110,7 +3092,7 @@ mod tests {
             key.clone(),
             "sk-1".to_owned(),
         )]));
-        let secrets = GraphSecrets::ungated(memory.clone());
+        let secrets = ungated(memory.clone());
         let kept = secrets.kept.clone();
         let sent = || authorization_sent(&store, &paths, &secrets, &server);
         assert_eq!(sent().await.as_deref(), Some("Bearer sk-1"));

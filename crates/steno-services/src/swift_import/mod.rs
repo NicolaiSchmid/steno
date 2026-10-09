@@ -647,7 +647,7 @@ pub fn key_denied_secrets(
 /// A pending import inside the graph: the gated secret store, the gate,
 /// and the step once the graph built it.
 pub struct GraphImport {
-    pub preferences: Arc<FilePreferences>,
+    preferences: Arc<FilePreferences>,
     pub gate: Arc<ImportGate>,
     /// The store every read in the graph goes through.
     pub secrets: Arc<dyn SecretStore>,
