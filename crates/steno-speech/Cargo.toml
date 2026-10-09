@@ -30,8 +30,7 @@ whatlang.workspace = true
 ort = { workspace = true, features = ["directml"] }
 
 # Linux only: the child's own systemd scope (`sidecar::scope`), asked of
-# the user manager over the user bus. Already in the lock through
-# `steno-desktop`.
+# the user manager over the user bus.
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus.workspace = true
 

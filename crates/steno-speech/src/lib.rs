@@ -33,7 +33,8 @@
 //!   `steno-speech-sidecar` child process, and its wire protocol, and the
 //!   process-wide switch-off of `DirectML` after a child crashed, hung or
 //!   overran the memory ceiling on it during a load or a request
-//!   ([`sidecar::directml_switched_off`]).
+//!   ([`sidecar::directml_switched_off`]), and on Linux the child's own
+//!   systemd scope (`sidecar` docs).
 //! - [`runtime`]: [`SpeechSettings`] and [`SpeechRuntime`], which engine
 //!   runs on which platform.
 //! - [`wav`]: the 16 kHz PCM-16 reader of the example and the tests.
