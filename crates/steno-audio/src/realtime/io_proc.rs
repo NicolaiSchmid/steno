@@ -118,10 +118,10 @@ pub const MAX_BUFFERS: usize = 16;
 /// first [`MAX_BUFFERS`] output buffers the HAL handed it, skipping a
 /// buffer without data or of size 0. The HAL zeroes an IOProc's output
 /// before the call already (measured on the Mac, A10 of
-/// `.plans/2026-10-07-stable-promotion.md`); writing the zeros again keeps
-/// the promise that the capture plays nothing but digital silence from
-/// depending on that. One `write_bytes` per buffer over memory the HAL
-/// owns: no allocation, no lock, no syscall.
+/// `.plans/2026-10-07-stable-promotion.md`); the zeros are written again so
+/// that the promise of digital silence does not rest on the HAL. One
+/// `write_bytes` per buffer over memory the HAL owns: no allocation, no
+/// lock, no syscall.
 ///
 /// # Safety
 ///

@@ -24,20 +24,23 @@ use objc2_core_audio::{
     AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProc, AudioDeviceIOProcID,
     AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
     AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice,
-    AudioHardwareDestroyProcessTap, AudioObjectAddPropertyListener, AudioObjectGetPropertyData,
-    AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
-    AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
-    AudioObjectSetPropertyData, CATapDescription, CATapMuteBehavior,
-    kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
+    AudioHardwareDestroyProcessTap, AudioHardwareIOProcStreamUsage, AudioObjectAddPropertyListener,
+    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
+    AudioObjectPropertyAddress, AudioObjectPropertyScope, AudioObjectPropertySelector,
+    AudioObjectRemovePropertyListener, AudioObjectSetPropertyData, CATapDescription,
+    CATapMuteBehavior, kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
     kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey,
+    kAudioAggregateDevicePropertyActiveSubDeviceList, kAudioAggregateDevicePropertyMainSubDevice,
     kAudioAggregateDeviceSubDeviceListKey, kAudioAggregateDeviceTapAutoStartKey,
     kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey,
-    kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyLatency,
+    kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceUID,
+    kAudioDevicePropertyIOProcStreamUsage, kAudioDevicePropertyLatency,
     kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertySafetyOffset,
-    kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyElementMain,
-    kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
-    kAudioObjectUnknown, kAudioSubDeviceDriftCompensationKey, kAudioSubDeviceUIDKey,
-    kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
+    kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyStreams,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyScopeInput, kAudioObjectSystemObject, kAudioObjectUnknown,
+    kAudioSubDeviceDriftCompensationKey, kAudioSubDeviceUIDKey, kAudioSubTapDriftCompensationKey,
+    kAudioSubTapUIDKey, kAudioTapPropertyFormat,
 };
 use objc2_core_audio_types::{
     AudioBufferList, AudioStreamBasicDescription, kAudioFormatFlagIsNonInterleaved,
@@ -340,11 +343,11 @@ pub fn is_alive(id: Id) -> bool {
 
 /// A private, unmuted global process tap of everything the Mac plays,
 /// Steno's own process included: the call capture's silent output IOProc
-/// is what keeps the tap aggregate running, and the HAL counts only the
-/// output of a process the tap includes (A10 of
-/// `.plans/2026-10-07-stable-promotion.md`). So nothing else of Steno's may
-/// play while it records, which [`crate::playback::Playback`] enforces.
-/// Destroyed on drop.
+/// on the aggregate's clock master is what keeps the tap aggregate
+/// running, and the HAL counts only the output of a process the tap
+/// includes (A10 of `.plans/2026-10-07-stable-promotion.md`). So nothing
+/// else of Steno's may play while it records, which
+/// [`crate::playback::Playback`] enforces. Destroyed on drop.
 pub struct ProcessTap {
     pub id: Id,
     /// The tap's UID as `kAudioSubTapUIDKey` wants it.
@@ -556,7 +559,28 @@ impl AggregateDevice {
     /// Channel count per input buffer, the shape the IOProc receives.
     #[must_use]
     pub fn input_channel_counts(&self) -> Vec<usize> {
-        channel_counts(self.id, objc2_core_audio::kAudioObjectPropertyScopeInput)
+        channel_counts(self.id, kAudioObjectPropertyScopeInput)
+    }
+
+    /// The aggregate's clock master as the HAL reports it: the active
+    /// sub-device whose UID is its main sub-device
+    /// (`kAudioAggregateDevicePropertyMainSubDevice`). Only ids and UIDs
+    /// are read.
+    pub fn main_sub_device(&self) -> Result<Id, CoreAudioError> {
+        let main = read_string(
+            self.id,
+            kAudioAggregateDevicePropertyMainSubDevice,
+            kAudioObjectPropertyScopeGlobal,
+        )?;
+        let active: Vec<Id> = read_array(
+            self.id,
+            kAudioAggregateDevicePropertyActiveSubDeviceList,
+            kAudioObjectPropertyScopeGlobal,
+        )?;
+        active
+            .into_iter()
+            .find(|&device| uid(device).is_ok_and(|uid| uid == main))
+            .ok_or_else(|| failed("find the main sub-device", self.id, -1))
     }
 }
 
@@ -583,6 +607,9 @@ impl std::fmt::Debug for IoProc {
 }
 
 impl IoProc {
+    /// Starts `callback` on `device` over every stream it has, as the HAL
+    /// does by default.
+    ///
     /// # Safety
     ///
     /// `client` must stay valid, and whatever it points at must not move,
@@ -592,6 +619,37 @@ impl IoProc {
         device: Id,
         callback: AudioDeviceIOProc,
         client: *mut c_void,
+    ) -> Result<Self, CaptureError> {
+        // SAFETY: the caller's guarantee, passed on.
+        unsafe { Self::start_with(device, callback, client, false) }
+    }
+
+    /// As [`Self::start`], with every input stream of `device` off for this
+    /// IOProc (`kAudioDevicePropertyIOProcStreamUsage`, set before the
+    /// start): an output client that reads nothing opens no input of its
+    /// own. A usage the HAL refuses is logged and the IOProc starts over
+    /// every stream.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::start`].
+    pub unsafe fn start_output_only(
+        device: Id,
+        callback: AudioDeviceIOProc,
+        client: *mut c_void,
+    ) -> Result<Self, CaptureError> {
+        // SAFETY: the caller's guarantee, passed on.
+        unsafe { Self::start_with(device, callback, client, true) }
+    }
+
+    /// # Safety
+    ///
+    /// As for [`Self::start`].
+    unsafe fn start_with(
+        device: Id,
+        callback: AudioDeviceIOProc,
+        client: *mut c_void,
+        output_only: bool,
     ) -> Result<Self, CaptureError> {
         let mut proc_id: AudioDeviceIOProcID = None;
         // SAFETY: valid device id, callback and out-pointer; `client` by the
@@ -605,6 +663,9 @@ impl IoProc {
                 status,
             });
         }
+        if output_only && let Err(error) = input_stream_usage_off(device, proc_id) {
+            tracing::warn!("the input streams stay on for an output-only IOProc ({error})");
+        }
         // SAFETY: the proc id was just created on this device.
         let status = unsafe { AudioDeviceStart(device, proc_id) };
         if status != 0 {
@@ -617,6 +678,112 @@ impl IoProc {
         }
         Ok(Self { device, proc_id })
     }
+
+    /// Whether each of the device's input streams is on for this IOProc.
+    #[cfg(test)]
+    fn input_stream_usage(&self) -> Result<Vec<u32>, CoreAudioError> {
+        let streams = input_stream_count(self.device)?;
+        let (mut usage, mut size) = stream_usage(self.proc_id, streams);
+        let mut addr = address(
+            kAudioDevicePropertyIOProcStreamUsage,
+            kAudioObjectPropertyScopeInput,
+        );
+        // SAFETY: `usage` holds `size` bytes, aligned for the struct, with
+        // `mIOProc` naming the proc whose usage the HAL fills in.
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                self.device,
+                NonNull::from(&mut addr),
+                0,
+                std::ptr::null(),
+                NonNull::from(&mut size),
+                NonNull::new(usage.as_mut_ptr().cast::<c_void>()).expect("non-null vec"),
+            )
+        };
+        if status != 0 {
+            return Err(failed(
+                "read the IOProc's stream usage",
+                self.device,
+                status,
+            ));
+        }
+        Ok(streams_on(&usage, streams))
+    }
+}
+
+/// How many input streams `device` has.
+fn input_stream_count(device: Id) -> Result<usize, CoreAudioError> {
+    Ok(read_array::<Id>(
+        device,
+        kAudioDevicePropertyStreams,
+        kAudioObjectPropertyScopeInput,
+    )?
+    .len())
+}
+
+/// An `AudioHardwareIOProcStreamUsage` for `proc_id` over `streams`
+/// streams, every one off, and its size in bytes. The struct ends in a
+/// variable-length array; `u64` storage keeps its pointer aligned.
+fn stream_usage(proc_id: AudioDeviceIOProcID, streams: usize) -> (Vec<u64>, u32) {
+    let size = std::mem::offset_of!(AudioHardwareIOProcStreamUsage, mStreamIsOn)
+        + streams * std::mem::size_of::<u32>();
+    let words = size.max(std::mem::size_of::<AudioHardwareIOProcStreamUsage>());
+    let mut usage = vec![0u64; words.div_ceil(8)];
+    let header = usage.as_mut_ptr().cast::<AudioHardwareIOProcStreamUsage>();
+    let proc_ptr = proc_id.map_or(std::ptr::null_mut(), |f| f as *mut c_void);
+    // SAFETY: `usage` is zeroed, aligned for the struct and at least its
+    // size; the pointer field is written as a raw pointer, since the zeroed
+    // storage is not yet a valid `NonNull`.
+    unsafe {
+        (&raw mut (*header).mIOProc)
+            .cast::<*mut c_void>()
+            .write(proc_ptr);
+        (&raw mut (*header).mNumberStreams).write(u32::try_from(streams).unwrap_or(u32::MAX));
+    }
+    (usage, u32::try_from(size).unwrap_or(u32::MAX))
+}
+
+/// The `mStreamIsOn` entries of a usage from [`stream_usage`].
+#[cfg(test)]
+fn streams_on(usage: &[u64], streams: usize) -> Vec<u32> {
+    let on = std::mem::offset_of!(AudioHardwareIOProcStreamUsage, mStreamIsOn);
+    let bytes: Vec<u8> = usage.iter().flat_map(|word| word.to_ne_bytes()).collect();
+    (0..streams)
+        .map(|index| {
+            let at = on + index * 4;
+            u32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        })
+        .collect()
+}
+
+/// Turns every input stream of `device` off for `proc_id`, before its
+/// start. A device without input streams has nothing to turn off.
+fn input_stream_usage_off(device: Id, proc_id: AudioDeviceIOProcID) -> Result<(), CoreAudioError> {
+    let streams = input_stream_count(device)?;
+    if streams == 0 {
+        return Ok(());
+    }
+    let (mut usage, size) = stream_usage(proc_id, streams);
+    let mut addr = address(
+        kAudioDevicePropertyIOProcStreamUsage,
+        kAudioObjectPropertyScopeInput,
+    );
+    // SAFETY: `usage` holds `size` bytes, aligned for the struct, naming a
+    // proc created on `device`.
+    let status = unsafe {
+        AudioObjectSetPropertyData(
+            device,
+            NonNull::from(&mut addr),
+            0,
+            std::ptr::null(),
+            size,
+            NonNull::new(usage.as_mut_ptr().cast::<c_void>()).expect("non-null vec"),
+        )
+    };
+    if status != 0 {
+        return Err(failed("write the IOProc's stream usage", device, status));
+    }
+    Ok(())
 }
 
 impl Drop for IoProc {
@@ -740,5 +907,81 @@ impl Drop for PropertyListener {
             );
             drop(Box::from_raw(self.handler));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_core_audio::kAudioHardwarePropertyDefaultInputDevice;
+    use objc2_core_audio_types::AudioTimeStamp;
+
+    use super::*;
+
+    unsafe extern "C-unwind" fn nothing(
+        _device: Id,
+        _now: NonNull<AudioTimeStamp>,
+        _input: NonNull<AudioBufferList>,
+        _input_time: NonNull<AudioTimeStamp>,
+        _output: NonNull<AudioBufferList>,
+        _output_time: NonNull<AudioTimeStamp>,
+        _client: *mut c_void,
+    ) -> OSStatus {
+        0
+    }
+
+    /// The usage the silent output writes: its own proc, the stream count,
+    /// every stream off, sized to the array.
+    #[test]
+    fn a_stream_usage_names_its_proc_with_every_stream_off() {
+        let proc_id: AudioDeviceIOProcID = Some(nothing);
+        let (usage, size) = stream_usage(proc_id, 3);
+        let on = std::mem::offset_of!(AudioHardwareIOProcStreamUsage, mStreamIsOn);
+        assert_eq!(size as usize, on + 12);
+        assert!(usage.len() * 8 >= size as usize);
+        assert_eq!(streams_on(&usage, 3), [0, 0, 0]);
+        let header = usage.as_ptr().cast::<AudioHardwareIOProcStreamUsage>();
+        // SAFETY: `stream_usage` wrote both fields of the header.
+        let (proc_ptr, streams) = unsafe {
+            (
+                (&raw const (*header).mIOProc).cast::<*mut c_void>().read(),
+                (*header).mNumberStreams,
+            )
+        };
+        assert_eq!(
+            proc_ptr,
+            proc_id.map_or(std::ptr::null_mut(), |f| f as *mut c_void)
+        );
+        assert_eq!(streams, 3);
+    }
+
+    /// On the default input, an IOProc started as the HAL does uses every
+    /// input stream; one started output-only uses none, read back from the
+    /// HAL.
+    #[test]
+    #[ignore = "needs a Mac with a microphone; run with -- --ignored"]
+    fn an_output_only_io_proc_leaves_every_input_stream_off() {
+        let microphone: Id = read_pod(
+            SYSTEM,
+            kAudioHardwarePropertyDefaultInputDevice,
+            kAudioObjectPropertyScopeGlobal,
+        )
+        .expect("a default input");
+        // SAFETY: `nothing` reads no client data.
+        let every = unsafe { IoProc::start(microphone, Some(nothing), std::ptr::null_mut()) }
+            .expect("an IOProc on the microphone");
+        let usage = every.input_stream_usage().expect("the usage reads");
+        assert!(!usage.is_empty(), "the microphone has input streams");
+        assert!(usage.iter().all(|on| *on != 0), "on by default: {usage:?}");
+        drop(every);
+        // SAFETY: as above.
+        let output_only =
+            unsafe { IoProc::start_output_only(microphone, Some(nothing), std::ptr::null_mut()) }
+                .expect("an output-only IOProc on the microphone");
+        let usage = output_only.input_stream_usage().expect("the usage reads");
+        println!("output-only input stream usage: {usage:?}");
+        assert!(
+            usage.iter().all(|on| *on == 0),
+            "every input off: {usage:?}"
+        );
     }
 }

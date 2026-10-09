@@ -80,12 +80,10 @@ impl AudioDevices {
         )?)
     }
 
-    /// The default output device: where apps play, and what the call
-    /// capture's tap follows.
-    pub fn default_output() -> Result<AudioDeviceInfo, CoreAudioError> {
-        Self::info(Self::default_device(
-            kAudioHardwarePropertyDefaultOutputDevice,
-        )?)
+    /// The default system output device's UID, `None` when none resolves.
+    #[must_use]
+    pub fn default_system_output_uid() -> Option<String> {
+        hal::uid(Self::default_device(kAudioHardwarePropertyDefaultSystemOutputDevice).ok()?).ok()
     }
 
     /// The default output device's UID, `None` when none resolves.
