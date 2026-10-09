@@ -12,20 +12,25 @@
 # corners render black there. After the run it checks the app's log and
 # the stop timeout drop-ins (stop_timeout.rs): the shutdown's duration at
 # warn, GNOME's scope drop-in in ~/.config/systemd/user, the autostart
-# unit's when the autostart entry is there, and a reload asked for after
-# a drop-in was written.
+# unit's when the autostart entry is there, a reload asked for after a
+# drop-in was written, and the owed reload's mark there exactly when that
+# reload failed. A second launch in the same HOME then writes nothing,
+# and asks for a reload only if one was still owed.
 #
 # Then two runs as the autostart unit, in a throwaway HOME, inside a
 # cgroup named after the unit below a delegated `systemd-run --user`
 # scope, so `runs_as_autostart_unit` holds (autostart.rs, stop_timeout.rs).
 # Both turn Launch at login off halfway (smoke.rs), which must leave the
-# entry as it was and set the mark. The first, a first launch with
-# ~/.config/autostart unwritable, cannot restore the entry and must ask
-# for no reload. The second must restore the entry the first never wrote,
-# marked, with its drop-in, and remove both at the exit, after the
-# shutdown's line. Without a user manager that starts the scope the two
-# runs are skipped, unless STENO_REQUIRE_UNIT_SMOKE is set (CI), which
-# fails instead.
+# entry as it was and set the mark. The first is a first launch with
+# ~/.config/autostart unwritable: it cannot restore the entry, must ask
+# for no reload, and must leave the reload owed. The second must restore
+# the entry the first never wrote, marked, with its drop-in, ask for the
+# reload, turn Launch at login on again and off once more (smoke.rs), and
+# remove the entry and its drop-in at the exit, after the shutdown's line.
+# Without a user manager that starts the scope, or as a root that can
+# write to the directory the first run needs unwritable, the two runs are
+# skipped, unless STENO_REQUIRE_UNIT_SMOKE is set (CI), which fails
+# instead.
 #
 # Then two runs with the login item the system's (STENO_LOGIN_ITEM=managed,
 # packaged.rs), each in a throwaway HOME holding an autostart entry an
@@ -113,26 +118,57 @@ xvfb-run --auto-servernum --server-args="$server_args" bash -c '
 (( status == 0 )) || exit "$status"
 
 fail() { echo "smoke: $*" >&2; exit 1; }
+# The autostart entry under a HOME, and in a config home the mark that
+# turns it off at the exit and the owed reload's (autostart.rs,
+# stop_timeout.rs).
+identifier="$(sed -n 's/^  "identifier": "\(.*\)",$/\1/p' "$root/apps/desktop/src-tauri/tauri.conf.json")"
+[[ -n "$identifier" ]] || fail "no identifier in tauri.conf.json"
+entry() { echo "$1/.config/autostart/steno-desktop.desktop"; }
+mark() { echo "$1/$identifier/launch-at-login-off-at-exit"; }
+owed() { echo "$1/$identifier/systemd-reload-owed"; }
+reloads='the systemd user manager (reloaded|did not reload)'
+
 grep -qE 'WARN.*the shutdown ended' "$log" || fail "no warn line with the shutdown's duration"
 units="$HOME/.config/systemd/user"
 [[ -f "$units/app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf" ]] \
   || fail "no stop timeout drop-in for GNOME's scope under $units"
-if [[ -f "$HOME/.config/autostart/steno-desktop.desktop" ]]; then
+if [[ -f "$(entry "$HOME")" ]]; then
   [[ -f "$units/app-steno\x2ddesktop@autostart.service.d/10-steno.conf" ]] \
     || fail "the autostart entry is there without its stop timeout drop-in"
 fi
 if grep -qE 'drop-in changed.*on.*true' "$log"; then
-  grep -qE 'the systemd user manager (reloaded|did not reload)' "$log" \
-    || fail "a drop-in was written and no reload asked for"
+  grep -qE "$reloads" "$log" || fail "a drop-in was written and no reload asked for"
+fi
+config="${XDG_CONFIG_HOME:-$HOME/.config}"
+# A reload that went through clears the mark, and one that failed leaves
+# it, for the next launch to ask again.
+if grep -qF 'the systemd user manager reloaded' "$log"; then
+  [[ ! -e "$(owed "$config")" ]] || fail "a reload went through and stays owed"
+fi
+if grep -qF 'the systemd user manager did not reload' "$log"; then
+  [[ -e "$(owed "$config")" ]] || fail "a reload failed and is not owed"
 fi
 echo "smoke: the shutdown's duration logged at warn, the stop timeout drop-ins in place"
 
-# The autostart entry and the mark that turns it off at the exit, under
-# a HOME whose config home is $HOME/.config (autostart.rs).
-identifier="$(sed -n 's/^  "identifier": "\(.*\)",$/\1/p' "$root/apps/desktop/src-tauri/tauri.conf.json")"
-[[ -n "$identifier" ]] || fail "no identifier in tauri.conf.json"
-entry() { echo "$1/.config/autostart/steno-desktop.desktop"; }
-mark() { echo "$1/.config/$identifier/launch-at-login-off-at-exit"; }
+# A second launch over what the first left writes no drop-in, and asks
+# for the reload only while one is owed.
+owed_before=false
+[[ -e "$(owed "$config")" ]] && owed_before=true
+xvfb-run --auto-servernum --server-args="$server_args" "$binary" > "$scratch/again" 2>&1 \
+  || { cat "$scratch/again" >&2; fail "the second launch failed"; }
+if grep -qF 'drop-in changed' "$scratch/again"; then
+  cat "$scratch/again" >&2
+  fail "the second launch wrote a drop-in again"
+fi
+if $owed_before && ! grep -qE "$reloads" "$scratch/again"; then
+  cat "$scratch/again" >&2
+  fail "a reload was owed and the second launch did not ask for it"
+fi
+if ! $owed_before && grep -qE "$reloads" "$scratch/again"; then
+  cat "$scratch/again" >&2
+  fail "nothing was written or owed and the second launch reloaded"
+fi
+echo "smoke: a second launch wrote nothing and reloaded only for an owed reload ($owed_before)"
 
 # Runs "$@" in a cgroup named after the autostart unit, below a delegated
 # scope of the user manager's.
@@ -143,10 +179,18 @@ as_unit() {
   ' _ "$@"
 }
 
-if as_unit true 2>/dev/null; then
-  home="$scratch/unit"
-  mkdir -p "$home/.config/autostart"
-  # One run as the unit; its output, both streams, in $1.
+home="$scratch/unit"
+mkdir -p "$home/.config/autostart"
+chmod a-w "$home/.config/autostart"
+unit_skip=""
+if ! as_unit true 2>/dev/null; then
+  unit_skip="no user manager started a delegated scope (systemd-run --user --scope)"
+elif touch "$home/.config/autostart/probe" 2>/dev/null; then
+  unit_skip="$(id -un) can write to a directory without write permission (root)"
+fi
+if [[ -z "$unit_skip" ]]; then
+  # One run as the unit; its output, both streams, in $1. xvfb-run starts
+  # a new bash, so as_unit goes with it as source.
   unit_run() {
     HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_DATA_HOME="$home/.local/share" \
       XDG_CACHE_HOME="$home/.cache" \
@@ -154,7 +198,6 @@ if as_unit true 2>/dev/null; then
       bash -c "$(declare -f as_unit); as_unit \"\$@\"" _ "$binary" > "$1" 2>&1 \
       || { cat "$1" >&2; fail "a run as the autostart unit failed"; }
   }
-  chmod a-w "$home/.config/autostart"
   unit_run "$scratch/unrestored"
   chmod u+w "$home/.config/autostart"
   for line in "the autostart entry could not be kept until the exit" \
@@ -162,15 +205,19 @@ if as_unit true 2>/dev/null; then
     "Launch at login turned off waits for the exit (the entry is absent)"; do
     grep -qF "$line" "$scratch/unrestored" || { cat "$scratch/unrestored" >&2; fail "as the unit with no entry to restore: no \"$line\""; }
   done
-  ! grep -qE 'the systemd user manager (reloaded|did not reload)' "$scratch/unrestored" \
-    || fail "as the unit without its entry, a reload was asked for"
+  if grep -qE "$reloads" "$scratch/unrestored"; then
+    fail "as the unit without its entry, a reload was asked for"
+  fi
+  [[ -e "$(owed "$home/.config")" ]] \
+    || fail "as the unit without its entry, the skipped reload is not owed"
   unit_run "$scratch/restored"
   # The unit as the log quotes it: unit="app-steno\\x2ddesktop@autostart.service".
   service='unit="app-steno[^"]*@autostart\.service"'
   if ! grep -qF "Launch at login turned off waits for the exit (the entry stands)" "$scratch/restored" \
-    || ! grep -qE "drop-in changed $service on=true" "$scratch/restored"; then
+    || ! grep -qE "drop-in changed $service on=true" "$scratch/restored" \
+    || ! grep -qE "$reloads" "$scratch/restored"; then
     cat "$scratch/restored" >&2
-    fail "as the unit, the launch did not restore the entry and its drop-in"
+    fail "as the unit, the launch did not restore the entry and its drop-in, and reload"
   fi
   ended="$(grep -nF "the shutdown ended" "$scratch/restored" | head -n1 | cut -d: -f1)"
   removed="$(grep -nE "drop-in changed $service on=false" "$scratch/restored" | head -n1 | cut -d: -f1)"
@@ -178,13 +225,14 @@ if as_unit true 2>/dev/null; then
     cat "$scratch/restored" >&2
     fail "the exit did not remove the drop-in after the shutdown"
   fi
-  [[ ! -e "$(entry "$home")" && ! -e "$(mark "$home")" ]] \
+  [[ ! -e "$(entry "$home")" && ! -e "$(mark "$home/.config")" ]] \
     || fail "the exit left the entry or its mark"
-  echo "smoke: as the autostart unit, Launch at login turned off waited for the exit, and the launch restored the entry only where it could"
+  echo "smoke: as the autostart unit, Launch at login turned off waited for the exit, on again kept the entry, and the launch restored the entry only where it could"
 elif [[ -n "${STENO_REQUIRE_UNIT_SMOKE:-}" ]]; then
-  fail "no user manager started a delegated scope (systemd-run --user --scope), and STENO_REQUIRE_UNIT_SMOKE is set"
+  fail "$unit_skip, and STENO_REQUIRE_UNIT_SMOKE is set"
 else
-  echo "smoke: no user manager started a delegated scope; the runs as the autostart unit are skipped"
+  chmod u+w "$home/.config/autostart"
+  echo "smoke: $unit_skip; the runs as the autostart unit are skipped"
 fi
 
 # One managed run in the throwaway HOME $1, with an earlier build's entry,
@@ -233,9 +281,9 @@ fi
 # of panicking. Its HOME holds an entry marked to go, which a launch that
 # went on would remove (`AtLaunch::TurnOff`).
 refusal="$scratch/refusal"
-mkdir -p "$refusal/Steno" "$(dirname "$(entry "$refusal")")" "$(dirname "$(mark "$refusal")")"
+mkdir -p "$refusal/Steno" "$(dirname "$(entry "$refusal")")" "$(dirname "$(mark "$refusal/.config")")"
 printf 'not a database\n' > "$refusal/Steno/steno.sqlite"
-touch "$(entry "$refusal")" "$(mark "$refusal")"
+touch "$(entry "$refusal")" "$(mark "$refusal/.config")"
 # Both streams go to one file: Debian's xvfb-run sends the command's
 # stderr to its stdout.
 code=0
@@ -243,9 +291,8 @@ HOME="$refusal" XDG_CONFIG_HOME="$refusal/.config" XDG_DATA_HOME="$refusal" STEN
   xvfb-run --auto-servernum "$binary" > "$refusal/output" 2>&1 || code=$?
 if [[ "$code" != 3 ]] || ! grep -qF "[steno-desktop] not starting:" "$refusal/output"; then
   cat "$refusal/output" >&2
-  echo "smoke: over a database it cannot open the shell must refuse (exit 3), got $code" >&2
-  exit 1
+  fail "over a database it cannot open the shell must refuse (exit 3), got $code"
 fi
-[[ -e "$(entry "$refusal")" && -e "$(mark "$refusal")" ]] \
+[[ -e "$(entry "$refusal")" && -e "$(mark "$refusal/.config")" ]] \
   || fail "the refused launch changed the login item"
 echo "smoke: a database it cannot open is refused (exit 3), the login item untouched"
