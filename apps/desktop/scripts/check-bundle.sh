@@ -120,15 +120,16 @@ check_deb() {
   # every recording fails at its start.
   local depends glibc
   depends="$(dpkg-deb -f "$deb" Depends)"
-  [[ ", $depends," == *", libpipewire-0.3-0t64 | libpipewire-0.3-0,"* \
-    && ", $depends," == *", pipewire,"* ]] \
+  # Whether Depends lists $1 as one of its entries, alternatives and all.
+  depends_on() { [[ ", $depends," == *", $1,"* ]]; }
+  { depends_on 'libpipewire-0.3-0t64 | libpipewire-0.3-0' && depends_on pipewire; } \
     || die "the .deb does not depend on PipeWire: $depends"
   echo "ok: the .deb depends on PipeWire ($depends)"
   # The newest glibc symbol version the binaries need, which the
   # dependency on libc6 must name, so apt refuses an older system instead
   # of installing binaries that cannot start there.
   glibc="$(objdump -T "$scratch/deb/usr/bin/"* | grep -o 'GLIBC_[0-9.]*' | cut -d_ -f2 | sort -uV | tail -n1)"
-  [[ -n "$glibc" && ", $depends," == *", libc6 (>= $glibc),"* ]] \
+  { [[ -n "$glibc" ]] && depends_on "libc6 (>= $glibc)"; } \
     || die "the binaries need glibc $glibc and the .deb does not depend on libc6 (>= $glibc): $depends"
   echo "ok: the .deb depends on libc6 (>= $glibc), the newest glibc its binaries need"
 }
