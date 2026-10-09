@@ -39,8 +39,9 @@
 //!   `enable_gapless`) but not for MP4, whose edit list it parses and
 //!   ignores. For AAC in MP4 the decoder finds the priming itself
 //!   ([`priming`]: the edit list, else iTunes' gapless tag, else the
-//!   2 112 samples AVFoundation assumes, which is what the phone's
-//!   `AVAudioRecorder` files need) and drops exactly that many frames from
+//!   2 112 samples AVFoundation assumes, but only in the layout of the
+//!   phone's `AVAudioRecorder`, whose files need it; any other undeclared
+//!   file keeps every sample) and drops exactly that many frames from
 //!   the start, by the packets' timestamps, so the lane starts on the
 //!   first sample the encoder was given (1 024 samples at 44.1 kHz, 23 ms,
 //!   for an ffmpeg encode; 2 112, 48 ms, for Apple's; `tests/codec.rs`).
@@ -396,10 +397,15 @@ impl Trim {
         let priming = Priming::read(path)?;
         let rate = params.sample_rate?;
         let Some(frames) = priming.frames(rate) else {
+            let reason = if rate == 0 || priming.timescale == 0 {
+                "the AAC track names no rate or no timescale"
+            } else {
+                "the AAC track starts later than any priming"
+            };
             tracing::warn!(
                 ?priming,
                 rate,
-                "the AAC track starts later than any priming; decoding it from its first sample"
+                "{reason}; decoding it from its first sample"
             );
             return None;
         };

@@ -14,9 +14,24 @@
 //!   its second field, in samples, counted in the same timescale. Apple's
 //!   `AVAudioFile` and `afconvert` write it (2 112 samples), with no edit
 //!   list: the Swift app's mixdowns;
-//! - neither: [`APPLE_PRIMING`], the 2 112 samples AVFoundation assumes for
-//!   AAC in MP4. `AVAudioRecorder`, the phone's recorder, writes neither
-//!   box, yet primes 2 112 samples like every Apple AAC encoder.
+//! - neither, in `AVAudioRecorder`'s layout: [`APPLE_PRIMING`], the
+//!   2 112 samples AVFoundation assumes. The phone's recorder (expo-audio's
+//!   `AVAudioRecorder`, `mobile/src/features/recorder/recording-options.ts`,
+//!   the one AAC source the handover accepts) writes neither box, yet
+//!   primes 2 112 samples like every Apple AAC encoder;
+//! - neither, in any other layout: no priming. Every sample is kept, as
+//!   25 ms of an encoder's quiet start is harmless and 25 ms of speech is
+//!   not: Android's `MPEG4Writer` primes 1 024 and declares nothing.
+//!
+//! `AVAudioRecorder`'s layout, read off its files on macOS 26 (mono,
+//! stereo, paused) and on no other writer's: major brand `M4A ` (the
+//! `.m4a` the phone names), `mp42` among the compatible brands, no
+//! `moov/udta` (so no encoder tag or gapless tag), and in the sound
+//! track's `esds` an ES_ID of 0 and the stream byte 0x14 (audio, with the
+//! reserved bit clear). ffmpeg writes `iso2`, a `udta` with its encoder
+//! tag, ES_ID 1 and 0x15; Android's `MPEG4Writer` `mp42`, no `udta` and
+//! ES_ID 0, but 0x15. A file that misses any of the five keeps its
+//! priming: a wrong guess costs 48 ms of quiet start, never speech.
 //!
 //! The edit list wins even when its edit starts at media time 0 next to a
 //! gapless tag that names a priming (some remuxers write that): the edit
@@ -41,7 +56,9 @@ use std::path::Path;
 pub const MAX_PRIMING_FRAMES: u64 = 4_096;
 
 /// The priming AVFoundation assumes for AAC in MP4 that declares none:
-/// what Apple's AAC encoder primes, in samples at the track's rate.
+/// what Apple's AAC encoder primes, in samples at the track's rate. The
+/// decoder assumes it only in `AVAudioRecorder`'s layout (see the module
+/// doc); any other undeclared file keeps every sample.
 pub const APPLE_PRIMING: u64 = 2_112;
 
 /// The priming of an MP4 file's sound track, in ticks of its timescale.
@@ -64,7 +81,8 @@ pub enum PrimingSource {
     EditList,
     /// iTunes' gapless tag.
     Gapless,
-    /// Neither: [`APPLE_PRIMING`].
+    /// Neither, in `AVAudioRecorder`'s layout: [`APPLE_PRIMING`]. A file
+    /// that declares neither in any other layout has no [`Priming`].
     Unstated,
 }
 
@@ -84,36 +102,46 @@ impl Priming {
     }
 
     /// The priming of the first sound track of the MP4 file at `path`;
-    /// `None` when it is not an MP4 file, has no sound track, or cannot be
-    /// read (the decode then starts where symphonia starts it).
+    /// `None` when it is not an MP4 file, has no sound track, declares no
+    /// priming and is not in `AVAudioRecorder`'s layout, or cannot be read
+    /// (the decode then starts where symphonia starts it).
     #[must_use]
     pub fn read(path: &Path) -> Option<Self> {
         let mut file = File::open(path).ok()?;
         let end = file.metadata().ok()?.len();
         let mut boxes = Boxes::new(&mut file, 0, end);
-        let first = boxes.next()?;
-        if &first.kind != b"ftyp" {
+        let ftyp = boxes.next()?;
+        if &ftyp.kind != b"ftyp" {
             return None;
         }
         let moov = std::iter::from_fn(|| boxes.next()).find(|b| &b.kind == b"moov")?;
         // The first sound track, as symphonia's default track is.
         let mut sound = None;
         let mut gapless = None;
+        let mut udta = false;
         for child in children(&mut file, moov) {
             match &child.kind {
                 b"trak" if sound.is_none() => {
-                    sound = sound_media(&mut file, child)
-                        .map(|mdia| timescale_and_edit(&mut file, child, mdia));
+                    sound = sound_media(&mut file, child).map(|mdia| (child, mdia));
                 }
-                b"udta" if gapless.is_none() => gapless = gapless_priming(&mut file, child),
+                b"udta" => {
+                    udta = true;
+                    if gapless.is_none() {
+                        gapless = gapless_priming(&mut file, child);
+                    }
+                }
                 _ => {}
             }
         }
-        let (timescale, edit) = sound??;
+        let (trak, mdia) = sound?;
+        let (timescale, edit) = timescale_and_edit(&mut file, trak, mdia)?;
         let (ticks, source) = match (edit, gapless) {
             (Some(ticks), _) => (ticks, PrimingSource::EditList),
             (None, Some(ticks)) => (ticks, PrimingSource::Gapless),
-            (None, None) => (APPLE_PRIMING, PrimingSource::Unstated),
+            (None, None) if !udta && recorder_layout(&mut file, ftyp, mdia) => {
+                (APPLE_PRIMING, PrimingSource::Unstated)
+            }
+            (None, None) => return None,
         };
         Some(Self {
             ticks,
@@ -249,7 +277,9 @@ fn first_media_time(elst: &[u8]) -> Option<u64> {
     let count = u32::from_be_bytes(field(elst, 4)?) as usize;
     // Entries from byte 8: duration, media time, rate; 64-bit in version 1.
     let (size, at) = if version == 1 { (20, 8) } else { (12, 4) };
-    (0..count).find_map(|entry| {
+    // A count past the bytes read ends at the last whole entry.
+    let whole = elst.len().saturating_sub(8) / size;
+    (0..count.min(whole)).find_map(|entry| {
         let offset = 8 + entry * size + at;
         let media_time = if version == 1 {
             i64::from_be_bytes(field(elst, offset)?)
@@ -258,6 +288,75 @@ fn first_media_time(elst: &[u8]) -> Option<u64> {
         };
         u64::try_from(media_time).ok()
     })
+}
+
+/// Whether a file that declares no priming is laid out as
+/// `AVAudioRecorder` writes AAC in an `.m4a` (see the module doc), apart
+/// from the missing `udta`, which the caller checks: its brands, and its
+/// sound track's ES_ID and stream byte.
+fn recorder_layout(file: &mut File, ftyp: Mp4Box, mdia: Mp4Box) -> bool {
+    // The major brand, the minor version, then the compatible brands.
+    let brands = body(file, ftyp, 64).is_some_and(|ftyp| {
+        ftyp.get(..4) == Some(b"M4A ")
+            && ftyp
+                .get(8..)
+                .is_some_and(|compatible| compatible.as_chunks::<4>().0.contains(b"mp42"))
+    });
+    brands && stream_signature(file, mdia) == Some((0, 0x14))
+}
+
+/// The ES_ID and the stream byte (the stream type, the upstream flag and
+/// a reserved bit) of the `esds` in the sound track's first sample entry,
+/// when that is `mp4a`.
+fn stream_signature(file: &mut File, mdia: Mp4Box) -> Option<(u16, u8)> {
+    let minf = child(file, mdia, *b"minf")?;
+    let stbl = child(file, minf, *b"stbl")?;
+    let stsd = child(file, stbl, *b"stsd")?;
+    // Version and flags and the entry count, then the entries.
+    let entry = children_from(file, stsd, 8).into_iter().next()?;
+    if &entry.kind != b"mp4a" {
+        return None;
+    }
+    // A sound sample entry's fields take 28 bytes, and QuickTime's
+    // versions 1 and 2 add 16 and 36; its version is at byte 8.
+    let head = body(file, entry, 10)?;
+    let skip = match u16::from_be_bytes(field(&head, 8)?) {
+        0 => 28,
+        1 => 44,
+        2 => 64,
+        _ => return None,
+    };
+    let esds = children_from(file, entry, skip)
+        .into_iter()
+        .find(|b| &b.kind == b"esds")?;
+    let esds = body(file, esds, 64)?;
+    // Version and flags, then the ES descriptor: its ES_ID, a flags byte
+    // and the fields those flags add.
+    let at = descriptor(&esds, 4, 0x03)?;
+    let es_id = u16::from_be_bytes(field(&esds, at)?);
+    let flags = *esds.get(at + 2)?;
+    let mut next = at + 3;
+    if flags & 0x80 != 0 {
+        next += 2;
+    }
+    if flags & 0x40 != 0 {
+        next += 1 + usize::from(*esds.get(next)?);
+    }
+    if flags & 0x20 != 0 {
+        next += 2;
+    }
+    // The decoder config: the object type, then the stream byte.
+    let at = descriptor(&esds, next, 0x04)?;
+    Some((es_id, *esds.get(at + 1)?))
+}
+
+/// Where the body of the descriptor at `at` starts, when its tag is `tag`:
+/// one tag byte, then a length of one to four bytes, seven bits each.
+fn descriptor(bytes: &[u8], at: usize, tag: u8) -> Option<usize> {
+    if *bytes.get(at)? != tag {
+        return None;
+    }
+    (1..=4).find_map(|length| (*bytes.get(at + length)? & 0x80 == 0).then_some(at + length + 1))
 }
 
 /// The priming in iTunes' gapless tag under `udta`, in samples.

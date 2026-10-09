@@ -464,6 +464,9 @@ fn box_offset(bytes: &[u8], path: &[&[u8; 4]]) -> usize {
 enum Declared {
     /// ffmpeg's own edit list: 1 024.
     EditList,
+    /// An empty edit (a delay before the track), then ffmpeg's: 1 024.
+    /// Android's `MPEG4Writer` writes that for a delayed track.
+    DelayThenEditList,
     /// No edit list, iTunes' gapless tag naming this many samples: the
     /// layout of `AVAudioFile` and `afconvert`.
     Gapless(u32),
@@ -471,28 +474,132 @@ enum Declared {
     EditListAndGapless(u32),
     /// An edit list starting at 0 and a gapless tag naming this many.
     ZeroEditAndGapless(u32),
-    /// Neither, as `AVAudioRecorder` writes it.
-    Neither,
+    /// Neither, in this layout.
+    Neither(Layout),
+}
+
+/// The marks of a rewritten fixture that declares no priming, which the
+/// decoder reads to tell `AVAudioRecorder`'s files from the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// ffmpeg's own: compatible brands `M4A isom iso2`, its encoder tag
+    /// in `moov/udta`, ES_ID 1, stream byte 0x15.
+    Ffmpeg,
+    /// `AVAudioRecorder`'s: major brand `M4A `, `mp42` for `iso2`, no
+    /// `udta`, ES_ID 0, stream byte 0x14.
+    Recorder,
+    /// Android's `MPEG4Writer`'s (`mp42`, no `udta`, ES_ID 0, 0x15) under
+    /// an `.m4a`'s major brand: the recorder's but for the stream byte.
+    Android,
+    /// The recorder's with major brand `mp42`.
+    MajorMp42,
+    /// The recorder's with `iso2` kept, so no `mp42`.
+    NoMp42,
+    /// The recorder's with ffmpeg's `udta` kept.
+    Udta,
+    /// The recorder's with ES_ID 1.
+    EsId1,
+}
+
+impl Layout {
+    /// The major brand, the third compatible brand, whether ffmpeg's
+    /// `udta` stays, the ES_ID and the stream byte.
+    fn marks(self) -> (&'static [u8; 4], &'static [u8; 4], bool, u16, u8) {
+        let recorder = (b"M4A ", b"mp42", false, 0, 0x14);
+        match self {
+            Self::Ffmpeg => (b"M4A ", b"iso2", true, 1, 0x15),
+            Self::Recorder => recorder,
+            Self::Android => (recorder.0, recorder.1, false, 0, 0x15),
+            Self::MajorMp42 => (b"mp42", recorder.1, false, 0, 0x14),
+            Self::NoMp42 => (recorder.0, b"iso2", false, 0, 0x14),
+            Self::Udta => (recorder.0, recorder.1, true, 0, 0x14),
+            Self::EsId1 => (recorder.0, recorder.1, false, 1, 0x14),
+        }
+    }
+}
+
+/// Adds `by` to the size of the box whose header is at `at`.
+fn grow(bytes: &mut [u8], at: usize, by: usize) {
+    let size = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize + by;
+    bytes[at..at + 4].copy_from_slice(&(size as u32).to_be_bytes());
+}
+
+/// The offsets of the ES_ID and the stream byte in the `esds` of an
+/// ffmpeg fixture's sound track.
+fn esds_fields(bytes: &[u8]) -> (usize, usize) {
+    let stsd = box_offset(
+        bytes,
+        &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"],
+    );
+    // `stsd`'s header, version and flags and count; `mp4a`'s header and
+    // its 28 bytes of fields.
+    let esds = stsd + 16 + 8 + 28;
+    assert_eq!(&bytes[esds + 4..esds + 8], b"esds");
+    // A descriptor's tag, then a length whose bytes but the last have
+    // their top bit set.
+    let body = |tag: u8, mut at: usize| {
+        assert_eq!(bytes[at], tag);
+        at += 1;
+        while bytes[at] & 0x80 != 0 {
+            at += 1;
+        }
+        at + 1
+    };
+    // The box's header and its version and flags.
+    let es_id = body(0x03, esds + 12);
+    assert_eq!(bytes[es_id + 2], 0, "no optional ES fields");
+    // The decoder config: the object type, then the stream byte.
+    (es_id, body(0x04, es_id + 3) + 1)
 }
 
 /// `bytes`, an ffmpeg onset fixture, rewritten as `declared` says, in
-/// `directory`. A dropped edit list is renamed `free` (the box stays, so
-/// no offset moves); a gapless tag is appended to `moov`, the file's last
-/// box.
+/// `directory`. A dropped edit list or `udta` is renamed `free` (the box
+/// stays, so no offset moves); an added edit or gapless tag grows `moov`,
+/// the file's last box.
 fn variant(directory: &Path, bytes: &[u8], declared: Declared) -> PathBuf {
     let mut bytes = bytes.to_vec();
     let edts = box_offset(&bytes, &[b"moov", b"trak", b"edts"]);
+    // `edts`'s header, then `elst`'s, its version and flags and its count.
+    let (elst, entries) = (edts + 8, edts + 8 + 8 + 4 + 4);
+    assert_eq!(&bytes[elst + 4..elst + 8], b"elst");
     match declared {
         Declared::EditList | Declared::EditListAndGapless(_) => {}
+        Declared::DelayThenEditList => {
+            // A duration of 100 ms, the media time -1 and the rate 1.0.
+            let delay = [100u32.to_be_bytes(), (-1i32).to_be_bytes(), [0, 1, 0, 0]].concat();
+            bytes.splice(entries..entries, delay);
+            bytes[entries - 4..entries].copy_from_slice(&2u32.to_be_bytes());
+            let moov = box_offset(&bytes, &[b"moov"]);
+            let trak = box_offset(&bytes, &[b"moov", b"trak"]);
+            for at in [moov, trak, edts, elst] {
+                grow(&mut bytes, at, 12);
+            }
+        }
         Declared::ZeroEditAndGapless(_) => {
-            // `edts`'s header, `elst`'s, its version and flags, its count,
-            // then the one entry's duration and its media time.
-            let media_time = edts + 8 + 8 + 4 + 4 + 4;
-            assert_eq!(&bytes[edts + 12..edts + 16], b"elst");
+            // The one entry's duration, then its media time.
+            let media_time = entries + 4;
             bytes[media_time..media_time + 4].copy_from_slice(&0u32.to_be_bytes());
         }
-        Declared::Gapless(_) | Declared::Neither => {
+        Declared::Gapless(_) => bytes[edts + 4..edts + 8].copy_from_slice(b"free"),
+        Declared::Neither(layout) => {
             bytes[edts + 4..edts + 8].copy_from_slice(b"free");
+            let (major, third, udta, es_id, stream) = layout.marks();
+            assert_eq!((&bytes[4..8], &bytes[24..28]), (&b"ftyp"[..], &b"iso2"[..]));
+            // `ftyp`'s header, the major brand, the minor version, then
+            // the compatible brands `M4A `, `isom` and the third.
+            bytes[8..12].copy_from_slice(major);
+            bytes[24..28].copy_from_slice(third);
+            if !udta {
+                let udta = box_offset(&bytes, &[b"moov", b"udta"]);
+                bytes[udta + 4..udta + 8].copy_from_slice(b"free");
+            }
+            let (es_id_at, stream_at) = esds_fields(&bytes);
+            assert_eq!(
+                (&bytes[es_id_at..es_id_at + 2], bytes[stream_at]),
+                (&[0u8, 1][..], 0x15)
+            );
+            bytes[es_id_at..es_id_at + 2].copy_from_slice(&es_id.to_be_bytes());
+            bytes[stream_at] = stream;
         }
     }
     if let Declared::Gapless(priming)
@@ -503,8 +610,7 @@ fn variant(directory: &Path, bytes: &[u8], declared: Declared) -> PathBuf {
         let moov_size = u32::from_be_bytes(bytes[moov..moov + 4].try_into().unwrap()) as usize;
         assert_eq!(moov + moov_size, bytes.len(), "moov is the last box");
         let udta = gapless_udta(priming);
-        let grown = (moov_size + udta.len()) as u32;
-        bytes[moov..moov + 4].copy_from_slice(&grown.to_be_bytes());
+        grow(&mut bytes, moov, udta.len());
         bytes.extend_from_slice(&udta);
     }
     let path = directory.join(format!("{declared:?}.m4a"));
@@ -578,17 +684,25 @@ const PAST_THE_BOUND: Declared = Declared::Gapless(4_097);
 
 /// The cases of [`the_aac_priming_is_trimmed_to_the_sample`] and its
 /// stereo sibling, each with the frames the decoder should cut: the
-/// declared priming one packet (1 024), Apple's 2 112 (two packets and 64
-/// frames, a cut inside a packet), the decoder's bound and one past it,
-/// nothing declared, and an edit list that wins over a gapless tag, even
-/// at 0.
-const DECLARATIONS: [(Declared, usize); 8] = [
+/// declared priming one packet (1 024), after a delay edit too; Apple's
+/// 2 112 (two packets and 64 frames, a cut inside a packet), the
+/// decoder's bound and one past it; nothing declared, which cuts Apple's
+/// 2 112 in `AVAudioRecorder`'s layout alone; and an edit list that wins
+/// over a gapless tag, even at 0.
+const DECLARATIONS: [(Declared, usize); 15] = [
     (Declared::EditList, PRIMING),
+    (Declared::DelayThenEditList, PRIMING),
     (Declared::Gapless(1_024), 1_024),
     (Declared::Gapless(2_112), 2_112),
     (Declared::Gapless(4_096), 4_096),
     (PAST_THE_BOUND, 0),
-    (Declared::Neither, 2_112),
+    (Declared::Neither(Layout::Recorder), 2_112),
+    (Declared::Neither(Layout::Ffmpeg), 0),
+    (Declared::Neither(Layout::Android), 0),
+    (Declared::Neither(Layout::MajorMp42), 0),
+    (Declared::Neither(Layout::NoMp42), 0),
+    (Declared::Neither(Layout::Udta), 0),
+    (Declared::Neither(Layout::EsId1), 0),
     (Declared::EditListAndGapless(2_112), PRIMING),
     (Declared::ZeroEditAndGapless(2_112), 0),
 ];
@@ -596,13 +710,16 @@ const DECLARATIONS: [(Declared, usize); 8] = [
 /// The AAC priming trimmed to the sample. The fixture is 0.2 s of silence
 /// and then a 440 Hz sine at 0.5 from sample 8 820 (ffmpeg's AAC encoder,
 /// which primes 1 024 samples and says so in the edit list). With the
-/// edit list, or iTunes' gapless tag naming 1 024 (Apple's layout), the
+/// edit list (after a delay edit too), or iTunes' gapless tag naming
+/// 1 024 (Apple's layout), the
 /// lane starts on the encoder's first sample, so the tone crosses the
 /// onset threshold on the sample the PCM given to the encoder does
 /// (8 822), and at 3 201 at 16 kHz. A tag naming more cuts that many
 /// frames, inside a packet too; one past [`MAX_PRIMING_FRAMES`] cuts
 /// nothing; a file that declares neither loses Apple's 2 112, as
-/// AVFoundation assumes; an edit list beside a tag wins, even at 0. Every
+/// AVFoundation assumes, only with every mark of `AVAudioRecorder`'s
+/// layout, and keeps every sample in ffmpeg's, in Android's and with any
+/// one mark missing; an edit list beside a tag wins, even at 0. Every
 /// trimmed decode is the untrimmed one less exactly its cut, bit for bit:
 /// the trim comes from the container.
 #[test]
@@ -630,6 +747,13 @@ fn the_aac_priming_is_trimmed_to_the_sample() {
             source.len(),
             decoded.len()
         );
+        if let Declared::Neither(layout) = declared {
+            assert_eq!(
+                Priming::read(&path).map(|p| (p.ticks, p.source)),
+                (layout == Layout::Recorder).then_some((2_112, PrimingSource::Unstated)),
+                "{declared:?}"
+            );
+        }
         let expected = pcm_onset + PRIMING - trim;
         assert_eq!(at_source, expected, "{declared:?}: onset");
         let expected_16k = (expected * 16_000 + 22_050) / 44_100;
@@ -651,7 +775,8 @@ fn the_aac_priming_is_trimmed_to_the_sample() {
 /// first and a 1 kHz one from 11 025 on the second (ffmpeg, as the mono
 /// fixture): each channel's onset moves by the cut, and each channel is
 /// the untrimmed one less exactly its cut, so the cut drops whole frames,
-/// never one channel's samples.
+/// never one channel's samples. A stereo file in `AVAudioRecorder`'s
+/// layout loses Apple's 2 112 frames as a mono one does.
 #[test]
 fn a_stereo_track_loses_the_same_frames_on_each_channel() {
     let pcm_onsets = [
