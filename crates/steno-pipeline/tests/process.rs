@@ -4515,7 +4515,7 @@ async fn a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed() {
 /// Runs a call of `duration` seconds whose every lane comes out with no
 /// transcript, under "delete after processing", and tells whether its
 /// recording was kept unstamped.
-async fn a_silent_call_keeps_its_recording(duration: f64) -> bool {
+async fn silent_call_is_kept(duration: f64) -> bool {
     let world = world_with(
         false,
         None,
@@ -4546,11 +4546,7 @@ async fn a_silent_call_keeps_its_recording(duration: f64) -> bool {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_recording_with_no_transcript_keeps_its_recording() {
     for (duration, kept) in [(31.0, true), (6.0, false)] {
-        assert_eq!(
-            a_silent_call_keeps_its_recording(duration).await,
-            kept,
-            "{duration} s"
-        );
+        assert_eq!(silent_call_is_kept(duration).await, kept, "{duration} s");
     }
 }
 
@@ -4637,20 +4633,40 @@ async fn the_keep_that_clears_a_stamp_commits_durably() {
     );
 }
 
-/// Settings' Keep forever for every recording clears the stamps durably
-/// too ([`Store::keep_forever`]).
+/// Settings' Keep forever for every recording clears every stamp, and
+/// the clear of each recording is as durable as the first, in one write
+/// ([`Store::keep_forever`]).
 #[tokio::test(flavor = "multi_thread")]
 async fn keep_forever_for_every_recording_commits_durably() {
     let world = world(false, None, AudioRetention::KeepDays(30));
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepDays(30));
-    world.pipeline.enqueue(&meeting, &asset).unwrap();
-    world.pipeline.wait_until_idle().await;
-    assert!(expires_at(&world, &asset).is_some());
-
-    let commits = stamp_commits(&world, &asset);
-    world.store.keep_forever(&[asset.id]).unwrap();
-    assert_eq!(expires_at(&world, &asset), None);
+    let first = call_meeting(world.now);
+    let first_asset = call_asset(&world.audio, first.id, AudioRetention::KeepDays(30));
+    let mut second = call_meeting(world.now);
+    second.id = Uuid::new_v4();
+    second.calendar_event_id = None;
+    let second_asset = call_asset(&world.audio, second.id, AudioRetention::KeepDays(30));
+    for (meeting, asset) in [(&first, &first_asset), (&second, &second_asset)] {
+        world.pipeline.enqueue(meeting, asset).unwrap();
+        world.pipeline.wait_until_idle().await;
+        assert!(expires_at(&world, asset).is_some());
+    }
+    // The ids sort the assets either way round; probe the one
+    // `keep_forever` writes last.
+    let last = if first_asset.id > second_asset.id {
+        &first_asset
+    } else {
+        &second_asset
+    };
+    let commits = stamp_commits(&world, last);
+    assert_eq!(
+        RetentionSweep::new(world.store.clone()).keep_all().unwrap(),
+        2
+    );
+    for asset in [&first_asset, &second_asset] {
+        let stored = world.store.asset_by_id(asset.id).unwrap().unwrap();
+        assert_eq!(stored.retention, AudioRetention::KeepForever);
+        assert_eq!(stored.expires_at, None);
+    }
     assert_eq!(first_level(&commits, false), Some(2));
 }
 
@@ -4771,12 +4787,17 @@ async fn a_failure_after_the_ready_write_keeps_a_fallback_recording() {
 }
 
 /// A re-run whose diarizer fails on a meeting with diarized speakers keeps
-/// them and maps the new segments onto their old spans, which leaves no
-/// room speaker for the stored rows to show: the run's own mark keeps the
-/// recording unstamped.
+/// them, and every new segment falls inside a stored span (the same
+/// audio): those speakers are as complete as the earlier working
+/// diarization, so no room row is stored, every segment keeps a speaker,
+/// and the run is stamped as the rule says.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rerun_whose_diarizer_fails_keeps_the_recording_of_diarized_speakers() {
-    let world = world(false, None, AudioRetention::DeleteAfterProcessing);
+async fn a_rerun_whose_diarizer_fails_stamps_when_the_stored_speakers_cover_every_segment() {
+    let world = world(
+        false,
+        Some(|vault| FakeDestination::new(vault)),
+        AudioRetention::DeleteAfterProcessing,
+    );
     let meeting = call_meeting(world.now);
     let asset = call_asset(
         &world.audio,
@@ -4793,17 +4814,24 @@ async fn a_rerun_whose_diarizer_fails_keeps_the_recording_of_diarized_speakers()
     pipeline.wait_until_idle().await;
     let again = world.store.export(meeting.id).unwrap();
     assert_eq!(again.meeting.state, MeetingState::Ready);
-    assert_eq!(labels(&again), labels(&first), "the stored speakers stay");
+    assert_eq!(labels(&again), labels(&first), "no room row");
     assert!(
-        !steno_core::results_need_the_audio(
-            &again.meeting,
-            &again.speakers,
-            &again.segments,
-            &asset
-        ),
-        "the stored rows alone do not show the fallback"
+        again
+            .speaker(steno_core::room_speaker_id(meeting.id))
+            .is_none()
     );
-    assert_eq!(expires_at(&world, &asset), None);
+    assert!(
+        again
+            .segments
+            .iter()
+            .all(|segment| segment.speaker_id.is_some())
+    );
+    assert!(!detail_reads_kept_incomplete(&world, meeting.id));
+    assert_eq!(
+        expires_at(&world, &asset),
+        Some(world.now),
+        "normal stamping"
+    );
 }
 
 /// The bound itself: an empty transcript over exactly 30 s is stamped,
@@ -4811,11 +4839,7 @@ async fn a_rerun_whose_diarizer_fails_keeps_the_recording_of_diarized_speakers()
 #[tokio::test(flavor = "multi_thread")]
 async fn the_empty_lane_bound_is_exclusive() {
     for (duration, kept) in [(30.0, false), (30.5, true)] {
-        assert_eq!(
-            a_silent_call_keeps_its_recording(duration).await,
-            kept,
-            "{duration} s"
-        );
+        assert_eq!(silent_call_is_kept(duration).await, kept, "{duration} s");
     }
 }
 
@@ -4906,4 +4930,527 @@ async fn a_phone_meeting_without_a_duration_gets_the_decoded_length() {
     assert_eq!(stored.duration, 31.0);
     assert_eq!(world.store.segments(meeting.id).unwrap(), Vec::new());
     assert_eq!(expires_at(&world, &asset), None);
+}
+/// Rewrites the system sidecar with `seconds` of the conversation: the
+/// fake engine then yields one-second tap segments up to `seconds`, so a
+/// re-run past the first run's six seconds has speech that no stored
+/// speaker's span covers (`cluster_covering` returns `None` for it).
+fn extend_the_tap(asset: &AudioAsset, seconds: f64) {
+    let layout = RecordingLayout::from_asset(asset).unwrap();
+    steno_pipeline::fixtures::write_wav(
+        &layout.sidecar(AudioLane::System),
+        &steno_pipeline::fixtures::conversation(seconds, &[AudioLane::System]),
+    )
+    .unwrap();
+}
+
+/// What the meeting detail's recording line reads for a ready meeting
+/// (`MeetingDetailViewModel::recording_status`, steno-host): `true` for
+/// `KeptIncomplete`. steno-host is not a dev-dependency of the pipeline,
+/// so this mirrors its ladder over the stored rows.
+fn detail_reads_kept_incomplete(world: &World, meeting_id: Uuid) -> bool {
+    let export = world.store.export(meeting_id).unwrap();
+    let asset = export.audio.clone().expect("an asset");
+    export.meeting.state == MeetingState::Ready
+        && file_url_path(&asset.url).unwrap().exists()
+        && asset.retention != AudioRetention::KeepForever
+        && asset.expires_at.is_none()
+        && world
+            .store
+            .deliveries(meeting_id)
+            .unwrap()
+            .iter()
+            .all(|row| row.status == DeliveryStatus::Delivered)
+        && steno_core::results_need_the_audio(
+            &export.meeting,
+            &export.speakers,
+            &export.segments,
+            &asset,
+        )
+}
+
+/// A call processed with a working diarizer under "delete after
+/// processing" and one working destination (stamped at `world.now`), its
+/// tap then extended to eight seconds.
+async fn a_diarized_call_with_new_speech(
+    summarizer: bool,
+) -> (World, Meeting, AudioAsset, MeetingExport) {
+    let world = world(
+        summarizer,
+        Some(|vault| FakeDestination::new(vault)),
+        AudioRetention::DeleteAfterProcessing,
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(
+        &world.audio,
+        meeting.id,
+        AudioRetention::DeleteAfterProcessing,
+    );
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(expires_at(&world, &asset), Some(world.now));
+    let first = world.store.export(meeting.id).unwrap();
+    assert_eq!(labels(&first), ["Me", "Speaker 1", "Speaker 2"]);
+    extend_the_tap(&asset, 8.0);
+    (world, meeting, asset, first)
+}
+
+/// A re-run whose diarizer fails keeps
+/// the stored speakers, and the tap's new speech (6..8 s), which no stored
+/// span covers, goes to the room row: the stored mark. The re-run, then a
+/// re-export, a summary re-run and a launch re-export all leave the
+/// recording unstamped, the detail reads keptIncomplete at every step, and
+/// the sweep deletes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fell_back_rerun_with_new_speech_keeps_the_recording_through_every_later_stamp() {
+    let (world, meeting, asset, first) = a_diarized_call_with_new_speech(true).await;
+    let persons = world.store.persons().unwrap();
+    let pipeline = with_failing_diarizer(&world, "no model");
+    pipeline.reprocess(meeting.id).unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert_eq!(expires_at(&world, &asset), None, "after the re-run");
+
+    pipeline.redeliver(meeting.id).await.unwrap();
+    assert_eq!(expires_at(&world, &asset), None, "after the re-export");
+    assert!(
+        detail_reads_kept_incomplete(&world, meeting.id),
+        "after the re-export"
+    );
+
+    pipeline.rerun_summary(meeting.id, "default").await.unwrap();
+    assert_eq!(expires_at(&world, &asset), None, "after the summary re-run");
+    assert!(
+        detail_reads_kept_incomplete(&world, meeting.id),
+        "after the summary re-run"
+    );
+
+    mark_delivery(&world, meeting.id, DeliveryStatus::Pending, None);
+    let launch = launch_at(
+        &world,
+        world.now + Duration::days(2),
+        FakeDestination::new(&world.vault),
+    );
+    assert_eq!(
+        launch
+            .redeliver_unfinished(&export_retries(&world))
+            .unwrap(),
+        [meeting.id]
+    );
+    launch.wait_until_idle().await;
+    assert_eq!(
+        world.store.deliveries(meeting.id).unwrap()[0].status,
+        DeliveryStatus::Delivered
+    );
+    assert_eq!(
+        expires_at(&world, &asset),
+        None,
+        "after the launch re-export"
+    );
+    assert!(
+        detail_reads_kept_incomplete(&world, meeting.id),
+        "after the launch re-export"
+    );
+    let sweep = RetentionSweep::new(world.store.clone());
+    assert_eq!(
+        sweep.run(world.now + Duration::days(3650)).unwrap(),
+        Vec::<PathBuf>::new()
+    );
+    assert!(file_url_path(&asset.url).unwrap().exists());
+
+    // The mark is the room row, and it holds exactly the new speech.
+    let again = world.store.export(meeting.id).unwrap();
+    let room = steno_core::room_speaker_id(meeting.id);
+    let row = again.speaker(room).expect("the room row is stored");
+    assert_eq!(row.assignment, steno_core::SpeakerAssignment::Unknown);
+    assert_eq!(row.embedding, None);
+    for segment in &again.segments {
+        if segment.lane == AudioLane::System && segment.start >= 6.0 {
+            assert_eq!(segment.speaker_id, Some(room), "{segment:?}");
+        } else {
+            let before = first
+                .segments
+                .iter()
+                .find(|before| {
+                    before.lane == segment.lane && (before.start - segment.start).abs() < 1e-9
+                })
+                .expect("the first run had this span");
+            assert_eq!(segment.speaker_id, before.speaker_id, "{segment:?}");
+        }
+    }
+    assert_eq!(
+        world.store.persons().unwrap(),
+        persons,
+        "no voice was touched"
+    );
+}
+
+/// The room row beside stored speakers takes the next free "Speaker N",
+/// never a stored label: in the export (its display name, every speaker
+/// once in the participants), in the delivered note and in the labels the
+/// summary pass maps back to ids (`steno_llm::labels::SpeakerLabels`
+/// keeps one id per lower-cased label).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_room_row_beside_stored_speakers_takes_the_next_free_label() {
+    let (world, meeting, _asset, _first) = a_diarized_call_with_new_speech(false).await;
+    let summarizer = Arc::new(RecordingSummarizer::default());
+    let mut dependencies = world.pipeline.dependencies().clone().with_llm(
+        Some(Arc::new(PassthroughCleaner::default())),
+        Some(summarizer.clone()),
+    );
+    dependencies.diarizer = Arc::new(FakeDiarizer {
+        failure: Some("no model".to_owned()),
+        ..FakeDiarizer::default()
+    });
+    let pipeline = ProcessingPipeline::new(dependencies);
+    pipeline.reprocess(meeting.id).unwrap();
+    pipeline.wait_until_idle().await;
+
+    let again = world.store.export(meeting.id).unwrap();
+    let room = steno_core::room_speaker_id(meeting.id);
+    let row = again.speaker(room).expect("the room row is stored");
+    assert_eq!(row.cluster_label, "Speaker 3");
+    assert_eq!(again.display_name_for_speaker(room), "Speaker 3");
+    let names: BTreeSet<String> = again
+        .speakers
+        .iter()
+        .map(|speaker| again.display_name_for_speaker(speaker.id))
+        .collect();
+    assert_eq!(
+        names.len(),
+        again.speakers.len(),
+        "no two speakers share a name"
+    );
+
+    let folder = world.store.deliveries(meeting.id).unwrap()[0]
+        .receipt
+        .clone()
+        .unwrap()
+        .folder;
+    let note = std::fs::read_to_string(world.vault.join(folder).join("meeting.json")).unwrap();
+    assert!(
+        note.contains("Speaker 3"),
+        "the delivered note carries the room's label"
+    );
+
+    let input = summarizer
+        .0
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("summarized");
+    let mut by_label: BTreeMap<String, Uuid> = BTreeMap::new();
+    for speaker in &input.speakers {
+        assert!(
+            by_label
+                .insert(speaker.cluster_label.to_lowercase(), speaker.id)
+                .is_none(),
+            "label {} twice in the summary's label map",
+            speaker.cluster_label
+        );
+    }
+    assert_eq!(by_label.get("speaker 3"), Some(&room));
+    assert_eq!(
+        by_label.get("speaker 1"),
+        Some(&speaker(&again.speakers, "Speaker 1").id)
+    );
+}
+
+/// A label merged away leaves a gap: the room row takes the first free
+/// label, which no stored row uses.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_room_label_skips_every_stored_label() {
+    let (world, meeting, _asset, first) = a_diarized_call_with_new_speech(false).await;
+    let anna = sample_data::person(0, "Anna");
+    world
+        .store
+        .confirm_speaker(speaker(&first.speakers, "Speaker 2").id, &anna)
+        .unwrap();
+    // Speaker 1 to the same person merges it into Speaker 2.
+    world
+        .store
+        .confirm_speaker(speaker(&first.speakers, "Speaker 1").id, &anna)
+        .unwrap();
+    let merged = world.store.export(meeting.id).unwrap();
+    assert_eq!(labels(&merged), ["Me", "Speaker 2"]);
+
+    let pipeline = with_failing_diarizer(&world, "no model");
+    pipeline.reprocess(meeting.id).unwrap();
+    pipeline.wait_until_idle().await;
+    let again = world.store.export(meeting.id).unwrap();
+    let row = again
+        .speaker(steno_core::room_speaker_id(meeting.id))
+        .expect("the room row is stored");
+    assert_eq!(row.cluster_label, "Speaker 1", "the first free label");
+    let stored: BTreeSet<String> = labels(&merged)
+        .iter()
+        .map(|label| label.to_lowercase())
+        .collect();
+    assert!(
+        !stored.contains(&row.cluster_label.to_lowercase()),
+        "{}",
+        row.cluster_label
+    );
+}
+
+/// A confirmed speaker and a renamed one (confirmed to a person typed in
+/// as new) keep every segment they cover, by midpoint or by overlap: the
+/// re-run's 1.4 s segments put [5.6, 7.0] over the end of the renamed
+/// speaker's stored [5, 6], so the overlap fallback gives it that segment,
+/// and only [7, 8], which overlaps nothing stored, goes to the room row.
+/// A whole-recording room cluster beside the owners would take neither,
+/// but a room fallback placed before the overlap rule would take [5.6, 7].
+#[tokio::test(flavor = "multi_thread")]
+async fn confirmed_and_renamed_speakers_keep_their_segments_on_a_fell_back_rerun() {
+    let (world, meeting, _asset, first) = a_diarized_call_with_new_speech(false).await;
+    let anna = sample_data::person(0, "Anna");
+    let one = speaker(&first.speakers, "Speaker 1").id;
+    let two = speaker(&first.speakers, "Speaker 2").id;
+    world.store.confirm_speaker(one, &anna).unwrap();
+    let dora = steno_core::Person {
+        embedding: None,
+        sample_count: 0,
+        ..sample_data::person(7, "Dora")
+    };
+    world.store.confirm_speaker(two, &dora).unwrap();
+
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.diarizer = Arc::new(FakeDiarizer {
+        failure: Some("no model".to_owned()),
+        ..FakeDiarizer::default()
+    });
+    dependencies.speech_engine = SharedSpeechEngine::new(Arc::new(FakeSpeechEngine {
+        segment_seconds: 1.4,
+        ..FakeSpeechEngine::default()
+    }));
+    let pipeline = ProcessingPipeline::new(dependencies);
+    pipeline.reprocess(meeting.id).unwrap();
+    pipeline.wait_until_idle().await;
+
+    let again = world.store.export(meeting.id).unwrap();
+    assert_eq!(again.meeting.state, MeetingState::Ready);
+    let room = steno_core::room_speaker_id(meeting.id);
+    assert_eq!(
+        again.speaker(one).unwrap().assignment,
+        steno_core::SpeakerAssignment::Confirmed { person_id: anna.id }
+    );
+    assert_eq!(
+        again.speaker(two).unwrap().assignment,
+        steno_core::SpeakerAssignment::Confirmed { person_id: dora.id }
+    );
+    let tap: Vec<(f64, Option<Uuid>)> = again
+        .segments
+        .iter()
+        .filter(|segment| segment.lane == AudioLane::System)
+        .map(|segment| (segment.start, segment.speaker_id))
+        .collect();
+    let expected = [
+        (0.0, Some(one)),
+        (1.4, Some(two)),
+        (2.8, Some(one)),
+        (4.2, Some(one)),
+        (5.6, Some(two)),
+        (7.0, Some(room)),
+    ];
+    assert_eq!(tap.len(), expected.len(), "{tap:?}");
+    for ((start, id), (want_start, want_id)) in tap.iter().zip(expected) {
+        assert!((start - want_start).abs() < 1e-6, "{tap:?}");
+        assert_eq!(*id, want_id, "the segment at {start} s");
+    }
+}
+
+/// The room row feeds no voice: confirmed to a person, it gives them no
+/// embedding (the voice is computed only from rows with one), so the next
+/// meeting's matching never suggests them; a diarized speaker confirmed to
+/// the same person merges into the room row (`merge_speaker_rows`) and
+/// the voice is then exactly that speaker's own embedding, what a plain
+/// confirmation of it gives, with nothing from the room's segments; the
+/// room row and so the mark stay.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_room_row_feeds_no_voice() {
+    let (world, meeting, asset, first) = a_diarized_call_with_new_speech(false).await;
+    let pipeline = with_failing_diarizer(&world, "no model");
+    pipeline.reprocess(meeting.id).unwrap();
+    pipeline.wait_until_idle().await;
+    let room = steno_core::room_speaker_id(meeting.id);
+    assert!(
+        world
+            .store
+            .export(meeting.id)
+            .unwrap()
+            .speaker(room)
+            .is_some()
+    );
+
+    let cleo = steno_core::Person {
+        embedding: None,
+        sample_count: 0,
+        ..sample_data::person(9, "Cleo")
+    };
+    world.store.confirm_speaker(room, &cleo).unwrap();
+    let voice = world.store.person(cleo.id).unwrap().unwrap();
+    assert_eq!((voice.embedding.clone(), voice.sample_count), (None, 0));
+
+    // The next meeting, matched against the stored voices, never meets
+    // Cleo.
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.speaker_memory =
+        Arc::new(steno_pipeline::StoreSpeakerMemory::new(world.store.clone()));
+    let next_pipeline = ProcessingPipeline::new(dependencies);
+    let mut next = call_meeting(world.now);
+    next.id = Uuid::new_v4();
+    next.calendar_event_id = None;
+    let next_asset = call_asset(&world.audio, next.id, AudioRetention::KeepForever);
+    next_pipeline.enqueue(&next, &next_asset).unwrap();
+    next_pipeline.wait_until_idle().await;
+    for speaker in world.store.speakers(next.id).unwrap() {
+        assert_ne!(speaker.person_id(), Some(cleo.id), "{speaker:?}");
+    }
+
+    // A diarized speaker confirmed to Cleo merges into the room row.
+    let two = speaker(&first.speakers, "Speaker 2");
+    world.store.confirm_speaker(two.id, &cleo).unwrap();
+    let after = world.store.export(meeting.id).unwrap();
+    assert!(after.speaker(two.id).is_none(), "merged into the room row");
+    let row = after.speaker(room).expect("the room row and the mark stay");
+    assert_eq!(
+        row.embedding, two.embedding,
+        "the merge copied its embedding"
+    );
+    let voice = world.store.person(cleo.id).unwrap().unwrap();
+    assert_eq!(voice.sample_count, 1);
+    assert_eq!(
+        voice.embedding,
+        steno_core::Embedding::mean(&[two.embedding.clone().unwrap()]),
+        "only the diarized speaker's own embedding"
+    );
+    assert!(detail_reads_kept_incomplete(&world, meeting.id));
+    assert_eq!(expires_at(&world, &asset), None);
+}
+
+/// A first-run fallback re-run whose diarizer fails again: the stored room
+/// row is the only owner, covers the whole recording again (the new speech
+/// included), and no second room row is pushed (a duplicate id would fail
+/// `insert_speaker` and so the run).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_of_a_first_run_fallback_keeps_one_room_row() {
+    let (world, pipeline, meeting, asset) = a_fallback_whose_export_failed(false).await;
+    extend_the_tap(&asset, 8.0);
+    pipeline.reprocess(meeting.id).unwrap();
+    pipeline.wait_until_idle().await;
+    let again = world.store.export(meeting.id).unwrap();
+    assert_eq!(again.meeting.state, MeetingState::Ready);
+    assert_eq!(labels(&again), ["Me", "Speaker 1"]);
+    let room = steno_core::room_speaker_id(meeting.id);
+    let tap: Vec<_> = again
+        .segments
+        .iter()
+        .filter(|segment| segment.lane == AudioLane::System)
+        .collect();
+    assert_eq!(tap.len(), 8);
+    assert!(tap.iter().all(|segment| segment.speaker_id == Some(room)));
+    pipeline.redeliver(meeting.id).await.unwrap();
+    assert_eq!(
+        world.store.deliveries(meeting.id).unwrap()[0].status,
+        DeliveryStatus::Delivered
+    );
+    assert_eq!(expires_at(&world, &asset), None);
+    assert!(detail_reads_kept_incomplete(&world, meeting.id));
+}
+
+/// A room row stored for the other lane (the first run diarized the mic,
+/// its tap silent) that the user confirmed takes none of this lane's
+/// segments when a re-run diarizes the tap and fails again: a confirmed
+/// row never gets segments it did not own. The row stays, so the meeting
+/// stays kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirmed_room_row_of_the_other_lane_takes_no_tap_segment() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::DeleteAfterProcessing,
+        engine_deaf_to_silence(),
+        FakeDiarizer::default(),
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(
+        &world.audio,
+        meeting.id,
+        AudioRetention::DeleteAfterProcessing,
+    );
+    silence_the_tap(&asset);
+    let pipeline = with_failing_diarizer(&world, "no model");
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+    let room = steno_core::room_speaker_id(meeting.id);
+    let first = world.store.export(meeting.id).unwrap();
+    assert!(
+        first
+            .segments
+            .iter()
+            .filter(|segment| segment.lane == AudioLane::Mic)
+            .all(|segment| segment.speaker_id == Some(room)),
+        "the mic was the room"
+    );
+    let anna = sample_data::person(0, "Anna");
+    world.store.confirm_speaker(room, &anna).unwrap();
+
+    extend_the_tap(&asset, 6.0);
+    pipeline.reprocess(meeting.id).unwrap();
+    pipeline.wait_until_idle().await;
+    let again = world.store.export(meeting.id).unwrap();
+    assert_eq!(again.meeting.state, MeetingState::Ready);
+    assert!(
+        again
+            .segments
+            .iter()
+            .any(|segment| segment.lane == AudioLane::System)
+    );
+    for segment in again
+        .segments
+        .iter()
+        .filter(|segment| segment.lane == AudioLane::System)
+    {
+        assert_ne!(segment.speaker_id, Some(room), "{segment:?}");
+    }
+    assert_eq!(
+        again.speaker(room).unwrap().assignment,
+        steno_core::SpeakerAssignment::Confirmed { person_id: anna.id }
+    );
+    assert_eq!(expires_at(&world, &asset), None);
+}
+
+/// Only a failed diarizer has a room fallback: the tap's segments a
+/// working diarizer's clusters miss (here the last two seconds) keep no
+/// speaker, no room row is stored, and the recording is stamped as the rule
+/// says.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_working_diarizer_leaves_what_its_clusters_miss_without_a_speaker() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::DeleteAfterProcessing,
+        FakeSpeechEngine::default(),
+        FakeDiarizer::answering(|_| FakeDiarizer::round_robin(4.0, 2, 1.5)),
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(
+        &world.audio,
+        meeting.id,
+        AudioRetention::DeleteAfterProcessing,
+    );
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let export = world.store.export(meeting.id).unwrap();
+    assert_eq!(export.meeting.state, MeetingState::Ready);
+    assert_eq!(labels(&export), ["Me", "Speaker 1", "Speaker 2"]);
+    let missed: Vec<_> = export
+        .segments
+        .iter()
+        .filter(|segment| segment.lane == AudioLane::System && segment.start >= 4.0)
+        .collect();
+    assert_eq!(missed.len(), 2, "{:?}", export.segments);
+    assert!(missed.iter().all(|segment| segment.speaker_id.is_none()));
+    assert_eq!(expires_at(&world, &asset), Some(world.now));
 }

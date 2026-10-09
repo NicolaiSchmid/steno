@@ -1912,3 +1912,144 @@ fn process_again_words_a_gone_recording_for_the_platform() {
         "The recording is no longer on this computer, so the meeting cannot be processed again."
     );
 }
+
+/// The stored shape the fix leaves: a room row beside diarized speakers,
+/// owning one tap segment, every lane transcribed, delivered, no stamp.
+/// The detail reads keptIncomplete from the room arm alone.
+#[test]
+fn a_room_row_beside_diarized_speakers_reads_kept_incomplete() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            set_retention(store, AudioRetention::DeleteAfterProcessing);
+            let mut asset = store.asset(uuid(MEETING)).unwrap().unwrap();
+            asset.retention = AudioRetention::DeleteAfterProcessing;
+            asset.expires_at = None;
+            store.save_asset(&asset).unwrap();
+        })
+        .build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["retention"]["kind"],
+        "keptWhileProcessing"
+    );
+    let export = harness.store.export(uuid(MEETING)).unwrap();
+    let room = steno_core::room_speaker_id(export.meeting.id);
+    let mut speakers = export.speakers.clone();
+    speakers.push(steno_core::Speaker {
+        id: room,
+        meeting_id: export.meeting.id,
+        cluster_label: format!("Speaker {}", speakers.len() + 1),
+        assignment: steno_core::SpeakerAssignment::Unknown,
+        embedding: None,
+        sample_clip_range: None,
+        sample_clip_url: None,
+        cluster_confidence: 0.0,
+    });
+    let mut segments = export.segments.clone();
+    segments
+        .iter_mut()
+        .rev()
+        .find(|segment| segment.lane == steno_core::AudioLane::System)
+        .unwrap()
+        .speaker_id = Some(room);
+    harness
+        .store
+        .replace_transcript(&export.meeting, &segments, &speakers)
+        .unwrap();
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["retention"]["kind"], "keptIncomplete");
+    assert_eq!(detail["retention"]["filesExist"], true);
+}
+
+/// The incomplete line never hides another status: with the sample's mic
+/// lane emptied (so `results_need_the_audio` holds), a stamp still reads
+/// deletesOn, a keep keptForever, gone files deleted, a failed meeting
+/// keptProcessingFailed and a failed export keptUntilExportSucceeds.
+/// Read first, the incomplete line would tell the user a recording is
+/// kept when the sweep is about to delete it, or already did.
+#[test]
+fn kept_incomplete_never_hides_another_status() {
+    fn incomplete(store: &steno_core::Store) {
+        let export = store.export(uuid(MEETING)).unwrap();
+        let system: Vec<_> = export
+            .segments
+            .iter()
+            .filter(|segment| segment.lane != steno_core::AudioLane::Mic)
+            .cloned()
+            .collect();
+        store
+            .replace_transcript(&export.meeting, &system, &export.speakers)
+            .unwrap();
+    }
+    fn unstamped(store: &steno_core::Store, retention: AudioRetention) {
+        set_retention(store, AudioRetention::DeleteAfterProcessing);
+        let mut asset = store.asset(uuid(MEETING)).unwrap().unwrap();
+        asset.retention = retention;
+        asset.expires_at = None;
+        store.save_asset(&asset).unwrap();
+    }
+    let kind = |seed: fn(&steno_core::Store, &steno_host::fakes::FakeServices)| {
+        let harness = Harness::builder()
+            .seed(move |store, fakes| {
+                populate_sample(store, fakes);
+                incomplete(store);
+                seed(store, fakes);
+            })
+            .build();
+        harness.snapshot(BridgeTopic::MeetingDetail)["retention"]["kind"].clone()
+    };
+    // The base case: unstamped, delivered, ready.
+    assert_eq!(
+        kind(|store, _| unstamped(store, AudioRetention::DeleteAfterProcessing)),
+        "keptIncomplete"
+    );
+    // The sample's own stamp (KeepDays(30)).
+    assert_eq!(kind(|_, _| {}), "deletesOn");
+    assert_eq!(
+        kind(|store, _| unstamped(store, AudioRetention::KeepForever)),
+        "keptForever"
+    );
+    assert_eq!(
+        kind(|store, fakes| {
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+            let asset = store.asset(uuid(MEETING)).unwrap().unwrap();
+            fakes
+                .file_system
+                .remove(&steno_core::paths::file_url_path(&asset.url).unwrap())
+                .unwrap();
+        }),
+        "deleted"
+    );
+    assert_eq!(
+        kind(|store, _| {
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+            store
+                .set_state(
+                    uuid(MEETING),
+                    MeetingState::Failed {
+                        reason: "diarize: no model".to_owned(),
+                    },
+                    now(),
+                )
+                .unwrap();
+        }),
+        "keptProcessingFailed"
+    );
+    assert_eq!(
+        kind(|store, _| {
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+            store
+                .save_delivery(&Delivery {
+                    id: Delivery::id_for(uuid(MEETING), "obsidian-folder"),
+                    meeting_id: uuid(MEETING),
+                    destination_id: "obsidian-folder".to_owned(),
+                    status: DeliveryStatus::Failed("vault missing".to_owned()),
+                    last_attempt_at: Some(now()),
+                    receipt: None,
+                })
+                .unwrap();
+        }),
+        "keptUntilExportSucceeds"
+    );
+}

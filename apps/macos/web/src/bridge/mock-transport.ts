@@ -366,9 +366,8 @@ export function applyScenario(
 
 	// `recording.live`, `meeting.detail.keptIncomplete`,
 	// `settings.summaries.codex`, `settings.summaries.fileKey`,
-	// `settings.iphone.pairing` and
-	// `onboarding.setup` are fixtures, not topics; the page never sees them
-	// by those names.
+	// `settings.iphone.pairing` and `onboarding.setup` are fixtures, not
+	// topics; the page never sees them by those names.
 	delete result["recording.live"];
 	delete result["meeting.detail.keptIncomplete"];
 	delete result["settings.summaries.codex"];

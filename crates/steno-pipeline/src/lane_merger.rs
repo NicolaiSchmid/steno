@@ -65,7 +65,9 @@ impl LaneMerger {
 
     /// The merged transcript, ordered by start, then lane order, then index.
     /// `diarized_lane` is the lane the clusters cover; `Some(Mic)` makes
-    /// the mic lane the room.
+    /// the mic lane the room. `fallback` is the speaker a segment that the
+    /// clusters are for and no cluster covers goes to (the diarizer
+    /// fallback's room speaker); `None` leaves it without one. Rust only.
     #[must_use]
     pub fn merge(
         meeting_id: Uuid,
@@ -73,6 +75,7 @@ impl LaneMerger {
         clusters: &[ClusterSpeaker],
         me_speaker_id: Option<Uuid>,
         diarized_lane: Option<AudioLane>,
+        fallback: Option<Uuid>,
     ) -> Vec<TranscriptSegment> {
         let mic_is_room = diarized_lane == Some(AudioLane::Mic);
         let mut merged: Vec<((f64, usize, usize), TranscriptSegment)> = Vec::new();
@@ -83,7 +86,7 @@ impl LaneMerger {
                     AudioLane::Mic if !mic_is_room => me_speaker_id,
                     AudioLane::System if mic_is_room => None,
                     AudioLane::Mic | AudioLane::System | AudioLane::Mixed => {
-                        Self::cluster_covering(segment, clusters)
+                        Self::cluster_covering(segment, clusters).or(fallback)
                     }
                 };
                 let transcript = TranscriptSegment {
@@ -181,7 +184,7 @@ mod tests {
             AudioLane::System,
             vec![raw(0.0, 0.8, "sys a"), raw(1.2, 1.9, "sys b")],
         );
-        let merged = LaneMerger::merge(meeting, &lanes, &clusters, Some(me), None);
+        let merged = LaneMerger::merge(meeting, &lanes, &clusters, Some(me), None, None);
         assert_eq!(
             merged.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
             ["sys a", "mic", "sys b"]
@@ -234,7 +237,8 @@ mod tests {
             merged.iter().map(|s| s.text.clone()).collect::<Vec<_>>()
         };
 
-        let merged = LaneMerger::merge(meeting, &lanes, &clusters, None, Some(AudioLane::Mic));
+        let merged =
+            LaneMerger::merge(meeting, &lanes, &clusters, None, Some(AudioLane::Mic), None);
         assert_eq!(texts(&merged), ["a one", "b one", "chime", "nobody"]);
         assert_eq!(
             merged.iter().map(|s| s.speaker_id).collect::<Vec<_>>(),
@@ -256,6 +260,7 @@ mod tests {
             &clusters,
             Some(me),
             Some(AudioLane::System),
+            None,
         );
         assert_eq!(texts(&standard), ["a one", "b one", "chime", "nobody"]);
         assert_eq!(
@@ -269,9 +274,57 @@ mod tests {
             .get_mut(&AudioLane::System)
             .unwrap()
             .push(raw(0.4, 0.6, "click"));
-        let merged = LaneMerger::merge(meeting, &lanes, &clusters, None, Some(AudioLane::Mic));
+        let merged =
+            LaneMerger::merge(meeting, &lanes, &clusters, None, Some(AudioLane::Mic), None);
         let click = merged.iter().find(|s| s.text == "click").unwrap();
         assert_eq!(click.speaker_id, None);
+    }
+
+    /// A fallback speaker takes only the diarized lane's segments that no
+    /// cluster covers, by midpoint or overlap; the mic stays "me".
+    #[test]
+    fn the_fallback_takes_only_what_no_cluster_covers() {
+        let meeting = Uuid::new_v4();
+        let me = LaneMerger::me_speaker_id(meeting);
+        let a = Uuid::new_v4();
+        let room = Uuid::new_v4();
+        let clusters = vec![ClusterSpeaker {
+            speaker_id: a,
+            ranges: vec![TimeRange {
+                lower: 0.0,
+                upper: 1.0,
+            }],
+        }];
+        let mut lanes = BTreeMap::new();
+        lanes.insert(AudioLane::Mic, vec![raw(5.0, 6.0, "mic")]);
+        lanes.insert(
+            AudioLane::System,
+            vec![
+                raw(0.2, 0.8, "inside"),
+                raw(0.6, 1.6, "overlap"),
+                raw(3.0, 4.0, "new"),
+            ],
+        );
+        let merged = LaneMerger::merge(
+            meeting,
+            &lanes,
+            &clusters,
+            Some(me),
+            Some(AudioLane::System),
+            Some(room),
+        );
+        assert_eq!(
+            merged
+                .iter()
+                .map(|s| (s.text.as_str(), s.speaker_id))
+                .collect::<Vec<_>>(),
+            [
+                ("inside", Some(a)),
+                ("overlap", Some(a)),
+                ("new", Some(room)),
+                ("mic", Some(me))
+            ]
+        );
     }
 
     #[test]

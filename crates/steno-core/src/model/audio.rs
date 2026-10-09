@@ -171,8 +171,9 @@ pub const EMPTY_LANE_MAXIMUM_SECONDS: f64 = 30.0;
 
 /// Whether a ready meeting's results could still need its recording, so
 /// the automatic retention keeps it unstamped: the diarizer failed and the
-/// room fell back to one unknown speaker ([`room_speaker_id`]), or a lane
-/// the asset recorded (a call records the system audio and the mic, an
+/// segments no stored speaker covers went to the one unknown room speaker
+/// ([`room_speaker_id`]), whose stored row is the mark, or a lane the
+/// asset recorded (a call records the system audio and the mic, an
 /// in-person or phone meeting one lane) has no segment while the meeting
 /// runs longer than [`EMPTY_LANE_MAXIMUM_SECONDS`] or has no positive
 /// duration. It errs towards keeping: a call whose mic stayed muted is
