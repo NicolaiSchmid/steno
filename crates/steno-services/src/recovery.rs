@@ -722,13 +722,14 @@ fn orphan_master(layout: &RecordingLayout) -> Option<(AudioFormat, PathBuf, Syst
     })
 }
 
-/// Whether `master`, in `format` and `len` bytes long, may hold a sample.
-/// A CAF shorter than the header [`CafStreamWriter`] writes and one whole
-/// frame holds none (a kill right after its creation cuts it inside the
-/// header, one before the first frame was whole leaves part of it): no
-/// CAF with a sample is that short. The frame is the header's channel
-/// count of samples, one sample when the header cannot be read. Any other
-/// format holds none only when empty.
+/// Whether `master`, in `format` and `len` bytes long, may hold audio: a
+/// whole frame for a CAF. A CAF shorter than the header
+/// [`CafStreamWriter`] writes and one whole frame holds none (a kill right
+/// after its creation cuts it inside the header, one before the first
+/// frame was whole leaves part of it): no CAF with a sample is that
+/// short. The frame is the header's channel count of samples, one sample
+/// when the header cannot be read. Any other format holds none only when
+/// empty.
 fn may_hold_audio(format: AudioFormat, master: &Path, len: u64) -> bool {
     match format {
         AudioFormat::Caf48kFloat32 => {
@@ -746,7 +747,7 @@ fn may_hold_audio(format: AudioFormat, master: &Path, len: u64) -> bool {
 
 /// Whether audio folder `folder` provably holds no master of meeting
 /// `meeting_id`: its meeting folder is there and each master in it is
-/// missing or too short to hold a sample ([`may_hold_audio`]), or the
+/// missing or too short to hold a frame ([`may_hold_audio`]), or the
 /// meeting folder is missing while `folder` lists at least one entry. An
 /// empty audio folder (a volume's mount point while it is not mounted), a
 /// folder or a master that cannot be read now (a permission, an I/O
@@ -950,18 +951,18 @@ fn adopted(
 /// their entry before the row. An entry counts only when it is both in
 /// the launch's listing and in a read after the rows. A delete forgets its
 /// entry before its rows go, and records it again when it does not go
-/// through (refused, or its commit failed), so a meeting deleted while the
-/// launch ran is not adopted back, and one whose delete was refused keeps
-/// its evidence. A master the record does not name is left alone
-/// ([`orphans`]), and nothing in the handover inbox is adopted: it holds
-/// files, not meeting folders.
+/// through (refused, its commit failed or a panic unwound it), so a
+/// meeting deleted while the launch ran is not adopted back, and one whose
+/// delete was refused keeps its evidence. A master the record does not
+/// name is left alone ([`orphans`]), and nothing in the handover inbox is
+/// adopted: it holds files, not meeting folders.
 ///
 /// An adopted master's entry stays: the insert commits under
 /// `synchronous = NORMAL`, so a power loss can still take it, and a later
 /// launch forgets the entry once its row is durable (`forget_settled`).
 /// An entry with no row is forgotten here only when its folder provably
-/// holds no master (`holds_no_master`, which counts a CAF cut inside its
-/// header as none) or its master is a header with no audio
+/// holds no master (`holds_no_master`, which counts a CAF short of one
+/// whole frame as none) or its master is a header with no audio
 /// ([`Unrecoverable::Empty`]); the file stays either way. One whose audio
 /// folder is empty, missing or unreadable stays, and is logged at debug.
 /// A master modified within [`LiveRecordingCheck::fresh_within`] is left
