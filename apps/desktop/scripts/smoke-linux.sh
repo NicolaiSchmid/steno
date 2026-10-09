@@ -245,8 +245,7 @@ if [[ -z "$unit_skip" ]]; then
   home_run "$scratch/counted" ""
   grep -qxF "Exec=$binary" "$(entry "$home")" \
     || { cat "$(entry "$home")" >&2; fail "the entry written outside an AppImage does not name $binary"; }
-  rm -f "$(entry "$home")"
-  rm -f "$(autostart_drop_in "$home")"
+  rm -f "$(entry "$home")" "$(autostart_drop_in "$home")"
   unit_run "$scratch/restored"
   if ! grep -qF "the autostart entry is back, marked to go at the exit" "$scratch/restored" \
     || ! grep -qF "Launch at login turned off waits for the exit (the entry stands)" "$scratch/restored" \
