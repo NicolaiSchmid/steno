@@ -803,6 +803,13 @@ impl CaptureRecorder {
         });
     }
 
+    /// Forgets the entry of a start that failed: nothing was recorded. One
+    /// that stays is forgotten by a later launch, once the failed row is
+    /// durable or the folder provably holds no master.
+    fn forget_failed_start(&self, meeting_id: Uuid) {
+        let _ = self.forget_recording(meeting_id);
+    }
+
     /// Notes `folder` as the one meeting `meeting_id` is recorded into,
     /// before its row is written, and among the known folders
     /// ([`crate::audio_folders`]). A failure is logged and the recording
@@ -870,7 +877,7 @@ impl CaptureRecorder {
             .begin(meeting_id, source(mode), None, None, &[], started_at)
             .is_err()
         {
-            self.forget_recording(meeting_id);
+            self.forget_failed_start(meeting_id);
             return Err(refused("meeting", "Steno could not create the meeting."));
         }
         let begun = BegunMeeting {
@@ -887,7 +894,7 @@ impl CaptureRecorder {
             begun.disarm();
             let reason = capture_refused(&error);
             let _ = intake.fail(meeting_id, &format!("{COULD_NOT_START} {reason}"));
-            self.forget_recording(meeting_id);
+            self.forget_failed_start(meeting_id);
             return Err(reason);
         }
         let shared = Arc::new(Mutex::new(None::<LaneLevels>));
@@ -1317,7 +1324,7 @@ impl Drop for BegunMeeting<'_> {
         let _ = session.stop();
         let _ = std::fs::remove_dir_all(&self.folder);
         let _ = self.recorder.intake().fail(self.meeting_id, START_PANICKED);
-        self.recorder.forget_recording(self.meeting_id);
+        self.recorder.forget_failed_start(self.meeting_id);
     }
 }
 
@@ -1475,10 +1482,21 @@ impl Recorder for CaptureRecorder {
         }
     }
 
-    fn forget_recording(&self, meeting_id: Uuid) {
-        if let Err(error) = crate::audio_folders::forget(&self.support_directory, &[meeting_id]) {
-            // The next launch forgets an entry whose meeting moved on.
-            tracing::debug!(%meeting_id, %error, "a recording folder not forgotten");
+    fn forget_recording(&self, meeting_id: Uuid) -> std::io::Result<Option<PathBuf>> {
+        crate::audio_folders::forget(&self.support_directory, &[meeting_id])
+            .map(|mut forgotten| forgotten.remove(&meeting_id))
+            .inspect_err(|error| {
+                // The error can name the user's folder: debug alone.
+                tracing::debug!(%meeting_id, %error, "a recording folder not forgotten");
+            })
+    }
+
+    fn restore_recording(&self, meeting_id: Uuid, folder: &Path) {
+        if let Err(error) =
+            crate::audio_folders::record(&self.support_directory, meeting_id, folder)
+        {
+            tracing::warn!(%meeting_id, "a meeting that was not deleted lost its recording's folder");
+            tracing::debug!(%meeting_id, %error, "recording folder not written again");
         }
     }
 }
@@ -2899,7 +2917,11 @@ mod tests {
         let left = harness.recorder.left_recording(meeting_id);
         assert_eq!(
             left.folders,
-            [recorded, harness.dir.path().join("audio"), retired.clone()]
+            [
+                recorded.clone(),
+                harness.dir.path().join("audio"),
+                retired.clone()
+            ]
         );
         assert!(left.still_written);
 
@@ -2907,11 +2929,48 @@ mod tests {
             .unwrap();
         assert!(!harness.recorder.left_recording(meeting_id).still_written);
 
-        harness.recorder.forget_recording(meeting_id);
+        assert_eq!(
+            harness.recorder.forget_recording(meeting_id).unwrap(),
+            Some(recorded)
+        );
         assert_eq!(
             harness.recorder.left_recording(meeting_id).folders,
             [harness.dir.path().join("audio"), retired]
         );
+    }
+
+    /// A delete that does not go through records the forgotten folder
+    /// again; a forget that cannot write the record (a read-only support
+    /// folder) is an error and keeps the entry, so the host refuses the
+    /// delete.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_forgotten_folder_is_restored_and_a_failed_forget_keeps_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let harness = harness(&[]);
+        let meeting_id = Uuid::new_v4();
+        let support = harness.dir.path().join("support");
+        let folder = harness.dir.path().join("audio");
+        crate::audio_folders::record(&support, meeting_id, &folder).unwrap();
+        let forgotten = harness.recorder.forget_recording(meeting_id).unwrap();
+        assert_eq!(forgotten.as_deref(), Some(folder.as_path()));
+        assert!(
+            harness
+                .recorder
+                .forget_recording(meeting_id)
+                .unwrap()
+                .is_none()
+        );
+        harness.recorder.restore_recording(meeting_id, &folder);
+        let entries = crate::audio_folders::recorded(&support).unwrap();
+        assert_eq!(entries.get(&meeting_id), Some(&folder));
+
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = harness.recorder.forget_recording(meeting_id);
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(failed.is_err(), "{failed:?}");
+        let entries = crate::audio_folders::recorded(&support).unwrap();
+        assert_eq!(entries.get(&meeting_id), Some(&folder));
     }
 
     #[test]

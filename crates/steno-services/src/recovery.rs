@@ -2362,6 +2362,43 @@ mod tests {
         assert!(after.store.meeting(orphan).unwrap().is_some());
     }
 
+    /// A delete the store refuses after its entry was forgotten (the
+    /// pipeline took the meeting up while the prompt was open) records the
+    /// entry again, as the host does: a power loss before a checkpoint then
+    /// takes the adoption's row, and the next launch adopts the master
+    /// back instead of leaving it with neither a row nor an entry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_delete_then_a_power_loss_leaves_the_master_to_the_next_launch() {
+        let harness = Harness::new();
+        harness.store.checkpoint_durably().unwrap();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 50);
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [orphan]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+        let mut meeting = harness.store.meeting(orphan).unwrap().unwrap();
+        meeting.state = MeetingState::Processing;
+        harness.store.save_meeting(&meeting).unwrap();
+
+        // The host's order: the entry, then the rows, refused; the entry
+        // the forget returned is recorded again.
+        let support = harness.support_directory();
+        let forgotten = crate::audio_folders::forget(&support, &[orphan]).unwrap();
+        assert!(harness.store.delete_meeting(orphan).is_err());
+        crate::audio_folders::record(&support, orphan, &forgotten[&orphan]).unwrap();
+
+        let after = power_loss(harness);
+        assert!(after.store.meeting(orphan).unwrap().is_none());
+        assert!(master_path(&after.audio_folder(), orphan).is_file());
+        assert_eq!(reconcile_at_launch(&after, &[], &an_hour_later()), [orphan]);
+        after.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            after.store.meeting(orphan).unwrap().unwrap().state,
+            MeetingState::Ready
+        );
+    }
+
     /// A meeting deleted while the launch runs, after the launch listed its
     /// entry and with its master still there (a removal not done yet, or
     /// one that failed), is not adopted back: the delete forgets the entry

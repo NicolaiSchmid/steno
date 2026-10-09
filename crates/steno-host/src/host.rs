@@ -349,6 +349,10 @@ const SECTION_TOPICS: [BridgeTopic; 6] = [
 /// Swift host said for a recording row.
 const STILL_RECORDING: &str = "This meeting is still recording.";
 
+/// A confirmed delete refused because what the recorder kept for the
+/// meeting's recovery could not be forgotten. Rust only.
+const COULD_NOT_DELETE: &str = "Steno could not delete this meeting.";
+
 /// Swift: `MainWindowBridge.deleteMeetingMessage`.
 pub const DELETE_MEETING_MESSAGE: &str = "The transcript, summary, tasks and the recording on this Mac are removed. Files already exported to Obsidian stay. People stay.";
 
@@ -1524,11 +1528,12 @@ impl BridgeHost for Host {
             // Before the rows go, so the launch's adoption, which reads the
             // entries after the rows, never finds the meeting gone and its
             // master still there (a removal not done yet, or one that
-            // failed).
-            self.shared
-                .services
-                .recorder
-                .forget_recording(params.meeting_id);
+            // failed). An entry that stays would bring the meeting back at
+            // the next launch: the delete is refused before any row goes.
+            let recorder = &self.shared.services.recorder;
+            let Ok(forgotten) = recorder.forget_recording(params.meeting_id) else {
+                return Err(BridgeError::failed(COULD_NOT_DELETE));
+            };
             let now = self.now();
             let mut deleted = false;
             self.command(
@@ -1554,6 +1559,12 @@ impl BridgeHost for Host {
                     }
                 },
             );
+            // Refused (the pipeline took the meeting up while the prompt
+            // was open) or not committed: the row stays, and until it is
+            // durable its entry is what lets a launch adopt the master.
+            if !deleted && let Some(folder) = forgotten {
+                recorder.restore_recording(params.meeting_id, &folder);
+            }
         }
         Ok(ConfirmReply { confirmed })
     }

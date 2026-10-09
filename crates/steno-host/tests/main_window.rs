@@ -305,6 +305,14 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         let forgotten = recorder.forgotten.lock().unwrap().contains(&uuid(MEETING));
         seen.lock().unwrap().push(forgotten);
     });
+    let audio = confirming.audio_folder();
+    confirming
+        .fakes
+        .recorder
+        .recorded
+        .lock()
+        .unwrap()
+        .insert(uuid(MEETING), audio);
     let reply = confirming
         .host
         .meetings_delete(MeetingIdParams {
@@ -334,6 +342,16 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         [uuid(MEETING)]
     );
     assert_eq!(*forgotten_at_commit.lock().unwrap(), [true]);
+    assert!(
+        confirming
+            .fakes
+            .recorder
+            .recorded
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "a delete that went through does not record the entry again"
+    );
     assert!(
         !confirming
             .fakes
@@ -458,6 +476,82 @@ fn a_delete_reports_files_that_stay_and_a_refusal_keeps_the_progress_entry() {
         refused.snapshot(BridgeTopic::Progress)["entries"][0]["meetingID"],
         id(0x88),
         "the refused meeting keeps its progress entry"
+    );
+}
+
+/// A confirmed delete the store refuses (the pipeline took the meeting up
+/// while the prompt was open) records the entry the recorder forgot for
+/// it again: the row stays, and until it is durable that entry is what
+/// lets a launch adopt its master. One whose entry cannot be forgotten is
+/// refused before any row goes.
+#[test]
+fn a_delete_that_does_not_go_through_keeps_the_recorders_entry() {
+    let refused = Harness::builder()
+        .confirm_with(|host, _| {
+            let mut meeting = host.store().meeting(uuid(MEETING)).unwrap().unwrap();
+            meeting.state = MeetingState::Processing;
+            host.store().save_meeting(&meeting).unwrap();
+            true
+        })
+        .seed(populate_sample)
+        .build();
+    let audio = refused.audio_folder();
+    refused
+        .fakes
+        .recorder
+        .recorded
+        .lock()
+        .unwrap()
+        .insert(uuid(MEETING), audio.clone());
+    let reply = refused
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap();
+    assert!(reply.confirmed);
+    assert!(refused.store.meeting(uuid(MEETING)).unwrap().is_some());
+    assert_eq!(
+        *refused.fakes.recorder.forgotten.lock().unwrap(),
+        [uuid(MEETING)]
+    );
+    assert_eq!(
+        refused
+            .fakes
+            .recorder
+            .recorded
+            .lock()
+            .unwrap()
+            .get(&uuid(MEETING)),
+        Some(&audio),
+        "the entry is recorded again"
+    );
+
+    let unforgotten = Harness::builder()
+        .confirm(true)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            *fakes.recorder.forget_fails.lock().unwrap() = true;
+        })
+        .build();
+    let error = unforgotten
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, BridgeErrorCode::Failed);
+    assert_eq!(error.message, "Steno could not delete this meeting.");
+    assert!(unforgotten.store.meeting(uuid(MEETING)).unwrap().is_some());
+    assert!(unforgotten.store.asset(uuid(MEETING)).unwrap().is_some());
+    assert!(
+        unforgotten
+            .fakes
+            .file_system
+            .removed
+            .lock()
+            .unwrap()
+            .is_empty()
     );
 }
 

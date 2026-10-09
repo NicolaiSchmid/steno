@@ -65,18 +65,29 @@ pub(crate) fn record(
 }
 
 /// Drops the entries of `meeting_ids`: their meetings completed, failed or
-/// went.
-pub(crate) fn forget(support_directory: &Path, meeting_ids: &[Uuid]) -> std::io::Result<()> {
+/// went. Returns the entries it dropped, so a delete that does not go
+/// through can record its entry again.
+pub(crate) fn forget(
+    support_directory: &Path,
+    meeting_ids: &[Uuid],
+) -> std::io::Result<BTreeMap<Uuid, PathBuf>> {
+    let mut forgotten = BTreeMap::new();
     change(
         support_directory,
         RECORDED_FILE,
         salvage_recorded,
         |recorded: &mut BTreeMap<Uuid, PathBuf>| {
-            let before = recorded.len();
-            recorded.retain(|id, _| !meeting_ids.contains(id));
-            recorded.len() != before
+            recorded.retain(|id, folder| {
+                let kept = !meeting_ids.contains(id);
+                if !kept {
+                    forgotten.insert(*id, folder.clone());
+                }
+                kept
+            });
+            !forgotten.is_empty()
         },
-    )
+    )?;
+    Ok(forgotten)
 }
 
 /// The phone intake's notes of the folder each upload is copied into
@@ -285,7 +296,7 @@ mod tests {
     }
 
     /// A recording's folder is recorded until its meeting is forgotten;
-    /// forgetting one leaves the others.
+    /// forgetting one returns its entry and leaves the others.
     #[test]
     fn a_recordings_folder_is_kept_until_it_is_forgotten() {
         let dir = tempfile::tempdir().unwrap();
