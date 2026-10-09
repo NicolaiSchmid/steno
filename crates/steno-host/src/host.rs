@@ -1504,16 +1504,19 @@ impl BridgeHost for Host {
             };
             (prompt, recording)
         };
-        // Where the meeting's folder may be, for a meeting no asset names
-        // the files of. A row left `recording` may be one another process
-        // still records (the Swift app started after this one): its master
-        // on disk says so. Read with the lock released.
-        let left = self
-            .shared
-            .services
-            .recorder
-            .left_recording(params.meeting_id);
-        if recording && left.still_written {
+        // Where the meeting's folder may be, for a meeting left `recording`
+        // or one whose files no asset names; one an asset names needs none
+        // of it. A row left `recording` may be one another process still
+        // records (the Swift app started after this one): its master on
+        // disk says so. Read with the lock released.
+        let named = !recording && matches!(self.shared.store.asset(params.meeting_id), Ok(Some(_)));
+        let left = (!named).then(|| {
+            self.shared
+                .services
+                .recorder
+                .left_recording(params.meeting_id)
+        });
+        if recording && left.as_ref().is_some_and(|left| left.still_written) {
             return Err(BridgeError::failed(STILL_RECORDING));
         }
         let confirmed = self.confirm(&prompt);
@@ -1527,7 +1530,7 @@ impl BridgeHost for Host {
                         params.meeting_id,
                         &self.shared.store,
                         &*self.shared.services.file_system,
-                        &left,
+                        left.as_ref(),
                         recording,
                     );
                     inner.list.reload(&self.shared.store);
@@ -1543,7 +1546,9 @@ impl BridgeHost for Host {
                     }
                 },
             );
-            if deleted && recording {
+            // Every delete: an entry left behind would let the next launch
+            // adopt a master whose removal failed.
+            if deleted {
                 self.shared
                     .services
                     .recorder

@@ -2232,7 +2232,7 @@ mod tests {
             meeting.id,
             &harness.store,
             &steno_host::services::RealFileSystem,
-            &left,
+            Some(&left),
             false,
         ));
         assert_eq!(list.error, None);

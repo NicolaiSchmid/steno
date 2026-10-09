@@ -241,11 +241,14 @@ pub trait Recorder: Send + Sync {
     fn remember_audio_folder(&self, folder: &Path);
     /// What deleting meeting `meeting_id` needs to know ([`LeftRecording`]):
     /// the audio folders its folder may be in, and for one left
-    /// `recording` whether its master is still written. Rust only: Swift
-    /// refused every recording row and removed only what an asset named.
+    /// `recording` whether its master is still written. The host asks only
+    /// for a meeting left `recording` or one whose files no asset names.
+    /// Rust only: Swift refused every recording row and removed only what
+    /// an asset named.
     fn left_recording(&self, meeting_id: Uuid) -> LeftRecording;
-    /// The rows of meeting `meeting_id`, left `recording`, are gone: what
-    /// the recorder kept for its recovery goes too. Rust only.
+    /// The rows of meeting `meeting_id` are gone (any delete): what the
+    /// recorder kept for its recovery goes too, so the launch does not
+    /// adopt a master whose removal failed. Rust only.
     fn forget_recording(&self, meeting_id: Uuid);
 }
 

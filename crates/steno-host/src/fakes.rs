@@ -295,6 +295,8 @@ pub struct FakeRecorder {
     pub remembered: Mutex<Vec<PathBuf>>,
     /// What `left_recording` answers per meeting; the default otherwise.
     pub left: Mutex<BTreeMap<Uuid, LeftRecording>>,
+    /// Every meeting `left_recording` was asked about, in order.
+    pub asked: Mutex<Vec<Uuid>>,
     /// Every meeting `forget_recording` was given, in order.
     pub forgotten: Mutex<Vec<Uuid>>,
 }
@@ -313,6 +315,7 @@ impl FakeRecorder {
             remembered: Mutex::new(Vec::new()),
             left: Mutex::new(BTreeMap::new()),
             forgotten: Mutex::new(Vec::new()),
+            asked: Mutex::new(Vec::new()),
         }
     }
 
@@ -416,6 +419,7 @@ impl Recorder for FakeRecorder {
     }
 
     fn left_recording(&self, meeting_id: Uuid) -> LeftRecording {
+        lock(&self.asked).push(meeting_id);
         lock(&self.left)
             .get(&meeting_id)
             .cloned()

@@ -303,13 +303,23 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
     assert!(confirming.store.meeting(uuid(MEETING)).unwrap().is_none());
     assert!(confirming.store.asset(uuid(MEETING)).unwrap().is_none());
     assert_eq!(confirming.store.persons().unwrap().len(), 3, "people stay");
-    // The meeting folder goes whole, through the file system seam.
+    // The meeting folder goes whole, through the file system seam. An
+    // asset names it, so the recorder is not asked where else it may be;
+    // it forgets what it kept for the meeting's recovery.
     let folder = confirming
         .audio_folder()
         .join(steno_core::json::uuid_string(uuid(MEETING)));
     assert_eq!(
         *confirming.fakes.file_system.removed.lock().unwrap(),
         vec![folder.clone()]
+    );
+    assert_eq!(
+        *confirming.fakes.recorder.asked.lock().unwrap(),
+        Vec::<uuid::Uuid>::new()
+    );
+    assert_eq!(
+        *confirming.fakes.recorder.forgotten.lock().unwrap(),
+        [uuid(MEETING)]
     );
     assert!(
         !confirming
@@ -362,6 +372,8 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         json!([]),
         "the progress entry goes with the meeting"
     );
+    // No asset names its files: the recorder says where its folder may be.
+    assert_eq!(*queued.fakes.recorder.asked.lock().unwrap(), [uuid(0x88)]);
     assert_eq!(queued.sink.count(BridgeTopic::Progress), 1);
 }
 
