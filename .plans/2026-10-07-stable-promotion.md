@@ -432,7 +432,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 |---|---|---|
 | A1 | A streamed decoder and mixdown: CAF and WAV decoded and mixed in bounded chunks, so a two-hour two-channel master never sits in memory whole | audio (#228) |
 | A2 | The CoreML backend on the shared chunker, merge and decoder settings | audio |
-| A3 | The diarizer on `ModelStore`, and its inference in the speech sidecar, so a crash in ONNX Runtime ends the child, not the app (invariant 4) | audio |
+| A3 | The diarizer on `ModelStore` (#229), and its inference in the speech sidecar's child on every platform, so a crash in ONNX Runtime ends the child, not the app (invariant 4) | audio (#229, #266) |
 | A4 | PipeWire: `stop()` bounded, the own output and the default move settled (#214); `start`'s first cycle and the latencies measured on Nicolai's hardware | audio (#214) |
 | A5 | One speech engine per reload | #218, merged |
 | A6 | Devices that will not run at 48 kHz, and a headset's switch mid-call | #198 |
@@ -729,9 +729,16 @@ Each lands before `0.11.0-rc.1`.
   chunker, merge and decoder settings, settling the unticked WP4 integration
   notes. Parity: FLEURS and the Swift fixtures hold within today's tolerance.
 - **A3 The diarizer on `ModelStore` and in the sidecar.** Its models come
-  through `steno_speech::ModelStore` (resume, lock, mirror), and its inference
-  runs in the speech sidecar through a request of its own. Parity: the
-  diarization fixtures give the same clusters.
+  through `steno_speech::ModelStore` (resume, lock, mirror; #229), and its
+  inference runs in the speech sidecar's child on every platform, the Mac
+  included (`steno_diarize::SidecarDiarizer`): one `diarize` request a lane,
+  the samples on stdin, the clusters back exactly. It shares the speech
+  engine's child, lock, deadline and memory ceiling; a child started only to
+  diarize stops after the call, and a child that dies while it diarizes fails
+  that diarize stage (the job falls back to its stored speakers, as for any
+  diarizer failure) and the next call starts a new one. Parity: the sidecar's
+  clusters equal the in-process pipeline's bit for bit on the two-voice
+  fixture, once and tiled to 75 s, so refinement runs too.
 - **A4 PipeWire** (#214), plus `start`'s first cycle and the latencies measured
   on Nicolai's GNOME and Omarchy machines.
 - **A5 One speech engine per reload** (#218, merged).
