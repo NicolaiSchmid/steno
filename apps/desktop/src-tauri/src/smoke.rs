@@ -487,8 +487,10 @@ fn check_onboarding_is_kept(app: &AppHandle) -> Result<(), String> {
 /// (`autostart::set_enabled`). Where the entry stands, it turns it on
 /// again, which clears the mark and leaves the entry unwritten, and then
 /// off once more. The log line says whether the entry stands, which the
-/// script checks against what the launch should have left. Nothing to
-/// check outside the unit.
+/// script checks against what the launch should have left. While the
+/// system manages the login item, turning it off must change nothing:
+/// the entry as it was, no mark, and `Managed`. Nothing to check outside
+/// the unit.
 #[cfg(target_os = "linux")]
 fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt as _;
@@ -507,6 +509,16 @@ fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
         })
     };
     let before = entry()?;
+    if crate::packaged::login_item_is_managed() {
+        switch(false)?;
+        if entry()? != before
+            || crate::autostart::marked_off_at_exit(app)
+            || crate::autostart::status(app) != crate::autostart::LoginItemStatus::Managed
+        {
+            return Err("managed, turning it off changed the login item".into());
+        }
+        return Ok(());
+    }
     let turn_off = || {
         switch(false)?;
         if entry()? != before {
