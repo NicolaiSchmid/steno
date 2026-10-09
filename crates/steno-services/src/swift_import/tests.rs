@@ -627,28 +627,7 @@ async fn a_graph_over_a_pending_import_reads_no_key_and_binds_no_listener_until_
         map.get(key).cloned()
     };
     let keychain = Arc::new(FakeKeychain::swift_app());
-    let pending = pending(launch(
-        &at_home(),
-        Arc::new(FilePreferences::in_support_directory(
-            &paths.support_directory,
-        )),
-        &FakeDefaults::new(fixture("swift-domain.plist")),
-        keychain,
-    ));
-    let app = crate::build_with_import(
-        crate::AppOptions {
-            paths,
-            database_path: None,
-            keyring: false,
-            opener: Arc::new(steno_host::fakes::FakeOpener::default()),
-            login_item: None,
-            runtime: tokio::runtime::Handle::current(),
-            version: "0.0.0".to_owned(),
-            make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
-        },
-        Some(pending),
-    )
-    .unwrap();
+    let app = build_over(paths, keychain);
 
     assert!(app.handover.is_none());
     let gated = app.gated_handover.clone().unwrap();
@@ -717,15 +696,7 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
             std::fs::write(&secrets_path, b"not json").unwrap();
         }
         let keychain = Arc::new(FakeKeychain::swift_app());
-        let pending = pending(launch(
-            &at_home(),
-            Arc::new(FilePreferences::in_support_directory(
-                &paths.support_directory,
-            )),
-            &FakeDefaults::new(fixture("swift-domain.plist")),
-            keychain.clone(),
-        ));
-        let app = crate::build_with_import(test_options(paths), Some(pending)).unwrap();
+        let app = build_over(paths, keychain.clone());
         app.store
             .save_paired_device(
                 &steno_core::PairedDevice {
@@ -770,5 +741,47 @@ fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
         runtime: tokio::runtime::Handle::current(),
         version: "0.0.0".to_owned(),
         make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+        lock_patience: std::time::Duration::ZERO,
     }
+}
+
+/// The graph under `paths` over the launch half against the Swift domain
+/// fixture and `keychain`, which must leave the import pending.
+fn build_over(paths: steno_core::StenoPaths, keychain: Arc<FakeKeychain>) -> crate::App {
+    crate::build_with_import(test_options(paths), |preferences| {
+        Some(pending(launch(
+            &at_home(),
+            preferences,
+            &FakeDefaults::new(fixture("swift-domain.plist")),
+            keychain,
+        )))
+    })
+    .unwrap()
+}
+
+/// A second app that the database's lock refuses (#225) runs no launch
+/// half: it reads neither the Swift domain nor the keychain and writes no
+/// `preferences.json` beside the first app's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_app_the_database_lock_refuses_runs_no_launch_half() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+    std::fs::create_dir_all(&paths.support_directory).unwrap();
+    let _first = steno_core::DatabaseLock::acquire(&paths.database_path()).unwrap();
+    let ran = AtomicUsize::new(0);
+    let refused = crate::build_with_import(test_options(paths.clone()), |_| {
+        ran.fetch_add(1, Ordering::SeqCst);
+        None
+    })
+    .err()
+    .unwrap();
+    assert!(
+        matches!(
+            refused,
+            crate::BuildError::Lock(steno_core::DatabaseLockError::Held(_))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the launch half ran");
+    assert!(!paths.support_directory.join("preferences.json").exists());
 }

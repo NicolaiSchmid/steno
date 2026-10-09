@@ -569,17 +569,22 @@ fn import_step(
 /// WASAPI backends enumerate devices.
 #[allow(clippy::too_many_lines)]
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
-    build_with_import(options, None)
+    build_with_import(options, |_| None)
 }
 
-/// [`build`] over the Swift import's launch half
-/// ([`crate::swift_import::launch`]): with a pending import the graph
-/// reads its secrets through the import's gate, so no API key is read and
-/// no handover listener is built until the onboarding step ran, and the
-/// step is the host's `SwiftImport`. The Mac shell's entry point.
+/// [`build`] with the Swift import's launch half: `import` runs once the
+/// database's lock is held, so a second app that the lock refuses never
+/// touches the Swift app's items or `preferences.json`, and before
+/// anything reads a preference or a secret. It gets the graph's
+/// `preferences.json` ([`crate::swift_import::launch_on_this_mac`] in the
+/// shell, `|_| None` in [`build`]). With a pending import the graph reads
+/// its secrets through the import's gate, so no API key is read and no
+/// handover listener is built until the onboarding step ran, and the step
+/// is the host's `SwiftImport`. The shell's entry point on every platform;
+/// off the Mac the launch half finds nothing.
 pub fn build_with_import(
     options: AppOptions,
-    pending: Option<crate::swift_import::PendingImport>,
+    import: impl FnOnce(Arc<FilePreferences>) -> Option<crate::swift_import::PendingImport>,
 ) -> Result<App, BuildError> {
     let mut warnings = Vec::new();
     let paths = options.paths;
@@ -587,6 +592,10 @@ pub fn build_with_import(
         .database_path
         .unwrap_or_else(|| paths.database_path());
     let database_lock = lock_or_run_without(&database_path, options.lock_patience, &mut warnings)?;
+    let preferences = Arc::new(FilePreferences::in_support_directory(
+        &paths.support_directory,
+    ));
+    let pending = import(preferences.clone());
     let store = open_store(&database_path)?;
     let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
     let kept = Arc::new(KeepsApiKey::new(secrets));

@@ -241,18 +241,17 @@ pub fn launch(
     }
 }
 
-/// The launch half on this Mac, over the real defaults command and the
-/// login keychain: the import the graph is to be built over
-/// ([`crate::build_with_import`]), or `None` when nothing is pending (and
-/// always off the Mac).
+/// The launch half on this Mac over the graph's `preferences.json`, the
+/// real defaults command and the login keychain: the import the graph is
+/// to be built over, or `None` when nothing is pending (and always off the
+/// Mac). [`crate::build_with_import`] calls it under the database's lock.
 #[must_use]
 pub fn launch_on_this_mac(
-    support_directory: &std::path::Path,
+    preferences: Arc<FilePreferences>,
     smoke_variable: &str,
 ) -> Option<PendingImport> {
     #[cfg(target_os = "macos")]
     {
-        let preferences = Arc::new(FilePreferences::in_support_directory(support_directory));
         match launch(
             &LaunchContext::current(smoke_variable),
             preferences,
@@ -269,7 +268,7 @@ pub fn launch_on_this_mac(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (support_directory, smoke_variable);
+        let _ = (preferences, smoke_variable);
         None
     }
 }
