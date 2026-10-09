@@ -80,10 +80,13 @@ impl ShellUpdates {
             downloaded: Mutex::new(None),
         }
     }
+}
 
+#[async_trait::async_trait]
+impl UpdateSource for ShellUpdates {
     /// Asks the lanes. The update itself, when there is one, is kept for
     /// the download and the install.
-    async fn ask_the_lanes(&self) -> Result<Option<Update>, String> {
+    async fn check(&self) -> Result<Option<String>, String> {
         let version = self.app.package_info().version.to_string();
         let handle = self.app.clone();
         let update = self
@@ -99,7 +102,25 @@ impl ShellUpdates {
             .await
             .map_err(|error| error.to_string())?;
         lock(&self.found).clone_from(&update);
-        Ok(update)
+        Ok(update.map(|update| update.version))
+    }
+
+    async fn download(&self) -> Result<(), String> {
+        let Some(update) = lock(&self.found).clone() else {
+            return Err("No update was found to download.".to_owned());
+        };
+        if lock(&self.downloaded)
+            .as_ref()
+            .is_some_and(|(version, _)| *version == update.version)
+        {
+            return Ok(());
+        }
+        let bytes = update
+            .download(|_, _| {}, || {})
+            .await
+            .map_err(|error| error.to_string())?;
+        *lock(&self.downloaded) = Some((update.version, bytes));
+        Ok(())
     }
 
     /// Installs the found update (from the kept bytes when they are its
@@ -107,11 +128,11 @@ impl ShellUpdates {
     /// The relaunch bypasses the exit request, so the shutdown runs first
     /// (`shut_down_before_exit`), as Sparkle's relaunch went through
     /// `applicationShouldTerminate`; on Windows the installer's own exit
-    /// runs it (`ask_the_lanes`). An install that fails after that shutdown
-    /// ran (Windows: the installer did not launch) ends the app once its
+    /// runs it (`check`). An install that fails after that shutdown ran
+    /// (Windows: the installer did not launch) ends the app once its
     /// message is closed: the recorder and the pipeline start nothing after
     /// a shutdown, and the next Quit would run none.
-    async fn install(&self) -> Result<(), String> {
+    async fn install_and_relaunch(&self) -> Result<(), String> {
         let app = &self.app;
         let Some(update) = lock(&self.found).clone() else {
             return Err("No update was found to install.".to_owned());
@@ -148,35 +169,6 @@ impl ShellUpdates {
                 Err(error.to_string())
             }
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl UpdateSource for ShellUpdates {
-    async fn check(&self) -> Result<Option<String>, String> {
-        Ok(self.ask_the_lanes().await?.map(|update| update.version))
-    }
-
-    async fn download(&self) -> Result<(), String> {
-        let Some(update) = lock(&self.found).clone() else {
-            return Err("No update was found to download.".to_owned());
-        };
-        if lock(&self.downloaded)
-            .as_ref()
-            .is_some_and(|(version, _)| *version == update.version)
-        {
-            return Ok(());
-        }
-        let bytes = update
-            .download(|_, _| {}, || {})
-            .await
-            .map_err(|error| error.to_string())?;
-        *lock(&self.downloaded) = Some((update.version, bytes));
-        Ok(())
-    }
-
-    async fn install_and_relaunch(&self) -> Result<(), String> {
-        self.install().await
     }
 
     fn announce(&self, version: &str) {
@@ -257,7 +249,7 @@ async fn offer(app: &AppHandle, version: &str) {
     if receiver.await != Ok(true) {
         return;
     }
-    if let Err(message) = source(app).install().await
+    if let Err(message) = source(app).install_and_relaunch().await
         && let Some(schedule) = schedule(app)
     {
         schedule.install_failed(message);
