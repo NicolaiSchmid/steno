@@ -175,7 +175,8 @@ struct Core {
     clock: Arc<dyn Clock>,
     make_writer: RecordingWriterFactory,
     /// Held from before the backend starts until the recording's teardown
-    /// is done ([`Active::_playback`]): no in-app playback while recording.
+    /// is done ([`Active::_recording_hold`]): no in-app playback while
+    /// recording.
     playback: Playback,
     inner: Mutex<Inner>,
     /// Notified on every state change; `stop()` waits on it while another
@@ -242,7 +243,7 @@ struct Active {
     /// The recording's hold on [`Playback`], taken before the backend
     /// started, kept across rebuilds and dropped with `Active` at the end
     /// of `finish()`, after `backend.stop()`. `Some` from `start` on.
-    _playback: Option<RecordingHold>,
+    _recording_hold: Option<RecordingHold>,
 }
 
 /// Ring overruns in samples at [`SAMPLE_RATE`], per lane. The sink counts
@@ -650,20 +651,20 @@ impl Core {
     /// tap) exists, and declared before the guard so that a failed or
     /// panicking start releases it only after the guard's `backend.stop()`.
     fn start(self: &Arc<Self>, meeting_id: Uuid) -> Result<(), CaptureError> {
-        let mut playback = Some(self.playback.hold_for_recording());
+        let mut hold = Some(self.playback.hold_for_recording());
         let unwinding = Unwinding::starting(self);
-        let started = self.start_recording(meeting_id, &mut playback);
+        let started = self.start_recording(meeting_id, &mut hold);
         unwinding.disarm();
         started
     }
 
-    /// Moves `playback` into the recording once it runs; a start that
-    /// fails leaves it for `start` to drop.
+    /// Moves `hold` into the recording once it runs; a start that fails
+    /// leaves it for `start` to drop.
     #[allow(clippy::too_many_lines)]
     fn start_recording(
         self: &Arc<Self>,
         meeting_id: Uuid,
-        playback: &mut Option<RecordingHold>,
+        hold: &mut Option<RecordingHold>,
     ) -> Result<(), CaptureError> {
         let mut inner = self.lock();
         match inner.state {
@@ -801,7 +802,7 @@ impl Core {
             rebuild: None,
             pending_change: None,
             ring_drops: RingDrops::default(),
-            _playback: playback.take(),
+            _recording_hold: hold.take(),
         });
         self.set_state(
             &mut inner,

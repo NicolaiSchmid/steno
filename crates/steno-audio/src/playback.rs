@@ -11,16 +11,16 @@
 //! - A player asks [`Playback::begin`] for a [`PlaybackPermit`] before it
 //!   plays, and plays only while it holds one. While a recording runs the
 //!   gate answers [`PlaybackRefused`], worded for the UI.
-//! - The capture session takes a [`RecordingHold`] before its backend
+//! - The capture session takes a hold on the gate before its backend
 //!   starts (before the tap exists) and keeps it across every rebuild; it
 //!   is released when the recording's teardown is done, and on any error
-//!   or panic by its drop.
+//!   or panic by its drop. Only the capture session takes one.
 //! - Taking a hold stops every playback that runs: each permit's `on_stop`
 //!   runs once, and the permit reads [`PlaybackPermit::is_stopped`] from
 //!   then on. Playback may begin again once the last hold is released.
 //!
 //! [`Playback::global`] is the process's gate, the one the capture session
-//! and a player use; [`Playback::new`] makes a private one for a test.
+//! and a player use; a test that must not share it makes a private one.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
@@ -41,7 +41,7 @@ struct Gate {
 }
 
 /// The gate; see the module doc. A cheap handle: clones share one gate.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Playback {
     gate: Arc<Mutex<Gate>>,
 }
@@ -63,10 +63,19 @@ impl std::fmt::Debug for Playback {
 pub struct PlaybackRefused;
 
 impl Playback {
-    /// A gate of its own, shared by nothing else: for tests.
+    /// A gate of its own, shared by nothing else: for a test that must not
+    /// share [`Self::global`] (`CaptureSession::with_playback`). A player
+    /// always asks the global gate.
+    #[doc(hidden)]
     #[must_use]
+    #[allow(
+        clippy::new_without_default,
+        reason = "a second gate is for tests only"
+    )]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            gate: Arc::default(),
+        }
     }
 
     /// The process's gate: the one the capture session holds while it
@@ -92,9 +101,23 @@ impl Playback {
     /// (stop or pause there, and do not block); dropping the permit ends
     /// the playback as far as the gate is concerned.
     ///
+    /// A player asks the process's gate before every playback:
+    ///
+    /// ```
+    /// use steno_audio::Playback;
+    ///
+    /// match Playback::global().begin(|| { /* pause the player */ }) {
+    ///     // Play while the permit is held and `is_stopped` is false; drop
+    ///     // it when the clip ends.
+    ///     Ok(permit) => assert!(!permit.is_stopped()),
+    ///     // A recording runs: show the refusal as it is worded.
+    ///     Err(refused) => assert!(refused.to_string().starts_with("Playback is off")),
+    /// }
+    /// ```
+    ///
     /// # Errors
     ///
-    /// [`PlaybackRefused`] while a [`RecordingHold`] is held.
+    /// [`PlaybackRefused`] while a recording holds the gate.
     pub fn begin(
         &self,
         on_stop: impl FnOnce() + Send + 'static,
@@ -117,7 +140,7 @@ impl Playback {
     /// with the gate unlocked, before this returns. Holds count, so two
     /// recordings keep the gate shut until both are released.
     #[must_use = "the gate opens again when the hold is dropped"]
-    pub fn hold_for_recording(&self) -> RecordingHold {
+    pub(crate) fn hold_for_recording(&self) -> RecordingHold {
         let stopping = {
             let mut gate = self.lock();
             gate.recordings += 1;
@@ -162,7 +185,7 @@ impl Drop for PlaybackPermit {
 /// One recording's hold on the gate, from [`Playback::hold_for_recording`];
 /// released on drop.
 #[derive(Debug)]
-pub struct RecordingHold {
+pub(crate) struct RecordingHold {
     playback: Playback,
 }
 

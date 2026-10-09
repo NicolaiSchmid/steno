@@ -146,6 +146,6 @@ pub use codec::{CodecError, SymphoniaAudioCodec};
 pub use detection::{
     MeetingDetector, MeetingEvent, ProcessAudioActivity, ProcessAudioActivitySource,
 };
-pub use playback::{Playback, PlaybackPermit, PlaybackRefused, RecordingHold};
+pub use playback::{Playback, PlaybackPermit, PlaybackRefused};
 pub use realtime::LaneFrameSink;
 pub use writer::{CafFile, CafHeader, RecordingWriter, WavFile};

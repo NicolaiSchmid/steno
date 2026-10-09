@@ -215,7 +215,7 @@ fn idle_starting_recording_stopping_idle_over_the_synthetic_backend() {
 
 /// A device that changes and never comes back: four restarts fail across
 /// the backoff ladder and the recording ends in `DeviceLost`, finalised and
-/// readable to its last frame.
+/// readable to its last frame, with its [`Playback`] hold released.
 #[test]
 fn device_lost_stops_cleanly_with_a_readable_master() {
     let directory = tempfile::tempdir().unwrap();
@@ -225,6 +225,7 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
             .change_device_after(1.0)
             .restarts_that_fail(CaptureSession::RESTART_ATTEMPTS),
     ));
+    let playback = Playback::new();
     let session = CaptureSession::with_backend(
         configuration(CaptureMode::Call, directory.path(), false),
         backend.clone(),
@@ -232,7 +233,8 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
         200,
         clock.clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_playback(playback.clone());
     let states = session.states();
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
@@ -240,6 +242,7 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
         notices.recv_timeout(RECV).unwrap(),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
+    assert!(playback.is_recording());
     advance_through_sleeps(&clock, CaptureSession::RESTART_ATTEMPTS - 1);
     let seen = collect_states(&states, until_failed);
     assert_eq!(
@@ -247,6 +250,10 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
         Some(&CaptureError::DeviceLost)
     );
     assert!(seen.contains(&CaptureState::Stopping));
+    assert!(
+        !playback.is_recording(),
+        "the device loss released the hold before the state said Failed"
+    );
 
     // The state carries the finalised partial recording; `stop()` returns
     // the same one, with what ended it.
@@ -3823,6 +3830,29 @@ fn a_start_that_fails_or_panics_releases_the_gate() {
         "released only after the guard stopped the backend"
     );
     assert!(playback.begin(|| {}).is_ok());
+}
+
+/// A session made without `with_playback` holds the process's gate, the
+/// one every player asks ([`Playback::global`]), while it records. Only
+/// the held state is asserted: the other tests' sessions share that gate.
+#[test]
+fn a_session_holds_the_process_gate_while_it_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        Arc::new(SyntheticCaptureBackend::new(tones(&call(), 0.5))),
+        passthrough(),
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    assert!(Playback::global().is_recording());
+    assert_eq!(
+        Playback::global().begin(|| {}).unwrap_err(),
+        PlaybackRefused
+    );
+    session.stop().unwrap();
 }
 
 /// Two sessions on one gate: it opens only when both have stopped.
