@@ -21,7 +21,8 @@ use steno_core::{
 use uuid::Uuid;
 
 use crate::labels::{
-    day_string, destination_display_name, display_title, end_reason_sentence, time,
+    damaged_audio_warning, day_string, destination_display_name, display_title,
+    end_reason_sentence, time,
 };
 use crate::main_window::detail::{MeetingDetailViewModel, RecordingStatus};
 use crate::main_window::list::MeetingListViewModel;
@@ -430,6 +431,7 @@ pub fn detail_snapshot(
         state: state(meeting.state.kind()),
         failure_reason: meeting.state.failure_reason().map(str::to_owned),
         end_reason: meeting.end_reason.as_ref().and_then(end_reason_sentence),
+        audio_warning: damaged_audio_warning(detail.damaged_audio_parts, meeting.source),
         tags: meeting.tags.clone(),
         tab: detail.tab,
         retention: DetailRetention {

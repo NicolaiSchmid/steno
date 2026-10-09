@@ -600,6 +600,15 @@ function DetailBody({
 					variant="destructive"
 				/>
 			) : null}
+			{detail.audioWarning ? (
+				<Callout
+					className="mb-6"
+					data-testid="audio-warning"
+					icon={<CircleAlertIcon aria-hidden="true" />}
+					title={detail.audioWarning}
+					variant="warning"
+				/>
+			) : null}
 			<div
 				className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs [&>i]:size-[3px] [&>i]:rounded-full [&>i]:bg-border"
 				data-testid="meeting-meta"

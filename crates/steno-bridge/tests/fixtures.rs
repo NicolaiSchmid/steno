@@ -39,6 +39,10 @@ const FIXTURES: &[(&str, Reencode)] = &[
     ("progress", reencode::<ProgressSnapshot>),
     ("meetings.list", reencode::<MeetingsListSnapshot>),
     ("meeting.detail", reencode::<MeetingDetailSnapshot>),
+    (
+        "meeting.detail.damagedAudio",
+        reencode::<MeetingDetailSnapshot>,
+    ),
     ("settings.general", reencode::<GeneralSettingsSnapshot>),
     ("settings.recording", reencode::<RecordingSettingsSnapshot>),
     (

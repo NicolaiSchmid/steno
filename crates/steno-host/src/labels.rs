@@ -129,6 +129,27 @@ pub fn end_reason_sentence(reason: &RecordingEndReason) -> Option<String> {
     }
 }
 
+/// The detail's warning when the decoder replaced `parts` of the recording
+/// by silence; `None` for a recording that decoded whole. The phone's is
+/// named, as it is the one recording that can carry damaged packets
+/// (AAC). Rust only: AVFoundation conceals them and says nothing.
+#[must_use]
+pub fn damaged_audio_warning(parts: u32, source: MeetingSource) -> Option<String> {
+    let recording = match source {
+        MeetingSource::Phone => "the phone recording",
+        MeetingSource::MacCall | MeetingSource::MacInPerson => "the recording",
+    };
+    match parts {
+        0 => None,
+        1 => Some(format!(
+            "1 damaged part of {recording} was replaced by silence."
+        )),
+        parts => Some(format!(
+            "{parts} damaged parts of {recording} were replaced by silence."
+        )),
+    }
+}
+
 /// What the rule does to the files, as Settings > Recording says it under the
 /// picker. Swift: `AudioRetention.footnote`.
 #[must_use]

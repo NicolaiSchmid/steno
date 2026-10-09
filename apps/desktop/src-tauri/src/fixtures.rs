@@ -25,6 +25,7 @@ fixtures![
     "progress",
     "meetings.list",
     "meeting.detail",
+    "meeting.detail.damagedAudio",
     "settings.general",
     "settings.recording",
     "settings.transcription",
@@ -192,6 +193,7 @@ mod tests {
     fn scenario_fixtures_are_not_topics() {
         for key in [
             "recording.live",
+            "meeting.detail.damagedAudio",
             "settings.summaries.codex",
             "settings.summaries.fileKey",
             "settings.iphone.pairing",

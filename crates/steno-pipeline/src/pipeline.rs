@@ -49,6 +49,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::crash_loop::{CountedRun, MAX_CRASHED_RUNS, OpenRuns, RunCount, TOO_MANY_CRASHED_RUNS};
+use crate::damaged_audio::DamagedAudio;
 use crate::estimator::{ProcessingEstimator, StageRates, StageSample, absorbing};
 use crate::events::MeetingEventBus;
 use crate::export_retries::ExportRetries;
@@ -464,6 +465,11 @@ pub struct PipelineDependencies {
     /// A fresh in-flight set from [`new`](Self::new); clones share theirs,
     /// and [`with_in_flight`](Self::with_in_flight) shares the caller's.
     pub in_flight: InFlight,
+    /// Where the decode stage records the parts of each meeting's
+    /// recording replaced by silence; in memory only from
+    /// [`new`](Self::new), the app's file with
+    /// [`with_damaged_audio`](Self::with_damaged_audio).
+    pub damaged_audio: Arc<DamagedAudio>,
     /// Called at each step of a run's sample clips, for the tests that end
     /// a run there as a crash would; `None` unless a test build sets it
     /// with [`with_clip_probe`](Self::with_clip_probe).
@@ -496,6 +502,7 @@ impl PipelineDependencies {
             clock: Arc::new(SystemClock::default()),
             quit_latch: QuitLatch::default(),
             in_flight: InFlight::default(),
+            damaged_audio: Arc::new(DamagedAudio::in_memory()),
             clip_probe: None,
         }
     }
@@ -545,6 +552,14 @@ impl PipelineDependencies {
     #[must_use]
     pub fn with_in_flight(mut self, in_flight: InFlight) -> Self {
         self.in_flight = in_flight;
+        self
+    }
+
+    /// Records the damaged parts in `damaged_audio`, which the host reads
+    /// for the meeting's detail, instead of in memory.
+    #[must_use]
+    pub fn with_damaged_audio(mut self, damaged_audio: Arc<DamagedAudio>) -> Self {
+        self.damaged_audio = damaged_audio;
         self
     }
 
@@ -2125,6 +2140,9 @@ impl ProcessingPipeline {
     /// Per lane: decode, then transcribe with the previous lane's dominant
     /// language as the hint. Each buffer goes out of scope before the next
     /// lane is decoded, except the last, which is returned for `diarize`.
+    /// The parts of the recording the decoder replaced by silence are
+    /// recorded for the meeting's detail ([`DamagedAudio`]): the most any
+    /// lane counted, as every lane of a master reads the same packets.
     async fn decode_and_transcribe(
         &self,
         asset: &AudioAsset,
@@ -2135,6 +2153,7 @@ impl ProcessingPipeline {
         let mut lanes: BTreeMap<AudioLane, Vec<RawSegment>> = BTreeMap::new();
         let mut hint: Option<LanguageTag> = None;
         let mut last: Option<DecodedLane> = None;
+        let mut damaged_parts = 0;
         for (index, lane) in ordered_lanes(&asset.lanes).into_iter().enumerate() {
             // Release the previous lane before decoding the next.
             drop(last.take());
@@ -2149,6 +2168,7 @@ impl ProcessingPipeline {
             } else {
                 attributing(PipelineStage::Decode, decoder.decode(asset, lane).await)?
             };
+            damaged_parts = damaged_parts.max(buffer.damaged_parts);
             let lane_hint = hint.clone();
             let segments = self
                 .run(
@@ -2162,6 +2182,17 @@ impl ProcessingPipeline {
             lanes.insert(lane, segments);
             last = Some(DecodedLane { lane, buffer });
         }
+        if damaged_parts > 0 {
+            tracing::warn!(
+                meeting = %meeting_id,
+                damaged_parts,
+                "parts of the recording did not decode and were replaced by silence"
+            );
+        }
+        self.inner
+            .dependencies
+            .damaged_audio
+            .record(meeting_id, damaged_parts);
         let language = elect_language(lanes.values().flatten());
         Ok((Transcription { lanes, language }, last))
     }

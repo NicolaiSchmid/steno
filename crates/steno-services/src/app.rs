@@ -19,7 +19,8 @@ use steno_host::services::{LoginItem, LoginItemStatus, Opener, Preferences, Serv
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
-    ExportRetries, MeetingEventBus, PipelineDependencies, RecordingIntake, RetentionSweep,
+    DamagedAudio, ExportRetries, MeetingEventBus, PipelineDependencies, RecordingIntake,
+    RetentionSweep,
 };
 
 use crate::block_on;
@@ -258,7 +259,9 @@ pub fn pipeline_dependencies(
     })
 }
 
-/// [`pipeline_dependencies`] over clones of its inputs, for the reloads.
+/// [`pipeline_dependencies`] over clones of its inputs, for the reloads,
+/// every build recording the damaged parts of a recording in
+/// `damaged_audio`.
 fn make_dependencies(
     store: &Arc<Store>,
     engines: &Arc<SpeechEngines>,
@@ -266,16 +269,24 @@ fn make_dependencies(
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
+    damaged_audio: &Arc<DamagedAudio>,
 ) -> MakeDependencies {
-    let (store, engines, secrets, codex, events, runtime) = (
+    let (store, engines, secrets, codex, events, runtime, damaged_audio) = (
         store.clone(),
         engines.clone(),
         secrets.clone(),
         codex.clone(),
         events.clone(),
         runtime.clone(),
+        damaged_audio.clone(),
     );
-    Arc::new(move || pipeline_dependencies(&store, &engines, &secrets, &codex, &events, &runtime))
+    Arc::new(move || {
+        let built = pipeline_dependencies(&store, &engines, &secrets, &codex, &events, &runtime)?;
+        Ok(BuiltPipeline {
+            dependencies: built.dependencies.with_damaged_audio(damaged_audio.clone()),
+            ..built
+        })
+    })
 }
 
 /// The phone intake over whichever pipeline is current when a recording
@@ -481,7 +492,18 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let speech = engines.setup();
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
-    let make = make_dependencies(&store, &engines, &kept, &codex, &events, &runtime);
+    // The decoder's count of damaged parts per meeting, in the support
+    // directory, which the detail reads through `HostPipeline`.
+    let damaged_audio = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
+    let make = make_dependencies(
+        &store,
+        &engines,
+        &kept,
+        &codex,
+        &events,
+        &runtime,
+        &damaged_audio,
+    );
     let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
     let sweep = RetentionSweep::new(store.clone());
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));

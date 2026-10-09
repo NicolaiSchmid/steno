@@ -8,6 +8,7 @@
 //! | Module | What it holds |
 //! |--------|---------------|
 //! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue` and `enqueue_saved`, `reprocess` (refused with a [`ReprocessError`]), `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `resume_unfinished` and `redeliver_unfinished` for the launch, the in-flight set ([`InFlight`]) a reload shares, `warm_up` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, `apply_retention`, the stages |
+//! | [`damaged_audio`] | [`DamagedAudio`], the parts of each meeting's recording the decoder replaced by silence, in `damaged-audio.json` |
 //! | [`export_retries`] | [`ExportRetries`], the launch re-exports in a row per meeting that did not deliver every row, in `export-retries.json` |
 //! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
 //! | [`run`] | One run's progress state with the monotonic clamp |
@@ -67,6 +68,7 @@
 #![deny(unsafe_code)]
 
 pub mod crash_loop;
+pub mod damaged_audio;
 pub mod estimator;
 pub mod events;
 pub mod export_retries;
@@ -80,6 +82,7 @@ pub mod run;
 pub mod sample_clips;
 pub mod speaker_memory;
 
+pub use damaged_audio::DamagedAudio;
 pub use estimator::{ProcessingEstimator, StageRates, StageSample};
 pub use events::{EventReceiver, MeetingEventBus};
 pub use export_retries::ExportRetries;

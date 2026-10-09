@@ -732,6 +732,55 @@ fn the_detail_heading_derives_an_untitled_meetings_title() {
     );
 }
 
+/// Parts of a recording the decoder replaced by silence show as the
+/// detail's audio warning, naming the phone's recording, in the singular
+/// for one; a recording that decoded whole carries none.
+#[test]
+fn the_detail_warns_about_a_recording_replaced_in_parts_by_silence() {
+    let harness = Harness::builder()
+        .seed(|store, _| {
+            store
+                .save_meeting(&meeting(
+                    0x67,
+                    "Standup",
+                    TitleOrigin::User,
+                    "2026-09-28T08:06:00.000Z",
+                    60.0,
+                    MeetingSource::Phone,
+                    &[],
+                    MeetingState::Ready,
+                    None,
+                ))
+                .unwrap();
+        })
+        .build();
+    let _ = harness.snapshot(BridgeTopic::MeetingsList);
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["id"], id(0x67));
+    assert!(detail.get("audioWarning").is_none(), "{detail}");
+    for (parts, warning) in [
+        (
+            3,
+            "3 damaged parts of the phone recording were replaced by silence.",
+        ),
+        (
+            1,
+            "1 damaged part of the phone recording was replaced by silence.",
+        ),
+    ] {
+        harness
+            .fakes
+            .pipeline
+            .damaged_audio
+            .lock()
+            .unwrap()
+            .insert(uuid(0x67), parts);
+        harness.host.store_changed();
+        let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+        assert_eq!(detail["audioWarning"], warning);
+    }
+}
+
 /// A sink that reads the host back from inside `emit`: the Tauri shell
 /// serialises on the webview thread, and the host must not hold its lock
 /// while it does.

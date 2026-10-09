@@ -317,6 +317,12 @@ pub trait Pipeline: Send + Sync {
     /// ([`steno_core::Meeting::offers_process_again`]) whatever the
     /// caller's view of it says. Rust only: the Swift app refuses it.
     fn process_again(&self, meeting_id: Uuid) -> Result<(), ProcessAgainRefusal>;
+    /// The parts of the meeting's recording its last decode could not read
+    /// and replaced by silence, which the detail warns about. The default
+    /// says none. Rust only.
+    fn damaged_audio_parts(&self, _meeting_id: Uuid) -> u32 {
+        0
+    }
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()>;
     /// Rebuilds the pipeline from the stored settings and the API key.
     fn reload(&self) -> BoundaryResult<()>;

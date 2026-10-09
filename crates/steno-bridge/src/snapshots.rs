@@ -454,6 +454,10 @@ pub struct MeetingDetailSnapshot {
     pub failure_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<String>,
+    /// The warning that parts of the recording could not be decoded and
+    /// were replaced by silence. Rust only: the Swift host never sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_warning: Option<String>,
     pub tags: Vec<String>,
     pub tab: DetailTab,
     pub retention: DetailRetention,

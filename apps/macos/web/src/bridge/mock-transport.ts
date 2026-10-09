@@ -236,8 +236,10 @@ function bareDetail(
  * recording, started 12:34 ago, its auto-stop counting down), `denied` (idle
  * with the microphone denied), `failed` (the failed meeting selected),
  * `processing` (a meeting in the progress entry, selected), `export-failed`
- * (the selected meeting's export failed). `tab=` picks the detail tab.
- * Without either, the fixtures pass through unchanged.
+ * (the selected meeting's export failed), `damaged-audio`
+ * (`meeting.detail.damagedAudio`: parts of the recording replaced by
+ * silence). `tab=` picks the detail tab. Without either, the fixtures pass
+ * through unchanged.
  */
 export function applyScenario(
 	snapshots: FixtureMap,
@@ -291,6 +293,11 @@ export function applyScenario(
 				canReveal: false,
 			},
 		} satisfies MeetingDetailSnapshot;
+	}
+
+	const damagedAudio = snapshots["meeting.detail.damagedAudio"];
+	if (scenario === "damaged-audio" && damagedAudio) {
+		result["meeting.detail"] = damagedAudio;
 	}
 
 	if (scenario === "failed" && list && detail) {
@@ -357,11 +364,12 @@ export function applyScenario(
 	applySettingsScenario(result, snapshots, scenario);
 	applyOnboardingScenario(result, snapshots, scenario);
 
-	// `recording.live`, `settings.summaries.codex`,
-	// `settings.summaries.fileKey`, `settings.iphone.pairing` and
-	// `onboarding.setup` are fixtures, not topics; the page never sees them
-	// by those names.
+	// `recording.live`, `meeting.detail.damagedAudio`,
+	// `settings.summaries.codex`, `settings.summaries.fileKey`,
+	// `settings.iphone.pairing` and `onboarding.setup` are fixtures, not
+	// topics; the page never sees them by those names.
 	delete result["recording.live"];
+	delete result["meeting.detail.damagedAudio"];
 	delete result["settings.summaries.codex"];
 	delete result["settings.summaries.fileKey"];
 	delete result["settings.iphone.pairing"];

@@ -197,6 +197,17 @@ describe("MeetingDetail", () => {
 		expect(screen.queryByTestId("keep-audio")).not.toBeInTheDocument();
 	});
 
+	it("warns when parts of the recording were replaced by silence", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(<MeetingDetail />, harness);
+		expect(screen.queryByTestId("audio-warning")).not.toBeInTheDocument();
+		const damaged = await createBridgeHarness("scenario=damaged-audio");
+		renderWithBridge(<MeetingDetail />, damaged);
+		expect(screen.getByTestId("audio-warning")).toHaveTextContent(
+			"3 damaged parts of the recording were replaced by silence.",
+		);
+	});
+
 	it("reports where the export stands in the footer", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<MeetingDetail />, harness);

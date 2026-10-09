@@ -173,6 +173,14 @@ public enum BridgeSamples {
       canReexport: false, canReveal: false),
     canProcessAgain: false, canRerunSummary: true, isBusy: false)
 
+  /// `meetingDetail` with three damaged parts of its recording replaced by
+  /// silence. Only the Rust host sends the warning.
+  public static let meetingDetailDamagedAudio: MeetingDetailSnapshot = {
+    var detail = meetingDetail
+    detail.audioWarning = "3 damaged parts of the recording were replaced by silence."
+    return detail
+  }()
+
   public static let settingsGeneral = GeneralSettingsSnapshot(
     subtitle: "Steno 0.10.0", version: "0.10.0", loginItem: .enabled, detectionEnabled: true,
     defaultTemplateID: "default",
@@ -440,6 +448,7 @@ extension BridgeSamples {
     BridgeFixture("progress", progress),
     BridgeFixture("meetings.list", meetingsList),
     BridgeFixture("meeting.detail", meetingDetail),
+    BridgeFixture("meeting.detail.damagedAudio", meetingDetailDamagedAudio),
     BridgeFixture("settings.general", settingsGeneral),
     BridgeFixture("settings.recording", settingsRecording),
     BridgeFixture("settings.transcription", settingsTranscription),

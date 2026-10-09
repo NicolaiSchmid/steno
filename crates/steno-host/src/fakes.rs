@@ -492,6 +492,8 @@ pub struct FakePipeline {
     pub failure: Mutex<Option<String>>,
     /// The meetings `export_keeps_failing` answers yes for.
     pub keeps_failing: Mutex<Vec<Uuid>>,
+    /// What `damaged_audio_parts` answers per meeting; 0 for the others.
+    pub damaged_audio: Mutex<std::collections::BTreeMap<Uuid, u32>>,
 }
 
 impl FakePipeline {
@@ -534,6 +536,13 @@ impl Pipeline for FakePipeline {
         }
         self.outcome()
             .map_err(|error| ProcessAgainRefusal::CouldNotStart(error.to_string()))
+    }
+
+    fn damaged_audio_parts(&self, meeting_id: Uuid) -> u32 {
+        lock(&self.damaged_audio)
+            .get(&meeting_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {

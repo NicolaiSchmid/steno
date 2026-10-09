@@ -219,6 +219,16 @@ impl Pipeline for HostPipeline {
             .map_err(process_again_refusal)
     }
 
+    /// From the current pipeline's [`DamagedAudio`](steno_pipeline::DamagedAudio),
+    /// which every reload shares.
+    fn damaged_audio_parts(&self, meeting_id: Uuid) -> u32 {
+        self.pipeline
+            .current()
+            .dependencies()
+            .damaged_audio
+            .parts(meeting_id)
+    }
+
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
         let pipeline = self.pipeline.current();
         Ok(block_on(
@@ -528,6 +538,88 @@ mod tests {
             call(move || fourth.redeliver(unknown)),
             Err(format!("deliver: meeting {unknown} not found"))
         );
+    }
+
+    /// The phone meeting of `fixture` (a file in `Tests/Fixtures/audio/`,
+    /// copied into `dir`) processed through `service`'s real decoder, to
+    /// the state it ends in.
+    async fn process_phone_fixture(
+        service: &HostPipeline,
+        store: &Store,
+        dir: &std::path::Path,
+        meeting: &steno_core::Meeting,
+        fixture: &str,
+    ) -> MeetingState {
+        let upload = dir.join(format!("{fixture}-{}.m4a", Uuid::new_v4()));
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../Tests/Fixtures/audio")
+                .join(fixture),
+            &upload,
+        )
+        .unwrap();
+        let asset = steno_core::AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: steno_core::paths::file_url(&upload, false),
+            format: steno_core::AudioFormat::M4aAac,
+            lanes: vec![steno_core::AudioLane::Mixed],
+            sidecars_16k: std::collections::BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepForever,
+            expires_at: None,
+        };
+        let pipeline = service.pipeline.current();
+        pipeline.enqueue(meeting, &asset).unwrap();
+        pipeline.wait_until_idle().await;
+        store.meeting(meeting.id).unwrap().unwrap().state
+    }
+
+    /// The damaged parts the real decoder counts reach the detail: a phone
+    /// recording with three undecodable packets processes to Ready, and
+    /// the host pipeline answers 3 for it, from the support directory's
+    /// file, after a reload too; the same meeting processed again from a
+    /// whole recording answers 0.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_damaged_parts_of_a_recording_reach_the_detail() {
+        let (dir, store) = temp_store();
+        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(dir.path()));
+        let service = pipeline_over(
+            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
+            &store,
+        );
+        let mut meeting = sample_data::meeting();
+        meeting.source = steno_core::MeetingSource::Phone;
+        meeting.state = MeetingState::Recording;
+        let state = process_phone_fixture(
+            &service,
+            &store,
+            dir.path(),
+            &meeting,
+            "tone-440-44k1-500ms-damaged.m4a",
+        )
+        .await;
+        assert_eq!(state, MeetingState::Ready);
+        assert_eq!(service.damaged_audio_parts(meeting.id), 3);
+        service.pipeline.reload().unwrap();
+        assert_eq!(service.damaged_audio_parts(meeting.id), 3, "after a reload");
+        assert_eq!(
+            steno_pipeline::DamagedAudio::in_directory(dir.path()).parts(meeting.id),
+            3,
+            "on disk"
+        );
+        assert_eq!(service.damaged_audio_parts(Uuid::new_v4()), 0);
+
+        let state = process_phone_fixture(
+            &service,
+            &store,
+            dir.path(),
+            &meeting,
+            "tone-440-44k1-500ms.m4a",
+        )
+        .await;
+        assert_eq!(state, MeetingState::Ready);
+        assert_eq!(service.damaged_audio_parts(meeting.id), 0);
     }
 
     /// A summary re-run exports the new summary, so it starts the count of
