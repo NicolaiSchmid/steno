@@ -96,8 +96,9 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    cutover the Swift app keeps its own list in `AGENTS.md`.
 4. **One speech pipeline above the tensors.** Chunker, overlap merge and the TDT decode
    loop are shared; the backends are CoreML (`objc2-core-ml`) on the Mac and ONNX
-   Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac stays
-   one process while `CoreML` runs Parakeet (the default). The diarizer's ONNX
+   Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac runs
+   Parakeet in process on `CoreML` (the default) and starts the sidecar only to
+   diarize. The diarizer's ONNX
    inference runs in the same sidecar on every platform, the Mac included
    (`steno_diarize::SidecarDiarizer`); `steno dev diarize-sweep` and the calibration
    harness keep it in their own process.
@@ -938,14 +939,19 @@ still has to draw the window side. `[ ]` is not ported yet.
   `SidecarSpeechEngine::diarize`). One request a lane (`loadDiarizer` once per child,
   then `diarize` with the samples on stdin, protocol version 2): the child runs the
   whole in-process pipeline with the default configuration and answers with the
-  clusters, their `f32` values widened to `f64` so they cross exactly; per window
+  clusters, embeddings included, their `f32` values widened to `f64`, which
+  round-trips exactly whatever `serde_json`'s `f32` path does; per window
   requests would have been some 5 000 round trips and four copies of the audio an hour.
   The diarizer shares the engine's child, lock, deadline (the transcription's) and
   memory ceiling: its models load into the child speech runs in, or into a child of its
   own that stops after the call, so no child outlives the job that needed it; a crash,
   hang or overrun fails that call and the diarize stage falls back as for any diarizer
   failure, and the next call starts a new child; it never counts against `DirectML`.
-  The models install in the app's process (`Install` as before) and a load the child
+  The 6 GiB ceiling holds a diarization beside Parakeet's working set up to about
+  4.3 h of a dense group call (measured on a synthetic six-voice lane: 3.94 GB at 3 h);
+  a longer call diarized while another job holds speech overruns it, and that job
+  keeps its transcript with the fallback speakers. A child that only diarizes peaked
+  at 286 MB for 30 min. The models install in the app's process (`Install` as before) and a load the child
   refuses is checked against the manifest there. The sidecar's clusters equal the
   in-process pipeline's bit for bit on the two-voice fixture, once and tiled to 75 s
   (`crates/steno-speech-sidecar/tests/diarize.rs`, model gated). `ModelDiarizer` keeps
@@ -3288,8 +3294,9 @@ WP10b puts the speech encoder on DirectML on Windows when the speech setting
 request, on Windows only; the child answers with the provider it chose). Only the
 encoder moves: the decoder and the joiner run once per token on one frame, and
 Silero on 32 ms frames, where a round trip to the GPU costs more than the step;
-the diarizer stays on the CPU because it runs in the app's process, where
-speech-stack decision 5 keeps no GPU driver. The probe is the session itself:
+the diarizer stays on the CPU, in the sidecar since #266, as it did in the
+app's process, where speech-stack decision 5 kept no GPU driver. The probe is
+the session itself:
 DirectML in the ONNX Runtime build, a hardware DirectX 12 adapter (the device
 filter leaves out WARP), the session created, one encoder run on a second of
 silence. Any failure opens the encoder on the CPU, and a later run that fails on

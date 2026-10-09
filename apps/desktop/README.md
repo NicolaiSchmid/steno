@@ -456,8 +456,8 @@ Swift app, so install it elsewhere (`~/Applications`) to keep both.
 Every release bundle carries `steno-speech-sidecar` beside the app (see
 "The speech sidecar" under Release), so a `.deb`, AppImage, `.msi` or NSIS
 install processes a meeting once the sidecar's models are downloaded (see
-Run). A Mac bundle processes on `CoreML`, except in the two cases under Run
-that send Parakeet to the sidecar.
+Run). A Mac bundle transcribes on `CoreML`, except in the two cases under
+Run that send Parakeet to the sidecar, and diarizes in the sidecar.
 
 Updates are signed: `plugins.updater.pubkey` is the public half of a key
 pair from `cargo tauri signer generate`. The private half is never in the
@@ -785,9 +785,10 @@ needs a manual install, and so does every app if the key is lost.
 ### The speech sidecar
 
 Off the Mac, and on the Mac when the ONNX fallback is on,
-`steno-speech-sidecar` runs the speech model in a child process, which
-`SidecarConfig::beside_current_exe` looks for in the directory of the
-running binary. `tauri.release.conf.json` declares it as an `externalBin`;
+`steno-speech-sidecar` runs the speech model in a child process; on every
+platform it also runs the diarizer, so a Mac bundle needs it too, or every
+meeting gets the fallback speakers. `SidecarConfig::beside_current_exe`
+looks for it in the directory of the running binary. `tauri.release.conf.json` declares it as an `externalBin`;
 `scripts/stage-sidecar.sh` builds it in release and copies it to
 `src-tauri/binaries/steno-speech-sidecar-<target triple>` (ignored by
 git), where the bundler finds it and installs it without the triple. It is

@@ -75,13 +75,14 @@ reports keep the interim reasoning.
    CoreML Parakeet.
 5. **Inference in a sidecar process for the ONNX engine off the Mac.** The sidecar
    speaks the same JSON convention as the bridge, is spawned per job, is killed on
-   timeout and isolates the GPU driver; the Mac app stays one process with CoreML speech
-   in-process, as `.plans/2026-09-29-macos-webview-ui.md` requires. Why: ONNX Runtime
+   timeout and isolates the GPU driver; the Mac app keeps CoreML speech in its own
+   process, as `.plans/2026-09-29-macos-webview-ui.md` requires. Why: ONNX Runtime
    errors are C++ exceptions that abort through the FFI, and the 2 to 3 GB working set
    should be released after processing. Rules out: in-process speech inference off the
-   Mac. The ONNX diarizer (decision 6) runs in the app's process for now; whether it
-   moves into the sidecar is open under "Speech" in the parity list of
-   `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
+   Mac. The ONNX diarizer (decision 6) runs in the same sidecar on every platform
+   since #266, so the Mac runs Parakeet in process on CoreML (the default) and starts
+   the sidecar only to diarize (invariant 4 of
+   `.plans/2026-10-02-rust-core-and-tauri-shell.md`).
 
    Implemented by WP4c of `.plans/2026-10-02-rust-core-and-tauri-shell.md`:
    `crates/steno-speech-sidecar` with `SidecarSpeechEngine` in `crates/steno-speech`.
