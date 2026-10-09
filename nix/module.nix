@@ -1,5 +1,6 @@
 # `programs.steno`: Steno on NixOS. The package, launch at login as a
-# systemd user service, PipeWire and a Secret Service provider. Item X7 of
+# systemd user service, PipeWire, and GNOME Keyring as the Secret Service
+# where nothing else provides one. Item X7 of
 # .plans/2026-10-07-stable-promotion.md. The handover port in the firewall
 # is X4's and not here yet.
 {packages}: {
@@ -43,10 +44,12 @@ in {
       default = true;
       description = ''
         Start Steno with the graphical session, as the systemd user service
-        `steno.service`. The app then leaves launch at login to the system
-        (`STENO_LOGIN_ITEM=managed`) and writes no autostart entry of its
-        own. Needs a session that reaches `graphical-session.target`: GNOME,
-        Plasma, or Hyprland with `programs.hyprland.withUWSM`.
+        `steno.service`, which sets `STENO_LOGIN_ITEM=managed`. X5 reads
+        it: the app then leaves launch at login to the system and writes no
+        autostart entry of its own. A rebuild never restarts or stops a
+        running Steno; the new version starts at the next login. Needs a
+        session that reaches `graphical-session.target`: GNOME, Plasma, or
+        Hyprland with `programs.hyprland.withUWSM`.
       '';
     };
 
@@ -55,9 +58,9 @@ in {
       default = null;
       example = 15;
       description = ''
-        Raise logind's `InhibitDelayMaxSec` (5 s unless set) so that a
-        reboot or a power-off waits long enough for Steno to save a
-        recording in progress. Off unless set.
+        Sets logind's `InhibitDelayMaxSec` (systemd's default is 5 s) so
+        that a reboot or a power-off waits for Steno to save a recording in
+        progress. `null` leaves logind's setting alone.
       '';
     };
   };
@@ -67,8 +70,8 @@ in {
     users.users = lib.genAttrs cfg.users (_: {packages = [cfg.package];});
 
     # The package's stop timeout drop-ins for the unit the XDG autostart
-    # generator makes and for GNOME's app scope: `systemd.packages` links
-    # lib/systemd/user/ into the user units as well.
+    # generator makes and for GNOME's app scope, once P5 (#227) lands:
+    # `systemd.packages` links lib/systemd/user/ into the user units as well.
     systemd.packages = [cfg.package];
 
     systemd.user.services.steno = lib.mkIf cfg.launchAtLogin {
@@ -82,27 +85,39 @@ in {
       # names what it opens files and links with.
       enableDefaultPath = false;
       environment.STENO_LOGIN_ITEM = "managed";
+      # A switch that changes or removes the unit (a nixpkgs bump changes
+      # its LOCALE_ARCHIVE and TZDIR) leaves a running Steno alone instead
+      # of stopping a recording; the new unit applies at the next login.
+      restartIfChanged = false;
+      unitConfig.X-StopOnRemoval = false;
       serviceConfig = {
         Type = "exec";
         ExecStart = executable;
         Slice = "app.slice";
-        # The save of a recording in progress at logout (P5 of the plan).
+        # The save of a recording in progress at logout (P5 of
+        # .plans/2026-10-07-stable-promotion.md).
         TimeoutStopSec = "20s";
       };
     };
-    # A Steno started from the launcher in the same session agrees that
-    # the service owns launch at login.
+    # For X5: a Steno started from the launcher in the same session then
+    # agrees that the service owns launch at login.
     environment.sessionVariables = lib.mkIf cfg.launchAtLogin {STENO_LOGIN_ITEM = "managed";};
 
     # Capture is native PipeWire.
     services.pipewire.enable = lib.mkDefault true;
     security.rtkit.enable = lib.mkDefault true;
 
-    # A Secret Service for the app's secrets. Plasma brings KWallet's;
-    # anything else gets GNOME Keyring unless the configuration says
-    # otherwise.
-    services.gnome.gnome-keyring.enable =
-      lib.mkDefault (!config.services.desktopManager.plasma6.enable);
+    # GNOME Keyring as the Secret Service for the app's secrets once #221
+    # moves them there (until then they are a 0600 file). Not where another
+    # one runs (Plasma's KWallet, pass-secret-service), and not beside
+    # `programs.ssh.startAgent`: the keyring brings gcr's SSH agent, which
+    # nixpkgs refuses next to it. Never set to false, so a desktop's own
+    # `mkDefault true` does not conflict.
+    services.gnome.gnome-keyring.enable = lib.mkIf (!(
+      config.services.desktopManager.plasma6.enable
+      || config.services.passSecretService.enable
+      || config.programs.ssh.startAgent
+    )) (lib.mkDefault true);
 
     services.logind.settings.Login = lib.mkIf (cfg.inhibitDelayMaxSec != null) {
       InhibitDelayMaxSec = cfg.inhibitDelayMaxSec;
