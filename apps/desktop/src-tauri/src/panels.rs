@@ -687,15 +687,6 @@ fn refresh(app: &AppHandle) {
     }
 }
 
-/// The recorder's state as the last `recording` snapshot gave it
-/// (`note_recording`); a lock a panic left behind still holds the last one.
-pub fn recording(app: &AppHandle) -> RecordingState {
-    *app.state::<Panels>()
-        .recording
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// A `recording` snapshot reached the main window.
 pub fn note_recording(app: &AppHandle, state: RecordingState) {
     if let Ok(mut recording) = app.state::<Panels>().recording.lock() {

@@ -835,7 +835,9 @@ impl App {
     /// Where the secret store can ask (the Secret Service), steps 3 and 4
     /// (all but the sweep) wait until it chose and the reread below ran, so
     /// no meeting, export or recovered recording runs on a pipeline built
-    /// without the key. The choice includes the unlock and the first
+    /// without the key, and the update schedule waits until it chose, so
+    /// its launch tick's alert does not come up beside the keyring's
+    /// prompt. The choice includes the unlock and the first
     /// launch's move or a later launch's tidy; on a locked keyring or
     /// `KeePassXC` each of their prompts may stay up for two minutes, so a
     /// meeting a crash left processing can show as processing that long (it
@@ -857,6 +859,7 @@ impl App {
         let recorder_host = host.clone();
         self.recorder
             .on_change(Arc::new(move || recorder_host.recorder_changed()));
+        self.report_update_checks(host);
 
         let mut receiver = self.events.subscribe();
         let sweep = self.sweep.clone();
@@ -924,20 +927,28 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+        let updates = self.updates.clone();
         let work = match unlocked {
             None => {
                 recover();
                 run_sweep(&self.sweep);
+                if let Some(updates) = updates {
+                    updates.start();
+                }
                 tokio::task::spawn_blocking(reconcile)
             }
             // The pipeline built while the keyring asked has no API key, so
             // the meetings and the interrupted recordings wait for the one
-            // built after the answer.
+            // built after the answer. The update schedule waits for the
+            // answer too.
             Some(unlocked) => {
                 run_sweep(&self.sweep);
                 let reread = self.reread_after_unlock(host);
                 tokio::spawn(async move {
                     let read_again = unlocked.await;
+                    if let Some(updates) = updates {
+                        updates.start();
+                    }
                     let _ = tokio::task::spawn_blocking(move || {
                         if read_again {
                             reread();
@@ -957,9 +968,18 @@ impl App {
         host.store_changed();
     }
 
-    /// The launch's step 5: the login item registered the first time, the
-    /// handover listener started when a phone is already paired, and the
-    /// update schedule started.
+    /// The host hears of every update check from here on, the launch
+    /// tick's included.
+    fn report_update_checks(&self, host: &Arc<Host>) {
+        if let Some(updates) = &self.updates {
+            let updates_host = host.clone();
+            updates.on_change(Arc::new(move || updates_host.updates_changed()));
+        }
+    }
+
+    /// The launch's step 5, but the update schedule: the login item
+    /// registered the first time, and the handover listener started when a
+    /// phone is already paired.
     fn start_alongside(&self, host: &Arc<Host>) {
         host.register_login_item_on_first_launch();
         if let Some(handover) = self
@@ -969,10 +989,6 @@ impl App {
             .cloned()
         {
             tokio::spawn(async move { start_if_paired(&handover).await });
-        }
-        if let Some(updates) = &self.updates {
-            let updates_host = host.clone();
-            updates.start(Arc::new(move || updates_host.updates_changed()));
         }
     }
 
@@ -1807,13 +1823,14 @@ mod tests {
             async fn download(&self, _version: &str) -> Result<Vec<u8>, String> {
                 Ok(Vec::new())
             }
-            async fn install_and_relaunch(
-                &self,
-                _version: &str,
-                _package: Option<Vec<u8>>,
-            ) -> Result<(), String> {
+            async fn install(&self, _version: &str, _package: Vec<u8>) -> Result<(), String> {
                 Ok(())
             }
+            async fn relaunch(&self) {}
+            async fn ask(&self, _question: crate::updates::Question<'_>) -> bool {
+                false
+            }
+            fn tell_install_failed(&self, _message: &str) {}
             fn announce(&self, _version: &str) {}
         }
         let dir = tempfile::tempdir().unwrap();

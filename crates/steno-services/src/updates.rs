@@ -26,11 +26,20 @@
 //! - **A found update** is announced once per version in a run
 //!   ([`UpdateSource::announce`]), as Sparkle's update alert, but not while
 //!   a recording starts, runs or stops; the first tick after it ends
-//!   announces it. The user installs it from there; a yes given after a
-//!   recording has started asks once more, since installing stops and
-//!   saves it ([`stops_a_recording`], the shell's `offer`), and a "Not
-//!   Now" there leaves the version to announce again
+//!   announces it. The user installs it from there
+//!   ([`UpdateSchedule::offer`]): a yes given after a recording has
+//!   started asks once more, since installing stops and saves it, and a
+//!   "Not Now" there leaves the version to announce again
 //!   ([`UpdateSchedule::announce_again`]).
+//! - **An install** downloads first, unless the package is kept, and then
+//!   holds recording starts off ([`Recorder::hold_starts`]) through the
+//!   install, the shutdown and the relaunch; a Record meanwhile is refused
+//!   and says [`INSTALLING_UPDATE`](steno_host::services::INSTALLING_UPDATE).
+//!   A recording the user did not agree to stop, one that started during
+//!   the download, puts the install off: the package is kept and the
+//!   version announced again, and the next yes installs it without a
+//!   second download. One install runs at a time, and only of the version
+//!   the last check found.
 //! - **Automatic downloads** wait for P25's [`InstallGate`] (stable plan):
 //!   until it replaces [`NeverIdle`], the flag is stored and shown but
 //!   nothing downloads by itself. With the gate, a found update is
@@ -38,9 +47,9 @@
 //!   installed while the install holds the gate's [`InstallHold`] through
 //!   the install, the shutdown and the relaunch; while the app is busy the
 //!   download, and then the install, wait for a later tick. The schedule
-//!   keeps the downloaded package until an install takes it, and frees it
-//!   when a check finds another version, or none, and when automatic
-//!   downloads are turned off.
+//!   keeps the downloaded package, its own or one a put-off install handed
+//!   back, until an install takes it, and frees it when a check finds
+//!   another version, or none, and when automatic downloads are turned off.
 //! - **Packaged installs** ([`updates_are_managed`], stable plan X5): no
 //!   schedule, and no check, the user's included.
 //!
@@ -48,13 +57,15 @@
 //! as the tray's Check for Updates, and sends nothing else.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use steno_bridge::RecordingState;
-use steno_host::services::{Clock, Preferences, Recorder, UpdateOutcome, Updater};
+use steno_host::services::{Clock, Preferences, Recorder, RecorderStatus, UpdateOutcome, Updater};
+use uuid::Uuid;
 
 use crate::files::{Access, replace_file};
 
@@ -112,6 +123,8 @@ fn managed_by(environment: Option<&str>, build: Option<&str>) -> bool {
 
 /// What an install holds while it installs and relaunches: until it is
 /// dropped no recording starts, no save runs and no processing job begins.
+/// The recording half is the recorder's [`Recorder::hold_starts`], which
+/// every install takes itself; the gate adds the rest.
 pub type InstallHold = Box<dyn Send>;
 
 /// Whether an update may install and relaunch the app now (stable plan
@@ -132,10 +145,37 @@ pub trait InstallGate: Send + Sync {
 }
 
 /// Whether installing now would stop a recording: one is starting, running
-/// or stopping. The announcement waits while it does, and the shell asks
-/// again before a yes given meanwhile installs.
-pub fn stops_a_recording(state: RecordingState) -> bool {
+/// or stopping. The announcement waits while it does, and a yes given
+/// meanwhile asks again before it installs.
+fn stops_a_recording(state: RecordingState) -> bool {
     state != RecordingState::Idle
+}
+
+/// What the user's install asks ([`UpdateSource::ask`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Question<'a> {
+    /// The update alert for this version: install it now and relaunch?
+    Install(&'a str),
+    /// A yes given while a recording is under way: installing stops and
+    /// saves it, go ahead? The answer that does not install is the
+    /// default, since this dialog follows the alert's yes and a second
+    /// Return would pass it unread.
+    StopRecording,
+}
+
+/// How an install ended, when it returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Installed {
+    /// The relaunch is under way (in a test, it returned).
+    Relaunching,
+    /// A recording the user did not agree to stop is under way: the
+    /// package is kept and the version announced again.
+    PutOff,
+    /// The install, or its download, failed; the user is told.
+    Failed,
+    /// Another install runs, or the last check found another version or
+    /// none, so nothing was installed.
+    Skipped,
 }
 
 /// The gate until P25 builds the real one: never idle, so the schedule
@@ -150,8 +190,10 @@ impl InstallGate for NeverIdle {
     }
 }
 
-/// The updater the schedule drives; the shell's runs the Tauri updater
-/// over the release lanes. Errors are the updater's words, which the
+/// The updater the schedule drives, and the dialogs it asks through; the
+/// shell's runs the Tauri updater over the release lanes. The schedule
+/// decides the order (download, start hold, install, relaunch); the source
+/// only carries each step out. Errors are the updater's words, which the
 /// General section shows.
 #[async_trait]
 pub trait UpdateSource: Send + Sync {
@@ -159,20 +201,22 @@ pub trait UpdateSource: Send + Sync {
     /// when this build is the newest.
     async fn check(&self) -> Result<Option<String>, String>;
     /// Downloads and verifies `version`, the update the last check found:
-    /// the package the schedule keeps for the install. Fails when the last
-    /// check found another version, or none.
+    /// the package an install writes. Fails when the last check found
+    /// another version, or none.
     async fn download(&self, version: &str) -> Result<Vec<u8>, String>;
-    /// Installs `version`, the update the last check found, from `package`
-    /// when [`Self::download`] fetched it, else downloading it now; runs the
-    /// shutdown and relaunches. Returns only when the install failed, or
-    /// was refused because the last check found another version, or none.
-    async fn install_and_relaunch(
-        &self,
-        version: &str,
-        package: Option<Vec<u8>>,
-    ) -> Result<(), String>;
-    /// Offers the found update to the user, who may install it then; the
-    /// shell confirms first when a recording has started since.
+    /// Writes `package`, the download of `version`, over the app. Fails
+    /// when the last check found another version, or none. On Windows the
+    /// installer ends the process once it runs (its exit runs the
+    /// shutdown), so it returns there only when it failed.
+    async fn install(&self, version: &str, package: Vec<u8>) -> Result<(), String>;
+    /// Runs the shutdown and relaunches into the installed version; returns
+    /// only in a test.
+    async fn relaunch(&self);
+    /// Asks the user `question`; true for the answer that installs.
+    async fn ask(&self, question: Question<'_>) -> bool;
+    /// Tells the user an install failed, with the updater's `message`.
+    fn tell_install_failed(&self, message: &str);
+    /// Offers the found update to the user ([`UpdateSchedule::offer`]).
     /// Swift: Sparkle's update alert.
     fn announce(&self, version: &str);
 }
@@ -190,8 +234,8 @@ struct State {
     /// by the attempt, so a failed download or install waits for the next
     /// check.
     to_download: Option<String>,
-    /// The package [`UpdateSource::download`] fetched, until an install
-    /// takes it.
+    /// The package [`UpdateSource::download`] fetched, or that a put-off
+    /// install handed back, until an install takes it.
     staged: Option<Staged>,
     /// The version last announced or shown to the user, so a later tick in
     /// this run does not ask again; a relaunch asks again, as Sparkle
@@ -230,6 +274,9 @@ pub struct UpdateSchedule {
     /// One check at a time: a tick that waited behind the user's check
     /// finds it no longer due.
     one_check: tokio::sync::Mutex<()>,
+    /// One install at a time ([`OneInstall`]), the download of the user's
+    /// included, so two dialogs answered yes do not write two packages.
+    installing: AtomicBool,
     on_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
@@ -250,7 +297,8 @@ pub struct ScheduleParts {
     pub preferences: Arc<dyn Preferences>,
     pub clock: Arc<dyn Clock>,
     pub gate: Arc<dyn InstallGate>,
-    /// The recorder, whose recording holds back the announcement.
+    /// The recorder, whose recording holds back the announcement and puts
+    /// an install off, and whose starts an install holds off.
     pub recorder: Arc<dyn Recorder>,
     /// Where [`LAST_CHECK_FILE`] lives.
     pub support_directory: PathBuf,
@@ -286,15 +334,20 @@ impl UpdateSchedule {
                 announced: None,
             }),
             one_check: tokio::sync::Mutex::new(()),
+            installing: AtomicBool::new(false),
             on_change: Mutex::new(None),
         })
     }
 
-    /// Calls `on_change` whenever a check starts or ends (the host's
-    /// `updates_changed`), and, unless the updates are managed, runs a tick
-    /// now and every [`TICK`] on the runtime.
-    pub fn start(&self, on_change: Arc<dyn Fn() + Send + Sync>) {
+    /// Calls `on_change` from now on whenever a check starts or ends (the
+    /// host's `updates_changed`).
+    pub fn on_change(&self, on_change: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.on_change) = Some(on_change);
+    }
+
+    /// Unless the updates are managed, runs a tick now and every [`TICK`]
+    /// on the runtime.
+    pub fn start(&self) {
         if self.managed {
             return;
         }
@@ -421,36 +474,137 @@ impl UpdateSchedule {
     }
 
     /// An install failed, the user's or the schedule's: the General section
-    /// says so.
-    pub fn install_failed(&self, message: String) {
+    /// says so, and the user is told.
+    fn install_failed(&self, message: String) {
+        self.source.tell_install_failed(&message);
         self.change(|state| {
             state.staged = None;
             state.outcome = UpdateOutcome::Failed(message);
         });
     }
 
+    /// Asks whether to install `version` now and, when the user agrees,
+    /// installs and relaunches ([`Self::install_on_request`]): after the
+    /// tray's check, and when the schedule announced an update it does not
+    /// install by itself. The dialog may have been open since before a
+    /// recording started, so when the recorder is no longer idle by the yes
+    /// it asks again first ([`Question::StopRecording`]); "Not Now", or
+    /// closing that dialog, leaves the version to announce again once the
+    /// recording has ended. Swift: Sparkle's update alert.
+    pub async fn offer(&self, version: &str) {
+        if !self.source.ask(Question::Install(version)).await {
+            return;
+        }
+        let status = self.recorder.status();
+        let agreed_to_stop = if stops_a_recording(status.state) {
+            if !self.source.ask(Question::StopRecording).await {
+                self.announce_again(version);
+                return;
+            }
+            status.meeting_id
+        } else {
+            None
+        };
+        self.install_on_request(version, agreed_to_stop).await;
+    }
+
     /// The user's install of `version`, after the dialog's yes: from the
-    /// kept package when it is that version. Returns only when the install
-    /// failed or was refused, which the General section then shows.
-    pub async fn install_on_request(&self, version: &str) {
-        let package = self
+    /// kept package when it is that version (one a put-off install left
+    /// there included), else downloaded now; then installed as
+    /// [`Self::install_now`] does, which may stop the recording of meeting
+    /// `agreed_to_stop` and no other. Nothing installs while another
+    /// install runs, or when the last check found another version, whose
+    /// own dialog asks; a version no longer found fails with a message.
+    async fn install_on_request(&self, version: &str, agreed_to_stop: Option<Uuid>) -> Installed {
+        let Some(_one) = OneInstall::start(&self.installing) else {
+            return Installed::Skipped;
+        };
+        let found = self.state().found.clone();
+        match found {
+            Some(found) if found == version => {}
+            Some(found) => {
+                tracing::info!(%version, %found, "a yes for an update the last check replaced");
+                return Installed::Skipped;
+            }
+            None => {
+                self.install_failed(format!("Steno {version} is no longer the update on offer."));
+                return Installed::Failed;
+            }
+        }
+        let kept = self
             .state()
             .staged
             .take_if(|staged| staged.version == version)
             .map(|staged| staged.package);
-        if let Err(message) = self.source.install_and_relaunch(version, package).await {
-            self.install_failed(message);
+        let package = match kept {
+            Some(package) => package,
+            None => match self.source.download(version).await {
+                Ok(package) => package,
+                Err(message) => {
+                    self.install_failed(message);
+                    return Installed::Failed;
+                }
+            },
+        };
+        self.install_now(version, package, agreed_to_stop).await
+    }
+
+    /// Installs the downloaded `package` of `version` and relaunches, while
+    /// holding recording starts off ([`Recorder::hold_starts`]) from just
+    /// before the install through the relaunch. The hold comes before the
+    /// install, not only before the relaunch, since on Windows the
+    /// installer ends the process itself. A recording under way once the
+    /// hold is taken, other than that of meeting `agreed_to_stop`, puts the
+    /// install off: the package goes back to the schedule ([`Self::keep`])
+    /// and the version is announced again.
+    async fn install_now(
+        &self,
+        version: &str,
+        package: Vec<u8>,
+        agreed_to_stop: Option<Uuid>,
+    ) -> Installed {
+        let hold = self.recorder.hold_starts();
+        if !may_stop(&self.recorder.status(), agreed_to_stop) {
+            drop(hold);
+            self.keep(version, package);
+            self.announce_again(version);
+            return Installed::PutOff;
+        }
+        match self.source.install(version, package).await {
+            Ok(()) => {
+                self.source.relaunch().await;
+                drop(hold);
+                Installed::Relaunching
+            }
+            Err(message) => {
+                drop(hold);
+                self.install_failed(message);
+                Installed::Failed
+            }
+        }
+    }
+
+    /// A put-off install hands its package back, kept while the last check
+    /// still found `version`.
+    fn keep(&self, version: &str, package: Vec<u8>) {
+        let mut state = self.state();
+        if state.found.as_deref() == Some(version) {
+            state.staged = Some(Staged {
+                version: version.to_owned(),
+                package,
+            });
         }
     }
 
     /// Whether a recording is starting, running or stopping now
-    /// ([`stops_a_recording`]): a yes to the dialog then asks again first.
-    pub fn recording_under_way(&self) -> bool {
+    /// ([`stops_a_recording`]).
+    fn recording_under_way(&self) -> bool {
         stops_a_recording(self.recorder.status().state)
     }
 
-    /// The user put off installing `version` because a recording is under
-    /// way: the first idle tick after it ends announces it again.
+    /// An install of `version` was put off because a recording is under
+    /// way (the user's "Not Now", or a recording started during the
+    /// download): the first idle tick after it ends announces it again.
     pub fn announce_again(&self, version: &str) {
         self.state()
             .announced
@@ -463,22 +617,17 @@ impl UpdateSchedule {
         let Some(hold) = self.gate.try_hold() else {
             return false;
         };
+        let Some(_one) = OneInstall::start(&self.installing) else {
+            return false;
+        };
         let Some(staged) = self.state().staged.take() else {
             return false;
         };
         let installed = self
-            .source
-            .install_and_relaunch(&staged.version, Some(staged.package))
+            .install_now(&staged.version, staged.package, None)
             .await;
         drop(hold);
-        match installed {
-            Ok(()) => true,
-            Err(message) => {
-                tracing::warn!("the downloaded update could not be installed: {message}");
-                self.install_failed(message);
-                false
-            }
-        }
+        installed == Installed::Relaunching
     }
 
     /// Announces the found update unless it was announced or shown in this
@@ -536,7 +685,8 @@ impl Updater for UpdateSchedule {
             .unwrap_or(AUTOMATIC_DOWNLOAD_DEFAULT)
     }
 
-    /// Turning automatic downloads off frees a kept package.
+    /// Turning automatic downloads off frees any kept package, a put-off
+    /// install's included, which the next yes downloads again.
     fn set_automatically_downloads(&self, enabled: bool) {
         self.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, enabled);
         if !enabled {
@@ -573,6 +723,30 @@ impl Updater for UpdateSchedule {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether an install may stop what the recorder is doing, as `status`
+/// says once starts are held off: nothing, or the recording of the meeting
+/// the user agreed to stop.
+fn may_stop(status: &RecorderStatus, agreed_to_stop: Option<Uuid>) -> bool {
+    !stops_a_recording(status.state)
+        || agreed_to_stop.is_some_and(|meeting| status.meeting_id == Some(meeting))
+}
+
+/// An install under way: while it lives a second one returns at once.
+struct OneInstall<'a>(&'a AtomicBool);
+
+impl<'a> OneInstall<'a> {
+    /// `None` while another install runs.
+    fn start(installing: &'a AtomicBool) -> Option<Self> {
+        (!installing.swap(true, Ordering::SeqCst)).then_some(OneInstall(installing))
+    }
+}
+
+impl Drop for OneInstall<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 /// [`LAST_CHECK_FILE`]'s one key.

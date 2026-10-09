@@ -24,15 +24,14 @@
 //! Swift: `apps/macos/Steno/Services/UpdaterController.swift`,
 //! `apps/macos/Steno/Services/UpdateChannels.swift`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use steno_services::updates::{
-    CHECK_TIMED_OUT, CHECK_TIMEOUT, MANAGED_CHECK, UpdateSchedule, UpdateSource,
+    CHECK_TIMED_OUT, CHECK_TIMEOUT, MANAGED_CHECK, Question, UpdateSchedule, UpdateSource,
 };
 use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_dialog::{
-    DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind,
+    DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
 use tauri_plugin_updater::{Update, UpdaterExt};
 
@@ -44,6 +43,9 @@ pub const STABLE_ENDPOINT: &str =
 /// the manifest of the newest pre-release or release.
 pub const BETA_ENDPOINT: &str =
     "https://github.com/NicolaiSchmid/steno/releases/download/desktop-beta/latest.json";
+
+/// The update alert's and the confirm's install button.
+const INSTALL: &str = "Install and Relaunch";
 
 /// Whether a marketing version is a pre-release (`UpdateChannels.allowed`:
 /// a hyphen means the beta lane).
@@ -69,12 +71,11 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry, tauri_plugin_updater::
 
 /// The update source the schedule drives, kept as Tauri managed state:
 /// the update the last check found, which the schedule's download and
-/// install name by version. The schedule keeps the downloaded package.
+/// install name by version, and the dialogs. The schedule decides the
+/// order and keeps the downloaded package.
 pub struct ShellUpdates {
     app: AppHandle,
     found: Mutex<Option<Update>>,
-    /// One install at a time ([`OneInstall`]).
-    installing: AtomicBool,
 }
 
 impl ShellUpdates {
@@ -82,34 +83,24 @@ impl ShellUpdates {
         ShellUpdates {
             app,
             found: Mutex::new(None),
-            installing: AtomicBool::new(false),
         }
     }
 
     /// The found update when it is `version`; the error says why not.
     fn found(&self, version: &str) -> Result<Update, String> {
-        lock(&self.found)
-            .clone()
-            .filter(|update| update.version == version)
-            .ok_or_else(|| format!("Steno {version} is no longer the update on offer."))
+        on_offer(lock(&self.found).clone(), version, |update| &update.version)
     }
 }
 
-/// An install under way: while it lives a second one returns at once, so
-/// two dialogs answered yes do not write two packages.
-struct OneInstall<'a>(&'a AtomicBool);
-
-impl<'a> OneInstall<'a> {
-    /// `None` while another install runs.
-    fn start(installing: &'a AtomicBool) -> Option<Self> {
-        (!installing.swap(true, Ordering::SeqCst)).then_some(OneInstall(installing))
-    }
-}
-
-impl Drop for OneInstall<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
+/// `found` when it is `version`; the error says why not.
+fn on_offer<T>(
+    found: Option<T>,
+    version: &str,
+    version_of: impl Fn(&T) -> &str,
+) -> Result<T, String> {
+    found
+        .filter(|update| version_of(update) == version)
+        .ok_or_else(|| format!("Steno {version} is no longer the update on offer."))
 }
 
 #[async_trait::async_trait]
@@ -143,66 +134,98 @@ impl UpdateSource for ShellUpdates {
             .map_err(|error| error.to_string())
     }
 
-    /// Installs `version` (from `package` when the schedule kept one, else
-    /// downloading it now), runs the shutdown and relaunches; a second
-    /// install while one runs returns at once, and a version the last check
-    /// no longer found is refused with a message.
+    /// Writes the package; on Windows the installer's own exit runs the
+    /// shutdown (`UpdateSource::check`).
+    async fn install(&self, version: &str, package: Vec<u8>) -> Result<(), String> {
+        self.found(version)?
+            .install(package)
+            .map_err(|error| error.to_string())
+    }
+
     /// The relaunch bypasses the exit request, so the shutdown runs first
     /// (`shut_down_before_exit`), as Sparkle's relaunch went through
-    /// `applicationShouldTerminate`; on Windows the installer's own exit
-    /// runs it (`UpdateSource::check`). An install that fails after that
-    /// shutdown ran (Windows: the installer did not launch) ends the app
-    /// once its message is closed: the recorder and the pipeline start
-    /// nothing after a shutdown, and the next Quit would run none.
-    async fn install_and_relaunch(
-        &self,
-        version: &str,
-        package: Option<Vec<u8>>,
-    ) -> Result<(), String> {
-        let app = &self.app;
-        let Some(_one) = OneInstall::start(&self.installing) else {
-            return Ok(());
-        };
-        let installed = async {
-            let update = self.found(version)?;
-            match package {
-                Some(bytes) => update.install(bytes),
-                None => update.download_and_install(|_, _| {}, || {}).await,
-            }
-            .map_err(|error| error.to_string())
-        }
+    /// `applicationShouldTerminate`.
+    async fn relaunch(&self) {
+        let handle = self.app.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            crate::shut_down_before_exit(&handle);
+        })
         .await;
-        match installed {
-            Ok(()) => {
-                let handle = app.clone();
-                let _ = tauri::async_runtime::spawn_blocking(move || {
-                    crate::shut_down_before_exit(&handle);
-                })
-                .await;
-                app.restart()
+        self.app.restart()
+    }
+
+    async fn ask(&self, question: Question<'_>) -> bool {
+        let dialog = Dialog::of(question);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app_dialog(&self.app, dialog.kind, dialog.message)
+            .buttons(dialog.buttons)
+            .show_with_result(move |result| {
+                let _ = sender.send(result);
+            });
+        receiver.await.is_ok_and(|result| installs(&result))
+    }
+
+    /// An install that fails after the shutdown ran (Windows: the
+    /// installer did not launch) ends the app once its message is closed:
+    /// the recorder and the pipeline start nothing after a shutdown, and
+    /// the next Quit would run none.
+    fn tell_install_failed(&self, message: &str) {
+        let shut_down = self.app.state::<steno_services::app::ExitGate>().released();
+        let handle = self.app.clone();
+        app_dialog(
+            &self.app,
+            MessageDialogKind::Error,
+            format!("The update could not be installed: {message}"),
+        )
+        .show(move |_| {
+            if shut_down {
+                handle.exit(0);
             }
-            Err(error) => {
-                let shut_down = app.state::<steno_services::app::ExitGate>().released();
-                let handle = app.clone();
-                dialog(
-                    app,
-                    MessageDialogKind::Error,
-                    format!("The update could not be installed: {error}"),
-                )
-                .show(move |_| {
-                    if shut_down {
-                        handle.exit(0);
-                    }
-                });
-                Err(error)
-            }
-        }
+        });
     }
 
     fn announce(&self, version: &str) {
         let (app, version) = (self.app.clone(), version.to_owned());
-        tauri::async_runtime::spawn(async move { offer(&app, &version).await });
+        tauri::async_runtime::spawn(async move {
+            if let Some(schedule) = schedule(&app) {
+                schedule.offer(&version).await;
+            }
+        });
     }
+}
+
+/// A question's dialog: its kind, its text and its buttons, the default
+/// first (macOS and Windows press the first button on Return, and GTK
+/// focuses it).
+struct Dialog {
+    kind: MessageDialogKind,
+    message: String,
+    buttons: MessageDialogButtons,
+}
+
+impl Dialog {
+    fn of(question: Question<'_>) -> Self {
+        match question {
+            Question::Install(version) => Dialog {
+                kind: MessageDialogKind::Info,
+                message: format!("Steno {version} is available. Install it and relaunch?"),
+                buttons: MessageDialogButtons::OkCancelCustom(INSTALL.into(), "Later".into()),
+            },
+            // "Not Now" first: the confirm comes up where the alert's
+            // Install was, so a second Return or click would pass it unread.
+            Question::StopRecording => Dialog {
+                kind: MessageDialogKind::Warning,
+                message: "Installing stops and saves the recording in progress.".to_owned(),
+                buttons: MessageDialogButtons::OkCancelCustom("Not Now".into(), INSTALL.into()),
+            },
+        }
+    }
+}
+
+/// Whether the button pressed installs: only the install button's own
+/// label; the other button, Escape and closing the dialog do not.
+fn installs(result: &MessageDialogResult) -> bool {
+    matches!(result, MessageDialogResult::Custom(label) if label == INSTALL)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -214,8 +237,8 @@ fn source(app: &AppHandle) -> Arc<ShellUpdates> {
     app.state::<Arc<ShellUpdates>>().inner().clone()
 }
 
-/// The schedule that records each check, when the host runs one (not for
-/// the fixture host, nor in a smoke run).
+/// The schedule that records each check and installs, when the host runs
+/// one (not for the fixture host, nor in a smoke run).
 fn schedule(app: &AppHandle) -> Option<Arc<UpdateSchedule>> {
     app.try_state::<crate::host::Host>()?.updates()
 }
@@ -234,7 +257,7 @@ async fn check_on_request(app: &AppHandle) -> Result<Option<String>, String> {
 }
 
 /// A message from the updater, one button unless the caller adds more.
-fn dialog(
+fn app_dialog(
     app: &AppHandle,
     kind: MessageDialogKind,
     message: impl Into<String>,
@@ -242,84 +265,34 @@ fn dialog(
     app.dialog().message(message).title("Steno").kind(kind)
 }
 
-/// Shows a two-button question and waits for the answer: true for `yes`;
-/// `no`, or a dialog closed without an answer, is false.
-async fn ask(
-    app: &AppHandle,
-    kind: MessageDialogKind,
-    message: String,
-    yes: &str,
-    no: &str,
-) -> bool {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    dialog(app, kind, message)
-        .buttons(MessageDialogButtons::OkCancelCustom(yes.into(), no.into()))
-        .show(move |agreed| {
-            let _ = sender.send(agreed);
-        });
-    receiver.await == Ok(true)
-}
-
-/// Whether a recording is starting, running or stopping now: the host's
-/// recorder when the host runs the schedule, else (the fixture host, a
-/// smoke run) the state the shell follows.
-fn recording_under_way(app: &AppHandle) -> bool {
-    match schedule(app) {
-        Some(schedule) => schedule.recording_under_way(),
-        None => steno_services::updates::stops_a_recording(crate::panels::recording(app)),
-    }
-}
-
-/// The tray's Check for Updates: checks, then asks before installing,
-/// as Sparkle's standard driver does. On a packaged install it says who
-/// delivers the updates instead.
+/// The tray's Check for Updates: checks, then offers to install
+/// (`UpdateSchedule::offer`), as Sparkle's standard driver does. On a
+/// packaged install it says who delivers the updates instead. Without a
+/// schedule (the fixture host, a smoke run) it only says what it found.
 pub async fn check_and_offer(app: &AppHandle) {
     match check_on_request(app).await {
-        Ok(Some(version)) => offer(app, &version).await,
+        Ok(Some(version)) => {
+            if let Some(schedule) = schedule(app) {
+                schedule.offer(&version).await;
+            } else {
+                let message =
+                    format!("Steno {version} is available. This build does not install it.");
+                app_dialog(app, MessageDialogKind::Info, message).show(|_| {});
+            }
+        }
         Ok(None) => {
-            dialog(app, MessageDialogKind::Info, "Steno is up to date.").show(|_| {});
+            app_dialog(app, MessageDialogKind::Info, "Steno is up to date.").show(|_| {});
         }
         Err(message) if message == MANAGED_CHECK => {
-            dialog(app, MessageDialogKind::Info, message).show(|_| {});
+            app_dialog(app, MessageDialogKind::Info, message).show(|_| {});
         }
         Err(message) => {
-            dialog(
+            app_dialog(
                 app,
                 MessageDialogKind::Error,
                 format!("The update check failed: {message}"),
             )
             .show(|_| {});
-        }
-    }
-}
-
-/// Asks whether to install `version` now and, when the user agrees,
-/// installs and relaunches: after the tray's check, and when the schedule
-/// found an update it does not install by itself (Sparkle's update alert).
-/// The dialog may have been open since before a recording started, so when
-/// the recorder is no longer idle by the yes it asks again first
-/// ("Installing stops and saves the recording in progress."); "Not Now",
-/// or closing that dialog, leaves the version for the schedule to announce
-/// once the recording has ended.
-async fn offer(app: &AppHandle, version: &str) {
-    const INSTALL: &str = "Install and Relaunch";
-    let message = format!("Steno {version} is available. Install it and relaunch?");
-    if !ask(app, MessageDialogKind::Info, message, INSTALL, "Later").await {
-        return;
-    }
-    if recording_under_way(app) {
-        let message = "Installing stops and saves the recording in progress.".to_owned();
-        if !ask(app, MessageDialogKind::Warning, message, INSTALL, "Not Now").await {
-            if let Some(schedule) = schedule(app) {
-                schedule.announce_again(version);
-            }
-            return;
-        }
-    }
-    match schedule(app) {
-        Some(schedule) => schedule.install_on_request(version).await,
-        None => {
-            let _ = source(app).install_and_relaunch(version, None).await;
         }
     }
 }
@@ -356,16 +329,50 @@ mod tests {
         }
     }
 
-    /// While one install runs a second does not start; once it ends, the
-    /// next may.
+    /// The update alert's default installs, as Sparkle's does; the
+    /// confirm's default is "Not Now", so a double Return or click passes
+    /// neither dialog into an install over a recording.
     #[test]
-    fn one_install_at_a_time() {
-        let installing = AtomicBool::new(false);
-        let first = OneInstall::start(&installing);
-        assert!(first.is_some());
-        assert!(OneInstall::start(&installing).is_none());
-        drop(first);
-        assert!(OneInstall::start(&installing).is_some());
+    fn the_confirms_default_button_does_not_install() {
+        let first = |question| match Dialog::of(question).buttons {
+            MessageDialogButtons::OkCancelCustom(first, second) => (first, second),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(first(Question::Install("0.12.0")).0, INSTALL);
+        let (default, other) = first(Question::StopRecording);
+        assert_eq!(default, "Not Now");
+        assert_eq!(other, INSTALL);
+        assert!(!installs(&MessageDialogResult::Custom(default)));
+        assert!(installs(&MessageDialogResult::Custom(other)));
+    }
+
+    /// Only the install button installs: Escape, closing the dialog and
+    /// any other result do not.
+    #[test]
+    fn only_the_install_button_installs() {
+        for result in [
+            MessageDialogResult::Cancel,
+            MessageDialogResult::Ok,
+            MessageDialogResult::Yes,
+            MessageDialogResult::No,
+            MessageDialogResult::Custom("Later".into()),
+        ] {
+            assert!(!installs(&result), "{result:?}");
+        }
+    }
+
+    /// The download and the install name the update the last check found,
+    /// and only that one.
+    #[test]
+    fn only_the_version_on_offer_installs() {
+        let found = |version: &str| Some(version.to_owned());
+        assert_eq!(
+            on_offer(found("0.12.0"), "0.12.0", String::as_str),
+            Ok("0.12.0".to_owned())
+        );
+        let refused = Err("Steno 0.12.0 is no longer the update on offer.".to_owned());
+        assert_eq!(on_offer(found("0.13.0"), "0.12.0", String::as_str), refused);
+        assert_eq!(on_offer(None, "0.12.0", String::as_str), refused);
     }
 
     #[test]
