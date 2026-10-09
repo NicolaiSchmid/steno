@@ -164,6 +164,7 @@ pub fn app_over_fakes(
         updates: None,
         handover: None,
         gated_handover: None,
+        import_gate: None,
         recorder,
         models_directory: root.join("models"),
         zone,

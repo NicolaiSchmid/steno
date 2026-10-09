@@ -138,6 +138,14 @@ fn the_swift_identity_exports_from_a_keychain_and_keeps_its_fingerprint_and_mac_
         "no key item yet"
     );
     assert!(!swift.has_stored_identity().unwrap(), "no entry yet");
+    // The import's marker: added into the test's keychain (an item of this
+    // process's own, so nothing prompts), found by its attributes, and a
+    // second add leaves it as it is.
+    assert!(!swift.import_done().unwrap(), "no marker yet");
+    swift.mark_import_done().unwrap();
+    assert!(swift.import_done().unwrap(), "the marker is found");
+    swift.mark_import_done().unwrap();
+    assert!(swift.import_done().unwrap());
 
     let passphrase = "a passphrase for this export";
     let exported = swift.export_identity(&certificate_der, passphrase).unwrap();

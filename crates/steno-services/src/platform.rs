@@ -101,8 +101,13 @@ pub struct FilePreferences {
 }
 
 impl FilePreferences {
+    /// Crate-only, as is [`Self::in_support_directory`]: every write
+    /// replaces the whole file from this instance's map, so a second
+    /// instance on the same file would drop the first one's later flags.
+    /// The graph builds the one instance (`crate::build_with_import`) and
+    /// hands it to the Swift import's launch half and to the host.
     #[must_use]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let (values, writable) = read_json(&path);
         FilePreferences {
@@ -116,7 +121,7 @@ impl FilePreferences {
 impl FilePreferences {
     /// `preferences.json` under `support_directory`.
     #[must_use]
-    pub fn in_support_directory(support_directory: &Path) -> Self {
+    pub(crate) fn in_support_directory(support_directory: &Path) -> Self {
         Self::new(support_directory.join("preferences.json"))
     }
 

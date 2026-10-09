@@ -35,8 +35,8 @@ use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
 use crate::recovery::{Interrupted, LiveRecordingCheck, adopt_orphans, reconcile_interrupted};
 use crate::secrets::{KeepsApiKey, KeyringUnavailable, SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
+use crate::swift_import::{GraphImport, HandoverGate, ImportGate};
 use crate::updates::{InstallGate, NeverIdle, ScheduleParts, UpdateSchedule, UpdateSource};
-use crate::swift_import::GraphImport;
 
 /// What stops the graph from being built: another process holds the
 /// database ([`DatabaseLock`]), or the database could not be opened or
@@ -137,6 +137,9 @@ pub struct App {
     /// The handover while the Swift import is pending: its listener comes
     /// once the import's gate opens (`crate::swift_import`).
     pub gated_handover: Option<Arc<GatedHandover>>,
+    /// The Swift import's gate while it is pending: [`App::launch`] holds
+    /// the resume, the re-exports and the recovery until the step is over.
+    pub import_gate: Option<Arc<ImportGate>>,
     pub recorder: Arc<CaptureRecorder>,
     /// Where the speech and diarization models live.
     pub models_directory: std::path::PathBuf,
@@ -206,6 +209,30 @@ fn api_key(
         .map_err(|error| format!("Could not read the LLM API key from the secret store: {error}"))
 }
 
+/// What the pipeline reads the API key through ([`pipeline_dependencies`]):
+/// the graph's secret store, behind the Swift import's gate when there is
+/// one, so a key the gate withholds is never read from the keychain; the
+/// app's [`KeepsApiKey`] inside it, whose kept key a failed read falls back
+/// on; and that gate.
+#[derive(Clone)]
+pub struct PipelineSecrets {
+    pub secrets: Arc<dyn SecretStore>,
+    pub kept: Arc<KeepsApiKey>,
+    pub key_gate: Option<Arc<ImportGate>>,
+}
+
+impl PipelineSecrets {
+    /// `kept` read directly, behind no gate.
+    #[must_use]
+    pub fn ungated(kept: Arc<KeepsApiKey>) -> Self {
+        PipelineSecrets {
+            secrets: kept.clone(),
+            kept,
+            key_gate: None,
+        }
+    }
+}
+
 /// The dependencies of one pipeline from the stored settings, the API key
 /// and `engines`, shared by the first build and every reload, with the
 /// speech engine and the diarizer `engines` keeps: the engine for the
@@ -214,20 +241,24 @@ fn api_key(
 /// so the two agree on where each engine runs; the recorder's warm-up
 /// reads the engine from the pipeline. A secret store that cannot be read
 /// is logged, and the passes are built with the key last read or written
-/// through `secrets` ([`KeepsApiKey`]), or without one: a keyring locked
-/// again while the app runs keeps the key a rebuild had, and a key the user
-/// removed or changed is never the one kept.
+/// through the app's store ([`KeepsApiKey`]), or without one: a keyring
+/// locked again while the app runs keeps the key a rebuild had, and a key
+/// the user removed or changed is never the one kept. While the Swift
+/// import's gate withholds the key ([`ImportGate::key_withheld`]) an
+/// endpoint other than the Codex backend gets no passes, as when no
+/// summaries are set up: the meeting completes without a summary instead
+/// of failing at it, and its summary can be run again once a key is saved.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,
-    secrets: &KeepsApiKey,
+    secrets: &PipelineSecrets,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
 ) -> Result<BuiltPipeline, BuildError> {
     let settings = store.settings()?;
-    let api_key = api_key(secrets, runtime).unwrap_or_else(|warning| {
-        let kept = secrets.kept_api_key();
+    let api_key = api_key(secrets.secrets.as_ref(), runtime).unwrap_or_else(|warning| {
+        let kept = secrets.kept.kept_api_key();
         if kept.is_some() {
             tracing::warn!("{warning}; the pipeline keeps the key it last had");
         } else {
@@ -236,7 +267,17 @@ pub fn pipeline_dependencies(
         kept
     });
     let zone = steno_adapters::runtime::local_time_zone();
-    let passes = crate::llm::passes(&settings, api_key.as_deref(), codex, zone);
+    let withheld = secrets
+        .key_gate
+        .as_deref()
+        .is_some_and(ImportGate::key_withheld)
+        && steno_llm::LlmEndpoint::from_settings(&settings)
+            .is_some_and(|endpoint| !endpoint.is_codex_backend());
+    let passes = if withheld {
+        None
+    } else {
+        crate::llm::passes(&settings, api_key.as_deref(), codex, zone)
+    };
     let speech = engines.setup();
     let engine_runtime = speech.runtime(&settings.speech_engine_id);
     let speech_engine = engines.engine(engine_runtime);
@@ -267,7 +308,7 @@ pub fn pipeline_dependencies(
 fn make_dependencies(
     store: &Arc<Store>,
     engines: &Arc<SpeechEngines>,
-    secrets: &Arc<KeepsApiKey>,
+    secrets: &PipelineSecrets,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
@@ -442,9 +483,10 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
     }
 }
 
-/// The secret store the graph reads through: the import's gate over
-/// `secrets` while an import is pending, else `secrets` behind the gate of
-/// a refused key read, if any ([`crate::swift_import::key_denied_secrets`]).
+/// The secret store the graph reads through, with the gate the pipeline
+/// asks whether the key is withheld: the import's gate over `secrets`
+/// while an import is pending, else `secrets` behind the gate of a refused
+/// key read, if any ([`crate::swift_import::key_denied_secrets`]).
 /// That gate is the keychain's only: over the secrets file (`file`, the
 /// CLI's on the Mac, which never asks the keychain) the key stays
 /// readable, so a run with `STENO_LLM_API_KEY` set still gets its key.
@@ -455,53 +497,22 @@ fn gated_secrets(
     preferences: &Arc<FilePreferences>,
     secrets: Arc<dyn SecretStore>,
     file: bool,
-) -> (Option<GraphImport>, Arc<dyn SecretStore>) {
+) -> (
+    Option<GraphImport>,
+    Arc<dyn SecretStore>,
+    Option<Arc<ImportGate>>,
+) {
     match pending {
         Some(pending) => {
             let import = GraphImport::new(pending, secrets);
-            let gated = import.secrets.clone();
-            (Some(import), gated)
+            let (gated, gate) = (import.secrets.clone(), import.gate.clone());
+            (Some(import), gated, Some(gate))
         }
-        None if file => (None, secrets),
-        None => (
-            None,
-            crate::swift_import::key_denied_secrets(preferences, secrets),
-        ),
-    }
-}
-
-/// Refuses to build the listener, which mints an identity when none is
-/// stored, while the store has a paired phone (or cannot say) and the
-/// stored identity is missing or cannot be read: a paired phone proves
-/// that an identity existed, and a new one would make every phone pair
-/// again. Both listeners ask it first, the one built at launch and the
-/// gated one: the import's gate opens the listener only after the Swift
-/// identity was stored, so there this holds only when the identity was
-/// lost since, or the Swift certificate disappeared before the step; at
-/// launch it holds when the identity was lost, or the launch half missed
-/// the Swift certificate. Once #221 merges, its guard in
-/// `HandoverIdentity::load_or_create` takes this one's place.
-fn refuse_to_mint_over_paired_phones(
-    store: &Store,
-    secrets: &Arc<dyn SecretStore>,
-    runtime: &tokio::runtime::Handle,
-) -> Result<(), String> {
-    let stored = block_on(
-        runtime,
-        secrets.secret(&steno_handover::HandoverIdentity::secret_key()),
-    );
-    match stored {
-        Ok(Some(_)) => Ok(()),
-        Err(error) => Err(format!(
-            "the handover identity could not be read, so none is minted: {error}"
-        )),
-        Ok(None) => match store.paired_devices() {
-            Ok(devices) if devices.is_empty() => Ok(()),
-            _ => Err(
-                "phones are paired but no handover identity is stored, so none is minted"
-                    .to_owned(),
-            ),
-        },
+        None if file => (None, secrets, None),
+        None => {
+            let (gated, gate) = crate::swift_import::key_denied_secrets(preferences, secrets);
+            (None, gated, gate)
+        }
     }
 }
 
@@ -527,7 +538,6 @@ fn gated_handover(
         store.clone(),
         import.gate.subscribe(),
         Box::new(move || {
-            refuse_to_mint_over_paired_phones(&store, &secrets, &runtime)?;
             handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
         }),
     ))
@@ -612,7 +622,8 @@ pub fn build_with_import(
     let store = open_store(&database_path)?;
     let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
     let kept = Arc::new(KeepsApiKey::new(secrets));
-    let (import, secrets) = gated_secrets(pending, &preferences, kept.clone(), !options.keyring);
+    let (import, secrets, key_gate) =
+        gated_secrets(pending, &preferences, kept.clone(), !options.keyring);
     let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
@@ -628,7 +639,19 @@ pub fn build_with_import(
     let speech = engines.setup();
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
-    let make = make_dependencies(&store, &engines, &kept, &codex, &events, &runtime);
+    let pipeline_secrets = PipelineSecrets {
+        secrets: secrets.clone(),
+        kept,
+        key_gate,
+    };
+    let make = make_dependencies(
+        &store,
+        &engines,
+        &pipeline_secrets,
+        &codex,
+        &events,
+        &runtime,
+    );
     let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
     let sweep = RetentionSweep::new(store.clone());
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
@@ -654,8 +677,7 @@ pub fn build_with_import(
     let handover = if gated_handover.is_some() {
         None
     } else {
-        refuse_to_mint_over_paired_phones(&store, &secrets, &runtime)
-            .and_then(|()| handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime))
+        handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
             .inspect_err(|error| warnings.push(format!("Phone handover is unavailable: {error}")))
             .ok()
     };
@@ -726,6 +748,7 @@ pub fn build_with_import(
         updates,
         handover,
         gated_handover,
+        import_gate: import.map(|import| import.gate),
         recorder,
         models_directory: speech.models_directory.clone(),
         zone,
@@ -1041,9 +1064,17 @@ impl App {
     ///    is being processed." under the Record control
     ///    (`CaptureRecorder::note_adopted`); the list is refreshed.
     /// 5. Meanwhile the login item is registered the first time, the
-    ///    handover listener starts when a phone is already paired, and the
-    ///    update schedule starts with its launch tick
+    ///    handover listener starts when a phone is already paired, or,
+    ///    behind the Swift import's gate, once the identity came over, and
+    ///    the update schedule starts with its launch tick
     ///    ([`UpdateSchedule::start`]).
+    ///
+    /// While the Swift import is pending ([`App::import_gate`]), steps 3
+    /// and 4 wait on a task of their own until the onboarding step ran or
+    /// was skipped ([`ImportGate::step_over`]): the pipeline has reloaded
+    /// with what the step read by then, so a meeting the Swift app left
+    /// queued is not processed without the key. [`App::launch_finished`]
+    /// then waits for the step too.
     ///
     /// Where the secret store can ask (the Secret Service), steps 3 and 4
     /// (all but the sweep) wait until it chose and the reread below ran, so
@@ -1120,46 +1151,8 @@ impl App {
             }
         });
 
-        let recover = self.recover_unfinished();
         let reconcile = self.reconcile_listed(host);
-        let unlocked = self
-            .secrets_unlocked
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let updates = self.updates.clone();
-        let work = match unlocked {
-            None => {
-                recover();
-                run_sweep(&self.sweep);
-                if let Some(updates) = updates {
-                    updates.start();
-                }
-                tokio::task::spawn_blocking(reconcile)
-            }
-            // The pipeline built while the keyring asked has no API key, so
-            // the meetings and the interrupted recordings wait for the one
-            // built after the answer. The update schedule waits for the
-            // answer too.
-            Some(unlocked) => {
-                run_sweep(&self.sweep);
-                let reread = self.reread_after_unlock(host);
-                tokio::spawn(async move {
-                    let read_again = unlocked.await;
-                    if let Some(updates) = updates {
-                        updates.start();
-                    }
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if read_again {
-                            reread();
-                        }
-                        recover();
-                        reconcile();
-                    })
-                    .await;
-                })
-            }
-        };
+        let work = self.recover_at_launch(host, reconcile);
         *self
             .launch_work
             .lock()
@@ -1193,6 +1186,74 @@ impl App {
         if let Some(gated) = &self.gated_handover {
             let phones_host = host.clone();
             tokio::spawn(gated.clone().follow(move || phones_host.phones_changed()));
+        }
+    }
+
+    /// Steps 3 and 4 of [`App::launch`], the recovery then `reconcile`:
+    /// at once, or, while the secret store asks the user or the Swift
+    /// import is pending, on a task of their own once the keyring answered
+    /// and the step ran.
+    fn recover_at_launch(
+        &self,
+        host: &Arc<Host>,
+        reconcile: impl FnOnce() + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        let unlocked = self
+            .secrets_unlocked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let held = self
+            .import_gate
+            .clone()
+            .filter(|gate| gate.handover() == HandoverGate::Pending);
+        let recover = self.recover_unfinished();
+        let updates = self.updates.clone();
+        if unlocked.is_none() && held.is_none() {
+            recover();
+            run_sweep(&self.sweep);
+            if let Some(updates) = updates {
+                updates.start();
+            }
+            tokio::task::spawn_blocking(reconcile)
+        } else {
+            // The pipeline built while the keyring asked, or while the
+            // Swift import was pending, has no API key, so the meetings and
+            // the interrupted recordings wait for the one built after the
+            // answer or the step. Behind the import the sweep waits too,
+            // so it runs after the resume, as without a wait. The update
+            // schedule waits for the keyring's answer, not for the step.
+            let sweep_now = held.is_none();
+            if sweep_now {
+                run_sweep(&self.sweep);
+            }
+            let (reread, sweep) = (self.reread_after_unlock(host), self.sweep.clone());
+            tokio::spawn(async move {
+                let read_again = match unlocked {
+                    Some(unlocked) => unlocked.await,
+                    None => false,
+                };
+                if let Some(updates) = updates {
+                    updates.start();
+                }
+                if let Some(gate) = held {
+                    gate.step_over().await;
+                }
+                let finished = tokio::task::spawn_blocking(move || {
+                    if read_again {
+                        reread();
+                    }
+                    recover();
+                    if !sweep_now {
+                        run_sweep(&sweep);
+                    }
+                    reconcile();
+                })
+                .await;
+                if finished.is_err() {
+                    tracing::warn!("the launch's held work did not finish");
+                }
+            })
         }
     }
 
@@ -1282,9 +1343,10 @@ impl App {
         }
     }
 
-    /// Waits until the launch's background half (`reconcile_at_launch`)
-    /// has run; at once when [`App::launch`] was not called or this was
-    /// already awaited.
+    /// Waits until the launch's background half (`reconcile_at_launch`,
+    /// and the work held for the keyring's answer or the Swift import's
+    /// step) has run; at once when [`App::launch`] was not called or this
+    /// was already awaited.
     pub async fn launch_finished(&self) {
         let work = self
             .launch_work
@@ -2303,7 +2365,7 @@ mod tests {
         let key = SecretKey::llm_api_key();
         secrets.set_secret(&key, Some("sk-stored")).await.unwrap();
         for (file, expected) in [(false, None), (true, Some("sk-stored"))] {
-            let (import, gated) = gated_secrets(None, &preferences, secrets.clone(), file);
+            let (import, gated, _) = gated_secrets(None, &preferences, secrets.clone(), file);
             assert!(import.is_none());
             assert_eq!(
                 gated.secret(&key).await.unwrap().as_deref(),
@@ -2345,7 +2407,7 @@ mod tests {
             again
                 .startup_warnings
                 .iter()
-                .any(|warning| warning.contains("none is minted")),
+                .any(|warning| warning.contains("pair again")),
             "{:?}",
             again.startup_warnings
         );
@@ -2876,6 +2938,87 @@ mod tests {
         }
     }
 
+    /// Counts the reads of the handover identity.
+    #[derive(Default)]
+    struct CountingIdentityReads {
+        inner: steno_core::testing::InMemorySecretStore,
+        reads: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SecretStore for CountingIdentityReads {
+        async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
+            if key.as_str() == steno_handover::HandoverIdentity::SECRET_KEY {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.secret(key).await
+        }
+
+        async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+            self.inner.set_secret(key, value).await
+        }
+    }
+
+    /// The listener reads the identity once, and builds on the bundle it
+    /// read: a stored identity, a minted one while no phone is paired, and
+    /// none at all once a phone is paired and the identity is gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_listener_reads_the_identity_once_and_mints_none_over_paired_phones() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = build(options_under(&dir.path().join("support"))).unwrap();
+        let runtime = tokio::runtime::Handle::current();
+        // A record of its own: the app's build minted and recorded one.
+        let paths = StenoPaths::new(dir.path().join("listener"));
+        let listener = |secrets: &Arc<CountingIdentityReads>| {
+            let secrets: Arc<dyn SecretStore> = secrets.clone();
+            let (store, pipeline, paths, zone) = (
+                app.store.clone(),
+                app.pipeline.clone(),
+                paths.clone(),
+                app.zone,
+            );
+            let runtime = runtime.clone();
+            std::thread::spawn(move || {
+                handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
+                    .map(|handover| steno_host::services::Handover::mac_id(handover.as_ref()))
+            })
+            .join()
+            .unwrap()
+        };
+        let minting = Arc::new(CountingIdentityReads::default());
+        let minted = listener(&minting).unwrap();
+        assert_eq!(minting.reads.load(Ordering::SeqCst), 1, "minted");
+        assert_eq!(listener(&minting).unwrap(), minted, "the stored one");
+        assert_eq!(minting.reads.load(Ordering::SeqCst), 2, "one read each");
+
+        app.store
+            .save_paired_device(
+                &PairedDevice {
+                    id: uuid::Uuid::new_v4(),
+                    name: "Phone".to_owned(),
+                    paired_at: chrono::Utc::now(),
+                    last_seen_at: None,
+                },
+                &[1; 32],
+            )
+            .unwrap();
+        let lost = Arc::new(CountingIdentityReads::default());
+        let refused = listener(&lost).unwrap_err();
+        assert!(refused.contains("pair again"), "{refused}");
+        assert_eq!(lost.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            block_on(
+                &runtime,
+                lost.inner
+                    .secret(&steno_handover::HandoverIdentity::secret_key())
+            )
+            .unwrap(),
+            None,
+            "an identity was minted over a paired phone"
+        );
+        app.shutdown();
+    }
+
     /// A secret store whose reads fail, as the keyring does without a
     /// default keychain.
     struct BrokenSecrets;
@@ -2899,7 +3042,7 @@ mod tests {
         let built = pipeline_dependencies(
             &store,
             &SpeechEngines::new(SpeechSetup::new(&store.settings().unwrap(), &paths)),
-            &secrets,
+            &PipelineSecrets::ungated(Arc::new(KeepsApiKey::new(Arc::new(BrokenSecrets)))),
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
@@ -2918,7 +3061,7 @@ mod tests {
     async fn authorization_sent(
         store: &Arc<Store>,
         paths: &StenoPaths,
-        secrets: &KeepsApiKey,
+        secrets: &PipelineSecrets,
         server: &steno_llm::testing::StubChatServer,
     ) -> Option<String> {
         let built = pipeline_dependencies(
@@ -2972,15 +3115,16 @@ mod tests {
             key.clone(),
             "sk-1".to_owned(),
         )]));
-        let secrets = KeepsApiKey::new(memory.clone());
+        let kept = Arc::new(KeepsApiKey::new(memory.clone()));
+        let secrets = PipelineSecrets::ungated(kept.clone());
         let sent = || authorization_sent(&store, &paths, &secrets, &server);
         assert_eq!(sent().await.as_deref(), Some("Bearer sk-1"));
 
         memory.fail_reads(Some("the keyring is locked"));
         assert_eq!(sent().await.as_deref(), Some("Bearer sk-1"), "kept");
-        secrets.set_secret(&key, Some("sk-2")).await.unwrap();
+        kept.set_secret(&key, Some("sk-2")).await.unwrap();
         assert_eq!(sent().await.as_deref(), Some("Bearer sk-2"), "changed");
-        secrets.set_secret(&key, None).await.unwrap();
+        kept.set_secret(&key, None).await.unwrap();
         assert_eq!(sent().await, None, "a removal while locked keeps no key");
 
         memory.fail_reads(None);

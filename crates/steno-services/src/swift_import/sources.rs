@@ -10,9 +10,12 @@ pub trait SwiftDefaults: Send + Sync {
     fn export(&self) -> Result<Vec<u8>, String>;
 }
 
-/// The Swift app's two keychain items in the login keychain: the handover
-/// identity (a certificate and a key item, `IdentityKeychain`) and the API
-/// key (a generic password, `KeychainSecretStore`).
+/// The keychain items the import reads in the login keychain: the Swift
+/// app's handover identity (a certificate and a key item,
+/// `IdentityKeychain`) and API key (a generic password,
+/// `KeychainSecretStore`), a desktop-id build's `handover-identity` entry,
+/// and the import's own marker ([`IMPORT_DONE_ENTRY`](super::IMPORT_DONE_ENTRY)),
+/// the one item it writes here.
 pub trait SwiftKeychain: Send + Sync {
     /// The DER of the certificate labelled
     /// [`SWIFT_IDENTITY_LABEL`](super::SWIFT_IDENTITY_LABEL), or `None`.
@@ -28,6 +31,13 @@ pub trait SwiftKeychain: Send + Sync {
     /// [`KEYRING_SERVICE`](crate::secrets::KEYRING_SERVICE). An attribute
     /// query, which asks nothing.
     fn has_stored_identity(&self) -> Result<bool, String>;
+    /// Whether the [`IMPORT_DONE_ENTRY`](super::IMPORT_DONE_ENTRY) marker
+    /// is filed under [`KEYRING_SERVICE`](crate::secrets::KEYRING_SERVICE).
+    /// An attribute query, which asks nothing.
+    fn import_done(&self) -> Result<bool, String>;
+    /// Adds the marker, an item of this app's own, so macOS asks nothing;
+    /// one already there is left as it is.
+    fn mark_import_done(&self) -> Result<(), String>;
     /// The API key; macOS asks for the login password once unless this
     /// app is already on the item's access list. `None` when the item is
     /// gone.
@@ -81,7 +91,9 @@ mod mac {
 
     use super::{ApiKeyItem, KeychainRefusal, SwiftDefaults, SwiftKeychain};
     use crate::secrets::KEYRING_SERVICE;
-    use crate::swift_import::{SWIFT_API_KEY_LABEL, SWIFT_DEFAULTS_DOMAIN, SWIFT_IDENTITY_LABEL};
+    use crate::swift_import::{
+        IMPORT_DONE_ENTRY, SWIFT_API_KEY_LABEL, SWIFT_DEFAULTS_DOMAIN, SWIFT_IDENTITY_LABEL,
+    };
 
     /// `/usr/bin/defaults export uno.schmid.steno.mac -`: the domain read
     /// by name, whatever this app's own identifier is.
@@ -194,6 +206,8 @@ mod mac {
 
     /// `errSecItemNotFound`.
     const ITEM_NOT_FOUND: i32 = -25300;
+    /// `errSecDuplicateItem`.
+    const DUPLICATE_ITEM: i32 = -25299;
 
     /// The label (`labl`) of an attribute query's result.
     fn label(result: &SearchResult) -> Option<String> {
@@ -233,6 +247,27 @@ mod mac {
 
         fn has_stored_identity(&self) -> Result<bool, String> {
             Ok(!self.passwords(HandoverIdentity::SECRET_KEY)?.is_empty())
+        }
+
+        fn import_done(&self) -> Result<bool, String> {
+            Ok(!self.passwords(IMPORT_DONE_ENTRY)?.is_empty())
+        }
+
+        fn mark_import_done(&self) -> Result<(), String> {
+            // Into the first keychain of the search list (the test's), else
+            // the default one, as `keyring` files the secrets.
+            let keychain = match self.keychains.first() {
+                Some(keychain) => keychain.clone(),
+                None => SecKeychain::default()
+                    .map_err(|error| format!("no default keychain: {error}"))?,
+            };
+            match keychain.add_generic_password(KEYRING_SERVICE, IMPORT_DONE_ENTRY, b"1") {
+                Ok(()) => Ok(()),
+                Err(error) if error.code() == DUPLICATE_ITEM => Ok(()),
+                Err(error) => Err(format!(
+                    "the {IMPORT_DONE_ENTRY} entry was not added: {error}"
+                )),
+            }
         }
 
         fn read_api_key(&self) -> Result<Option<String>, KeychainRefusal> {
