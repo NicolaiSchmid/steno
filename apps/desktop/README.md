@@ -368,18 +368,24 @@ channel does in the Swift app: a pre-release reads the beta manifest first,
 a release the stable one only (`updater.rs`; the manifests are under
 Release).
 
-Besides the tray's Check for Updates and Settings' Check Now, the update
+Besides Check for Updates in the tray and in Settings, the update
 schedule (`steno_services::updates`) checks at launch and every hour once
-the last check is a day old, as Sparkle's daily check did. Settings'
-switches are the booleans `steno.updates.automaticChecks` (on when
-missing) and `steno.updates.automaticDownload` (off when missing) in
-`preferences.json`; the last check time is `lastCheckAt`, RFC 3339 UTC,
-in `update-check.json` beside it, written only after a check that
-succeeded. To make the next launch check, set it back a day or delete the
-file. A found update brings up the Install and Relaunch dialog once; the
-app installs by itself only when its install gate says it is idle
-(`InstallGate`, which until then never does). With `STENO_DISTRIBUTION`
-set to `aur` or `nix` the schedule does not run.
+the last check is a day old, as Sparkle's daily check did. A check that
+has not answered after 60 seconds fails with "The update check timed
+out." Settings' switches are the booleans `steno.updates.automaticChecks`
+(on when missing) and `steno.updates.automaticDownload` (off when
+missing) in `preferences.json`; the last check time is `lastCheckAt`,
+RFC 3339 UTC, in `update-check.json` beside it, written only after a
+check that succeeded. To make the next launch check, set it back a day or
+delete the file. A found update brings up the Install and Relaunch dialog
+once per version in a run, and not while a recording runs: the first
+hourly tick after the recording ends brings it up. The app downloads and
+installs by itself only when its install gate says it is idle, and no
+build has that gate until P25 of `.plans/2026-10-07-stable-promotion.md`
+builds it; until then automatic downloads stay off in effect, and every
+install is the user's, from the dialog. With `STENO_DISTRIBUTION` set to
+`aur` or `nix` the schedule does not run and a check fails without a
+request.
 
 To run a debug binary against the embedded bundle instead of the dev server
 (what the smoke does), drop the dev URL through Tauri's own configuration
@@ -860,16 +866,17 @@ removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it
 lands the desktop app installs beside the Swift app on the Mac. WP6b
 filled the host's half of the WP8 seams except four; S4 of
 `.plans/2026-10-07-stable-promotion.md` later filled the updater and the
-QR encoder, and three remain (the plan's
-"Pipeline and services (WP6b)" list gives each one's reason and what
-closes it): the detection controller (WP5) is not ported, so nothing
+QR encoder, which leaves the detection controller, the permissions and
+the clip player (the plan's "Pipeline and services (WP6b)" list gives
+each one's reason and what closes it): the detection controller (WP5) is not ported, so nothing
 raises the prompt (`panels::set_prompt`) and its X
 (`panels::dismiss_prompt`) tells no one; the host's `Permissions` stay
 the services' fake (all granted), because `permissions` answers
 `unknown` off the Mac and for the Mac's system audio, which the host's
 onboarding opener counts as missing, so onboarding would open at every
 launch until the audio probe (WP5) and a rule for `unknown` land; and
-the clip player is a fake, which needs an audio output. The
+the clip player is a fake, which needs an audio output and follows the
+stable release. The
 host may treat the main window as always present: a close hides it, or
 ends the process when no tray stands, so publishing to it never fails for
 want of a window. Launch at login is a Launch Agent, not `SMAppService`;

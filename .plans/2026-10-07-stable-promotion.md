@@ -558,10 +558,14 @@ Every package is written in parallel except where a dependency is named:
     which R4 sets back by 25 hours. The flags are the booleans
     `steno.updates.automaticChecks` (missing: on, as `SUEnableAutomaticChecks`
     in the Swift Info.plist) and `steno.updates.automaticDownload` (missing:
-    off, Sparkle's default) in `preferences.json`. A found update raises the
-    "Install and Relaunch" dialog once per version; the schedule installs by
-    itself only with a hold from P25's `InstallGate::try_hold`, whose stand-in
-    `NeverIdle` gives none. `updates_are_managed` is X5's switch. The QR code is
+    off, Sparkle's default) in `preferences.json`. A check is also due when the
+    stored time is in the future (the clock was set back), and a check that has
+    not answered after 60 seconds fails. A found update raises the "Install and
+    Relaunch" dialog once per version in a run, not while a recording runs.
+    Automatic downloads wait for P25's gate: the schedule downloads and installs
+    by itself only with a hold from `InstallGate::try_hold`, and through the
+    stand-in `NeverIdle` it downloads nothing, so P25 turns the download on.
+    `updates_are_managed` is X5's switch. The QR code is
     the `qrcode` crate's, level M, as a greyscale PNG.
 - **S5 Handover on a changing network** (`fix/handover-republish`).
   - Re-register the Bonjour record when the interfaces change, on every
