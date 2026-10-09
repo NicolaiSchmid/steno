@@ -409,6 +409,35 @@ impl Array {
             .ok_or_else(|| SpeechError::CoreMl("empty f32 array".to_owned()))
     }
 
+    /// The elements of an `f32` array in first-major order, read through
+    /// the strides, so a strided model output reads as a dense one.
+    pub fn to_vec_f32(&self) -> Result<Vec<f32>, SpeechError> {
+        self.require_type(DataType::Float32)?;
+        let base = self.base().cast::<f32>();
+        let mut out = Vec::with_capacity(self.len());
+        let mut index = vec![0usize; self.shape.len()];
+        for _ in 0..self.len() {
+            let offset: usize = index
+                .iter()
+                .zip(&self.strides)
+                .map(|(i, stride)| i * stride)
+                .sum();
+            // SAFETY: every `index[d] < shape[d]`, so `offset` addresses an
+            // element of the buffer under CoreML's own (non-negative, per
+            // `read_numbers`) strides; the array is alive for `&self`.
+            out.push(unsafe { base.add(offset).read() });
+            // The next index, last axis fastest.
+            for d in (0..index.len()).rev() {
+                index[d] += 1;
+                if index[d] < self.shape[d] {
+                    break;
+                }
+                index[d] = 0;
+            }
+        }
+        Ok(out)
+    }
+
     /// Copy a contiguous `f32` array of the same length into `dst`.
     pub fn copy_f32_into(&self, dst: &mut [f32]) -> Result<(), SpeechError> {
         let src = self.as_f32()?;
