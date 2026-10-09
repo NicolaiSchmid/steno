@@ -1,0 +1,60 @@
+# The flake (flake.nix, nix/): every output evaluates on both systems, the
+# web UI's pnpm hash matches its lockfile, and the Linux package and its
+# checks build (X7 of .plans/2026-10-07-stable-promotion.md). A pull request
+# runs it when the flake or the web UI's dependencies change; main also
+# after any change to what the package builds, so a tag never finds the
+# package broken first.
+name: Nix CI
+
+on:
+  pull_request:
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
+      - 'apps/macos/web/package.json'
+      - 'apps/macos/web/pnpm-lock.yaml'
+      - 'apps/macos/web/pnpm-workspace.yaml'
+      - '.github/workflows/nix-ci.yml'
+  push:
+    branches: ['main']
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
+      - 'apps/macos/web/**'
+      - 'apps/desktop/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Sources/StenoCore/Resources/**'
+      - '.github/workflows/nix-ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: nix-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Flake (x86_64-linux package and module)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Evaluate every output
+        run: nix flake check --no-build --all-systems
+
+      # Fails within a minute and prints the `got:` hash for nix/package.nix
+      # when the web UI's lockfile moved without it.
+      - name: Web UI dependencies against their hash
+        run: nix build --no-link -L .#steno.pnpmDeps
+
+      - name: Package and checks
+        run: nix build --no-link -L .#checks.x86_64-linux.package .#checks.x86_64-linux.module
