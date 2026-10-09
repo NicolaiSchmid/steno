@@ -548,6 +548,15 @@ the user service `steno.service` (`TimeoutStopSec=20s` and
 profile path, `/run/current-system/sw/bin/steno-desktop` or
 `/etc/profiles/per-user/%u/bin/steno-desktop`, never a store path.
 
+The session's `STENO_LOGIN_ITEM=managed` applies to every user, listed in
+`programs.steno.users` or not, so list every user who runs Steno: for one
+left out, a Steno from their own `nix profile` starts at no login and
+removes the autostart entry it wrote before. The variable reaches a
+session only from its next login (with lingering, from the next boot):
+after the switch that turns the module on, log out and in, or reboot,
+before starting Steno. A Steno started before then writes its own
+autostart entry, which goes once the variable is in place.
+
 A rebuild never restarts or stops `steno.service`, whatever changed
 (`X-RestartIfChanged=false`, `X-StopOnRemoval=false`). The new version
 starts at the next login, or at the next launch after quitting. Turning the
@@ -566,7 +575,12 @@ to `programs.ssh.startAgent`, and next to
 `programs.gnupg.agent.enableSSHSupport` gcr's socket takes the session's
 `SSH_AUTH_SOCK`, so SSH through gpg-agent stops working.
 `services.gnome.gnome-keyring.enable = false` turns it off; the module only
-sets a default. The module links the package's systemd
+sets a default. If one of these comes on after Steno has moved its secrets
+into GNOME Keyring, the keyring goes off and Steno can no longer reach the
+API key or this computer's phone pairing; they stay in
+`~/.local/share/keyrings`. Beside an SSH agent,
+`services.gnome.gnome-keyring.enable = true` with
+`services.gnome.gcr-ssh-agent.enable = false` keeps the keyring. The module links the package's systemd
 user files (once P5, #227, lands), and raises logind's `InhibitDelayMaxSec`
 when `programs.steno.inhibitDelayMaxSec` is set. It does not open the
 handover's port in the firewall yet.
@@ -576,12 +590,15 @@ carries a second GTK and WebKit closure. `inputs.steno.inputs.nixpkgs.follows
 = "nixpkgs"` builds it with the system's nixpkgs instead, which CI does not
 test.
 
-`nix flake check` builds the package and checks its layout (the wrapper and
-its GTK schemas, the sidecar beside the real binary, no missing library, the
-tray's library, the `.deb`'s systemd user files once #227 lands) and that
-the release pins the same Tauri CLI. It evaluates the module in a
-system-wide and a per-user system down to the user units, and in one each
-with `programs.ssh.startAgent` and with GnuPG's SSH support.
+`nix flake check` builds the package and checks its layout (the wrapper,
+its GTK schemas and its `STENO_DISTRIBUTION=nix`, the sidecar beside the
+real binary, no missing library, the tray's library, the `.deb`'s systemd
+user files once #227 lands), that the build itself sets
+`STENO_DISTRIBUTION=nix`, and that the release pins the same Tauri CLI. It
+evaluates the module in a system-wide and a per-user system down to the
+user units and the session variable, in one with `launchAtLogin = false`,
+and in one each with `programs.ssh.startAgent` and with GnuPG's SSH
+support.
 
 ## Release
 

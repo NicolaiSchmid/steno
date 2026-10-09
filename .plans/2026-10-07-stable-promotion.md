@@ -1595,11 +1595,19 @@ passes when the meeting and the pairing are kept and, after a logout and login,
 Steno starts once, as the new version. Each target's step 1 sets up its step 0;
 steps 2 onward run on the candidate under test. On `v0.11.0`, R8 repeats step 0
 from the last candidate and one recording.
-The status query used throughout (`sqlite3`, or `nix-shell -p sqlite` on NixOS):
+The status queries used throughout (`sqlite3`, or `nix-shell -p sqlite` on
+NixOS, for `q`):
 
 ```sh
 q() { sqlite3 ~/.local/share/Steno/steno.sqlite \
   "select datetime(startedAt), state, round(duration,1), endReason, failureReason from meeting order by startedAt desc limit 3"; }
+# The cgroup of every running Steno, one line each. `pidof` misses a Steno
+# that an old autostart entry starts as `.steno-desktop-wrapped`.
+cg() { for p in /proc/[0-9]*; do
+  case "$(readlink "$p/exe" 2>/dev/null)" in
+    */steno-desktop | */.steno-desktop-wrapped) cat "$p/cgroup" ;;
+  esac
+done; }
 ```
 
 Good: the newest meeting is `queued` or later, with a duration near the time
@@ -1673,8 +1681,8 @@ interrupted" after one. On the GNOME machine,
      `steno.nixosModules.default` in the system's modules and
      `programs.steno.enable = true`.
   2. Steps 2 to 4 and 6 of the GNOME gate, with the phone through the firewall
-     the module opens (by hand until X4). Under the module, step 5's `cat
-     /proc/$(pidof -s steno-desktop)/cgroup` ends in `steno.service`, and
+     the module opens (by hand until X4). Under the module, step 5's cgroup check, run
+     as `cg`, prints one line, ending in `steno.service`, and
      `systemctl --user show steno.service -p TimeoutStopUSec` is 20 s.
   3. Open Settings and choose a folder: the file chooser opens (the wrapper's
      schemas).
@@ -1694,11 +1702,22 @@ interrupted" after one. On the GNOME machine,
      `~/.config/autostart/steno-desktop.desktop` with `[Desktop Entry]`,
      `Type=Application`, `Name=Steno` and `Exec=<dir>/.steno-desktop-wrapped`,
      where `<dir>` is `dirname $(readlink -f
-     /run/current-system/sw/bin/steno-desktop)`, then log out and in, and log
-     out and in again. Pass when the entry is gone after Steno's first exit, at
-     the next login `pidof steno-desktop` prints exactly one PID, its cgroup
-     ends in `steno.service`, and step 6 run again keeps its recording the same
-     way.
+     /run/current-system/sw/bin/steno-desktop)`.
+     1. With `steno.service` masked, so that the entry's own unit starts
+        Steno: `systemctl --user mask steno.service`, then log out and in.
+        Pass when `cg` prints one line, ending in
+        `app-steno\x2ddesktop@autostart.service`; `systemctl --user
+        is-active 'app-steno\x2ddesktop@autostart.service'` prints `active`;
+        and the entry is still there. Log out: the entry is gone.
+     2. Unmasked: `systemctl --user unmask steno.service`, write the entry
+        again, then log out and in. Both units start Steno; the one
+        `steno.service` starts wins and removes the entry at launch, and the
+        other ends before setup. Pass when `cg` prints one line, ending in
+        `steno.service`; `systemctl --user is-active
+        'app-steno\x2ddesktop@autostart.service'` does not print `active`;
+        the entry is gone; and step 6 run again keeps its recording the same
+        way. If `cg` names the autostart unit instead, that instance won the
+        start: log out and in once more, and check again.
   8. A package-only install: set `programs.steno.enable = false`,
      `nixos-rebuild switch`, and log out and in so the module's Steno is gone;
      `nix profile install
