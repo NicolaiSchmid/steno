@@ -915,7 +915,9 @@ impl CaptureBackend for LiveCaptureBackend {
 
     /// The microphone, the master whenever a lane needs it, delivers
     /// continuously; the system stream alone (a lane override) does not,
-    /// since endpoint loopback delivers no packet while nothing plays.
+    /// since endpoint loopback delivers no packet while nothing plays. The
+    /// recorder's `microphone_is_the_master` (steno-services) states the
+    /// same rule for its warnings; a change here goes there too. Rust only.
     fn delivers_continuously(&self, lanes: &[AudioLane]) -> bool {
         SplitStreamPlan::new(lanes).is_ok_and(|plan| plan.master == StreamSource::Microphone)
     }

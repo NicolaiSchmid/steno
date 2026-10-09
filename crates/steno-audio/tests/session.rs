@@ -4194,7 +4194,9 @@ fn a_stop_during_the_wait_for_a_first_frame_or_the_backoff_returns_at_once() {
         if in_the_backoff {
             // The wait gives up `STALL_TIMEOUT` after the start; the
             // backoff follows.
-            for _ in 0..CaptureSession::STALL_TIMEOUT.as_millis() / 100 {
+            for _ in 0..CaptureSession::STALL_TIMEOUT.as_millis()
+                / CaptureSession::STALL_CHECK_INTERVAL.as_millis()
+            {
                 assert!(clock.wait_for_sleepers(2));
                 clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
             }

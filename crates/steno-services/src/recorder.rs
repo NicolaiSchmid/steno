@@ -513,6 +513,9 @@ struct Outage {
 /// the WASAPI backend makes it the master stream whenever a lane needs
 /// it. A Mac call capture runs on the output's clock (the aggregate's
 /// master) and a Linux one on the graph's driver, which may be the sink.
+/// The WASAPI rule is the one its `delivers_continuously` states
+/// (steno-audio `capture/live/wasapi`); a change there comes here too. Rust
+/// only.
 fn microphone_is_the_master(mode: CaptureMode) -> bool {
     mode == CaptureMode::InPerson || cfg!(windows)
 }

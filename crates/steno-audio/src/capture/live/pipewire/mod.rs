@@ -81,7 +81,7 @@
 //! capture's client closed from outside) reads as
 //! [`DeviceChangeReason::AudioServiceRestarted`], whatever the graph
 //! reads, so the session restarts until a start runs and the recording
-//! resumes there (Rust only, as the Mac's `coreaudiod` restart).
+//! resumes there (Rust only, like the Mac's `coreaudiod` restart).
 //! A lost stream reads as the output gone (the input for an in-person
 //! capture). A lost link reads as the device of the lane it
 //! serves gone: a monitor link as the output gone, the microphone's link

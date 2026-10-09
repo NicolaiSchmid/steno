@@ -24,8 +24,8 @@
 //! fills the gap with silence through the relay so the master stays on
 //! wall time, starts a processing thread built for the new latencies, and
 //! keeps the sink, the relay, the writer thread, the writer and the files.
-//! The state stays `Recording`; `notices` carries `DeviceChanged`,
-//! `StillRestarting` and `Delivering` (below) and `DeviceResumed`. From the
+//! The state stays `Recording`; `notices` carries `DeviceChanged` and
+//! `DeviceResumed`, and `StillRestarting` and `Delivering` (below). From the
 //! old stream's stop until the restarted one delivers, the levels read
 //! silence.
 //!
@@ -60,15 +60,19 @@
 //! off as [`CaptureSession::restart_backoff`] says: `RESTART_BACKOFF`
 //! between the first `RESTART_ATTEMPTS`, then 2 s, then every
 //! [`CaptureSession::RESTART_BACKOFF_LONGEST`] (4 s), with no limit. Once
-//! the devices are back, that costs the start in flight (up to 3 s on
-//! Linux), the wait and the first frame's arrival: about 8 s of audio at
-//! worst, filled with silence. `notices` carries `StillRestarting` once
+//! the devices are back, that costs the starts in flight (one deadline
+//! per device tried: 3 s each on Linux, a chosen microphone and then the
+//! default; up to 10 s on Windows), the wait and the first frame, filled
+//! with silence up to [`CaptureSession::MAXIMUM_GAP`]; past it the master
+//! falls short of wall time, and the recorder's note after the stop counts
+//! that time. `notices` carries `StillRestarting` once
 //! they pass `RESTART_ATTEMPTS`, for a warning, and `Delivering` once audio
 //! arrives after it. Over a watched backend (below) whose streams do not
 //! wait for playback, a restart that starts but whose stream offers no
 //! frame within [`CaptureSession::STALL_TIMEOUT`] is stopped and counts as
 //! one that did not run (on macOS and Windows a device that delivers
-//! nothing still starts); its gap runs to the first frame.
+//! nothing still starts); its gap runs to the last sample before the first
+//! frame (within [`CaptureSession::STALL_CHECK_INTERVAL`]).
 //!
 //! A stream a rebuild resumed on that stalls again within 10 s, or before
 //! it delivered anything, continues that rebuild's streak: the next
@@ -530,10 +534,14 @@ impl CaptureSession {
     pub const RESTART_ATTEMPTS: usize = Self::RESTART_BACKOFF.len() + 1;
     /// The longest wait between two restarts that go on past
     /// `RESTART_ATTEMPTS` ([`Self::restart_backoff`]). Four seconds: the
-    /// wait is audio lost once the devices are back (with the start in
-    /// flight and the first frame's arrival, about 8 s at worst), and a try
-    /// holds the session's lock for up to a start's deadline (3 s on Linux),
-    /// so the callers wait for less than half the time. Rust only.
+    /// wait is audio lost once the devices are back, with the starts in
+    /// flight (one deadline per device tried: 3 s each on Linux, a chosen
+    /// microphone and then the default; up to 10 s on Windows) and the
+    /// first frame; past [`Self::MAXIMUM_GAP`] the master falls short of
+    /// wall time, and the recorder's note after the stop counts it. Each
+    /// start holds the session's lock for up to its deadline, released
+    /// between the starts and through the wait, so the callers wait for up
+    /// to one deadline at a time. Rust only.
     pub const RESTART_BACKOFF_LONGEST: Duration = Duration::from_secs(4);
 
     /// The wait after the failed restart numbered `attempt` (1 for the
