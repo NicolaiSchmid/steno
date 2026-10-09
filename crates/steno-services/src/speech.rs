@@ -608,6 +608,11 @@ impl ModelStoreSpeechModels {
         }
     }
 
+    /// Why a row Settings does not offer cannot be downloaded or removed.
+    fn not_offered(asset: ModelAsset) -> String {
+        format!("{} is not part of this version", asset.as_str())
+    }
+
     fn size_of(path: &Path) -> i64 {
         fn walk(path: &Path) -> u64 {
             if path.is_file() {
@@ -671,7 +676,7 @@ impl SpeechModels for ModelStoreSpeechModels {
             ModelAsset::ParakeetV3 => {
                 install_with_progress(&self.speech, &steno_speech::ModelAsset::onnx(), progress)
             }
-            other => Err(format!("{} is not part of this version", other.as_str()).into()),
+            other => Err(Self::not_offered(other).into()),
         }
     }
 
@@ -684,8 +689,7 @@ impl SpeechModels for ModelStoreSpeechModels {
                 .coreml_store
                 .remove(&steno_speech::ModelAsset::parakeet_v3_coreml())?),
             other => {
-                let asset = Self::onnx_asset(other)
-                    .ok_or_else(|| format!("{} is not part of this version", other.as_str()))?;
+                let asset = Self::onnx_asset(other).ok_or_else(|| Self::not_offered(other))?;
                 Ok(self.speech.remove(&asset)?)
             }
         }
