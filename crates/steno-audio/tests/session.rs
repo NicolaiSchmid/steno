@@ -4294,7 +4294,7 @@ fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
     let backend = Arc::new(SlowRestart {
         inner: SyntheticCaptureBackend::new(stalling(1.0, 0.5)),
         clock: clock.clone(),
-        start_takes: Duration::from_millis(500),
+        start_takes: Duration::from_millis(300),
     });
     let session = in_person_session(directory.path(), backend.clone(), clock.clone());
     let notices = session.notices();
@@ -4304,7 +4304,7 @@ fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
     // The restart starts at once, at the stall's report one sample past
     // `STALL_TIMEOUT` after the last frame, which the first sample saw.
     let gap = gap_seconds(CaptureSession::STALL_TIMEOUT + CaptureSession::STALL_CHECK_INTERVAL);
-    assert_eq!(next_resume(&notices).1, gap, "not the start's 0.5 s on top");
+    assert_eq!(next_resume(&notices).1, gap, "not the start's 0.3 s on top");
     backend.inner.wait_until_finished();
     let result = session.stop().unwrap();
     assert_eq!(result.statistics.gap_seconds, gap);
