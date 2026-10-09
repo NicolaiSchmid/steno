@@ -345,34 +345,35 @@ pub fn sync_at_launch(app: &AppHandle) {
         return;
     }
     let mark = off_at_exit(app);
-    let marked = mark.as_ref().is_some_and(|mark| mark.exists());
     let manager = app.autolaunch();
     let step = at_launch(
         status_from_plugin(manager.is_enabled()),
-        marked,
+        mark.as_deref().is_some_and(std::path::Path::exists),
         stop_timeout::runs_as_autostart_unit(),
     );
-    let login_item = login_item_after(step, |on| {
-        let switched = if on {
+    let switch = |on| -> Result<(), Box<dyn std::error::Error>> {
+        if on {
             // Marked first: a restored entry without its mark would stay.
-            mark.as_deref()
-                .ok_or_else(|| "the app has no config directory".to_owned())
-                .and_then(|mark| set_mark(mark, true).map_err(|error| error.to_string()))
-                .and_then(|()| enable(app).map_err(|error| error.to_string()))
+            let mark = mark.as_deref().ok_or("the app has no config directory")?;
+            set_mark(mark, true)?;
+            enable(app)?;
         } else {
-            manager.disable().map_err(|error| error.to_string())
-        };
-        if let Err(error) = &switched {
-            if on {
-                tracing::warn!(
-                    "the autostart entry could not be kept until the exit; the unit keeps a 5 s stop timeout"
-                );
-            } else {
-                tracing::warn!("Launch at login could not be turned off; it stays on");
-            }
-            tracing::debug!(%error, on, "the login item at launch");
+            manager.disable()?;
         }
-        switched.is_ok()
+        Ok(())
+    };
+    let login_item = login_item_after(step, |on| {
+        let Err(error) = switch(on) else {
+            return true;
+        };
+        let failure = if on {
+            "the autostart entry could not be kept until the exit; the unit keeps a 5 s stop timeout"
+        } else {
+            "Launch at login could not be turned off; it stays on"
+        };
+        tracing::warn!("{failure}");
+        tracing::debug!(%error, on, "the login item at launch");
+        false
     });
     // No entry is left: a mark has nothing more to turn off.
     if login_item == Some(false)
