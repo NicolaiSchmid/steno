@@ -7,17 +7,24 @@
 //! capture's silent output IOProc must be inside it. Anything else Steno
 //! played would land in the recording's system lane. Steno plays nothing
 //! today; the clip player planned under "What follows" will be the first.
+//! That player is native: the web UI plays nothing, since its `<audio>`
+//! would play from the web view's media process, which the tap includes
+//! and this gate cannot see.
 //!
 //! - A player asks [`Playback::begin`] for a [`PlaybackPermit`] before it
-//!   plays, and plays only while it holds one. While a recording runs the
-//!   gate answers [`PlaybackRefused`], worded for the UI.
+//!   plays, starts through [`PlaybackPermit::start`], and plays only while
+//!   it holds the permit. While a recording runs the gate answers
+//!   [`PlaybackRefused`], worded for the UI.
 //! - The capture session takes a hold on the gate before its backend
 //!   starts (before the tap exists) and keeps it across every rebuild; it
 //!   is released when the recording's teardown is done, and on any error
 //!   or panic by its drop. Only the capture session takes one.
 //! - Taking a hold stops every playback that runs: each permit's `on_stop`
 //!   runs once, and the permit reads [`PlaybackPermit::is_stopped`] from
-//!   then on. Playback may begin again once the last hold is released.
+//!   then on. A start runs under the gate's lock, so a hold taken between
+//!   `begin` and the start refuses it, and a start under way finishes
+//!   before the hold, whose `on_stop` then stops it. Playback may begin
+//!   again once the last hold is released.
 //!
 //! [`Playback::global`] is the process's gate, the one the capture session
 //! and a player use; a test that must not share it makes a private one.
@@ -107,9 +114,9 @@ impl Playback {
     /// use steno_audio::Playback;
     ///
     /// match Playback::global().begin(|| { /* pause the player */ }) {
-    ///     // Play while the permit is held and `is_stopped` is false; drop
-    ///     // it when the clip ends.
-    ///     Ok(permit) => assert!(!permit.is_stopped()),
+    ///     // Start under the gate's lock, then play while the permit is
+    ///     // held; drop it when the clip ends.
+    ///     Ok(permit) => assert!(permit.start(|| { /* start the player */ }).is_ok()),
     ///     // A recording runs: show the refusal as it is worded.
     ///     Err(refused) => assert!(refused.to_string().starts_with("Playback is off")),
     /// }
@@ -165,6 +172,24 @@ pub struct PlaybackPermit {
 }
 
 impl PlaybackPermit {
+    /// Runs `start` (the player's start) under the gate's lock, unless a
+    /// recording has started since the permit was given. A recording's hold
+    /// waits for it, then runs `on_stop`, so nothing starts once a hold is
+    /// taken. `start` must only start the player, not play the clip
+    /// through, and must not ask the gate again.
+    ///
+    /// # Errors
+    ///
+    /// [`PlaybackRefused`] when a recording has started since the permit
+    /// was given; `start` has not run.
+    pub fn start<R>(&self, start: impl FnOnce() -> R) -> Result<R, PlaybackRefused> {
+        let gate = self.playback.lock();
+        if !gate.playing.contains_key(&self.id) {
+            return Err(PlaybackRefused);
+        }
+        Ok(start())
+    }
+
     /// Whether a recording has started since the permit was given; its
     /// `on_stop` has run, and the player must not play on.
     #[must_use]
@@ -198,7 +223,9 @@ impl Drop for RecordingHold {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use super::*;
 
@@ -240,6 +267,54 @@ mod tests {
         drop(hold);
         let _again = playback.hold_for_recording();
         assert_eq!(stops.load(Ordering::SeqCst), 1, "once, not per recording");
+    }
+
+    /// The gap between `begin` and the first sound: once a hold is taken
+    /// the player cannot start, and a start under way finishes before the
+    /// hold, whose `on_stop` then stops it.
+    #[test]
+    fn a_player_cannot_start_once_a_recording_holds_the_gate() {
+        let playback = Playback::new();
+        let playing = Arc::new(AtomicBool::new(false));
+        let stop = |playing: &Arc<AtomicBool>| {
+            let playing = Arc::clone(playing);
+            move || playing.store(false, Ordering::SeqCst)
+        };
+
+        // The recording takes its hold after the permit, before the start.
+        let permit = playback.begin(stop(&playing)).unwrap();
+        let hold = playback.hold_for_recording();
+        assert_eq!(
+            permit.start(|| playing.store(true, Ordering::SeqCst)),
+            Err(PlaybackRefused)
+        );
+        assert!(!playing.load(Ordering::SeqCst), "the start did not run");
+        drop((hold, permit));
+
+        // The recording asks for its hold while the start runs.
+        let permit = playback.begin(stop(&playing)).unwrap();
+        let (inside, entered) = mpsc::channel();
+        let taken = Arc::new(AtomicBool::new(false));
+        let recorder = {
+            let (playback, taken) = (playback.clone(), Arc::clone(&taken));
+            std::thread::spawn(move || {
+                entered.recv().unwrap();
+                let hold = playback.hold_for_recording();
+                taken.store(true, Ordering::SeqCst);
+                hold
+            })
+        };
+        permit
+            .start(|| {
+                inside.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+                assert!(!taken.load(Ordering::SeqCst), "the hold waits");
+                playing.store(true, Ordering::SeqCst);
+            })
+            .unwrap();
+        let _hold = recorder.join().unwrap();
+        assert!(!playing.load(Ordering::SeqCst), "on_stop stopped it");
+        assert!(permit.is_stopped());
     }
 
     /// The gate opens only when the last of two recordings releases it.

@@ -144,7 +144,8 @@ pub unsafe fn silence_output(list: std::ptr::NonNull<objc2_core_audio_types::Aud
             if !buffer.mData.is_null() && buffer.mDataByteSize > 0 {
                 // SAFETY: a non-null `mData` is valid for writes of
                 // `mDataByteSize` bytes by the caller's guarantee; zero
-                // bytes are digital silence in every linear PCM format.
+                // bytes are digital silence in the float and signed
+                // integer formats an IOProc is handed.
                 std::ptr::write_bytes(buffer.mData.cast::<u8>(), 0, buffer.mDataByteSize as usize);
             }
         }

@@ -404,6 +404,7 @@ impl CaptureSession {
     /// # Panics
     ///
     /// When the session has started a recording (its core is shared then).
+    #[doc(hidden)]
     #[must_use]
     pub fn with_playback(mut self, playback: Playback) -> Self {
         Arc::get_mut(&mut self.core)

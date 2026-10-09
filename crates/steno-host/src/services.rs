@@ -453,15 +453,15 @@ pub trait FileSystem: Send + Sync {
 ///
 /// No in-app playback while recording, enforced by `steno_audio::Playback`:
 /// the call capture's tap includes Steno's own process, so the shell's
-/// player asks `Playback::global().begin` before every clip, plays only
-/// while it holds the permit, and stops in the permit's `on_stop` when a
-/// recording starts. Until that player exists, a refusal is `false` here,
-/// a clip that could not be played; the player changes `play` to return
-/// `PlaybackRefused`'s text, worded for the UI (stable plan, "What
-/// follows").
+/// player asks `Playback::global().begin` before every clip, starts it
+/// through the permit's `start`, and stops in the permit's `on_stop` when a
+/// recording starts. The player is native; the web UI plays nothing (its
+/// `<audio>` would play from the web view's media process, which the gate
+/// cannot see).
 pub trait ClipPlayer: Send + Sync {
-    /// Starts the clip; false when the file is missing or unreadable, or
-    /// when a recording runs.
+    /// Starts the clip; false when the file is missing or unreadable. The
+    /// shell's player, when it exists, returns false while a recording runs
+    /// (`Playback::begin` refused).
     fn play(&self, clip: &Path) -> bool;
     fn stop(&self);
     fn playing(&self) -> Option<PathBuf>;

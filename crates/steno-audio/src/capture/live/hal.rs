@@ -624,11 +624,10 @@ impl IoProc {
         unsafe { Self::start_with(device, callback, client, false) }
     }
 
-    /// As [`Self::start`], with every input stream of `device` off for this
-    /// IOProc (`kAudioDevicePropertyIOProcStreamUsage`, set before the
-    /// start): an output client that reads nothing opens no input of its
-    /// own. A usage the HAL refuses is logged and the IOProc starts over
-    /// every stream.
+    /// As [`Self::start`], for an output client that reads nothing: its
+    /// input streams are set off for its IOProc (read back as off), through
+    /// `kAudioDevicePropertyIOProcStreamUsage` before the start. A usage the
+    /// HAL refuses is logged and the IOProc starts over every stream.
     ///
     /// # Safety
     ///
