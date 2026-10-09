@@ -7,6 +7,8 @@
 //! Ignored by default: it needs a user manager and runs in a unit of
 //! one, as CI's Linux job runs it:
 //! `systemd-run --user --scope cargo test -p steno-speech-sidecar --test user_scope -- --ignored`.
+//! The app's own units, `app-steno\x2ddesktop…`, are not counted, so it
+//! also runs beside a running Steno.
 
 #![cfg(target_os = "linux")]
 
@@ -44,14 +46,15 @@ fn unit_of(pid: &str) -> String {
     path.rsplit('/').next().unwrap().to_owned()
 }
 
-/// The sidecar's scopes the user manager knows, in any state.
+/// The sidecar's scopes the user manager knows, in any state. The
+/// pattern's `?` stands for the backslash of the escaped `-`.
 fn sidecar_scopes() -> String {
     systemctl(&[
         "list-units",
         "--all",
         "--plain",
         "--no-legend",
-        "app-steno*",
+        "app-steno?x2dspeech?x2dsidecar-*",
     ])
 }
 

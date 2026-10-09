@@ -352,9 +352,8 @@ jobs:
       # plan), asked of the runner's user manager: the test runs in a scope
       # of that manager, as the app runs in a launcher's, and fails unless
       # the sidecar's cgroup names its active scope and no scope is left
-      # after the sidecar ends. `--workspace` keeps the Test step's feature
-      # set, so nothing rebuilds. A renamed test would match nothing and
-      # pass, so the step greps for the one pass.
+      # after the sidecar ends. A test binary that runs nothing would pass
+      # too, so the step greps for the one pass.
       - name: Speech sidecar in a scope of its own
         if: matrix.name == 'linux'
         timeout-minutes: 5
@@ -362,7 +361,7 @@ jobs:
         run: |
           log="$RUNNER_TEMP/sidecar-scope.log"
           systemd-run --user --scope --quiet \
-            cargo test --workspace --test user_scope --locked -- --ignored --nocapture | tee "$log"
+            cargo test -p steno-speech-sidecar --test user_scope --locked -- --ignored --nocapture | tee "$log"
           grep -qF "test result: ok. 1 passed" "$log" \
             || { echo "::error::the sidecar's scope test did not pass"; exit 1; }
 
