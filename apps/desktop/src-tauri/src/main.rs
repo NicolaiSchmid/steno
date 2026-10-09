@@ -561,10 +561,9 @@ fn onboarding_closed(app: &tauri::AppHandle) {
 /// (`autostart::remove_earlier_entry_at_exit`): only once the save is
 /// over, since until then the unit the app runs as needs the entry.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
-    let shutdown = host::host(app).shutdown_action();
     #[cfg(target_os = "linux")]
     let app = app.clone();
-    timed_then(shutdown, move || {
+    timed_then(host::host(&app).shutdown_action(), move || {
         #[cfg(target_os = "linux")]
         {
             autostart::turn_off_at_exit(&app);
@@ -917,9 +916,9 @@ mod tests {
         assert!(!platform_app_running("com.nicolaischmid.steno.no-such-app"));
     }
 
-    /// What runs after the shutdown (on Linux, an earlier build's
-    /// autostart entry that waited for the exit) runs only once the save
-    /// is over.
+    /// What runs after the shutdown (on Linux, Launch at login turned off
+    /// as the autostart unit, and an earlier build's autostart entry that
+    /// waited for the exit) runs only once the save is over.
     #[test]
     fn the_exit_action_runs_its_after_step_once_the_shutdown_ended() {
         let steps = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

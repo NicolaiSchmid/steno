@@ -17,8 +17,8 @@
 //!
 //! On Linux the entry comes with the systemd drop-ins that give the app
 //! the time its save needs when the session stops it (`stop_timeout`).
-//! Launch at login turned off while the app runs as the unit a desktop
-//! made from the entry goes off when the app exits (`OFF_AT_EXIT`):
+//! Launch at login turned off while the app runs as the autostart unit
+//! (`stop_timeout`) goes off when the app exits (`OFF_AT_EXIT`):
 //! removing the entry then would let any reload of the user manager
 //! unload the running unit, and the session's end would stop the app
 //! without the SIGTERM that saves its recording.
@@ -58,11 +58,13 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 /// the app at login; on Linux, an entry that goes at the exit
 /// (`OFF_AT_EXIT`) is already off.
 pub fn status(app: &AppHandle) -> LoginItemStatus {
-    let status = status_unless_managed(packaged::login_item_is_managed(), || {
-        app.autolaunch().is_enabled()
-    });
-    let marked = cfg!(target_os = "linux") && off_at_exit(app).is_some_and(|mark| mark.exists());
-    with_off_at_exit(status, marked)
+    let mark = off_at_exit(app).filter(|_| cfg!(target_os = "linux"));
+    with_off_at_exit(
+        status_unless_managed(packaged::login_item_is_managed(), || {
+            app.autolaunch().is_enabled()
+        }),
+        mark.as_deref(),
+    )
 }
 
 /// `Managed` when `managed`, without asking the plugin; else the
@@ -93,7 +95,7 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
     change_unless_managed(packaged::login_item_is_managed(), || {
         #[cfg(target_os = "linux")]
         {
-            let deferred = !enabled && stop_timeout::runs_as_autostart_unit();
+            let deferred = defers_off(enabled, stop_timeout::runs_as_autostart_unit());
             mark_off_at_exit(app, deferred)?;
             if deferred {
                 tracing::info!("Launch at login goes off when the app exits");
@@ -150,9 +152,18 @@ pub fn remove_earlier_entry(app: &AppHandle) {
     packaged::remove_earlier_entry(&app.package_info().name);
 }
 
+/// Whether switching Launch at login to `enabled` waits for the exit: only
+/// turning it off while the app runs as the autostart unit
+/// (`as_autostart_unit`), whose entry the unit needs until it has stopped.
+#[cfg(target_os = "linux")]
+fn defers_off(enabled: bool, as_autostart_unit: bool) -> bool {
+    !enabled && as_autostart_unit
+}
+
 /// The file that marks Launch at login to go off at the exit, in the
 /// app's config directory. A file rather than a flag, so the choice
-/// outlives a kill or a crash before the exit (`at_launch`). Linux only.
+/// outlives a kill or a crash before the exit (`at_launch`). Read only on
+/// Linux.
 const OFF_AT_EXIT: &str = "launch-at-login-off-at-exit";
 
 fn off_at_exit(app: &AppHandle) -> Option<std::path::PathBuf> {
@@ -187,10 +198,13 @@ fn set_mark(mark: &std::path::Path, on: bool) -> std::io::Result<()> {
     }
 }
 
-/// The plugin's status with the mark: an entry marked to go is off.
-fn with_off_at_exit(status: LoginItemStatus, marked: bool) -> LoginItemStatus {
+/// The plugin's status with the mark at `mark`, if any: an entry marked
+/// to go is off.
+fn with_off_at_exit(status: LoginItemStatus, mark: Option<&std::path::Path>) -> LoginItemStatus {
     match status {
-        LoginItemStatus::Enabled if marked => LoginItemStatus::NotRegistered,
+        LoginItemStatus::Enabled if mark.is_some_and(std::path::Path::exists) => {
+            LoginItemStatus::NotRegistered
+        }
         status => status,
     }
 }
@@ -216,10 +230,13 @@ pub fn turn_off_at_exit(app: &AppHandle) {
     if packaged::login_item_is_managed() {
         return;
     }
-    let Some(mark) = off_at_exit(app).filter(|mark| mark.exists()) else {
+    let Some(mark) = off_at_exit(app) else {
         return;
     };
-    if RELAUNCHING.load(std::sync::atomic::Ordering::Relaxed) {
+    if !turns_off_at_exit(
+        mark.exists(),
+        RELAUNCHING.load(std::sync::atomic::Ordering::Relaxed),
+    ) {
         return;
     }
     if let Err(error) = app.autolaunch().disable() {
@@ -231,6 +248,14 @@ pub fn turn_off_at_exit(app: &AppHandle) {
     }
     stop_timeout::remove_autostart();
     clear_mark(&mark);
+}
+
+/// Whether the exit removes the entry: when it is `marked` to go, unless
+/// the exit is an update's relaunch (`relaunching`), whose next process
+/// runs on in the same unit.
+#[cfg(target_os = "linux")]
+fn turns_off_at_exit(marked: bool, relaunching: bool) -> bool {
+    marked && !relaunching
 }
 
 /// Removes the mark at `mark`; a failure is logged.
@@ -263,9 +288,9 @@ enum AtLaunch {
     /// and the app no longer runs as its unit: it goes now.
     TurnOff,
     /// No entry: its drop-in goes, and a mark left behind.
-    Drop,
+    Gone,
     /// The entry could not be read: only GNOME's drop-in is installed.
-    Leave,
+    Unread,
 }
 
 /// The step for the plugin's `status`, whether the entry is `marked` to go
@@ -275,8 +300,21 @@ fn at_launch(status: LoginItemStatus, marked: bool, as_autostart_unit: bool) -> 
     match status {
         LoginItemStatus::Enabled if marked && !as_autostart_unit => AtLaunch::TurnOff,
         LoginItemStatus::Enabled => AtLaunch::Keep,
-        LoginItemStatus::NotRegistered => AtLaunch::Drop,
-        _ => AtLaunch::Leave,
+        LoginItemStatus::NotRegistered => AtLaunch::Gone,
+        _ => AtLaunch::Unread,
+    }
+}
+
+/// The login item the drop-ins follow after the launch's `step`
+/// (`stop_timeout::sync`); `turn_off` removes the entry for `TurnOff` and
+/// says whether it went, and an entry that stays is still on.
+#[cfg(target_os = "linux")]
+fn login_item_after(step: AtLaunch, turn_off: impl FnOnce() -> bool) -> Option<bool> {
+    match step {
+        AtLaunch::Keep => Some(true),
+        AtLaunch::TurnOff => Some(!turn_off()),
+        AtLaunch::Gone => Some(false),
+        AtLaunch::Unread => None,
     }
 }
 
@@ -298,19 +336,14 @@ pub fn sync_at_launch(app: &AppHandle) {
         marked,
         stop_timeout::runs_as_autostart_unit(),
     );
-    let login_item = match step {
-        AtLaunch::Keep => Some(true),
-        AtLaunch::TurnOff => match manager.disable() {
-            Ok(()) => Some(false),
-            Err(error) => {
-                tracing::warn!("Launch at login could not be turned off; it stays on");
-                tracing::debug!(%error, "turning Launch at login off at launch");
-                Some(true)
-            }
-        },
-        AtLaunch::Drop => Some(false),
-        AtLaunch::Leave => None,
-    };
+    let login_item = login_item_after(step, || match manager.disable() {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!("Launch at login could not be turned off; it stays on");
+            tracing::debug!(%error, "turning Launch at login off at launch");
+            false
+        }
+    });
     // No entry is left: a mark has nothing more to turn off.
     if login_item == Some(false)
         && let Some(mark) = &mark
@@ -421,16 +454,45 @@ mod tests {
     }
 
     /// An entry marked to go at the exit reads as off; nothing else
-    /// changes.
+    /// changes, and a mark path with no file is no mark.
     #[test]
     fn a_marked_entry_reads_as_off() {
         use LoginItemStatus::{Enabled, NotFound, NotRegistered};
-        assert_eq!(with_off_at_exit(Enabled, true), NotRegistered);
-        assert_eq!(with_off_at_exit(Enabled, false), Enabled);
+        let root = std::env::temp_dir().join(format!("steno-marked-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (marked, unmarked) = (root.join("marked"), root.join("unmarked"));
+        std::fs::write(&marked, b"").unwrap();
+        let marks = [Some(marked.as_path()), Some(unmarked.as_path()), None];
+        assert_eq!(with_off_at_exit(Enabled, marks[0]), NotRegistered);
+        assert_eq!(with_off_at_exit(Enabled, marks[1]), Enabled);
+        assert_eq!(with_off_at_exit(Enabled, marks[2]), Enabled);
         for status in [NotRegistered, NotFound] {
-            assert_eq!(with_off_at_exit(status, true), status);
-            assert_eq!(with_off_at_exit(status, false), status);
+            for mark in marks {
+                assert_eq!(with_off_at_exit(status, mark), status);
+            }
         }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Only turning Launch at login off as the autostart unit waits for
+    /// the exit; turning it on, or off outside the unit, applies at once.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_off_as_the_autostart_unit_waits_for_the_exit() {
+        assert!(defers_off(false, true));
+        assert!(!defers_off(false, false));
+        assert!(!defers_off(true, true));
+        assert!(!defers_off(true, false));
+    }
+
+    /// A marked entry goes at the exit, except at an update's relaunch.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_exit_removes_a_marked_entry_unless_it_relaunches() {
+        assert!(turns_off_at_exit(true, false));
+        assert!(!turns_off_at_exit(true, true));
+        assert!(!turns_off_at_exit(false, false));
+        assert!(!turns_off_at_exit(false, true));
     }
 
     /// The launch keeps a standing entry's drop-in, also for a marked
@@ -444,12 +506,25 @@ mod tests {
         for as_unit in [false, true] {
             assert_eq!(at_launch(Enabled, false, as_unit), AtLaunch::Keep);
             for marked in [false, true] {
-                assert_eq!(at_launch(NotRegistered, marked, as_unit), AtLaunch::Drop);
-                assert_eq!(at_launch(NotFound, marked, as_unit), AtLaunch::Leave);
+                assert_eq!(at_launch(NotRegistered, marked, as_unit), AtLaunch::Gone);
+                assert_eq!(at_launch(NotFound, marked, as_unit), AtLaunch::Unread);
             }
         }
         assert_eq!(at_launch(Enabled, true, true), AtLaunch::Keep);
         assert_eq!(at_launch(Enabled, true, false), AtLaunch::TurnOff);
+    }
+
+    /// Only `TurnOff` removes the entry, and an entry that would not go
+    /// keeps its drop-in.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_launch_turns_off_only_a_marked_entry_and_keeps_one_that_stays() {
+        let untouched = |step| login_item_after(step, || panic!("{step:?} turned it off"));
+        assert_eq!(untouched(AtLaunch::Keep), Some(true));
+        assert_eq!(untouched(AtLaunch::Gone), Some(false));
+        assert_eq!(untouched(AtLaunch::Unread), None);
+        assert_eq!(login_item_after(AtLaunch::TurnOff, || true), Some(false));
+        assert_eq!(login_item_after(AtLaunch::TurnOff, || false), Some(true));
     }
 
     #[cfg(target_os = "linux")]
