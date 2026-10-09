@@ -159,15 +159,20 @@ launcher's scope, the autostart service), the sidecar gets a transient
 scope of its own right after its start,
 `app-steno\x2dspeech\x2dsidecar-<pid>.scope`, in the app's slice and
 `PartOf` the app's unit (`crates/steno-speech/src/sidecar/scope.rs`).
-`systemd-oomd`, which some distributions turn on for `app.slice`, kills a
-whole cgroup under memory pressure: it now picks the sidecar's, by far
-the larger, and the recording goes on; the job that was transcribing
-fails as after any crash of the sidecar, and the next one starts another.
-Stopping the app's unit stops the sidecar's scope too. The app asks over
-the user bus's Unix socket in `$XDG_RUNTIME_DIR`, with the child's pid
-and the unit names only, and waits two seconds at most. Without a user
-manager, a user bus or a unit (a plain shell, a container), or when the
-manager refuses, the sidecar stays in the app's cgroup, as before.
+`systemd-oomd`, which some distributions turn on for the user's session,
+kills a whole cgroup under memory pressure. With the sidecar in a cgroup
+of its own, oomd takes the sidecar first and the recording goes on: the
+job that was transcribing fails as after any crash of the sidecar, and
+the next job starts a new one. The app's own cgroup is still a
+candidate. Speaker diarization runs in the app's process, and pressure
+that lasts after the sidecar is gone can take the app too.
+Stopping the app's unit also stops the sidecar's scope. The app asks over
+the user bus's Unix socket in `$XDG_RUNTIME_DIR`, with the sidecar's pid
+and the unit names only, and waits two seconds at most for the sidecar
+to be in its scope; a scope the sidecar has not joined by then is
+stopped. Without a user manager, a user bus or a unit (a plain shell, a
+container), or when the manager refuses or is slow, the sidecar stays in
+the app's cgroup, as before.
 
 Snapshots reach the windows, the tray and the panels from the main thread
 (`WindowSink` in `host.rs`): the host emits under its `publishing` lock,

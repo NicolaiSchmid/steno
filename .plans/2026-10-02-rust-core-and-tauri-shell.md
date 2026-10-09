@@ -79,7 +79,7 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    The speech sidecar gets its samples on stdin and answers on stdout, never through a
    socket, and opens no connection (WP4c). On Linux the app, not the sidecar, asks the
    systemd user manager over the user bus's Unix socket for a scope of the sidecar's
-   own, sending its pid and unit names only (`crates/steno-speech/src/sidecar/scope.rs`,
+   own, sending the sidecar's pid and unit names only (`crates/steno-speech/src/sidecar/scope.rs`,
    P6 of `.plans/2026-10-07-stable-promotion.md`). ONNX Runtime's telemetry is off in every
    process that opens a session (`init_environment` in
    `crates/steno-speech/src/onnx.rs`, which `steno-diarize` calls too). Until the
@@ -3163,7 +3163,7 @@ PR off `main`.
 | S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | open |
 | The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | open |
 | Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
-| The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd picks it and not the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | open |
+| The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd kills it before the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
