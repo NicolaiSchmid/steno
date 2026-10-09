@@ -503,8 +503,8 @@ struct Outage {
     /// Whether the session's restarts went on past
     /// `CaptureSession::RESTART_ATTEMPTS` (`StillRestarting`) and no audio
     /// arrived since ([`no_audio_warning`]); cleared by `Delivering`, not
-    /// by a resume (a stream that waits for playback may resume silent),
-    /// and once dismissed.
+    /// by a resume (a stream that resumes may stall again soon), and once
+    /// dismissed.
     still_trying: bool,
 }
 
@@ -2613,28 +2613,42 @@ mod tests {
         assert!(seconds >= 10, "{seconds} s");
     }
 
-    /// A stream that resumes and stalls again before it delivered anything
-    /// (a Mac call capture waiting for playback) keeps the warning through
-    /// its resumes: they back off as one streak, and only audio arriving
-    /// ends the warning.
+    /// A call that delivers nothing from its start (a Mac call capture
+    /// whose silent output did not start, with nothing playing): its
+    /// restarts warn without naming the microphone, whose clock does not
+    /// drive a call capture there, and so does the note after the stop. On
+    /// Windows the microphone drives it, and is named.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_stream_that_resumes_silent_keeps_the_warning() {
-        let harness = stalling_harness(|options| {
-            options
-                .stall_after(BEFORE_THE_OUTAGE)
-                .restarts_stall_after(0.0)
-                .waits_for_playback(true)
-        });
-        // Past the 2 s backoff after the warning, and the resume after it.
-        let seconds = until_still_trying(
-            &harness,
-            STILL_TRYING_ON_USB,
-            FROM_USB,
-            STILL_TRYING_WITHIN,
-            Duration::from_secs(3),
-        )
+    async fn a_call_with_nothing_playing_warns_without_naming_the_microphone() {
+        let harness =
+            stalling_harness(|options| options.stall_after(0.0).restarts_stall_after(0.0));
+        let warning = if cfg!(windows) {
+            STILL_TRYING_ON_USB
+        } else {
+            "No audio is arriving. Still trying."
+        };
+        let starting = harness.recorder.clone();
+        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
+            .await
+            .unwrap();
+        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+        let deadline = std::time::Instant::now() + STILL_TRYING_WITHIN;
+        while harness.recorder.status().warning.as_deref() != Some(warning) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the warning: {:?}",
+                harness.recorder.status().warning
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stop(&harness.recorder).await;
+        let note = harness.recorder.status().warning.unwrap_or_default();
+        assert!(note.contains("of the recording are missing"), "{note}");
+        assert_eq!(note.contains("USB Microphone"), cfg!(windows), "{note}");
+        eventually("the pipeline picked the saved meeting up", || {
+            harness.engine.transcriptions.count() > 0
+        })
         .await;
-        assert!(seconds >= 10, "{seconds} s");
     }
 
     /// Restarts that go on after a device change rather than a stall name
