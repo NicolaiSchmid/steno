@@ -2705,12 +2705,19 @@ touch and admission lines; each fix is ported to Swift before cutover.
   would otherwise pass it unread), and "Not Now" leaves the version to be raised again
   after the recording. The install downloads first and then holds recording starts off
   (`Recorder::hold_starts`) from just before the updater writes the package through
-  the relaunch: a Record meanwhile, from the sidebar, the tray or a meeting prompt, is
-  refused and says "Steno is installing an update and relaunches in a moment.", and a
-  prompt stays up until its countdown ends. A recording the user did not agree to
-  stop, one that started during the download, puts the install off: the package is
-  kept, the version is raised again at the first idle tick, and the next yes installs
-  without a second download. A confirm's yes may stop only the recording it named.
+  the relaunch: a Record meanwhile, from the sidebar or the tray, is refused and says
+  "Steno is installing an update. You can record again once it relaunches, or if you
+  cancel the install."; a meeting prompt's Record, once detection raises one, goes
+  through the same `recording.start` and is refused the same way. The hold also spans
+  the updater's password prompt: a `.deb` install always asks (pkexec, then a zenity
+  or kdialog password dialog, then a terminal `sudo`), and on macOS an app folder the
+  user cannot write asks for an administrator. Cancelling every prompt fails the
+  install, which drops the hold and clears the message. A recording the user did not
+  agree to stop, such as one that started during the download, puts the install off:
+  the package is kept, the version is raised again at the first idle tick, and the
+  next yes installs without a second download. A confirm's yes may stop only the
+  recording it named; one still starting when the confirm came up is named by the
+  meeting id it has at the yes.
   Automatic downloads wait for P25's `InstallGate` (stable plan): its stand-in
   `NeverIdle` never gives a hold, so until P25 lands the flag downloads nothing and
   every install waits for the user's yes; with the gate the schedule downloads by
@@ -2725,14 +2732,14 @@ touch and admission lines; each fix is ported to Swift before cutover.
   time, and the install is of the version the dialog named; a yes for a version a
   later check replaced installs nothing, since the newer one has its own dialog. The
   schedule's launch tick waits for the keyring's answer where the Secret Service asks,
-  so its dialog does not come up beside that prompt. A packaged
-  install (`STENO_DISTRIBUTION=aur|nix`, the environment before the build's value;
-  stable plan X5, `updates_are_managed`) runs no schedule, and its checks, the tray's
+  so its dialog does not come up beside that prompt. A packaged install
+  (`STENO_DISTRIBUTION=aur|nix`, the environment before the build's value; stable
+  plan X5, `updates_are_managed`) runs no schedule, and its checks, the tray's
   included, fail without a request; the tray says the package manager delivers the
   updates. A smoke run (`STENO_SMOKE_SECONDS`) and the fixture host pass no update
   source, so they never check on their own; the tray's check there has the same 60
-  second limit and only says what it found. The
-  network is the updater's: the same lane manifests, nothing new sent.
+  second limit and only says what it found. The network is the updater's: the same
+  lane manifests, nothing new sent.
 
 ### Bridge
 

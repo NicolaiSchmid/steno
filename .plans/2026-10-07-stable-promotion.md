@@ -521,6 +521,10 @@ Every package is written in parallel except where a dependency is named:
     with its 60-second countdown, with `dismiss_prompt` reaching the controller.
   - Port the auto-stop after a call: the 90-second grace, "Keep recording" and
     the end reasons.
+  - A prompt's Record that an update install's start hold refuses (S4) shows
+    the recorder's error in the prompt, or detection prompts again after the
+    relaunch for a call still under way; until then the refusal shows only in
+    the main window.
   - Tests: Swift's `DetectionTests` and `AutoStopTests` as table tests against a
     fake clock and a fake process list. **Nicolai**, on his Mac: a FaceTime or
     Teams call raises the prompt, and hanging up stops the recording after the
@@ -566,10 +570,14 @@ Every package is written in parallel except where a dependency is named:
     before it installs. The install downloads first, then holds recording
     starts off (`Recorder::hold_starts`) from just before the package is
     written through the relaunch, and a Record meanwhile says "Steno is
-    installing an update and relaunches in a moment."; a recording that
-    started during the download puts the install off, with the package kept
-    and the version raised again. P25's `InstallHold` takes the same
-    recorder start hold rather than building a second one. Automatic
+    installing an update. You can record again once it relaunches, or if you
+    cancel the install." (the hold spans the updater's password prompt,
+    which a `.deb` install always shows; cancelling it fails the install and
+    frees Record); a recording that started during the download puts the
+    install off, with the package kept and the version raised again. A
+    refused Record shows only in the main window (S2 carries the prompt's
+    part). P25's `InstallHold` takes the same recorder start hold rather
+    than building a second one. Automatic
     downloads wait for P25's gate: the schedule downloads by itself only
     while `InstallGate::is_idle_now` says idle and installs only with the
     gate's hold from `InstallGate::try_hold`; the stand-in
