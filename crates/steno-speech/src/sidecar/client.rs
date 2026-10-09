@@ -325,6 +325,9 @@ impl SidecarProcess {
                 source,
             })?;
         let pid = child.id();
+        // Before any wait on the child, so its pid names no other process.
+        #[cfg(target_os = "linux")]
+        super::scope::move_to_own_scope(pid);
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {

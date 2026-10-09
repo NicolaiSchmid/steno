@@ -12,6 +12,10 @@
 //!   docs); and
 //!   [`FALLBACK_NOTICE`], the start of the child's stderr line about a
 //!   fallback.
+//! - `scope` (Linux only): the child in a systemd scope of its own when
+//!   the app runs in a unit of a systemd user manager, so that under
+//!   memory pressure `systemd-oomd` can kill the child's cgroup without
+//!   the app's.
 //!
 //! The binary lives in `crates/steno-speech-sidecar`; its tests kill,
 //! abort, hang and overfill the child and check that the engine reports
@@ -21,6 +25,8 @@
 
 pub mod client;
 pub mod protocol;
+#[cfg(target_os = "linux")]
+mod scope;
 
 pub use client::{
     FALLBACK_NOTICE, SIDECAR_BINARY, SidecarConfig, SidecarHealth, SidecarSpeechEngine,

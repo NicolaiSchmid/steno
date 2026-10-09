@@ -154,6 +154,34 @@ macOS: Ctrl-C, a closed terminal and systemd signal it with the app, and
 it would otherwise end its job first. It exits within a heartbeat once
 the app is gone.
 
+On Linux, when the app runs in a unit of a systemd user manager (a
+launcher's scope, the autostart service), the sidecar gets a transient
+scope of its own right after its start,
+`app-steno\x2dspeech\x2dsidecar-<pid>.scope`, in the app's slice and
+`PartOf` the app's unit (`crates/steno-speech/src/sidecar/scope.rs`).
+`systemd-oomd`, which some distributions turn on for the user's session,
+kills a whole cgroup under memory pressure. With the sidecar in a cgroup
+of its own, oomd takes the sidecar first and the recording goes on: the
+job that was transcribing fails as after any crash of the sidecar, and
+the next job starts a new one. The app's own cgroup stays a
+candidate: speaker diarization runs in the app's process, so while it
+runs, or under pressure that lasts after the sidecar is gone, oomd can
+take the app.
+
+The app asks the user manager for the scope over the user bus's Unix
+socket in `$XDG_RUNTIME_DIR`, sending the sidecar's pid, the unit names
+and the scope's fixed settings, nothing else, and waits about two seconds
+for the sidecar to be in it. A start the manager has not carried out by
+then is called off and the sidecar stays in the app's cgroup; a sidecar
+that joined its scope just before, or that a late manager moves
+afterwards, stays in its scope. Without a user manager, a user bus or a
+unit (a plain shell, a container), or when the manager refuses, the
+sidecar stays in the app's cgroup. Stopping the app's unit also stops the
+sidecar's scope. The log says which happened: `speech sidecar in a scope
+of its own`, `the speech sidecar stays in the app's cgroup`, or, when
+nothing tells whether the manager moved it, `the speech sidecar stays
+where the user manager put it`.
+
 Snapshots reach the windows, the tray and the panels from the main thread
 (`WindowSink` in `host.rs`): the host emits under its `publishing` lock,
 the main thread can be waiting for a thread that holds it (a Stop from the
