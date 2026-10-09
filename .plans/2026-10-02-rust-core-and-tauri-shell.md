@@ -1497,10 +1497,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   master. The phone keeps its copy either way. A copy left behind stays noted in the
   record of recording folders, and the next launch adopts it
   (`recovery::adopt_orphans`, stable plan P3; Rust only). The earlier copy of a
-  re-admitted `complete` receipt is left alone and costs disk space only. The intake completes
-  only a receipt of the admitting upload: its read and, again, the admission's
-  transaction refuse another device's receipt under the same recording id, and one
-  of other bytes (`StoreError::ReceiptOfAnotherUpload`,
+  re-admitted `complete` receipt is left alone and costs disk space only. The intake
+  completes only a receipt of the admitting upload: its read and, again, the
+  admission's transaction refuse another device's receipt under the same recording
+  id, and one of other bytes (`StoreError::ReceiptOfAnotherUpload`,
   `MeetingStoreError.receiptOfAnotherUpload`), and leave that receipt as it is, the
   copy removed. When the ledger already holds the bytes and their meeting exists,
   the transaction completes the receipt with that meeting and writes no other, and
