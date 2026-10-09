@@ -72,16 +72,18 @@ pub struct ChunkerConfig {
 
 /// The defaults are the spike D harness values
 /// (`spikes/onnx-speech/src/main.rs`: target 25 s, search 4 s, long pause
-/// 3 s, pad 0.25 s); `max_seconds` 60 and `overlap_seconds` 1.5 are
-/// decision 1 (the harness ran with a 190 s clamp); `min_chunk_seconds` is
-/// new here and keeps a cut in speech from landing right after a chunk's
-/// start.
+/// 3 s, pad 0.25 s); `max_seconds` 60 is decision 1 (the harness ran with
+/// a 190 s clamp); `overlap_seconds` 2 is `FluidAudio`'s, within decision
+/// 1's 1 to 2 s, and scored better than 1.5 s on FLEURS German on both
+/// backends (A2 in `.plans/2026-10-07-stable-promotion.md`);
+/// `min_chunk_seconds` is new here and keeps a cut in speech from landing
+/// right after a chunk's start.
 impl Default for ChunkerConfig {
     fn default() -> Self {
         ChunkerConfig {
             target_seconds: 25.0,
             search_seconds: 4.0,
-            overlap_seconds: 1.5,
+            overlap_seconds: 2.0,
             long_pause_seconds: 3.0,
             max_seconds: 60.0,
             pad_seconds: 0.25,
@@ -281,7 +283,7 @@ mod tests {
         let chunks = layout(&audio(52.0, &speech), &speech, &ChunkerConfig::default());
         assert_eq!(chunks[0].cut, Cut::Pause);
         assert_eq!(chunks[0].range.end, s(24.5));
-        assert_eq!(chunks[1].range.start, s(24.5) - s(1.5));
+        assert_eq!(chunks[1].range.start, s(24.5) - s(2.0));
         assert_eq!(chunks.last().unwrap().cut, Cut::Tail);
         assert!(covers(&chunks, &speech));
     }
