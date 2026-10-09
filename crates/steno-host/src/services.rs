@@ -246,9 +246,10 @@ pub trait Recorder: Send + Sync {
     /// Rust only: Swift refused every recording row and removed only what
     /// an asset named.
     fn left_recording(&self, meeting_id: Uuid) -> LeftRecording;
-    /// The rows of meeting `meeting_id` are gone (any delete): what the
-    /// recorder kept for its recovery goes too, so the launch does not
-    /// adopt a master whose removal failed. Rust only.
+    /// The rows of meeting `meeting_id` are about to go (any confirmed
+    /// delete, asked before its rows go): what the recorder kept for its
+    /// recovery goes first, so the launch does not adopt a master whose
+    /// removal failed or is not done yet. Rust only.
     fn forget_recording(&self, meeting_id: Uuid);
 }
 

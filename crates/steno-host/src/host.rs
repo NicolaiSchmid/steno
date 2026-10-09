@@ -1521,6 +1521,14 @@ impl BridgeHost for Host {
         }
         let confirmed = self.confirm(&prompt);
         if confirmed {
+            // Before the rows go, so the launch's adoption, which reads the
+            // entries after the rows, never finds the meeting gone and its
+            // master still there (a removal not done yet, or one that
+            // failed).
+            self.shared
+                .services
+                .recorder
+                .forget_recording(params.meeting_id);
             let now = self.now();
             let mut deleted = false;
             self.command(
@@ -1546,14 +1554,6 @@ impl BridgeHost for Host {
                     }
                 },
             );
-            // Every delete: an entry left behind would let the next launch
-            // adopt a master whose removal failed.
-            if deleted {
-                self.shared
-                    .services
-                    .recorder
-                    .forget_recording(params.meeting_id);
-            }
         }
         Ok(ConfirmReply { confirmed })
     }

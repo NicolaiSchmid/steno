@@ -293,6 +293,18 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         .build();
     let _ = confirming.snapshot(BridgeTopic::MeetingsList);
     confirming.sink.clear();
+    // Whether each commit saw the entry already forgotten: the delete's
+    // commit must, since the launch's adoption reads the entries after the
+    // rows.
+    let forgotten_at_commit: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let (seen, recorder) = (
+        forgotten_at_commit.clone(),
+        confirming.fakes.recorder.clone(),
+    );
+    confirming.store.probe_commits(move |_| {
+        let forgotten = recorder.forgotten.lock().unwrap().contains(&uuid(MEETING));
+        seen.lock().unwrap().push(forgotten);
+    });
     let reply = confirming
         .host
         .meetings_delete(MeetingIdParams {
@@ -321,6 +333,7 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         *confirming.fakes.recorder.forgotten.lock().unwrap(),
         [uuid(MEETING)]
     );
+    assert_eq!(*forgotten_at_commit.lock().unwrap(), [true]);
     assert!(
         !confirming
             .fakes

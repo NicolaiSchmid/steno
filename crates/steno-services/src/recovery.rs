@@ -51,7 +51,7 @@
 //! each, and the phone still has its copy.
 //!
 //! During the rollback window a recording can come back once: a Rust
-//! recording killed, the Swift app's launch fails its row, and the user
+//! recording is killed, the Swift app's launch fails its row, and the user
 //! deletes it there. The Swift app removes only what an asset names, so
 //! the master stays, and its entry too; the next launch here adopts it
 //! again. A delete here removes it for good.
@@ -911,7 +911,9 @@ fn adopted(
 /// known folder or a stored asset's folder, that holds a non-empty master,
 /// has no row, and is named in the record of recording folders
 /// ([`crate::audio_folders`]), which a recording's start and a phone
-/// upload's copy write before the row. Each is adopted where it is, as a
+/// upload's copy write before the row, both as the launch listed it and as
+/// read again after the rows: a delete forgets its entry before its rows
+/// go, so a meeting deleted while the launch ran is not adopted back. Each is adopted where it is, as a
 /// `queued` meeting with that id ([`adopted`]), its meeting and asset
 /// inserted in one transaction that fails when a row with the id was
 /// written meanwhile, and processed
@@ -920,8 +922,8 @@ fn adopted(
 /// power loss can still take it, and a later launch forgets the entry
 /// once its row is durable (`forget_settled`). An entry with no row is
 /// forgotten here only when its folder provably holds no master
-/// (`holds_no_master`); one whose folder is empty, missing or unreadable
-/// stays, and is logged at debug. A master modified within
+/// (`holds_no_master`); one whose audio folder is empty, missing or
+/// unreadable stays, and is logged at debug. A master modified within
 /// [`LiveRecordingCheck::fresh_within`] is left for the next launch:
 /// another process (a phone upload still being admitted, the Swift app) may
 /// be writing it. One that cannot be read now, or whose rows cannot be
@@ -939,7 +941,7 @@ pub(crate) fn adopt_orphans(
 ) -> Vec<Uuid> {
     // `None`: the record or the rows left `recording` could not be read,
     // so no master can be told this install's.
-    let Some(recorded) = &interrupted.recorded else {
+    let Some(listed_at_launch) = &interrupted.recorded else {
         return Vec::new();
     };
     let listed = store
@@ -952,6 +954,22 @@ pub(crate) fn adopt_orphans(
             return Vec::new();
         }
     };
+    // Only an entry in the launch's listing and in a read after the rows
+    // is evidence: a delete forgets its entry before its rows go, so a
+    // meeting deleted since the listing is not in this read, and one
+    // started since is not in the listing.
+    let recorded = match crate::audio_folders::recorded(&interrupted.support_directory) {
+        Ok(now) => {
+            let mut recorded = listed_at_launch.clone();
+            recorded.retain(|meeting_id, _| now.contains_key(meeting_id));
+            recorded
+        }
+        Err(error) => {
+            tracing::debug!(%error, "recording folders not read again; none adopted");
+            return Vec::new();
+        }
+    };
+    let recorded = &recorded;
     let others = other_folders(store, &interrupted.known_folders).unwrap_or_else(|error| {
         tracing::debug!(%error, "the stored assets' folders were not listed");
         interrupted.known_folders.clone()
@@ -966,6 +984,8 @@ pub(crate) fn adopt_orphans(
     let found = orphans(&folders, &ids, recorded);
     let _entered = runtime.enter();
     let mut adopted_ids = Vec::new();
+    // No master to lose: forgotten whether or not the store is durable.
+    let mut gone = Vec::new();
     for orphan in &found {
         let meeting_id = orphan.meeting_id;
         if check.is_fresh(&orphan.master) {
@@ -991,8 +1011,6 @@ pub(crate) fn adopt_orphans(
             }
         }
     }
-    // No master to lose: forgotten whether or not the store is durable.
-    let mut gone = Vec::new();
     for (&meeting_id, folder) in recorded {
         if ids.contains(&meeting_id) || found.iter().any(|orphan| orphan.meeting_id == meeting_id) {
             continue;
@@ -2311,6 +2329,46 @@ mod tests {
             after.store.meeting(orphan).unwrap().unwrap().state,
             MeetingState::Ready
         );
+    }
+
+    /// A meeting deleted while the launch runs, after the launch listed its
+    /// entry and with its master still there (a removal not done yet, or
+    /// one that failed), is not adopted back: the delete forgets the entry
+    /// before its rows go, and the adoption reads the entries again after
+    /// the rows, both between the forget and the commit and after the
+    /// commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_meeting_deleted_while_the_launch_runs_is_not_adopted_back() {
+        let harness = Harness::new();
+        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 50);
+        assert_eq!(
+            reconcile_at_launch(&harness, &[], &an_hour_later()),
+            [orphan]
+        );
+        harness.pipeline.current().wait_until_idle().await;
+        // The next launch lists the entry, kept until a launch finds the
+        // row durable.
+        let launch = harness.interrupted(&[]);
+        assert!(launch.recorded.as_ref().unwrap().contains_key(&orphan));
+        let adopt = || {
+            adopt_orphans(
+                &harness.store,
+                &harness.pipeline.current(),
+                &launch,
+                &an_hour_later(),
+                chrono::FixedOffset::east_opt(0).unwrap(),
+                &tokio::runtime::Handle::current(),
+            )
+        };
+
+        // The delete in the host's order: the entry, the rows, the files.
+        crate::audio_folders::forget(&harness.support_directory(), &[orphan]).unwrap();
+        assert_eq!(adopt(), Vec::<Uuid>::new());
+        harness.store.delete_meeting(orphan).unwrap();
+        assert_eq!(adopt(), Vec::<Uuid>::new());
+        harness.pipeline.current().wait_until_idle().await;
+        assert!(harness.store.meeting(orphan).unwrap().is_none());
+        assert!(master_path(&harness.audio_folder(), orphan).is_file());
     }
 
     /// An entry with no row whose folder cannot be told empty stays: an
