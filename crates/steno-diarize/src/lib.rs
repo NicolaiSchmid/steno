@@ -47,22 +47,27 @@
 //! one for one with `Sources/StenoSpeech/Diarization` and the `FluidAudio`
 //! code it ran.
 //!
-//! Entry points: [`ModelDiarizer`] is the `steno_core::Diarizer` the
-//! meeting pipeline (WP6) holds, built by `ModelDiarizer::onnx` over
-//! `steno-speech`'s `ModelStore`, which installs the two ONNX models of
-//! `models::asset` beside the speech models where the caller's `Install`
-//! allows it (`models::installed` is the check without a download), or by
-//! `ModelDiarizer::coreml` over `coreml::model_directory`, where the Swift
-//! app installs `FluidAudio`'s models; [`Pipeline`] exposes `analyze`,
+//! Entry points: [`SidecarDiarizer`] is the `steno_core::Diarizer` the
+//! meeting pipeline (WP6) holds, the ONNX models in the speech sidecar's
+//! child ([`sidecar`]), so a crash in ONNX Runtime ends the child, not the
+//! app; [`ModelDiarizer`] runs the same pipeline in this process, for
+//! `steno dev diarize-sweep` and the tests. Both install the two ONNX
+//! models of `models::asset` through `steno-speech`'s `ModelStore`, beside
+//! the speech models, where the caller's `Install` allows it
+//! (`models::installed` is the check without a download);
+//! `ModelDiarizer::onnx` loads them here, and `ModelDiarizer::coreml` runs
+//! over `coreml::model_directory` instead, where the Swift app installs
+//! `FluidAudio`'s models. [`Pipeline`] exposes `analyze`,
 //! `map` and `refine` one at a time for the calibration harness, which
 //! analyses a lane once and sweeps the cut; [`fbank`] is the feature front
 //! end the ONNX backend puts in front of the embedding model. Features:
 //! `onnx` builds the ONNX Runtime backend and its `models`, `coreml` the
 //! `CoreML` one (a no-op off macOS); both are on by default.
 //!
-//! Audio never leaves the device: this crate opens no connection. The ONNX
-//! models are fetched by `steno-speech`'s `ModelStore`, which sends nothing
-//! but the request.
+//! Audio never leaves the device: this crate opens no connection, and
+//! `SidecarDiarizer` hands a lane to the sidecar only over the child's
+//! stdin. The ONNX models are fetched by `steno-speech`'s `ModelStore`,
+//! which sends nothing but the request.
 
 #![deny(unsafe_code)]
 
@@ -82,6 +87,8 @@ pub mod onnx;
 pub mod pipeline;
 pub mod refinement;
 pub mod segmentation;
+#[cfg(feature = "onnx")]
+pub mod sidecar;
 pub mod timeline;
 
 pub use backend::{BackendError, DiarizationBackend, SegmentationGeometry};
@@ -90,6 +97,8 @@ pub use error::DiarizeError;
 #[cfg(feature = "onnx")]
 pub use models::Install;
 pub use pipeline::{DEFAULT_CLUSTERING_THRESHOLD, DiarizerConfig, Pipeline};
+#[cfg(feature = "onnx")]
+pub use sidecar::SidecarDiarizer;
 
 /// Exact for every count below 2^53, far beyond any sample count.
 #[allow(clippy::cast_precision_loss)]

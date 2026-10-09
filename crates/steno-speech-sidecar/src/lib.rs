@@ -1,5 +1,5 @@
 //! `steno-speech-sidecar`, the speech sidecar: the child process that runs
-//! Parakeet on ONNX Runtime for the app (decision 5 of
+//! Parakeet and the diarizer on ONNX Runtime for the app (decision 5 of
 //! `.plans/2026-10-01-cross-platform-speech-stack.md`, invariant 4 of
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md`). The app, its parent,
 //! drives it through [`steno_speech::SidecarSpeechEngine`]; the wire format
@@ -15,7 +15,12 @@
 //! # What the child does
 //!
 //! It loads the models once from the store root the parent names and
-//! installed; it never downloads and opens no connection. When the parent
+//! installed; it never downloads and opens no connection. The diarizer's
+//! two models (pyannote segmentation 3.0, `WeSpeaker` ResNet34-LM) load the
+//! same way from the files the parent names, on the CPU, independently of
+//! speech's; a diarization runs `steno_diarize`'s pipeline over them with
+//! its default configuration, the code the app ran in its own process
+//! before, and answers with the clusters, embeddings included. When the parent
 //! asks for `DirectML` on Windows, the encoder runs there if the probe in
 //! `steno_speech::onnx` passes, and the child answers the load with the
 //! provider it chose. Its health reports and transcripts carry the provider
@@ -41,7 +46,10 @@
 //! # Privacy
 //!
 //! Its sessions open through [`steno_speech::onnx`], which switches ONNX
-//! Runtime's telemetry off first, so ONNX Runtime sends nothing. With
+//! Runtime's telemetry off first, so ONNX Runtime sends nothing; the
+//! diarizer's open through `steno_diarize::onnx`, which makes the same call
+//! first. The audio of a diarization arrives on stdin like a
+//! transcription's. With
 //! `DirectML` on, `DirectML.dll` and Direct3D 12 may still log to Windows'
 //! own diagnostic data, as for any program that uses them; the child opens
 //! nothing for it, and no audio or text is involved.
@@ -49,7 +57,9 @@
 //! # Test faults
 //!
 //! `--fake-engine` replaces Parakeet with an engine that needs no models
-//! and answers with the sample count and peak of the audio it received; it
+//! and answers with the sample count and peak of the audio it received (a
+//! diarization with one cluster over the whole audio whose confidence is
+//! the peak and whose embedding is made from it); it
 //! answers a load that asks for `DirectML` with `DirectML`, and reports no
 //! live provider until `--fault fallback`. Only with it, `--fault <kind>`
 //! ([`Fault`]) makes the next transcription abort, panic, flood stderr and
@@ -58,10 +68,13 @@
 //! to send, answer and then report a resident set over any ceiling, report
 //! a fallback to the CPU or lose the encoder, the child abort on any load
 //! or on a load that asks for `DirectML`, or stay silent, greet late or
-//! announce another protocol version from the start. `--fault-once
+//! announce another protocol version from the start; the crashes, the hang,
+//! the allocation and the failure apply to the next diarization too, one
+//! abort to a diarization only, and one fault refuses every diarizer load.
+//! `--fault-once
 //! <path>` limits that to the first child that creates `<path>`, which
-//! holds that child's pid. The isolation tests and the `DirectML` test
-//! binaries drive the real client against these.
+//! holds that child's pid. The isolation tests, the diarization tests and
+//! the `DirectML` test binaries drive the real client against these.
 
 use std::fs::File;
 use std::io::{self, BufReader, Write};
@@ -70,9 +83,13 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use steno_core::{AudioBuffer16k, LanguageTag, RawSegment};
+use steno_core::{AudioBuffer16k, Embedding, LanguageTag, RawSegment, SpeakerCluster, TimeRange};
+use steno_diarize::models::ModelPaths;
+use steno_diarize::{DiarizerConfig, Pipeline};
 use steno_speech::sidecar::FALLBACK_NOTICE;
-use steno_speech::sidecar::protocol::{self, MAX_HEADER_BYTES, PROTOCOL_VERSION, Reply, Request};
+use steno_speech::sidecar::protocol::{
+    self, DiarizedCluster, MAX_HEADER_BYTES, PROTOCOL_VERSION, Reply, Request,
+};
 use steno_speech::{
     EncoderProvider, ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig,
     Transcriber, VadConfig,
@@ -80,7 +97,11 @@ use steno_speech::{
 
 steno_core::string_enum! {
     /// What the next transcription of the fake engine does instead of
-    /// answering.
+    /// answering; [`Fault::Abort`], [`Fault::Panic`], [`Fault::Exit`],
+    /// [`Fault::Hang`], [`Fault::Allocate`] and [`Fault::Error`] apply to
+    /// the next diarization as well, whichever comes first,
+    /// [`Fault::AbortDiarizing`] to the next diarization only, and
+    /// [`Fault::RefuseDiarizer`] to every diarizer load.
     pub enum Fault {
         /// `std::process::abort`, the way an uncaught C++ exception in ONNX
         /// Runtime ends the process.
@@ -133,6 +154,14 @@ steno_core::string_enum! {
         /// At start: waits 200 ms before its ready message, so a heartbeat
         /// started before it would come first.
         SlowStart = "slow-start",
+        /// `std::process::abort` inside the next diarization, the way an
+        /// uncaught C++ exception in ONNX Runtime ends it there;
+        /// transcriptions answer.
+        AbortDiarizing = "abort-diarizing",
+        /// Refuses every diarizer load with an error and keeps running, as
+        /// the real engine does with a file ONNX Runtime cannot load;
+        /// transcriptions answer.
+        RefuseDiarizer = "refuse-diarizer",
     }
 }
 
@@ -236,12 +265,17 @@ trait Engine {
         samples: &[f32],
         hint: Option<&LanguageTag>,
     ) -> Result<Vec<RawSegment>, String>;
+    /// Loads the diarizer's two models, replacing any loaded before.
+    fn load_diarizer(&mut self, models: &ModelPaths, threads: usize) -> Result<(), String>;
+    /// Diarizes `audio` with the diarizer's default configuration.
+    fn diarize(&mut self, audio: AudioBuffer16k) -> Result<Vec<SpeakerCluster>, String>;
 }
 
-/// Parakeet on ONNX Runtime from an installed store.
+/// Parakeet and the diarizer on ONNX Runtime from installed models.
 #[derive(Default)]
 struct OnnxEngine {
     transcriber: Option<Transcriber<OnnxBackend>>,
+    diarizer: Option<Pipeline<steno_diarize::onnx::OnnxBackend>>,
 }
 
 impl Engine for OnnxEngine {
@@ -295,6 +329,25 @@ impl Engine for OnnxEngine {
         transcriber
             .transcribe(samples, hint)
             .map(|t| t.segments)
+            .map_err(|e| e.to_string())
+    }
+
+    fn load_diarizer(&mut self, models: &ModelPaths, threads: usize) -> Result<(), String> {
+        self.diarizer = None;
+        let backend =
+            steno_diarize::onnx::OnnxBackend::load(models, threads).map_err(|e| e.to_string())?;
+        self.diarizer = Some(Pipeline::new(backend, DiarizerConfig::default()));
+        Ok(())
+    }
+
+    fn diarize(&mut self, audio: AudioBuffer16k) -> Result<Vec<SpeakerCluster>, String> {
+        let pipeline = self
+            .diarizer
+            .as_mut()
+            .ok_or_else(|| "the diarizer's models are not loaded".to_owned())?;
+        pipeline
+            .diarize(&audio)
+            .map(|result| result.clusters)
             .map_err(|e| e.to_string())
     }
 }
@@ -377,7 +430,13 @@ impl Engine for FakeEngine {
         samples: &[f32],
         hint: Option<&LanguageTag>,
     ) -> Result<Vec<RawSegment>, String> {
-        match self.fault_now() {
+        // Left for the diarization it is meant for.
+        let fault = if self.fault == Some(Fault::AbortDiarizing) {
+            None
+        } else {
+            self.fault_now()
+        };
+        match fault {
             Some(Fault::Abort) => std::process::abort(),
             Some(Fault::Panic) => {
                 // A line that is not UTF-8 first, as a native library may
@@ -402,15 +461,7 @@ impl Engine for FakeEngine {
                 std::process::exit(3)
             }
             Some(Fault::Hang) => hang(),
-            Some(Fault::Allocate) => {
-                let mut hoard: Vec<Vec<u8>> = Vec::new();
-                while hoard.len() < 256 {
-                    // Touched, so the pages are resident, not just reserved.
-                    hoard.push(vec![1u8; 16 << 20]);
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                hang()
-            }
+            Some(Fault::Allocate) => allocate_and_hang(),
             Some(Fault::Garbage) => {
                 let mut out = io::stdout().lock();
                 // Under the header limit, so only the first byte after
@@ -445,11 +496,53 @@ impl Engine for FakeEngine {
                 | Fault::WrongProtocol
                 | Fault::SlowStart
                 | Fault::AbortOnLoad
-                | Fault::AbortOnDirectmlLoad,
+                | Fault::AbortOnDirectmlLoad
+                | Fault::AbortDiarizing
+                | Fault::RefuseDiarizer,
             )
             | None => Ok(describe(samples, hint)),
         }
     }
+
+    /// Needs no files; fails with [`Fault::RefuseDiarizer`].
+    fn load_diarizer(&mut self, _: &ModelPaths, _: usize) -> Result<(), String> {
+        if self.fault == Some(Fault::RefuseDiarizer) {
+            return Err("simulated refusal of the diarizer's models".to_owned());
+        }
+        Ok(())
+    }
+
+    fn diarize(&mut self, audio: AudioBuffer16k) -> Result<Vec<SpeakerCluster>, String> {
+        match self.fault_now() {
+            Some(Fault::Abort | Fault::AbortDiarizing) => std::process::abort(),
+            Some(Fault::Panic) => panic!("simulated panic in the diarizer"),
+            Some(Fault::Exit) => std::process::exit(3),
+            Some(Fault::Hang) => hang(),
+            Some(Fault::Allocate) => allocate_and_hang(),
+            Some(Fault::Error) => Err("simulated failure in the diarizer".to_owned()),
+            _ => Ok(describe_voices(&audio)),
+        }
+    }
+}
+
+/// The fake diarizer's answer: one cluster over the whole audio, its
+/// confidence the peak and its embedding the peak times 1 to 256 over 256,
+/// so every bit of the floats has to cross.
+fn describe_voices(audio: &AudioBuffer16k) -> Vec<SpeakerCluster> {
+    let peak = audio.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    let whole = TimeRange {
+        lower: 0.0,
+        upper: audio.duration(),
+    };
+    vec![SpeakerCluster {
+        label: "Speaker 1".to_owned(),
+        ranges: vec![whole],
+        embedding: Some(Embedding(
+            (1..=256u16).map(|i| peak * f32::from(i) / 256.0).collect(),
+        )),
+        cluster_confidence: peak,
+        sample_clip_range: Some(whole),
+    }]
 }
 
 /// The fake engine's answer: one segment naming what arrived.
@@ -477,6 +570,17 @@ fn hang() -> ! {
     loop {
         std::thread::sleep(Duration::from_secs(3600));
     }
+}
+
+/// [`Fault::Allocate`]: 4 GiB in 16 MiB steps, then [`hang`].
+fn allocate_and_hang() -> ! {
+    let mut hoard: Vec<Vec<u8>> = Vec::new();
+    while hoard.len() < 256 {
+        // Touched, so the pages are resident, not just reserved.
+        hoard.push(vec![1u8; 16 << 20]);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    hang()
 }
 
 /// The resident set of this process; 0 where it cannot be read.
@@ -595,11 +699,91 @@ fn transcribe(
     }
 }
 
+/// Reads the samples of a diarization request and answers it; `Err` is
+/// the exit code when the audio is unreadable.
+fn diarize(
+    engine: &mut dyn Engine,
+    input: &mut impl io::Read,
+    id: u64,
+    sample_count: u64,
+) -> Result<Reply, ExitCode> {
+    let samples = protocol::read_samples(input, sample_count)
+        .map_err(|error| give_up("unreadable audio", error))?;
+    Ok(match engine.diarize(AudioBuffer16k::new(samples)) {
+        Ok(clusters) => Reply::Diarization {
+            id,
+            clusters: clusters.iter().map(DiarizedCluster::from).collect(),
+        },
+        Err(error) => Reply::Failed { id, error },
+    })
+}
+
 /// Says on stderr why the child stops, for the parent's crash report, and
 /// returns the exit status for it, 2 even when stderr is gone.
 fn give_up(why: &str, error: impl std::fmt::Display) -> ExitCode {
     stderr_line!("steno-speech-sidecar: {why}: {error}");
     ExitCode::from(2)
+}
+
+/// The reply to `request`, its payload read from `input`; `Err` is the
+/// exit code when the child exits instead: after a shutdown, which has
+/// said goodbye, or when the audio is unreadable or the encoder lost.
+fn answer(
+    engine: &mut dyn Engine,
+    input: &mut impl io::Read,
+    request: Request,
+) -> Result<Reply, ExitCode> {
+    Ok(match request {
+        Request::Load {
+            id,
+            models_root,
+            intra_threads,
+            inter_threads,
+            directml,
+        } => {
+            let options = OnnxOptions {
+                intra_threads,
+                inter_threads,
+                directml,
+            };
+            match engine.load(&models_root, &options) {
+                Ok(provider) => Reply::Loaded { id, provider },
+                Err(error) => Reply::Failed { id, error },
+            }
+        }
+        Request::Health { id } => Reply::Health {
+            id,
+            pid: std::process::id(),
+            rss_bytes: rss_bytes(),
+            loaded: engine.loaded(),
+            provider: engine.provider(),
+        },
+        Request::Transcribe {
+            id,
+            sample_count,
+            hint,
+        } => transcribe(engine, input, id, sample_count, hint.as_ref())?,
+        Request::LoadDiarizer {
+            id,
+            segmentation,
+            embedding,
+            intra_threads,
+        } => {
+            let models = ModelPaths {
+                segmentation,
+                embedding,
+            };
+            match engine.load_diarizer(&models, intra_threads) {
+                Ok(()) => Reply::DiarizerLoaded { id },
+                Err(error) => Reply::Failed { id, error },
+            }
+        }
+        Request::Diarize { id, sample_count } => diarize(engine, input, id, sample_count)?,
+        Request::Shutdown { id } => {
+            send(&Reply::Bye { id });
+            return Err(ExitCode::SUCCESS);
+        }
+    })
 }
 
 /// Runs the child until it exits, with status 0 or 2 as
@@ -649,43 +833,9 @@ pub fn serve(options: &Options) -> ExitCode {
             Ok(None) => return ExitCode::SUCCESS,
             Err(error) => return give_up("unreadable request", error),
         };
-        let reply = match request {
-            Request::Load {
-                id,
-                models_root,
-                intra_threads,
-                inter_threads,
-                directml,
-            } => {
-                let options = OnnxOptions {
-                    intra_threads,
-                    inter_threads,
-                    directml,
-                };
-                match engine.load(&models_root, &options) {
-                    Ok(provider) => Reply::Loaded { id, provider },
-                    Err(error) => Reply::Failed { id, error },
-                }
-            }
-            Request::Health { id } => Reply::Health {
-                id,
-                pid: std::process::id(),
-                rss_bytes: rss_bytes(),
-                loaded: engine.loaded(),
-                provider: engine.provider(),
-            },
-            Request::Transcribe {
-                id,
-                sample_count,
-                hint,
-            } => match transcribe(&mut *engine, &mut input, id, sample_count, hint.as_ref()) {
-                Ok(reply) => reply,
-                Err(code) => return code,
-            },
-            Request::Shutdown { id } => {
-                send(&Reply::Bye { id });
-                return ExitCode::SUCCESS;
-            }
+        let reply = match answer(&mut *engine, &mut input, request) {
+            Ok(reply) => reply,
+            Err(code) => return code,
         };
         tell_fallback(&*engine, &mut fallback_told);
         send(&reply);

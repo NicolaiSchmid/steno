@@ -776,9 +776,11 @@ impl CaptureRecorder {
     /// failed reload, or an engine the Swift app saved meanwhile, the two
     /// differ. An engine in this process (`CoreML` on
     /// the Mac) is loaded with the diarizer, as Swift did. Where the speech
-    /// sidecar runs the engine ([`SpeechRuntime`]), only the diarizer is:
-    /// the child would hold its 2.2 GB through the whole recording, outside
-    /// any job's claim, so the job starts it instead. Swift:
+    /// sidecar runs the engine ([`SpeechRuntime`]), only the diarizer's
+    /// warm-up runs: the child would hold its 2.2 GB through the whole
+    /// recording, outside any job's claim, so the job starts it instead.
+    /// The diarizer's warm-up checks its models and starts no child: its
+    /// models load into the sidecar's child when it diarizes. Swift:
     /// `AppEnvironment.warmUpPipelineIfModelsInstalled`, called when a
     /// recording starts.
     ///

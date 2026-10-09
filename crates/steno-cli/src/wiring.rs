@@ -175,7 +175,8 @@ pub const ENGINE_IDS: [&str; 4] = [
 ];
 
 /// `--engine <id>`: without it the pipeline runs the fakes; with it
-/// Parakeet v3 where the flag's help says, the ONNX diarizer and cosine
+/// Parakeet v3 where the flag's help says, the ONNX diarizer in
+/// `steno-speech-sidecar` (on the Mac too, with `CoreML` speech) and cosine
 /// speaker memory over the store. The diarizer's models, and in the speech
 /// sidecar Parakeet's, download on first use (from their hosts or the
 /// mirror); the `CoreML` Parakeet must be installed.
@@ -184,7 +185,7 @@ pub struct SpeechOptions {
     #[arg(
         long,
         value_name = "engine",
-        help = "Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs Parakeet v3 in steno-speech-sidecar, which must sit beside steno, except parakeet-v3 on the Mac, which runs on CoreML unless speech.json chooses the sidecar."
+        help = "Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs Parakeet v3 in steno-speech-sidecar, which must sit beside steno, except parakeet-v3 on the Mac, which runs on CoreML unless speech.json chooses the sidecar. The diarizer runs in steno-speech-sidecar with every engine, so on the Mac it must sit beside steno too, or every meeting gets the fallback speakers."
     )]
     pub engine: Option<String>,
 }
@@ -346,11 +347,13 @@ pub fn dependencies(
                 Some(directory) => standardized(directory),
                 None => steno_services::speech::models_directory(settings, &paths()?),
             });
+            // One sidecar engine for both, so they share its child.
+            let sidecar = Arc::new(steno_services::speech::sidecar_engine(&speech));
             (
                 // The flag names the engine for this run, as the Swift CLI's
                 // `makeSpeechEngine(engine, ...)` did; the stored id does not.
-                steno_services::speech::speech_engine(engine, &speech),
-                process_diarizer(&speech),
+                steno_services::speech::speech_engine_in(engine, &speech, &sidecar),
+                process_diarizer(sidecar),
                 Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
             )
         }
@@ -379,14 +382,16 @@ pub fn dependencies(
     })
 }
 
-/// The diarizer `steno process --engine` runs over `speech`. It stays on
-/// `Install::Allowed`: a user who runs an explicit command in a terminal
-/// asked for the work and sees its output, so it may download the
-/// diarizer's models on first use. The app's pipelines never do
+/// The diarizer `steno process --engine` runs in the child of `sidecar`.
+/// It stays on `Install::Allowed`: a user who runs an explicit command in
+/// a terminal asked for the work and sees its output, so it may download
+/// the diarizer's models on first use. The app's pipelines never do
 /// (`Install::Never` in `steno_services::speech::SpeechEngines`), and
 /// this wiring is built here, not shared with them.
-fn process_diarizer(speech: &SpeechSetup) -> Arc<dyn steno_core::Diarizer> {
-    steno_services::speech::diarizer(speech, steno_diarize::Install::Allowed)
+fn process_diarizer(
+    sidecar: Arc<steno_speech::SidecarSpeechEngine>,
+) -> Arc<dyn steno_core::Diarizer> {
+    steno_services::speech::diarizer_in(sidecar, steno_diarize::Install::Allowed)
 }
 
 /// A hex SHA-256, `sha256sum`'s spelling.
@@ -612,7 +617,8 @@ mod tests {
             &StenoPaths::new(dir.path()),
         );
         speech.speech_settings.models_mirror = Some(mirror);
-        assert!(process_diarizer(&speech).prepare().await.is_err());
+        let sidecar = Arc::new(steno_services::speech::sidecar_engine(&speech));
+        assert!(process_diarizer(sidecar).prepare().await.is_err());
         assert!(requests.load(Ordering::SeqCst) > 0);
     }
 

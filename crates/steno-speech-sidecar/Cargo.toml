@@ -1,6 +1,6 @@
 [package]
 name = "steno-speech-sidecar"
-description = "The child process that runs Steno's ONNX speech engine off the app's process, driven over stdin and stdout"
+description = "The child process that runs Steno's ONNX speech engine and diarizer off the app's process, driven over stdin and stdout"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,6 +15,9 @@ path = "src/main.rs"
 [dependencies]
 steno-core = { path = "../steno-core" }
 steno-speech = { path = "../steno-speech" }
+# The diarizer's ONNX backend and pipeline; not its CoreML backend, which
+# stays in the Mac app's process.
+steno-diarize = { path = "../steno-diarize", default-features = false, features = ["onnx"] }
 memory-stats.workspace = true
 serde.workspace = true
 

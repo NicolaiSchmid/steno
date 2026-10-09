@@ -5132,6 +5132,7 @@ dependencies = [
  "memory-stats",
  "serde",
  "steno-core",
+ "steno-diarize",
  "steno-speech",
  "tempfile",
  "tokio",

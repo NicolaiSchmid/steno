@@ -1,5 +1,8 @@
 //! `steno_core::Diarizer` over a [`Pipeline`] whose backend loads on first
-//! use. Swift: `Sources/StenoSpeech/Diarization/FluidDiarizer.swift`.
+//! use, in this process: for `steno dev diarize-sweep`, the calibration and
+//! the tests; the app and `steno process` diarize in the speech sidecar
+//! ([`crate::SidecarDiarizer`]). Swift:
+//! `Sources/StenoSpeech/Diarization/FluidDiarizer.swift`.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -33,8 +36,9 @@ impl Slot {
     }
 }
 
-/// The diarizer the meeting pipeline (WP6) holds as `Arc<dyn Diarizer>`.
-/// Calls run one after another behind the lock, as `FluidDiarizer` runs
+/// A diarizer in this process, for `steno dev` and the tests; the meeting
+/// pipeline (WP6) holds a [`crate::SidecarDiarizer`] instead. Calls run one
+/// after another behind the lock, as `FluidDiarizer` runs
 /// its calls, so one backend instance serves every meeting it processes.
 ///
 /// The work is minutes of model inference, so each call runs on one of

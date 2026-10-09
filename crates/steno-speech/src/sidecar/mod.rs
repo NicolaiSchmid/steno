@@ -29,6 +29,6 @@ pub mod protocol;
 mod scope;
 
 pub use client::{
-    FALLBACK_NOTICE, SIDECAR_BINARY, SidecarConfig, SidecarHealth, SidecarSpeechEngine,
-    directml_switched_off,
+    DiarizerModels, FALLBACK_NOTICE, SIDECAR_BINARY, SidecarConfig, SidecarHealth,
+    SidecarSpeechEngine, directml_switched_off,
 };

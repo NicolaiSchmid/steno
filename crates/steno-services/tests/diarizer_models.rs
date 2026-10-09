@@ -1,19 +1,26 @@
 //! A meeting processed while the diarizer's models are missing, through the
-//! diarizer the app builds (`steno_services::speech::diarizer`) over a
-//! loopback mirror. The speech engine is core's fake. No network beyond
-//! 127.0.0.1.
+//! diarizer the app builds (`steno_services::speech::diarizer_in` over a
+//! `sidecar_engine`) with a loopback mirror, in the real
+//! `steno-speech-sidecar` binary from the target directory (`cargo test
+//! --workspace` builds it). The speech engine
+//! is core's fake. No network beyond 127.0.0.1.
 //!
-//! - Under `Install::Allowed` (what `steno process` builds, and
-//!   `SpeechEngines` until the pipeline gains its models-missing gate), a
-//!   download cut off mid-file, then refused, ends the job `ready` with the
-//!   one room speaker. The recording's files stay byte for byte, the
+//! - Under `Install::Allowed` (what `steno process` builds), a download
+//!   cut off mid-file, then refused, ends the job `ready` with the one room
+//!   speaker. The recording's files stay byte for byte, the
 //!   cut-off download stays as a partial in `onnx/diarization/`, and
 //!   processing the meeting again resumes it rather than repeating a
 //!   cached failure.
-//! - Under `Install::Never`, with today's pipeline, the job falls back
+//! - Under `Install::Never` with no gate in front, the job falls back
 //!   the same way and the mirror sees no request; files of the right size
 //!   in the folder Settings installs that fail to load and fail their
 //!   checksum are deleted, so Settings offers Download.
+//! - The app's diarizer (`SpeechEngines::diarizer`: `Install::Never`
+//!   behind the models-missing gate of `steno_services::model_gate`)
+//!   leaves the job `queued`, waiting for the models with its recording,
+//!   instead: when the models are missing, and when the child refuses
+//!   files of the right size that then fail their checksum. The mirror
+//!   sees no request either way.
 //!
 //! The test's recordings are kept forever (`KeepForever`). Under
 //! `DeleteAfterProcessing`, a meeting that ends `ready` without its
@@ -37,8 +44,8 @@ use chrono::{Duration, Utc};
 use steno_audio::SymphoniaAudioCodec;
 use steno_core::testing::{FakeDestination, FakeSpeechEngine};
 use steno_core::{
-    AudioAsset, AudioRetention, Destination, Meeting, MeetingSource, MeetingState, StenoPaths,
-    Store, TitleOrigin,
+    AudioAsset, AudioRetention, Destination, Diarizer, Meeting, MeetingSource, MeetingState,
+    StenoPaths, Store, TitleOrigin,
 };
 use steno_diarize::Install;
 use steno_diarize::models::{self, ModelPaths, SEGMENTATION_FILE};
@@ -47,8 +54,10 @@ use steno_host::speech::ModelAsset;
 use steno_pipeline::{
     MeetingEventBus, PipelineDependencies, ProcessingPipeline, RetentionSweep, StoreSpeakerMemory,
 };
-use steno_services::speech::{ModelStoreSpeechModels, SpeechSetup};
+use steno_services::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 use steno_speech::ModelStore;
+
+mod common;
 
 /// The body bytes the first response sends before the mirror cuts it.
 const CUT_AFTER: usize = 256 * 1024;
@@ -190,8 +199,8 @@ fn contents(directory: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-/// The store, the pipeline over the app's diarizer with the mirror and
-/// `install`, the recording's folder and its asset, the setup and the
+/// The store, the pipeline over the diarizer [`world_with`] was given,
+/// the recording's folder and its asset, the setup and the
 /// model store the diarizer reads, in an empty models directory. The
 /// meeting is enqueued by [`World::start`].
 struct World {
@@ -205,8 +214,26 @@ struct World {
     _dir: tempfile::TempDir,
 }
 
-/// A six-second call, kept forever (see the module doc).
+/// [`world_with`] over the diarizer `diarizer_in` builds under `install`
+/// in a sidecar engine of its own, with no gate in front.
 fn world(mirror: &Mirror, install: Install) -> World {
+    world_with(mirror, |setup| {
+        steno_services::speech::diarizer_in(
+            Arc::new(steno_services::speech::sidecar_engine(setup)),
+            install,
+        )
+    })
+}
+
+/// [`world_with`] over the diarizer the app's pipelines run
+/// (`SpeechEngines::new(..).diarizer()`).
+fn app_world(mirror: &Mirror) -> World {
+    world_with(mirror, |setup| SpeechEngines::new(setup.clone()).diarizer())
+}
+
+/// A six-second call, kept forever (see the module doc), processed with
+/// the diarizer `diarizer` builds over the world's setup.
+fn world_with(mirror: &Mirror, diarizer: impl FnOnce(&SpeechSetup) -> Arc<dyn Diarizer>) -> World {
     let dir = tempfile::tempdir().unwrap();
     let models_directory = dir.path().join("models");
     let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
@@ -214,6 +241,8 @@ fn world(mirror: &Mirror, install: Install) -> World {
     let mut setup =
         SpeechSetup::in_models_directory(models_directory.clone(), &StenoPaths::new(dir.path()));
     setup.speech_settings.models_mirror = Some(mirror.url.clone());
+    // The real child, which loads (and refuses) the files it is handed.
+    setup.sidecar.program = common::sidecar_binary();
     let models = setup.model_store();
     assert_eq!(
         models.directory(&models::asset()),
@@ -229,7 +258,7 @@ fn world(mirror: &Mirror, install: Install) -> World {
     let pipeline = ProcessingPipeline::new(PipelineDependencies::new(
         Arc::new(SymphoniaAudioCodec::new()),
         Arc::new(FakeSpeechEngine::default()),
-        steno_services::speech::diarizer(&setup, install),
+        diarizer(&setup),
         Arc::new(StoreSpeakerMemory::new(store.clone())),
         dispatcher,
         store.clone(),
@@ -303,6 +332,20 @@ impl World {
             .collect();
         labels.sort();
         assert_eq!(labels, ["Me", "Speaker 1"]);
+    }
+
+    /// The meeting is `queued` and waits for the models: the run stopped
+    /// at the diarize stage with the models-missing refusal (a failed run
+    /// would be `failed`, the fallback `ready`) and stored no speakers.
+    fn assert_waiting_for_the_models(&self) {
+        let meeting_id = self.asset.meeting_id;
+        assert_eq!(self.state(), MeetingState::Queued);
+        assert_eq!(
+            self.pipeline.dependencies().model_waits.waiting(),
+            [meeting_id]
+        );
+        let speakers = self.store.speakers(meeting_id).unwrap();
+        assert!(speakers.is_empty(), "{speakers:?}");
     }
 
     /// The meeting is `ready` and diarized: a speaker carries the
@@ -481,6 +524,49 @@ async fn junk_where_settings_installs_is_deleted_so_settings_offers_download() {
     }
     assert!(!settings.is_installed(ModelAsset::OfflineDiarizer));
     assert!(models::installed(&world.models).is_err());
+    assert_eq!(mirror.seen(), []);
+}
+
+/// The app's diarizer over an empty models directory: the job waits for
+/// the models with its recording, rather than ending with the room
+/// speaker, and nothing is downloaded or written to the models folder.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_apps_diarizer_without_its_models_parks_the_job_and_fetches_nothing() {
+    let mirror = Mirror::start(None);
+    let world = app_world(&mirror);
+    let before = world.run_the_job().await;
+    world.assert_waiting_for_the_models();
+    world.assert_recording_kept(&before);
+    assert_eq!(mirror.seen(), []);
+    assert!(!world.models.directory(&models::asset()).exists());
+}
+
+/// Files of the right size pass the gate's check, so the app's diarizer
+/// hands them to the real child, which cannot load them. They fail their
+/// checksum and are deleted, which is `DiarizeError::NotInstalled`, and
+/// the gate takes that as the models-missing refusal: the job waits with
+/// its recording, and no request is made.
+#[tokio::test(flavor = "multi_thread")]
+async fn files_the_apps_diarizer_cannot_load_in_its_child_park_the_job() {
+    let mirror = Mirror::start(None);
+    let world = app_world(&mirror);
+    let asset = models::asset();
+    let folder = world.models.directory(&asset);
+    std::fs::create_dir_all(&folder).unwrap();
+    for file in &asset.files {
+        std::fs::File::create(folder.join(&file.name))
+            .unwrap()
+            .set_len(file.size)
+            .unwrap();
+    }
+    assert!(models::installed(&world.models).is_ok());
+
+    let before = world.run_the_job().await;
+    world.assert_waiting_for_the_models();
+    world.assert_recording_kept(&before);
+    for file in &asset.files {
+        assert!(!folder.join(&file.name).exists(), "{}", file.name);
+    }
     assert_eq!(mirror.seen(), []);
 }
 

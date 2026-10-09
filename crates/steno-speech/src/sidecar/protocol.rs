@@ -4,14 +4,18 @@
 //!
 //! A message is one frame: the length of its JSON header as a
 //! little-endian `u32`, then the header, then the payload the header
-//! declares. Only [`Request::Transcribe`] has a payload: `sampleCount`
-//! samples of 16 kHz mono audio as little-endian `f32`, bit for bit what
-//! the engine was given. The header follows the bridge's JSON convention
-//! (`steno_core::json`: sorted keys, camelCase), with a `type` tag.
+//! declares. Only [`Request::Transcribe`] and [`Request::Diarize`] have a
+//! payload: `sampleCount` samples of 16 kHz mono audio as little-endian
+//! `f32`, bit for bit what the engine or the diarizer was given. The
+//! header follows the bridge's JSON convention (`steno_core::json`: sorted
+//! keys, camelCase), with a `type` tag.
 //!
 //! The child sends [`Reply::Ready`] first, then [`Reply::Memory`] every
 //! heartbeat interval from a thread of its own, between and during
-//! requests, and one reply per request with the request's `id`. It exits
+//! requests, and one reply per request with the request's `id`. Speech
+//! ([`Request::Load`], [`Request::Transcribe`]) and the diarizer
+//! ([`Request::LoadDiarizer`], [`Request::Diarize`]) load and run
+//! independently in the one child. It exits
 //! with status 0 after [`Request::Shutdown`] and when its stdin or stdout
 //! closes, so a dead parent leaves no child behind. It exits with status
 //! 2, after a line on stderr, when it cannot read a frame, write a reply
@@ -36,7 +40,7 @@ use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use steno_core::{LanguageTag, RawSegment};
+use steno_core::{Embedding, LanguageTag, RawSegment, SpeakerCluster, TimeRange};
 use thiserror::Error;
 
 use crate::onnx::EncoderProvider;
@@ -44,8 +48,8 @@ use crate::onnx::EncoderProvider;
 /// Bumped on any change a peer of the old version would misread; the
 /// client refuses a child whose [`Reply::Ready`] names another. A field
 /// added with a default for its absence (`directml`, `provider`) is no such
-/// change.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// change; a new request is (version 2: the diarizer's two).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The longest header either side accepts. A transcript of a long meeting
 /// is a few megabytes of JSON; one of 24 hours (see [`MAX_SAMPLES`]) stays
@@ -90,6 +94,22 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hint: Option<LanguageTag>,
     },
+    /// Load the diarizer's two models from these files, which the parent
+    /// has installed (`steno_diarize::models`); the child never downloads.
+    /// Independent of [`Request::Load`]: a child may hold either or both.
+    LoadDiarizer {
+        id: u64,
+        /// pyannote segmentation 3.0.
+        segmentation: PathBuf,
+        /// `WeSpeaker` ResNet34-LM.
+        embedding: PathBuf,
+        /// `intraThreads`: ONNX Runtime's threads within one operator, for
+        /// both sessions; zero lets ONNX Runtime decide.
+        intra_threads: usize,
+    },
+    /// Diarize the `sampleCount` samples that follow the header with the
+    /// diarizer's default configuration, after [`Request::LoadDiarizer`].
+    Diarize { id: u64, sample_count: u64 },
     /// Answer with [`Reply::Bye`] and exit.
     Shutdown { id: u64 },
 }
@@ -102,6 +122,8 @@ impl Request {
             Request::Load { id, .. }
             | Request::Health { id }
             | Request::Transcribe { id, .. }
+            | Request::LoadDiarizer { id, .. }
+            | Request::Diarize { id, .. }
             | Request::Shutdown { id } => *id,
         }
     }
@@ -110,7 +132,9 @@ impl Request {
     #[must_use]
     pub fn payload_bytes(&self) -> u64 {
         match self {
-            Request::Transcribe { sample_count, .. } => sample_count.saturating_mul(4),
+            Request::Transcribe { sample_count, .. } | Request::Diarize { sample_count, .. } => {
+                sample_count.saturating_mul(4)
+            }
             _ => 0,
         }
     }
@@ -164,6 +188,14 @@ pub enum Reply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<EncoderProvider>,
     },
+    /// The answer to [`Request::LoadDiarizer`]: both models are loaded.
+    DiarizerLoaded { id: u64 },
+    /// The answer to [`Request::Diarize`]: the clusters in the order the
+    /// diarizer returned them.
+    Diarization {
+        id: u64,
+        clusters: Vec<DiarizedCluster>,
+    },
     /// The request failed inside the child; the child keeps running.
     Failed { id: u64, error: String },
     /// The answer to [`Request::Shutdown`], the child's last message.
@@ -179,8 +211,60 @@ impl Reply {
             Reply::Loaded { id, .. }
             | Reply::Health { id, .. }
             | Reply::Transcript { id, .. }
+            | Reply::DiarizerLoaded { id }
+            | Reply::Diarization { id, .. }
             | Reply::Failed { id, .. }
             | Reply::Bye { id } => Some(*id),
+        }
+    }
+}
+
+/// A [`SpeakerCluster`] on the wire, its embedding included, which
+/// `SpeakerCluster`'s own serde form leaves out. The `f32` values travel
+/// widened to `f64`, which round-trips the JSON exactly
+/// (`serde_json`'s `float_roundtrip`, which `steno-core` turns on)
+/// whatever `serde_json`'s `f32` path does, and narrowing it back is
+/// exact, so the parent gets the child's clusters bit for bit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiarizedCluster {
+    pub label: String,
+    pub ranges: Vec<TimeRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f64>>,
+    pub cluster_confidence: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_clip_range: Option<TimeRange>,
+}
+
+impl From<&SpeakerCluster> for DiarizedCluster {
+    fn from(cluster: &SpeakerCluster) -> Self {
+        DiarizedCluster {
+            label: cluster.label.clone(),
+            ranges: cluster.ranges.clone(),
+            embedding: cluster
+                .embedding
+                .as_ref()
+                .map(|embedding| embedding.0.iter().copied().map(f64::from).collect()),
+            cluster_confidence: f64::from(cluster.cluster_confidence),
+            sample_clip_range: cluster.sample_clip_range,
+        }
+    }
+}
+
+impl From<DiarizedCluster> for SpeakerCluster {
+    // Each value was an `f32` widened by the child, so narrowing it back
+    // is exact.
+    #[allow(clippy::cast_possible_truncation)]
+    fn from(cluster: DiarizedCluster) -> Self {
+        SpeakerCluster {
+            label: cluster.label,
+            ranges: cluster.ranges,
+            embedding: cluster
+                .embedding
+                .map(|values| Embedding(values.into_iter().map(|value| value as f32).collect())),
+            cluster_confidence: cluster.cluster_confidence as f32,
+            sample_clip_range: cluster.sample_clip_range,
         }
     }
 }
@@ -271,7 +355,8 @@ const INITIAL_CAPACITY: usize = 1 << 16;
 /// The bytes of payload [`read_samples`] reads at a time.
 const READ_CHUNK: usize = 1 << 16;
 
-/// Reads the payload of a transcribe request: `sample_count` samples.
+/// Reads the payload of a transcribe or diarize request: `sample_count`
+/// samples.
 pub fn read_samples<R: Read>(input: &mut R, sample_count: u64) -> Result<Vec<f32>, FrameError> {
     if sample_count > MAX_SAMPLES {
         return Err(FrameError::TooLarge(sample_count.saturating_mul(4)));
@@ -305,7 +390,7 @@ pub fn read_samples<R: Read>(input: &mut R, sample_count: u64) -> Result<Vec<f32
     Ok(samples)
 }
 
-/// `samples` as the payload of a transcribe request.
+/// `samples` as the payload of a transcribe or diarize request.
 #[must_use]
 pub fn encode_samples(samples: &[f32]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(samples.len() * 4);
@@ -351,8 +436,45 @@ mod tests {
                 sample_count: 0,
                 hint: None,
             },
+            Request::LoadDiarizer {
+                id: 6,
+                segmentation: PathBuf::from("/models/diarization/segmentation.onnx"),
+                embedding: PathBuf::from("/models/diarization/embedding.onnx"),
+                intra_threads: 4,
+            },
+            Request::Diarize {
+                id: 7,
+                sample_count: 3,
+            },
             Request::Shutdown { id: 5 },
         ]
+    }
+
+    /// A cluster whose values need every bit of their `f32`.
+    fn cluster() -> SpeakerCluster {
+        SpeakerCluster {
+            label: "Speaker 1".to_owned(),
+            ranges: vec![
+                TimeRange {
+                    lower: 0.1,
+                    upper: 1.0 / 3.0,
+                },
+                TimeRange {
+                    lower: 2.016_875,
+                    upper: 9.335_75,
+                },
+            ],
+            embedding: Some(Embedding(
+                (0..256u16)
+                    .map(|i| (f32::from(i) * 0.731).sin() / 16.0 + f32::EPSILON)
+                    .collect(),
+            )),
+            cluster_confidence: 0.1 + f32::EPSILON,
+            sample_clip_range: Some(TimeRange {
+                lower: 0.1,
+                upper: 1.0 / 3.0,
+            }),
+        }
     }
 
     fn replies() -> Vec<Reply> {
@@ -392,8 +514,51 @@ mod tests {
                 id: 4,
                 error: "no".to_owned(),
             },
+            Reply::DiarizerLoaded { id: 6 },
+            Reply::Diarization {
+                id: 7,
+                clusters: vec![
+                    DiarizedCluster::from(&cluster()),
+                    DiarizedCluster::from(&SpeakerCluster {
+                        embedding: None,
+                        sample_clip_range: None,
+                        ..cluster()
+                    }),
+                ],
+            },
             Reply::Bye { id: 5 },
         ]
+    }
+
+    #[test]
+    fn a_cluster_crosses_the_wire_bit_for_bit_embedding_included() {
+        let mut wire = Vec::new();
+        let reply = Reply::Diarization {
+            id: 1,
+            clusters: vec![DiarizedCluster::from(&cluster())],
+        };
+        write_frame(&mut wire, &reply, &[]).unwrap();
+        let Some(Reply::Diarization { clusters, .. }) = read_header(&mut wire.as_slice()).unwrap()
+        else {
+            panic!("a diarization");
+        };
+        let back: Vec<SpeakerCluster> = clusters.into_iter().map(SpeakerCluster::from).collect();
+        assert_eq!(back, [cluster()]);
+        let bits = |cluster: &SpeakerCluster| -> Vec<u32> {
+            cluster
+                .embedding
+                .as_ref()
+                .unwrap()
+                .0
+                .iter()
+                .map(|v| v.to_bits())
+                .collect()
+        };
+        assert_eq!(bits(&back[0]), bits(&cluster()));
+        assert_eq!(
+            back[0].cluster_confidence.to_bits(),
+            cluster().cluster_confidence.to_bits()
+        );
     }
 
     #[test]
@@ -413,7 +578,9 @@ mod tests {
         for expected in requests() {
             let request: Request = read_header(&mut input).unwrap().unwrap();
             assert_eq!(request, expected);
-            if let Request::Transcribe { sample_count, .. } = request {
+            if let Request::Transcribe { sample_count, .. }
+            | Request::Diarize { sample_count, .. } = request
+            {
                 let read = read_samples(&mut input, sample_count).unwrap();
                 assert_eq!(read, &samples[..sample_count as usize]);
             }

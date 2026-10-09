@@ -1,5 +1,6 @@
 //! The models directory, the speech settings and the speech engine per
-//! platform behind `SpeechEngine`, the ONNX diarizer, and the host's
+//! platform behind `SpeechEngine`, the ONNX diarizer in the speech
+//! sidecar, and the host's
 //! `SpeechModels` over the installed models. [`SpeechSetup`] gathers what
 //! the engine is built from; [`SpeechSetup::runtime`] applies
 //! `steno_speech`'s platform policy ([`steno_speech::SpeechRuntime`]): on
@@ -11,7 +12,9 @@
 //! the encoder on `DirectML` ([`SpeechSetup::sidecar`]). [`SpeechEngines`]
 //! keeps the engines and the diarizer the pipelines run on, so a pipeline
 //! reload keeps its engine and diarizer and the app never runs two speech
-//! sidecars at once.
+//! sidecars at once: the diarizer runs its models in the child of the one
+//! sidecar engine ([`diarizer_in`]), on the Mac too, where speech may run
+//! on `CoreML` in this process.
 //! Swift: `makeSpeechEngine`, `makeDiarizer`, `ModelStore`,
 //! `Sources/StenoSpeech/Engines/SpeechEngineID.swift`.
 
@@ -23,7 +26,7 @@ use steno_core::{
     AudioBuffer16k, Diarizer, LanguageTag, RawSegment, Settings, SpeechEngine, StenoPaths,
     async_trait, paths::file_url_path, protocols::BoundaryResult,
 };
-use steno_diarize::{DiarizerConfig, Install, ModelDiarizer};
+use steno_diarize::{Install, SidecarDiarizer};
 use steno_host::services::{ModelNotice, SpeechModels};
 use steno_host::speech::ModelAsset;
 use steno_pipeline::{SharedSpeechEngine, WeakSpeechEngine};
@@ -231,12 +234,28 @@ pub fn coreml_model_directory(models_directory: &Path) -> PathBuf {
 /// relies on that.
 #[must_use]
 pub fn speech_engine(engine_id: &str, setup: &SpeechSetup) -> Arc<dyn SpeechEngine> {
-    engine_on(setup.runtime(engine_id), setup)
+    speech_engine_in(engine_id, setup, &Arc::new(sidecar_engine(setup)))
 }
 
-/// The engine that runs on `runtime` over `setup`; off the Mac every
-/// runtime is the speech sidecar.
-fn engine_on(runtime: SpeechRuntime, setup: &SpeechSetup) -> Arc<dyn SpeechEngine> {
+/// [`speech_engine`] with `sidecar` as the engine where Parakeet runs in
+/// the speech sidecar, so a diarizer over the same engine
+/// ([`diarizer_in`]) shares its child.
+#[must_use]
+pub fn speech_engine_in(
+    engine_id: &str,
+    setup: &SpeechSetup,
+    sidecar: &Arc<SidecarSpeechEngine>,
+) -> Arc<dyn SpeechEngine> {
+    engine_on(setup.runtime(engine_id), setup, sidecar)
+}
+
+/// The engine that runs on `runtime` over `setup`, `sidecar` where that is
+/// the speech sidecar; off the Mac every runtime is the speech sidecar.
+fn engine_on(
+    runtime: SpeechRuntime,
+    setup: &SpeechSetup,
+    sidecar: &Arc<SidecarSpeechEngine>,
+) -> Arc<dyn SpeechEngine> {
     #[cfg(target_os = "macos")]
     {
         if runtime == SpeechRuntime::CoreMlInProcess {
@@ -248,8 +267,8 @@ fn engine_on(runtime: SpeechRuntime, setup: &SpeechSetup) -> Arc<dyn SpeechEngin
             ))));
         }
     }
-    let _ = runtime;
-    Arc::new(sidecar_engine(setup))
+    let _ = (runtime, setup);
+    sidecar.clone()
 }
 
 /// Builds the engine for a runtime; [`engine_on`] over the setup in the
@@ -270,15 +289,17 @@ pub(crate) type BuildEngine = Box<dyn Fn(SpeechRuntime) -> Arc<dyn SpeechEngine>
 /// them in the same place. A changed setup takes a new value, at the next
 /// launch.
 ///
-/// The sidecar engine is built at its first use and kept for the app's
+/// The sidecar engine is built with this value and kept for the app's
 /// run. It holds a child only while a job needs one, and as the only
 /// sidecar engine it never runs two at once, also when a reload on the
 /// Mac goes to `CoreML` and back while a retired pipeline still
 /// transcribes. The in-process engine (`CoreML` on the Mac) is kept only
 /// while a pipeline runs on it ([`WeakSpeechEngine`]): a reload back to it
 /// while a retired pipeline still transcribes gets the same engine, and
-/// its model is freed once no pipeline holds it. The diarizer, which
-/// depends on the setup's model store alone, is built with this value.
+/// its model is freed once no pipeline holds it. The diarizer is built with
+/// this value over the sidecar engine ([`diarizer_in`]), so its models load
+/// into the child speech runs in, or into a child of its own while none
+/// runs, which stops after the call; the app never runs two children.
 ///
 /// ```no_run
 /// use steno_core::{Settings, StenoPaths};
@@ -335,48 +356,61 @@ impl SpeechEngines {
         // The default already; set so a setup that allows downloads (the
         // CLI's) never reaches the app's engines or `setup()`.
         setup.sidecar.install = Install::Never;
-        let over = setup.clone();
-        let mut engines = Self::with_builder(
-            setup,
-            Box::new({
-                let speech_installed = speech_installed.clone();
-                move |runtime| {
-                    let installed = speech_installed.clone();
-                    Arc::new(GatedSpeechEngine::new(
-                        engine_on(runtime, &over),
-                        Arc::new(move || installed(runtime)),
-                    ))
-                }
-            }),
-        );
-        engines.diarizer = Arc::new(GatedDiarizer::new(
-            engines.diarizer,
+        let sidecar = Arc::new(sidecar_engine(&setup));
+        let diarizer = Arc::new(GatedDiarizer::new(
+            Self::app_diarizer(sidecar.clone()),
             diarizer_installed.clone(),
         ));
-        engines.installed =
-            Arc::new(move |runtime| speech_installed(runtime) && diarizer_installed());
-        engines
+        let over = setup.clone();
+        let build = Box::new({
+            let speech_installed = speech_installed.clone();
+            move |runtime| {
+                let installed = speech_installed.clone();
+                Arc::new(GatedSpeechEngine::new(
+                    engine_on(runtime, &over, &sidecar),
+                    Arc::new(move || installed(runtime)),
+                )) as Arc<dyn SpeechEngine>
+            }
+        });
+        let installed = Arc::new(move |runtime| speech_installed(runtime) && diarizer_installed());
+        Self::with_parts(setup, build, diarizer, installed)
     }
 
-    /// Engines from `build` instead, for the tests.
+    /// Engines from `build` instead, with no gates, for the tests; the
+    /// diarizer runs in a sidecar engine of its own over the setup.
+    #[cfg(test)]
     pub(crate) fn with_builder(setup: SpeechSetup, build: BuildEngine) -> Self {
+        let diarizer = Self::app_diarizer(Arc::new(sidecar_engine(&setup)));
+        Self::with_parts(setup, build, diarizer, Arc::new(|_| true))
+    }
+
+    /// The app's diarizer over `sidecar`. Never downloads: a missing file
+    /// is `NotInstalled`, which the gate takes as the models-missing
+    /// refusal, so the meeting waits with its audio instead of ending with
+    /// one room speaker (S1 of `.plans/2026-10-07-stable-promotion.md`).
+    fn app_diarizer(sidecar: Arc<SidecarSpeechEngine>) -> Arc<dyn Diarizer> {
+        diarizer_in(sidecar, Install::Never)
+    }
+
+    fn with_parts(
+        setup: SpeechSetup,
+        build: BuildEngine,
+        diarizer: Arc<dyn Diarizer>,
+        installed: ModelsInstalled,
+    ) -> Self {
         SpeechEngines {
-            // Never downloads: a missing file is `NotInstalled`, which the
-            // gate takes as the models-missing refusal, so the meeting waits
-            // with its audio instead of ending with one room speaker (S1 of
-            // `.plans/2026-10-07-stable-promotion.md`).
-            diarizer: diarizer(&setup, Install::Never),
+            diarizer,
             setup,
             build,
             kept: std::sync::Mutex::default(),
-            installed: Arc::new(|_| true),
+            installed,
         }
     }
 
     /// Whether the gates would let a pipeline whose speech engine runs on
     /// `runtime` through now: its speech models and the diarizer's are
-    /// installed. Always, for engines from [`Self::with_builder`], which
-    /// have no gates. What the app asks before an install or a reload
+    /// installed. Always, for the tests' engines without gates
+    /// (`with_builder`). What the app asks before an install or a reload
     /// resumes the meetings waiting for models
     /// ([`CurrentPipeline::resuming_when`](crate::pipeline::CurrentPipeline::resuming_when)).
     #[must_use]
@@ -413,8 +447,8 @@ impl SpeechEngines {
         }
     }
 
-    /// The diarizer every pipeline runs, built over the setup's model
-    /// store ([`diarizer`]).
+    /// The diarizer every pipeline runs, in the child of this value's
+    /// sidecar engine ([`diarizer_in`]).
     #[must_use]
     pub fn diarizer(&self) -> Arc<dyn Diarizer> {
         self.diarizer.clone()
@@ -542,23 +576,21 @@ impl SpeechEngine for LanguageTaggingEngine {
     }
 }
 
-/// The ONNX diarizer over [`SpeechSetup::model_store`], the store and
-/// mirror the speech models install through: it loads its two models from
-/// `<models directory>/onnx/diarization/` on first use. `install` says
-/// whether a missing file is downloaded first (`Install::Allowed`) or
-/// fails the call with `DiarizeError::NotInstalled` and no request
-/// (`Install::Never`, the app's pipelines through [`SpeechEngines`];
-/// `steno_diarize::models::installed` is the same check without a load).
-/// A load that fails fails that call only; the next call tries again,
-/// resuming a cut-off download where downloads are allowed.
+/// The ONNX diarizer in the child of `sidecar` (`SidecarDiarizer`), its
+/// sessions on [`ONNX_THREADS`]: it installs its two models into
+/// `<store root>/diarization/` of the engine's store (in the app,
+/// `<models directory>/onnx/diarization/`) and the child loads them there.
+/// `install` says whether a missing file is downloaded first
+/// (`Install::Allowed`) or fails the call with
+/// `DiarizeError::NotInstalled` and no request (`Install::Never`, the
+/// app's pipelines through [`SpeechEngines`];
+/// `steno_diarize::models::installed` is the same check). A call that
+/// fails fails that call only; the next call tries again, resuming a
+/// cut-off download where downloads are allowed, in a new child if the
+/// last one died.
 #[must_use]
-pub fn diarizer(setup: &SpeechSetup, install: Install) -> Arc<dyn Diarizer> {
-    Arc::new(ModelDiarizer::onnx(
-        DiarizerConfig::default(),
-        setup.model_store(),
-        install,
-        ONNX_THREADS,
-    ))
+pub fn diarizer_in(sidecar: Arc<SidecarSpeechEngine>, install: Install) -> Arc<dyn Diarizer> {
+    Arc::new(SidecarDiarizer::new(sidecar, install, ONNX_THREADS))
 }
 
 /// The host's model service over the models under one directory.
@@ -741,7 +773,7 @@ impl SpeechModels for ModelStoreSpeechModels {
     }
 
     /// The diarizer's two ONNX models each have a line with their own
-    /// licence and attribution ([`ONNX_DIARIZER_NOTICES`]); every other
+    /// licence and attribution (`ONNX_DIARIZER_NOTICES`); every other
     /// asset has the default one.
     fn notices(&self, asset: ModelAsset) -> Vec<ModelNotice> {
         match asset {

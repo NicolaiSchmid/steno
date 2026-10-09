@@ -85,7 +85,8 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
      connection.
 
    The speech sidecar gets its samples on stdin and answers on stdout, never through a
-   socket, and opens no connection (WP4c). On Linux the app, not the sidecar, asks the
+   socket, and opens no connection (WP4c); the diarizer's lanes reach it the same way.
+   On Linux the app, not the sidecar, asks the
    systemd user manager over the user bus's Unix socket for a scope of the sidecar's
    own, sending the sidecar's pid, the unit names and the scope's fixed settings, nothing
    else (`crates/steno-speech/src/sidecar/scope.rs`, P6 of
@@ -95,10 +96,12 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    cutover the Swift app keeps its own list in `AGENTS.md`.
 4. **One speech pipeline above the tensors.** Chunker, overlap merge and the TDT decode
    loop are shared; the backends are CoreML (`objc2-core-ml`) on the Mac and ONNX
-   Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac stays
-   one process while `CoreML` runs Parakeet (the default). The diarizer's ONNX
-   inference does not run in the sidecar yet: see the open item under "Pipeline and
-   services (WP6b)".
+   Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac runs
+   Parakeet in process on `CoreML` (the default) and starts the sidecar only to
+   diarize. The diarizer's ONNX
+   inference runs in the same sidecar on every platform, the Mac included
+   (`steno_diarize::SidecarDiarizer`); `steno dev diarize-sweep` and the calibration
+   harness keep it in their own process.
 5. **No allocation and no lock on the audio thread**, proven by the counting allocator
    in `crates/steno-audio/src/testing/rt.rs` in a test build.
 6. **Scope stays the scope.** No new features in the port; a Rust behaviour that
@@ -904,7 +907,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   during the other's release
   (`a_job_on_another_pipeline_that_starts_during_a_release_prepares_after_it`). Jobs
   across a reload queue on the one diarizer, as jobs on one pipeline do. The sidecar
-  engine is built at its first use and kept for the run; it holds a child only while a
+  engine is built with `SpeechEngines` and kept for the run; it holds a child only while a
   job needs one and never runs two, also when a reload on the Mac goes to `CoreML` and
   back while a retired job transcribes
   (`a_reload_while_a_job_transcribes_keeps_one_sidecar_child`,
@@ -917,8 +920,9 @@ still has to draw the window side. `[ ]` is not ported yet.
 - A recording's warm-up (Swift's `warmUpPipelineIfModelsInstalled`, gated on the
   same installed check) loads the speech engine only where it runs in the app's
   process, `CoreML` on the Mac, as Swift did; with Parakeet in the speech sidecar it
-  loads the diarizer only (`ProcessingPipeline::warm_up_diarizer`), so no 2.2 GB
-  child is resident through the recording or left without a job when the save fails.
+  warms the diarizer only (`ProcessingPipeline::warm_up_diarizer`), which checks its
+  models and starts no child, so no child is resident through the recording or left
+  without a job when the save fails.
   Both the installed check and that choice follow the engine the current pipeline was
   built with (`CurrentPipeline::current_with_engine`, set by each successful build and
   reload), not the id stored now, so neither a failed reload nor an engine the Swift
@@ -928,12 +932,36 @@ still has to draw the window side. `[ ]` is not ported yet.
   `after_a_failed_reload_the_warm_up_follows_the_engine_the_pipeline_kept`). Rust
   only: Swift loaded the engine during every recording; with Parakeet in the
   sidecar, the job after a recording starts the child cold.
-- Open, against invariant 4: the ONNX diarizer (pyannote segmentation and the
-  WeSpeaker embeddings) still runs in the app's process on every platform, so a crash
-  in ONNX Runtime there ends the app. Memory is not the reason to move it (the larger
-  of its two models is 26 MB, against Parakeet's 2.6 GB export); crash isolation is.
-  Moving it needs a request of its own in the sidecar protocol; no work package has it
-  yet.
+- Closed (#266, A3 of `.plans/2026-10-07-stable-promotion.md`): the ONNX diarizer (pyannote
+  segmentation and the WeSpeaker embeddings) runs in the speech sidecar's child on
+  every platform, the Mac included, so a crash in ONNX Runtime while it diarizes ends
+  the child, not the app (`steno_diarize::SidecarDiarizer` over
+  `SidecarSpeechEngine::diarize`). One request a lane (`loadDiarizer` once per child,
+  then `diarize` with the samples on stdin, protocol version 2): the child runs the
+  whole in-process pipeline with the default configuration and answers with the
+  clusters, embeddings included, their `f32` values widened to `f64`, which
+  round-trips exactly whatever `serde_json`'s `f32` path does; per window
+  requests would have been some 5 000 round trips and four copies of the audio an hour.
+  The diarizer shares the engine's child, lock, deadline (the transcription's) and
+  memory ceiling: its models load into the child speech runs in, or into a child of its
+  own that stops after the call, so no child outlives the job that needed it; a crash,
+  hang or overrun fails that call and the diarize stage falls back as for any diarizer
+  failure, and the next call starts a new child; it never counts against `DirectML`.
+  The 6 GiB ceiling holds a diarization beside Parakeet's working set up to about
+  4.3 h of a dense group call (measured on a synthetic six-voice lane: 3.94 GB at 3 h);
+  a longer call diarized while another job holds speech overruns it, and that job
+  keeps its transcript with the fallback speakers. A child that only diarizes peaked
+  at 286 MB for 30 min. The models install in the app's process (`Install` as before:
+  `Install::Never` behind the gate in the app, `Install::Allowed` in `steno process`)
+  and a load the child refuses is checked against the manifest there; a file that
+  fails it is deleted and the call is `DiarizeError::NotInstalled`, which the app's
+  gate takes as the models-missing refusal, so the meeting waits with its audio
+  instead of falling back (`files_the_apps_diarizer_cannot_load_in_its_child_park_the_job`
+  in `crates/steno-services/tests/diarizer_models.rs`). The sidecar's clusters equal the
+  in-process pipeline's bit for bit on the two-voice fixture, once and tiled to 75 s
+  (`crates/steno-speech-sidecar/tests/diarize.rs`, model gated). `ModelDiarizer` keeps
+  the in-process path for `steno dev diarize-sweep`, the calibration harness and the
+  tests; the CoreML diarizer backend has no caller in the app and stays in process.
 - Closed (#185): a sidecar whose parent is gone exits from its heartbeat thread
   (`send` in `crates/steno-speech-sidecar/src/lib.rs`) while ONNX Runtime may still be
   inferring. On Linux and macOS it calls `libc::_exit`, so no atexit handler or C++
@@ -3067,10 +3095,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   keeps its own until then, so FLEURS and the Swift parity both hold. Where:
   `crates/steno-speech-coreml`, `crates/steno-speech`; the integration notes under WP4.
   Found: #171, #182.
-- **Unowned.** The diarizer's ONNX inference runs in the app's process on every
-  platform, against invariant 4, so a crash in ONNX Runtime there ends the app; moving
-  it needs its own request in the sidecar protocol. Where: `crates/steno-diarize`; the
-  "Open, against invariant 4" item under "Pipeline and services (WP6b)". Found: #183.
 - **Unowned.** The speech settings (`onnxSidecarOnMac`, `directmlOnWindows`,
   `modelsMirror`) live only in `speech.json`, which nothing writes, and the bridge has
   no field for them; `.plans/2026-10-07-speech-settings-ui.md` proposes where they
@@ -3275,8 +3299,9 @@ WP10b puts the speech encoder on DirectML on Windows when the speech setting
 request, on Windows only; the child answers with the provider it chose). Only the
 encoder moves: the decoder and the joiner run once per token on one frame, and
 Silero on 32 ms frames, where a round trip to the GPU costs more than the step;
-the diarizer stays on the CPU because it runs in the app's process, where
-speech-stack decision 5 keeps no GPU driver. The probe is the session itself:
+the diarizer stays on the CPU, in the sidecar since #266, as it did in the
+app's process, where speech-stack decision 5 kept no GPU driver. The probe is
+the session itself:
 DirectML in the ONNX Runtime build, a hardware DirectX 12 adapter (the device
 filter leaves out WARP), the session created, one encoder run on a second of
 silence. Any failure opens the encoder on the CPU, and a later run that fails on
