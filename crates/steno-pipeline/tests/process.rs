@@ -4715,6 +4715,52 @@ async fn a_resumed_meeting_posts_progress_before_the_engines_load() {
     assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
 }
 
+/// A resume after only the speech model was installed, with the
+/// diarizer's still missing: the run is refused again at `diarize`, so the
+/// meeting stays `queued` with no failure reason, posts one more
+/// `ModelsMissing` and waits again; the diarizer's install then takes it
+/// to `ready`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resume_with_one_of_two_models_installed_waits_again() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let speech = Uninstalled::refusing(Refusal::Transcribe);
+    let diarization = Uninstalled::refusing(Refusal::Diarize);
+    let mut dependencies = with_engine(&world, speech.clone());
+    dependencies.diarizer = Arc::new(UninstalledDiarizer(diarization.clone()));
+    let waits = dependencies.model_waits.clone();
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let mut events = world.events.subscribe();
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(waits.waiting(), [meeting]);
+    let missing = |posted: &[MeetingEvent]| {
+        posted
+            .iter()
+            .filter(|event| **event == MeetingEvent::ModelsMissing { meeting_id: meeting })
+            .count()
+    };
+    assert_eq!(missing(&drain(&mut events)), 1);
+
+    speech
+        .installed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(pipeline.resume_waiting().unwrap(), [meeting]);
+    pipeline.wait_until_idle().await;
+    let row = world.store.meeting(meeting).unwrap().unwrap();
+    assert_eq!(row.state, MeetingState::Queued);
+    assert_eq!(row.state.failure_reason(), None);
+    assert_eq!(missing(&drain(&mut events)), 1, "one more refusal");
+    assert_eq!(waits.waiting(), [meeting]);
+
+    diarization
+        .installed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(pipeline.resume_waiting().unwrap(), [meeting]);
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    assert_eq!(waits.waiting(), Vec::<Uuid>::new());
+}
+
 /// An install that finishes while a run is being refused, with its resume
 /// skipping the meeting because it is in flight: the run goes again
 /// instead of leaving the meeting waiting with every model installed.
