@@ -981,6 +981,15 @@ fn enqueue_call(world: &World, pipeline: &ProcessingPipeline) -> Uuid {
     meeting.id
 }
 
+/// [`enqueue_call`] for a run refused for missing models, once it ended:
+/// its meeting is the one waiting.
+async fn enqueue_refused_call(world: &World, pipeline: &ProcessingPipeline) -> Uuid {
+    let meeting = enqueue_call(world, pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(pipeline.dependencies().model_waits.waiting(), [meeting]);
+    meeting
+}
+
 fn meeting_state(world: &World, id: Uuid) -> MeetingState {
     world.store.meeting(id).unwrap().unwrap().state
 }
@@ -4682,11 +4691,8 @@ async fn a_resumed_meeting_posts_progress_before_the_engines_load() {
     let diarizer = Arc::new(SlowLoadDiarizer::default());
     let mut dependencies = with_engine(&world, gate.clone());
     dependencies.diarizer = diarizer.clone();
-    let waits = dependencies.model_waits.clone();
     let pipeline = ProcessingPipeline::new(dependencies);
-    let meeting = enqueue_call(&world, &pipeline);
-    pipeline.wait_until_idle().await;
-    assert_eq!(waits.waiting(), [meeting]);
+    let meeting = enqueue_refused_call(&world, &pipeline).await;
 
     let mut events = world.events.subscribe();
     gate.installed
@@ -4730,9 +4736,7 @@ async fn a_resume_with_one_of_two_models_installed_waits_again() {
     let waits = dependencies.model_waits.clone();
     let pipeline = ProcessingPipeline::new(dependencies);
     let mut events = world.events.subscribe();
-    let meeting = enqueue_call(&world, &pipeline);
-    pipeline.wait_until_idle().await;
-    assert_eq!(waits.waiting(), [meeting]);
+    let meeting = enqueue_refused_call(&world, &pipeline).await;
     let missing = |posted: &[MeetingEvent]| {
         posted
             .iter()
@@ -4814,12 +4818,8 @@ async fn an_install_during_the_refusing_run_still_processes_the_meeting() {
 async fn resume_waiting_starts_only_the_meetings_runs_left_waiting() {
     let world = world(false, None, AudioRetention::KeepForever);
     let gate = Uninstalled::refusing(Refusal::Transcribe);
-    let dependencies = with_engine(&world, gate.clone());
-    let waits = dependencies.model_waits.clone();
-    let pipeline = ProcessingPipeline::new(dependencies);
-    let refused = enqueue_call(&world, &pipeline);
-    pipeline.wait_until_idle().await;
-    assert_eq!(waits.waiting(), [refused]);
+    let pipeline = ProcessingPipeline::new(with_engine(&world, gate.clone()));
+    let refused = enqueue_refused_call(&world, &pipeline).await;
     let mut untouched = call_meeting(world.now);
     untouched.id = Uuid::new_v4();
     untouched.state = MeetingState::Queued;

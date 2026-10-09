@@ -22,6 +22,9 @@ use steno_pipeline::{
 use tracing_subscriber::layer::SubscriberExt as _;
 use uuid::Uuid;
 
+/// How long a test waits for a gate or for its runs to end.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Reads the 16 kHz mono WAV fixtures.
 struct WavDecoder;
 
@@ -236,7 +239,7 @@ async fn a_resume_while_a_refused_run_lets_go_of_its_meeting_still_starts_it() {
     .unwrap();
 
     let meeting_id = enqueue_call(&audio, &pipeline);
-    tokio::time::timeout(std::time::Duration::from_secs(10), gated.notified())
+    tokio::time::timeout(PATIENCE, gated.notified())
         .await
         .expect("the gate was reached");
     pipeline.wait_until_idle().await;
@@ -287,19 +290,16 @@ fn wait_until_idle_waits_for_a_refused_run_to_start_its_meeting_again() {
         let engine = Arc::new(HeldRefusal::default());
         let (store, audio, pipeline) = pipeline_over(dir.path(), engine.clone());
         let meeting_id = enqueue_call(&audio, &pipeline);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            engine.entered.notified(),
-        )
-        .await
-        .expect("the run is transcribing");
+        tokio::time::timeout(PATIENCE, engine.entered.notified())
+            .await
+            .expect("the run is transcribing");
         assert_eq!(
             pipeline.resume_waiting().unwrap(),
             Vec::<Uuid>::new(),
             "the meeting is in flight"
         );
         engine.open.notify_one();
-        tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified())
+        tokio::time::timeout(PATIENCE, reached.notified())
             .await
             .expect("the refused run is starting its meeting again");
 
@@ -313,7 +313,7 @@ fn wait_until_idle_waits_for_a_refused_run_to_start_its_meeting_again() {
             "wait_until_idle returned while the refused run was starting its meeting again"
         );
         open.send(()).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10), idle)
+        tokio::time::timeout(PATIENCE, idle)
             .await
             .expect("every run is done");
         assert_eq!(
