@@ -163,16 +163,15 @@ impl UpdateSource for ShellUpdates {
         let Some(_one) = OneInstall::start(&self.installing) else {
             return Ok(());
         };
-        let installed = match self.found(version) {
-            Ok(update) => match package {
-                Some(bytes) => update.install(bytes).map_err(|error| error.to_string()),
-                None => update
-                    .download_and_install(|_, _| {}, || {})
-                    .await
-                    .map_err(|error| error.to_string()),
-            },
-            Err(refused) => Err(refused),
-        };
+        let installed = async {
+            let update = self.found(version)?;
+            match package {
+                Some(bytes) => update.install(bytes),
+                None => update.download_and_install(|_, _| {}, || {}).await,
+            }
+            .map_err(|error| error.to_string())
+        }
+        .await;
         match installed {
             Ok(()) => {
                 let handle = app.clone();

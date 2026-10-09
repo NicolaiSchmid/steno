@@ -214,12 +214,6 @@ impl std::fmt::Debug for Staged {
     }
 }
 
-impl State {
-    fn staged_version(&self) -> Option<&String> {
-        self.staged.as_ref().map(|staged| &staged.version)
-    }
-}
-
 /// The host's `Updater`: the daily schedule, the flags and the last check.
 /// See the module doc.
 pub struct UpdateSchedule {
@@ -411,12 +405,10 @@ impl UpdateSchedule {
                     state.outcome = found
                         .clone()
                         .map_or(UpdateOutcome::UpToDate, UpdateOutcome::Available);
-                    if state.staged_version() != found.as_ref() {
-                        state.staged = None;
-                    }
-                    state.to_download = found
-                        .clone()
-                        .filter(|found| state.staged_version() != Some(found));
+                    state
+                        .staged
+                        .take_if(|staged| Some(&staged.version) != found.as_ref());
+                    state.to_download = found.clone().filter(|_| state.staged.is_none());
                     state.found.clone_from(found);
                 }
                 Err(message) => state.outcome = UpdateOutcome::Failed(message.clone()),
@@ -441,13 +433,11 @@ impl UpdateSchedule {
     /// kept package when it is that version. Returns only when the install
     /// failed or was refused, which the General section then shows.
     pub async fn install_on_request(&self, version: &str) {
-        let package = {
-            let mut state = self.state();
-            state
-                .staged
-                .take_if(|staged| staged.version == version)
-                .map(|staged| staged.package)
-        };
+        let package = self
+            .state()
+            .staged
+            .take_if(|staged| staged.version == version)
+            .map(|staged| staged.package);
         if let Err(message) = self.source.install_and_relaunch(version, package).await {
             self.install_failed(message);
         }
