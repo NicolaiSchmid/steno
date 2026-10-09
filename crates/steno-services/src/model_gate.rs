@@ -4,7 +4,8 @@
 //! [`PipelineFailure::models_missing`], so the meeting stays `queued` with
 //! no failure reason on its row and is processed once Settings or
 //! onboarding installed the models ([`ResumingSpeechModels`] then resumes
-//! it). The speech sidecar and the diarizer never download either
+//! it), or at the next pipeline reload or launch when the `steno` command
+//! installed them ([`CurrentPipeline::resume_waiting`]). The speech sidecar and the diarizer never download either
 //! ([`Install::Never`](steno_speech::Install::Never)), so a file removed
 //! between the gate's check and the load is refused too, never fetched; an
 //! engine's error while its models are gone is the same refusal. The

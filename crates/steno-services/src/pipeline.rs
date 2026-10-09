@@ -140,9 +140,15 @@ impl CurrentPipeline {
     /// [`ProcessingPipeline::resume_waiting`] on the current pipeline,
     /// from any thread: the meetings a run on any of its pipelines left
     /// `queued` for missing models since the last resume start on the
-    /// runtime. Called once a model install finished; a failure is logged.
-    /// Not the launch's recovery, which is
-    /// [`ProcessingPipeline::resume_unfinished`] over every queued meeting.
+    /// runtime. Called once a model install from Settings or onboarding
+    /// finished, and after every [`reload`](Self::reload), so models the
+    /// `steno` command installed into the app's models directory are
+    /// picked up at the next settings change (or the next launch); it
+    /// returns at once when nothing waits. A failure, a busy store
+    /// included, is logged and not retried: the meetings stay `queued`
+    /// for the next of these or the launch's recovery. Not the launch's
+    /// recovery itself, which is [`ProcessingPipeline::resume_unfinished`]
+    /// over every queued meeting.
     pub fn resume_waiting(&self) {
         let _entered = self.runtime.enter();
         match self.current().resume_waiting() {
@@ -150,7 +156,9 @@ impl CurrentPipeline {
                 tracing::info!(count = resumed.len(), "resumed meetings waiting for models");
             }
             Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
+            Err(error) => {
+                tracing::warn!(%error, "meetings waiting for models could not be resumed");
+            }
         }
     }
 
@@ -167,7 +175,8 @@ impl CurrentPipeline {
     /// with its claims, while the stored engine id runs where it did, and
     /// the diarizer ([`SpeechEngines`](crate::speech::SpeechEngines)), so
     /// the retired pipeline's jobs and the new one's share them and the
-    /// one sidecar child.
+    /// one sidecar child. Then it resumes the meetings waiting for models
+    /// on the new pipeline ([`resume_waiting`](Self::resume_waiting)).
     pub fn reload(&self) -> Result<(), BuildError> {
         let replacement = Current::new(
             (self.make)()?,
@@ -178,6 +187,7 @@ impl CurrentPipeline {
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
         self.runtime
             .spawn(async move { retired.wait_until_idle().await });
+        self.resume_waiting();
         Ok(())
     }
 
@@ -1457,17 +1467,19 @@ mod tests {
         };
         let current =
             CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
-        let waiting = enqueue_call(dir.path(), &current.current());
-        current.current().wait_until_idle().await;
-        assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
-        assert_eq!(
-            current.current().dependencies().model_waits.waiting(),
-            vec![waiting]
-        );
-
-        installed.store(true, Ordering::SeqCst);
+        // The reload comes first, as its own resume would start a meeting
+        // waiting by then; the run on the retired pipeline then leaves the
+        // meeting waiting.
         let retired = current.current();
         current.reload().unwrap();
+        let waiting = enqueue_call(dir.path(), &retired);
+        eventually("the refused run left the meeting waiting", || {
+            current.current().dependencies().model_waits.waiting() == vec![waiting]
+        })
+        .await;
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
+
+        installed.store(true, Ordering::SeqCst);
         let asset_id = store.asset(waiting).unwrap().unwrap().id;
         let held = tokio::spawn({
             let retired = retired.clone();
@@ -1490,6 +1502,41 @@ mod tests {
         assert_eq!(
             after_held, one_run,
             "the waiting meeting the retired pipeline held ran again on the new one"
+        );
+    }
+
+    /// Models the `steno` command installed into the app's models
+    /// directory leave Settings with no Download to press, so no install
+    /// resumes a meeting waiting for them: the next reload does, on the
+    /// new pipeline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_resumes_a_meeting_waiting_for_models_installed_meanwhile() {
+        let (dir, store) = temp_store();
+        let (installed, check) = crate::model_gate::testing::flag(false);
+        let shared = steno_pipeline::SharedSpeechEngine::new(Arc::new(
+            crate::model_gate::GatedSpeechEngine::new(Arc::new(FakeSpeechEngine::default()), check),
+        ));
+        let make: MakeDependencies = {
+            let store = store.clone();
+            Arc::new(move || {
+                Ok(on_the_sidecar(
+                    fake_dependencies(&store, "fake-engine").with_speech_engine(shared.clone()),
+                ))
+            })
+        };
+        let current =
+            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+        let waiting = enqueue_call(dir.path(), &current.current());
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
+
+        installed.store(true, Ordering::SeqCst);
+        current.reload().unwrap();
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
+        assert_eq!(
+            current.current().dependencies().model_waits.waiting(),
+            Vec::<Uuid>::new()
         );
     }
 
