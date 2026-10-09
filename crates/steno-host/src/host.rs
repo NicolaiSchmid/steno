@@ -1570,11 +1570,10 @@ impl BridgeHost for Host {
                 folder,
             };
             let now = self.now();
-            let mut deleted = false;
             self.command(
                 &[BridgeTopic::MeetingsList, BridgeTopic::Progress],
                 |inner| {
-                    deleted = inner.list.delete(
+                    let deleted = inner.list.delete(
                         params.meeting_id,
                         &self.shared.store,
                         &*self.shared.services.file_system,
@@ -1583,8 +1582,10 @@ impl BridgeHost for Host {
                     );
                     inner.list.reload(&self.shared.store);
                     // The store's `deleted` event, posted only when the rows
-                    // went: a queued meeting's progress entry goes with it.
+                    // went: a queued meeting's progress entry goes with it,
+                    // and the forgotten entry is not recorded again.
                     if deleted {
+                        forgotten.folder = None;
                         inner.progress.apply(
                             &MeetingEvent::Deleted {
                                 meeting_id: params.meeting_id,
@@ -1594,9 +1595,6 @@ impl BridgeHost for Host {
                     }
                 },
             );
-            if deleted {
-                forgotten.folder = None;
-            }
         }
         Ok(ConfirmReply { confirmed })
     }

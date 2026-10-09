@@ -754,17 +754,15 @@ fn may_hold_audio(format: AudioFormat, master: &Path, len: u64) -> bool {
 fn holds_no_master(folder: &Path, meeting_id: Uuid) -> bool {
     let layout = RecordingLayout::new(folder, meeting_id);
     match std::fs::metadata(&layout.directory) {
-        Ok(metadata) if metadata.is_dir() => {
-            AudioFormat::ALL
-                .iter()
-                .all(|&format| match std::fs::metadata(layout.master(format)) {
-                    Ok(metadata) => {
-                        metadata.is_file()
-                            && !may_hold_audio(format, &layout.master(format), metadata.len())
-                    }
-                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-                })
-        }
+        Ok(metadata) if metadata.is_dir() => AudioFormat::ALL.iter().all(|&format| {
+            let master = layout.master(format);
+            match std::fs::metadata(&master) {
+                Ok(metadata) => {
+                    metadata.is_file() && !may_hold_audio(format, &master, metadata.len())
+                }
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            }
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             std::fs::read_dir(folder).is_ok_and(|mut entries| entries.any(|entry| entry.is_ok()))
         }
