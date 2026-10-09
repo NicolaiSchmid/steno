@@ -562,9 +562,10 @@ Every package is written in parallel except where a dependency is named:
     stored time is in the future (the clock was set back), and a check that has
     not answered after 60 seconds fails. A found update raises the "Install and
     Relaunch" dialog once per version in a run, not while a recording runs.
-    Automatic downloads wait for P25's gate: the schedule downloads and installs
-    by itself only with a hold from `InstallGate::try_hold`, and through the
-    stand-in `NeverIdle` it downloads nothing, so P25 turns the download on.
+    Automatic downloads wait for P25's gate: the schedule downloads by itself
+    only while `InstallGate::is_idle_now` says idle and installs only with a
+    hold from `InstallGate::try_hold`; the stand-in `NeverIdle` is never idle,
+    so it downloads nothing, and P25's gate turns the download on.
     `updates_are_managed` is X5's switch. The QR code is
     the `qrcode` crate's, level M, as a greyscale PNG.
 - **S5 Handover on a changing network** (`fix/handover-republish`).

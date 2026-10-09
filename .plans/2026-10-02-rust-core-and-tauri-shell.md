@@ -2701,8 +2701,9 @@ touch and admission lines; each fix is ported to Swift before cutover.
   recording starts, runs or stops: the first tick after it ends raises it. Automatic
   downloads wait for P25's `InstallGate` (stable plan): its stand-in `NeverIdle`
   never gives a hold, so until P25 lands the flag downloads nothing and every install
-  waits for the user's yes; with the gate the schedule downloads and installs by
-  itself only through `InstallGate::try_hold`. Sparkle installed a download at quit.
+  waits for the user's yes; with the gate the schedule downloads by itself only while
+  `InstallGate::is_idle_now` says idle (a recording or a processing job has the disk
+  and the network to itself) and installs only with a hold from `try_hold`. Sparkle installed a download at quit.
   Settings' footer ("installed when you relaunch Steno", `general-section.tsx`)
   describes Sparkle; in the Rust app the dialog's yes installs at once, and the
   shared copy follows when the Swift app retires (`.plans/2026-10-04-mac-cutover.md`).
