@@ -122,7 +122,9 @@ pub struct SpeechSetup {
     pub speech_settings: SpeechSettings,
     /// How the speech sidecar starts ([`sidecar_config`]), its encoder on
     /// `DirectML` when the speech settings ask for it on Windows
-    /// ([`SpeechSettings::directml_on_windows`]).
+    /// ([`SpeechSettings::directml_on_windows`]). It never downloads a
+    /// missing model ([`Install::Never`], the default); the `steno`
+    /// command turns that on in its own setup.
     pub sidecar: SidecarConfig,
 }
 
@@ -323,12 +325,14 @@ impl SpeechEngines {
     /// [`Self::new`] with the gates' checks passed in, for the tests: the
     /// speech engine's for the runtime it runs on, and the diarizer's.
     pub(crate) fn gated(
-        setup: SpeechSetup,
+        mut setup: SpeechSetup,
         speech_installed: Arc<dyn Fn(SpeechRuntime) -> bool + Send + Sync>,
         diarizer_installed: InstalledCheck,
     ) -> Self {
-        let mut over = setup.clone();
-        over.sidecar.install_models = false;
+        // The default already; set so a setup that allows downloads (the
+        // CLI's) never reaches the app's engines or `setup()`.
+        setup.sidecar.install = Install::Never;
+        let over = setup.clone();
         let mut engines = Self::with_builder(
             setup,
             Box::new(move |runtime| {

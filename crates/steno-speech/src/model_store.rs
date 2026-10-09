@@ -396,6 +396,21 @@ const CHUNK: u64 = 64 << 20;
 /// The read buffer of a download and of a hash.
 const READ_BUFFER: usize = 1 << 16;
 
+/// Whether a model's user may download it when a file is missing: the
+/// speech sidecar's ([`SidecarConfig::install`](crate::SidecarConfig::install))
+/// and `steno-diarize`'s, which re-exports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Install {
+    /// A missing file is downloaded first ([`ModelStore::ensure`]): the
+    /// `steno` command's explicit commands, `steno process` among them.
+    Allowed,
+    /// A missing file is [`SpeechError::NotInstalled`] and no request is
+    /// made ([`ModelStore::installed_directory`]): the app's pipelines,
+    /// which check for missing models before a job and never download
+    /// during one; Settings and onboarding install the models.
+    Never,
+}
+
 /// The store root, the mirror, the HTTP client, and the chunk size, body
 /// timeouts and clock the tests change.
 #[derive(Debug, Clone)]

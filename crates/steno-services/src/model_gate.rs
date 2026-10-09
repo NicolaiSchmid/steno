@@ -4,13 +4,13 @@
 //! [`PipelineFailure::models_missing`], so the meeting stays `queued` with
 //! no failure reason on its row and is processed once Settings or
 //! onboarding installed the models ([`ResumingSpeechModels`] then resumes
-//! it). The speech sidecar's own install is turned off as well
-//! (`SidecarConfig::install_models`), so a file removed between the gate's
-//! check and the child's load is refused too, never fetched; an engine's
-//! error while its models are gone is the same refusal. The `steno`
-//! command's engines (`crates/steno-cli/src/wiring.rs`) keep downloading
-//! on first use, for a command a user runs. Rust only: the Swift pipeline
-//! downloaded inside the run.
+//! it). The speech sidecar and the diarizer never download either
+//! ([`Install::Never`](steno_speech::Install::Never)), so a file removed
+//! between the gate's check and the load is refused too, never fetched; an
+//! engine's error while its models are gone is the same refusal. The
+//! `steno` command's engines (`crates/steno-cli/src/wiring.rs`) are built
+//! with `Install::Allowed` and download on first use, for a command a user
+//! runs. Rust only: the Swift pipeline downloaded inside the run.
 //!
 //! | Item | What it does |
 //! |------|--------------|
@@ -449,30 +449,30 @@ mod tests {
     }
 
     /// The speech sidecar behind a gate that lets every call through,
-    /// over an empty models directory and a mirror on a closed port: the
-    /// app's engines turn the sidecar's install off, so the child's load
-    /// is refused for the missing models before any download starts, and
-    /// nothing is written.
+    /// over an empty models directory and a mirror on a closed port, from
+    /// a setup that allows downloads (as the CLI's does): the app's engines
+    /// turn the sidecar's install off, also in the setup they hand out, so
+    /// the child's load is refused for the missing models before any
+    /// download starts, and nothing is written.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_apps_sidecar_refuses_missing_models_past_its_gate() {
         use crate::speech::{SpeechEngines, testing};
-        use steno_speech::{SpeechRuntime, SpeechSettings};
+        use steno_speech::{Install, SpeechRuntime, SpeechSettings};
 
         let dir = tempfile::tempdir().unwrap();
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let mirror = format!("http://{}", closed.local_addr().unwrap());
         drop(closed);
-        let engines = SpeechEngines::gated(
-            testing::setup(
-                dir.path(),
-                SpeechSettings {
-                    models_mirror: Some(mirror),
-                    ..SpeechSettings::default()
-                },
-            ),
-            Arc::new(|_| true),
-            Arc::new(|| true),
+        let mut setup = testing::setup(
+            dir.path(),
+            SpeechSettings {
+                models_mirror: Some(mirror),
+                ..SpeechSettings::default()
+            },
         );
+        setup.sidecar.install = Install::Allowed;
+        let engines = SpeechEngines::gated(setup, Arc::new(|_| true), Arc::new(|| true));
+        assert_eq!(engines.setup().sidecar.install, Install::Never);
         let error = engines
             .engine(SpeechRuntime::OnnxSidecar)
             .prepare()

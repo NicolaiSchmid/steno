@@ -60,18 +60,11 @@ pub const SEGMENTATION_REPO: &str = "csukuangfj/sherpa-onnx-pyannote-segmentatio
 /// at, so the bytes never change under the manifest's checksum.
 pub const SEGMENTATION_REVISION: &str = "9403a6902bb58e3d5ae8c7e77c3422de279db2e0";
 
-/// Whether building the diarizer's backend may download its models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Install {
-    /// A missing file is downloaded first ([`ensure`]): the CLI's explicit
-    /// commands, `steno process` among them, and the app's pipeline until
-    /// it checks for missing models itself.
-    Allowed,
-    /// A missing file is [`DiarizeError::NotInstalled`] and no request is
-    /// made ([`installed`]): for a pipeline that checks for missing models
-    /// before a job, so it never downloads during one.
-    Never,
-}
+/// Whether building the diarizer's backend may download its models:
+/// [`ensure`] under [`Install::Allowed`], [`installed`] under
+/// [`Install::Never`], whose missing file is [`DiarizeError::NotInstalled`].
+/// The speech sidecar takes the same policy (`steno_speech::SidecarConfig`).
+pub use steno_speech::Install;
 
 /// The asset: [`SEGMENTATION_FILE`] and [`EMBEDDING_FILE`] with their
 /// sources, sizes and SHA-256, [`DISPLAY_NAME`], [`LICENCE`] and
