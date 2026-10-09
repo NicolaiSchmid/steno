@@ -33,6 +33,12 @@
 //!   kill is made up for at the next `sync`. With nothing written and
 //!   nothing owed there is no reload: each one reruns every generator of
 //!   the user manager.
+//! - **Managed** (`STENO_LOGIN_ITEM=managed`): the switch of Launch at
+//!   login writes nothing, though it shows on. The autostart unit's
+//!   drop-in is written only while the app runs as that unit and its
+//!   entry stands (one an earlier build wrote, which goes at the exit, or
+//!   the user's own), and the exit that removes that entry removes the
+//!   drop-in with it (`autostart::at_exit`).
 //! - **The reload rule** (`may_reload`): as the autostart unit
 //!   (`runs_as_autostart_unit`) the app reloads only while the unit's
 //!   entry stands. Once the entry is gone, a reload unloads the unit, and
@@ -180,7 +186,7 @@ fn may_reload(login_item: Option<bool>, as_autostart_unit: bool) -> bool {
 }
 
 /// Removes the autostart unit's drop-in without a reload, at the exit
-/// that turns Launch at login off (`autostart::turn_off_at_exit`).
+/// that removes the unit's entry (`autostart::at_exit`).
 pub fn remove_autostart() {
     if let Some(home) = home() {
         change(&DropIn::AUTOSTART, &home, false);

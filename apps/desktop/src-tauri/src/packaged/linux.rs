@@ -243,7 +243,7 @@ enum Removal {
     AtExit,
 }
 
-/// What [`at_launch`] does with the entry: see [`Removal`].
+/// What [`remove_or_defer`] does with the entry: see [`Removal`].
 fn removal(managed: bool, earlier: bool, as_autostart_unit: bool) -> Removal {
     match (managed && earlier, as_autostart_unit) {
         (false, _) => Removal::Keep,
@@ -266,7 +266,7 @@ pub fn remove_earlier_entry(app_name: &str) {
     let Some(path) = entry_path_here(app_name) else {
         return;
     };
-    let removal = at_launch(
+    let removal = remove_or_defer(
         &path,
         super::login_item_is_managed(),
         &candidates_here(),
@@ -278,7 +278,7 @@ pub fn remove_earlier_entry(app_name: &str) {
 }
 
 /// [`remove_earlier_entry`]'s launch step for the entry at `path`.
-fn at_launch(
+fn remove_or_defer(
     path: &Path,
     managed: bool,
     candidates: &[PathBuf],
@@ -307,14 +307,11 @@ fn at_launch(
 /// on Wayland, which relaunches the app when the session goes on
 /// (`session_end::SaveAndQuit::of`); xfce4-session starts autostart
 /// entries itself, so that app is not the autostart unit and never
-/// leaves the entry for the exit.
-pub fn remove_earlier_entry_at_exit(app_name: &str, relaunching: bool) {
-    if !removes_at_exit(EARLIER_ENTRY_AT_EXIT.load(Ordering::Relaxed), relaunching) {
-        return;
-    }
-    if let Some(path) = entry_path_here(app_name) {
-        remove_if_earlier(&path, &candidates_here());
-    }
+/// leaves the entry for the exit. True when the entry went.
+pub fn remove_earlier_entry_at_exit(app_name: &str, relaunching: bool) -> bool {
+    removes_at_exit(EARLIER_ENTRY_AT_EXIT.load(Ordering::Relaxed), relaunching)
+        && entry_path_here(app_name)
+            .is_some_and(|path| remove_if_earlier(&path, &candidates_here()))
 }
 
 /// Whether the exit removes the entry: it waited for the exit
@@ -683,26 +680,26 @@ mod tests {
         let write = |exec: &Path| write_entry_at(&path, "steno-desktop", Some(exec)).unwrap();
 
         assert_eq!(
-            at_launch(&path, true, &[], false),
+            remove_or_defer(&path, true, &[], false),
             Removal::Keep,
             "no entry"
         );
 
         write(store);
-        assert_eq!(at_launch(&path, false, &[], false), Removal::Keep);
+        assert_eq!(remove_or_defer(&path, false, &[], false), Removal::Keep);
         assert!(path.exists(), "an unmanaged launch keeps it");
-        assert_eq!(at_launch(&path, true, &[], false), Removal::Now);
+        assert_eq!(remove_or_defer(&path, true, &[], false), Removal::Now);
         assert!(!path.exists(), "outside the unit it goes at once");
 
         write(store);
-        assert_eq!(at_launch(&path, true, &[], true), Removal::AtExit);
+        assert_eq!(remove_or_defer(&path, true, &[], true), Removal::AtExit);
         assert!(path.exists(), "as the unit it stays while the app runs");
         assert!(removes_at_exit(true, false));
         assert!(remove_if_earlier(&path, &[]));
         assert!(!path.exists(), "gone after the exit");
 
         write(Path::new("/opt/steno/steno-desktop"));
-        assert_eq!(at_launch(&path, true, &[], false), Removal::Keep);
+        assert_eq!(remove_or_defer(&path, true, &[], false), Removal::Keep);
         assert!(!remove_if_earlier(&path, &[]));
         assert!(path.exists(), "an entry no earlier build wrote stays");
     }
@@ -737,12 +734,12 @@ mod tests {
             // update's relaunch keeps it.
             EARLIER_ENTRY_AT_EXIT.store(true, Ordering::Relaxed);
             write_entry(BINARY).unwrap();
-            remove_earlier_entry_at_exit(BINARY, false);
+            assert!(!remove_earlier_entry_at_exit(BINARY, false));
             assert!(path.exists(), "this build's own entry stays");
             write_entry_at(&path, BINARY, Some(&per_user)).unwrap();
-            remove_earlier_entry_at_exit(BINARY, true);
+            assert!(!remove_earlier_entry_at_exit(BINARY, true));
             assert!(path.exists(), "an update's relaunch keeps it");
-            remove_earlier_entry_at_exit(BINARY, false);
+            assert!(remove_earlier_entry_at_exit(BINARY, false));
             assert!(!path.exists(), "gone after the exit");
             return;
         }
