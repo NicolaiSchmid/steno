@@ -5,9 +5,13 @@
 //! output; a note on stderr says when the summary was skipped for lack of
 //! an LLM endpoint. Swift: `Sources/steno/Commands/Process.swift`.
 //!
-//! `steno process --meeting <id>` processes a stored ready or failed
-//! meeting again from its recording, through the pipeline's `reprocess`,
-//! and reports as above. Rust only: Swift's CLI had no such flag.
+//! `steno process --meeting <id>` processes a stored meeting again from its
+//! recording, and reports as above: a meeting the app offers "Process
+//! again" for (a failed one), through the pipeline's `process_again`, or
+//! with `--allow-ready` a ready one too, through `reprocess`. A ready
+//! meeting processed again re-delivers its note, and without an LLM
+//! endpoint its cleaned transcript goes back to the raw text. Rust only:
+//! Swift's CLI had no such flag.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,8 +21,8 @@ use chrono::{Duration, Utc};
 use clap::{Args, ValueEnum};
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, Meeting, MeetingEvent, MeetingSource, MeetingState,
-    PipelineStage, ProcessingProgress, RecordingLayout, Settings, Store, SummaryTemplate,
-    TitleOrigin,
+    MeetingStateKind, PipelineStage, ProcessingProgress, RecordingLayout, Settings, Store,
+    SummaryTemplate, TitleOrigin,
     json::uuid_string,
     paths::{file_url, file_url_path},
 };
@@ -50,8 +54,8 @@ pub struct Process {
     /// 16 kHz mono WAV: the mic lane of a call, or the room recording.
     #[arg(required_unless_present = "meeting")]
     pub input: Option<PathBuf>,
-    /// Process a stored ready or failed meeting again from its recording,
-    /// instead of a new one from <INPUT>.
+    /// Process a stored failed meeting again from its recording, instead
+    /// of a new one from <INPUT>.
     #[arg(
         long,
         value_name = "ID",
@@ -59,6 +63,13 @@ pub struct Process {
         conflicts_with_all = ["input", "system_lane", "source", "title", "template", "audio_folder"]
     )]
     pub meeting: Option<Uuid>,
+    /// With --meeting, process a ready meeting again too. It re-delivers
+    /// the meeting's note, and without an LLM endpoint its cleaned
+    /// transcript goes back to the raw text.
+    // `requires` alone lets `<INPUT> --allow-ready` through: clap counts
+    // `--meeting` as satisfied once its conflict, `<INPUT>`, is present.
+    #[arg(long = "allow-ready", requires = "meeting", conflicts_with = "input")]
+    pub allow_ready: bool,
     /// The system lane WAV of a call.
     #[arg(long = "system-lane", value_name = "WAV")]
     pub system_lane: Option<PathBuf>,
@@ -212,13 +223,20 @@ impl Process {
         .await
     }
 
-    /// `--meeting`: the stored meeting processed again from its recording.
+    /// `--meeting`: the stored meeting processed again from its recording,
+    /// a ready one only with `--allow-ready`.
     async fn run_again(self, meeting_id: Uuid) -> Outcome {
         self.speech.validate()?;
         let store = self.database.open()?;
         let settings = store.settings().map_err(Failure::runtime)?;
+        let allow_ready = self.allow_ready;
         self.run_and_report(&store, &settings, meeting_id, |pipeline| {
-            pipeline.reprocess(meeting_id).map_err(reprocess_failure)
+            if allow_ready {
+                pipeline.reprocess(meeting_id)
+            } else {
+                pipeline.process_again(meeting_id)
+            }
+            .map_err(reprocess_failure)
         })
         .await
     }
@@ -289,10 +307,21 @@ fn reprocess_failure(error: ReprocessError) -> Failure {
         ReprocessError::MeetingNotFound(id) => {
             Failure::usage(format!("No meeting has the id {}.", uuid_string(id)))
         }
-        ReprocessError::Unfinished { meeting_id, state } => Failure::runtime(format!(
-            "Meeting {} is {}; only a ready or failed meeting can be processed again.",
-            uuid_string(meeting_id),
-            state.as_str()
+        ReprocessError::Unfinished {
+            meeting_id,
+            state: MeetingStateKind::Queued | MeetingStateKind::Processing,
+        }
+        | ReprocessError::Busy(meeting_id) => Failure::runtime(format!(
+            "Meeting {} is already being processed.",
+            uuid_string(meeting_id)
+        )),
+        ReprocessError::Unfinished { meeting_id, .. } => Failure::runtime(format!(
+            "Meeting {} is still recording, so it cannot be processed again.",
+            uuid_string(meeting_id)
+        )),
+        ReprocessError::NotOffered(id) => Failure::runtime(format!(
+            "Meeting {} is ready; pass --allow-ready to process it again.",
+            uuid_string(id)
         )),
         ReprocessError::NoAsset(id) => Failure::runtime(format!(
             "Meeting {} has no recording on record, so it cannot be processed again.",
@@ -300,10 +329,6 @@ fn reprocess_failure(error: ReprocessError) -> Failure {
         )),
         ReprocessError::AudioGone(id) => Failure::runtime(format!(
             "The recording of meeting {} is no longer on disk, so it cannot be processed again.",
-            uuid_string(id)
-        )),
-        ReprocessError::Busy(id) => Failure::runtime(format!(
-            "Meeting {} is already being processed.",
             uuid_string(id)
         )),
         ReprocessError::Quitting => {
@@ -388,6 +413,70 @@ mod tests {
         });
         assert_eq!(line, "transcribe      3% 1m 20s, lane 2 of 2");
         assert_eq!(remaining_text(3.2), "4s");
+    }
+
+    #[test]
+    fn every_reprocess_refusal_has_its_words_and_exit_code() {
+        let id = Uuid::from_u128(0x6F96_19FF_8B86_D011_B42D_00C0_4FC9_64FF);
+        let s = uuid_string(id);
+        let busy = format!("Meeting {s} is already being processed.");
+        let unfinished = |state| ReprocessError::Unfinished {
+            meeting_id: id,
+            state,
+        };
+        let cases = [
+            (
+                ReprocessError::MeetingNotFound(id),
+                Failure::usage(format!("No meeting has the id {s}.")),
+            ),
+            (
+                unfinished(MeetingStateKind::Recording),
+                Failure::runtime(format!(
+                    "Meeting {s} is still recording, so it cannot be processed again."
+                )),
+            ),
+            (
+                unfinished(MeetingStateKind::Queued),
+                Failure::runtime(busy.clone()),
+            ),
+            (
+                unfinished(MeetingStateKind::Processing),
+                Failure::runtime(busy.clone()),
+            ),
+            (
+                ReprocessError::NotOffered(id),
+                Failure::runtime(format!(
+                    "Meeting {s} is ready; pass --allow-ready to process it again."
+                )),
+            ),
+            (
+                ReprocessError::NoAsset(id),
+                Failure::runtime(format!(
+                    "Meeting {s} has no recording on record, so it cannot be processed again."
+                )),
+            ),
+            (
+                ReprocessError::AudioGone(id),
+                Failure::runtime(format!(
+                    "The recording of meeting {s} is no longer on disk, so it cannot be processed again."
+                )),
+            ),
+            (ReprocessError::Busy(id), Failure::runtime(busy)),
+            (
+                ReprocessError::Quitting,
+                Failure::runtime("The pipeline is shutting down; nothing was started."),
+            ),
+            (
+                ReprocessError::Pipeline(steno_pipeline::PipelineFailure::new(
+                    PipelineStage::Decode,
+                    "the disk is full",
+                )),
+                Failure::runtime("Processing could not start: decode: the disk is full"),
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(reprocess_failure(error.clone()), expected, "{error:?}");
+        }
     }
 
     #[test]

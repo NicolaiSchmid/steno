@@ -285,8 +285,9 @@ pub trait Pipeline: Send + Sync {
     /// "Process again": saves the meeting queued and starts its run from
     /// `decode` with its recording, returning once the run has started.
     /// Refused, without a change, for the reason [`ProcessAgainRefusal`]
-    /// gives. Swift: `ProcessingPipeline.enqueue` with the stored asset, in
-    /// `MeetingDetailViewModel.processAgain()`.
+    /// gives, which includes a stored meeting that is not offered
+    /// ([`steno_core::Meeting::offers_process_again`]) whatever the
+    /// caller's view of it says. Rust only: the Swift app refuses it.
     fn process_again(&self, meeting_id: Uuid) -> Result<(), ProcessAgainRefusal>;
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()>;
     /// Rebuilds the pipeline from the stored settings and the API key.
@@ -304,19 +305,21 @@ pub trait Pipeline: Send + Sync {
 pub enum ProcessAgainRefusal {
     /// No meeting has the id: it was deleted under the detail.
     MeetingGone,
-    /// The meeting is recording, queued or processing, or the detail
-    /// offers the action only for a failed one and it is not.
-    NotFailed,
+    /// The meeting is not one "Process again" is offered for
+    /// ([`steno_core::Meeting::offers_process_again`]): it is recording,
+    /// or ready.
+    NotOffered,
     /// The master is not on disk, or the meeting has no recording on
     /// record.
     RecordingGone,
-    /// Another operation holds the meeting.
+    /// The meeting is queued or processing, or another operation holds
+    /// it.
     Busy,
     /// The app is exiting; the next launch can process the meeting again.
     Quitting,
     /// The store failed reading the meeting or saving it queued: the
     /// failure's text.
-    Failed(String),
+    CouldNotStart(String),
 }
 
 /// The speech model store (WP4). The fake keeps a map of installed

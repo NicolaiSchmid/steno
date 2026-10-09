@@ -680,7 +680,9 @@ fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
 
 /// `steno process --meeting <id>` processes a stored failed meeting again
 /// from its recording: refused while the master is gone, and once the
-/// broken lane is replaced the run ends ready and prints the id.
+/// broken lane is replaced the run ends ready and prints the id. A ready
+/// meeting is refused unless `--allow-ready` asks for it.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
     let home = tempfile::tempdir().unwrap();
@@ -763,11 +765,32 @@ fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
     );
 
     let ready = steno(&["process", "--meeting", &meeting_id, "--db", db], home);
-    assert_eq!(
-        ready.status, 0,
-        "a ready meeting runs again too: {}",
+    assert_eq!(ready.status, 2, "{}", ready.stderr);
+    assert!(
+        ready.stderr.contains(&format!(
+            "Meeting {meeting_id} is ready; pass --allow-ready to process it again."
+        )),
+        "{}",
         ready.stderr
     );
+    assert_eq!(ready.stdout, "");
+    let allowed = steno(
+        &[
+            "process",
+            "--meeting",
+            &meeting_id,
+            "--allow-ready",
+            "--db",
+            db,
+        ],
+        home,
+    );
+    assert_eq!(
+        allowed.status, 0,
+        "--allow-ready runs a ready meeting again: {}",
+        allowed.stderr
+    );
+    assert!(allowed.stderr.contains("transcribe"), "{}", allowed.stderr);
 }
 
 /// `--meeting` stands instead of the input and the new meeting's flags,
@@ -794,6 +817,17 @@ fn process_meeting_is_exclusive_of_the_input_and_names_an_unknown_id() {
             run.stderr
         );
     }
+    // `--allow-ready` needs `--meeting`, beside an input or alone.
+    let beside = steno(&["process", sweep, "--allow-ready", "--db", db], home);
+    assert_eq!(beside.status, 1, "{}", beside.stderr);
+    assert!(
+        beside.stderr.contains("--allow-ready") && beside.stderr.contains("cannot be used with"),
+        "{}",
+        beside.stderr
+    );
+    let alone = steno(&["process", "--allow-ready", "--db", db], home);
+    assert_eq!(alone.status, 1, "{}", alone.stderr);
+    assert!(alone.stderr.contains("--meeting <ID>"), "{}", alone.stderr);
     let neither = steno(&["process", "--db", db], home);
     assert_eq!(neither.status, 1, "{}", neither.stderr);
     assert!(neither.stderr.contains("<INPUT>"), "{}", neither.stderr);
@@ -1251,4 +1285,53 @@ fn bakeoff_with_fake_engines_reports_one_segment_per_second() {
             "{name}"
         );
     }
+}
+
+/// `--meeting` refuses every flag of a new meeting, each by name, and
+/// checks the speech flags before it opens the database.
+#[test]
+fn process_meeting_refuses_each_new_meeting_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let db = db.to_str().unwrap();
+    let lane = fixtures_root().join("audio/conversation-system-6s.wav");
+    let lane = lane.to_str().unwrap();
+    let folder = home.join("audio");
+    let folder = folder.to_str().unwrap();
+    let id = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
+    for (flag, value) in [
+        ("--system-lane", lane),
+        ("--template", "default"),
+        ("--audio-folder", folder),
+    ] {
+        let run = steno(&["process", "--meeting", id, flag, value, "--db", db], home);
+        assert_eq!(run.status, 1, "{flag}: {}", run.stderr);
+        assert!(
+            run.stderr.contains("cannot be used with") && run.stderr.contains(flag),
+            "{flag}: {}",
+            run.stderr
+        );
+        assert_eq!(run.stdout, "", "{flag}");
+    }
+    // An unknown engine is the usage error, before the database is opened.
+    let engine = steno(
+        &[
+            "process",
+            "--meeting",
+            id,
+            "--engine",
+            "parakeet-v9",
+            "--db",
+            db,
+        ],
+        home,
+    );
+    assert_eq!(engine.status, 1, "{}", engine.stderr);
+    assert!(engine.stderr.contains("parakeet-v9"), "{}", engine.stderr);
+    assert!(
+        !engine.stderr.contains("No meeting has the id"),
+        "{}",
+        engine.stderr
+    );
 }

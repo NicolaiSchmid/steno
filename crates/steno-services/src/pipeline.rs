@@ -6,8 +6,8 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use steno_core::AudioRetention;
 use steno_core::protocols::BoundaryResult;
+use steno_core::{AudioRetention, MeetingStateKind};
 use steno_host::services::{Pipeline, ProcessAgainRefusal};
 use steno_pipeline::{
     ExportRetries, InFlight, Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline,
@@ -215,7 +215,7 @@ impl Pipeline for HostPipeline {
         let _runtime = self.pipeline.runtime.enter();
         self.pipeline
             .current()
-            .reprocess(meeting_id)
+            .process_again(meeting_id)
             .map_err(process_again_refusal)
     }
 
@@ -239,19 +239,28 @@ impl Pipeline for HostPipeline {
     }
 }
 
-/// The host's reading of a refused [`ProcessingPipeline::reprocess`]: a
+/// The host's reading of a refused [`ProcessingPipeline::process_again`]:
+/// a queued or processing meeting is already being processed, and a
 /// meeting without a recording on record reads as one whose recording is
 /// gone, as the pipeline's docs ask.
 fn process_again_refusal(error: ReprocessError) -> ProcessAgainRefusal {
     match error {
         ReprocessError::MeetingNotFound(_) => ProcessAgainRefusal::MeetingGone,
-        ReprocessError::Unfinished { .. } => ProcessAgainRefusal::NotFailed,
+        ReprocessError::Unfinished {
+            state: MeetingStateKind::Queued | MeetingStateKind::Processing,
+            ..
+        }
+        | ReprocessError::Busy(_) => ProcessAgainRefusal::Busy,
+        ReprocessError::Unfinished { .. } | ReprocessError::NotOffered(_) => {
+            ProcessAgainRefusal::NotOffered
+        }
         ReprocessError::NoAsset(_) | ReprocessError::AudioGone(_) => {
             ProcessAgainRefusal::RecordingGone
         }
-        ReprocessError::Busy(_) => ProcessAgainRefusal::Busy,
         ReprocessError::Quitting => ProcessAgainRefusal::Quitting,
-        ReprocessError::Pipeline(failure) => ProcessAgainRefusal::Failed(failure.to_string()),
+        ReprocessError::Pipeline(failure) => {
+            ProcessAgainRefusal::CouldNotStart(failure.to_string())
+        }
     }
 }
 
@@ -812,7 +821,7 @@ mod tests {
         let (queued, _) = recorded_meeting(&store, dir.path(), MeetingState::Queued);
         assert_eq!(
             process_again(&service, queued.id),
-            Err(ProcessAgainRefusal::NotFailed)
+            Err(ProcessAgainRefusal::Busy)
         );
 
         let mut without_asset = sample_data::meeting();
@@ -854,7 +863,7 @@ mod tests {
                 PipelineStage::Decode,
                 "the disk is full"
             ))),
-            ProcessAgainRefusal::Failed("decode: the disk is full".to_owned())
+            ProcessAgainRefusal::CouldNotStart("decode: the disk is full".to_owned())
         );
     }
 
@@ -1080,6 +1089,43 @@ mod tests {
                     if meeting_id == id && progress.stage == PipelineStage::Deliver
             ),
             "{event:?}"
+        );
+    }
+
+    /// "Process again" is for a meeting it is offered for: a ready one is
+    /// refused below the host too, so a stale detail cannot run it again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_refuses_a_ready_meeting() {
+        let (dir, store) = temp_store();
+        let service = Arc::new(pipeline(&store, None));
+        let (ready, _) = recorded_meeting(&store, dir.path(), MeetingState::Ready);
+        assert_eq!(
+            process_again(&service, ready.id),
+            Err(ProcessAgainRefusal::NotOffered)
+        );
+        service.pipeline.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, ready.id), MeetingState::Ready);
+    }
+
+    /// A queued or processing meeting is already being processed; a
+    /// recording one is not offered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_on_a_queued_or_processing_meeting_is_busy() {
+        let (dir, store) = temp_store();
+        let service = Arc::new(pipeline(&store, None));
+        for state in [MeetingState::Queued, MeetingState::Processing] {
+            let (meeting, _) = recorded_meeting(&store, dir.path(), state.clone());
+            assert_eq!(
+                process_again(&service, meeting.id),
+                Err(ProcessAgainRefusal::Busy),
+                "{state:?}"
+            );
+            assert_eq!(meeting_state(&store, meeting.id), state, "unchanged");
+        }
+        let (recording, _) = recorded_meeting(&store, dir.path(), MeetingState::Recording);
+        assert_eq!(
+            process_again(&service, recording.id),
+            Err(ProcessAgainRefusal::NotOffered)
         );
     }
 }

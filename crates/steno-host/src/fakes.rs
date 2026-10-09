@@ -499,7 +499,7 @@ impl Pipeline for FakePipeline {
             return Err(refusal);
         }
         self.outcome()
-            .map_err(|error| ProcessAgainRefusal::Failed(error.to_string()))
+            .map_err(|error| ProcessAgainRefusal::CouldNotStart(error.to_string()))
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {

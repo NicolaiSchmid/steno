@@ -169,6 +169,16 @@ impl MeetingDetailViewModel {
         self.can_rerun() && self.llm_configured && self.has_transcript()
     }
 
+    /// "Process again": the meeting is one it is offered for
+    /// ([`Meeting::offers_process_again`]) and its recording is on disk.
+    /// The snapshot's `canProcessAgain`, and the guard of
+    /// [`process_again`](Self::process_again), so the button and the action
+    /// cannot drift apart.
+    #[must_use]
+    pub fn can_process_again(&self) -> bool {
+        self.recording_files_exist && self.meeting().is_some_and(Meeting::offers_process_again)
+    }
+
     /// "Re-export" and "Export now": without a vault there is nowhere to
     /// export to.
     #[must_use]
@@ -259,27 +269,22 @@ impl MeetingDetailViewModel {
         self.run("Re-export", || pipeline.redeliver(id));
     }
 
-    /// "Process again", which the page offers for a failed meeting whose
-    /// recording is on disk (`state` and `retention.filesExist` in the
-    /// snapshot): the pipeline saves the meeting queued and runs it from
-    /// the start with its recording; the caller's reload then shows it
-    /// queued. A refusal, the detail's own (the meeting is not failed, its
-    /// recording is gone) or the pipeline's, is the error line in
-    /// [`process_again_refusal_line`]'s words; one while the app quits
-    /// shows nothing. Swift: `MeetingDetailViewModel.processAgain()`.
+    /// "Process again", offered while [`can_process_again`] holds: the
+    /// pipeline saves the meeting queued and runs it from the start with
+    /// its recording; the caller's reload then shows it queued. A refusal,
+    /// the detail's own (not offered) or the pipeline's, is the error line
+    /// in [`process_again_refusal_line`]'s words; one while the app quits
+    /// shows nothing. Rust only: the Swift app refuses it.
+    ///
+    /// [`can_process_again`]: Self::can_process_again
     pub fn process_again(&mut self, pipeline: &dyn Pipeline, platform: Platform) {
-        let failed = self
-            .meeting()
-            .is_some_and(|meeting| meeting.state.is_failed());
-        let outcome = if !failed {
-            Err(ProcessAgainRefusal::NotFailed)
-        } else if !self.recording_files_exist {
-            Err(ProcessAgainRefusal::RecordingGone)
-        } else {
+        let outcome = if self.can_process_again() {
             self.is_busy = true;
             let outcome = pipeline.process_again(self.id);
             self.is_busy = false;
             outcome
+        } else {
+            Err(ProcessAgainRefusal::NotOffered)
         };
         match outcome {
             Ok(()) => self.error = None,
@@ -423,8 +428,7 @@ impl MeetingDetailViewModel {
 }
 
 /// What the detail's error line says when "Process again" is refused;
-/// `None` while the app quits, which the user asked for. Swift: the same
-/// words in `MeetingDetailViewModel.processAgain()`.
+/// `None` while the app quits, which the user asked for.
 #[must_use]
 pub fn process_again_refusal_line(
     refusal: &ProcessAgainRefusal,
@@ -432,7 +436,9 @@ pub fn process_again_refusal_line(
 ) -> Option<String> {
     Some(match refusal {
         ProcessAgainRefusal::MeetingGone => "This meeting no longer exists.".to_owned(),
-        ProcessAgainRefusal::NotFailed => "Only a failed meeting can be processed again.".to_owned(),
+        ProcessAgainRefusal::NotOffered => {
+            "Only a failed meeting can be processed again.".to_owned()
+        }
         ProcessAgainRefusal::RecordingGone => platform
             .mac_or(
                 "The recording is no longer on this Mac, so the meeting cannot be processed again.",
@@ -441,7 +447,9 @@ pub fn process_again_refusal_line(
             .to_owned(),
         ProcessAgainRefusal::Busy => "This meeting is already being processed.".to_owned(),
         ProcessAgainRefusal::Quitting => return None,
-        ProcessAgainRefusal::Failed(reason) => format!("Processing could not start: {reason}"),
+        ProcessAgainRefusal::CouldNotStart(reason) => {
+            format!("Processing could not start: {reason}")
+        }
     })
 }
 

@@ -199,6 +199,7 @@ private var utc: Calendar {
     #expect(snapshot.export.message == SetupCopy.notExportedNoVault)
     #expect(!snapshot.export.canReexport)
     #expect(!snapshot.canRerunSummary, "no endpoint in the preview environment")
+    #expect(!snapshot.canProcessAgain, "the Swift app never offers Process again")
     #expect(!snapshot.isBusy)
     #expect(snapshot.error == nil)
 

@@ -468,6 +468,9 @@ pub struct MeetingDetailSnapshot {
     pub decisions: Vec<String>,
     pub notes: String,
     pub export: DetailExport,
+    /// Whether the page shows "Process again". Swift sends `false`: its
+    /// app refuses the action.
+    pub can_process_again: bool,
     pub can_rerun_summary: bool,
     pub is_busy: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

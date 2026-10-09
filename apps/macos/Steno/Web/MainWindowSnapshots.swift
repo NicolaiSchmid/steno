@@ -419,7 +419,10 @@ extension MeetingDetailSnapshot {
       },
       transcript: MainWindowSnapshots.turns(export.segments) { detail.displayName(forSpeaker: $0) },
       tasks: tasks, decisions: export.decisions.map(\.text), notes: meeting.scratchpad,
-      export: exportSnapshot, canRerunSummary: detail.canRerunSummary, isBusy: detail.isBusy,
+      export: exportSnapshot,
+      // Never offered: the Swift app ships no further release (D9 of the
+      // stable promotion plan), so it refuses "Process again".
+      canProcessAgain: false, canRerunSummary: detail.canRerunSummary, isBusy: detail.isBusy,
       error: detail.error)
   }
 }

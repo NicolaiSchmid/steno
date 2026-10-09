@@ -446,6 +446,8 @@ export const meetingDetailSnapshot = z
 				canReveal: z.boolean(),
 			})
 			.strict(),
+		/** Whether "Process again" is offered; the host decides. */
+		canProcessAgain: z.boolean(),
 		canRerunSummary: z.boolean(),
 		isBusy: z.boolean(),
 		error: z.string().optional(),

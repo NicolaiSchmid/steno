@@ -305,6 +305,7 @@ export function applyScenario(
 					showsKeepToggle: false,
 					filesExist: true,
 				},
+				canProcessAgain: true,
 				canRerunSummary: true,
 			});
 		}

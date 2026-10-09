@@ -2983,6 +2983,41 @@ async fn reprocess_refuses_a_meeting_that_is_not_finished_or_has_no_asset() {
     );
 }
 
+/// `process_again` is `reprocess` for a meeting the app offers it for: a
+/// ready one is refused under the pipeline's own read and stays as it was,
+/// unclaimed; a failed one runs to ready.
+#[tokio::test(flavor = "multi_thread")]
+async fn process_again_refuses_a_ready_meeting_and_runs_a_failed_one() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let mut meeting = call_meeting(world.now);
+    meeting.state = MeetingState::Ready;
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    world
+        .store
+        .save_meeting_with_asset(&meeting, &asset)
+        .unwrap();
+    assert_eq!(
+        world.pipeline.process_again(meeting.id),
+        Err(ReprocessError::NotOffered(meeting.id))
+    );
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert_eq!(world.pipeline.in_flight(), Vec::<Uuid>::new());
+
+    world
+        .store
+        .set_state(
+            meeting.id,
+            MeetingState::Failed {
+                reason: "decode: unreadable".to_owned(),
+            },
+            world.now,
+        )
+        .unwrap();
+    world.pipeline.process_again(meeting.id).unwrap();
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+}
+
 /// The retention sweep keeps the asset row when it removes a ready
 /// meeting's files, so `reprocess` checks the disk: a meeting whose master
 /// is gone is refused before anything is saved, so its transcript stays,

@@ -402,12 +402,10 @@ function DetailBody({
 		send(client, "meeting.rerunSummary");
 	}
 
-	// "Process again" runs a failed meeting from the start with its
-	// recording, so it is offered only while the recording is on disk; the
-	// host words any refusal on the error line. The button stays disabled
-	// until the host answers, so a second click cannot start a second run.
-	const canProcessAgain =
-		detail.state === "failed" && detail.retention.filesExist;
+	// "Process again" runs the meeting from the start with its recording;
+	// the host says when it is offered (`canProcessAgain`) and words any
+	// refusal on the error line. The button stays disabled until the host
+	// answers, so a second click cannot start a second run.
 	const [startingAgain, setStartingAgain] = useState(false);
 	async function processAgain() {
 		setStartingAgain(true);
@@ -455,28 +453,15 @@ function DetailBody({
 			return (
 				<EmptyState
 					action={
-						<>
-							{canProcessAgain ? (
-								<Button
-									data-testid={`${current}-process-again`}
-									disabled={detail.isBusy || startingAgain}
-									onClick={processAgain}
-									variant="outline"
-								>
-									<RotateCcwIcon aria-hidden="true" />
-									Process again
-								</Button>
-							) : null}
-							<Button
-								data-testid={`${current}-try-again`}
-								disabled={!detail.canRerunSummary || detail.isBusy}
-								onClick={rerun}
-								variant="outline"
-							>
-								<RefreshCwIcon aria-hidden="true" />
-								Try again
-							</Button>
-						</>
+						<Button
+							data-testid={`${current}-try-again`}
+							disabled={!detail.canRerunSummary || detail.isBusy}
+							onClick={rerun}
+							variant="outline"
+						>
+							<RefreshCwIcon aria-hidden="true" />
+							Try again
+						</Button>
 					}
 					body={
 						detail.failureReason
@@ -509,6 +494,18 @@ function DetailBody({
 	const actions = (
 		<div className="flex shrink-0 items-center gap-2">
 			{holdsRecorder && recording ? <HeaderStop recording={recording} /> : null}
+			{detail.canProcessAgain ? (
+				<Button
+					data-testid="process-again"
+					disabled={detail.isBusy || startingAgain}
+					onClick={processAgain}
+					size="sm"
+					variant="outline"
+				>
+					<RotateCcwIcon aria-hidden="true" />
+					Process again
+				</Button>
+			) : null}
 			<Button
 				data-testid="export-meeting"
 				disabled={!canReexport}

@@ -171,7 +171,7 @@ public enum BridgeSamples {
     export: .init(
       status: .notConfigured, message: "Not exported: no Obsidian vault is configured.",
       canReexport: false, canReveal: false),
-    canRerunSummary: true, isBusy: false)
+    canProcessAgain: false, canRerunSummary: true, isBusy: false)
 
   public static let settingsGeneral = GeneralSettingsSnapshot(
     subtitle: "Steno 0.10.0", version: "0.10.0", loginItem: .enabled, detectionEnabled: true,

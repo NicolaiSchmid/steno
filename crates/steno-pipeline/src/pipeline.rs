@@ -132,6 +132,12 @@ pub enum ReprocessError {
         /// Its state.
         state: MeetingStateKind,
     },
+    /// The meeting is finished, but [`process_again`] does not offer it
+    /// ([`Meeting::offers_process_again`]): today, it is ready.
+    ///
+    /// [`process_again`]: ProcessingPipeline::process_again
+    #[error("meeting {0} is not offered to be processed again")]
+    NotOffered(Uuid),
     /// The meeting has no recording on record. A button treats it like
     /// [`AudioGone`](Self::AudioGone).
     #[error("meeting {0} has no recording on record")]
@@ -960,6 +966,26 @@ impl ProcessingPipeline {
     /// the CLI; a button shows its own words for each variant. Needs a
     /// `tokio` runtime. Rust only: Swift had no such action.
     pub fn reprocess(&self, meeting_id: Uuid) -> std::result::Result<(), ReprocessError> {
+        self.reprocess_if(meeting_id, |_| true)
+    }
+
+    /// "Process again" as the app and `steno process --meeting` offer it:
+    /// [`reprocess`](Self::reprocess), refused with
+    /// [`ReprocessError::NotOffered`] unless the meeting it reads
+    /// [offers it](Meeting::offers_process_again), so a caller's stale view
+    /// of a meeting that has since become ready cannot run it again. Rust
+    /// only.
+    pub fn process_again(&self, meeting_id: Uuid) -> std::result::Result<(), ReprocessError> {
+        self.reprocess_if(meeting_id, Meeting::offers_process_again)
+    }
+
+    /// [`reprocess`](Self::reprocess) for a finished meeting `offered`
+    /// accepts, checked under the same read as the rest.
+    fn reprocess_if(
+        &self,
+        meeting_id: Uuid,
+        offered: fn(&Meeting) -> bool,
+    ) -> std::result::Result<(), ReprocessError> {
         if self.quitting() {
             return Err(ReprocessError::Quitting);
         }
@@ -968,6 +994,9 @@ impl ProcessingPipeline {
         let state = meeting.state.kind();
         if !matches!(state, MeetingStateKind::Ready | MeetingStateKind::Failed) {
             return Err(ReprocessError::Unfinished { meeting_id, state });
+        }
+        if !offered(&meeting) {
+            return Err(ReprocessError::NotOffered(meeting_id));
         }
         let mut asset = attributing(PipelineStage::Decode, self.store().asset(meeting_id))?
             .ok_or(ReprocessError::NoAsset(meeting_id))?;

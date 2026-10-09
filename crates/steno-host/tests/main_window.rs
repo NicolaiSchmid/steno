@@ -1718,9 +1718,10 @@ fn give_the_failed_meeting_a_recording(store: &steno_core::Store, fakes: &FakeSe
 }
 
 /// "Process again" on the selected failed meeting whose recording is on
-/// disk reaches the pipeline; each refusal is the error line in the user's
-/// words, and one while the app quits shows nothing. A meeting that is not
-/// failed, or whose recording is gone, never reaches the pipeline.
+/// disk is offered (`canProcessAgain`) and reaches the pipeline; each
+/// refusal is the error line in the user's words, and one while the app
+/// quits shows nothing. A meeting that is not failed, or whose recording is
+/// gone, is not offered and never reaches the pipeline.
 #[test]
 fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
     let master = Arc::new(Mutex::new(PathBuf::new()));
@@ -1737,6 +1738,10 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
     let error_line = || harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"].clone();
 
     // The selection is the ready meeting: only a failed one is processed again.
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        false
+    );
     harness.host.meeting_process_again().unwrap();
     assert_eq!(
         error_line(),
@@ -1750,6 +1755,10 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
             meeting_id: uuid(MEETING_FAILED),
         })
         .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        true
+    );
     harness.host.meeting_process_again().unwrap();
     assert_eq!(error_line(), Value::Null, "accepted: the line clears");
     assert_eq!(
@@ -1768,12 +1777,12 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         ),
         (Refusal::Busy, "This meeting is already being processed."),
         (
-            Refusal::NotFailed,
+            Refusal::NotOffered,
             "Only a failed meeting can be processed again.",
         ),
         (Refusal::MeetingGone, "This meeting no longer exists."),
         (
-            Refusal::Failed("decode: the disk is full".to_owned()),
+            Refusal::CouldNotStart("decode: the disk is full".to_owned()),
             "Processing could not start: decode: the disk is full",
         ),
     ] {
@@ -1800,10 +1809,14 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         .unwrap()
         .remove(&*master.lock().unwrap());
     harness.host.store_changed();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        false
+    );
     harness.host.meeting_process_again().unwrap();
     assert_eq!(
         error_line(),
-        "The recording is no longer on this Mac, so the meeting cannot be processed again."
+        "Only a failed meeting can be processed again."
     );
     assert_eq!(pipeline.processed_again.lock().unwrap().len(), asked);
 }
@@ -1813,7 +1826,10 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
 fn process_again_words_a_gone_recording_for_the_platform() {
     let harness = Harness::builder()
         .platform(steno_core::Platform::Linux)
-        .seed(populate_sample)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            give_the_failed_meeting_a_recording(store, fakes);
+        })
         .build();
     harness
         .host
@@ -1821,18 +1837,10 @@ fn process_again_words_a_gone_recording_for_the_platform() {
             meeting_id: uuid(MEETING_FAILED),
         })
         .unwrap();
+    *harness.fakes.pipeline.process_again_refusal.lock().unwrap() = Some(Refusal::RecordingGone);
     harness.host.meeting_process_again().unwrap();
     assert_eq!(
         harness.snapshot(BridgeTopic::MeetingDetail)["error"],
         "The recording is no longer on this computer, so the meeting cannot be processed again."
-    );
-    assert!(
-        harness
-            .fakes
-            .pipeline
-            .processed_again
-            .lock()
-            .unwrap()
-            .is_empty()
     );
 }
