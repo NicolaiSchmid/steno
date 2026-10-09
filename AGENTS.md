@@ -23,6 +23,7 @@ code; propose changes as a new plan file first.
 | Landing page | `apps/site/` | [steno.nicolaischmid.com](https://steno.nicolaischmid.com): Next.js 16 static export (home page and `/recording-law`), React and Tailwind, Biome. Lives in the root pnpm workspace (`package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml` at the repo root), own README |
 | Mobile | `mobile/` | Expo dev-client iOS recorder. Own `pnpm` lockfile, own Biome config, own README |
 | Scripts | `scripts/` | Worktree bootstrap (`setup-worktree.sh`), Linux build packages (`setup-linux.sh`), headless PipeWire for capture tests, the Swift app's web build, Swift schema dump and store cross-check, model upload to Hugging Face |
+| Nix | `flake.nix`, `nix/` | The flake: the released Mac app unchanged (`aarch64-darwin`), the Linux app built from this tree (`x86_64-linux`, `nix/package.nix`), the NixOS module `programs.steno` (`nix/module.nix`) and the Linux checks (`nix/checks.nix`). The web UI's pnpm hash in `nix/package.nix` follows its lockfile; the desktop README says how |
 | Spikes | `spikes/` | Frozen evidence of the cross-platform spikes; not in the Cargo workspace |
 | Plans | `.plans/` | Dated decision and implementation plans |
 | Research | `docs/research/` | Product teardowns and landscape notes |

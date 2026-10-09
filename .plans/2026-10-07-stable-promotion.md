@@ -1037,6 +1037,30 @@ The table above names each package and its owner. Their tests:
   and an opt-in raise of logind's `InhibitDelayMaxSec`. The macOS output stays
   as it is. A candidate is built from its tag
   (`nix build github:NicolaiSchmid/steno/v0.11.0-rc.N#steno`).
+  - As built (#259): the package and the module are in
+    `nix/`. The module adds the options `users` (a per-user install instead of
+    a system-wide one) and `launchAtLogin`, and puts `STENO_LOGIN_ITEM=managed`
+    in `environment.sessionVariables` too. The per-user path in the unit is
+    `/etc/profiles/per-user/%u/bin/steno-desktop`. `steno.service` carries
+    `X-RestartIfChanged=false` and `X-StopOnRemoval=false`, so a switch never
+    restarts or stops Steno, whatever changed; the new unit applies at the next
+    login. A switch that changes PipeWire's units, as most nixpkgs bumps do,
+    restarts PipeWire: a recording in progress reconnects through the capture
+    session's restarts (`crates/steno-audio/src/capture/session.rs`, about 2 s)
+    with a second or two of silence, or ends and is saved if PipeWire is not
+    back in time (NixOS gate step 6). GNOME Keyring is a `mkDefault` only where
+    none of Plasma 6, `services.passSecretService`, `programs.ssh.startAgent`
+    and `programs.gnupg.agent.enableSSHSupport` is on: its gcr SSH agent
+    conflicts with `startAgent`, and takes `SSH_AUTH_SOCK` from gpg-agent's.
+    X4's firewall port is not in the module; X4 adds it. P5's drop-ins arrive
+    through the `.deb`'s `files` map once #227 merges. Without the module, the
+    autostart entry names the profile's path by X5's rule (#261), so the
+    wrapper sets no `STENO_EXEC_PATH`. ONNX Runtime is nixpkgs' 1.27.1 against the
+    1.28.0 build `ort` downloads, at FLEURS 4.9 % with both. Nix CI
+    (`nix-ci.yml`) runs on a pull request that touches the flake, the web UI's
+    dependencies, a Cargo manifest, the lockfile, a build script, the Tauri
+    configuration, the sidecar staging or the release's Tauri CLI pin, and on
+    main after any change to what the package builds.
 - **X8 The Linux gates** (Rehearsal).
 
 ## Release mechanics
@@ -1573,11 +1597,19 @@ passes when the meeting and the pairing are kept and, after a logout and login,
 Steno starts once, as the new version. Each target's step 1 sets up its step 0;
 steps 2 onward run on the candidate under test. On `v0.11.0`, R8 repeats step 0
 from the last candidate and one recording.
-The status query used throughout (`sqlite3`, or `nix-shell -p sqlite` on NixOS):
+The status queries used throughout (`sqlite3`, or `nix-shell -p sqlite` on
+NixOS, for `q`):
 
 ```sh
 q() { sqlite3 ~/.local/share/Steno/steno.sqlite \
   "select datetime(startedAt), state, round(duration,1), endReason, failureReason from meeting order by startedAt desc limit 3"; }
+# The cgroup of every running Steno, one line each. `pidof` misses a Steno
+# that an old autostart entry starts as `.steno-desktop-wrapped`.
+cg() { for p in /proc/[0-9]*; do
+  case "$(readlink "$p/exe" 2>/dev/null)" in
+    */steno-desktop | */.steno-desktop-wrapped) cat "$p/cgroup" ;;
+  esac
+done; }
 ```
 
 Good: the newest meeting is `queued` or later, with a duration near the time
@@ -1651,13 +1683,44 @@ interrupted" after one. On the GNOME machine,
      `steno.nixosModules.default` in the system's modules and
      `programs.steno.enable = true`.
   2. Steps 2 to 4 and 6 of the GNOME gate, with the phone through the firewall
-     the module opened.
+     the module opens (by hand until X4). Under the module, step 5's cgroup check, run
+     as `cg`, prints one line, ending in `steno.service`, and
+     `systemctl --user show steno.service -p TimeoutStopUSec` is 20 s.
   3. Open Settings and choose a folder: the file chooser opens (the wrapper's
      schemas).
   4. Launch at login: after step 0's upgrade and collection, `systemctl --user
      cat steno.service` names the profile path, and About shows the new version.
   5. Settings says updates come from the package manager.
-  6. A package-only install: set `programs.steno.enable = false`,
+  6. A switch that restarts PipeWire, as most nixpkgs bumps do: start a
+     recording, add `systemd.user.services.pipewire.environment.STENO_GATE =
+     "1";` to the system, `nixos-rebuild switch`, wait a minute, remove the
+     line, switch again, wait a minute and stop. `systemctl --user show
+     pipewire.service -p ActiveEnterTimestamp` is the time of the second
+     switch. Pass when `q` shows one meeting for the recording, `queued` or
+     later, with a duration near the time recorded and `manual` as `endReason`
+     (not `deviceLost`), and the audio has at most a couple of seconds of
+     silence at each switch.
+  7. An autostart entry from a build without X5: write
+     `~/.config/autostart/steno-desktop.desktop` with `[Desktop Entry]`,
+     `Type=Application`, `Name=Steno` and `Exec=<dir>/.steno-desktop-wrapped`,
+     where `<dir>` is `dirname $(readlink -f
+     /run/current-system/sw/bin/steno-desktop)`.
+     1. With `steno.service` masked, so that the entry's own unit starts
+        Steno: `systemctl --user mask steno.service`, then log out and in.
+        Pass when `cg` prints one line, ending in
+        `app-steno\x2ddesktop@autostart.service`; `systemctl --user
+        is-active 'app-steno\x2ddesktop@autostart.service'` prints `active`;
+        and the entry is still there. Log out: the entry is gone.
+     2. Unmasked: `systemctl --user unmask steno.service`, write the entry
+        again, then log out and in. Both units start Steno; the one
+        `steno.service` starts wins and removes the entry at launch, and the
+        other ends before setup. Pass when `cg` prints one line, ending in
+        `steno.service`; `systemctl --user is-active
+        'app-steno\x2ddesktop@autostart.service'` does not print `active`;
+        the entry is gone; and step 6 run again keeps its recording the same
+        way. If `cg` names the autostart unit instead, that instance won the
+        start: log out and in once more, and check again.
+  8. A package-only install: set `programs.steno.enable = false`,
      `nixos-rebuild switch`, and log out and in so the module's Steno is gone;
      `nix profile install
      github:NicolaiSchmid/steno/v0.11.0-rc.<N-1>#steno`, launch at login on;
