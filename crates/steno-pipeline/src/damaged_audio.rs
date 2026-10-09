@@ -11,19 +11,16 @@
 //! processed again shows what that run found; a meeting whose recording
 //! decoded whole has no entry.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
 use uuid::Uuid;
 
-use crate::files::{read_json, write_json};
+use crate::files::MeetingCounts;
 
 /// The damaged parts of each meeting's recording, as its last decode
-/// counted them. Read with [`read_json`], so a missing or corrupt file
-/// counts 0 for every meeting, and replaced with [`write_json`] on every
-/// change; a file that may not be written keeps the counts of this run in
-/// memory only, as [`ExportRetries`](crate::ExportRetries) does.
+/// counted them. Read and written as [`ExportRetries`](crate::ExportRetries)
+/// is: a missing or corrupt file counts 0 for every meeting, and a file
+/// that may not be written keeps the counts of this run in memory only.
 ///
 /// ```
 /// use steno_pipeline::DamagedAudio;
@@ -40,11 +37,7 @@ use crate::files::{read_json, write_json};
 /// ```
 #[derive(Debug)]
 pub struct DamagedAudio {
-    path: PathBuf,
-    counts: Mutex<BTreeMap<Uuid, u32>>,
-    /// False for [`in_memory`](Self::in_memory), and when the file on disk
-    /// could not be read or set aside.
-    writable: bool,
+    counts: MeetingCounts,
 }
 
 impl DamagedAudio {
@@ -54,12 +47,8 @@ impl DamagedAudio {
     /// The counts in `path`, read now.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        let (counts, writable) = read_json(&path);
         DamagedAudio {
-            path,
-            counts: Mutex::new(counts),
-            writable,
+            counts: MeetingCounts::new(path.into()),
         }
     }
 
@@ -75,47 +64,26 @@ impl DamagedAudio {
     #[must_use]
     pub fn in_memory() -> Self {
         DamagedAudio {
-            path: PathBuf::new(),
-            counts: Mutex::default(),
-            writable: false,
+            counts: MeetingCounts::in_memory(),
         }
     }
 
     /// The parts of `meeting_id`'s recording replaced by silence.
     #[must_use]
     pub fn parts(&self, meeting_id: Uuid) -> u32 {
-        self.lock().get(&meeting_id).copied().unwrap_or(0)
+        self.counts.get(meeting_id)
     }
 
     /// `parts` for `meeting_id`, replacing what an earlier run counted; 0
     /// removes the meeting.
     pub fn record(&self, meeting_id: Uuid, parts: u32) {
-        let mut counts = self.lock();
-        let changed = if parts == 0 {
-            counts.remove(&meeting_id).is_some()
-        } else {
-            counts.insert(meeting_id, parts) != Some(parts)
-        };
-        if changed {
-            self.write(&counts);
-        }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, BTreeMap<Uuid, u32>> {
-        self.counts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Replaces the file with `counts`, logging a failure: the counts of
-    /// this run stay in memory then.
-    fn write(&self, counts: &BTreeMap<Uuid, u32>) {
-        if !self.writable {
-            return;
-        }
-        if let Err(error) = write_json(&self.path, counts) {
-            tracing::warn!("{} could not be written: {error}", self.path.display());
-        }
+        self.counts.change(|counts| {
+            if parts == 0 {
+                counts.remove(&meeting_id).is_some()
+            } else {
+                counts.insert(meeting_id, parts) != Some(parts)
+            }
+        });
     }
 }
 
