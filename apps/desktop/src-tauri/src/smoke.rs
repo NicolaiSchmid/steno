@@ -11,11 +11,13 @@
 //! panels hid, closing main hid it rather than destroying it, and on Linux
 //! closing Settings kept it and opening it again on a section loaded a
 //! fresh page there, and closing onboarding kept it and told the host once
-//! (`windows::Kept`); 1 otherwise; a value that is not a positive number
-//! ends the run at once with 2. Screenshots of the Xvfb root during the
-//! wait are the review evidence; the windows carry what the host's
-//! database holds (nothing on a fresh runner, synthetic data with the
-//! fixture host), the prompts name made-up apps.
+//! (`windows::Kept`), and on Linux, in a run as the autostart unit,
+//! turning Launch at login off left the entry and set the mark
+//! (`check_login_item_waits_for_the_exit`); 1 otherwise; a value that is
+//! not a positive number ends the run at once with 2. Screenshots of the
+//! Xvfb root during the wait are the review evidence; the windows carry
+//! what the host's database holds (nothing on a fresh runner, synthetic
+//! data with the fixture host), the prompts name made-up apps.
 
 use std::{
     collections::HashMap,
@@ -180,6 +182,11 @@ pub enum Outcome {
     /// not kept on a close, or Settings did not open again on its section;
     /// the message says which.
     WindowsFailed(String),
+    /// On Linux, as the autostart unit: turning Launch at login off
+    /// changed the entry at once, set no mark, or still read as on; the
+    /// message says which.
+    #[cfg(target_os = "linux")]
+    LoginItemFailed(String),
 }
 
 impl Outcome {
@@ -200,6 +207,8 @@ impl Outcome {
             ),
             Outcome::PanelsFailed(problem) => format!("FAILED, panels: {problem}"),
             Outcome::WindowsFailed(problem) => format!("FAILED, windows: {problem}"),
+            #[cfg(target_os = "linux")]
+            Outcome::LoginItemFailed(problem) => format!("FAILED, Launch at login: {problem}"),
             Outcome::NoSnapshot => format!(
                 "FAILED, page.ready from main but no snapshot reached it in {seconds}s: \
                  the bridge host did not answer"
@@ -300,6 +309,10 @@ pub fn arm(app: &AppHandle) {
                     .and_then(|()| check_onboarding_is_kept(&handle))
                     .map_err(Outcome::WindowsFailed)
             });
+        #[cfg(target_os = "linux")]
+        let checks = checks.and_then(|()| {
+            check_login_item_waits_for_the_exit(&handle).map_err(Outcome::LoginItemFailed)
+        });
         let outcome = handle.state::<Smoke>().outcome(checks);
         stderr_line!("[steno-desktop] smoke: {}", outcome.message(seconds));
         handle.exit(outcome.exit_code());
@@ -463,6 +476,42 @@ fn check_onboarding_is_kept(app: &AppHandle) -> Result<(), String> {
         ));
     }
     stderr_line!("[steno-desktop] smoke: closing onboarding kept it and told the host once");
+    Ok(())
+}
+
+/// On Linux, in a run as the autostart unit (`smoke-linux.sh`'s runs in
+/// that unit), turns Launch at login off as the General section does: the
+/// entry stays as it was, marked to go at the exit, and reads as off
+/// (`autostart::set_enabled`). The log line says whether the entry stands,
+/// which the script checks against what the launch should have left.
+/// Nothing to check outside the unit.
+#[cfg(target_os = "linux")]
+fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt as _;
+    if !crate::stop_timeout::runs_as_autostart_unit() {
+        return Ok(());
+    }
+    let entry = || {
+        app.autolaunch()
+            .is_enabled()
+            .map_err(|error| format!("reading the entry: {error}"))
+    };
+    let before = entry()?;
+    crate::autostart::set_enabled(app, false)
+        .map_err(|error| format!("turning it off failed: {}", error.message))?;
+    if entry()? != before {
+        return Err("turning it off as the autostart unit changed the entry at once".into());
+    }
+    if !crate::autostart::marked_off_at_exit(app) {
+        return Err("turning it off as the autostart unit set no mark".into());
+    }
+    if crate::autostart::status(app).is_on() {
+        return Err("turned off, it still reads as on".into());
+    }
+    let entry = if before { "stands" } else { "is absent" };
+    stderr_line!(
+        "[steno-desktop] smoke: as the autostart unit, Launch at login turned off waits for the exit (the entry {entry})"
+    );
     Ok(())
 }
 

@@ -404,6 +404,13 @@ fn restore<E: std::error::Error + 'static>(
     Ok(())
 }
 
+/// Whether Launch at login is marked to go at the exit (`OFF_AT_EXIT`),
+/// for the smoke run as the autostart unit (`smoke`).
+#[cfg(target_os = "linux")]
+pub fn marked_off_at_exit(app: &AppHandle) -> bool {
+    off_at_exit(app).is_some_and(|mark| mark.exists())
+}
+
 /// Where the user manages login items; `None` where there is no such
 /// pane to open (Linux desktops differ).
 pub fn system_settings_url() -> Option<&'static str> {

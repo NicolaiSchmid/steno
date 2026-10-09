@@ -15,6 +15,18 @@
 # unit's when the autostart entry is there, and a reload asked for after
 # a drop-in was written.
 #
+# Then two runs as the autostart unit, in a throwaway HOME, inside a
+# cgroup named after the unit below a delegated `systemd-run --user`
+# scope, so `runs_as_autostart_unit` holds (autostart.rs, stop_timeout.rs).
+# Both turn Launch at login off halfway (smoke.rs), which must leave the
+# entry as it was and set the mark. The first, a first launch with
+# ~/.config/autostart unwritable, cannot restore the entry and must ask
+# for no reload. The second must restore the entry the first never wrote,
+# marked, with its drop-in, and remove both at the exit, after the
+# shutdown's line. Without a user manager that starts the scope the two
+# runs are skipped, unless STENO_REQUIRE_UNIT_SMOKE is set (CI), which
+# fails instead.
+#
 # Then two runs with the login item the system's (STENO_LOGIN_ITEM=managed,
 # packaged.rs), each in a throwaway HOME holding an autostart entry an
 # earlier build wrote, whose Exec starts a program in /nix/store. The
@@ -26,8 +38,10 @@
 # STENO_REQUIRE_UNIT_SMOKE is set (CI), which fails instead.
 #
 # Then it launches the binary once more over a database it cannot open,
-# in a throwaway XDG_DATA_HOME, and expects the refusal: the "not
-# starting" line and exit 3, and fails (exit 1) otherwise.
+# in a throwaway XDG_DATA_HOME and HOME, and expects the refusal: the
+# "not starting" line and exit 3, and an autostart entry marked to go
+# still there, since a refused launch changes no login item. It fails
+# (exit 1) otherwise.
 #
 #   [STENO_SMOKE_DPI=<dpi>] [STENO_REQUIRE_UNIT_SMOKE=1] apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
 #
@@ -57,7 +71,7 @@ export GDK_BACKEND=x11
 # The default filter, and the drop-ins' changes and reload.
 export RUST_LOG=warn,steno_desktop::stop_timeout=debug
 scratch="$(mktemp -d)"
-trap 'rm -rf "$scratch"' EXIT
+trap 'chmod -R u+w "$scratch"; rm -rf "$scratch"' EXIT
 log="$scratch/log"
 
 # 1120x720 main at the origin, Settings to its right, onboarding below.
@@ -113,7 +127,12 @@ if grep -qE 'drop-in changed.*on.*true' "$log"; then
 fi
 echo "smoke: the shutdown's duration logged at warn, the stop timeout drop-ins in place"
 
+# The autostart entry and the mark that turns it off at the exit, under
+# a HOME whose config home is $HOME/.config (autostart.rs).
+identifier="$(sed -n 's/^  "identifier": "\(.*\)",$/\1/p' "$root/apps/desktop/src-tauri/tauri.conf.json")"
+[[ -n "$identifier" ]] || fail "no identifier in tauri.conf.json"
 entry() { echo "$1/.config/autostart/steno-desktop.desktop"; }
+mark() { echo "$1/.config/$identifier/launch-at-login-off-at-exit"; }
 
 # Runs "$@" in a cgroup named after the autostart unit, below a delegated
 # scope of the user manager's.
@@ -123,6 +142,50 @@ as_unit() {
     mkdir "$cgroup" && echo 0 > "$cgroup/cgroup.procs" && exec "$@"
   ' _ "$@"
 }
+
+if as_unit true 2>/dev/null; then
+  home="$scratch/unit"
+  mkdir -p "$home/.config/autostart"
+  # One run as the unit; its output, both streams, in $1.
+  unit_run() {
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_DATA_HOME="$home/.local/share" \
+      XDG_CACHE_HOME="$home/.cache" \
+      xvfb-run --auto-servernum --server-args="$server_args" \
+      bash -c "$(declare -f as_unit); as_unit \"\$@\"" _ "$binary" > "$1" 2>&1 \
+      || { cat "$1" >&2; fail "a run as the autostart unit failed"; }
+  }
+  chmod a-w "$home/.config/autostart"
+  unit_run "$scratch/unrestored"
+  chmod u+w "$home/.config/autostart"
+  for line in "the autostart entry could not be kept until the exit" \
+    "no reload while the app runs as the autostart unit without its entry" \
+    "Launch at login turned off waits for the exit (the entry is absent)"; do
+    grep -qF "$line" "$scratch/unrestored" || { cat "$scratch/unrestored" >&2; fail "as the unit with no entry to restore: no \"$line\""; }
+  done
+  ! grep -qE 'the systemd user manager (reloaded|did not reload)' "$scratch/unrestored" \
+    || fail "as the unit without its entry, a reload was asked for"
+  unit_run "$scratch/restored"
+  # The unit as the log quotes it: unit="app-steno\\x2ddesktop@autostart.service".
+  service='unit="app-steno[^"]*@autostart\.service"'
+  if ! grep -qF "Launch at login turned off waits for the exit (the entry stands)" "$scratch/restored" \
+    || ! grep -qE "drop-in changed $service on=true" "$scratch/restored"; then
+    cat "$scratch/restored" >&2
+    fail "as the unit, the launch did not restore the entry and its drop-in"
+  fi
+  ended="$(grep -nF "the shutdown ended" "$scratch/restored" | head -n1 | cut -d: -f1)"
+  removed="$(grep -nE "drop-in changed $service on=false" "$scratch/restored" | head -n1 | cut -d: -f1)"
+  if [[ -z "$ended" || -z "$removed" ]] || (( ended > removed )); then
+    cat "$scratch/restored" >&2
+    fail "the exit did not remove the drop-in after the shutdown"
+  fi
+  [[ ! -e "$(entry "$home")" && ! -e "$(mark "$home")" ]] \
+    || fail "the exit left the entry or its mark"
+  echo "smoke: as the autostart unit, Launch at login turned off waited for the exit, and the launch restored the entry only where it could"
+elif [[ -n "${STENO_REQUIRE_UNIT_SMOKE:-}" ]]; then
+  fail "no user manager started a delegated scope (systemd-run --user --scope), and STENO_REQUIRE_UNIT_SMOKE is set"
+else
+  echo "smoke: no user manager started a delegated scope; the runs as the autostart unit are skipped"
+fi
 
 # One managed run in the throwaway HOME $1, with an earlier build's entry,
 # its output, both streams, in $1/output; $2 runs the binary (as_unit, or
@@ -150,11 +213,11 @@ managed_run "$scratch/managed" ""
   || { cat "$scratch/managed/output" >&2; fail "managed, the launch did not remove an earlier build's store entry"; }
 echo "smoke: managed, an earlier build's store entry went at launch"
 if as_unit true 2>/dev/null; then
-  managed_run "$scratch/unit" as_unit
-  if [[ "$(cat "$scratch/unit/halfway")" != there || -e "$(entry "$scratch/unit")" ]] \
-    || ! grep -qF "goes when Steno exits" "$scratch/unit/output" \
-    || ! grep -qF "removed the autostart entry an earlier build wrote" "$scratch/unit/output"; then
-    cat "$scratch/unit/output" >&2
+  managed_run "$scratch/managed-unit" as_unit
+  if [[ "$(cat "$scratch/managed-unit/halfway")" != there || -e "$(entry "$scratch/managed-unit")" ]] \
+    || ! grep -qF "goes when Steno exits" "$scratch/managed-unit/output" \
+    || ! grep -qF "removed the autostart entry an earlier build wrote" "$scratch/managed-unit/output"; then
+    cat "$scratch/managed-unit/output" >&2
     fail "managed, as the autostart unit, the earlier build's entry did not stay until the exit and go then"
   fi
   echo "smoke: managed, as the autostart unit, an earlier build's store entry stayed while the app ran and went at the exit"
@@ -167,18 +230,22 @@ fi
 # Then a launch over a database it cannot open, in a throwaway support
 # directory: the shell must refuse with its dialog (`refuse_to_start`),
 # which nobody closes here, and exit 3 once the smoke's wait ends, instead
-# of panicking.
+# of panicking. Its HOME holds an entry marked to go, which a launch that
+# went on would remove (`AtLaunch::TurnOff`).
 refusal="$scratch/refusal"
-mkdir -p "$refusal/Steno"
+mkdir -p "$refusal/Steno" "$(dirname "$(entry "$refusal")")" "$(dirname "$(mark "$refusal")")"
 printf 'not a database\n' > "$refusal/Steno/steno.sqlite"
+touch "$(entry "$refusal")" "$(mark "$refusal")"
 # Both streams go to one file: Debian's xvfb-run sends the command's
 # stderr to its stdout.
 code=0
-XDG_DATA_HOME="$refusal" STENO_SMOKE_SECONDS=3 \
+HOME="$refusal" XDG_CONFIG_HOME="$refusal/.config" XDG_DATA_HOME="$refusal" STENO_SMOKE_SECONDS=3 \
   xvfb-run --auto-servernum "$binary" > "$refusal/output" 2>&1 || code=$?
 if [[ "$code" != 3 ]] || ! grep -qF "[steno-desktop] not starting:" "$refusal/output"; then
   cat "$refusal/output" >&2
   echo "smoke: over a database it cannot open the shell must refuse (exit 3), got $code" >&2
   exit 1
 fi
-echo "smoke: a database it cannot open is refused (exit 3)"
+[[ -e "$(entry "$refusal")" && -e "$(mark "$refusal")" ]] \
+  || fail "the refused launch changed the login item"
+echo "smoke: a database it cannot open is refused (exit 3), the login item untouched"
