@@ -727,13 +727,15 @@ impl Shared {
         &self,
         slot: &'a mut Option<SidecarProcess>,
     ) -> Result<&'a mut SidecarProcess, SidecarError> {
-        if slot.is_none() {
+        let process = if let Some(process) = slot.take() {
+            process
+        } else {
             let process = SidecarProcess::spawn(&self.config)?;
             self.spawns.fetch_add(1, Ordering::SeqCst);
             self.pid.store(process.pid, Ordering::SeqCst);
-            *slot = Some(process);
-        }
-        Ok(slot.as_mut().expect("a child runs"))
+            process
+        };
+        Ok(slot.insert(process))
     }
 
     /// Has the running child, or a new one, load the models, asking for
@@ -852,14 +854,10 @@ impl Shared {
         timeout: Duration,
     ) -> Result<Vec<SpeakerCluster>, SidecarError> {
         self.drop_failed(slot);
-        let result = self.diarize_in(slot, models, sample_count, payload, timeout);
-        let result = match result {
-            Ok(clusters) => Ok(clusters),
-            Err(error) => Err(self.kill_unless_remote_counting(slot, error, false)),
-        };
-        if slot.as_ref().is_some_and(|p| p.provider.is_none())
-            && let Some(process) = slot.take()
-        {
+        let result = self
+            .diarize_in(slot, models, sample_count, payload, timeout)
+            .map_err(|error| self.kill_unless_remote_counting(slot, error, false));
+        if let Some(process) = slot.take_if(|p| p.provider.is_none()) {
             self.pid.store(0, Ordering::SeqCst);
             process.shut_down(self.config.control_timeout);
         }
@@ -1084,9 +1082,7 @@ impl SidecarSpeechEngine {
         })
         .await?)
     }
-}
 
-impl SidecarSpeechEngine {
     /// Diarizes `audio` in the child with the diarizer's default
     /// configuration, so a crash in ONNX Runtime ends the child, not this
     /// process: in the running child, whose speech models stay loaded, or
@@ -1113,11 +1109,10 @@ impl SidecarSpeechEngine {
         let sample_count = audio.samples.len() as u64;
         let timeout = shared.config.transcribe_timeout(audio.duration());
         let payload = protocol::encode_samples(&audio.samples);
-        let clusters = blocking(move || {
+        Ok(blocking(move || {
             shared.diarize(&mut shared.lock(), models, sample_count, payload, timeout)
         })
-        .await??;
-        Ok(clusters)
+        .await??)
     }
 }
 

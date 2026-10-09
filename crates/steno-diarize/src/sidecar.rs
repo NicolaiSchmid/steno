@@ -100,14 +100,13 @@ impl SidecarDiarizer {
     async fn models(&self) -> Result<DiarizerModels, DiarizeError> {
         let store = self.engine.store().clone();
         let install = self.install;
-        let threads = self.threads;
         let paths = tokio::task::spawn_blocking(move || models::paths(&store, install))
             .await
             .map_err(DiarizeError::backend)??;
         Ok(DiarizerModels {
             segmentation: paths.segmentation,
             embedding: paths.embedding,
-            intra_threads: threads,
+            intra_threads: self.threads,
         })
     }
 }
