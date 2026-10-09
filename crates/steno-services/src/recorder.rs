@@ -607,6 +607,16 @@ fn no_audio_warning(stalled: Option<&str>) -> String {
     }
 }
 
+/// The seconds a recording's master is missing, for
+/// [`missing_audio_note`]: the `gap_seconds` filled with silence, and the
+/// wall time (`wall` seconds) the master's `duration` does not hold (a gap
+/// past `MAXIMUM_GAP`, a stop inside one) beyond what the device clocks
+/// drift from the wall clock ([`CLOCK_DRIFT`]; 300 to 500 ppm: 2 to 4 s in
+/// two hours). Rust only.
+fn missing_seconds(gap_seconds: f64, wall: f64, duration: f64) -> f64 {
+    gap_seconds + (wall - duration - wall * CLOCK_DRIFT).max(0.0)
+}
+
 /// The note after a recording whose master holds `missing` seconds of
 /// silence written for gaps, or of wall time it does not hold at all,
 /// when that is more than about a second; it names the cause only when
@@ -1394,12 +1404,7 @@ impl CaptureRecorder {
                         None,
                     ),
                 );
-                // Gaps filled with silence, and wall time the master does
-                // not hold (a gap past `MAXIMUM_GAP`, a stop inside one)
-                // beyond what the device clocks drift from the wall clock
-                // (300 to 500 ppm: 2 to 4 s in two hours).
-                let missing = statistics.gap_seconds
-                    + (wall - statistics.duration - wall * CLOCK_DRIFT).max(0.0);
+                let missing = missing_seconds(statistics.gap_seconds, wall, statistics.duration);
                 match completed {
                     Ok(_) => Ok((recording_warning(active.mode, &statistics), missing, ended)),
                     Err(error) => Err(not_saved(meeting_id, &error)),
@@ -2656,6 +2661,25 @@ mod tests {
     fn only_a_microphone_that_drives_the_capture_is_blamed_for_a_stall() {
         assert!(microphone_is_the_master(CaptureMode::InPerson));
         assert_eq!(microphone_is_the_master(CaptureMode::Call), cfg!(windows));
+    }
+
+    /// Two hours of wall time against a master 2 s shorter is the device
+    /// clocks' drift, no note; a real shortfall, or a gap filled with
+    /// silence, still gives one.
+    #[test]
+    fn the_missing_seconds_leave_the_clock_drift_out() {
+        assert_eq!(missing_seconds(0.0, 7200.0, 7198.0), 0.0);
+        assert_eq!(
+            missing_audio_note(missing_seconds(0.0, 7200.0, 7198.0), None),
+            None
+        );
+        let short = missing_seconds(0.0, 7200.0, 7180.0);
+        assert!((short - 12.8).abs() < 1e-9, "{short}");
+        assert_eq!(
+            missing_audio_note(short, None).as_deref(),
+            Some("About 13 seconds of the recording are missing.")
+        );
+        assert_eq!(missing_seconds(3.0, 60.0, 60.0), 3.0);
     }
 
     /// The note comes from about a second on, and names a device only when
