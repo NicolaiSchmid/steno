@@ -262,13 +262,8 @@ impl UpdateSchedule {
                 }
             }
         }
-        let first = {
-            let mut state = self.state();
-            let first = state.announced.as_deref() != Some(version.as_str());
-            state.announced = Some(version.clone());
-            first
-        };
-        if first {
+        let announced = self.state().announced.replace(version.clone());
+        if announced.as_ref() != Some(&version) {
             self.source.announce(&version);
         }
     }

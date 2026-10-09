@@ -987,10 +987,6 @@ pub struct FakePreferences {
 }
 
 impl Preferences for FakePreferences {
-    fn flag(&self, key: &str) -> bool {
-        self.stored_flag(key).unwrap_or(false)
-    }
-
     fn stored_flag(&self, key: &str) -> Option<bool> {
         lock(&self.flags).get(key).copied()
     }

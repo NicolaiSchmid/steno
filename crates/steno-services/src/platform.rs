@@ -114,10 +114,6 @@ impl FilePreferences {
 }
 
 impl Preferences for FilePreferences {
-    fn flag(&self, key: &str) -> bool {
-        self.stored_flag(key).unwrap_or(false)
-    }
-
     fn stored_flag(&self, key: &str) -> Option<bool> {
         self.values
             .lock()

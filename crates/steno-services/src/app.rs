@@ -15,7 +15,7 @@ use steno_handover::{HandoverService, IdentityError, Unavailability};
 use steno_host::fakes::{
     FakeClipPlayer, FakeFileSystem, FakeLoginItem, FakePermissions, FakeUpdater,
 };
-use steno_host::services::{LoginItem, LoginItemStatus, Opener, Preferences, Services, Updater};
+use steno_host::services::{LoginItem, LoginItemStatus, Opener, Preferences, Services};
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
@@ -514,10 +514,10 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
             .login_item
             .unwrap_or_else(|| Arc::new(FakeLoginItem::new(LoginItemStatus::NotRegistered))),
         permissions,
-        updater: updates.clone().map_or_else(
-            || Arc::new(FakeUpdater::default()) as Arc<dyn Updater>,
-            |updates| updates as Arc<dyn Updater>,
-        ),
+        updater: match &updates {
+            Some(updates) => updates.clone(),
+            None => Arc::new(FakeUpdater::default()),
+        },
         recorder: recorder.clone(),
         pipeline: Arc::new(HostPipeline {
             pipeline: pipeline.clone(),

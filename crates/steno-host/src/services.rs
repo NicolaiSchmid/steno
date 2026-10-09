@@ -488,7 +488,9 @@ pub trait Opener: Send + Sync {
 /// (WP6b) keeps them in its own settings file; the fake holds a map.
 pub trait Preferences: Send + Sync {
     /// False when the key is missing or holds no boolean.
-    fn flag(&self, key: &str) -> bool;
+    fn flag(&self, key: &str) -> bool {
+        self.stored_flag(key).unwrap_or(false)
+    }
     /// `None` when the key is missing or holds no boolean, for a flag
     /// whose default is not false (the updater's automatic checks).
     fn stored_flag(&self, key: &str) -> Option<bool>;
