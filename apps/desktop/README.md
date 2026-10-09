@@ -517,8 +517,8 @@ the `.deb`'s tree. The differences:
   file chooser's schemas need). The wrapper sets `STENO_DISTRIBUTION=nix`
   unless the environment has it, and execs `bin/.steno-desktop-wrapped`;
   the sidecar beside it stays the plain binary.
-- `STENO_DISTRIBUTION=nix` is also in the build environment, for X5's
-  build-time default; nothing reads either until X5 lands.
+- `STENO_DISTRIBUTION=nix` is also in the build environment, the default
+  the app is built with (see Packaged installs).
 - Once P5 (#227) lands, the `.deb`'s systemd user files (the stop timeout
   drop-ins) end up in `share/systemd/user/`, where stdenv moves them, with
   `lib/systemd/user` a link to it: the module links them into the user
@@ -542,10 +542,10 @@ steno.nixosModules.default
 
 It installs the package system-wide, or for the users in
 `programs.steno.users` only, and starts Steno with the graphical session as
-the user service `steno.service` (`TimeoutStopSec=20s`,
-`STENO_LOGIN_ITEM=managed`, which X5 reads; `programs.steno.launchAtLogin =
-false` turns it off). The service runs the profile path,
-`/run/current-system/sw/bin/steno-desktop` or
+the user service `steno.service` (`TimeoutStopSec=20s` and
+`STENO_LOGIN_ITEM=managed`, which the app reads as Packaged installs says;
+`programs.steno.launchAtLogin = false` turns it off). The service runs the
+profile path, `/run/current-system/sw/bin/steno-desktop` or
 `/etc/profiles/per-user/%u/bin/steno-desktop`, never a store path.
 
 A rebuild never restarts or stops `steno.service`, whatever changed

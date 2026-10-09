@@ -44,8 +44,8 @@ in {
       default = true;
       description = ''
         Start Steno with the graphical session, as the systemd user service
-        `steno.service`, which sets `STENO_LOGIN_ITEM=managed`. X5 reads
-        it: the app then leaves launch at login to the system and writes no
+        `steno.service`, which sets `STENO_LOGIN_ITEM=managed`: the app
+        then leaves launch at login to the system and writes no
         autostart entry of its own. A rebuild never restarts or stops
         `steno.service`, whatever changed; the new version starts at the
         next login, or at the next launch after quitting. One that changes
@@ -106,7 +106,7 @@ in {
         TimeoutStopSec = "20s";
       };
     };
-    # For X5: a Steno started from the launcher in the same session then
+    # A Steno started from the launcher in the same session then also
     # agrees that the service owns launch at login.
     environment.sessionVariables = lib.mkIf cfg.launchAtLogin {STENO_LOGIN_ITEM = "managed";};
 

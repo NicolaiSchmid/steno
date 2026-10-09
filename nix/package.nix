@@ -129,8 +129,9 @@ in
       # crates/steno-speech/src/onnx.rs.
       ORT_LIB_LOCATION = "${lib.getLib onnxruntime}/lib";
       ORT_PREFER_DYNAMIC_LINK = "1";
-      # The build-time default of the distribution switch, for X5 to read:
-      # updates then come from the package manager. The wrapper sets it too.
+      # The build-time default of the distribution switch (`option_env!` in
+      # `steno_services::updates`): updates then come from the package
+      # manager. The wrapper sets it too, and the environment wins.
       STENO_DISTRIBUTION = "nix";
     };
 

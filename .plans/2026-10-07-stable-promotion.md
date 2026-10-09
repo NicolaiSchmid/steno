@@ -1035,7 +1035,7 @@ The table above names each package and its owner. Their tests:
   and an opt-in raise of logind's `InhibitDelayMaxSec`. The macOS output stays
   as it is. A candidate is built from its tag
   (`nix build github:NicolaiSchmid/steno/v0.11.0-rc.N#steno`).
-  - As built (#259, merging after X5, #261): the package and the module are in
+  - As built (#259): the package and the module are in
     `nix/`. The module adds the options `users` (a per-user install instead of
     a system-wide one) and `launchAtLogin`, and puts `STENO_LOGIN_ITEM=managed`
     in `environment.sessionVariables` too. The per-user path in the unit is
@@ -1051,8 +1051,9 @@ The table above names each package and its owner. Their tests:
     and `programs.gnupg.agent.enableSSHSupport` is on: its gcr SSH agent
     conflicts with `startAgent`, and takes `SSH_AUTH_SOCK` from gpg-agent's.
     X4's firewall port is not in the module; X4 adds it. P5's drop-ins arrive
-    through the `.deb`'s `files` map once #227 merges. The path rule for the autostart entry without
-    the module is X5's work. ONNX Runtime is nixpkgs' 1.27.1 against the
+    through the `.deb`'s `files` map once #227 merges. Without the module, the
+    autostart entry names the profile's path by X5's rule (#261), so the
+    wrapper sets no `STENO_EXEC_PATH`. ONNX Runtime is nixpkgs' 1.27.1 against the
     1.28.0 build `ort` downloads, at FLEURS 4.9 % with both. Nix CI
     (`nix-ci.yml`) runs on a pull request that touches the flake, the web UI's
     dependencies, a Cargo manifest, the lockfile, a build script, the Tauri
@@ -1689,14 +1690,15 @@ interrupted" after one. On the GNOME machine,
      later, with a duration near the time recorded and `manual` as `endReason`
      (not `deviceLost`), and the audio has at most a couple of seconds of
      silence at each switch.
-  7. An autostart entry from a build without X5 (needs X5, #261): write
+  7. An autostart entry from a build without X5: write
      `~/.config/autostart/steno-desktop.desktop` with `[Desktop Entry]`,
      `Type=Application`, `Name=Steno` and `Exec=<dir>/.steno-desktop-wrapped`,
      where `<dir>` is `dirname $(readlink -f
-     /run/current-system/sw/bin/steno-desktop)`, then log out and in. Pass when
-     the entry is gone after Steno's first launch, `pidof steno-desktop` prints
-     one PID, its cgroup ends in `steno.service`, and step 6 run again keeps its
-     recording the same way.
+     /run/current-system/sw/bin/steno-desktop)`, then log out and in, and log
+     out and in again. Pass when the entry is gone after Steno's first exit, at
+     the next login `pidof steno-desktop` prints exactly one PID, its cgroup
+     ends in `steno.service`, and step 6 run again keeps its recording the same
+     way.
   8. A package-only install: set `programs.steno.enable = false`,
      `nixos-rebuild switch`, and log out and in so the module's Steno is gone;
      `nix profile install
