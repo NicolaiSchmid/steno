@@ -756,9 +756,14 @@ mod tests {
         assert!(switch_entry(&gone, Some(&mark), true, true).unwrap());
         assert_eq!(gone.calls(), [("enable", false)]);
         let outside = FakeEntry::new(true, &mark);
+        assert!(switch_entry(&outside, Some(&mark), true, false).unwrap());
         assert!(switch_entry(&outside, Some(&mark), false, false).unwrap());
         assert!(switch_entry(&outside, Some(&mark), true, false).unwrap());
-        assert_eq!(outside.calls(), [("disable", false), ("enable", false)]);
+        assert_eq!(
+            outside.calls(),
+            [("enable", false), ("disable", false), ("enable", false)],
+            "outside the unit an entry is written again, as the plugin keeps it current"
+        );
         assert!(!mark.exists());
 
         let refused = FakeEntry {
