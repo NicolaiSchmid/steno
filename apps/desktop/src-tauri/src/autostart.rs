@@ -465,9 +465,6 @@ fn launch(entry: &impl Entry, mark: Option<&std::path::Path>, as_unit: bool) -> 
             entry.disable()
         };
         let Err(error) = switched else {
-            if on {
-                tracing::info!("the autostart entry is back, marked to go at the exit");
-            }
             return true;
         };
         let failure = if on {
@@ -501,6 +498,7 @@ fn restore(entry: &impl Entry, mark: Option<&std::path::Path>) -> EntryResult<()
     if !entry.is_enabled()? {
         return Err("no autostart entry was written".into());
     }
+    tracing::info!("the autostart entry is back, marked to go at the exit");
     Ok(())
 }
 
