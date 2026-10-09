@@ -176,7 +176,19 @@ impl MeetingDetailViewModel {
     /// cannot drift apart.
     #[must_use]
     pub fn can_process_again(&self) -> bool {
-        self.recording_files_exist && self.meeting().is_some_and(Meeting::offers_process_again)
+        self.process_again_refusal().is_none()
+    }
+
+    /// Why the detail itself refuses "Process again": the meeting is not
+    /// one it is offered for, or its recording is gone.
+    fn process_again_refusal(&self) -> Option<ProcessAgainRefusal> {
+        if !self.meeting().is_some_and(Meeting::offers_process_again) {
+            Some(ProcessAgainRefusal::NotOffered)
+        } else if !self.recording_files_exist {
+            Some(ProcessAgainRefusal::RecordingGone)
+        } else {
+            None
+        }
     }
 
     /// "Re-export" and "Export now": without a vault there is nowhere to
@@ -272,19 +284,20 @@ impl MeetingDetailViewModel {
     /// "Process again", offered while [`can_process_again`] holds: the
     /// pipeline saves the meeting queued and runs it from the start with
     /// its recording; the caller's reload then shows it queued. A refusal,
-    /// the detail's own (not offered) or the pipeline's, is the error line
-    /// in [`process_again_refusal_line`]'s words; one while the app quits
-    /// shows nothing. Rust only: the Swift app refuses it.
+    /// the detail's own (not offered, or the recording gone) or the
+    /// pipeline's, is the error line in [`process_again_refusal_line`]'s
+    /// words; one while the app quits shows nothing. Rust only: the Swift
+    /// app refuses it.
     ///
     /// [`can_process_again`]: Self::can_process_again
     pub fn process_again(&mut self, pipeline: &dyn Pipeline, platform: Platform) {
-        let outcome = if self.can_process_again() {
+        let outcome = if let Some(refusal) = self.process_again_refusal() {
+            Err(refusal)
+        } else {
             self.is_busy = true;
             let outcome = pipeline.process_again(self.id);
             self.is_busy = false;
             outcome
-        } else {
-            Err(ProcessAgainRefusal::NotOffered)
         };
         match outcome {
             Ok(()) => self.error = None,

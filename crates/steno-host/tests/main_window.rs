@@ -1720,20 +1720,16 @@ fn give_the_failed_meeting_a_recording(store: &steno_core::Store, fakes: &FakeSe
 /// "Process again" on the selected failed meeting whose recording is on
 /// disk is offered (`canProcessAgain`) and reaches the pipeline; each
 /// refusal is the error line in the user's words, and one while the app
-/// quits shows nothing. A meeting that is not failed, or whose recording is
-/// gone, is not offered and never reaches the pipeline.
+/// quits shows nothing. A meeting that is not failed is not offered and
+/// never reaches the pipeline.
 #[test]
 fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
-    let master = Arc::new(Mutex::new(PathBuf::new()));
-    let harness = {
-        let master = master.clone();
-        Harness::builder()
-            .seed(move |store, fakes| {
-                populate_sample(store, fakes);
-                *master.lock().unwrap() = give_the_failed_meeting_a_recording(store, fakes);
-            })
-            .build()
-    };
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            give_the_failed_meeting_a_recording(store, fakes);
+        })
+        .build();
     let pipeline = &harness.fakes.pipeline;
     let error_line = || harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"].clone();
 
@@ -1797,10 +1793,35 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
     *pipeline.process_again_refusal.lock().unwrap() = Some(Refusal::Quitting);
     harness.host.meeting_process_again().unwrap();
     assert_eq!(error_line(), Value::Null);
+}
 
-    // The recording is gone: refused before the pipeline is asked.
-    let asked = pipeline.processed_again.lock().unwrap().len();
-    *pipeline.process_again_refusal.lock().unwrap() = None;
+/// A stale page clicks "Process again" on the selected failed meeting after
+/// its recording has gone (the button is hidden, the page has not caught
+/// up). The detail refuses before the pipeline is asked, and the error line
+/// says the recording is gone: the meeting is failed, so "Only a failed
+/// meeting" would be wrong.
+#[test]
+fn process_again_words_a_gone_recording_through_the_detail() {
+    let master = Arc::new(Mutex::new(PathBuf::new()));
+    let harness = {
+        let master = master.clone();
+        Harness::builder()
+            .seed(move |store, fakes| {
+                populate_sample(store, fakes);
+                *master.lock().unwrap() = give_the_failed_meeting_a_recording(store, fakes);
+            })
+            .build()
+    };
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(MEETING_FAILED),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        true
+    );
     harness
         .fakes
         .file_system
@@ -1814,11 +1835,19 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         false
     );
     harness.host.meeting_process_again().unwrap();
-    assert_eq!(
-        error_line(),
-        "Only a failed meeting can be processed again."
+    assert!(
+        harness
+            .fakes
+            .pipeline
+            .processed_again
+            .lock()
+            .unwrap()
+            .is_empty()
     );
-    assert_eq!(pipeline.processed_again.lock().unwrap().len(), asked);
+    assert_eq!(
+        harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"],
+        "The recording is no longer on this Mac, so the meeting cannot be processed again."
+    );
 }
 
 /// Off the Mac the recording is "on this computer".
