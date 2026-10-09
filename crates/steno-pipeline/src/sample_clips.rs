@@ -241,13 +241,27 @@ mod tests {
         let blocked = layout.run_sample_clip(Uuid::new_v4(), run);
         std::fs::create_dir(&blocked).unwrap();
         let clip = AudioBuffer16k::new(vec![0.25; 1600]);
-        let clips = vec![(first.clone(), clip.clone()), (blocked.clone(), clip)];
+        let clips = vec![
+            (first.clone(), clip.clone()),
+            (blocked.clone(), clip.clone()),
+        ];
 
         assert!(write(&layout, &clips, None).is_err());
         assert!(
             !first.exists(),
             "the clip written before the failure is removed"
         );
+        assert_eq!(std::fs::read(&earlier).unwrap(), b"earlier clip");
+
+        // A failure once its clip is on the disk removes that clip too.
+        let second = layout.run_sample_clip(Uuid::new_v4(), run);
+        let clips = vec![(first.clone(), clip.clone()), (second.clone(), clip)];
+        let failing: ClipProbe = Arc::new(|step| match step {
+            ClipStep::Written(1) => Err(std::io::Error::other("the disk is full")),
+            _ => Ok(()),
+        });
+        assert!(write(&layout, &clips, Some(&failing)).is_err());
+        assert!(!first.exists() && !second.exists());
         assert_eq!(std::fs::read(&earlier).unwrap(), b"earlier clip");
     }
 }
