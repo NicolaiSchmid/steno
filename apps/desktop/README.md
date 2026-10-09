@@ -269,10 +269,17 @@ both set and `GDK_BACKEND` is not, `main` allows GDK only its `x11`
 backend before Tauri initialises GTK (`display.rs`). That setting stays
 inside the process, so a browser the shell opens still starts on Wayland.
 Every start logs one `display:` line naming the backend. A `GDK_BACKEND`
-set before launch always wins: `GDK_BACKEND=wayland steno-desktop` runs
-natively on Wayland, with panels that neither stay on top nor keep their
-place. A Wayland session without XWayland (no `DISPLAY`) runs on Wayland
-too, since X11 would not open there.
+that is a list, or holds GDK's `*`, counts as not set: it is a session's
+default for every app (Omarchy exports `wayland,x11,*`), and GDK skips
+the entries it is not allowed. A single `GDK_BACKEND` set before launch
+always wins: `GDK_BACKEND=wayland steno-desktop` runs natively on
+Wayland, with panels that neither stay on top nor keep their place. A
+Wayland session without XWayland (no `DISPLAY`) runs on Wayland too,
+since X11 would not open there.
+
+On Linux the panels are titled "Steno bubble" and "Steno prompt" (on
+macOS and Windows "Steno", as the main window), so a window manager's
+rules can tell them from the main window; Hyprland's are below.
 
 The bridge methods the shell answers itself, beside `window.*` and
 `system.openURL`: `system.openSystemSettings` (the pane per OS),
@@ -475,6 +482,55 @@ What a package sets:
   no `STENO_EXEC_PATH`; it still needs `STENO_DISTRIBUTION=aur`, from a
   wrapper or from the build's environment, and both drop-ins under
   `/usr/lib/systemd/user/`.
+
+## Hyprland
+
+Hyprland (Omarchy, NixOS with `programs.hyprland`) ignores the
+always-on-top and every-workspace hints the panels set, and focuses every
+window that opens. Without rules the bubble takes the keyboard focus from
+the call when a recording starts and stays on the workspace it opened
+on. `src-tauri/linux/hyprland-steno.lua` holds the window rules for
+Hyprland 0.55 and later, whose config is Lua: the panels float, are
+pinned to every workspace, take no focus when they open or when the
+pointer crosses them, and have no border, shadow or blur. The rules match
+the class and the panels' titles ("Steno bubble", "Steno prompt"), never
+the main window ("Steno").
+
+Load them at the end of `~/.config/hypr/hyprland.lua` (on Omarchy, below
+"Add any other personal Hyprland configuration below"):
+
+```lua
+-- the AUR package installs the file here
+require("/usr/share/steno-desktop/hyprland-steno")
+-- or a copy of it at ~/.config/hypr/steno.lua
+require("steno")
+```
+
+Hyprland reloads its config when the file changes. A config in the older
+syntax, `hyprland.conf` from Hyprland 0.53 on (or the one Home Manager
+writes from `wayland.windowManager.hyprland.settings`), takes the same
+rule as one line:
+
+```
+windowrule = match:class [Ss]teno-desktop, match:title Steno (bubble|prompt), float on, pin on, no_initial_focus on, no_follow_mouse on, border_size 0, no_shadow on, no_blur on
+```
+
+With the rules loaded, a recording's bubble shows as floating, pinned
+and under XWayland:
+
+```sh
+hyprctl clients -j | jq '.[] | select(.class | test("steno-desktop"; "i"))
+  | {title, xwayland, floating, pinned}'
+```
+
+On a `uwsm` session, as Omarchy's, start Steno from the app launcher or
+with `uwsm-app -- steno-desktop`, so it runs in a scope of its own and
+not in Hyprland's unit (stable plan X1). Steno runs under XWayland there
+even though Omarchy sets `GDK_BACKEND=wayland,x11,*`, since a list is a
+session default (above). Under native Wayland (a single
+`GDK_BACKEND=wayland`, or no XWayland) Hyprland places the panels itself
+and a drag is not saved; native panels on the layer-shell protocol,
+which would need no rules, are later work.
 
 ## Run
 

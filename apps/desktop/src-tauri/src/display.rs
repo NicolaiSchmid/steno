@@ -5,7 +5,9 @@
 //! `XWayland` the shell therefore allows GDK only its `x11` backend, before
 //! Tauri initialises GTK. That is a setting inside this process, so nothing
 //! the shell starts (the browser behind `xdg-open`) inherits it. A
-//! `GDK_BACKEND` the user set always wins.
+//! single `GDK_BACKEND` the user set always wins; a list (`wayland,x11,*`,
+//! which Omarchy sets for the whole session) is a session default, which
+//! the shell narrows to `x11` as if none were set.
 //!
 //! Swift: none; `AppKit` has a single window server.
 
@@ -23,7 +25,7 @@ pub enum Backend {
     /// open, so GTK runs on Wayland and the panels neither stay on top nor
     /// keep their place.
     WaylandOnly,
-    /// The user's `GDK_BACKEND`, whatever it says.
+    /// The user's `GDK_BACKEND`: one backend, or empty.
     UserChoice,
 }
 
@@ -35,7 +37,7 @@ impl Backend {
             Self::ForcedX11 => {
                 "display: a Wayland session, so the shell runs under XWayland \
                  (GDK's x11 backend) to keep the panels on top and where they are put; \
-                 a GDK_BACKEND set before launch overrides this"
+                 a single GDK_BACKEND set before launch overrides this"
             }
             Self::WaylandOnly => {
                 "display: a Wayland session without XWayland, so the panels \
@@ -58,14 +60,15 @@ impl Backend {
 
 /// The GDK backend for a session with these `WAYLAND_DISPLAY`, `DISPLAY`
 /// and `GDK_BACKEND` values (an empty value counts as none, except the
-/// user's `GDK_BACKEND`, which wins even when it is `wayland` or empty).
+/// user's `GDK_BACKEND`, which wins even when it is `wayland` or empty;
+/// a list counts as none, `is_session_default`).
 pub fn backend(
     wayland_display: Option<&OsStr>,
     x11_display: Option<&OsStr>,
     gdk_backend: Option<&OsStr>,
 ) -> Backend {
     let set = |value: Option<&OsStr>| value.is_some_and(|value| !value.is_empty());
-    if gdk_backend.is_some() {
+    if gdk_backend.is_some_and(|value| !is_session_default(value)) {
         Backend::UserChoice
     } else if !set(wayland_display) {
         Backend::GtksChoice
@@ -74,6 +77,19 @@ pub fn backend(
     } else {
         Backend::WaylandOnly
     }
+}
+
+/// Whether a `GDK_BACKEND` is a session's default rather than the user's
+/// choice: a list of backends (`wayland,x11,*`) or one with GDK's `*` (any
+/// backend). A desktop that exports such a list for every app, as Omarchy
+/// does, only states a preference; the panels need `x11`, and
+/// `gdk_set_allowed_backends` keeps GDK to it, since GDK skips every entry
+/// of the list it does not allow.
+fn is_session_default(gdk_backend: &OsStr) -> bool {
+    gdk_backend
+        .as_encoded_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b',' | b'*'))
 }
 
 /// Applies `backend` to this process and logs it once. Runs first in
@@ -95,7 +111,7 @@ mod tests {
     use super::*;
 
     /// A Wayland session runs under `XWayland` when there is one, unless
-    /// the user chose a backend; an X11 session, or an empty
+    /// the user chose a single backend; an X11 session, or an empty
     /// `WAYLAND_DISPLAY`, is left to GTK.
     #[test]
     fn a_wayland_session_runs_under_xwayland_unless_the_user_chose() {
@@ -111,6 +127,12 @@ mod tests {
             (wayland, x11, Some(""), UserChoice),
             (Some(""), x11, None, GtksChoice),
             (wayland, Some(""), None, WaylandOnly),
+            // A list is the session's default (Omarchy's), not a choice.
+            (wayland, x11, Some("wayland,x11,*"), ForcedX11),
+            (wayland, x11, Some("wayland,x11"), ForcedX11),
+            (wayland, x11, Some("*"), ForcedX11),
+            (wayland, None, Some("wayland,x11,*"), WaylandOnly),
+            (None, x11, Some("wayland,x11,*"), GtksChoice),
         ] {
             assert_eq!(
                 backend(
@@ -122,6 +144,18 @@ mod tests {
                 "{wayland_display:?} {x11_display:?} {gdk_backend:?}"
             );
             assert!(expected.describe().starts_with("display: "));
+        }
+    }
+
+    /// A list or GDK's `*` is a session default; one backend, or none
+    /// named (empty), is the user's.
+    #[test]
+    fn a_list_or_any_backend_is_a_session_default() {
+        for value in ["wayland,x11,*", "x11,wayland", "wayland,", "*", "wayland,*"] {
+            assert!(is_session_default(OsStr::new(value)), "{value}");
+        }
+        for value in ["wayland", "x11", "", "broadway"] {
+            assert!(!is_session_default(OsStr::new(value)), "{value}");
         }
     }
 
