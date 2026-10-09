@@ -28,15 +28,24 @@ pub struct DeliveryLedger {
     /// ([`DeliveryLedger::move_folder`]), written as on a first delivery.
     claimed: Option<String>,
     files: BTreeMap<String, DeliveredFile>,
+    warnings: Vec<String>,
 }
 
 impl DeliveryLedger {
     /// The ledger for `root`; `previous` applies only when it is from this
-    /// root and stays inside it.
+    /// root and stays inside it. Its root is this one when it is another
+    /// spelling of it ([`Self::same_root`]) or when `is_root` says the file
+    /// system resolves it to this one (a symlink, another case on a
+    /// case-insensitive disk), the destination's I/O answer
+    /// ([`LocalFolderSink::is_root`](crate::fs::LocalFolderSink::is_root)).
     #[must_use]
-    pub fn new(previous: Option<&DeliveryReceipt>, root: &str) -> Self {
+    pub fn new(
+        previous: Option<&DeliveryReceipt>,
+        root: &str,
+        is_root: impl Fn(&str) -> bool,
+    ) -> Self {
         let previous = previous
-            .filter(|receipt| Self::same_root(&receipt.root, root))
+            .filter(|receipt| Self::same_root(&receipt.root, root) || is_root(&receipt.root))
             .filter(|receipt| Self::stays_inside_root(receipt))
             .cloned();
         // Files from the previous receipt stay listed unless rewritten or
@@ -52,6 +61,7 @@ impl DeliveryLedger {
             previous,
             claimed: None,
             files,
+            warnings: Vec::new(),
         }
     }
 
@@ -97,9 +107,7 @@ impl DeliveryLedger {
                 .claimed
                 .as_deref()
                 .is_some_and(|folder| Self::name_in(path, folder).is_some())
-            || self
-                .previous_files()
-                .any(|file| file.ownership == FileOwnership::Owned && file.relative_path == path)
+            || self.delivered_hash(path).is_some()
     }
 
     /// Moves the receipt from `from`, the pinned folder that is no longer
@@ -162,7 +170,8 @@ impl DeliveryLedger {
     }
 
     /// The receipt of this delivery: every file by path, with the renderer
-    /// version the destination rendered with.
+    /// version the destination rendered with and the warnings it gave
+    /// ([`Self::warn`]).
     #[must_use]
     pub fn receipt(&self, folder: &str, renderer_version: i64) -> DeliveryReceipt {
         DeliveryReceipt {
@@ -170,8 +179,104 @@ impl DeliveryLedger {
             folder: folder.to_owned(),
             files: self.files.values().cloned().collect(),
             renderer_version,
-            warnings: Vec::new(),
+            warnings: self.warnings.clone(),
         }
+    }
+
+    /// The hash an owned file at `path` had when the previous delivery
+    /// wrote it; `None` on a first delivery or for a path it did not own.
+    #[must_use]
+    pub fn delivered_hash(&self, path: &str) -> Option<&[u8]> {
+        self.previous_files()
+            .find(|file| file.ownership == FileOwnership::Owned && file.relative_path == path)
+            .map(|file| file.sha256.as_slice())
+    }
+
+    /// Keeps the receipt's entry for `path`, a file the user edited that
+    /// this delivery left alone, when Steno may write there
+    /// ([`Self::may_write`]): the hash Steno last wrote there when the
+    /// receipt carries one, else this render's. Never the user's bytes, so
+    /// the next delivery still sees the edit, and kept so the path stays
+    /// Steno's to write once the user takes Steno's version. No entry for a
+    /// file Steno never wrote (a receipt applies and does not list it): a
+    /// rolled-back Swift app writes any path the receipt lists.
+    pub fn keep(&mut self, path: &str, data: &[u8]) {
+        if !self.may_write(path, true) {
+            return;
+        }
+        self.files
+            .entry(path.to_owned())
+            .or_insert_with(|| DeliveredFile {
+                relative_path: path.to_owned(),
+                ownership: FileOwnership::Owned,
+                sha256: sha256(data),
+            });
+    }
+
+    /// Whether `hash` is what the previous delivery wrote to an owned file
+    /// at `path` or to a copy beside it ([`Self::copy_stamp`]): bytes on
+    /// disk with that hash are Steno's, also after the user moved a copy
+    /// over the note.
+    #[must_use]
+    pub fn wrote(&self, path: &str, hash: &[u8]) -> bool {
+        self.previous_files().any(|file| {
+            file.ownership == FileOwnership::Owned
+                && file.sha256 == hash
+                && (file.relative_path == path
+                    || Self::copy_stamp(path, &file.relative_path).is_some())
+        })
+    }
+
+    /// The copies an earlier delivery wrote beside `path` because the note
+    /// there had been edited, as the previous receipt lists them, newest
+    /// first: by date, then number ([`Self::copy_stamp`]).
+    #[must_use]
+    pub fn listed_copies(&self, path: &str) -> Vec<String> {
+        let mut copies: Vec<_> = self
+            .previous_files()
+            .filter(|file| file.ownership == FileOwnership::Owned)
+            .filter_map(|file| Some((Self::copy_stamp(path, &file.relative_path)?, file)))
+            .collect();
+        copies.sort_by(|(left, _), (right, _)| right.cmp(left));
+        copies
+            .into_iter()
+            .map(|(_, file)| file.relative_path.clone())
+            .collect()
+    }
+
+    /// The path of a copy beside `path`: `<stem> (Steno <date>).<extension>`
+    /// for the first of the day, `<stem> (Steno <date> <number>).<extension>`
+    /// from 2 on.
+    #[must_use]
+    pub fn copy_beside_path(path: &str, date: &str, number: u32) -> String {
+        let (stem, extension) = split_extension(path);
+        if number == 1 {
+            format!("{stem} (Steno {date}){extension}")
+        } else {
+            format!("{stem} (Steno {date} {number}){extension}")
+        }
+    }
+
+    /// The date and number of `copy` when it is a copy beside `path`
+    /// ([`Self::copy_beside_path`]), 1 for the unnumbered one. The dates are
+    /// ISO, so they order as strings.
+    #[must_use]
+    pub fn copy_stamp<'a>(path: &str, copy: &'a str) -> Option<(&'a str, u32)> {
+        let (stem, extension) = split_extension(path);
+        let stamp = copy
+            .strip_prefix(stem)?
+            .strip_prefix(" (Steno ")?
+            .strip_suffix(extension)?
+            .strip_suffix(')')?;
+        match stamp.split_once(' ') {
+            Some((date, number)) => Some((date, number.parse().ok()?)),
+            None => Some((stamp, 1)),
+        }
+    }
+
+    /// Adds `warning` to the receipt this delivery returns.
+    pub fn warn(&mut self, warning: String) {
+        self.warnings.push(warning);
     }
 
     /// Two spellings of one root: trailing slashes, `.` and `..` components
@@ -274,6 +379,16 @@ impl DeliveryLedger {
             suffix += 1;
         }
         Ok(candidate)
+    }
+}
+
+/// `path` split before the extension of its last component: `("a/b", ".md")`
+/// for `a/b.md`, `("a/b", "")` without one.
+fn split_extension(path: &str) -> (&str, &str) {
+    let name_start = path.rfind('/').map_or(0, |slash| slash + 1);
+    match path[name_start..].rfind('.') {
+        Some(dot) if dot > 0 => path.split_at(name_start + dot),
+        _ => (path, ""),
     }
 }
 

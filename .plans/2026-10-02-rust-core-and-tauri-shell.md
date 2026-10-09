@@ -1675,6 +1675,33 @@ still has to draw the window side. `[ ]` is not ported yet.
 - On Windows the Rust person pages keep off the reserved device names (`Con` becomes
   `Con_.md`, linked `[[Con_|Con]]`); the Swift app runs on the Mac only, where the
   names are allowed, so it has nothing to mirror and both apps name a Mac page `Con.md`.
+- A re-export keeps a note the user edited in the vault (decided by Nicolai on
+  2026-10-07, D13 of `.plans/2026-10-07-stable-promotion.md`). A note is edited when
+  what is on disk is a directory, or bytes that are neither this render nor bytes the
+  receipt says Steno wrote there or to a copy beside it; with no receipt that applies
+  (another vault in between, or `steno deliver --vault`) any other bytes count, so an
+  unedited earlier render gets a copy too. The Rust destination leaves it and writes
+  the new render beside it as `<name> (Steno <date>).<ext>`: the newest listed copy
+  that is unedited, else a new copy dated today (`… 2`, `… 3` within a day). It keeps
+  the receipt's entry for the note when Steno wrote it (a file the receipt does not
+  list stays off it), and adds a warning to `DeliveryReceipt::warnings` (absent from
+  the JSON when empty), which the export line and `steno deliver` show: "Kept your
+  changes to `<slug>.md` and put Steno's version beside it as `<slug> (Steno
+  <date>).md`; to use Steno's, delete `<slug>.md` and export again", or for several
+  files "Kept your changes to `a`, `b` and `c` and put Steno's versions beside them; to
+  use Steno's, delete your versions and export again". A note that holds the new
+  render, or a copy the user moved over it, is Steno's again; a receipt's copy of
+  `meeting.json` keeps the folder pinned once the kept files are deleted. A receipt
+  applies to a vault spelled through a symlink or in another case too
+  (`LocalFolderSink::is_root`); Swift compares the spellings only. The audio copy is
+  not checked, and a person page's managed block stays Steno's to rewrite. Swift
+  overwrites an edited note, and so does a rolled-back Swift app: a loss on rollback
+  only, accepted under D3 and D9; it also ignores the `warnings` key. Tests: the
+  `reexport_keeps_an_edited_note_…` test and the D13 block at the end of
+  `crates/steno-adapters/tests/obsidian.rs`, `LocalFolderSink::is_root`'s tests in
+  `crates/steno-adapters/src/fs/sink.rs`, and
+  `deliver_into_the_apps_vault_keeps_a_note_edited_since_the_app_delivered` in
+  `crates/steno-cli/tests/cli.rs`.
 
 ### Audio
 

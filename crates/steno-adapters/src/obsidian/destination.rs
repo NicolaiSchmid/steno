@@ -7,7 +7,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, TryLockError};
 
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use steno_core::content_hash::sha256;
 use steno_core::paths::file_url_path;
 use steno_core::{
     AudioFormat, BoundaryResult, DeliveryReceipt, Destination, FileOwnership, MeetingExport,
@@ -82,6 +84,33 @@ fn folder_slug(folder: &str) -> String {
     )
 }
 
+/// The last component of the vault-relative `path`.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or_default()
+}
+
+/// The receipt's warning for the notes this delivery kept, each as `(name,
+/// copy name)` ([`ObsidianFolderDestination::write_note`]): for one, a
+/// sentence naming both files; for several, one naming the notes only.
+/// `None` when it kept none.
+fn kept_warning(kept: &[(String, String)]) -> Option<String> {
+    match kept {
+        [] => None,
+        [(name, copy)] => Some(format!(
+            "Kept your changes to {name} and put Steno's version beside it as {copy}; \
+             to use Steno's, delete {name} and export again"
+        )),
+        [rest @ .., (last, _)] => {
+            let rest: Vec<&str> = rest.iter().map(|(name, _)| name.as_str()).collect();
+            Some(format!(
+                "Kept your changes to {} and {last} and put Steno's versions beside them; \
+                 to use Steno's, delete your versions and export again",
+                rest.join(", ")
+            ))
+        }
+    }
+}
+
 /// An audio copy's file name: `audio` or `audio.<ext>`.
 fn is_audio(name: &str) -> bool {
     name == "audio" || name.starts_with("audio.")
@@ -131,6 +160,9 @@ pub struct ObsidianFolderDestination {
     /// The tests' [`DeliveryStep`] hook; `None` outside them.
     #[cfg(feature = "testing")]
     steps: Option<StepHook>,
+    /// The wall clock that dates a copy written beside an edited note;
+    /// tests pin it.
+    now: fn() -> DateTime<Utc>,
 }
 
 impl ObsidianFolderDestination {
@@ -182,7 +214,16 @@ impl ObsidianFolderDestination {
             sink,
             #[cfg(feature = "testing")]
             steps: None,
+            now: Utc::now,
         }
+    }
+
+    /// The same destination dating the copies it writes beside edited
+    /// notes with `now`: the tests pin the clock.
+    #[must_use]
+    pub fn with_now(mut self, now: fn() -> DateTime<Utc>) -> Self {
+        self.now = now;
+        self
     }
 
     /// The same destination naming its calls after `platform`: the golden
@@ -246,8 +287,9 @@ impl ObsidianFolderDestination {
     /// [`Destination::deliver`] without the boundary error wrapper and on
     /// the calling thread, where the tests call it. Blocks while another
     /// delivery into the same vault runs in this process (`vault_lock`). A
-    /// delivery without the audio it should copy succeeds and says so in
-    /// the receipt's `warnings` ([`Self::NO_AUDIO_WARNING`]).
+    /// delivery that kept a note the user edited ([`Self::write_note`]) or
+    /// went without the audio it should copy ([`Self::NO_AUDIO_WARNING`])
+    /// succeeds and says so in the receipt's `warnings`.
     pub fn deliver_meeting(
         &self,
         meeting: &MeetingExport,
@@ -266,7 +308,9 @@ impl ObsidianFolderDestination {
             }
         };
         self.check_vault()?;
-        let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path);
+        let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path, |root| {
+            self.sink.is_root(root)
+        });
         let (folder, created) = self.folder_for(meeting, &mut ledger)?;
         let written = self.write_meeting(meeting, &folder, &mut ledger);
         if written.is_err() && created {
@@ -275,11 +319,8 @@ impl ObsidianFolderDestination {
             // meeting's; one that holds a file stays.
             let _ = fs::remove_dir(self.sink.path(&folder));
         }
-        let warnings = written?;
-        Ok(DeliveryReceipt {
-            warnings,
-            ..ledger.receipt(&folder, ArtifactRenderer::VERSION)
-        })
+        written?;
+        Ok(ledger.receipt(&folder, ArtifactRenderer::VERSION))
     }
 
     /// The meeting folder of this delivery, and whether this delivery
@@ -300,7 +341,7 @@ impl ObsidianFolderDestination {
         if !self.sink.entry_exists(&pinned) && self.recreate(&pinned)? {
             return Ok((pinned, true));
         }
-        if self.keeps_pin(&pinned, meeting.meeting.id)? {
+        if self.keeps_pin(ledger, &pinned, meeting.meeting.id)? {
             return Ok((pinned, false));
         }
         let (claimed, created) = self.claim_folder(meeting)?;
@@ -309,13 +350,13 @@ impl ObsidianFolderDestination {
     }
 
     /// Writes the meeting's files into `folder`, its person pages and its
-    /// audio copy; returns the receipt's warnings.
+    /// audio copy; what it could not do goes into the receipt's warnings.
     fn write_meeting(
         &self,
         meeting: &MeetingExport,
         folder: &str,
         ledger: &mut DeliveryLedger,
-    ) -> Result<Vec<String>, ObsidianError> {
+    ) -> Result<(), ObsidianError> {
         let slug = folder_slug(folder);
         let options = RenderOptions {
             link_style: LinkStyle::Wikilink,
@@ -336,23 +377,25 @@ impl ObsidianFolderDestination {
                 path: self.absolute(&format!("{folder}/{}", MeetingFolder::JSON)),
                 underlying: error.to_string(),
             })?;
+        let mut kept = Vec::new();
         for artifact in artifacts {
-            self.write_owned(
-                ledger,
-                &format!("{folder}/{}", artifact.file_name),
-                &artifact.data,
-            )?;
+            let path = format!("{folder}/{}", artifact.file_name);
+            if let Some(copy) = self.write_note(ledger, &path, &artifact.data)? {
+                kept.push((artifact.file_name, file_name(&copy).to_owned()));
+            }
+        }
+        if let Some(warning) = kept_warning(&kept) {
+            ledger.warn(warning);
         }
 
         if let Some(people_folder) = &self.settings.people_folder {
             let pages = renderer.render_person_pages(meeting, &options, Some(&slug));
             self.write_person_pages(people_folder, pages, meeting.meeting.id, ledger)?;
         }
-        let mut warnings = Vec::new();
         if self.settings.include_audio && !self.copy_audio(meeting, folder, ledger)? {
-            warnings.push(Self::NO_AUDIO_WARNING.to_owned());
+            ledger.warn(Self::NO_AUDIO_WARNING.to_owned());
         }
-        Ok(warnings)
+        Ok(())
     }
 
     /// Writes every rendered page into `people_folder`: whole when the page
@@ -445,6 +488,103 @@ impl ObsidianFolderDestination {
             &data,
         )?;
         Ok(true)
+    }
+
+    /// [`write_owned`](Self::write_owned) for a note the user may edit in
+    /// the vault (every rendered file but the audio copy). A note the user
+    /// edited ([`Self::is_edited`]) is left as it is: the new render goes
+    /// beside it ([`Self::copy_path`]), and the receipt keeps the note's
+    /// entry when Steno may write there ([`DeliveryLedger::keep`]), so the
+    /// next delivery sees the edit too. Returns the copy it wrote, which the
+    /// receipt's warning names with the note and how to get Steno's version
+    /// (`kept_warning`). Rust only: Swift overwrites the note.
+    fn write_note(
+        &self,
+        ledger: &mut DeliveryLedger,
+        path: &str,
+        data: &[u8],
+    ) -> Result<Option<String>, ObsidianError> {
+        if !self.is_edited(ledger, path, data)? {
+            self.write_owned(ledger, path, data)?;
+            return Ok(None);
+        }
+        let copy = self.copy_path(ledger, path, data)?;
+        self.writing(&copy, || self.sink.write(data, &copy))?;
+        ledger.record(&copy, FileOwnership::Owned, data);
+        ledger.keep(path, data);
+        Ok(Some(copy))
+    }
+
+    /// Whether what is at `path` is the user's to keep: a directory (or a
+    /// link to one), or a file whose bytes are neither this render nor bytes
+    /// Steno wrote there or to a copy beside it ([`DeliveryLedger::wrote`]).
+    /// Without a receipt that lists them (none applies, or it does not list
+    /// the path) any other bytes count as edited, so an unedited note of an
+    /// earlier render gets a copy too. A file that already holds this render
+    /// is not edited: a delivery that failed or was not saved after writing
+    /// heals on the next one. Neither is a note the user moved a copy over,
+    /// also once the render changes. A path with nothing at it is not
+    /// edited.
+    fn is_edited(
+        &self,
+        ledger: &DeliveryLedger,
+        path: &str,
+        data: &[u8],
+    ) -> Result<bool, ObsidianError> {
+        if self.sink.is_directory(path) {
+            return Ok(true);
+        }
+        let Some(on_disk) = self.reading(path, || self.sink.read(path))? else {
+            return Ok(false);
+        };
+        Ok(on_disk != data && !ledger.wrote(path, &sha256(&on_disk)))
+    }
+
+    /// Where the new render `data` of the edited note at `path` goes: the
+    /// newest copy an earlier delivery wrote beside it
+    /// ([`DeliveryLedger::listed_copies`]) that is there and not edited
+    /// ([`Self::may_reuse`]); else a new one dated today in the
+    /// destination's time zone, numbered from 2 within the day while
+    /// anything (a dangling link too) holds the name, unless what holds it
+    /// is a file with this render already (a delivery that failed after
+    /// writing it). A listed copy the user deleted leaves the receipt, so it
+    /// is not written again under its old date.
+    fn copy_path(
+        &self,
+        ledger: &mut DeliveryLedger,
+        path: &str,
+        data: &[u8],
+    ) -> Result<String, ObsidianError> {
+        for copy in ledger.listed_copies(path) {
+            if self.may_reuse(ledger, &copy, data)? {
+                return Ok(copy);
+            }
+            if !self.sink.entry_exists(&copy) {
+                ledger.forget(&copy);
+            }
+        }
+        let today = (self.now)()
+            .with_timezone(&self.time_zone)
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut number = 1;
+        let mut candidate = DeliveryLedger::copy_beside_path(path, &today, number);
+        while self.sink.entry_exists(&candidate) && !self.may_reuse(ledger, &candidate, data)? {
+            number += 1;
+            candidate = DeliveryLedger::copy_beside_path(path, &today, number);
+        }
+        Ok(candidate)
+    }
+
+    /// Whether the copy at `copy` may take the new render `data`: a file
+    /// (not a dangling link) is there, and it is not edited.
+    fn may_reuse(
+        &self,
+        ledger: &DeliveryLedger,
+        copy: &str,
+        data: &[u8],
+    ) -> Result<bool, ObsidianError> {
+        Ok(self.sink.exists(copy) && !self.is_edited(ledger, copy, data)?)
     }
 
     fn write_owned(
@@ -548,23 +688,37 @@ impl ObsidianFolderDestination {
 
     /// Whether a pinned folder that is there is still this meeting's: a
     /// directory whose `meeting.json` names this meeting, or, with
-    /// `meeting.json` missing, one where the `transcript.vtt` header or the
-    /// folder note's `steno_id` names it. The user moved or deleted this
-    /// meeting's folder, and a meeting with the same date and title may have
-    /// claimed the name since; a folder that is not this meeting's is never
-    /// written, so the cost is a duplicate folder. A `meeting.json` or note
-    /// that cannot be read is [`ObsidianError::ReadFailed`].
-    fn keeps_pin(&self, folder: &str, id: Uuid) -> Result<bool, ObsidianError> {
+    /// `meeting.json` missing, one where the `transcript.vtt` header, the
+    /// folder note's `steno_id` or a copy of `meeting.json` the receipt
+    /// lists ([`DeliveryLedger::listed_copies`]) names it, so a user who
+    /// deleted the edited files Steno kept gets Steno's back in place. The
+    /// user moved or deleted this meeting's folder, and a meeting with the
+    /// same date and title may have claimed the name since; a folder that
+    /// is not this meeting's is never written, so the cost is a duplicate
+    /// folder. A `meeting.json`, note or copy that cannot be read is
+    /// [`ObsidianError::ReadFailed`].
+    fn keeps_pin(
+        &self,
+        ledger: &DeliveryLedger,
+        folder: &str,
+        id: Uuid,
+    ) -> Result<bool, ObsidianError> {
         if !self.sink.is_directory(folder) {
             return Ok(false);
         }
-        if self
-            .sink
-            .exists(&format!("{folder}/{}", MeetingFolder::JSON))
-        {
-            return Ok(self.meeting_of(folder)? == Some(id));
+        let json = format!("{folder}/{}", MeetingFolder::JSON);
+        if self.sink.exists(&json) {
+            return Ok(self.meeting_in(&json)? == Some(id));
         }
-        self.a_note_carries(folder, id)
+        if self.a_note_carries(folder, id)? {
+            return Ok(true);
+        }
+        for copy in ledger.listed_copies(&json) {
+            if self.meeting_in(&copy)? == Some(id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Whether `transcript.vtt` (its `WEBVTT - Steno <id>` header) or the
@@ -605,8 +759,13 @@ impl ObsidianFolderDestination {
     /// [`ObsidianError::ReadFailed`], so a file another program holds open
     /// fails the delivery instead of passing for another meeting's.
     fn meeting_of(&self, folder: &str) -> Result<Option<Uuid>, ObsidianError> {
-        let path = format!("{folder}/{}", MeetingFolder::JSON);
-        let Some(data) = self.reading(&path, || self.sink.read(&path))? else {
+        self.meeting_in(&format!("{folder}/{}", MeetingFolder::JSON))
+    }
+
+    /// The meeting the `meeting.json` (or copy of it) at `path` names,
+    /// [`Self::meeting_of`]'s rule.
+    fn meeting_in(&self, path: &str) -> Result<Option<Uuid>, ObsidianError> {
+        let Some(data) = self.reading(path, || self.sink.read(path))? else {
             return Ok(None);
         };
         let probe: Option<serde_json::Value> = serde_json::from_slice(&data).ok();

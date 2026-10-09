@@ -994,6 +994,8 @@ The table above names each package and its owner. Their tests:
 - **P30.** A note changed in the vault since Steno wrote it (its hash differs
   from the ledger's) gets the new version beside it as `<name> (Steno
   <date>).md` and a warning, and stays as it was; an unchanged note is replaced.
+  A rolled-back Swift app overwrites an edited note: a loss on rollback only,
+  accepted under D3 and D9.
 - **P9.** A failed meeting with its master processes again from the button and
   from `steno process --meeting <id>`; a meeting queued for missing models
   resumes after the install.

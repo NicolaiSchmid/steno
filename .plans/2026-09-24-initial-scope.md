@@ -154,7 +154,9 @@ Meetings/
   the implemented line is `- [ ] text [[Assignee]] ⏫ 📅 YYYY-MM-DD` (see
   `2026-09-25-v1-program.md`, scope clarifications).
 - Optional per-person pages linking their meetings.
-- Re-export overwrites app-written files, never touches other files in the folder.
+- Re-export overwrites app-written files, never touches other files in the folder. Since
+  2026-10-07 (D13 of `.plans/2026-10-07-stable-promotion.md`) an app-written file the user
+  edited in the vault is kept, and the new render is written beside it.
 - The app never runs git.
 
 Export formats produced: Markdown, VTT, JSON. SRT later.
