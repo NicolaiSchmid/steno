@@ -4512,34 +4512,45 @@ async fn a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed() {
     assert_eq!(expires_at(&world, &asset), Some(world.now));
 }
 
+/// Runs a call of `duration` seconds whose every lane comes out with no
+/// transcript, under "delete after processing", and tells whether its
+/// recording was kept unstamped.
+async fn a_silent_call_keeps_its_recording(duration: f64) -> bool {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::DeleteAfterProcessing,
+        FakeSpeechEngine {
+            silent_below_peak: Some(f32::MAX),
+            ..FakeSpeechEngine::default()
+        },
+        FakeDiarizer::default(),
+    );
+    let mut meeting = call_meeting(world.now);
+    meeting.duration = duration;
+    let asset = call_asset(
+        &world.audio,
+        meeting.id,
+        AudioRetention::DeleteAfterProcessing,
+    );
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert_eq!(world.store.segments(meeting.id).unwrap(), Vec::new());
+    expires_at(&world, &asset).is_none()
+}
+
 /// A recording longer than half a minute that came out with no transcript
 /// at all most likely failed to transcribe: the automatic retention keeps
 /// it; a short one is stamped as usual.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_recording_with_no_transcript_keeps_its_recording() {
     for (duration, kept) in [(31.0, true), (6.0, false)] {
-        let world = world_with(
-            false,
-            None,
-            AudioRetention::DeleteAfterProcessing,
-            FakeSpeechEngine {
-                silent_below_peak: Some(f32::MAX),
-                ..FakeSpeechEngine::default()
-            },
-            FakeDiarizer::default(),
+        assert_eq!(
+            a_silent_call_keeps_its_recording(duration).await,
+            kept,
+            "{duration} s"
         );
-        let mut meeting = call_meeting(world.now);
-        meeting.duration = duration;
-        let asset = call_asset(
-            &world.audio,
-            meeting.id,
-            AudioRetention::DeleteAfterProcessing,
-        );
-        world.pipeline.enqueue(&meeting, &asset).unwrap();
-        world.pipeline.wait_until_idle().await;
-        assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
-        assert_eq!(world.store.segments(meeting.id).unwrap(), Vec::new());
-        assert_eq!(expires_at(&world, &asset).is_none(), kept, "{duration} s");
     }
 }
 
@@ -4643,13 +4654,14 @@ async fn keep_forever_for_every_recording_commits_durably() {
     assert_eq!(first_level(&commits, false), Some(2));
 }
 
-/// A fallback meeting whose export failed is exported again: once every
-/// delivery succeeded, the re-export still keeps the recording unstamped,
-/// and the sweep deletes nothing.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_reexport_of_a_diarizer_fallback_keeps_the_recording() {
+/// A meeting whose diarizer failed, run under "delete after processing"
+/// by the pipeline returned with it, its one export failed; `summarizer`
+/// as in [`world`].
+async fn a_fallback_whose_export_failed(
+    summarizer: bool,
+) -> (World, ProcessingPipeline, Meeting, AudioAsset) {
     let world = world(
-        false,
+        summarizer,
         Some(|vault| FakeDestination {
             fail_until: 1,
             ..FakeDestination::new(vault)
@@ -4665,6 +4677,15 @@ async fn a_reexport_of_a_diarizer_fallback_keeps_the_recording() {
     );
     pipeline.enqueue(&meeting, &asset).unwrap();
     pipeline.wait_until_idle().await;
+    (world, pipeline, meeting, asset)
+}
+
+/// A fallback meeting whose export failed is exported again: once every
+/// delivery succeeded, the re-export still keeps the recording unstamped,
+/// and the sweep deletes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reexport_of_a_diarizer_fallback_keeps_the_recording() {
+    let (world, pipeline, meeting, asset) = a_fallback_whose_export_failed(false).await;
     assert!(matches!(
         world.store.deliveries(meeting.id).unwrap()[0].status,
         DeliveryStatus::Failed(_)
@@ -4690,23 +4711,7 @@ async fn a_reexport_of_a_diarizer_fallback_keeps_the_recording() {
 /// The launch's re-export of the same meeting keeps it unstamped too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_launch_reexport_of_a_diarizer_fallback_keeps_the_recording() {
-    let world = world(
-        false,
-        Some(|vault| FakeDestination {
-            fail_until: 1,
-            ..FakeDestination::new(vault)
-        }),
-        AudioRetention::DeleteAfterProcessing,
-    );
-    let pipeline = with_failing_diarizer(&world, "no model");
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(
-        &world.audio,
-        meeting.id,
-        AudioRetention::DeleteAfterProcessing,
-    );
-    pipeline.enqueue(&meeting, &asset).unwrap();
-    pipeline.wait_until_idle().await;
+    let (world, _pipeline, meeting, asset) = a_fallback_whose_export_failed(false).await;
     let at = world.now + Duration::days(2);
     let launch = launch_at(&world, at, FakeDestination::new(&world.vault));
     let retries = export_retries(&world);
@@ -4723,23 +4728,7 @@ async fn a_launch_reexport_of_a_diarizer_fallback_keeps_the_recording() {
 /// fallback meeting stays unstamped.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_summary_rerun_of_a_diarizer_fallback_keeps_the_recording() {
-    let world = world(
-        true,
-        Some(|vault| FakeDestination {
-            fail_until: 1,
-            ..FakeDestination::new(vault)
-        }),
-        AudioRetention::DeleteAfterProcessing,
-    );
-    let pipeline = with_failing_diarizer(&world, "no model");
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(
-        &world.audio,
-        meeting.id,
-        AudioRetention::DeleteAfterProcessing,
-    );
-    pipeline.enqueue(&meeting, &asset).unwrap();
-    pipeline.wait_until_idle().await;
+    let (world, pipeline, meeting, asset) = a_fallback_whose_export_failed(true).await;
     pipeline.rerun_summary(meeting.id, "default").await.unwrap();
     assert_eq!(
         world.store.deliveries(meeting.id).unwrap()[0].status,
@@ -4822,26 +4811,11 @@ async fn a_rerun_whose_diarizer_fails_keeps_the_recording_of_diarized_speakers()
 #[tokio::test(flavor = "multi_thread")]
 async fn the_empty_lane_bound_is_exclusive() {
     for (duration, kept) in [(30.0, false), (30.5, true)] {
-        let world = world_with(
-            false,
-            None,
-            AudioRetention::DeleteAfterProcessing,
-            FakeSpeechEngine {
-                silent_below_peak: Some(f32::MAX),
-                ..FakeSpeechEngine::default()
-            },
-            FakeDiarizer::default(),
+        assert_eq!(
+            a_silent_call_keeps_its_recording(duration).await,
+            kept,
+            "{duration} s"
         );
-        let mut meeting = call_meeting(world.now);
-        meeting.duration = duration;
-        let asset = call_asset(
-            &world.audio,
-            meeting.id,
-            AudioRetention::DeleteAfterProcessing,
-        );
-        world.pipeline.enqueue(&meeting, &asset).unwrap();
-        world.pipeline.wait_until_idle().await;
-        assert_eq!(expires_at(&world, &asset).is_none(), kept, "{duration} s");
     }
 }
 
