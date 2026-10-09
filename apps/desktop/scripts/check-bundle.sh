@@ -11,7 +11,8 @@
 #
 #   deb       deb/*.deb, unpacked with dpkg-deb -x, into usr/bin/; also
 #             the stop timeout drop-ins for the autostart unit and GNOME's
-#             scope under usr/lib/systemd/user/
+#             scope under usr/lib/systemd/user/, and the postinst that
+#             reloads the user managers for them
 #   appimage  appimage/*.AppImage, unpacked with --appimage-extract, into
 #             usr/bin/
 #   app       macos/*.app, into Contents/MacOS/. With --signed, also the
@@ -107,6 +108,12 @@ check_deb() {
   # `\x2d` is literal, as systemd names the directories.
   drop_in 'app-steno\x2ddesktop@autostart.service.d/10-steno.conf' autostart-service-stop-timeout.conf
   drop_in 'app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf' gnome-scope-stop-timeout.conf
+  dpkg-deb -e "$deb" "$scratch/deb-control"
+  [[ -x "$scratch/deb-control/postinst" ]] \
+    || die "the .deb has no executable postinst"
+  cmp -s "$scratch/deb-control/postinst" "$root/apps/desktop/src-tauri/linux/deb-postinst.sh" \
+    || die "the .deb's postinst is not linux/deb-postinst.sh"
+  echo "ok: the .deb's postinst reloads the user managers"
 }
 
 check_appimage() {

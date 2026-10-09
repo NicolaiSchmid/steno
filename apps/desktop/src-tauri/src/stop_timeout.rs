@@ -26,7 +26,9 @@
 //! once the autostart entry is gone, a reload unloads the unit, and the
 //! session's end then stops the app without a SIGTERM. For the same reason
 //! Launch at login, turned off while the app runs as that unit, goes off
-//! at the exit (`autostart::set_enabled`).
+//! at the exit (`autostart::set_enabled`). The `.deb`'s `postinst` reloads
+//! the user managers by the same rule (`linux/deb-postinst.sh`), so an app
+//! already running when the package is upgraded gets the 20 s too.
 //!
 //! Rust only: the Swift app is a macOS login item.
 
@@ -390,6 +392,29 @@ mod tests {
                     .unwrap();
             assert_eq!(shipped, drop_in.contents, "{target}");
         }
+    }
+
+    /// The `.deb`'s postinst reloads the user managers, and skips a user
+    /// whose app runs as this autostart unit without the entry the plugin
+    /// writes (`may_reload`).
+    #[test]
+    fn the_debs_postinst_knows_the_unit_and_the_entry() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let script = config["bundle"]["linux"]["deb"]["postInstallScript"]
+            .as_str()
+            .unwrap();
+        assert_eq!(script, "linux/deb-postinst.sh");
+        let script = include_str!("../linux/deb-postinst.sh");
+        assert!(script.contains(&format!("unit='{}'", DropIn::AUTOSTART.unit)));
+        let linux: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.linux.conf.json")).unwrap();
+        let entry = format!(
+            "/.config/autostart/{}.desktop",
+            linux["productName"].as_str().unwrap()
+        );
+        assert!(script.contains(&entry), "{entry}");
+        assert!(script.contains("daemon-reload"));
     }
 
     /// Under `$HOME/.config` whatever `XDG_CONFIG_HOME` says: the second
