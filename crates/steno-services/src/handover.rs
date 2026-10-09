@@ -260,7 +260,7 @@ impl Handover for ListenerHandover {
 
 /// What `start` and `revoke` answer while the import waits, before a
 /// listener build failed.
-pub const WAITING_FOR_IMPORT: &str = "Phones can upload again once Steno has brought over this Mac's phone pairing from the previous version.";
+pub const WAITING_FOR_IMPORT: &str = "Phones can upload again once Steno has brought over this Mac's phone pairing from the previous version. This happens in the welcome step when Steno next starts.";
 
 /// The host's `Handover` while the Swift import is pending
 /// (`crate::swift_import`): no listener and no identity read until the

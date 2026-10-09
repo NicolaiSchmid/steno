@@ -81,7 +81,7 @@ export function ImportPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 				description={`Then Steno reads what the previous version stored without asking again. Your meetings and settings are already here. ${
 					waiting
 						? "Continue for now leaves phone uploads waiting until this step comes back at the next launch."
-						: "Not now leaves phone uploads waiting, and new meetings without a summary, until this step comes back at the next launch."
+						: "Not now leaves phone uploads waiting until this step comes back at the next launch. If your summaries use an API key, new meetings get no summary until then, or until you enter the key in Settings."
 				}`}
 				icon={<KeyRoundIcon aria-hidden="true" />}
 				title="Choose Always Allow in each prompt."

@@ -599,8 +599,8 @@ pub struct SwiftImportStatus {
     pub stage: SwiftImportStage,
     /// The keychain prompts a run may bring up, at most three: one per item
     /// it reads (the API key until it was read, whether the Swift app or a
-    /// beta stored it, the handover identity until its export got through,
-    /// and a beta's stored identity it replaces).
+    /// desktop-id build stored it, the handover identity until its export
+    /// got through, and a desktop-id build's stored identity it replaces).
     pub prompts: u8,
     /// Why the last run left the identity behind, for the step's line.
     pub error: Option<String>,

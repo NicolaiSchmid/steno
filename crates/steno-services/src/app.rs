@@ -223,8 +223,8 @@ fn api_key(
 /// through: the host's [`Services`], the pipeline
 /// ([`pipeline_dependencies`]) and the handover listener. Only the
 /// import's step writes the identity to the store behind the gate.
-/// [`build_with_import`] builds the layers in one place, which the tests
-/// share.
+/// `gated_secrets` builds the layers in one place, which
+/// [`build_with_import`] and the tests share.
 #[derive(Clone)]
 pub struct GraphSecrets {
     /// The outermost layer.

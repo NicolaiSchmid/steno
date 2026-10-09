@@ -19,6 +19,9 @@ describe("ImportPage", () => {
 		expect(screen.getByTestId("import-always-allow")).toHaveTextContent(
 			"Choose Always Allow in each prompt.",
 		);
+		expect(screen.getByTestId("import-always-allow")).toHaveTextContent(
+			"Not now leaves phone uploads waiting until this step comes back at the next launch. If your summaries use an API key, new meetings get no summary until then, or until you enter the key in Settings.",
+		);
 		expect(screen.queryByTestId("import-waiting")).not.toBeInTheDocument();
 		await user.click(screen.getByTestId("import-run"));
 		expect(callsTo(harness.transport, "onboarding.import")).toHaveLength(1);

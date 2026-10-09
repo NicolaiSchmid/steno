@@ -42,7 +42,7 @@
 //! The whole state machine, one row per event. The key gate is what the
 //! graph's API key reads answer ([`KeyGate`]): *closed* is no key item,
 //! so every read answers no key and the passes run keyless, until the
-//! step ran and opens it; *withheld* answers no key, and for an endpoint
+//! step ran or was skipped, which opens it; *withheld* answers no key, and for an endpoint
 //! that needs the key the pipeline runs no LLM pass, neither the cleanup
 //! nor the summary (the meeting completes with its raw transcript and no
 //! summary, which can be run again once a key is saved; `ChatGPT` summaries
