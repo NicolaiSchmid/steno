@@ -395,27 +395,179 @@ mod tests {
         }
     }
 
-    /// The `.deb`'s postinst reloads the user managers, and skips a user
-    /// whose app runs as this autostart unit without the entry the plugin
-    /// writes (`may_reload`).
-    #[test]
-    fn the_debs_postinst_knows_the_unit_and_the_entry() {
+    /// A `systemctl` for the postinst: logs each call to `$FAKE/calls`,
+    /// lists `$FAKE/managers`, answers `is-active` with `$FAKE/<user>`
+    /// (`error`: a failed call, which prints nothing on stdout), and fails
+    /// a reload for a user with `$FAKE/<user>.fails`.
+    const FAKE_SYSTEMCTL: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE/calls"
+case $1 in
+  list-units) cat "$FAKE/managers"; exit 0 ;;
+  --user) [ "$2" = -M ] || exit 9; user=${3%@}; shift 3 ;;
+  *) exit 9 ;;
+esac
+case $1 in
+  is-active)
+    state=$(cat "$FAKE/$user")
+    [ "$state" = error ] && { echo "Failed to connect to bus" >&2; exit 1; }
+    echo "$state"
+    [ "$state" = active ] ;;
+  daemon-reload) [ ! -e "$FAKE/$user.fails" ] ;;
+  *) exit 9 ;;
+esac
+"#;
+
+    /// A `getent passwd <uid>` over `$FAKE/passwd`.
+    const FAKE_GETENT: &str = r#"#!/bin/sh
+[ "$1" = passwd ] && grep "^[^:]*:x:$2:" "$FAKE/passwd"
+"#;
+
+    /// The guard on systemd running, which the test points at `$FAKE`.
+    const SYSTEMD_RUNNING: &str = "[ -d /run/systemd/system ]";
+
+    /// The `.deb`'s postinst (`postInstallScript` in `tauri.conf.json`),
+    /// with a fake `systemctl` and `getent` first on its `PATH`, the
+    /// running user managers' users as `(user, autostart entry, the unit's
+    /// state)`, and `$HOME` (root's) holding an entry of its own. Returns
+    /// the script's exit status and the `systemctl` calls.
+    fn run_postinst(
+        name: &str,
+        argument: Option<&str>,
+        systemd: bool,
+        users: &[(&str, bool, &str)],
+        failing_reload: &str,
+    ) -> (std::process::ExitStatus, Vec<String>) {
+        use std::fmt::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
         let config: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
-        let script = config["bundle"]["linux"]["deb"]["postInstallScript"]
+        let path = config["bundle"]["linux"]["deb"]["postInstallScript"]
             .as_str()
             .unwrap();
-        assert_eq!(script, "linux/deb-postinst.sh");
-        let script = include_str!("../linux/deb-postinst.sh");
-        assert!(script.contains(&format!("unit='{}'", DropIn::AUTOSTART.unit)));
+        let script =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap();
+        assert_eq!(script.matches(SYSTEMD_RUNNING).count(), 1);
+        let root = scratch(name);
+        let fake = root.join("fake");
+        let bin = root.join("bin");
+        for directory in [&fake, &bin] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        if systemd {
+            std::fs::create_dir_all(fake.join("systemd")).unwrap();
+        }
+        let postinst = root.join("postinst");
+        std::fs::write(
+            &postinst,
+            script.replace(SYSTEMD_RUNNING, r#"[ -d "$FAKE/systemd" ]"#),
+        )
+        .unwrap();
+        for (tool, contents) in [("systemctl", FAKE_SYSTEMCTL), ("getent", FAKE_GETENT)] {
+            let tool = bin.join(tool);
+            std::fs::write(&tool, contents).unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let linux: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.linux.conf.json")).unwrap();
         let entry = format!(
-            "/.config/autostart/{}.desktop",
+            ".config/autostart/{}.desktop",
             linux["productName"].as_str().unwrap()
         );
-        assert!(script.contains(&entry), "{entry}");
-        assert!(script.contains("daemon-reload"));
+        let (mut managers, mut passwd) = (String::new(), String::new());
+        // One manager whose uid has no passwd entry, which is skipped.
+        managers.push_str("user@999.service loaded active running User Manager for UID 999\n");
+        for (uid, (user, has_entry, state)) in (1000..).zip(users) {
+            let home = root.join("home").join(user);
+            std::fs::create_dir_all(&home).unwrap();
+            if *has_entry {
+                std::fs::create_dir_all(home.join(&entry).parent().unwrap()).unwrap();
+                std::fs::write(home.join(&entry), b"").unwrap();
+            }
+            std::fs::write(fake.join(user), state).unwrap();
+            writeln!(
+                managers,
+                "user@{uid}.service loaded active running User Manager for UID {uid}"
+            )
+            .unwrap();
+            writeln!(passwd, "{user}:x:{uid}:{uid}::{}:/bin/sh", home.display()).unwrap();
+        }
+        std::fs::write(fake.join(format!("{failing_reload}.fails")), b"").unwrap();
+        std::fs::write(fake.join("managers"), managers).unwrap();
+        std::fs::write(fake.join("passwd"), passwd).unwrap();
+        let root_home = root.join("root");
+        std::fs::create_dir_all(root_home.join(&entry).parent().unwrap()).unwrap();
+        std::fs::write(root_home.join(&entry), b"").unwrap();
+
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let status = std::process::Command::new("sh")
+            .arg(&postinst)
+            .args(argument)
+            .env("PATH", path)
+            .env("FAKE", &fake)
+            .env("HOME", &root_home)
+            .status()
+            .unwrap();
+        let calls = std::fs::read_to_string(fake.join("calls")).unwrap_or_default();
+        std::fs::remove_dir_all(&root).unwrap();
+        (status, calls.lines().map(str::to_owned).collect())
+    }
+
+    /// At `configure` the postinst reloads every running user manager
+    /// whose user has the autostart entry, or whose autostart unit is known
+    /// to be stopped (`inactive`, `failed`), without asking for the unit's
+    /// state where the entry stands. It skips a user whose unit runs, is
+    /// starting or stopping, or whose state the call could not read, since
+    /// without the entry the reload would unload a running unit; it reads
+    /// the user's home from `passwd`, not root's `$HOME`. A failed reload
+    /// fails nothing.
+    #[test]
+    fn the_debs_postinst_reloads_only_where_the_unit_survives_it() {
+        let users = [
+            ("entry", true, "active"),
+            ("fails", true, "active"),
+            ("running", false, "active"),
+            ("stopped", false, "inactive"),
+            ("crashed", false, "failed"),
+            ("unread", false, "error"),
+            ("starting", false, "activating"),
+            ("stopping", false, "deactivating"),
+        ];
+        let (status, calls) = run_postinst("postinst", Some("configure"), true, &users, "fails");
+        assert!(status.success(), "{status}");
+        let mut expected = vec![
+            "list-units --type=service --state=running --plain --no-legend user@*.service"
+                .to_owned(),
+        ];
+        for (user, has_entry, state) in users {
+            if !has_entry {
+                expected.push(format!(
+                    "--user -M {user}@ is-active {}",
+                    DropIn::AUTOSTART.unit
+                ));
+            }
+            if has_entry || ["inactive", "failed"].contains(&state) {
+                expected.push(format!("--user -M {user}@ daemon-reload"));
+            }
+        }
+        assert_eq!(calls, expected);
+    }
+
+    /// Only `configure` acts, and only where systemd runs.
+    #[test]
+    fn the_debs_postinst_acts_only_at_configure_under_systemd() {
+        let users = [("stopped", false, "inactive")];
+        for (argument, systemd) in [
+            (Some("abort-upgrade"), true),
+            (None, true),
+            (Some("configure"), false),
+        ] {
+            let (status, calls) = run_postinst("postinst-idle", argument, systemd, &users, "");
+            assert!(status.success(), "{argument:?} {systemd}: {status}");
+            assert_eq!(calls, Vec::<String>::new(), "{argument:?} {systemd}");
+        }
     }
 
     /// Under `$HOME/.config` whatever `XDG_CONFIG_HOME` says: the second
