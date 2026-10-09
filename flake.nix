@@ -1,5 +1,5 @@
 {
-  description = "Steno: a bot-free meeting recorder for the Mac (installs the released Steno.app)";
+  description = "Steno: a bot-free meeting recorder (the released Mac app, and the Linux app built from source with a NixOS module)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -15,7 +15,7 @@
     };
 
     # The app is a signed, notarised Apple Silicon bundle; there is nothing
-    # to build on any other system.
+    # to build on the Mac.
     system = "aarch64-darwin";
     pkgs = nixpkgs.legacyPackages.${system};
     lib = pkgs.lib;
@@ -86,11 +86,22 @@
         sourceProvenance = [lib.sourceTypes.binaryNativeCode];
       };
     };
+
+    # Linux: the Tauri app built from this tree (nix/package.nix).
+    linuxSystem = "x86_64-linux";
+    linuxPkgs = nixpkgs.legacyPackages.${linuxSystem};
+    linuxSteno = linuxPkgs.callPackage ./nix/package.nix {};
   in {
     packages.${system} = {
       inherit steno;
       default = steno;
     };
+    packages.${linuxSystem} = {
+      steno = linuxSteno;
+      default = linuxSteno;
+    };
+
+    nixosModules.default = import ./nix/module.nix {inherit (self) packages;};
 
     checks.${system} = {
       # The unpacked bundle is a real app with the expected identity. The
@@ -116,6 +127,12 @@
           PY
           touch $out
         '';
+    };
+
+    checks.${linuxSystem} = import ./nix/checks.nix {
+      inherit nixpkgs self;
+      pkgs = linuxPkgs;
+      steno = linuxSteno;
     };
 
     formatter = lib.genAttrs [system "x86_64-linux" "aarch64-linux"] (

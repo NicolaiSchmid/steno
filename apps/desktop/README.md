@@ -493,6 +493,69 @@ dependency sources in the cargo home read `cargo/…`. Cargo already gives
 the workspace's own sources relative paths; any absolute one reads
 `steno/…`.
 
+### The Nix package and the NixOS module
+
+`flake.nix` builds the Linux app from the tree it is in
+(`packages.x86_64-linux.steno`, in `nix/package.nix`), so any tag builds as
+it is:
+
+```sh
+nix build github:NicolaiSchmid/steno/<tag>#steno
+```
+
+The derivation does what the release does for the `.deb`: it builds the web
+UI, stages the sidecar with `stage-sidecar.sh`, runs `cargo tauri build
+--config tauri.release.conf.json` without updater artifacts, and installs
+the `.deb`'s tree. The differences:
+
+- ONNX Runtime is nixpkgs' `onnxruntime`, linked dynamically
+  (`ORT_LIB_LOCATION`, `ORT_PREFER_DYNAMIC_LINK=1`), since the sandbox
+  cannot download pyke's build.
+- The tray's `dlopen` of `libayatana-appindicator3.so.1` names the library's
+  store path (`postPatch`).
+- Only `steno-desktop` gets the GTK wrapper (`wrapGAppsHook3`, which the
+  file chooser's schemas need). The wrapper sets `STENO_DISTRIBUTION=nix`
+  unless the environment has it, and execs `bin/.steno-desktop-wrapped`;
+  the sidecar beside it stays the plain binary.
+- `STENO_DISTRIBUTION=nix` is also in the build environment, for the
+  build-time default.
+- The `.deb`'s systemd user files (the stop timeout drop-ins) end up in
+  `share/systemd/user/`, where stdenv moves them, with `lib/systemd/user`
+  a link to it: the module links them into the user units, and a profile
+  install's `share/` is on the user manager's `XDG_DATA_DIRS` search path.
+
+The crates' hashes come from `Cargo.lock`. The web UI's dependencies are
+one fixed-output hash, `pnpmDeps.hash` in `nix/package.nix`: a change to
+`apps/macos/web/pnpm-lock.yaml` needs a new one. Build, and copy the `got:`
+hash from the mismatch.
+
+`nixosModules.default` adds `programs.steno` (`nix/module.nix`):
+
+```nix
+# The system's flake.nix: an input at a tag,
+inputs.steno.url = "github:NicolaiSchmid/steno/<tag>";
+# and in nixpkgs.lib.nixosSystem's modules:
+steno.nixosModules.default
+{ programs.steno.enable = true; }
+```
+
+It installs the package system-wide, or for the users in
+`programs.steno.users` only, and starts Steno with the graphical session as
+the user service `steno.service` (`TimeoutStopSec=20s`,
+`STENO_LOGIN_ITEM=managed`; `programs.steno.launchAtLogin = false` turns it
+off). The service runs the profile path, `/run/current-system/sw/bin/steno-desktop`
+or `/etc/profiles/per-user/%u/bin/steno-desktop`, never a store path. The
+module also turns PipeWire on and GNOME Keyring as the Secret Service
+(unless Plasma's KWallet is there; both are `mkDefault`), links the
+package's systemd user files, and raises logind's `InhibitDelayMaxSec` when
+`programs.steno.inhibitDelayMaxSec` is set. It does not open the handover's
+port in the firewall yet.
+
+`nix flake check` builds the package and checks its layout (the wrapper,
+the sidecar beside the real binary, no missing library, the tray's
+library, the `.deb`'s systemd user files), and evaluates the module in a
+system-wide and a per-user system down to the user units.
+
 ## Release
 
 `.github/workflows/desktop-release.yml` builds the six bundles on the three
