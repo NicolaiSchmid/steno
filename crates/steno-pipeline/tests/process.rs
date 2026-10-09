@@ -1711,11 +1711,16 @@ async fn a_failing_stage_marks_the_meeting_failed_with_its_name() {
 /// A pipeline over the world whose diarizer fails with `reason`.
 fn with_failing_diarizer(world: &World, reason: &str) -> ProcessingPipeline {
     let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.diarizer = Arc::new(FakeDiarizer {
+    dependencies.diarizer = failing_diarizer(reason);
+    ProcessingPipeline::new(dependencies)
+}
+
+/// A diarizer whose every run fails with `reason`.
+fn failing_diarizer(reason: &str) -> Arc<FakeDiarizer> {
+    Arc::new(FakeDiarizer {
         failure: Some(reason.to_owned()),
         ..FakeDiarizer::default()
-    });
-    ProcessingPipeline::new(dependencies)
+    })
 }
 
 /// A diarizer that fails costs the speaker labels, not the transcript:
@@ -4770,10 +4775,7 @@ async fn a_failure_after_the_ready_write_keeps_a_fallback_recording() {
         .dependencies()
         .clone()
         .with_clock(Arc::new(clock));
-    dependencies.diarizer = Arc::new(FakeDiarizer {
-        failure: Some("no model".to_owned()),
-        ..FakeDiarizer::default()
-    });
+    dependencies.diarizer = failing_diarizer("no model");
     let pipeline = ProcessingPipeline::new(dependencies);
     let asset = call_asset(
         &world.audio,
@@ -4931,6 +4933,7 @@ async fn a_phone_meeting_without_a_duration_gets_the_decoded_length() {
     assert_eq!(world.store.segments(meeting.id).unwrap(), Vec::new());
     assert_eq!(expires_at(&world, &asset), None);
 }
+
 /// Rewrites the system sidecar with `seconds` of the conversation: the
 /// fake engine then yields one-second tap segments up to `seconds`, so a
 /// re-run past the first run's six seconds has speech that no stored
@@ -5098,10 +5101,7 @@ async fn the_room_row_beside_stored_speakers_takes_the_next_free_label() {
         Some(Arc::new(PassthroughCleaner::default())),
         Some(summarizer.clone()),
     );
-    dependencies.diarizer = Arc::new(FakeDiarizer {
-        failure: Some("no model".to_owned()),
-        ..FakeDiarizer::default()
-    });
+    dependencies.diarizer = failing_diarizer("no model");
     let pipeline = ProcessingPipeline::new(dependencies);
     pipeline.reprocess(meeting.id).unwrap();
     pipeline.wait_until_idle().await;
@@ -5216,10 +5216,7 @@ async fn confirmed_and_renamed_speakers_keep_their_segments_on_a_fell_back_rerun
     world.store.confirm_speaker(two, &dora).unwrap();
 
     let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.diarizer = Arc::new(FakeDiarizer {
-        failure: Some("no model".to_owned()),
-        ..FakeDiarizer::default()
-    });
+    dependencies.diarizer = failing_diarizer("no model");
     dependencies.speech_engine = SharedSpeechEngine::new(Arc::new(FakeSpeechEngine {
         segment_seconds: 1.4,
         ..FakeSpeechEngine::default()
