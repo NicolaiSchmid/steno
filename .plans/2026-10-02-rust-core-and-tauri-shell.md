@@ -966,8 +966,9 @@ still has to draw the window side. `[ ]` is not ported yet.
     earlier clip goes only once a durable commit names the new one. A confirmed
     speaker the re-run drops, or whose new row has no clip, loses its row or its
     `sampleClipURL`, as before, but keeps every clip file it had: the file stays on
-    the disk, unnamed and not played, until the meeting is deleted. The sweep runs
-    while the run holds the meeting in the in-flight set, so no other run of the
+    the disk, unnamed and not played; retention removes it with the audio while the
+    meeting still has that speaker, and deleting the meeting removes it. The sweep
+    runs while the run holds the meeting in the in-flight set, so no other run of the
     meeting has uncommitted clips in that folder, and speaker ids derive from the
     meeting id, so another meeting's clips are never the sweep's. Clips are written
     only into the meeting's own folder: a meeting whose master is not in its own
