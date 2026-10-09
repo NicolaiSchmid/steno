@@ -471,7 +471,7 @@ pub fn process_again_refusal_line(
             )
             .to_owned(),
         ProcessAgainRefusal::Busy => "This meeting is already being processed.".to_owned(),
-        ProcessAgainRefusal::ModelsMissing => ProgressEntry::MODELS_MISSING_TITLE.to_owned(),
+        ProcessAgainRefusal::ModelsMissing => format!("{}.", ProgressEntry::MODELS_MISSING_TITLE),
         ProcessAgainRefusal::Quitting => return None,
         ProcessAgainRefusal::CouldNotStart(reason) => {
             format!("Processing could not start: {reason}")

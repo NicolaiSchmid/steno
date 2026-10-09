@@ -2090,7 +2090,7 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         (Refusal::Busy, "This meeting is already being processed."),
         (
             Refusal::ModelsMissing,
-            "Download the speech models in Settings",
+            "Download the speech models in Settings.",
         ),
         (
             Refusal::NotOffered,

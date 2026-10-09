@@ -996,7 +996,7 @@ fn process_meeting_on_a_queued_meeting_says_the_app_processes_it() {
     assert!(
         queued.stderr.contains(&format!(
             "Meeting {id} is queued or being processed; the app processes it at its next \
-             launch or once its models are installed."
+             launch, or once the speech models are installed in Settings."
         )),
         "{}",
         queued.stderr

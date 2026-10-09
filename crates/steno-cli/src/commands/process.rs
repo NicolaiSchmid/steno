@@ -318,8 +318,8 @@ fn reprocess_failure(error: ReprocessError) -> Failure {
             state: MeetingStateKind::Queued | MeetingStateKind::Processing,
         }
         | ReprocessError::WaitingForModels(meeting_id) => Failure::runtime(format!(
-            "Meeting {} is queued or being processed; the app processes it at its next launch \
-             or once its models are installed.",
+            "Meeting {} is queued or being processed; the app processes it at its next launch, \
+             or once the speech models are installed in Settings.",
             uuid_string(meeting_id)
         )),
         ReprocessError::Busy(meeting_id) => Failure::runtime(format!(
@@ -432,8 +432,8 @@ mod tests {
         let s = uuid_string(id);
         let busy = format!("Meeting {s} is already being processed.");
         let queued = format!(
-            "Meeting {s} is queued or being processed; the app processes it at its next launch \
-             or once its models are installed."
+            "Meeting {s} is queued or being processed; the app processes it at its next launch, \
+             or once the speech models are installed in Settings."
         );
         let unfinished = |state| ReprocessError::Unfinished {
             meeting_id: id,
