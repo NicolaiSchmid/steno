@@ -546,16 +546,27 @@ the user service `steno.service` (`TimeoutStopSec=20s`,
 `STENO_LOGIN_ITEM=managed`, which X5 reads; `programs.steno.launchAtLogin =
 false` turns it off). The service runs the profile path,
 `/run/current-system/sw/bin/steno-desktop` or
-`/etc/profiles/per-user/%u/bin/steno-desktop`, never a store path. A
-rebuild never restarts or stops a running Steno (`X-RestartIfChanged=false`,
-`X-StopOnRemoval=false`); the new version starts at the next login.
+`/etc/profiles/per-user/%u/bin/steno-desktop`, never a store path.
+
+A rebuild never restarts or stops `steno.service`, whatever changed
+(`X-RestartIfChanged=false`, `X-StopOnRemoval=false`). The new version
+starts at the next login, or at the next launch after quitting. Turning the
+module or `launchAtLogin` off leaves a running Steno until it quits or the
+session ends. A rebuild that changes PipeWire's units, as most nixpkgs bumps
+do, restarts PipeWire. A recording in progress then reconnects with a second
+or two of silence; if PipeWire is not back within about 2 s, the recording
+ends and what was recorded is saved.
 
 The module also turns on PipeWire and, as the Secret Service, GNOME Keyring,
-both with `mkDefault`. The app's secrets move there with #221; until then
-they are a 0600 file. The keyring stays off where another Secret Service
-runs (Plasma's KWallet, `services.passSecretService`) and beside
-`programs.ssh.startAgent`, because the keyring brings gcr's SSH agent and
-nixpkgs refuses the two together. The module links the package's systemd
+both with `mkDefault`. The app keeps its secrets there, or in a 0600 file
+where no Secret Service answers. The keyring stays off where another Secret
+Service runs (Plasma's KWallet, `services.passSecretService`) and beside
+another SSH agent, because the keyring brings gcr's: nixpkgs refuses it next
+to `programs.ssh.startAgent`, and next to
+`programs.gnupg.agent.enableSSHSupport` gcr's socket takes the session's
+`SSH_AUTH_SOCK`, so SSH through gpg-agent stops working.
+`services.gnome.gnome-keyring.enable = false` turns it off; the module only
+sets a default. The module links the package's systemd
 user files (once P5, #227, lands), and raises logind's `InhibitDelayMaxSec`
 when `programs.steno.inhibitDelayMaxSec` is set. It does not open the
 handover's port in the firewall yet.
@@ -567,9 +578,10 @@ test.
 
 `nix flake check` builds the package and checks its layout (the wrapper and
 its GTK schemas, the sidecar beside the real binary, no missing library, the
-tray's library, the `.deb`'s systemd user files) and that the release pins
-the same Tauri CLI. It evaluates the module in a system-wide and a per-user
-system down to the user units, and in one with `programs.ssh.startAgent`.
+tray's library, the `.deb`'s systemd user files once #227 lands) and that
+the release pins the same Tauri CLI. It evaluates the module in a
+system-wide and a per-user system down to the user units, and in one each
+with `programs.ssh.startAgent` and with GnuPG's SSH support.
 
 ## Release
 
