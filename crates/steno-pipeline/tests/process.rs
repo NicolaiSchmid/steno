@@ -4901,3 +4901,37 @@ async fn process_again_on_a_meeting_waiting_for_models_leaves_it_waiting() {
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, refused), MeetingState::Ready);
 }
+
+/// "Process again" on a failed meeting while its models are missing parks
+/// it like any refused run: `queued` with no failure reason, waiting for
+/// the models, its audio kept and its old retention stamp gone, so the
+/// sweep cannot take the recording while it waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn process_again_with_models_missing_parks_the_failed_meeting_with_its_audio() {
+    let world = world(false, None, AudioRetention::KeepDays(30));
+    let gate = Uninstalled::refusing(Refusal::Transcribe);
+    let pipeline = ProcessingPipeline::new(with_engine(&world, gate));
+    let mut meeting = call_meeting(world.now);
+    meeting.state = MeetingState::Failed {
+        reason: "decode: unreadable".to_owned(),
+    };
+    let mut asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepDays(30));
+    asset.expires_at = Some(world.now);
+    world
+        .store
+        .save_meeting_with_asset(&meeting, &asset)
+        .unwrap();
+
+    pipeline.process_again(meeting.id).unwrap();
+    pipeline.wait_until_idle().await;
+    let row = world.store.meeting(meeting.id).unwrap().unwrap();
+    assert_eq!(row.state, MeetingState::Queued);
+    assert_eq!(row.state.failure_reason(), None);
+    assert_eq!(pipeline.dependencies().model_waits.waiting(), [meeting.id]);
+    let stored = world.store.asset(meeting.id).unwrap().unwrap();
+    assert_eq!(stored.expires_at, None);
+    assert!(file_url_path(&stored.url).unwrap().exists());
+    for lane in stored.sidecars_16k.values() {
+        assert!(file_url_path(lane).unwrap().exists());
+    }
+}
