@@ -773,7 +773,7 @@ impl SpeechModels for ModelStoreSpeechModels {
     }
 
     /// The diarizer's two ONNX models each have a line with their own
-    /// licence and attribution ([`ONNX_DIARIZER_NOTICES`]); every other
+    /// licence and attribution (`ONNX_DIARIZER_NOTICES`); every other
     /// asset has the default one.
     fn notices(&self, asset: ModelAsset) -> Vec<ModelNotice> {
         match asset {
