@@ -5106,6 +5106,7 @@ dependencies = [
  "tracing",
  "ureq",
  "whatlang",
+ "zbus",
 ]
 
 [[package]]
