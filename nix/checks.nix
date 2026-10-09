@@ -1,7 +1,8 @@
 # The Linux checks behind `nix flake check`: the package's layout, libraries
 # and wrapper, and the NixOS module evaluated in minimal systems (a
-# system-wide and a per-user install down to the user units it generates,
-# and one each with OpenSSH's and GnuPG's SSH agent).
+# system-wide and a per-user install down to the user units it generates and
+# the session variable, one without launch at login, and one each with
+# OpenSSH's and GnuPG's SSH agent).
 {
   nixpkgs,
   self,
@@ -46,6 +47,7 @@
       programs.steno.inhibitDelayMaxSec = 15;
     }
   ];
+  noLogin = system [{programs.steno.launchAtLogin = false;}];
   # Another SSH agent: the keyring default must stay off and evaluate.
   withAgent = system [{programs.ssh.startAgent = true;}];
   withGpgAgent = system [
@@ -69,6 +71,8 @@
 in {
   package = assert lib.assertMsg (releaseTauriVersions != [] && lib.all (v: v == tauriVersion) releaseTauriVersions)
   "nix/package.nix builds with Tauri CLI ${tauriVersion}, desktop-release.yml with ${toString releaseTauriVersions}";
+  assert lib.assertMsg (steno.env.STENO_DISTRIBUTION == "nix")
+  "the package is built with STENO_DISTRIBUTION=${steno.env.STENO_DISTRIBUTION}, not nix";
     pkgs.runCommand "steno-package-check" {
       nativeBuildInputs = [pkgs.file];
       inherit userUnitFiles;
@@ -85,8 +89,9 @@ in {
       # finds; the sidecar itself is not wrapped.
       grep -q "$bin/.steno-desktop-wrapped" "$bin/steno-desktop" \
         || { echo "the wrapper does not exec .steno-desktop-wrapped"; exit 1; }
-      grep -q 'STENO_DISTRIBUTION' "$bin/steno-desktop" \
-        || { echo "the wrapper misses STENO_DISTRIBUTION"; exit 1; }
+      # makeBinaryWrapper embeds its C source: this is the --set-default.
+      grep -qaF 'setenv("STENO_DISTRIBUTION", "nix", 0)' "$bin/steno-desktop" \
+        || { echo "the wrapper does not default STENO_DISTRIBUTION to nix"; exit 1; }
       # GTK's schemas, without which the file chooser aborts the app, and
       # GIO's TLS module.
       grep -qF 'gsettings-schemas/${pkgs.gtk3.name}' "$bin/steno-desktop" \
@@ -124,7 +129,7 @@ in {
   module = assert installs systemWide.config;
   assert !(installs perUser.config);
   assert lib.elem steno perUser.config.users.users.alice.packages;
-  assert evaluates systemWide.config && evaluates perUser.config;
+  assert evaluates systemWide.config && evaluates perUser.config && evaluates noLogin.config;
   assert evaluates withAgent.config && evaluates withGpgAgent.config;
   assert systemWide.config.services.pipewire.enable;
   assert systemWide.config.services.gnome.gnome-keyring.enable;
@@ -132,6 +137,14 @@ in {
   assert !withGpgAgent.config.services.gnome.gnome-keyring.enable;
   assert !(systemWide.config.services.logind.settings.Login ? InhibitDelayMaxSec);
   assert perUser.config.services.logind.settings.Login.InhibitDelayMaxSec == 15;
+  assert lib.assertMsg (systemWide.config.environment.sessionVariables.STENO_LOGIN_ITEM or null == "managed")
+  "the session lacks STENO_LOGIN_ITEM=managed";
+  assert lib.assertMsg (perUser.config.environment.sessionVariables.STENO_LOGIN_ITEM or null == "managed")
+  "the per-user session lacks STENO_LOGIN_ITEM=managed";
+  assert lib.assertMsg (!(noLogin.config.environment.sessionVariables ? STENO_LOGIN_ITEM))
+  "launchAtLogin = false still sets STENO_LOGIN_ITEM";
+  assert lib.assertMsg (!(noLogin.config.systemd.user.services ? steno))
+  "launchAtLogin = false still has steno.service";
     pkgs.runCommand "steno-module-check" {
       inherit userUnitFiles;
       systemWideUnits = userUnits systemWide.config;

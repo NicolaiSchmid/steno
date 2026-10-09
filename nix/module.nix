@@ -36,6 +36,8 @@ in {
       description = ''
         Install Steno for these users only (their `users.users.<name>.packages`)
         instead of system-wide. Launch at login then starts it only for them.
+        The session's `STENO_LOGIN_ITEM=managed` applies to every user, so
+        list every user who runs Steno.
       '';
     };
 
@@ -106,8 +108,8 @@ in {
         TimeoutStopSec = "20s";
       };
     };
-    # A Steno started from the launcher in the same session then also
-    # agrees that the service owns launch at login.
+    # A Steno started from the launcher in a session that began after the
+    # switch also agrees that the service owns launch at login.
     environment.sessionVariables = lib.mkIf cfg.launchAtLogin {STENO_LOGIN_ITEM = "managed";};
 
     # Capture is native PipeWire.
