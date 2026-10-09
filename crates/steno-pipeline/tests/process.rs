@@ -4644,6 +4644,77 @@ impl steno_core::Diarizer for HeldRefusingDiarizer {
     }
 }
 
+/// A diarizer whose `prepare` waits at a gate (`entered`, then `open`)
+/// while `hold` is set, as a model load that takes a while.
+#[derive(Default)]
+struct SlowLoadDiarizer {
+    hold: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    open: tokio::sync::Notify,
+    inner: FakeDiarizer,
+}
+
+#[async_trait]
+impl steno_core::Diarizer for SlowLoadDiarizer {
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        if self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.open.notified().await;
+        }
+        self.inner.prepare().await
+    }
+
+    async fn diarize(
+        &self,
+        audio: &steno_core::AudioBuffer16k,
+    ) -> steno_core::protocols::BoundaryResult<steno_core::DiarizationResult> {
+        self.inner.diarize(audio).await
+    }
+}
+
+/// A meeting an install's resume starts after it waited for models posts
+/// its `decode` progress before the engines load, so its card no longer
+/// asks for the download while they do.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_meeting_posts_progress_before_the_engines_load() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let gate = Uninstalled::refusing(Refusal::Transcribe);
+    let diarizer = Arc::new(SlowLoadDiarizer::default());
+    let mut dependencies = with_engine(&world, gate.clone());
+    dependencies.diarizer = diarizer.clone();
+    let waits = dependencies.model_waits.clone();
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(waits.waiting(), [meeting]);
+
+    let mut events = world.events.subscribe();
+    gate.installed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    diarizer
+        .hold
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(pipeline.resume_waiting().unwrap(), [meeting]);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        diarizer.entered.notified(),
+    )
+    .await
+    .expect("the engines are loading");
+    let posted = drain(&mut events);
+    assert!(
+        posted.iter().any(|event| matches!(
+            event,
+            MeetingEvent::Progress { meeting_id, progress }
+                if *meeting_id == meeting && progress.stage == PipelineStage::Decode
+        )),
+        "{posted:?}"
+    );
+    diarizer.open.notify_one();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+}
+
 /// An install that finishes while a run is being refused, with its resume
 /// skipping the meeting because it is in flight: the run goes again
 /// instead of leaving the meeting waiting with every model installed.

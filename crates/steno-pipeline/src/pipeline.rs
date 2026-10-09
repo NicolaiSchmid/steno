@@ -1281,6 +1281,16 @@ impl ProcessingPipeline {
         }
     }
 
+    /// Before a meeting that waited for models (`among` holds the waiting
+    /// ones) starts again, posts its `decode` progress, as the run would
+    /// only once the engines are loaded: its card stops asking for the
+    /// download while they load. Rust only, as the wait is.
+    fn leaving_the_wait(&self, among: Option<&BTreeSet<Uuid>>, meeting_id: Uuid) {
+        if among.is_some() {
+            self.post(PipelineStage::Decode, 0, meeting_id);
+        }
+    }
+
     /// The body of both resumes, over every `queued` or `processing`
     /// meeting, or those in `among`: the meetings started, and those
     /// skipped because a run holds them.
@@ -1355,6 +1365,7 @@ impl ProcessingPipeline {
             }
             // Never refused: no run asks to go alone before the loop ends.
             let shared = turns.clone().try_read_owned().ok();
+            self.leaving_the_wait(among, meeting.id);
             self.start(&asset, Turn::Now(shared), claim);
             resumed.push(meeting.id);
         }
@@ -1362,6 +1373,7 @@ impl ProcessingPipeline {
         for (meeting_id, asset, claim) in alone {
             let (turn, waiting) = oneshot::channel();
             turns_alone.push(turn);
+            self.leaving_the_wait(among, meeting_id);
             self.start(&asset, Turn::Alone(waiting), claim);
             resumed.push(meeting_id);
         }
