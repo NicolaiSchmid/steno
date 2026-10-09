@@ -529,6 +529,16 @@ fn shut_down_before_exit(app: &tauri::AppHandle) {
     steno_services::flush_logs();
 }
 
+/// The shutdown before an update's relaunch (`updater`, and the smoke's
+/// `STENO_SMOKE_RELAUNCH`): on Linux it marks the exit as a relaunch first
+/// (`autostart::relaunching`), so the exit's step keeps the login item for
+/// the next process, which runs on in the same unit.
+fn shut_down_for_relaunch(app: &tauri::AppHandle) {
+    #[cfg(target_os = "linux")]
+    autostart::relaunching();
+    shut_down_before_exit(app);
+}
+
 /// The save before an end that no exit request announced, on Linux: the
 /// pipeline quits first, as for an exit signal (`Host::quit_pipeline`),
 /// then the shutdown runs on the calling thread's behalf

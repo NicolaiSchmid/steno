@@ -145,16 +145,14 @@ impl UpdateSource for ShellUpdates {
             .map_err(|error| error.to_string())
     }
 
-    /// Runs the shutdown first (`shut_down_before_exit`), as Sparkle's
+    /// Runs the shutdown first (`shut_down_for_relaunch`), as Sparkle's
     /// relaunch went through `applicationShouldTerminate`. The restart's
     /// own exit request (`tauri::RESTART_EXIT_CODE`) then finds the exit
     /// gate released and goes through (`main::exit_request`).
     async fn relaunch(&self) {
         let handle = self.app.clone();
-        #[cfg(target_os = "linux")]
-        crate::autostart::relaunching();
         let _ = tauri::async_runtime::spawn_blocking(move || {
-            crate::shut_down_before_exit(&handle);
+            crate::shut_down_for_relaunch(&handle);
         })
         .await;
         self.app.restart()

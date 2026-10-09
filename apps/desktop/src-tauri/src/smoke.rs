@@ -13,12 +13,16 @@
 //! fresh page there, and closing onboarding kept it and told the host once
 //! (`windows::Kept`), and on Linux, in a run as the autostart unit,
 //! turning Launch at login off left the entry and set the mark, and on
-//! again cleared it without rewriting the entry
+//! again cleared it without rewriting the entry, or, while the system
+//! manages the login item, turning it off changed nothing
 //! (`check_login_item_waits_for_the_exit`); 1 otherwise; a value that is
-//! not a positive number ends the run at once with 2. Screenshots of the
-//! Xvfb root during the wait are the review evidence; the windows carry
-//! what the host's database holds (nothing on a fresh runner, synthetic
-//! data with the fixture host), the prompts name made-up apps.
+//! not a positive number ends the run at once with 2. With
+//! `STENO_SMOKE_RELAUNCH` set, the run ends as an update's relaunch does,
+//! through `main::shut_down_for_relaunch`, without the restart.
+//! Screenshots of the Xvfb root during the wait are the review evidence;
+//! the windows carry what the host's database holds (nothing on a fresh
+//! runner, synthetic data with the fixture host), the prompts name
+//! made-up apps.
 
 use std::{
     collections::HashMap,
@@ -44,6 +48,10 @@ use crate::{
 };
 
 pub const SECONDS_VARIABLE: &str = "STENO_SMOKE_SECONDS";
+
+/// Set, the run ends as an update's relaunch does (`arm`), so
+/// `smoke-linux.sh` can check what that exit keeps.
+const RELAUNCH_VARIABLE: &str = "STENO_SMOKE_RELAUNCH";
 
 /// What the run has seen so far; managed state, read by the timer thread.
 /// Counts on every run, logs only on a smoke run.
@@ -185,8 +193,9 @@ pub enum Outcome {
     WindowsFailed(String),
     /// On Linux, as the autostart unit: turning Launch at login off
     /// changed the entry at once, set no mark, or still read as on, or
-    /// turning it on again kept the mark or rewrote the entry; the message
-    /// says which.
+    /// turning it on again kept the mark or rewrote the entry, or, while
+    /// the system manages the login item, turning it off changed the login
+    /// item at all; the message says which.
     #[cfg(target_os = "linux")]
     LoginItemFailed(String),
 }
@@ -317,6 +326,10 @@ pub fn arm(app: &AppHandle) {
         });
         let outcome = handle.state::<Smoke>().outcome(checks);
         stderr_line!("[steno-desktop] smoke: {}", outcome.message(seconds));
+        if env::var_os(RELAUNCH_VARIABLE).is_some() {
+            stderr_line!("[steno-desktop] smoke: ending as an update's relaunch");
+            crate::shut_down_for_relaunch(&handle);
+        }
         handle.exit(outcome.exit_code());
     });
 }
