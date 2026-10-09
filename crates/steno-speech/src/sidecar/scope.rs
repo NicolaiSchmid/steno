@@ -972,6 +972,26 @@ mod tests {
     }
 
     #[test]
+    fn a_call_off_left_unanswered_leaves_the_scope() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let asked = FakeManager::serve(&daemon, Job::SlowToCancel(Duration::from_millis(500)));
+
+        // The call-off's method timeout is the 300 ms left at the start.
+        let error = start_scope_over_bus(
+            4242,
+            &placement(UWSM).unwrap(),
+            &uwsm_system(daemon.path(), LEFT_BEHIND),
+            Instant::now() + Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ScopeError::Unsure(_)), "{error}");
+        assert!(asked.cancelled.try_recv().is_ok());
+        assert!(asked.stopped.recv_timeout(Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
     fn a_manager_that_answers_after_the_deadline_is_not_waited_for() {
         static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
         let Some(daemon) = Daemon::start() else {
