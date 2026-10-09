@@ -1510,8 +1510,8 @@ impl Core {
 }
 
 /// `error` as a `WriterFailed`: one that already is passes through, so its
-/// `Display` says "writing the recording failed" once, and so does a
-/// `RecordingExists`, which wrote nothing.
+/// `Display` says "writing the recording failed" once. A `RecordingExists`
+/// passes through too: it wrote nothing, and its `Display` names the folder.
 fn as_writer_failure(error: CaptureError) -> CaptureError {
     match error {
         CaptureError::WriterFailed(_) | CaptureError::RecordingExists(_) => error,

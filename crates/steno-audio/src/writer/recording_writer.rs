@@ -4,10 +4,10 @@
 //! The master is `recording.caf` (48 kHz Float32, one channel per lane),
 //! plus one 16 kHz Int16 WAV sidecar per lane through
 //! [`Resampler48kTo16k`], plus `mic.raw.caf` when asked, all into
-//! `RecordingLayout`'s directory, which `new` creates and never reuses
-//! (Rust only). Owned by the writer thread; one `write`
-//! per 10 ms frame, `finish()` patches sizes and returns the files. All
-//! scratch buffers are allocated in `new`.
+//! `RecordingLayout`'s directory, which `new` creates and never reuses.
+//! Owned by the writer thread; one `write` per 10 ms frame, `finish()`
+//! patches sizes and returns the files. All scratch buffers are allocated
+//! in `new`.
 //!
 //! The sidecars lag the master by the resampler's group delay: the 192-tap
 //! linear-phase FIR delays by 95.5 input samples, so every sidecar sample

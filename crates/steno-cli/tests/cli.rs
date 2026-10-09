@@ -1316,7 +1316,7 @@ fn record_refuses_a_meeting_folder_that_holds_a_recording() {
     assert!(
         before
             .iter()
-            .any(|(path, bytes)| { path.ends_with("recording.caf") && bytes.len() > 4_096 }),
+            .any(|(path, bytes)| path.ends_with("recording.caf") && bytes.len() > 4_096),
         "a master with audio in {}",
         folder.display()
     );
