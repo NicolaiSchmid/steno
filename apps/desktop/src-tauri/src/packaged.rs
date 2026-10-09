@@ -15,20 +15,19 @@
 //!   exit, after the save ([`remove_earlier_entry_at_exit`]), since a
 //!   reload of the user manager without the entry would leave the
 //!   recorder in a unit no logout stops.
-//! - **The entry's path** ([`launcher_path`](linux::launcher_path), Linux):
-//!   the autostart entry the app writes names a path that stays the same
-//!   across upgrades, never `current_exe()` (on Nix the wrapped binary
-//!   inside the store): [`EXEC_PATH_VARIABLE`](linux::EXEC_PATH_VARIABLE)
-//!   when a package's wrapper names one, else the first of the
-//!   [`candidates`](linux::candidates) that resolves into the directory
-//!   the running binary resolves into
-//!   ([`stable_path`](linux::stable_path)). Nix's wrapper
-//!   (`<out>/bin/steno-desktop`) and the binary it runs
-//!   (`<out>/bin/.steno-desktop-wrapped`) share that directory, so a
-//!   profile's `bin/steno-desktop` counts while it links to this build. An
-//!   `AppImage` keeps the plugin's own entry, which names `$APPIMAGE`. With
-//!   no such path the app writes no entry, and turning launch at login on
-//!   fails with [`NO_STABLE_PATH`](linux::NO_STABLE_PATH).
+//! - **The entry's path** (`linux::launcher_path`): the autostart entry
+//!   the app writes names a path that stays the same across upgrades,
+//!   never `current_exe()` (on Nix the wrapped binary inside the store):
+//!   [`EXEC_PATH_VARIABLE`](linux::EXEC_PATH_VARIABLE) when a package's
+//!   wrapper names one, else the first of the candidates
+//!   (`linux::candidates`) that resolves into the directory the running
+//!   binary resolves into. Nix's wrapper (`<out>/bin/steno-desktop`) and
+//!   the binary it runs (`<out>/bin/.steno-desktop-wrapped`) share that
+//!   directory, so a profile's `bin/steno-desktop` counts while it links
+//!   to this build. An `AppImage` keeps the plugin's own entry, which
+//!   names `$APPIMAGE`. With no such path the app writes no entry, and
+//!   turning launch at login on fails with
+//!   [`NO_STABLE_PATH`](linux::NO_STABLE_PATH).
 //!
 //! Rust only: the Swift app is a bundle `SMAppService` registers.
 
