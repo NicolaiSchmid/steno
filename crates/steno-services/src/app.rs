@@ -23,7 +23,7 @@ use steno_pipeline::{
 };
 
 use crate::block_on;
-use crate::handover::{ListenerHandover, start_if_paired};
+use crate::handover::{GatedHandover, ListenerHandover, start_if_paired};
 use crate::llm::{ClientLlmService, codex_store};
 use crate::pipeline::{
     BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
@@ -35,6 +35,7 @@ use crate::recovery::{Interrupted, LiveRecordingCheck, adopt_orphans, reconcile_
 use crate::secrets::{KeepsApiKey, KeyringUnavailable, SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 use crate::updates::{InstallGate, NeverIdle, ScheduleParts, UpdateSchedule, UpdateSource};
+use crate::swift_import::GraphImport;
 
 /// What stops the graph from being built: another process holds the
 /// database ([`DatabaseLock`]), or the database could not be opened or
@@ -132,6 +133,9 @@ pub struct App {
     /// passed an update source; [`App::launch`] starts it.
     pub updates: Option<Arc<UpdateSchedule>>,
     pub handover: Option<Arc<ListenerHandover>>,
+    /// The handover while the Swift import is pending: its listener comes
+    /// once the import's gate opens (`crate::swift_import`).
+    pub gated_handover: Option<Arc<GatedHandover>>,
     pub recorder: Arc<CaptureRecorder>,
     /// Where the speech and diarization models live.
     pub models_directory: std::path::PathBuf,
@@ -456,6 +460,18 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
 /// WASAPI backends enumerate devices.
 #[allow(clippy::too_many_lines)]
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
+    build_with_import(options, None)
+}
+
+/// [`build`] over the Swift import's launch half
+/// ([`crate::swift_import::launch`]): with a pending import the graph
+/// reads its secrets through the import's gate, so no API key is read and
+/// no handover listener is built until the onboarding step ran, and the
+/// step is the host's `SwiftImport`. The Mac shell's entry point.
+pub fn build_with_import(
+    options: AppOptions,
+    pending: Option<crate::swift_import::PendingImport>,
+) -> Result<App, BuildError> {
     let mut warnings = Vec::new();
     let paths = options.paths;
     let database_path = options
@@ -465,7 +481,10 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let store = open_store(&database_path)?;
     let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
     let kept = Arc::new(KeepsApiKey::new(secrets));
-    let secrets: Arc<dyn SecretStore> = kept.clone();
+    let import = pending.map(|pending| GraphImport::new(pending, kept.clone()));
+    let secrets: Arc<dyn SecretStore> = import
+        .as_ref()
+        .map_or_else(|| kept.clone() as Arc<dyn SecretStore>, |import| import.secrets.clone());
     let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
@@ -501,14 +520,46 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     // The save writes to the database's volume too.
     recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
 
-    let handover = handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
-        .inspect_err(|error| warnings.push(format!("Phone handover is unavailable: {error}")))
-        .ok();
+    let gated_handover = import.as_ref().map(|import| {
+        let (store, pipeline, secrets, paths, runtime) = (
+            store.clone(),
+            pipeline.clone(),
+            secrets.clone(),
+            paths.clone(),
+            runtime.clone(),
+        );
+        Arc::new(GatedHandover::new(
+            store.clone(),
+            import.gate.subscribe(),
+            Box::new(move || handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)),
+        ))
+    });
+    let handover = if gated_handover.is_some() {
+        None
+    } else {
+        handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
+            .inspect_err(|error| warnings.push(format!("Phone handover is unavailable: {error}")))
+            .ok()
+    };
+    let swift_import = import.as_ref().map(|import| {
+        let pipeline = pipeline.clone();
+        Arc::new(import.step(
+            runtime.clone(),
+            Box::new(move || {
+                if let Err(error) = pipeline.reload() {
+                    tracing::warn!(%error, "the pipeline did not reload with the imported key");
+                }
+            }),
+        ))
+    });
 
     let clock = Arc::new(WallClock);
-    let preferences: Arc<dyn Preferences> = Arc::new(FilePreferences::new(
-        paths.support_directory.join("preferences.json"),
-    ));
+    let preferences: Arc<dyn Preferences> = match &import {
+        Some(import) => import.preferences.clone(),
+        None => Arc::new(FilePreferences::new(
+            paths.support_directory.join("preferences.json"),
+        )),
+    };
     let updates = options.update_source.map(|source| {
         UpdateSchedule::new(ScheduleParts {
             source,
@@ -541,9 +592,12 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         speech_models,
         llm: Arc::new(ClientLlmService { codex }),
         export_validator: Arc::new(crate::export::ObsidianExportValidator),
-        handover: handover
-            .clone()
-            .map(|handover| handover as Arc<dyn steno_host::services::Handover>),
+        handover: match &gated_handover {
+            Some(gated) => Some(gated.clone() as Arc<dyn steno_host::services::Handover>),
+            None => handover
+                .clone()
+                .map(|handover| handover as Arc<dyn steno_host::services::Handover>),
+        },
         qr: Arc::new(PngQrEncoder),
         audio_devices: Arc::new(PlatformAudioDevices),
         folder_usage: Arc::new(DiskFolderUsage),
@@ -552,6 +606,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         opener: options.opener,
         preferences,
         secrets: secrets.clone(),
+        swift_import: swift_import
+            .clone()
+            .map(|step| step as Arc<dyn steno_host::services::SwiftImport>),
     };
 
     Ok(App {
@@ -565,6 +622,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         services,
         updates,
         handover,
+        gated_handover,
         recorder,
         models_directory: speech.models_directory.clone(),
         zone,
@@ -838,6 +896,13 @@ impl App {
         if let Some(handover) = self.handover.as_deref().and_then(ListenerHandover::close) {
             block_on(&self.runtime, handover.stop());
         }
+        if let Some(handover) = self
+            .gated_handover
+            .as_ref()
+            .and_then(|gated| gated.service())
+        {
+            block_on(&self.runtime, handover.stop());
+        }
     }
 
     /// Everything that happens once at launch, in order:
@@ -1006,6 +1071,10 @@ impl App {
             .cloned()
         {
             tokio::spawn(async move { start_if_paired(&handover).await });
+        }
+        if let Some(gated) = &self.gated_handover {
+            let phones_host = host.clone();
+            tokio::spawn(gated.clone().follow(move || phones_host.phones_changed()));
         }
     }
 

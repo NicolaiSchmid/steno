@@ -16,6 +16,11 @@ chrono-tz.workspace = true
 fs4.workspace = true
 png.workspace = true
 qrcode.workspace = true
+# The Swift import's platform-independent half: the defaults domain as a
+# property list and the exported identity's PKCS#12.
+base64.workspace = true
+p12-keystore.workspace = true
+plist.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 steno-adapters = { path = "../steno-adapters" }
@@ -41,6 +46,10 @@ uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 steno-speech-coreml = { path = "../steno-speech-coreml" }
+# The Swift import's keychain and account lookups.
+nix.workspace = true
+security-framework.workspace = true
+steno-macos = { path = "../steno-macos" }
 
 # The Keychain (`secrets::KeyringSecretStore`); Linux builds the crate
 # without using it.
@@ -73,6 +82,12 @@ tokio = { workspace = true, features = ["test-util"] }
 # credentials back through it.
 [target.'cfg(windows)'.dev-dependencies]
 keyring = { workspace = true, features = ["windows-native"] }
+
+# The keychain test (`tests/swift_keychain.rs`): the fixture calls and a
+# key item's data.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+core-foundation.workspace = true
+steno-macos = { path = "../steno-macos", features = ["testing"] }
 
 [lints]
 workspace = true

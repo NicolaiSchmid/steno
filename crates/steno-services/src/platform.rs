@@ -113,6 +113,24 @@ impl FilePreferences {
     }
 }
 
+impl FilePreferences {
+    /// `preferences.json` under `support_directory`.
+    #[must_use]
+    pub fn in_support_directory(support_directory: &Path) -> Self {
+        Self::new(support_directory.join("preferences.json"))
+    }
+
+    /// Whether the file holds `key` at all, whatever its value: the Swift
+    /// import copies the Swift app's onboarding flag only while it does not.
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.values
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(key)
+    }
+}
+
 impl Preferences for FilePreferences {
     fn stored_flag(&self, key: &str) -> Option<bool> {
         self.values
@@ -149,6 +167,17 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn a_flag_set_to_false_is_there_and_an_unset_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let preferences = FilePreferences::in_support_directory(dir.path());
+        assert!(!preferences.contains("a"));
+        preferences.set_flag("a", false);
+        assert!(preferences.contains("a"));
+        assert!(!preferences.flag("a"));
+        assert!(FilePreferences::in_support_directory(dir.path()).contains("a"));
     }
 
     /// A flag lands in one whole file, beside which no temporary is left,

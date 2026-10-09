@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::block_on;
 use crate::files::{Access, replace_file};
+use crate::swift_import::HandoverGate;
 
 /// The handover identity's fingerprint in `handover-identity.json` under
 /// the support directory, as `{"steno.handoverIdentityFingerprint": "<hex>"}`,
@@ -253,6 +254,147 @@ impl Handover for ListenerHandover {
     fn receipts(&self) -> Vec<HandoverReceipt> {
         self.listener()
             .map(|service| service.receipts().borrow().clone())
+            .unwrap_or_default()
+    }
+}
+
+/// What `start` and `revoke` answer while the import waits.
+pub const WAITING_FOR_IMPORT: &str = "Phone handover waits until Steno has brought over this Mac's phone pairing from the previous Steno app.";
+
+/// The host's `Handover` while the Swift import is pending
+/// (`crate::swift_import`): no listener and no identity read until the
+/// gate opens, then the listener the graph builds then, which this hands
+/// every call to. Until then the paired phones come from the store, the
+/// listener reads as stopped, and starting it or revoking a phone says
+/// that it waits.
+pub struct GatedHandover {
+    store: Arc<Store>,
+    gate: tokio::sync::watch::Receiver<HandoverGate>,
+    make: MakeListener,
+    listener: std::sync::OnceLock<Arc<ListenerHandover>>,
+}
+
+/// Builds the listener once the gate opened: loads the identity the
+/// import stored, as the graph's build does without an import.
+pub type MakeListener = Box<dyn Fn() -> Result<Arc<ListenerHandover>, String> + Send + Sync>;
+
+impl GatedHandover {
+    #[must_use]
+    pub fn new(
+        store: Arc<Store>,
+        gate: tokio::sync::watch::Receiver<HandoverGate>,
+        make: MakeListener,
+    ) -> Self {
+        GatedHandover {
+            store,
+            gate,
+            make,
+            listener: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Waits for the gate to say [`HandoverGate::Ready`], then builds the
+    /// listener, starts it when a phone is paired (as the launch does) and
+    /// calls `changed`. Never builds a listener while the gate waits, so
+    /// no identity is read or minted before the import put one in place.
+    pub async fn follow(self: Arc<Self>, changed: impl FnOnce() + Send + 'static) {
+        let mut gate = self.gate.clone();
+        if gate
+            .wait_for(|gate| *gate == HandoverGate::Ready)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let this = self.clone();
+        let built = tokio::task::spawn_blocking(move || (this.make)()).await;
+        let listener = match built {
+            Ok(Ok(listener)) => listener,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "phone handover is unavailable");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "phone handover is unavailable");
+                return;
+            }
+        };
+        let service = listener.listener().cloned();
+        let _ = self.listener.set(listener);
+        if let Some(service) = service {
+            start_if_paired(&service).await;
+        }
+        changed();
+    }
+
+    /// The listener's service, once open.
+    #[must_use]
+    pub fn service(&self) -> Option<Arc<HandoverService>> {
+        self.listener.get().and_then(|listener| listener.listener().cloned())
+    }
+}
+
+fn waiting() -> steno_core::BoxError {
+    WAITING_FOR_IMPORT.into()
+}
+
+impl Handover for GatedHandover {
+    fn state(&self) -> ListenerState {
+        self.listener
+            .get()
+            .map_or(ListenerState::Stopped, |listener| listener.state())
+    }
+
+    fn mac_id(&self) -> String {
+        self.listener
+            .get()
+            .map(|listener| listener.mac_id())
+            .unwrap_or_default()
+    }
+
+    fn paired_devices(&self) -> BoundaryResult<Vec<PairedDevice>> {
+        match self.listener.get() {
+            Some(listener) => listener.paired_devices(),
+            None => Ok(self.store.paired_devices()?),
+        }
+    }
+
+    fn start(&self) -> BoundaryResult<()> {
+        self.listener.get().ok_or_else(waiting)?.start()
+    }
+
+    fn stop(&self) {
+        if let Some(listener) = self.listener.get() {
+            listener.stop();
+        }
+    }
+
+    fn begin_pairing(&self) -> PairingCode {
+        match self.listener.get() {
+            Some(listener) => listener.begin_pairing(),
+            // Unreachable from the Phones section, which starts the
+            // listener first: a code that has already run out.
+            None => PairingCode {
+                expires_at: chrono::DateTime::UNIX_EPOCH,
+                url_string: String::new(),
+            },
+        }
+    }
+
+    fn cancel_pairing(&self) {
+        if let Some(listener) = self.listener.get() {
+            listener.cancel_pairing();
+        }
+    }
+
+    fn revoke(&self, device_id: Uuid) -> BoundaryResult<()> {
+        self.listener.get().ok_or_else(waiting)?.revoke(device_id)
+    }
+
+    fn receipts(&self) -> Vec<HandoverReceipt> {
+        self.listener
+            .get()
+            .map(|listener| listener.receipts())
             .unwrap_or_default()
     }
 }

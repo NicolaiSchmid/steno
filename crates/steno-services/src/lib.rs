@@ -23,6 +23,7 @@
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the flags in `preferences.json` |
 //! | [`updates`] | The host's `Updater`: the daily update schedule over the shell's updater, its flags, the last check time, the install gate and the packaged-install switch |
 //! | [`qr`] | The host's `QrEncoder`: the pairing code as a PNG |
+//! | [`swift_import`] | The Mac's import of the Swift app's preferences, API key and handover identity, at the first launch after the update: the launch half, the onboarding step's half and the handover gate |
 //!
 //! What stays a fake here is named in [`build`]'s doc: the platform
 //! services the shell does not supply yet (permissions, clip player; the
@@ -99,11 +100,14 @@ pub mod recorder;
 pub mod recovery;
 pub mod secrets;
 pub mod speech;
+pub mod swift_import;
 #[cfg(test)]
 mod testing;
 pub mod updates;
 
-pub use app::{App, AppOptions, BuildError, build, lock_database, open_store};
+pub use app::{
+    App, AppOptions, BuildError, build, build_with_import, lock_database, open_store,
+};
 pub use logs::{LOG_FILTER, flush_logs, log_to_stderr};
 pub use secrets::{
     FileSecretStore, KeyringSecretStore, KeyringUnavailable, secret_store, secret_store_with_unlock,
