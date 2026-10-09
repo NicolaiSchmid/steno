@@ -392,11 +392,14 @@ jobs:
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
       # the dev URL is dropped through Tauri's configuration merge. The run
       # ends itself after 15 s; the step limit catches a hang before that.
+      # The runner's user manager starts the scope the managed run as the
+      # autostart unit needs, so it may not be skipped here.
       - name: Desktop smoke
         if: matrix.name == 'linux'
         timeout-minutes: 5
         env:
           TAURI_CONFIG: '{"build":{"devUrl":null}}'
+          STENO_REQUIRE_UNIT_SMOKE: 1
         run: |
           cargo build -p steno-desktop --locked
           apps/desktop/scripts/smoke-linux.sh target/debug/steno-desktop 15
