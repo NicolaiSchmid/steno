@@ -4736,7 +4736,12 @@ async fn a_resume_with_one_of_two_models_installed_waits_again() {
     let missing = |posted: &[MeetingEvent]| {
         posted
             .iter()
-            .filter(|event| **event == MeetingEvent::ModelsMissing { meeting_id: meeting })
+            .filter(|event| {
+                **event
+                    == MeetingEvent::ModelsMissing {
+                        meeting_id: meeting,
+                    }
+            })
             .count()
     };
     assert_eq!(missing(&drain(&mut events)), 1);

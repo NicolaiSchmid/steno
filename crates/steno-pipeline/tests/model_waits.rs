@@ -287,9 +287,12 @@ fn wait_until_idle_waits_for_a_refused_run_to_start_its_meeting_again() {
         let engine = Arc::new(HeldRefusal::default());
         let (store, audio, pipeline) = pipeline_over(dir.path(), engine.clone());
         let meeting_id = enqueue_call(&audio, &pipeline);
-        tokio::time::timeout(std::time::Duration::from_secs(10), engine.entered.notified())
-            .await
-            .expect("the run is transcribing");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            engine.entered.notified(),
+        )
+        .await
+        .expect("the run is transcribing");
         assert_eq!(
             pipeline.resume_waiting().unwrap(),
             Vec::<Uuid>::new(),
@@ -317,6 +320,9 @@ fn wait_until_idle_waits_for_a_refused_run_to_start_its_meeting_again() {
             store.meeting(meeting_id).unwrap().unwrap().state,
             MeetingState::Ready
         );
-        assert_eq!(pipeline.dependencies().model_waits.waiting(), Vec::<Uuid>::new());
+        assert_eq!(
+            pipeline.dependencies().model_waits.waiting(),
+            Vec::<Uuid>::new()
+        );
     });
 }

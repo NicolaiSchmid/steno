@@ -1807,13 +1807,15 @@ mod tests {
             let (store, refusing, builds) = (store.clone(), refusing.clone(), builds.clone());
             Arc::new(move || {
                 let dependencies = fake_dependencies(&store, "fake-engine");
-                Ok(on_the_sidecar(if builds.fetch_add(1, Ordering::SeqCst) == 0 {
-                    dependencies.with_speech_engine(steno_pipeline::SharedSpeechEngine::new(
-                        refusing.clone(),
-                    ))
-                } else {
-                    dependencies
-                }))
+                Ok(on_the_sidecar(
+                    if builds.fetch_add(1, Ordering::SeqCst) == 0 {
+                        dependencies.with_speech_engine(steno_pipeline::SharedSpeechEngine::new(
+                            refusing.clone(),
+                        ))
+                    } else {
+                        dependencies
+                    },
+                ))
             })
         };
         let current =
@@ -1845,9 +1847,12 @@ mod tests {
         let mut meeting = sample_data::meeting();
         meeting.id = Uuid::new_v4();
         meeting.state = MeetingState::Queued;
-        let asset =
-            steno_pipeline::fixtures::two_lane_call(dir.path(), meeting.id, AudioRetention::KeepForever)
-                .unwrap();
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            dir.path(),
+            meeting.id,
+            AudioRetention::KeepForever,
+        )
+        .unwrap();
         store.save_meeting_with_asset(&meeting, &asset).unwrap();
 
         current.resume_waiting();

@@ -136,8 +136,9 @@ pub use error::{SidecarError, SpeechError};
 pub use features::MelExtractor;
 pub use language::{LanguageRecognizer, LanguageTagger, StopwordRecognizer, WhatlangRecognizer};
 pub use model_store::{
-    DownloadProgress, Install, ModelAsset, ModelFile, ModelSource, ModelStore, PARAKEET_V3_COREML_REPO,
-    PARAKEET_V3_COREML_REVISION, PARAKEET_V3_FP32_REVISION, STENO_MODELS_REPO,
+    DownloadProgress, Install, ModelAsset, ModelFile, ModelSource, ModelStore,
+    PARAKEET_V3_COREML_REPO, PARAKEET_V3_COREML_REVISION, PARAKEET_V3_FP32_REVISION,
+    STENO_MODELS_REPO,
 };
 pub use onnx::{EncoderProvider, OnnxBackend, OnnxOptions};
 pub use pipeline::{PipelineConfig, RecoveryConfig, Transcriber, Transcript};
