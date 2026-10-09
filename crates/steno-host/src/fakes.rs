@@ -493,7 +493,7 @@ pub struct FakePipeline {
     /// The meetings `export_keeps_failing` answers yes for.
     pub keeps_failing: Mutex<Vec<Uuid>>,
     /// What `damaged_audio_parts` answers per meeting; 0 for the others.
-    pub damaged_audio: Mutex<std::collections::BTreeMap<Uuid, u32>>,
+    pub damaged_audio: Mutex<BTreeMap<Uuid, u32>>,
 }
 
 impl FakePipeline {
