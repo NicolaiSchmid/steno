@@ -3,10 +3,10 @@
 -- or later, whose config is Lua. Load the file from
 -- ~/.config/hypr/hyprland.lua, below your other rules:
 --
---   require("/usr/share/steno-desktop/hyprland-steno") -- the AUR package
---   require("steno")             -- a copy at ~/.config/hypr/steno.lua
+--   dofile("/usr/share/steno-desktop/hyprland-steno.lua") -- the .deb or the AUR package
+--   require("steno")  -- a copy at ~/.config/hypr/steno.lua
 --
--- Steno runs under XWayland on Hyprland, where it places the panels itself.
+-- On Hyprland Steno runs under XWayland, so Steno places the panels itself.
 -- These rules keep them floating on every workspace, out of the keyboard
 -- focus, and without a border, shadow or blur around their transparent
 -- corners. The class is "steno-desktop" on Wayland and "Steno-desktop"

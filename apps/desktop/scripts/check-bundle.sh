@@ -13,7 +13,9 @@
 #             the stop timeout drop-ins for the autostart unit and GNOME's
 #             scope under usr/lib/systemd/user/, the postinst that
 #             reloads the user managers for them, the dependency on
-#             PipeWire, and the one on the glibc the binaries need
+#             PipeWire, the one on the glibc the binaries need, and the
+#             Hyprland rules (usr/share/steno-desktop/hyprland-steno.lua),
+#             byte for byte apps/desktop/src-tauri/linux/hyprland-steno.lua
 #   appimage  appimage/*.AppImage, unpacked with --appimage-extract, into
 #             usr/bin/
 #   app       macos/*.app, into Contents/MacOS/. With --signed, also the
@@ -44,6 +46,7 @@ bundle="${1:?bundle directory, e.g. target/release/bundle}"
 types="${2:?bundle types, e.g. deb,appimage}"
 sidecar_name=steno-speech-sidecar
 linux="$(cd "$(dirname "${BASH_SOURCE[0]}")/../src-tauri/linux" && pwd)"
+hyprland_rules=usr/share/steno-desktop/hyprland-steno.lua
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
@@ -132,6 +135,9 @@ check_deb() {
   { [[ -n "$glibc" ]] && depends_on "libc6 (>= $glibc)"; } \
     || die "the binaries need glibc $glibc and the .deb does not depend on libc6 (>= $glibc): $depends"
   echo "ok: the .deb depends on libc6 (>= $glibc), the newest glibc its binaries need"
+  cmp -s "$scratch/deb/$hyprland_rules" "$linux/hyprland-steno.lua" \
+    || die "$deb does not hold apps/desktop/src-tauri/linux/hyprland-steno.lua as /$hyprland_rules"
+  echo "ok: $deb holds the Hyprland rules as /$hyprland_rules"
 }
 
 check_appimage() {
