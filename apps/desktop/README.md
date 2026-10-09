@@ -154,6 +154,21 @@ macOS: Ctrl-C, a closed terminal and systemd signal it with the app, and
 it would otherwise end its job first. It exits within a heartbeat once
 the app is gone.
 
+On Linux, when the app runs in a unit of a systemd user manager (a
+launcher's scope, the autostart service), the sidecar gets a transient
+scope of its own right after its start,
+`app-steno\x2dspeech\x2dsidecar-<pid>.scope`, in the app's slice and
+`PartOf` the app's unit (`crates/steno-speech/src/sidecar/scope.rs`).
+`systemd-oomd`, which some distributions turn on for `app.slice`, kills a
+whole cgroup under memory pressure: it now picks the sidecar's, by far
+the larger, and the recording goes on; the job that was transcribing
+fails as after any crash of the sidecar, and the next one starts another.
+Stopping the app's unit stops the sidecar's scope too. The app asks over
+the user bus's Unix socket in `$XDG_RUNTIME_DIR`, with the child's pid
+and the unit names only, and waits two seconds at most. Without a user
+manager, a user bus or a unit (a plain shell, a container), or when the
+manager refuses, the sidecar stays in the app's cgroup, as before.
+
 Snapshots reach the windows, the tray and the panels from the main thread
 (`WindowSink` in `host.rs`): the host emits under its `publishing` lock,
 the main thread can be waiting for a thread that holds it (a Stop from the
