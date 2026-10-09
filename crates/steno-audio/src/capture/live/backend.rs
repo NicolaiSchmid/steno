@@ -31,17 +31,32 @@
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,
 //! `AudioDeviceDestroyIOProcID`, the callback context, listeners,
-//! `AudioHardwareDestroyAggregateDevice`, `AudioHardwareDestroyProcessTap`.
+//! `AudioHardwareDestroyAggregateDevice`, `AudioHardwareDestroyProcessTap`,
+//! and last the silent output IOProc (below), which starts before the
+//! aggregate's IOProc. A `start` that fails part way drops what it built in
+//! the same order.
 //!
-//! Call mode needs an output client. The aggregate's clock master is the
-//! system output device; where the capture permission is missing (a
-//! session without a GUI, over SSH) the HAL runs the IOProc only while
-//! another client has that output open, so the capture delivers no
-//! callbacks at all until something plays (measured in
-//! `.plans/spikes/2026-10-01-spike-rust-capture.md`: the first callback
-//! arrived when `afplay` opened the speakers, and a run with nothing
-//! playing got none). In-person mode has no tap and runs on the
-//! microphone's clock.
+//! Call mode is its own output client (A10 of
+//! `.plans/2026-10-07-stable-promotion.md`). An aggregate with a process
+//! tap runs only while a process the tap includes drives the output: with
+//! nothing playing, `AudioDeviceStart` succeeds and the IOProc is never
+//! called, so neither the tap nor the microphone delivered until some app
+//! played (0 callbacks on a Mac over SSH; a silent `afplay` already
+//! playing gave the first at 67 ms). So the tap includes Steno's own
+//! process, and a call capture starts a silent IOProc of its own
+//! (`silent_io_proc`) on the aggregate's clock master, the system output,
+//! read from the aggregate once it is built, and before the aggregate's
+//! IOProc: the first callback then comes within 100 ms of `start`
+//! returning. On a Mac whose default output was another device than the
+//! system output, the tap aggregate ran with the silent IOProc on the
+//! clock master alone, the default output never started. The silent
+//! IOProc's input streams are off. It is rebuilt with the capture, so a
+//! change of the system output moves it to the new clock master; one that
+//! does not start is logged, and the capture then records only while
+//! another app plays, as before A10. No in-app playback while recording,
+//! enforced by [`Playback`](crate::playback::Playback): Steno's own output
+//! would land in the system lane, and the capture session holds that gate
+//! while it records. In-person mode has no tap and needs no output client.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -68,7 +83,9 @@ use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     LaneSource, NominalSampleRate, StreamLayout,
 };
-use crate::realtime::{BufferView, LaneFrameSink, RateConverter, deliver};
+use crate::realtime::{
+    BufferView, LaneFrameSink, MAX_BUFFERS, RateConverter, deliver, silence_output,
+};
 
 /// Shared with the IOProc through a raw pointer; boxed so it never moves,
 /// alive until the `IoProc` is dropped.
@@ -76,11 +93,6 @@ struct CallbackContext {
     sink: Arc<LaneFrameSink>,
     sources: Vec<LaneSource>,
 }
-
-/// The most input buffers an aggregate of ours produces: the output device's
-/// inputs (usually none), the microphone's and the tap's. Sixteen leaves
-/// room for a many-channel interface.
-const MAX_BUFFERS: usize = 16;
 
 /// The IOProc. Builds a stack array of [`BufferView`]s from the HAL's
 /// buffer list and hands it to [`deliver`]: no allocation, no lock, no
@@ -121,6 +133,59 @@ unsafe extern "C-unwind" fn io_proc(
         }
     });
     0
+}
+
+/// The call capture's silent output IOProc on the aggregate's clock
+/// master: writes zeros over its output buffers ([`silence_output`]; the
+/// HAL has zeroed them already) and reads nothing, so the capture is a
+/// client of the output that the tap includes. No allocation, no lock, no
+/// syscall; behind [`hal::abort_on_panic`]. See the module doc.
+unsafe extern "C-unwind" fn silent_io_proc(
+    _device: Id,
+    _now: NonNull<AudioTimeStamp>,
+    _input: NonNull<AudioBufferList>,
+    _input_time: NonNull<AudioTimeStamp>,
+    output: NonNull<AudioBufferList>,
+    _output_time: NonNull<AudioTimeStamp>,
+    _client: *mut c_void,
+) -> OSStatus {
+    hal::abort_on_panic(|| {
+        // SAFETY: `output` is the HAL's output list for this cycle, its
+        // buffers writable for their `mDataByteSize` for the call.
+        unsafe { silence_output(output) };
+    });
+    0
+}
+
+/// Starts [`silent_io_proc`], output only, on the aggregate's clock master
+/// as the aggregate reports it, read once; on `requested`, the device the
+/// aggregate was built with as its main sub-device, when that read fails.
+/// The device it runs on is logged at `info` (its name read for the line
+/// alone), and a failure to start at `warn`: the capture then goes on
+/// without it, as it did before A10.
+fn start_silent_output(aggregate: &AggregateDevice, requested: Id) -> Option<IoProc> {
+    let device = aggregate.main_sub_device().unwrap_or_else(|error| {
+        tracing::warn!("the aggregate's clock master did not read ({error}); using {requested}");
+        requested
+    });
+    // SAFETY: `silent_io_proc` reads no client data, so a null client
+    // stays valid for as long as the IOProc runs.
+    match unsafe { IoProc::start_output_only(device, Some(silent_io_proc), std::ptr::null_mut()) } {
+        Ok(io) => {
+            tracing::info!(
+                "the silent output runs on {} (audio device {device}), the aggregate's clock master",
+                hal::name(device)
+            );
+            Some(io)
+        }
+        Err(error) => {
+            tracing::warn!(
+                "the silent output on audio device {device} did not start ({error}); \
+                 the call capture runs only while another app plays"
+            );
+            None
+        }
+    }
 }
 
 /// The input a capture asked for `uid` records now ([`chosen_or_default`]):
@@ -213,6 +278,9 @@ struct Active {
     _listeners: Vec<PropertyListener>,
     _aggregate: AggregateDevice,
     _tap: Option<ProcessTap>,
+    /// Started before the aggregate's IOProc, stopped after the tap is
+    /// destroyed; `None` in-person, and when it did not start.
+    _silent_output: Option<IoProc>,
     watcher: Arc<Watcher>,
     watcher_thread: Option<JoinHandle<()>>,
 }
@@ -321,6 +389,19 @@ impl LiveCaptureBackend {
         (now != started).then_some(kAudioDevicePropertyNominalSampleRate)
     }
 
+    /// The same for the system output, read again once the listeners are
+    /// in place (`now`, `None` when none resolves): a system output
+    /// notification when it is not the one the capture was built on. Its
+    /// listener reports only a switch after it was added, so a switch while
+    /// the aggregate was built would leave the capture and its silent
+    /// output on the old clock master.
+    fn late_output_notification(
+        started: &str,
+        now: Option<&str>,
+    ) -> Option<AudioObjectPropertySelector> {
+        (now != Some(started)).then_some(kAudioHardwarePropertyDefaultSystemOutputDevice)
+    }
+
     /// The microphone's latency of `frames` in the stream's frames: as it
     /// is when the microphone is the clock master, rescaled from its own
     /// `mic_rate` to `stream_rate` otherwise (rounded down; an unreadable
@@ -416,9 +497,11 @@ impl CaptureBackend for LiveCaptureBackend {
             (None, false)
         };
 
+        // Declared before the tap and the aggregate, so a `start` that fails
+        // once it runs drops it after them, in the teardown order.
+        let silent_output: Option<IoProc>;
         let tap = if needs_tap {
-            let own = hal::own_process_object()?;
-            Some(ProcessTap::new(&[own], "Steno system lane")?)
+            Some(ProcessTap::new("Steno system lane")?)
         } else {
             None
         };
@@ -476,6 +559,16 @@ impl CaptureBackend for LiveCaptureBackend {
                 .unwrap_or_default(),
             mic_sub_device,
         )?;
+
+        // The call capture's own output client, started once the aggregate
+        // is built (building it over a running output device took about
+        // 300 ms longer on a Mac) and before the aggregate's IOProc; see the
+        // module doc.
+        silent_output = if needs_tap {
+            start_silent_output(&aggregate, output.id)
+        } else {
+            None
+        };
 
         let context = Box::new(CallbackContext {
             sink: Arc::clone(&sink),
@@ -536,11 +629,17 @@ impl CaptureBackend for LiveCaptureBackend {
                 .ok()
             })
             .collect();
-        // Any change from here on notifies; one before the rate listener was
-        // in place is judged as if it had.
-        if let Some(selector) =
-            Self::late_rate_notification(sample_rate, aggregate.nominal_sample_rate())
-        {
+        // Any change from here on notifies; one before its listener was in
+        // place (the rate, or the system output the aggregate and its silent
+        // output were built on) is judged as if it had.
+        let late = [
+            Self::late_rate_notification(sample_rate, aggregate.nominal_sample_rate()),
+            Self::late_output_notification(
+                &output.uid,
+                AudioDevices::default_system_output_uid().as_deref(),
+            ),
+        ];
+        for selector in late.into_iter().flatten() {
             watcher.notify(selector);
         }
 
@@ -590,6 +689,7 @@ impl CaptureBackend for LiveCaptureBackend {
         };
 
         *active = Some(Active {
+            _silent_output: silent_output,
             _tap: tap,
             _aggregate: aggregate,
             _io_proc: io,
@@ -624,13 +724,14 @@ impl CaptureBackend for LiveCaptureBackend {
             let _ = thread.join();
         }
         // The teardown order: IOProc (stop, destroy) before the context it
-        // reads, then listeners, aggregate, tap.
+        // reads, then listeners, aggregate, tap, silent output.
         let Active {
             _io_proc: io_proc,
             _context: context,
             _listeners: listeners,
             _aggregate: aggregate,
             _tap: tap,
+            _silent_output: silent_output,
             ..
         } = active;
         drop(io_proc);
@@ -638,6 +739,7 @@ impl CaptureBackend for LiveCaptureBackend {
         drop(listeners);
         drop(aggregate);
         drop(tap);
+        drop(silent_output);
     }
 }
 
@@ -749,6 +851,58 @@ mod tests {
         );
     }
 
+    /// A system output that switched while the aggregate was built, before
+    /// its listener was registered, is judged as a system output
+    /// notification and reported, so the session rebuilds on the new clock
+    /// master; the same device, read again, raises nothing.
+    #[test]
+    fn a_system_output_that_switched_before_its_listener_is_judged_as_a_change() {
+        assert_eq!(
+            LiveCaptureBackend::late_output_notification("speakers", Some("speakers")),
+            None
+        );
+        let selector = LiveCaptureBackend::late_output_notification("speakers", Some("headset"));
+        assert_eq!(
+            selector,
+            Some(kAudioHardwarePropertyDefaultSystemOutputDevice)
+        );
+        assert_eq!(
+            LiveCaptureBackend::late_output_notification("speakers", None),
+            selector,
+            "none resolving is judged too"
+        );
+
+        let (watcher, thread, judgements) = watching(None);
+        watcher.notify(selector.unwrap());
+        let judged = judgements.recv_timeout(WAIT).unwrap();
+        assert_eq!(
+            judged,
+            Judged::Notification(kAudioHardwarePropertyDefaultSystemOutputDevice)
+        );
+        stop(&watcher, thread);
+
+        let baseline = DeviceSnapshot {
+            output_uid: Some("speakers".into()),
+            default_output_uid: Some("speakers".into()),
+            input_uid: Some("built-in".into()),
+            output_alive: true,
+            input_alive: true,
+            sample_rate: 48_000.0,
+        };
+        let switched = DeviceSnapshot {
+            output_uid: Some("headset".into()),
+            ..baseline.clone()
+        };
+        assert_eq!(
+            LiveCaptureBackend::judgement(judged, &switched, &baseline),
+            Some(DeviceChangeReason::DefaultOutputChanged)
+        );
+        assert_eq!(
+            LiveCaptureBackend::judgement(judged, &baseline, &baseline),
+            None
+        );
+    }
+
     /// A 48 kHz built-in microphone beside a headset at 24 kHz: its
     /// latency is halved into the stream's frames, never doubled, while a
     /// microphone on the clock master keeps its own count.
@@ -766,6 +920,44 @@ mod tests {
             LiveCaptureBackend::mic_latency_frames(481, false, 0.0, 24_000.0),
             481
         );
+    }
+
+    /// The silent output IOProc zeroes the output list it is handed and
+    /// returns 0. The buffer cases (a null `mData`, a size of 0, the last
+    /// buffer) are `tests/realtime.rs`' `the_silent_output_allocates_nothing`.
+    #[test]
+    fn the_silent_output_writes_only_zeros() {
+        use objc2_core_audio_types::AudioBuffer;
+
+        let mut samples = vec![0.75f32; 1_024];
+        let list = |data: *mut f32, floats: u32| AudioBufferList {
+            mNumberBuffers: 1,
+            mBuffers: [AudioBuffer {
+                mNumberChannels: 2,
+                mDataByteSize: floats * 4,
+                mData: data.cast(),
+            }],
+        };
+        let mut output = list(samples.as_mut_ptr(), 1_024);
+        let mut input = list(std::ptr::null_mut(), 0);
+        // SAFETY: an all-zero `AudioTimeStamp` is a valid, unset stamp.
+        let mut time: AudioTimeStamp = unsafe { std::mem::zeroed() };
+        let time = NonNull::from(&mut time);
+        // SAFETY: the output's one buffer points at a vector of
+        // `mDataByteSize` bytes that outlives the call; the input has none.
+        let status = unsafe {
+            silent_io_proc(
+                0,
+                time,
+                NonNull::from(&mut input),
+                time,
+                NonNull::from(&mut output),
+                time,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert!(samples.iter().all(|s| s.to_bits() == 0), "zeroed in full");
     }
 
     /// Only a capture on the fallback is re-checked.

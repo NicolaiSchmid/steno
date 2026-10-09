@@ -39,7 +39,8 @@ pub enum DevCommand {
     AudioDevices(AudioDevices),
     /// Measure echo cancellation on recorded or synthetic lanes.
     AecBench(AecBench),
-    /// Record the live lanes and report levels, layout and onset alignment.
+    /// Record the live lanes and report levels, layout, onset alignment and
+    /// digital silence.
     CaptureSpike(CaptureSpike),
     /// List, download or remove speech and diarization models.
     Models(Models),
@@ -389,6 +390,21 @@ impl CaptureSpike {
                 .join(", ")
         );
         println!("duration: {:.2} s", result.statistics.duration);
+        // Exact, from the master's Float32 samples (the sidecars' Int16
+        // rounds a whisper to 0): `nonzero system: 0 of N` is digital
+        // silence.
+        if let Some(master) = file_url_path(&result.asset.url)
+            && let Ok(master) = steno_audio::CafFile::read(&master)
+        {
+            for (lane, samples) in result.asset.lanes.iter().zip(&master.channels) {
+                let nonzero = samples.iter().filter(|s| **s != 0.0).count();
+                println!(
+                    "nonzero {}: {nonzero} of {} samples",
+                    lane.as_str(),
+                    samples.len()
+                );
+            }
+        }
         for lane in &result.asset.lanes {
             if let Some(sidecar) = result.asset.sidecars_16k.get(lane)
                 && let Some(path) = file_url_path(sidecar)

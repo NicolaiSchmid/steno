@@ -80,6 +80,12 @@ impl AudioDevices {
         )?)
     }
 
+    /// The default system output device's UID, `None` when none resolves.
+    #[must_use]
+    pub fn default_system_output_uid() -> Option<String> {
+        hal::uid(Self::default_device(kAudioHardwarePropertyDefaultSystemOutputDevice).ok()?).ok()
+    }
+
     /// The default output device's UID, `None` when none resolves.
     #[must_use]
     pub fn default_output_uid() -> Option<String> {
@@ -89,7 +95,7 @@ impl AudioDevices {
     /// The device a default-device `selector` names; an error when none is
     /// set.
     fn default_device(selector: AudioObjectPropertySelector) -> Result<Id, CoreAudioError> {
-        let id: Id = hal::read_pod(SYSTEM, selector, kAudioObjectPropertyScopeGlobal, None)?;
+        let id: Id = hal::read_pod(SYSTEM, selector, kAudioObjectPropertyScopeGlobal)?;
         if id == UNKNOWN {
             return Err(CoreAudioError {
                 operation: "default device".into(),

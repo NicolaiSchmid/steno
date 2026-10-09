@@ -84,14 +84,16 @@
 //! server removes Steno's link to it) reads as the input gone. The sample
 //! rate never changes: the adapter resamples.
 //!
-//! The system lane is the whole default sink, Steno's own output included
-//! (the Mac's tap excludes Steno's process; Steno plays no audio). Linking
+//! The system lane is the whole default sink, Steno's own output included,
+//! as on the Mac, where the tap includes Steno's process (A10 of
+//! `.plans/2026-10-07-stable-promotion.md`); no in-app playback while
+//! recording, enforced by [`Playback`](crate::playback::Playback). Linking
 //! each app's stream instead of the monitor was weighed and not done: it
 //! is a linking policy of its own, and an app's audio that reaches the
 //! sink through a filter is mixed already (see "The system lane is the
 //! whole default sink" in the plan's Linux list). Linking the sink's
-//! monitor keeps the sink running, so, unlike the Mac's call mode, cycles
-//! arrive with nothing playing.
+//! monitor keeps the sink running, so cycles arrive with nothing playing,
+//! as they do on the Mac through its silent output.
 
 mod devices;
 mod graph;

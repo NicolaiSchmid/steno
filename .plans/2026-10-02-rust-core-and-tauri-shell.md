@@ -1752,13 +1752,17 @@ parity item until a plan says otherwise:
   `AudioDevices::inputs` leaves out the private aggregates Steno's
   captures create (`uno.schmid.steno.aggregate.*`); Swift lists them as a
   choice while a recording runs.
-- **Call mode waits for an output client.** Swift and Rust both clock the
-  tap aggregate from the system output. Without the capture permission,
-  the IOProc runs only once another client opens the output
-  (`.plans/spikes/2026-10-01-spike-rust-capture.md`; `tests/live.rs`
-  skips). Whether a GUI session also loses its first seconds is
-  unchecked. Check on the Swift app before cutover; a plan decides any
-  remedy.
+- **Call mode is its own output client** (fixed by A10 of
+  `.plans/2026-10-07-stable-promotion.md`). A tap aggregate runs only while
+  a process the tap includes drives the output, so Swift, which excludes
+  its own process from the tap, records nothing until another app plays
+  (`.plans/spikes/2026-10-01-spike-rust-capture.md`), and keeps that until
+  the handoff. Rust includes its own process in the tap and starts a
+  silent output IOProc (its input streams set off for it) on the
+  aggregate's clock master (the system output, read from the aggregate)
+  before the aggregate's IOProc, so with nothing playing the first callback comes within 100 ms
+  of `start` returning and 200 ms of the call to `start` (`tests/live.rs`).
+  No in-app playback while recording, enforced by `steno_audio::Playback`.
 - **The files are synced while recording, the relay holds 20 s, and the
   warnings are joined** (stable plan rows P21 and P23,
   `.plans/2026-10-07-stable-promotion.md`). The writer thread syncs every
@@ -1980,7 +1984,8 @@ item to settle before the Linux release:
   take 1 to 2 s to start. The Mac's returns before any callback, WASAPI's
   once both streams started (at most 10 s). Linking the sink's monitor keeps
   the sink running, so cycles arrive with nothing playing (the Mac's call
-  mode waits for an output client). The cost, measured on the private
+  mode keeps its tap aggregate running with a silent output of its own,
+  A10). The cost, measured on the private
   daemon over the 24 starts of one run of the live tests at a load
   average of 9: the first cycle comes 2 to 43 ms after the links, and the
   whole `start` (connection, two roundtrips, links, first cycle,
@@ -2796,12 +2801,12 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
 - **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
   Swift defects (each ported to Swift if it ships another release, otherwise closed by
   the cutover), the fixtures the Swift side owes, and the audio choices to settle at
-  cutover (the WAV mixdown, the resampler, the sidecar's 2 ms lag, AAC priming, call
-  mode without an output client). Where: "Store", "Adapters", "Handover", "LLM",
+  cutover (the WAV mixdown, the resampler, the sidecar's 2 ms lag, AAC priming).
+  Where: "Store", "Adapters", "Handover", "LLM",
   "Audio" and "Bridge" in the parity list, and the CLI's `--title` under "Pipeline
   and services (WP6b)". `.plans/2026-10-07-stable-promotion.md` (D9) settles all of
-  them, the parity notes' other "before cutover" ports to Swift included, apart from call
-  mode, which its A9 checks; its S7 deletes this item, and A9 the call-mode part.
+  them, the parity notes' other "before cutover" ports to Swift included; its S7
+  deletes this item. Call mode without an output client is fixed by A10.
   Found: #155, #165, #166, #167, #169, #190.
 - **WP9b.** No concurrency group spans the two release workflows, so two macOS signing
   jobs can run at once; only both READMEs state the one-at-a-time rule, until

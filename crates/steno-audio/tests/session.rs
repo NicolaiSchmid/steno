@@ -39,8 +39,8 @@ use steno_audio::writer::{
     CafFile, LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting, WavFile,
 };
 use steno_audio::{
-    Clock, EchoMetrics, FRAME_SIZE, FRAMES_PER_SECOND, PassthroughEchoCanceller, SAMPLE_RATE,
-    SystemClock,
+    Clock, EchoMetrics, FRAME_SIZE, FRAMES_PER_SECOND, PassthroughEchoCanceller, Playback,
+    PlaybackRefused, SAMPLE_RATE, SystemClock,
 };
 use steno_core::paths::file_url_path;
 use steno_core::{AudioFormat, AudioLane, AudioRetention, EchoCanceller, RecordingLayout};
@@ -215,7 +215,7 @@ fn idle_starting_recording_stopping_idle_over_the_synthetic_backend() {
 
 /// A device that changes and never comes back: four restarts fail across
 /// the backoff ladder and the recording ends in `DeviceLost`, finalised and
-/// readable to its last frame.
+/// readable to its last frame, with its [`Playback`] hold released.
 #[test]
 fn device_lost_stops_cleanly_with_a_readable_master() {
     let directory = tempfile::tempdir().unwrap();
@@ -225,6 +225,7 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
             .change_device_after(1.0)
             .restarts_that_fail(CaptureSession::RESTART_ATTEMPTS),
     ));
+    let playback = Playback::new();
     let session = CaptureSession::with_backend(
         configuration(CaptureMode::Call, directory.path(), false),
         backend.clone(),
@@ -232,7 +233,8 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
         200,
         clock.clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_playback(playback.clone());
     let states = session.states();
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
@@ -240,6 +242,7 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
         notices.recv_timeout(RECV).unwrap(),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
+    assert!(playback.is_recording());
     advance_through_sleeps(&clock, CaptureSession::RESTART_ATTEMPTS - 1);
     let seen = collect_states(&states, until_failed);
     assert_eq!(
@@ -247,6 +250,10 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
         Some(&CaptureError::DeviceLost)
     );
     assert!(seen.contains(&CaptureState::Stopping));
+    assert!(
+        !playback.is_recording(),
+        "the device loss released the hold before the state said Failed"
+    );
 
     // The state carries the finalised partial recording; `stop()` returns
     // the same one, with what ended it.
@@ -3673,4 +3680,193 @@ fn the_independent_tone_survives_within_three_decibels() {
     let echo_after = EchoMetrics::tone_level(&processed[range], 1_000.0, 48_000.0);
     let erle = 20.0 * (echo_before / echo_after).log10();
     assert!(erle >= 15.0, "echo tone ERLE {erle} dB under double talk");
+}
+
+/// The backend as the session drives it, noting whether the session's
+/// [`Playback`] gate is held at each `start` and `stop`: the hold must be
+/// taken before the backend (on macOS its tap) exists and kept until the
+/// backend has stopped.
+struct GateWatch {
+    inner: SyntheticCaptureBackend,
+    playback: Playback,
+    held_at_start: Mutex<Vec<bool>>,
+    held_at_stop: Mutex<Vec<bool>>,
+}
+
+impl GateWatch {
+    fn new(options: SyntheticOptions, playback: &Playback) -> Arc<Self> {
+        Arc::new(Self {
+            inner: SyntheticCaptureBackend::new(options),
+            playback: playback.clone(),
+            held_at_start: Mutex::new(Vec::new()),
+            held_at_stop: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn session(self: &Arc<Self>, directory: &Path) -> CaptureSession {
+        CaptureSession::with_backend(
+            configuration(CaptureMode::Call, directory, false),
+            self.clone(),
+            passthrough(),
+            1_000,
+            Arc::new(SystemClock::new()),
+        )
+        .unwrap()
+        .with_playback(self.playback.clone())
+    }
+}
+
+impl CaptureBackend for GateWatch {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        input_device_uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        self.held_at_start
+            .lock()
+            .unwrap()
+            .push(self.playback.is_recording());
+        self.inner.start(lanes, input_device_uid, sink)
+    }
+
+    fn stop(&self) {
+        self.held_at_stop
+            .lock()
+            .unwrap()
+            .push(self.playback.is_recording());
+        self.inner.stop();
+    }
+}
+
+/// No in-app playback while recording: the session holds the gate from
+/// before its backend starts, across a rebuild, until the backend has
+/// stopped; playback is refused meanwhile and allowed again after.
+#[test]
+fn playback_is_refused_while_the_session_records_and_across_a_rebuild() {
+    let directory = tempfile::tempdir().unwrap();
+    let playback = Playback::new();
+    let backend = GateWatch::new(tones(&call(), 0.5), &playback);
+    let session = backend.session(directory.path());
+    let notices = session.notices();
+    assert!(playback.begin(|| {}).is_ok(), "idle: playback is allowed");
+
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(playback.begin(|| {}).unwrap_err(), PlaybackRefused);
+    session.device_changed(DeviceChangeReason::DefaultOutputChanged);
+    loop {
+        let notice = notices.recv_timeout(RECV).unwrap();
+        if matches!(notice, CaptureNotice::DeviceResumed { .. }) {
+            break;
+        }
+    }
+    assert_eq!(
+        playback.begin(|| {}).unwrap_err(),
+        PlaybackRefused,
+        "still refused after the rebuild"
+    );
+    session.stop().unwrap();
+
+    assert!(playback.begin(|| {}).is_ok(), "allowed once stopped");
+    assert_eq!(*backend.held_at_start.lock().unwrap(), [true, true]);
+    assert!(
+        backend
+            .held_at_stop
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|held| *held),
+        "held through every stop of the backend"
+    );
+}
+
+/// Playback that runs when a recording starts is stopped before the
+/// backend starts.
+#[test]
+fn playback_that_runs_is_stopped_when_the_session_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    let playback = Playback::new();
+    let backend = GateWatch::new(tones(&call(), 0.5), &playback);
+    let session = backend.session(directory.path());
+    let stopped = Arc::new(AtomicBool::new(false));
+    let on_stop = Arc::clone(&stopped);
+    let permit = playback
+        .begin(move || on_stop.store(true, Ordering::SeqCst))
+        .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    assert!(stopped.load(Ordering::SeqCst));
+    assert!(permit.is_stopped());
+    session.stop().unwrap();
+}
+
+/// A start that fails, or panics once the backend runs, releases the gate:
+/// playback is allowed again, and the failed state is no reason to refuse.
+#[test]
+fn a_start_that_fails_or_panics_releases_the_gate() {
+    let directory = tempfile::tempdir().unwrap();
+    let playback = Playback::new();
+    let refused = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        Arc::new(Failing),
+        passthrough(),
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap()
+    .with_playback(playback.clone());
+    assert!(refused.start(Uuid::new_v4()).is_err());
+    assert!(!playback.is_recording(), "released after a failed start");
+
+    let backend = GateWatch::new(tones(&call(), 0.5).start_panics_once_running(), &playback);
+    let session = backend.session(directory.path());
+    let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        session.start(Uuid::new_v4())
+    }));
+    assert!(started.is_err(), "the start panicked");
+    assert!(!playback.is_recording(), "released after a panicking start");
+    assert_eq!(
+        *backend.held_at_stop.lock().unwrap(),
+        [true],
+        "released only after the guard stopped the backend"
+    );
+    assert!(playback.begin(|| {}).is_ok());
+}
+
+/// A session made without `with_playback` holds the process's gate, the
+/// one every player asks ([`Playback::global`]), while it records. Only
+/// the held state is asserted: the other tests' sessions share that gate.
+#[test]
+fn a_session_holds_the_process_gate_while_it_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        Arc::new(SyntheticCaptureBackend::new(tones(&call(), 0.5))),
+        passthrough(),
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    assert!(Playback::global().is_recording());
+    assert_eq!(
+        Playback::global().begin(|| {}).unwrap_err(),
+        PlaybackRefused
+    );
+    session.stop().unwrap();
+}
+
+/// Two sessions on one gate: it opens only when both have stopped.
+#[test]
+fn two_recording_sessions_keep_the_gate_shut_until_both_stop() {
+    let playback = Playback::new();
+    let (first_directory, second_directory) =
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let first = GateWatch::new(tones(&call(), 0.5), &playback).session(first_directory.path());
+    let second = GateWatch::new(tones(&call(), 0.5), &playback).session(second_directory.path());
+    first.start(Uuid::new_v4()).unwrap();
+    second.start(Uuid::new_v4()).unwrap();
+    first.stop().unwrap();
+    assert_eq!(playback.begin(|| {}).unwrap_err(), PlaybackRefused);
+    second.stop().unwrap();
+    assert!(playback.begin(|| {}).is_ok());
 }

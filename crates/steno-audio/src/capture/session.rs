@@ -11,6 +11,13 @@
 //! `sidecars_16k` filled, retention `KeepForever` until the caller sets it
 //! from `Settings`) with statistics.
 //!
+//! No in-app playback while recording, enforced by [`Playback`]: `start`
+//! takes the process's gate ([`Playback::global`]) before the backend
+//! starts, which stops any playback that runs and refuses new playback,
+//! and the recording keeps that hold across every rebuild until its
+//! teardown is done. On macOS the call capture's tap includes Steno's own
+//! process, so anything Steno played would land in the system lane.
+//!
 //! A device change while recording does not end the recording. The
 //! backend reports it through the sink; the session stops the backend and
 //! the processing thread, starts the backend again on the devices as they
@@ -127,6 +134,7 @@ use super::configuration::{
 };
 use crate::aec::SpeexEchoCanceller;
 use crate::clock::{Cancel, Clock, SystemClock};
+use crate::playback::{Playback, RecordingHold};
 use crate::realtime::{
     FrameRelay, LaneFrameSink, LevelSlot, ProcessingConfiguration, ProcessingThread, RateConverter,
 };
@@ -166,6 +174,10 @@ struct Core {
     backend: Arc<dyn CaptureBackend>,
     clock: Arc<dyn Clock>,
     make_writer: RecordingWriterFactory,
+    /// Held from before the backend starts until the recording's teardown
+    /// is done ([`Active::_recording_hold`]): no in-app playback while
+    /// recording.
+    playback: Playback,
     inner: Mutex<Inner>,
     /// Notified on every state change; `stop()` waits on it while another
     /// thread's finalise holds `Stopping`.
@@ -228,6 +240,10 @@ struct Active {
     /// The ring overruns of the streams a rebuild has stopped, each counted
     /// at its own rate.
     ring_drops: RingDrops,
+    /// The recording's hold on [`Playback`], taken before the backend
+    /// started, kept across rebuilds and dropped with `Active` at the end
+    /// of `finish()`, after `backend.stop()`. `Some` from `start` on.
+    _recording_hold: Option<RecordingHold>,
 }
 
 /// Ring overruns in samples at [`SAMPLE_RATE`], per lane. The sink counts
@@ -361,6 +377,7 @@ impl CaptureSession {
                 backend,
                 clock,
                 make_writer,
+                playback: Playback::global(),
                 inner: Mutex::new(Inner {
                     state: CaptureState::Idle,
                     state_subscribers: Vec::new(),
@@ -378,6 +395,22 @@ impl CaptureSession {
                 refuse_writer_failure_thread: AtomicBool::new(false),
             }),
         })
+    }
+
+    /// The session with its own [`Playback`] gate instead of the
+    /// process's ([`Playback::global`]), for a test that must not share
+    /// it. Call it before the first `start`.
+    ///
+    /// # Panics
+    ///
+    /// When the session has started a recording (its core is shared then).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_playback(mut self, playback: Playback) -> Self {
+        Arc::get_mut(&mut self.core)
+            .expect("with_playback before the first start")
+            .playback = playback;
+        self
     }
 
     /// The configuration given at construction.
@@ -614,15 +647,26 @@ impl Core {
     /// `Starting` for good, which no `start()` or `stop()` leaves. The body
     /// holds the lock throughout and drops it as it unwinds, before the
     /// guard takes it.
+    ///
+    /// The [`Playback`] hold is taken first, before the backend (and its
+    /// tap) exists, and declared before the guard so that a failed or
+    /// panicking start releases it only after the guard's `backend.stop()`.
     fn start(self: &Arc<Self>, meeting_id: Uuid) -> Result<(), CaptureError> {
+        let mut hold = Some(self.playback.hold_for_recording());
         let unwinding = Unwinding::starting(self);
-        let started = self.start_recording(meeting_id);
+        let started = self.start_recording(meeting_id, &mut hold);
         unwinding.disarm();
         started
     }
 
+    /// Moves `hold` into the recording once it runs; a start that fails
+    /// leaves it for `start` to drop.
     #[allow(clippy::too_many_lines)]
-    fn start_recording(self: &Arc<Self>, meeting_id: Uuid) -> Result<(), CaptureError> {
+    fn start_recording(
+        self: &Arc<Self>,
+        meeting_id: Uuid,
+        hold: &mut Option<RecordingHold>,
+    ) -> Result<(), CaptureError> {
         let mut inner = self.lock();
         match inner.state {
             CaptureState::Idle | CaptureState::Failed { .. } => {}
@@ -759,6 +803,7 @@ impl Core {
             rebuild: None,
             pending_change: None,
             ring_drops: RingDrops::default(),
+            _recording_hold: hold.take(),
         });
         self.set_state(
             &mut inner,

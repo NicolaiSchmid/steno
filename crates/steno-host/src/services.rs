@@ -450,8 +450,18 @@ pub trait FileSystem: Send + Sync {
 /// Plays a speaker's sample clip, one at a time (the shell implements it
 /// in WP6b). The fake plays a clip the fake file system has and records
 /// every clip it played. Swift: `ClipPlayer`.
+///
+/// No in-app playback while recording, enforced by `steno_audio::Playback`:
+/// the call capture's tap includes Steno's own process, so the shell's
+/// player asks `Playback::global().begin` before every clip, starts it
+/// through the permit's `start`, and stops in the permit's `on_stop` when a
+/// recording starts. The player is native; the web UI plays nothing (its
+/// `<audio>` would play from the web view's media process, which the gate
+/// cannot see).
 pub trait ClipPlayer: Send + Sync {
-    /// Starts the clip; false when the file is missing or unreadable.
+    /// Starts the clip; false when the file is missing or unreadable. The
+    /// shell's player, when it exists, returns false while a recording runs
+    /// (`Playback::begin` refused).
     fn play(&self, clip: &Path) -> bool;
     fn stop(&self);
     fn playing(&self) -> Option<PathBuf>;
