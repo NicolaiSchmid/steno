@@ -13,9 +13,9 @@ use steno_core::{
 };
 use steno_handover::{HandoverService, IdentityError, Unavailability};
 use steno_host::fakes::{
-    FakeClipPlayer, FakeFileSystem, FakeLoginItem, FakePermissions, FakeQrEncoder, FakeUpdater,
+    FakeClipPlayer, FakeFileSystem, FakeLoginItem, FakePermissions, FakeUpdater,
 };
-use steno_host::services::{LoginItem, LoginItemStatus, Opener, Services};
+use steno_host::services::{LoginItem, LoginItemStatus, Opener, Preferences, Services};
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
@@ -29,10 +29,12 @@ use crate::pipeline::{
     BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
 };
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
+use crate::qr::PngQrEncoder;
 use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
 use crate::recovery::{Interrupted, LiveRecordingCheck, reconcile_interrupted};
 use crate::secrets::{KeepsApiKey, KeyringUnavailable, SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
+use crate::updates::{InstallGate, NeverIdle, ScheduleParts, UpdateSchedule, UpdateSource};
 
 /// What stops the graph from being built: another process holds the
 /// database ([`DatabaseLock`]), or the database could not be opened or
@@ -64,6 +66,13 @@ pub struct AppOptions {
     /// The login item; the shell's (`autostart.rs`), `None` for a fake
     /// that registers nothing (the CLI, the tests).
     pub login_item: Option<Arc<dyn LoginItem>>,
+    /// The updater the update schedule drives; the shell's (`updater.rs`),
+    /// `None` for a fake that never checks (the CLI, the tests).
+    pub update_source: Option<Arc<dyn UpdateSource>>,
+    /// Whether an update may install now (stable plan P25); [`NeverIdle`]
+    /// until the shell supplies the real gate, and through it nothing
+    /// downloads or installs by itself.
+    pub install_gate: Arc<dyn InstallGate>,
     /// The runtime the host's synchronous service calls block on.
     pub runtime: tokio::runtime::Handle,
     /// `CFBundleShortVersionString`'s equivalent.
@@ -94,6 +103,8 @@ impl AppOptions {
             keyring: true,
             opener,
             login_item: None,
+            update_source: None,
+            install_gate: Arc::new(NeverIdle),
             runtime,
             version: version.to_owned(),
             make_capture_session: Arc::new(|configuration| {
@@ -117,6 +128,9 @@ pub struct App {
     /// resets.
     pub export_retries: Arc<ExportRetries>,
     pub services: Services,
+    /// The update schedule behind `services.updater`, when the shell
+    /// passed an update source; [`App::launch`] starts it.
+    pub updates: Option<Arc<UpdateSchedule>>,
     pub handover: Option<Arc<ListenerHandover>>,
     pub recorder: Arc<CaptureRecorder>,
     /// Where the speech and diarization models live.
@@ -421,9 +435,11 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
 /// diarizer, cosine speaker memory over the store, LLM passes, delivery
 /// coordinator, handover listener, capture session, recorder, the speech
 /// models, folder usage, preferences, and the login item when the shell
-/// passes its own ([`AppOptions::login_item`]). Fakes where no platform
-/// side exists yet (the plan's "Pipeline and services (WP6b)" list says why
-/// for each): permissions (all granted), updater, clip player, QR encoder;
+/// passes its own ([`AppOptions::login_item`]), the update schedule over
+/// the shell's update source ([`AppOptions::update_source`]), the QR
+/// encoder. Fakes where no platform side exists yet (the plan's "Pipeline
+/// and services (WP6b)" list says why for each): permissions (all
+/// granted), clip player, the updater when the shell passes no source;
 /// the audio device list is empty off the Mac until the `PipeWire` and
 /// WASAPI backends enumerate devices.
 #[allow(clippy::too_many_lines)]
@@ -477,13 +493,33 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         .inspect_err(|error| warnings.push(format!("Phone handover is unavailable: {error}")))
         .ok();
 
+    let clock = Arc::new(WallClock);
+    let preferences: Arc<dyn Preferences> = Arc::new(FilePreferences::new(
+        paths.support_directory.join("preferences.json"),
+    ));
+    let updates = options.update_source.map(|source| {
+        UpdateSchedule::new(ScheduleParts {
+            source,
+            preferences: preferences.clone(),
+            clock: clock.clone(),
+            gate: options.install_gate,
+            recorder: recorder.clone(),
+            support_directory: paths.support_directory.clone(),
+            managed: crate::updates::updates_are_managed(),
+            runtime: runtime.clone(),
+        })
+    });
+
     let services = Services {
-        clock: Arc::new(WallClock),
+        clock,
         login_item: options
             .login_item
             .unwrap_or_else(|| Arc::new(FakeLoginItem::new(LoginItemStatus::NotRegistered))),
         permissions,
-        updater: Arc::new(FakeUpdater::default()),
+        updater: match &updates {
+            Some(updates) => updates.clone(),
+            None => Arc::new(FakeUpdater::default()),
+        },
         recorder: recorder.clone(),
         pipeline: Arc::new(HostPipeline {
             pipeline: pipeline.clone(),
@@ -496,15 +532,13 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         handover: handover
             .clone()
             .map(|handover| handover as Arc<dyn steno_host::services::Handover>),
-        qr: Arc::new(FakeQrEncoder::new("")),
+        qr: Arc::new(PngQrEncoder),
         audio_devices: Arc::new(PlatformAudioDevices),
         folder_usage: Arc::new(DiskFolderUsage),
         file_system: Arc::new(steno_host::services::RealFileSystem),
         clip_player: Arc::new(FakeClipPlayer::new(Arc::new(FakeFileSystem::default()))),
         opener: options.opener,
-        preferences: Arc::new(FilePreferences::new(
-            paths.support_directory.join("preferences.json"),
-        )),
+        preferences,
         secrets: secrets.clone(),
     };
 
@@ -517,6 +551,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         sweep,
         export_retries,
         services,
+        updates,
         handover,
         recorder,
         models_directory: speech.models_directory.clone(),
@@ -792,13 +827,17 @@ impl App {
     /// 4. On a blocking task (`reconcile_at_launch`, which may wait up to
     ///    10 s for a master that is still written): those recordings are
     ///    recovered, left alone or failed, and the list is refreshed.
-    /// 5. Meanwhile the login item is registered the first time, and the
-    ///    handover listener starts when a phone is already paired.
+    /// 5. Meanwhile the login item is registered the first time, the
+    ///    handover listener starts when a phone is already paired, and the
+    ///    update schedule starts with its launch tick
+    ///    ([`UpdateSchedule::start`]).
     ///
     /// Where the secret store can ask (the Secret Service), steps 3 and 4
     /// (all but the sweep) wait until it chose and the reread below ran, so
     /// no meeting, export or recovered recording runs on a pipeline built
-    /// without the key. The choice includes the unlock and the first
+    /// without the key, and the update schedule waits until it chose, so
+    /// its launch tick's alert does not come up beside the keyring's
+    /// prompt. The choice includes the unlock and the first
     /// launch's move or a later launch's tidy; on a locked keyring or
     /// `KeePassXC` each of their prompts may stay up for two minutes, so a
     /// meeting a crash left processing can show as processing that long (it
@@ -820,6 +859,7 @@ impl App {
         let recorder_host = host.clone();
         self.recorder
             .on_change(Arc::new(move || recorder_host.recorder_changed()));
+        self.report_update_checks(host);
 
         let mut receiver = self.events.subscribe();
         let sweep = self.sweep.clone();
@@ -887,20 +927,28 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+        let updates = self.updates.clone();
         let work = match unlocked {
             None => {
                 recover();
                 run_sweep(&self.sweep);
+                if let Some(updates) = updates {
+                    updates.start();
+                }
                 tokio::task::spawn_blocking(reconcile)
             }
             // The pipeline built while the keyring asked has no API key, so
             // the meetings and the interrupted recordings wait for the one
-            // built after the answer.
+            // built after the answer. The update schedule waits for the
+            // answer too.
             Some(unlocked) => {
                 run_sweep(&self.sweep);
                 let reread = self.reread_after_unlock(host);
                 tokio::spawn(async move {
                     let read_again = unlocked.await;
+                    if let Some(updates) = updates {
+                        updates.start();
+                    }
                     let _ = tokio::task::spawn_blocking(move || {
                         if read_again {
                             reread();
@@ -916,6 +964,23 @@ impl App {
             .launch_work
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(work);
+        self.start_alongside(host);
+        host.store_changed();
+    }
+
+    /// The host hears of every update check from here on, the launch
+    /// tick's included.
+    fn report_update_checks(&self, host: &Arc<Host>) {
+        if let Some(updates) = &self.updates {
+            let updates_host = host.clone();
+            updates.on_change(Arc::new(move || updates_host.updates_changed()));
+        }
+    }
+
+    /// The launch's step 5, but the update schedule: the login item
+    /// registered the first time, and the handover listener started when a
+    /// phone is already paired.
+    fn start_alongside(&self, host: &Arc<Host>) {
         host.register_login_item_on_first_launch();
         if let Some(handover) = self
             .handover
@@ -925,7 +990,6 @@ impl App {
         {
             tokio::spawn(async move { start_if_paired(&handover).await });
         }
-        host.store_changed();
     }
 
     /// The launch's crash recovery: meetings left queued or processing
@@ -1745,6 +1809,57 @@ mod tests {
         assert!(!text.contains("the model said"), "{text}");
     }
 
+    /// The update source the shell passes makes the update schedule the
+    /// host's updater, over the graph's `preferences.json`; without one the
+    /// updater is the fake. The QR encoder draws real codes either way.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_update_source_the_shell_passes_drives_the_hosts_updater() {
+        struct NoUpdates;
+        #[async_trait::async_trait]
+        impl UpdateSource for NoUpdates {
+            async fn check(&self) -> Result<Option<String>, String> {
+                Ok(None)
+            }
+            async fn download(&self, _version: &str) -> Result<Vec<u8>, String> {
+                Ok(Vec::new())
+            }
+            async fn install(&self, _version: &str, _package: Vec<u8>) -> Result<(), String> {
+                Ok(())
+            }
+            async fn relaunch(&self) {}
+            async fn ask(&self, _question: crate::updates::Question<'_>) -> bool {
+                false
+            }
+            fn tell_install_failed(&self, _message: &str) {}
+            fn announce(&self, _version: &str) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let app = build(AppOptions {
+            update_source: Some(Arc::new(NoUpdates)),
+            ..options_under(&support)
+        })
+        .unwrap();
+        let updates = app.updates.clone().expect("the schedule");
+        assert!(app.services.updater.can_check_for_updates());
+        app.services.updater.set_automatically_downloads(true);
+        assert!(
+            app.services
+                .preferences
+                .flag(crate::updates::AUTOMATIC_DOWNLOAD_KEY)
+        );
+        assert_eq!(updates.check_on_request().await, Ok(None));
+        assert!(app.services.updater.last_check_at().is_some());
+        assert!(support.join(crate::updates::LAST_CHECK_FILE).is_file());
+        assert!(app.services.qr.png_base64("steno://pair/v1").is_some());
+        drop(app);
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = build(options_under(&dir.path().join("support"))).unwrap();
+        assert!(app.updates.is_none());
+        assert!(app.services.updater.last_check_at().is_none());
+    }
+
     /// The options of the product's graph under `support`, without a
     /// capture backend or a keyring.
     fn options_under(support: &std::path::Path) -> AppOptions {
@@ -1754,6 +1869,8 @@ mod tests {
             keyring: false,
             opener: Arc::new(steno_host::fakes::FakeOpener::default()),
             login_item: None,
+            update_source: None,
+            install_gate: Arc::new(NeverIdle),
             runtime: tokio::runtime::Handle::current(),
             version: "0.0.0".to_owned(),
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),

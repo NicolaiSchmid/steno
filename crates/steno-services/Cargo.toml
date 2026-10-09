@@ -10,10 +10,13 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 fs4.workspace = true
 keyring.workspace = true
+png.workspace = true
+qrcode.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 steno-adapters = { path = "../steno-adapters" }
@@ -24,8 +27,8 @@ steno-core = { path = "../steno-core" }
 steno-diarize = { path = "../steno-diarize", default-features = false, features = ["onnx"] }
 steno-handover = { path = "../steno-handover" }
 # The host's fakes for the platform services the shell does not supply yet
-# (permissions, updater, clip player, QR encoder; the login item when the
-# shell passes none). The plan's "Pipeline and services (WP6b)" list says
+# (permissions, clip player; the updater and the login item when the shell
+# passes none). The plan's "Pipeline and services (WP6b)" list says
 # why for each.
 steno-host = { path = "../steno-host", features = ["fakes"] }
 steno-llm = { path = "../steno-llm" }
@@ -50,8 +53,11 @@ zbus.workspace = true
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-llm = { path = "../steno-llm", features = ["testing"] }
 steno-pipeline = { path = "../steno-pipeline", features = ["testing"] }
+rqrr.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
+# The paused clock of the update check's timeout test.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -161,6 +161,7 @@ pub fn app_over_fakes(
         sweep: steno_pipeline::RetentionSweep::new(store.clone()),
         export_retries: Arc::new(steno_pipeline::ExportRetries::in_memory()),
         services,
+        updates: None,
         handover: None,
         recorder,
         models_directory: root.join("models"),

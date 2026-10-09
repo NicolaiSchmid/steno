@@ -521,6 +521,10 @@ Every package is written in parallel except where a dependency is named:
     with its 60-second countdown, with `dismiss_prompt` reaching the controller.
   - Port the auto-stop after a call: the 90-second grace, "Keep recording" and
     the end reasons.
+  - A prompt's Record that an update install's start hold refuses (S4) shows
+    the recorder's error in the prompt, or detection prompts again after the
+    relaunch for a call still under way; until then the refusal shows only in
+    the main window.
   - Tests: Swift's `DetectionTests` and `AutoStopTests` as table tests against a
     fake clock and a fake process list. **Nicolai**, on his Mac: a FaceTime or
     Teams call raises the prompt, and hanging up stops the recording after the
@@ -551,6 +555,38 @@ Every package is written in parallel except where a dependency is named:
     proves the schedule on real releases.
   - In "Open after the port", S4 cuts the shell's four-gaps item down to the
     badge and the clip player.
+  - As built (`steno_services::updates`, `steno_services::qr`): the last check
+    time is the key `lastCheckAt` in `update-check.json` in the support
+    directory (`~/Library/Application Support/Steno/update-check.json` on the
+    Mac), an RFC 3339 UTC string such as `{"lastCheckAt":"2026-10-09T08:00:00Z"}`,
+    which R4 sets back by 25 hours. The flags are the booleans
+    `steno.updates.automaticChecks` (missing: on, as `SUEnableAutomaticChecks`
+    in the Swift Info.plist) and `steno.updates.automaticDownload` (missing:
+    off, Sparkle's default) in `preferences.json`. A check is also due when the
+    stored time is in the future (the clock was set back), and a check that has
+    not answered after 60 seconds fails. A found update raises the "Install and
+    Relaunch" dialog once per version in a run, not while a recording starts,
+    runs or stops, and a yes given once a recording has started asks again
+    before it installs. The install downloads first, then holds recording
+    starts off (`Recorder::hold_starts`) from just before the package is
+    written through the relaunch, and a Record meanwhile says "Steno is
+    installing an update. You can record again once it relaunches, or if you
+    cancel the install." (the hold spans the updater's password prompt,
+    which a `.deb` install always shows; cancelling it fails the install and
+    frees Record); a recording that started during the download puts the
+    install off, with the package kept and the version raised again. A
+    refused Record shows only in the main window (S2 carries the prompt's
+    part). P25's `InstallHold` takes the same recorder start hold rather
+    than building a second one. Automatic
+    downloads wait for P25's gate: the schedule downloads by itself only
+    while `InstallGate::is_idle_now` says idle and installs only with the
+    gate's hold from `InstallGate::try_hold`; the stand-in
+    `NeverIdle` is never idle, so it downloads nothing, and P25's gate turns
+    automatic downloads on. P25 also re-reads the automatic-downloads flag when
+    a download ends and before the install: a switch turned off during the
+    transfer finds nothing kept yet, so today the same tick would still keep
+    and install the package. `updates_are_managed` is X5's switch. The QR code
+    is the `qrcode` crate's, level M, as a greyscale PNG.
 - **S5 Handover on a changing network** (`fix/handover-republish`).
   - Re-register the Bonjour record when the interfaces change, on every
     platform.

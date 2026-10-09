@@ -127,8 +127,9 @@ pub enum UpdateOutcome {
     Failed(String),
 }
 
-/// Sparkle today, the Tauri updater at cutover (WP8). The fake holds the
-/// flags and counts the checks. Swift: `UpdaterControlling`.
+/// Sparkle in the Swift app; in this one the update schedule over the
+/// Tauri updater (`steno_services::updates`). The fake holds the flags and
+/// counts the checks. Swift: `UpdaterControlling`.
 pub trait Updater: Send + Sync {
     fn can_check_for_updates(&self) -> bool;
     fn automatically_checks(&self) -> bool;
@@ -208,7 +209,17 @@ impl RecorderStatus {
 pub trait Recorder: Send + Sync {
     fn status(&self) -> RecorderStatus;
     /// Starts a recording; `call_app` is the app the detection prompt named.
+    /// While a [`StartHold`] lives the start is refused, and the status's
+    /// error says [`INSTALLING_UPDATE`].
     fn start(&self, mode: CaptureMode, call_app: Option<&str>);
+    /// Holds every recording start off until the hold is dropped, for an
+    /// install that relaunches the app. A recording already starting,
+    /// running or stopping goes on: the hold is taken under the lock a
+    /// start checks it under, so [`Self::status`] read after it says what
+    /// an install would stop, and no start begins after that read. Dropping
+    /// the last hold clears the refusal's error. Rust only: Sparkle
+    /// installed at quit.
+    fn hold_starts(&self) -> StartHold;
     fn stop(&self);
     fn toggle(&self);
     /// "Keep recording": disarms the auto-stop.
@@ -229,6 +240,14 @@ pub trait Recorder: Send + Sync {
     /// the recorder kept for its recovery goes too. Rust only.
     fn forget_recording(&self, meeting_id: Uuid);
 }
+
+/// What [`Recorder::hold_starts`] returns: recording starts are refused
+/// until it is dropped.
+pub type StartHold = Box<dyn Send>;
+
+/// The error a start refused under a [`StartHold`] leaves in the status.
+/// It promises no time: the hold can span the updater's password prompt.
+pub const INSTALLING_UPDATE: &str = "Steno is installing an update. You can record again once it relaunches, or if you cancel the install.";
 
 /// A meeting left `recording`, as [`Recorder::left_recording`] finds it
 /// on disk.
@@ -399,7 +418,7 @@ pub trait Handover: Send + Sync {
     fn receipts(&self) -> Vec<HandoverReceipt>;
 }
 
-/// Draws a QR code as a PNG, base64 (the shell implements it in WP6b).
+/// Draws a QR code as a PNG, base64 (`steno_services::qr` implements it).
 /// The fake answers the image a test set, whatever the text. Swift:
 /// `QRCode.png(for:)` in `apps/macos/Steno/Services/QRCode.swift`.
 pub trait QrEncoder: Send + Sync {
@@ -481,11 +500,19 @@ pub trait Opener: Send + Sync {
     fn close_window(&self, window: BridgeWindow);
 }
 
-/// The two flags the Swift app kept in `UserDefaults`: whether onboarding
-/// has finished and whether the login item was registered once. The shell
-/// (WP6b) keeps them in its own settings file; the fake holds a map.
+/// The flags the Swift app kept in `UserDefaults`: whether onboarding has
+/// finished, whether the login item was registered once, and Sparkle's
+/// automatic-check and automatic-download flags (the updater's).
+/// `steno_services::platform::FilePreferences` keeps them in
+/// `preferences.json`; the fake holds a map.
 pub trait Preferences: Send + Sync {
-    fn flag(&self, key: &str) -> bool;
+    /// False when the key is missing or holds no boolean.
+    fn flag(&self, key: &str) -> bool {
+        self.stored_flag(key).unwrap_or(false)
+    }
+    /// `None` when the key is missing or holds no boolean, for a flag
+    /// whose default is not false (the updater's automatic checks).
+    fn stored_flag(&self, key: &str) -> Option<bool>;
     fn set_flag(&self, key: &str, value: bool);
 }
 

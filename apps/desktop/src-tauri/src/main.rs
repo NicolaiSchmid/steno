@@ -169,7 +169,6 @@ fn main() {
         .manage(panels::Panels::default())
         .manage(windows::Pages::default())
         .manage(windows::Kept::default())
-        .manage(updater::Updates::default())
         .manage(TrayAtClose::default())
         .manage(steno_services::app::ExitGate::default())
         .invoke_handler(tauri::generate_handler![
@@ -200,6 +199,9 @@ fn setup(
     handle: &tauri::AppHandle,
     runtime: &'static tokio::runtime::Runtime,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    handle.manage(std::sync::Arc::new(updater::ShellUpdates::new(
+        handle.clone(),
+    )));
     #[cfg(not(feature = "fixture-host"))]
     if let Some(refusal) = refusal_before_build(platform_app_running) {
         refuse_to_start(

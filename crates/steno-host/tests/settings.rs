@@ -21,7 +21,7 @@ use steno_bridge::{
 use steno_core::paths::file_url;
 use steno_core::protocols::{BoundaryResult, SecretKey, SecretStore};
 use steno_core::{AudioRetention, LlmProvider};
-use steno_host::services::{CodexModel, LoginItemStatus};
+use steno_host::services::{CodexModel, LoginItemStatus, UpdateOutcome};
 use steno_host::settings::{KeyRead, LlmSettingsViewModel};
 use steno_host::speech::ModelAsset;
 
@@ -133,6 +133,29 @@ fn general_saves_template_detection_login_item_calendar_and_updates() {
     assert_eq!(*harness.fakes.updater.checks.lock().unwrap(), 1);
     harness.host.settings_general_open_login_items().unwrap();
     assert_eq!(*harness.fakes.login_item.opened.lock().unwrap(), 1);
+}
+
+/// A check that ended outside a command (the daily schedule, the tray's
+/// Check for Updates) reaches the General section and the overview's
+/// subtitle through `updates_changed`. Rust only: the Swift view model
+/// observed `UpdaterController`.
+#[test]
+fn a_check_outside_a_command_republishes_the_general_section() {
+    let harness = Harness::builder().build();
+    harness.fakes.updater.set_last_check(
+        Some(date("2026-10-09T08:00:00.000Z")),
+        UpdateOutcome::Available("0.12.0".into()),
+    );
+    harness.sink.clear();
+    harness.host.updates_changed();
+    let general = harness.sink.last(BridgeTopic::SettingsGeneral).unwrap();
+    assert_eq!(
+        general["updates"]["lastCheckAt"],
+        "2026-10-09T08:00:00.000Z"
+    );
+    assert_eq!(general["updates"]["outcome"], "available");
+    assert_eq!(general["updates"]["detail"], "0.12.0");
+    assert_eq!(general["subtitle"], "Update available: 0.12.0");
 }
 
 /// Swift: `testAudioSavesDeviceFolderAndRetention`, `testAudioSwitchingToForeverKeepsRecordingsOnDisk`,
