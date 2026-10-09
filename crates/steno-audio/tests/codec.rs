@@ -459,55 +459,69 @@ fn box_offset(bytes: &[u8], path: &[&[u8; 4]]) -> usize {
     at
 }
 
-/// What happens to an ffmpeg onset fixture's edit list in [`rewritten`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditList {
-    /// Kept as ffmpeg wrote it (1 024).
-    Kept,
-    /// Its one edit's media time set to 0.
-    Zero,
-    /// Renamed `free` (the box stays, so no offset moves).
-    Dropped,
+/// What a rewritten onset fixture declares of its priming.
+#[derive(Debug, Clone, Copy)]
+enum Declared {
+    /// ffmpeg's own edit list: 1 024.
+    EditList,
+    /// No edit list, iTunes' gapless tag naming this many samples: the
+    /// layout of `AVAudioFile` and `afconvert`.
+    Gapless(u32),
+    /// ffmpeg's edit list and a gapless tag naming this many.
+    EditListAndGapless(u32),
+    /// An edit list starting at 0 and a gapless tag naming this many.
+    ZeroEditAndGapless(u32),
+    /// Neither, as `AVAudioRecorder` writes it.
+    Neither,
 }
 
-/// An ffmpeg onset fixture with its edit list changed as `edit` says and,
-/// when `gapless` is given, iTunes' gapless tag naming that priming
-/// appended to `moov`, the file's last box. Dropped with a tag is the
-/// layout of `AVAudioFile` and `afconvert`; dropped without,
-/// `AVAudioRecorder`'s.
-fn rewritten(bytes: &[u8], edit: EditList, gapless: Option<u32>) -> Vec<u8> {
+/// `bytes`, an ffmpeg onset fixture, rewritten as `declared` says, in
+/// `directory`. A dropped edit list is renamed `free` (the box stays, so
+/// no offset moves); a gapless tag is appended to `moov`, the file's last
+/// box.
+fn variant(directory: &Path, bytes: &[u8], declared: Declared) -> PathBuf {
     let mut bytes = bytes.to_vec();
     let edts = box_offset(&bytes, &[b"moov", b"trak", b"edts"]);
-    match edit {
-        EditList::Kept => {}
-        EditList::Zero => {
+    match declared {
+        Declared::EditList | Declared::EditListAndGapless(_) => {}
+        Declared::ZeroEditAndGapless(_) => {
             // `edts`'s header, `elst`'s, its version and flags, its count,
             // then the one entry's duration and its media time.
             let media_time = edts + 8 + 8 + 4 + 4 + 4;
             assert_eq!(&bytes[edts + 12..edts + 16], b"elst");
             bytes[media_time..media_time + 4].copy_from_slice(&0u32.to_be_bytes());
         }
-        EditList::Dropped => bytes[edts + 4..edts + 8].copy_from_slice(b"free"),
+        Declared::Gapless(_) | Declared::Neither => {
+            bytes[edts + 4..edts + 8].copy_from_slice(b"free");
+        }
     }
-    let Some(priming) = gapless else {
-        return bytes;
-    };
-    let moov = box_offset(&bytes, &[b"moov"]);
-    let moov_size = u32::from_be_bytes(bytes[moov..moov + 4].try_into().unwrap()) as usize;
-    assert_eq!(moov + moov_size, bytes.len(), "moov is the last box");
-    let full_box = |kind: &[u8; 4], body: &[u8]| {
-        let mut b = ((body.len() + 12) as u32).to_be_bytes().to_vec();
-        b.extend_from_slice(kind);
-        b.extend_from_slice(&[0; 4]);
-        b.extend_from_slice(body);
-        b
-    };
+    if let Declared::Gapless(priming)
+    | Declared::EditListAndGapless(priming)
+    | Declared::ZeroEditAndGapless(priming) = declared
+    {
+        let moov = box_offset(&bytes, &[b"moov"]);
+        let moov_size = u32::from_be_bytes(bytes[moov..moov + 4].try_into().unwrap()) as usize;
+        assert_eq!(moov + moov_size, bytes.len(), "moov is the last box");
+        let udta = gapless_udta(priming);
+        let grown = (moov_size + udta.len()) as u32;
+        bytes[moov..moov + 4].copy_from_slice(&grown.to_be_bytes());
+        bytes.extend_from_slice(&udta);
+    }
+    let path = directory.join(format!("{declared:?}.m4a"));
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// A `udta` box holding iTunes' gapless tag that names `priming` samples.
+fn gapless_udta(priming: u32) -> Vec<u8> {
     let plain_box = |kind: &[u8; 4], body: &[u8]| {
         let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
         b.extend_from_slice(kind);
         b.extend_from_slice(body);
         b
     };
+    // Version and flags, then the body.
+    let full_box = |kind: &[u8; 4], body: &[u8]| plain_box(kind, &[&[0u8; 4][..], body].concat());
     let value = format!(" 00000000 {priming:08X} 00000000 0000000000005A00");
     let mut data = vec![0, 0, 0, 1, 0, 0, 0, 0];
     data.extend_from_slice(value.as_bytes());
@@ -527,11 +541,7 @@ fn rewritten(bytes: &[u8], edit: EditList, gapless: Option<u32>) -> Vec<u8> {
         b"meta",
         &[full_box(b"hdlr", &handler), plain_box(b"ilst", &item)].concat(),
     );
-    let udta = plain_box(b"udta", &meta);
-    let grown = (moov_size + udta.len()) as u32;
-    bytes[moov..moov + 4].copy_from_slice(&grown.to_be_bytes());
-    bytes.extend_from_slice(&udta);
-    bytes
+    plain_box(b"udta", &meta)
 }
 
 /// A sine at 0.5 from sample `start` of 22 050 at 44.1 kHz: what ffmpeg
@@ -558,36 +568,6 @@ fn channels_of(path: &Path) -> Vec<Vec<f32>> {
                 .map(|decoded| decoded.samples)
         })
         .collect()
-}
-
-/// `bytes`, an ffmpeg onset fixture, rewritten as `declared` says, in
-/// `directory`.
-fn variant(directory: &Path, bytes: &[u8], declared: Declared) -> PathBuf {
-    let bytes = match declared {
-        Declared::EditList => bytes.to_vec(),
-        Declared::Gapless(priming) => rewritten(bytes, EditList::Dropped, Some(priming)),
-        Declared::EditListAndGapless(priming) => rewritten(bytes, EditList::Kept, Some(priming)),
-        Declared::ZeroEditAndGapless(priming) => rewritten(bytes, EditList::Zero, Some(priming)),
-        Declared::Neither => rewritten(bytes, EditList::Dropped, None),
-    };
-    let path = directory.join(format!("{declared:?}.m4a"));
-    std::fs::write(&path, bytes).unwrap();
-    path
-}
-
-/// What a rewritten onset fixture declares of its priming.
-#[derive(Debug, Clone, Copy)]
-enum Declared {
-    /// ffmpeg's own edit list: 1 024.
-    EditList,
-    /// No edit list, iTunes' gapless tag naming this many samples.
-    Gapless(u32),
-    /// ffmpeg's edit list and a gapless tag naming this many.
-    EditListAndGapless(u32),
-    /// An edit list starting at 0 and a gapless tag naming this many.
-    ZeroEditAndGapless(u32),
-    /// Neither, as `AVAudioRecorder` writes it.
-    Neither,
 }
 
 /// The priming ffmpeg's AAC encoder adds and its edit list declares.
