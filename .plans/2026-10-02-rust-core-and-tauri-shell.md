@@ -1408,11 +1408,12 @@ still has to draw the window side. `[ ]` is not ported yet.
   keeps its audio. The bridge method `meeting.processAgain` (no params, on the
   selected meeting) is answered through the host's `Pipeline::process_again`, whose
   `ProcessAgainRefusal` the detail words on its error line (nothing while the app
-  quits); the page offers the button on a failed meeting while
-  `retention.filesExist`, so the snapshot gained no field. The Swift app answers the
-  method too, from its own `enqueue` with the stored asset and its stamp cleared, so
-  the button works there during the rollback window; Swift had no such action
-  before. `steno process --meeting <id>` is Rust only.
+  quits). The host decides when it is offered: the detail snapshot's
+  `canProcessAgain`, `Meeting::offers_process_again` (a failed meeting today) and the
+  master on disk, and the pipeline's `process_again` checks the same rule under its
+  own read, so a stale detail cannot run a ready meeting again. The Swift app sends
+  `canProcessAgain: false` and refuses the method in words. `steno process --meeting
+  <id>` is Rust only and takes a ready meeting only with `--allow-ready`.
 - Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds
   under 5 % of the mic lane's speech and under ten seconds is diarized on the mic lane
   (`pipeline::diarized_lane_after_transcription`, `tap_carried_no_conversation`); the
