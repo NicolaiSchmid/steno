@@ -877,3 +877,33 @@ fn a_second_import_while_one_runs_does_nothing() {
         "done"
     );
 }
+
+/// Not now while Continue's prompts are up does nothing: the run decides,
+/// and a run that leaves the identity behind stays on the step with Try
+/// again.
+#[test]
+fn not_now_while_the_import_runs_leaves_the_step_to_the_run() {
+    let harness = Harness::builder().with_swift_import(2).build();
+    let import = harness.fakes.swift_import.clone().unwrap();
+    import.deny_export("Steno could not bring over this Mac's phone pairing.");
+    let host = harness.host.clone();
+    let page = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = page.clone();
+    *import.during_run.lock().unwrap() = Some(Box::new(move || {
+        host.onboarding_skip_import().unwrap();
+        let onboarding = host.snapshot(BridgeTopic::Onboarding).unwrap();
+        *seen.lock().unwrap() = Some((
+            onboarding["page"].clone(),
+            onboarding["swiftImport"]["state"].clone(),
+        ));
+    }));
+    harness.host.onboarding_import().unwrap();
+    assert_eq!(*import.skips.lock().unwrap(), 0, "Not now skipped a run");
+    assert_eq!(
+        page.lock().unwrap().take(),
+        Some((json!("import"), json!("importing")))
+    );
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["page"], "import");
+    assert_eq!(onboarding["swiftImport"]["state"], "waiting");
+}

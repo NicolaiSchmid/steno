@@ -2333,10 +2333,15 @@ impl BridgeHost for Host {
         Ok(())
     }
 
+    /// Not now while a run's prompts are up does nothing: that run
+    /// publishes the outcome, and its Try again stays on the step.
     fn onboarding_skip_import(&self) -> Outcome<()> {
         let Some(import) = self.shared.services.swift_import.clone() else {
             return Ok(());
         };
+        if self.lock().onboarding.importing {
+            return Ok(());
+        }
         let status = import.skip();
         self.finish_swift_import(status, true);
         Ok(())
