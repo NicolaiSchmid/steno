@@ -963,9 +963,11 @@ still has to draw the window side. `[ ]` is not ported yet.
     `steno-base64:`, as GNOME Keyring's unencrypted file (Omarchy's default) rejects a
     whole keyring over one.
   - Fallback and downgrade: with no provider, no default collection, a session bus that
-    is not a `unix:` socket, or a keyring the user leaves locked before the first move,
-    the app keeps every secret in the file for that run, shared with the CLI under the
-    lock. A build from before the mark cannot
+    is not a `unix:` socket, a bus that does not answer the connection and its session
+    within 2 s (zbus's method timeout does not cover the connection's set-up), or a
+    keyring the user leaves locked before the first move, the app keeps every secret in
+    the file for that run, shared with the CLI under the lock; after the mark the
+    secrets are unavailable for that run instead. A build from before the mark cannot
     parse the marked file and fails every secret read and write (no summaries key, no
     handover) rather than minting.
   - Tested against a fake Secret Service on a private `dbus-daemon`, and against GNOME

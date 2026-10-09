@@ -137,10 +137,15 @@ pub struct State {
     /// Whether the `default` alias names no collection.
     pub no_default: bool,
     /// Whether the collection left the bus, as `KeePassXC`'s does when its
-    /// database locks: its methods fail with `UnknownObject`, and an
-    /// unlock that names it unlocks nothing and asks nothing, as
-    /// `KeePassXC`'s does.
+    /// database locks: its methods and its items' fail with
+    /// `UnknownObject`, and an unlock that names it unlocks nothing and
+    /// asks nothing, as `KeePassXC`'s does.
     pub collection_gone: bool,
+    /// Whether the collection leaves the bus right after the next search
+    /// answers, as when the database locks between the store's calls.
+    pub gone_after_search: bool,
+    /// How many sessions were opened.
+    pub sessions: usize,
     /// How many prompts were shown.
     pub prompts: usize,
     /// How many prompts were made, shown or not.
@@ -309,6 +314,7 @@ impl FakeService {
         if algorithm != "plain" {
             return Err(fdo::Error::NotSupported(algorithm.to_owned()));
         }
+        self.state.lock().unwrap().sessions += 1;
         Ok((
             Value::from("").try_into().unwrap(),
             path(SESSION_PATH.to_owned()),
@@ -349,13 +355,14 @@ impl FakeCollection {
         &self,
         attributes: HashMap<String, String>,
     ) -> fdo::Result<Vec<OwnedObjectPath>> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if state.collection_gone {
             return Err(fdo::Error::UnknownObject(COLLECTION_PATH.to_owned()));
         }
         if state.locked {
             return Err(fdo::Error::AccessDenied("locked".to_owned()));
         }
+        state.collection_gone = std::mem::take(&mut state.gone_after_search);
         Ok(state
             .items
             .iter()
@@ -453,6 +460,9 @@ struct FakeItem {
 impl FakeItem {
     fn get_secret(&self, session: ObjectPath<'_>) -> fdo::Result<Secret> {
         let state = self.state.lock().unwrap();
+        if state.collection_gone {
+            return Err(fdo::Error::UnknownObject(item_path(self.id).to_string()));
+        }
         if state.locked || state.items_locked {
             return Err(fdo::Error::AccessDenied("locked".to_owned()));
         }

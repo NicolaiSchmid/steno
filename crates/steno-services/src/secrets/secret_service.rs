@@ -13,12 +13,13 @@
 //! secret from anyone who could not already read it. The bus is local; no
 //! secret leaves the computer. A session bus whose address is not a
 //! `unix:` socket (`tcp:` in some remote or container setups would carry
-//! the secret in clear) is not used: every secret then stays with the file.
+//! the secret in clear) is not used: every secret then stays with the file,
+//! or, once the file is marked, is unavailable for the run.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
 use steno_core::{
@@ -29,32 +30,41 @@ use tokio::sync::watch;
 use zbus::Connection;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Type, Value};
 
-use super::{Contents, FileSecretStore, KEYRING_SERVICE, KeyringUnavailable, SecretsUnlocked};
+use super::{
+    Contents, FileSecretStore, KEYRING_SERVICE, KeyringUnavailable, SecretsUnlocked, plain_name,
+};
 use crate::handover::FingerprintFile;
 
 /// The Secret Service when a provider answers on the session bus, else the
-/// [`FileSecretStore`] it wraps; `STENO_<KEY>` wins over both.
+/// [`FileSecretStore`] it wraps, or, once the file is marked, the secrets
+/// unavailable for the run; `STENO_<KEY>` wins either way.
 ///
 /// The choice is made once, on a thread of the store's own that starts
 /// when the store is made, and logged: the store connects, opens a
 /// session, finds the default collection and unlocks it and Steno's items
-/// in it (the provider may ask the user). No bus, no provider, no default
-/// collection, or an unlock the user declines or leaves unanswered leaves
-/// every secret of this process with the file, never some here and some
-/// there. A call made while the choice runs waits for it, except while the
-/// provider's prompt is on screen: then it fails at once with
-/// [`KeyringUnavailable::Unlocking`], so no read (the app's start on the
-/// main thread, the host under its lock, a window's close) waits on the
-/// user. [`SecretServiceStore::unlocked_after_prompt`] says when to read
-/// again.
+/// in it (the provider may ask the user). The connection and the session
+/// get two seconds together, as a bus that takes the connection and never
+/// answers is under no other deadline. No bus, no provider, no answer in
+/// those two seconds, no default collection, or an unlock the user
+/// declines or leaves unanswered leaves every secret of this process with
+/// the file, never some here and some there; once the file is marked,
+/// they are unavailable for the run instead (a key the file lacks is an
+/// error, never `None`). A call made while the choice runs waits for it,
+/// except while the provider's prompt is on screen: then it fails at once
+/// with [`KeyringUnavailable::Unlocking`], so no read (the app's start on
+/// the main thread, the host under its lock, a window's close) waits on
+/// the user. [`SecretServiceStore::unlocked_after_prompt`] says when to
+/// read again.
 ///
 /// After the choice only a write asks the user, as a write is something
 /// the user did: a read of a collection or an item that is locked again
 /// fails with [`KeyringUnavailable::Locked`] and dismisses the provider's
-/// prompt unseen. A write waits for the answer, up to two minutes; the
-/// host saves under its lock, so a keyring locked again while the app runs
-/// holds every window and the tray until the user answers the prompt
-/// Settings' save raised.
+/// prompt unseen. A bus error, or a provider that stops answering, fails a
+/// call the same way, so the user reads the keyring's sentence, not the
+/// bus's (the log keeps the bus's). A write waits for the answer, up to
+/// two minutes; the host saves under its lock, so a keyring locked again
+/// while the app runs holds every window and the tray until the user
+/// answers the prompt Settings' save raised.
 ///
 /// On choosing the service the first time, the store copies what the file
 /// holds into it, reads each value back, and then marks the file as moved
@@ -129,6 +139,7 @@ impl std::fmt::Debug for SecretServiceStore {
 }
 
 /// Which bus the store looks for a provider on.
+#[derive(Clone)]
 enum Bus {
     Session,
     /// A private bus, for the tests.
@@ -143,6 +154,14 @@ enum Backend {
 
 /// How long a D-Bus call may take, libdbus's default.
 const CALL_TIMEOUT: Duration = Duration::from_secs(25);
+/// How long the connection and its first call (the session) may take
+/// together. The method timeout does not cover the connection's set-up
+/// (the SASL handshake and the bus's `Hello`), so a bus that takes the
+/// connection and never answers would hold the choice, and every call
+/// waiting on it, for good. A provider the bus starts on that first call
+/// and that needs longer leaves the run without the keyring; the next
+/// start finds it running.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long the store waits for the user to answer the provider's prompt.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -302,7 +321,7 @@ impl Shared {
             |_| {
                 tracing::warn!(
                     "secrets: choosing the Secret Service panicked, {}",
-                    self.kept()
+                    self.fallback_note()
                 );
                 Backend::File
             },
@@ -311,7 +330,7 @@ impl Shared {
 
     /// Where the secrets are when the choice falls back to the file, for
     /// the log.
-    fn kept(&self) -> &'static str {
+    fn fallback_note(&self) -> &'static str {
         if self.file.read().is_ok_and(|contents| contents.moved) {
             "the secrets stay in the keyring, unavailable this run"
         } else {
@@ -350,7 +369,7 @@ impl Shared {
                 } else {
                     "the Secret Service could not be opened"
                 };
-                tracing::warn!("secrets: {what} ({error}), {}", self.kept());
+                tracing::warn!("secrets: {what} ({error}), {}", self.fallback_note());
                 return Backend::File;
             }
         };
@@ -402,7 +421,8 @@ impl SecretStore for SecretServiceStore {
     /// Never asks the user. A read of the service has one deadline over
     /// all its calls, as long as one D-Bus call may take (25 s), so a
     /// provider that stops answering holds a caller (the host under its
-    /// lock) that long once, not once per call.
+    /// lock) that long once, not once per call; the read then fails as a
+    /// locked keyring.
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
         if let Some(value) = self.shared.file.environment_value(key) {
             return Ok(Some(value.to_owned()));
@@ -411,8 +431,8 @@ impl SecretStore for SecretServiceStore {
             Backend::Service(keyring) => {
                 let read = tokio::time::timeout(CALL_TIMEOUT, keyring.secret(key, Ask::Never))
                     .await
-                    .map_err(|_| ServiceError::NoAnswer)?;
-                Ok(read?)
+                    .unwrap_or(Err(ServiceError::NoAnswer));
+                Ok(read.map_err(as_locked)?)
             }
             Backend::File => self.shared.file.secret(key).await,
         }
@@ -436,7 +456,10 @@ impl SecretStore for SecretServiceStore {
                 if removal {
                     self.drop_file_copy(key)?;
                 }
-                keyring.set_secret(key, value, self.ask()).await?;
+                keyring
+                    .set_secret(key, value, self.ask())
+                    .await
+                    .map_err(as_locked)?;
                 if !removal {
                     self.drop_file_copy(key)?;
                 }
@@ -476,17 +499,18 @@ pub(super) enum ServiceError {
          (Passwords and Keys, KWalletManager, KeePassXC's Secret Service settings)"
     )]
     NoDefaultCollection,
-    #[error("the Secret Service's prompt was dismissed")]
+    #[error("the keyring's prompt was dismissed")]
     Dismissed,
-    #[error("nobody answered the Secret Service's prompt")]
+    #[error("nobody answered the keyring's prompt")]
     PromptTimedOut,
-    #[error("the Secret Service closed its prompt without an answer")]
+    #[error("the keyring closed its prompt without an answer")]
     PromptClosed,
-    #[error("the Secret Service did not answer in time")]
+    #[error("the keyring did not answer in time")]
     NoAnswer,
     #[error("the session bus is not a local socket")]
     NotLocal,
-    #[error("the Secret Service holds `{0}` as bytes that are not UTF-8")]
+    /// Holds the key's raw value; the message names it in plain words.
+    #[error("the keyring holds {} in a form Steno cannot read", plain_name(.0))]
     NotText(String),
     #[error("`{0}` did not read back from the Secret Service as written")]
     ReadBack(String),
@@ -562,20 +586,17 @@ impl Keyring {
     /// every Steno item in it (`KeePassXC` locks items one by one).
     async fn open(bus: &Bus, ask: Ask<'_>) -> Result<Self, ServiceError> {
         let local = match bus {
-            Bus::Session => std::env::var("DBUS_SESSION_BUS_ADDRESS")
-                .map_or(true, |address| local_bus(&address)),
+            Bus::Session => session_is_local(std::env::var("DBUS_SESSION_BUS_ADDRESS")),
             Bus::Address(address) => local_bus(address),
         };
         if !local {
             return Err(ServiceError::NotLocal);
         }
-        let builder = match bus {
-            Bus::Session => zbus::connection::Builder::session()?,
-            Bus::Address(address) => zbus::connection::Builder::address(address.as_str())?,
-        };
-        let connection = builder.method_timeout(CALL_TIMEOUT).build().await?;
-        let service = ServiceProxy::new(&connection).await?;
-        let (_, session) = service.open_session("plain", &Value::from("")).await?;
+        let Connected {
+            connection,
+            service,
+            session,
+        } = connect_within(bus.clone(), CONNECT_TIMEOUT).await?;
         let collection = service.read_alias("default").await?;
         if collection.as_str() == NO_OBJECT {
             return Err(ServiceError::NoDefaultCollection);
@@ -757,24 +778,14 @@ impl Keyring {
     }
 
     /// The default collection's items filed under `key`, lowest path
-    /// first, once it is unlocked. A collection that left the bus since the
-    /// choice (`KeePassXC` removes a locked database's) reads as locked, so
-    /// the user sees the keyring's sentence, not the bus's.
+    /// first, once it is unlocked.
     async fn items(
         &self,
         key: &SecretKey,
         ask: Ask<'_>,
     ) -> Result<Vec<OwnedObjectPath>, ServiceError> {
-        let gone_as_locked = |error: ServiceError| match error {
-            ServiceError::Bus(error) if unknown_object(&error) => KeyringUnavailable::Locked.into(),
-            error => error,
-        };
-        self.unlock_collection(ask).await.map_err(gone_as_locked)?;
-        let mut items = self
-            .collection
-            .search_items(attributes(key))
-            .await
-            .map_err(|error| gone_as_locked(error.into()))?;
+        self.unlock_collection(ask).await?;
+        let mut items = self.collection.search_items(attributes(key)).await?;
         items.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         Ok(items)
     }
@@ -849,21 +860,85 @@ fn pin_file_identity(record: &FingerprintFile, pem: &str) -> Result<(), ServiceE
         .map_err(ServiceError::Record)
 }
 
-/// Whether `error` says the object a call named is not on the bus.
-fn unknown_object(error: &zbus::Error) -> bool {
+/// A call's failure after the choice as the user reads it: a bus error or
+/// a provider that stopped answering reads as a locked keyring, in the
+/// keyring's sentence; the bus's goes to the log. A collection that left
+/// the bus between two calls (`KeePassXC` removes a locked database's,
+/// with its items) is one such error, a provider that quit another.
+fn as_locked(error: ServiceError) -> ServiceError {
     match error {
-        zbus::Error::MethodError(name, _, _) => {
-            name.as_str() == "org.freedesktop.DBus.Error.UnknownObject"
+        ServiceError::Bus(_) | ServiceError::NoAnswer => {
+            tracing::info!("secrets: a keyring call failed ({error}); it reads as locked");
+            KeyringUnavailable::Locked.into()
         }
-        zbus::Error::FDO(error) => matches!(**error, zbus::fdo::Error::UnknownObject(_)),
-        _ => false,
+        error => error,
     }
 }
 
+/// A connection with an open `plain` session.
+struct Connected {
+    connection: Connection,
+    service: ServiceProxy<'static>,
+    session: OwnedObjectPath,
+}
+
+/// [`connect`] on a thread of its own, waited for `patience` at most:
+/// [`ServiceError::NoAnswer`] after that, which the choice takes as a
+/// keyring it could not open. The thread holds the bus's address and its
+/// socket only, no lock and nothing of the store's, so one the bus never
+/// answers waits there alone until the process ends, and an answer that
+/// comes later reaches no one: the connection it built closes with the
+/// thread.
+async fn connect_within(bus: Bus, patience: Duration) -> Result<Connected, ServiceError> {
+    let deadline = Instant::now() + patience;
+    let (done, outcome) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("steno-secrets-connect".to_owned())
+        .spawn(move || {
+            let connected = match tokio::runtime::Builder::new_current_thread().build() {
+                Ok(runtime) => runtime.block_on(connect(&bus, deadline)),
+                Err(error) => Err(zbus::Error::InputOutput(Arc::new(error)).into()),
+            };
+            let _ = done.send(connected);
+        })
+        .map_err(|error| zbus::Error::InputOutput(Arc::new(error)))?;
+    tokio::time::timeout(patience, outcome)
+        .await
+        .map_or(Err(ServiceError::NoAnswer), |sent| {
+            sent.unwrap_or(Err(ServiceError::NoAnswer))
+        })
+}
+
+/// Connects to `bus` and opens a `plain` session. A bus that takes the
+/// connection only after `deadline` is not asked for a session: the
+/// choice stopped waiting then.
+async fn connect(bus: &Bus, deadline: Instant) -> Result<Connected, ServiceError> {
+    let builder = match bus {
+        Bus::Session => zbus::connection::Builder::session()?,
+        Bus::Address(address) => zbus::connection::Builder::address(address.as_str())?,
+    };
+    let connection = builder.method_timeout(CALL_TIMEOUT).build().await?;
+    if Instant::now() >= deadline {
+        return Err(ServiceError::NoAnswer);
+    }
+    let service = ServiceProxy::new(&connection).await?;
+    let (_, session) = service.open_session("plain", &Value::from("")).await?;
+    Ok(Connected {
+        connection,
+        service,
+        session,
+    })
+}
+
+/// Whether the session bus at `address` (`DBUS_SESSION_BUS_ADDRESS`) is
+/// local. Unset or not Unicode, `zbus` uses the socket in
+/// `XDG_RUNTIME_DIR`, which is.
+fn session_is_local(address: Result<String, std::env::VarError>) -> bool {
+    address.map_or(true, |address| local_bus(&address))
+}
+
 /// Whether every address in a D-Bus address list is a `unix:` socket, so
-/// the `plain` session's secrets stay on this computer. Without
-/// `DBUS_SESSION_BUS_ADDRESS`, `zbus` uses the socket in
-/// `XDG_RUNTIME_DIR`.
+/// the `plain` session's secrets stay on this computer.
 fn local_bus(address: &str) -> bool {
     address
         .split(';')

@@ -43,9 +43,10 @@
 //! never waits on the keyring's prompt: one made while the prompt is up
 //! fails, and [`App::launch`] reads again once the keyring answered (the
 //! handover's identity too). [`build`] still waits for the choice until a
-//! prompt shows, so a provider that holds the bus name but never answers
-//! holds the start for one D-Bus call timeout (25 s) before the file is
-//! chosen. A write may wait on the user. The `keyring`
+//! prompt shows, so a bus or a provider that never answers holds the start
+//! for two seconds (the connection and its session), and a provider that
+//! stops answering after the session for one D-Bus call timeout (25 s),
+//! before the file is chosen. A write may wait on the user. The `keyring`
 //! crate's `linux-native` store is the kernel keyring, which does not
 //! survive a reboot (the handover identity and the LLM API key would
 //! vanish), so it is not used.

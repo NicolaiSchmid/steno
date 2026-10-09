@@ -94,16 +94,17 @@ pub enum KeyringUnavailable {
          once it is answered"
     )]
     Unlocking,
-    /// The keyring was locked again while the app ran, or refused Steno
-    /// access (`KeePassXC`'s access dialog denied).
+    /// The keyring was locked again while the app ran, refused Steno
+    /// access (`KeePassXC`'s access dialog denied), or stopped answering.
     #[error(
         "the keyring is locked or did not let Steno in; unlock it or allow Steno, then start \
          Steno again"
     )]
     Locked,
     /// The secrets moved into the keyring, which could not be opened at
-    /// start: locked, its prompt dismissed, or no provider running. Holds
-    /// the key's raw value; the message names it in plain words.
+    /// start: locked, its prompt dismissed, no provider running, or no
+    /// answer within two seconds. Holds the key's raw value; the message
+    /// names it in plain words.
     #[error(
         "{} is kept in the keyring, which Steno could not open when it started; unlock the \
          keyring and start Steno again",

@@ -949,6 +949,246 @@ async fn a_collection_that_left_the_bus_reads_as_locked() {
     assert_eq!(setup.values("llm-api-key"), ["sk-1"]);
 }
 
+/// A collection that leaves the bus between the store's search and its
+/// calls on the item (the item's unlock, `GetSecret`) reads as locked too,
+/// as does any other bus error after the choice, and the key reads again
+/// once the collection is back.
+#[tokio::test]
+async fn a_collection_that_leaves_the_bus_after_the_search_reads_as_locked() {
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    let store = setup.launch().await;
+    assert!(chose_service(&store));
+    let key = SecretKey::llm_api_key();
+    store.set_secret(&key, Some("sk-1")).await.unwrap();
+    let locked = KeyringUnavailable::Locked.to_string();
+    setup.state().gone_after_search = true;
+    assert_eq!(store.secret(&key).await.unwrap_err().to_string(), locked);
+    setup.state().collection_gone = false;
+    assert_eq!(store.secret(&key).await.unwrap().as_deref(), Some("sk-1"));
+
+    setup.state().refuse_writes = true;
+    assert_eq!(
+        store
+            .set_secret(&key, Some("sk-2"))
+            .await
+            .unwrap_err()
+            .to_string(),
+        locked
+    );
+    assert_eq!(setup.values("llm-api-key"), ["sk-1"]);
+}
+
+/// A unix socket that takes every connection and never answers, as a bus
+/// whose daemon hangs; a connection stays open until the test takes it
+/// from `accepted` and drops it.
+struct SilentBus {
+    address: String,
+    socket: std::path::PathBuf,
+    accepted: std::sync::mpsc::Receiver<std::os::unix::net::UnixStream>,
+    _folder: tempfile::TempDir,
+}
+
+impl SilentBus {
+    fn new() -> Self {
+        let folder = tempfile::tempdir().unwrap();
+        let socket = folder.path().join("bus");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let (sender, accepted) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                if sender.send(stream).is_err() {
+                    return;
+                }
+            }
+        });
+        SilentBus {
+            address: format!("unix:path={}", socket.display()),
+            socket,
+            accepted,
+            _folder: folder,
+        }
+    }
+}
+
+impl SilentBus {
+    /// Joins the connection the bus took to the daemon at `address`, as a
+    /// bus that answers late; the thread ends with how many bytes the
+    /// daemon sent once the connection closed.
+    fn answer_late(&self, address: &str) -> std::thread::JoinHandle<u64> {
+        let held = self
+            .accepted
+            .try_recv()
+            .expect("the bus took the connection");
+        let socket = address
+            .strip_prefix("unix:path=")
+            .and_then(|rest| rest.split(',').next())
+            .unwrap();
+        let daemon = std::os::unix::net::UnixStream::connect(socket).unwrap();
+        let (mut from_client, mut to_daemon) =
+            (held.try_clone().unwrap(), daemon.try_clone().unwrap());
+        std::thread::spawn(move || {
+            let (mut from_daemon, mut to_client) = (daemon, held);
+            let downstream =
+                std::thread::spawn(move || std::io::copy(&mut from_daemon, &mut to_client));
+            let _ = std::io::copy(&mut from_client, &mut to_daemon);
+            let _ = to_daemon.shutdown(std::net::Shutdown::Write);
+            downstream.join().unwrap().unwrap()
+        })
+    }
+}
+
+impl Drop for SilentBus {
+    /// Ends the accepting thread: with the receiver gone, the connection
+    /// that wakes it is its last.
+    fn drop(&mut self) {
+        drop(std::mem::replace(
+            &mut self.accepted,
+            std::sync::mpsc::channel().1,
+        ));
+        let _ = std::os::unix::net::UnixStream::connect(&self.socket);
+    }
+}
+
+/// A launch over a bus that takes the connection and never answers
+/// settles within the connection's two seconds, as a keyring it could not
+/// open: over a marked file the secrets are unavailable, and the
+/// handover's load mints nothing.
+#[tokio::test]
+async fn a_bus_that_never_answers_settles_in_time_as_a_keyring_not_opened() {
+    let bus = SilentBus::new();
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("secrets.json");
+    std::fs::write(&path, br#"{"movedToSecretService": true}"#).unwrap();
+    let record = FingerprintFile::in_support_directory(folder.path());
+    let started = std::time::Instant::now();
+    let store = SecretServiceStore::on_bus(
+        file_at(&path, &[]),
+        record.clone(),
+        &bus.address,
+        PROMPT_TIMEOUT,
+    );
+    tokio::time::timeout(Duration::from_secs(10), store.chosen())
+        .await
+        .expect("the choice does not wait on the bus for good");
+    assert!(
+        started.elapsed() >= CONNECT_TIMEOUT,
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(chose_file(&store));
+    assert!(
+        bus.accepted.try_recv().is_ok(),
+        "the bus took the connection"
+    );
+    assert_eq!(store.place(), Some(SecretPlace::Keyring));
+    let read = store.secret(&identity()).await.unwrap_err().to_string();
+    assert_eq!(
+        read,
+        KeyringUnavailable::NotOpened(identity().0).to_string()
+    );
+    assert!(load(&store, &record).await.is_err(), "nothing is minted");
+    assert_eq!(record.recorded().unwrap(), None);
+    assert_eq!(file_at(&path, &[]).read().unwrap(), moved(&[]));
+}
+
+/// A bus that answers only after the choice gave up on it changes
+/// nothing: the store stays with the file it chose, no session is opened,
+/// nothing moves into the keyring, and the file's identity is not
+/// adopted over the keyring's or replaced. The connection's thread holds
+/// no lock meanwhile: the file takes a write.
+#[tokio::test]
+async fn an_answer_after_the_connections_deadline_changes_nothing() {
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    // What the keyring holds from elsewhere, and the file from before.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let seeding = SecretServiceStore::on_bus(
+        file_at(&elsewhere.path().join("secrets.json"), &[]),
+        FingerprintFile::in_support_directory(elsewhere.path()),
+        &setup.daemon.address,
+        PROMPT_TIMEOUT,
+    );
+    seeding.chosen().await;
+    let key = SecretKey::llm_api_key();
+    let service_identity = minted("service").to_pem().unwrap();
+    seeding.set_secret(&key, Some("sk-service")).await.unwrap();
+    seeding
+        .set_secret(&identity(), Some(&service_identity))
+        .await
+        .unwrap();
+    drop(seeding);
+    let file_identity = minted("file");
+    let file_pem = file_identity.to_pem().unwrap();
+    write_file(
+        &setup.path(),
+        &[("llm-api-key", "sk-file"), ("handover-identity", &file_pem)],
+    );
+    let sessions = setup.state().sessions;
+
+    let bus = SilentBus::new();
+    let store = SecretServiceStore::on_bus(
+        file_at(&setup.path(), &[]),
+        setup.record(),
+        &bus.address,
+        PROMPT_TIMEOUT,
+    );
+    tokio::time::timeout(Duration::from_secs(10), store.chosen())
+        .await
+        .expect("the choice does not wait on the bus for good");
+    assert!(chose_file(&store));
+    assert_eq!(
+        store.secret(&key).await.unwrap().as_deref(),
+        Some("sk-file")
+    );
+    let loaded = load(&store, &setup.record()).await.unwrap();
+    assert_eq!(loaded.certificate_der(), file_identity.certificate_der());
+    store
+        .set_secret(&SecretKey::from("other"), Some("x"))
+        .await
+        .unwrap();
+
+    // The bus answers now.
+    let late = bus.answer_late(&setup.daemon.address);
+    let answered = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || late.join().unwrap()),
+    )
+    .await
+    .expect("the late connection closes once it is turned away")
+    .unwrap();
+    assert!(answered > 0, "the daemon answered the late connection");
+
+    assert!(chose_file(&store));
+    assert_eq!(
+        *store.shared.phase.borrow(),
+        Phase::Chosen { reread: false }
+    );
+    assert_eq!(setup.state().sessions, sessions, "no session was opened");
+    assert_eq!(setup.values("llm-api-key"), ["sk-service"]);
+    assert_eq!(
+        setup.values("handover-identity"),
+        [one_line(&service_identity)]
+    );
+    assert_eq!(
+        setup.contents(),
+        Contents {
+            moved: false,
+            entries: entries(&[
+                ("handover-identity", &file_pem),
+                ("llm-api-key", "sk-file"),
+                ("other", "x"),
+            ]),
+        }
+    );
+    assert_eq!(
+        setup.record().recorded().unwrap(),
+        Some(fingerprint(&file_identity))
+    );
+}
+
 /// A choice that panics settles on the file instead of leaving every call
 /// waiting for it.
 #[tokio::test]
@@ -1032,6 +1272,19 @@ async fn a_bus_that_is_not_a_local_socket_keeps_the_secrets_with_the_file() {
     assert!(!local_bus("unix:path=/a;tcp:host=example.org,port=1"));
     assert!(!local_bus("unixexec:path=ssh"));
     assert!(!local_bus("nonce-tcp:host=127.0.0.1,port=1"));
+    assert!(!session_is_local(
+        Ok("tcp:host=127.0.0.1,port=1".to_owned())
+    ));
+    assert!(session_is_local(Ok(
+        "unix:path=/run/user/1000/bus".to_owned()
+    )));
+    assert!(
+        session_is_local(Err(std::env::VarError::NotPresent)),
+        "zbus then uses the socket in XDG_RUNTIME_DIR"
+    );
+    assert!(session_is_local(Err(std::env::VarError::NotUnicode(
+        "\u{0}".into()
+    ))));
 }
 
 /// A run that could not open the keyring after the move says the secrets
@@ -1109,8 +1362,10 @@ fn a_value_with_any_line_break_is_encoded_and_a_damaged_encoding_is_an_error() {
         assert_eq!(from_one_line(&key, stored).unwrap(), value);
     }
     assert_eq!(one_line("sk-1"), "sk-1");
-    assert!(matches!(
-        from_one_line(&key, format!("{ONE_LINE_PREFIX}not base64!")),
-        Err(ServiceError::NotText(_))
-    ));
+    let damaged = from_one_line(&key, format!("{ONE_LINE_PREFIX}not base64!")).unwrap_err();
+    assert!(matches!(damaged, ServiceError::NotText(_)));
+    assert_eq!(
+        damaged.to_string(),
+        "the keyring holds the API key in a form Steno cannot read"
+    );
 }
