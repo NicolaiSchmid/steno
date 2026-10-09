@@ -221,6 +221,8 @@ mod tests {
             "0::/system.slice/t3code.service",
             "0::/user.slice/user-1000.slice/session-3.scope",
             "0::/user.slice/user-1000.slice/user@1000.service/init.scope",
+            // Units below a system service that delegates its subtree.
+            "0::/system.slice/runner.service/app.slice/job.scope",
             // A sub-cgroup inside a delegated unit, an escaped name.
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/vte.scope/tab-1",
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/_cgroup.scope",
