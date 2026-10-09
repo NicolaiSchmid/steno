@@ -41,7 +41,7 @@
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -195,8 +195,8 @@ where
 }
 
 /// Moves the child `pid` into a scope of its own beside the app's unit
-/// at `placement`, over the user bus in `runtime_dir`; the scope's name
-/// once `child_cgroup` names it. Every call waits at most the time left
+/// at `placement`, over `host`'s user bus; the scope's name once the
+/// child's cgroup names it. Every call waits at most the time left
 /// before `deadline` when the connection started. A bus that has not
 /// taken the connection by `deadline` is not asked: the spawn stopped
 /// waiting then, and a child that died since may be reaped and its pid
@@ -209,11 +209,10 @@ where
 fn start_scope_over_bus(
     pid: u32,
     placement: &Placement,
-    runtime_dir: &Path,
-    child_cgroup: fn(u32) -> std::io::Result<String>,
+    host: &Host,
     deadline: Instant,
 ) -> Result<String, ScopeError> {
-    let stream = UnixStream::connect(runtime_dir.join("bus")).map_err(ScopeError::NoBus)?;
+    let stream = UnixStream::connect(host.runtime_dir.join("bus")).map_err(ScopeError::NoBus)?;
     let connection = Builder::async_io_unix_stream(stream)
         .method_timeout(deadline.saturating_duration_since(Instant::now()))
         .build()?;
@@ -227,7 +226,7 @@ fn start_scope_over_bus(
         "StartTransientUnit",
         &(name.as_str(), "fail", properties(pid, placement), auxiliary),
     )?;
-    while !child_cgroup(pid).is_ok_and(|cgroup| holds(&cgroup, &name)) {
+    while !(host.child_cgroup)(pid).is_ok_and(|cgroup| holds(&cgroup, &name)) {
         if Instant::now() >= deadline {
             if let Err(error) = manager(&connection, "StopUnit", &(name.as_str(), "replace")) {
                 tracing::info!(pid, %error, scope = %name, "the speech sidecar's scope could not be stopped");
@@ -258,7 +257,7 @@ impl Drop for InFlight {
 /// `in_flight` is set and later spawns do not ask.
 fn move_within(
     pid: u32,
-    host: &Host,
+    host: Host,
     timeout: Duration,
     in_flight: &'static AtomicBool,
 ) -> Result<Option<String>, ScopeError> {
@@ -271,13 +270,10 @@ fn move_within(
     let guard = InFlight(in_flight);
     let deadline = Instant::now() + timeout;
     let (done, outcome) = mpsc::channel();
-    let runtime_dir = host.runtime_dir.clone();
-    let child_cgroup = host.child_cgroup;
     std::thread::Builder::new()
         .name(format!("sidecar-{pid}-scope"))
         .spawn(move || {
-            let outcome =
-                start_scope_over_bus(pid, &placement, &runtime_dir, child_cgroup, deadline);
+            let outcome = start_scope_over_bus(pid, &placement, &host, deadline);
             drop(guard);
             if let Err(mpsc::SendError(late)) = done.send(outcome) {
                 match late {
@@ -318,7 +314,7 @@ pub(super) fn move_to_own_scope(pid: u32) {
     let Some(host) = host else {
         return;
     };
-    match move_within(pid, &host, ANSWER_TIMEOUT, &IN_FLIGHT) {
+    match move_within(pid, host, ANSWER_TIMEOUT, &IN_FLIGHT) {
         Ok(Some(scope)) => tracing::info!(pid, %scope, "speech sidecar in a scope of its own"),
         Ok(None) => tracing::debug!(
             pid,
@@ -338,6 +334,7 @@ pub(super) fn move_to_own_scope(pid: u32) {
 mod tests {
     use std::io::BufRead as _;
     use std::os::unix::net::UnixListener;
+    use std::path::Path;
 
     use steno_core::SpeechEngine as _;
     use zbus::zvariant::{OwnedObjectPath, OwnedValue};
@@ -573,7 +570,7 @@ mod tests {
 
         let scope = move_within(
             4242,
-            &host(daemon.path(), IN_ITS_SCOPE),
+            host(daemon.path(), IN_ITS_SCOPE),
             ANSWER_TIMEOUT,
             &IN_FLIGHT,
         )
@@ -617,7 +614,7 @@ mod tests {
 
         let timeout = Duration::from_millis(300);
         let error =
-            move_within(4242, &host(daemon.path(), LEFT_BEHIND), timeout, &IN_FLIGHT).unwrap_err();
+            move_within(4242, host(daemon.path(), LEFT_BEHIND), timeout, &IN_FLIGHT).unwrap_err();
         // The thread stops the scope at the deadline; the spawn may have
         // stopped waiting a moment earlier.
         assert!(
@@ -640,7 +637,7 @@ mod tests {
             ..host(Path::new("/nonexistent"), IN_ITS_SCOPE)
         };
         assert!(matches!(
-            move_within(4242, &outside, ANSWER_TIMEOUT, &IN_FLIGHT),
+            move_within(4242, outside, ANSWER_TIMEOUT, &IN_FLIGHT),
             Ok(None)
         ));
         assert!(!IN_FLIGHT.load(Ordering::SeqCst));
@@ -674,14 +671,14 @@ mod tests {
         let uwsm = placement(UWSM).unwrap();
         let nowhere = Path::new("/nonexistent");
         assert!(matches!(
-            start_scope_over_bus(1, &uwsm, nowhere, IN_ITS_SCOPE, in_time()),
+            start_scope_over_bus(1, &uwsm, &host(nowhere, IN_ITS_SCOPE), in_time()),
             Err(ScopeError::NoBus(_))
         ));
 
         // One request at a time: a later spawn does not ask.
         IN_FLIGHT.store(true, Ordering::SeqCst);
         assert!(matches!(
-            move_within(1, &host(nowhere, IN_ITS_SCOPE), ANSWER_TIMEOUT, &IN_FLIGHT),
+            move_within(1, host(nowhere, IN_ITS_SCOPE), ANSWER_TIMEOUT, &IN_FLIGHT),
             Err(ScopeError::Busy)
         ));
         IN_FLIGHT.store(false, Ordering::SeqCst);
@@ -693,7 +690,7 @@ mod tests {
         let asked = Instant::now();
         let error = move_within(
             1,
-            &host(silent.path(), IN_ITS_SCOPE),
+            host(silent.path(), IN_ITS_SCOPE),
             Duration::from_millis(200),
             &IN_FLIGHT,
         )
@@ -711,8 +708,8 @@ mod tests {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let error =
-            start_scope_over_bus(1, &uwsm, daemon.path(), IN_ITS_SCOPE, in_time()).unwrap_err();
+        let error = start_scope_over_bus(1, &uwsm, &host(daemon.path(), IN_ITS_SCOPE), in_time())
+            .unwrap_err();
         assert!(
             matches!(&error, ScopeError::Bus(zbus::Error::MethodError(name, ..)) if name.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown"),
             "{error}"
@@ -723,13 +720,13 @@ mod tests {
         // during its set-up.
         let asked = FakeManager::serve(&daemon);
         assert!(matches!(
-            start_scope_over_bus(1, &uwsm, daemon.path(), IN_ITS_SCOPE, Instant::now()),
+            start_scope_over_bus(1, &uwsm, &host(daemon.path(), IN_ITS_SCOPE), Instant::now()),
             Err(ScopeError::Late)
         ));
         let slow = slow_bus(daemon.path(), Duration::from_millis(500));
         let error = move_within(
             1,
-            &host(slow.path(), IN_ITS_SCOPE),
+            host(slow.path(), IN_ITS_SCOPE),
             Duration::from_millis(200),
             &IN_FLIGHT,
         )
