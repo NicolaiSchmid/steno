@@ -389,13 +389,12 @@ impl LiveCaptureBackend {
         (now != started).then_some(kAudioDevicePropertyNominalSampleRate)
     }
 
-    /// The same for the system output: a system output notification when
-    /// the one read again once the listeners are in place (`now`, `None`
-    /// when none resolves) is not the one the capture was built on. The
+    /// The same for the system output, read again once the listeners are
+    /// in place (`now`, `None` when none resolves): a system output
+    /// notification when it is not the one the capture was built on. Its
     /// listener reports only a switch after it was added, so a switch while
-    /// the aggregate was built would leave the capture, and its silent
-    /// output, on a device that is no longer the clock the Mac plays alerts
-    /// on, with a baseline that never sees the difference.
+    /// the aggregate was built would leave the capture and its silent
+    /// output on the old clock master.
     fn late_output_notification(
         started: &str,
         now: Option<&str>,

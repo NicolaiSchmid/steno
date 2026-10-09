@@ -455,11 +455,10 @@ pub trait FileSystem: Send + Sync {
 /// the call capture's tap includes Steno's own process, so the shell's
 /// player asks `Playback::global().begin` before every clip, plays only
 /// while it holds the permit, and stops in the permit's `on_stop` when a
-/// recording starts. A refusal (`PlaybackRefused`) is worded for the UI;
-/// until the shell's player exists `play` reports it as `false`, which the
-/// speakers view shows as a clip that could not be played, and the player
-/// that lands with it changes `play` to return the refusal's text instead
-/// (stable plan, "What follows").
+/// recording starts. Until that player exists, a refusal is `false` here,
+/// a clip that could not be played; the player changes `play` to return
+/// `PlaybackRefused`'s text, worded for the UI (stable plan, "What
+/// follows").
 pub trait ClipPlayer: Send + Sync {
     /// Starts the clip; false when the file is missing or unreadable, or
     /// when a recording runs.
