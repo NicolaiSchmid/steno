@@ -28,7 +28,7 @@ systemctl list-units --type=service --state=running --plain --no-legend 'user@*.
     home=$(getent passwd "$uid" | cut -d: -f6)
     [ -n "$user" ] || continue
     if [ ! -e "$home/$entry" ]; then
-      # Empty when the call fails, which skips the user as a running unit.
+      # Empty when the call fails; the user is then skipped, as for a running unit.
       state=$(systemctl --user -M "$user@" is-active "$unit" 2>/dev/null)
       case $state in
         inactive | failed) ;;
