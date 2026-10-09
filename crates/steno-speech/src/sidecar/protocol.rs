@@ -6,8 +6,9 @@
 //! little-endian `u32`, then the header, then the payload the header
 //! declares. Only [`Request::Transcribe`] and [`Request::Diarize`] have a
 //! payload: `sampleCount` samples of 16 kHz mono audio as little-endian
-//! `f32`, bit for bit what the engine or the diarizer was given. The header follows the bridge's JSON convention
-//! (`steno_core::json`: sorted keys, camelCase), with a `type` tag.
+//! `f32`, bit for bit what the engine or the diarizer was given. The
+//! header follows the bridge's JSON convention (`steno_core::json`: sorted
+//! keys, camelCase), with a `type` tag.
 //!
 //! The child sends [`Reply::Ready`] first, then [`Reply::Memory`] every
 //! heartbeat interval from a thread of its own, between and during
@@ -220,10 +221,10 @@ impl Reply {
 
 /// A [`SpeakerCluster`] on the wire, its embedding included, which
 /// `SpeakerCluster`'s own serde form leaves out. The `f32` values travel
-/// widened to `f64`: an `f64` round-trips through the JSON exactly
-/// (`serde_json`'s `float_roundtrip`, which `steno-core` turns on), and
-/// narrowing it back is exact, so the parent gets the child's clusters bit
-/// for bit.
+/// widened to `f64`, which round-trips the JSON exactly
+/// (`serde_json`'s `float_roundtrip`, which `steno-core` turns on)
+/// whatever `serde_json`'s `f32` path does, and narrowing it back is
+/// exact, so the parent gets the child's clusters bit for bit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiarizedCluster {

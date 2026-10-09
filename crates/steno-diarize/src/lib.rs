@@ -47,16 +47,17 @@
 //! one for one with `Sources/StenoSpeech/Diarization` and the `FluidAudio`
 //! code it ran.
 //!
-//! Entry points: `SidecarDiarizer` is the `steno_core::Diarizer` the
+//! Entry points: [`SidecarDiarizer`] is the `steno_core::Diarizer` the
 //! meeting pipeline (WP6) holds, the ONNX models in the speech sidecar's
 //! child ([`sidecar`]), so a crash in ONNX Runtime ends the child, not the
 //! app; [`ModelDiarizer`] runs the same pipeline in this process, for
-//! `steno dev diarize-sweep` and the tests, built by `ModelDiarizer::onnx` over
-//! `steno-speech`'s `ModelStore`, which installs the two ONNX models of
-//! `models::asset` beside the speech models where the caller's `Install`
-//! allows it (`models::installed` is the check without a download), or by
-//! `ModelDiarizer::coreml` over `coreml::model_directory`, where the Swift
-//! app installs `FluidAudio`'s models; [`Pipeline`] exposes `analyze`,
+//! `steno dev diarize-sweep` and the tests. Both install the two ONNX
+//! models of `models::asset` through `steno-speech`'s `ModelStore`, beside
+//! the speech models, where the caller's `Install` allows it
+//! (`models::installed` is the check without a download);
+//! `ModelDiarizer::onnx` loads them here, and `ModelDiarizer::coreml` runs
+//! over `coreml::model_directory` instead, where the Swift app installs
+//! `FluidAudio`'s models. [`Pipeline`] exposes `analyze`,
 //! `map` and `refine` one at a time for the calibration harness, which
 //! analyses a lane once and sweeps the cut; [`fbank`] is the feature front
 //! end the ONNX backend puts in front of the embedding model. Features:
