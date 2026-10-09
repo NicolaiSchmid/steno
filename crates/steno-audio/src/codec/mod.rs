@@ -191,15 +191,25 @@ impl SymphoniaAudioCodec {
 
     /// Seconds in the file at `path` as its container declares them (an
     /// m4a's track header, a WAV's data chunk), read without decoding it;
-    /// `None` when the container does not say. For a recording that has no
-    /// stored duration, such as one the launch adopts from the audio
-    /// folder. Rust only.
+    /// `None` when the container does not say. Without the AAC priming the
+    /// decode drops, so it matches the decode up to the encoder's padding
+    /// at the end (under a packet), and capped at five hours as a declared
+    /// length is when its buffer is reserved, so a corrupt header cannot
+    /// move a start absurdly far back. For a recording that has no stored
+    /// duration, such as one the launch adopts from the audio folder. Rust
+    /// only.
     pub fn declared_duration(path: &Path) -> Result<Option<f64>, CodecError> {
         let frames = SymphoniaFrames::open(path)?;
+        let primed = frames.priming.map_or(0, |trim| trim.frames);
         Ok(frames
             .frames
             .zip(frames.rate.filter(|rate| *rate > 0))
-            .map(|(frames, rate)| frames as f64 / f64::from(rate)))
+            .map(|(declared, rate)| {
+                let presented = declared
+                    .saturating_sub(primed)
+                    .min(MAX_DECLARED_SECONDS * u64::from(rate));
+                presented as f64 / f64::from(rate)
+            }))
     }
 
     /// `samples` at `rate` to 16 kHz in one pass: exact length `round(len *
@@ -251,6 +261,9 @@ fn frames_at_16k(frames: usize, rate: u32) -> usize {
     length_at_16k(frames, rate) + AudioBuffer16k::SAMPLE_RATE as usize
 }
 
+/// The longest length a container may declare, in seconds: five hours.
+const MAX_DECLARED_SECONDS: u64 = 5 * 3_600;
+
 /// The frames to reserve for a stream: its length, but a length the
 /// container declares is capped at five hours at the stream's rate (a
 /// corrupt header must not reserve gigabytes, and a failed allocation
@@ -258,8 +271,6 @@ fn frames_at_16k(frames: usize, rate: u32) -> usize {
 /// 16 kHz whatever the rate. A length measured from the file is not
 /// capped.
 fn reserved_frames(spec: Spec) -> usize {
-    /// Five hours, in seconds.
-    const MAX_DECLARED_SECONDS: u64 = 5 * 3_600;
     match spec.length {
         Length::Measured(frames) => frames,
         Length::Declared(frames) => usize::try_from(
