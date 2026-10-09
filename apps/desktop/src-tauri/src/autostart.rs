@@ -381,7 +381,7 @@ pub fn sync_at_launch(app: &AppHandle) {
     {
         clear_mark(mark);
     }
-    stop_timeout::sync(login_item);
+    stop_timeout::sync_at_launch(login_item);
 }
 
 /// Where the user manages login items; `None` where there is no such

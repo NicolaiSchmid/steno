@@ -21,15 +21,18 @@
 //! The `.deb` installs both under `/usr/lib/systemd/user` (`files` in
 //! `tauri.conf.json`); the app writes the same files into the user's own
 //! unit directory (`sync`) for the `AppImage` and installs from before the
-//! drop-ins, and has the user manager reload its units when it wrote one.
-//! It never reloads while the app runs as the autostart unit
-//! (`runs_as_autostart_unit`) unless the unit's entry stands (`may_reload`):
-//! once the autostart entry is gone, a reload unloads the unit, and the
-//! session's end then stops the app without a SIGTERM. For the same reason
-//! Launch at login, turned off while the app runs as that unit, goes off
-//! at the exit (`autostart::set_enabled`). The `.deb`'s `postinst` reloads
-//! the user managers by the same rule (`linux/deb-postinst.sh`), so an app
-//! already running when the package is upgraded gets the 20 s too.
+//! drop-ins, and has the user manager reload its units when it wrote one,
+//! and at each launch while one is in place (`sync_at_launch`), so a
+//! reload that failed or was skipped is made up for. It never reloads
+//! while the app runs as the autostart unit (`runs_as_autostart_unit`)
+//! unless the unit's entry stands (`may_reload`): once the autostart entry
+//! is gone, a reload unloads the unit, and the session's end then stops
+//! the app without a SIGTERM. For the same reason Launch at login, turned
+//! off while the app runs as that unit, goes off at the exit
+//! (`autostart::set_enabled`). The `.deb`'s `postinst` reloads the user
+//! managers too, so an app already running when the package is upgraded
+//! gets the 20 s, and skips a user whose entry is gone unless their
+//! autostart unit is known to be stopped (`linux/deb-postinst.sh`).
 //!
 //! Rust only: the Swift app is a macOS login item.
 
@@ -76,6 +79,9 @@ impl DropIn {
         contents: include_str!("../linux/gnome-scope-stop-timeout.conf"),
     };
 
+    /// Both, as the `.deb` ships them.
+    const ALL: [Self; 2] = [Self::AUTOSTART, Self::GNOME_SCOPE];
+
     /// The drop-in's path below a unit directory: `<unit>.d/<file name>`.
     fn relative_path(&self) -> String {
         format!("{}.d/{}", self.unit, self.file_name)
@@ -100,6 +106,19 @@ impl DropIn {
 /// and `may_reload` allows it. A failure is logged and changes nothing
 /// else: Launch at login works without the drop-ins.
 pub fn sync(login_item: Option<bool>) {
+    sync_from(login_item, false);
+}
+
+/// `sync` at a launch, which also has the user manager reload when a
+/// drop-in was already in place: an earlier reload may have failed, or
+/// been skipped while the app ran as the autostart unit without its
+/// entry, and the manager would read the drop-in only at the next login.
+/// One reload per launch, under the same `may_reload`.
+pub fn sync_at_launch(login_item: Option<bool>) {
+    sync_from(login_item, true);
+}
+
+fn sync_from(login_item: Option<bool>, at_launch: bool) {
     let Some(home) = home() else {
         tracing::warn!("no home directory for the stop timeout drop-ins");
         return;
@@ -108,19 +127,33 @@ pub fn sync(login_item: Option<bool>) {
         &home,
         login_item,
         runs_as_autostart_unit(),
+        at_launch,
         reload_user_manager,
     );
 }
 
 /// `sync` under `home`, for an app that runs as the autostart unit or not:
-/// calls `reload` once when it wrote a file, never after a removal alone,
-/// and only as `may_reload` allows.
-fn sync_in(home: &Path, login_item: Option<bool>, as_autostart_unit: bool, reload: impl FnOnce()) {
+/// calls `reload` once when it wrote a file, or `at_launch` when a
+/// drop-in is in place, never after a removal alone, and only as
+/// `may_reload` allows.
+fn sync_in(
+    home: &Path,
+    login_item: Option<bool>,
+    as_autostart_unit: bool,
+    at_launch: bool,
+    reload: impl FnOnce(),
+) {
     let mut wrote = change(&DropIn::GNOME_SCOPE, home, true);
     if let Some(on) = login_item {
         wrote |= change(&DropIn::AUTOSTART, home, on);
     }
-    if !wrote {
+    let in_place = || {
+        DropIn::ALL
+            .iter()
+            .any(|drop_in| drop_in.user_path(home).exists())
+    };
+    let reloads = wrote || (at_launch && in_place());
+    if !reloads {
         return;
     }
     if may_reload(login_item, as_autostart_unit) {
@@ -294,9 +327,6 @@ mod tests {
 
     use super::*;
 
-    /// Both, as the `.deb` ships them.
-    const ALL: [DropIn; 2] = [DropIn::AUTOSTART, DropIn::GNOME_SCOPE];
-
     fn scratch(name: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("steno-stop-timeout-{name}-{}", std::process::id()));
@@ -363,7 +393,7 @@ mod tests {
     fn the_file_names_sort_where_their_values_win() {
         assert!(DropIn::GNOME_SCOPE.file_name > "override.conf");
         assert!(DropIn::AUTOSTART.file_name < "override.conf");
-        for drop_in in ALL {
+        for drop_in in DropIn::ALL {
             assert_eq!(
                 Path::new(drop_in.file_name).extension(),
                 Some("conf".as_ref())
@@ -384,8 +414,8 @@ mod tests {
             .keys()
             .filter(|target| target.starts_with("/usr/lib/systemd/user/"))
             .count();
-        assert_eq!(units, ALL.len());
-        for drop_in in ALL {
+        assert_eq!(units, DropIn::ALL.len());
+        for drop_in in DropIn::ALL {
             let target = format!("/usr/lib/systemd/user/{}", drop_in.relative_path());
             let source = files[&target].as_str().unwrap();
             let shipped =
@@ -576,7 +606,7 @@ esac
     #[test]
     fn the_user_copy_is_under_home_dot_config() {
         if let Some(home) = home() {
-            for drop_in in ALL {
+            for drop_in in DropIn::ALL {
                 assert!(
                     drop_in
                         .user_path(&home)
@@ -688,7 +718,7 @@ esac
     /// after a removal alone: that reload would unload a running
     /// autostarted Steno's unit.
     #[test]
-    fn sync_follows_the_login_item_and_reloads_only_after_a_write() {
+    fn sync_follows_the_login_item_and_reloads_after_a_write() {
         let root = scratch("sync");
         let (scope, service) = (
             DropIn::GNOME_SCOPE.user_path(&root),
@@ -696,7 +726,7 @@ esac
         );
         let reloads = Cell::new(0);
         let sync = |login_item| {
-            sync_in(&root, login_item, false, || {
+            sync_in(&root, login_item, false, false, || {
                 reloads.set(reloads.get() + 1);
             });
         };
@@ -719,22 +749,59 @@ esac
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// A launch reloads once while a drop-in is in place, though it wrote
+    /// nothing: the reload after the write may have failed, or been
+    /// skipped as the autostart unit without its entry. It reloads under
+    /// the same rule (`may_reload`).
+    #[test]
+    fn a_launch_reloads_while_a_drop_in_is_in_place() {
+        let root = scratch("launch");
+        let reloads = Cell::new(0);
+        let launch = |login_item, as_unit| {
+            sync_in(&root, login_item, as_unit, true, || {
+                reloads.set(reloads.get() + 1);
+            });
+        };
+        sync_in(&root, Some(true), false, false, || {});
+        for (login_item, as_unit, reloaded) in [
+            (Some(true), false, 1),
+            (Some(true), true, 1),
+            (None, false, 1),
+            (None, true, 0),
+        ] {
+            reloads.set(0);
+            launch(login_item, as_unit);
+            assert_eq!(reloads.get(), reloaded, "{login_item:?} {as_unit}");
+        }
+        reloads.set(0);
+        launch(Some(false), true);
+        assert_eq!(reloads.get(), 0, "as the unit without its entry");
+        launch(Some(false), false);
+        assert_eq!(reloads.get(), 1, "outside the unit, for GNOME's drop-in");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// As the autostart unit, the launch writes GNOME's drop-in (the first
     /// launch of this build, a `.deb` install) but reloads only while the
     /// entry stands: with the entry gone, or unread, the reload could
     /// unload the unit the app runs in.
     #[test]
     fn as_the_autostart_unit_it_reloads_only_while_the_entry_stands() {
-        for (login_item, reloaded) in [(Some(false), false), (None, false), (Some(true), true)] {
-            let root = scratch("as-unit");
-            let reloads = Cell::new(0);
-            sync_in(&root, login_item, true, || reloads.set(reloads.get() + 1));
-            assert!(
-                DropIn::GNOME_SCOPE.user_path(&root).exists(),
-                "{login_item:?}"
-            );
-            assert_eq!(reloads.get(), usize::from(reloaded), "{login_item:?}");
-            std::fs::remove_dir_all(&root).unwrap();
+        for at_launch in [false, true] {
+            for (login_item, reloaded) in [(Some(false), false), (None, false), (Some(true), true)]
+            {
+                let root = scratch("as-unit");
+                let reloads = Cell::new(0);
+                sync_in(&root, login_item, true, at_launch, || {
+                    reloads.set(reloads.get() + 1);
+                });
+                assert!(
+                    DropIn::GNOME_SCOPE.user_path(&root).exists(),
+                    "{login_item:?}"
+                );
+                assert_eq!(reloads.get(), usize::from(reloaded), "{login_item:?}");
+                std::fs::remove_dir_all(&root).unwrap();
+            }
         }
     }
 
