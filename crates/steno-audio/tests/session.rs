@@ -3928,7 +3928,7 @@ fn a_short_stall_rebuilds_nothing() {
 /// A stream that delivers nothing from its start is stalled once
 /// `STALL_TIMEOUT` passed, as one that stopped is, on every backend that is
 /// watched: a Mac call capture too, whose silent output drives the tap
-/// from the start (A10).
+/// from the start (A10 of `.plans/2026-10-07-stable-promotion.md`).
 #[test]
 fn a_stream_that_never_delivered_is_stalled_too() {
     let directory = tempfile::tempdir().unwrap();

@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use steno_audio::capture::{
-    CaptureBackend, CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureResult,
-    CaptureSession, CaptureStream, DeviceChangeReason,
+    CaptureBackend, CaptureConfiguration, CaptureError, CaptureInput, CaptureMode, CaptureNotice,
+    CaptureResult, CaptureSession, CaptureStream, DeviceChangeReason,
 };
 use steno_audio::realtime::LaneFrameSink;
 use steno_audio::testing::ManualClock;
@@ -40,17 +40,26 @@ const STEP: Duration = CaptureSession::STALL_CHECK_INTERVAL;
 /// `STALLED_AGAIN`).
 const STALLED_AGAIN: Duration = Duration::from_secs(10);
 
-/// Stands in for a watched device: every start hands the sink over and
-/// delivers nothing until the test pushes a callback (`push`); a stopped
-/// device takes none. Each start's reading of the manual clock is kept.
+/// Stands in for a watched device on the Mac: every start hands the sink
+/// over and delivers nothing until the test pushes a callback (`push`); a
+/// stopped device takes none. It logs a line at each start and stop, at
+/// `debug` inside the session's quiet restarts, as the live backends do
+/// (the Mac's silent output and first callback lines), and answers
+/// whether a stall may be the microphone's as the Mac does. Each start's
+/// reading of the manual clock and microphone are kept.
 struct Pushed {
     clock: Arc<ManualClock>,
     /// The sink and the lane count while started, `None` once stopped,
     /// under one lock with `push`, so no frame lands after `stop`.
     running: Mutex<Option<(Arc<LaneFrameSink>, usize)>>,
     starts: Mutex<Vec<Duration>>,
+    /// The microphone each start was given, `None` for the default.
+    inputs: Mutex<Vec<Option<String>>>,
     /// Frames the sink took, over every start.
     accepted: Mutex<usize>,
+    /// Callbacks pushed while stopped: audio that played and that no
+    /// capture took.
+    dropped: Mutex<usize>,
 }
 
 impl Pushed {
@@ -59,21 +68,27 @@ impl Pushed {
             clock,
             running: Mutex::new(None),
             starts: Mutex::new(Vec::new()),
+            inputs: Mutex::new(Vec::new()),
             accepted: Mutex::new(0),
+            dropped: Mutex::new(0),
         })
     }
 
-    /// One callback on every lane, while started.
+    /// One callback on every lane, while started; counted as dropped while
+    /// stopped.
     fn push(&self) {
         let running = self.running.lock().unwrap();
-        if let Some((sink, lanes)) = running.as_ref()
-            && sink.begin_callback(CALLBACK)
-        {
-            for lane in 0..*lanes {
-                sink.write_slice(lane, &[0.25; CALLBACK]);
+        match running.as_ref() {
+            Some((sink, lanes)) => {
+                if sink.begin_callback(CALLBACK) {
+                    for lane in 0..*lanes {
+                        sink.write_slice(lane, &[0.25; CALLBACK]);
+                    }
+                    sink.end_callback();
+                    *self.accepted.lock().unwrap() += CALLBACK;
+                }
             }
-            sink.end_callback();
-            *self.accepted.lock().unwrap() += CALLBACK;
+            None => *self.dropped.lock().unwrap() += 1,
         }
     }
 
@@ -93,26 +108,63 @@ impl Pushed {
     fn accepted(&self) -> usize {
         *self.accepted.lock().unwrap()
     }
+
+    fn is_running(&self) -> bool {
+        self.running.lock().unwrap().is_some()
+    }
+
+    fn inputs(&self) -> Vec<Option<String>> {
+        self.inputs.lock().unwrap().clone()
+    }
+
+    fn dropped(&self) -> usize {
+        *self.dropped.lock().unwrap()
+    }
+}
+
+/// A line the device logs, at `info`, or at `debug` inside the session's
+/// quiet restarts.
+fn device_line(what: &str) {
+    if steno_audio::testing::start_log_is_quiet() {
+        tracing::debug!("the device {what}");
+    } else {
+        tracing::info!("the device {what}");
+    }
 }
 
 impl CaptureBackend for Pushed {
     fn start(
         &self,
         lanes: &[AudioLane],
-        _: Option<&str>,
+        input: Option<&str>,
         sink: Arc<LaneFrameSink>,
     ) -> Result<CaptureStream, CaptureError> {
+        device_line("started");
         self.starts.lock().unwrap().push(self.clock.now());
+        self.inputs.lock().unwrap().push(input.map(str::to_owned));
         *self.running.lock().unwrap() = Some((sink, lanes.len()));
-        Ok(CaptureStream::SYNTHETIC)
+        Ok(CaptureStream {
+            input: Some(CaptureInput {
+                uid: input.unwrap_or("built-in").to_owned(),
+                name: None,
+                is_fallback: false,
+            }),
+            ..CaptureStream::SYNTHETIC
+        })
     }
 
     fn stop(&self) {
-        self.running.lock().unwrap().take();
+        if self.running.lock().unwrap().take().is_some() {
+            device_line("stopped");
+        }
     }
 
     fn delivers_continuously(&self, _: &[AudioLane]) -> bool {
         true
+    }
+
+    fn stall_may_be_the_microphone(&self, lanes: &[AudioLane]) -> bool {
+        !lanes.contains(&AudioLane::System)
     }
 }
 
@@ -139,15 +191,13 @@ impl Log {
         })
     }
 
-    /// The session's lines at `level` so far that contain `text`.
+    /// The capture's lines at `level` so far that contain `text`: every
+    /// line the binary logs, the session's, the rest of the crate's and
+    /// the device's.
     fn count(&self, level: &str, text: &str) -> usize {
         String::from_utf8_lossy(&self.0.lock().unwrap())
             .lines()
-            .filter(|line| {
-                line.trim_start().starts_with(level)
-                    && line.contains("steno_audio::capture::session")
-                    && line.contains(text)
-            })
+            .filter(|line| line.trim_start().starts_with(level) && line.contains(text))
             .count()
     }
 }
@@ -187,11 +237,17 @@ fn one_at_a_time() -> (MutexGuard<'static, ()>, &'static Log) {
 /// that filled would hold the rebuild in its waits for room while the test
 /// moves the clock on. The directory holds the recording's files.
 fn record(mode: CaptureMode) -> (TempDir, CaptureSession, Drive) {
+    record_on(mode, None)
+}
+
+/// [`record`] on the microphone `input` chose in Settings.
+fn record_on(mode: CaptureMode, input: Option<&str>) -> (TempDir, CaptureSession, Drive) {
     let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(ManualClock::new());
     let backend = Pushed::new(clock.clone());
     let mut configuration = CaptureConfiguration::new(mode, directory.path());
     configuration.echo_cancellation = false;
+    configuration.input_device_uid = input.map(str::to_owned);
     let session =
         CaptureSession::with_backend(configuration, backend.clone(), None, 16_000, clock.clone())
             .unwrap();
@@ -330,14 +386,26 @@ fn master_frames(result: &CaptureResult) -> usize {
         .frame_count()
 }
 
-/// The session's `warn` lines over a recording that has run `until`: the
-/// stall and the streak's first failure, then about one a minute.
+/// The device's `info` lines before its restarts go quiet: the
+/// recording's start, and the stop and the start of the streak's first
+/// restart. A stop or a start that logged at every restart shows here.
+const LOUD_DEVICE_LINES: usize = 4;
+
+/// Every line the capture logged over a recording that has run `until`:
+/// the session's `warn` lines for the stall and the streak's first failure,
+/// then about one a minute, and the device's `info` lines before the
+/// restarts went quiet (`LOUD_DEVICE_LINES`).
 fn assert_about_once_a_minute(log: &Log, until: Duration) {
     let warns = log.count("WARN", "");
+    let infos = log.count("INFO", "");
     let minutes = until.as_secs() / 60;
     assert!(
         warns >= 2 && warns <= 2 + minutes as usize,
         "{warns} warn lines in {until:?}"
+    );
+    assert!(
+        infos <= LOUD_DEVICE_LINES,
+        "{infos} info lines in {until:?}"
     );
 }
 
@@ -453,16 +521,20 @@ fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
     assert_nothing_lost(&result, &drive.backend);
 }
 
-/// A Mac call capture whose silent output did not start (A10 logs it at
-/// `warn`): it delivers nothing until another app plays, from its start
-/// on. Held to deliver as every capture is, it is restarted on the
-/// backoff, about every 6 s (a 2 s wait for a frame, then 4 s), with about
-/// one log line a minute and one `StillRestarting`, and no audio exists to
-/// lose meanwhile. Once something plays, the next restart delivers, the
-/// silence before it fills up to `MAXIMUM_GAP`, and the master holds every
-/// frame from then on; the warning ends once it has delivered for 10 s.
+/// A Mac call capture whose silent output did not start (A10 of
+/// `.plans/2026-10-07-stable-promotion.md` logs that, once a streak): it
+/// delivers nothing until another app plays, from its start on. Held to
+/// deliver as every capture is, it is restarted on the backoff, about
+/// every 6 s (a 2 s wait for a frame, then 4 s), with about one log line a
+/// minute, the device's included, and one `StillRestarting`; no audio
+/// exists to lose meanwhile. Playback that begins while it waits between
+/// two restarts is lost until the next start: up to `RESTART_BACKOFF_LONGEST`
+/// here, and one start more on a live device (its wait for a first frame).
+/// That restart delivers, the silence before it fills up to `MAXIMUM_GAP`,
+/// and the master holds every frame from then on; the warning ends once it
+/// has delivered for 10 s.
 #[test]
-fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_loses_nothing_once_it_plays() {
+fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_records_from_the_next_start() {
     let (_one, log) = one_at_a_time();
     let (_directory, session, mut drive) = record(CaptureMode::Call);
     drive.run_to(Duration::from_secs(120), false);
@@ -500,8 +572,17 @@ fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_loses_nothing
     );
     assert_about_once_a_minute(log, drive.clock.now());
 
-    // Something plays from here on: the next restart delivers.
+    // Something plays from here on, beginning while the capture waits
+    // between two restarts: the next restart delivers.
+    while drive.backend.is_running() {
+        drive.run(1, false);
+    }
     let resumed_at = drive.run_until(steps_in(Duration::from_secs(10)), true, is_resumed);
+    let lost = STEP * drive.backend.dropped() as u32;
+    assert!(
+        lost > Duration::ZERO && lost <= CaptureSession::RESTART_BACKOFF_LONGEST,
+        "{lost:?} of playback before the next start"
+    );
     let gap = drive
         .seen
         .iter()
@@ -523,10 +604,11 @@ fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_loses_nothing
 /// A warning that stands when a new streak begins (a device change after
 /// restarts that went past `RESTART_ATTEMPTS` and resumed) stands into it,
 /// and ends once the stream that change resumed on has delivered for 10 s,
-/// with one `Delivering` and nothing after it.
+/// with one `Delivering` and nothing after it, and one `info` line that
+/// answers the restarts' `warn` lines.
 #[test]
 fn a_warning_that_stands_into_a_new_streak_ends_once_its_stream_delivers() {
-    let (_one, _log) = one_at_a_time();
+    let (_one, log) = one_at_a_time();
     let (_directory, session, mut drive) = record(CaptureMode::InPerson);
     drive.run(5, true);
     drive.run_until(
@@ -551,6 +633,105 @@ fn a_warning_that_stands_into_a_new_streak_ends_once_its_stream_delivers() {
         vec![CaptureNotice::Delivering],
         "one Delivering, and nothing after it"
     );
+    assert_eq!(log.count("INFO", "delivers again"), 1);
+    let result = session.stop().unwrap();
+    assert_nothing_lost(&result, &drive.backend);
+}
+
+/// A Mac call capture on a microphone chosen in Settings, with nothing
+/// playing: it runs on the output's clock, so its restarts that deliver
+/// nothing say nothing of the microphone, and every one stays on the
+/// chosen one. Wherever in a restart's cycle playback begins, the capture
+/// resumes on that microphone, not on the default input in its place, so
+/// the recorder, which reads the fallback from the resumed stream, never
+/// says the chosen microphone is not available. Playback that stops again
+/// soon after (a stall within 10 s of the resume) keeps it too, and
+/// nothing is lost.
+#[test]
+fn a_call_capture_keeps_its_chosen_microphone_through_restarts_with_nothing_playing() {
+    // One restart's cycle at the longest backoff, in half seconds.
+    let cycle = CaptureSession::STALL_TIMEOUT + CaptureSession::RESTART_BACKOFF_LONGEST;
+    let onsets = (cycle.as_millis() / 500) as usize + 1;
+    for onset in 0..onsets {
+        let (_one, _log) = one_at_a_time();
+        let (_directory, session, mut drive) = record_on(CaptureMode::Call, Some("usb-mic"));
+        drive.run_to(Duration::from_secs(30), false);
+        drive.run(5 * onset, false);
+        let on_the_chosen = |session: &CaptureSession, what: &str| {
+            let input = session.stream().unwrap().input.unwrap();
+            assert_eq!(
+                (input.uid.as_str(), input.is_fallback),
+                ("usb-mic", false),
+                "onset {onset}: {what} on the chosen microphone"
+            );
+        };
+        drive.run_until(steps_in(Duration::from_secs(10)), true, is_resumed);
+        on_the_chosen(&session, "resumed");
+        // The playback stops a moment, and its stall comes within 10 s of
+        // the resume.
+        drive.run(steps_in(Duration::from_secs(3)), true);
+        drive.run_until(steps_in(Duration::from_secs(5)), false, |notice| {
+            matches!(notice, CaptureNotice::DeviceChanged(_))
+        });
+        drive.run_until(steps_in(Duration::from_secs(10)), true, is_resumed);
+        on_the_chosen(&session, "resumed again");
+        drive.run(steps_in(Duration::from_secs(5)), true);
+        let inputs = drive.backend.inputs();
+        assert!(
+            inputs
+                .iter()
+                .all(|input| input.as_deref() == Some("usb-mic")),
+            "onset {onset}: no start on the default: {inputs:?}"
+        );
+        let result = session.stop().unwrap();
+        assert!(!result.statistics.ended_on_device_loss);
+        assert_nothing_lost(&result, &drive.backend);
+    }
+}
+
+/// A stream that delivers for 9 s and stalls, over and over, after
+/// restarts that brought the warning up: each stall comes more than 10 s
+/// after the resume, so each begins a new streak, which resumes on its
+/// first restart. The warning stands through them (no `Delivering`, since
+/// no 10 s of audio came), and while the restarts' `warn` line stands
+/// unanswered the stalls log at `debug`: no `warn` line over two minutes.
+/// Once the stream delivers for 10 s, one `info` line answers it.
+#[test]
+fn a_stream_that_stalls_after_each_few_seconds_logs_no_warn_per_stall() {
+    let (_one, log) = one_at_a_time();
+    let (_directory, session, mut drive) = record(CaptureMode::InPerson);
+    drive.run(5, true);
+    drive.run_until(
+        steps_in(Duration::from_secs(30)),
+        false,
+        is_still_restarting,
+    );
+    drive.run_until(steps_in(Duration::from_secs(10)), true, is_resumed);
+    let warns = log.count("WARN", "");
+    let from = drive.seen.len();
+    let end = drive.clock.now() + Duration::from_secs(120);
+    let mut stalls = 0;
+    while drive.clock.now() < end {
+        drive.run(steps_in(Duration::from_secs(9)), true);
+        drive.run_until(steps_in(Duration::from_secs(5)), false, |notice| {
+            matches!(notice, CaptureNotice::DeviceChanged(_))
+        });
+        drive.run_until(steps_in(Duration::from_secs(10)), true, |notice| {
+            matches!(notice, CaptureNotice::DeviceResumed { attempt: 1, .. })
+        });
+        stalls += 1;
+    }
+    assert!(stalls >= 10, "{stalls} stalls");
+    assert_eq!(log.count("WARN", ""), warns, "no warn line per stall");
+    assert_eq!(drive.count(is_delivering), 0, "the warning stands");
+    assert!(
+        drive.seen[from..]
+            .iter()
+            .all(|(_, notice)| !is_still_restarting(notice))
+    );
+    assert_eq!(log.count("INFO", "delivers again"), 0);
+    drive.run_until(steps_in(Duration::from_secs(12)), true, is_delivering);
+    assert_eq!(log.count("INFO", "delivers again"), 1);
     let result = session.stop().unwrap();
     assert_nothing_lost(&result, &drive.backend);
 }
