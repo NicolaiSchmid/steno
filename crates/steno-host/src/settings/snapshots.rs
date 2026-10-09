@@ -30,22 +30,14 @@ pub const MANAGED_LOGIN_ITEM: &str =
 /// Rust only.
 pub const MANAGED_UPDATES: &str = "Updates come from your package manager.";
 
-/// The contract's login item, and the line under it when the system
-/// manages it: on, which the page shows locked.
-fn login_item(status: LoginItemStatus) -> (GeneralLoginItem, Option<String>) {
-    let item = match status {
+/// A login item the system manages is on, which the page shows locked.
+fn login_item(status: LoginItemStatus) -> GeneralLoginItem {
+    match status {
         LoginItemStatus::NotRegistered => GeneralLoginItem::NotRegistered,
-        LoginItemStatus::Enabled => GeneralLoginItem::Enabled,
+        LoginItemStatus::Enabled | LoginItemStatus::Managed => GeneralLoginItem::Enabled,
         LoginItemStatus::RequiresApproval => GeneralLoginItem::RequiresApproval,
         LoginItemStatus::NotFound => GeneralLoginItem::NotFound,
-        LoginItemStatus::Managed => {
-            return (
-                GeneralLoginItem::Enabled,
-                Some(MANAGED_LOGIN_ITEM.to_owned()),
-            );
-        }
-    };
-    (item, None)
+    }
 }
 
 /// The libraries Steno ships with, for the Acknowledgements dialog; the
@@ -122,7 +114,6 @@ pub fn general(
     version: &str,
     updates_managed: bool,
 ) -> GeneralSettingsSnapshot {
-    let (login_item, login_item_note) = login_item(general.login_item);
     let (outcome, detail) = match services.updater.last_outcome() {
         UpdateOutcome::NotChecked => (GeneralUpdatesOutcome::NotChecked, None),
         UpdateOutcome::UpToDate => (GeneralUpdatesOutcome::UpToDate, None),
@@ -132,8 +123,9 @@ pub fn general(
     GeneralSettingsSnapshot {
         subtitle: subtitle.to_owned(),
         version: version.to_owned(),
-        login_item,
-        login_item_note,
+        login_item: login_item(general.login_item),
+        login_item_note: (general.login_item == LoginItemStatus::Managed)
+            .then(|| MANAGED_LOGIN_ITEM.to_owned()),
         detection_enabled: general.detection_enabled,
         default_template_id: general.default_template_id.clone(),
         templates: SummaryTemplate::bundled()
