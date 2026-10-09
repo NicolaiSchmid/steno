@@ -646,13 +646,9 @@ impl Shared {
         }
         for asset in &self.assets {
             match self.config.install {
-                Install::Allowed => {
-                    self.store.ensure(asset, &mut log_download)?;
-                }
-                Install::Never => {
-                    self.store.installed_directory(asset)?;
-                }
-            }
+                Install::Allowed => self.store.ensure(asset, &mut log_download)?,
+                Install::Never => self.store.installed_directory(asset)?,
+            };
         }
         Ok(())
     }
