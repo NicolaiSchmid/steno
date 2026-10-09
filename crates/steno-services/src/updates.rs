@@ -484,13 +484,13 @@ impl UpdateSchedule {
     }
 
     /// Asks whether to install `version` now and, when the user agrees,
-    /// installs and relaunches ([`Self::install_on_request`]): after the
-    /// tray's check, and when the schedule announced an update it does not
-    /// install by itself. The dialog may have been open since before a
-    /// recording started, so when the recorder is no longer idle by the yes
-    /// it asks again first ([`Question::StopRecording`]); "Not Now", or
-    /// closing that dialog, leaves the version to announce again once the
-    /// recording has ended. Swift: Sparkle's update alert.
+    /// installs and relaunches as the module doc's "An install" says:
+    /// after the tray's check, and when the schedule announced an update it
+    /// does not install by itself. The dialog may have been open since
+    /// before a recording started, so when the recorder is no longer idle
+    /// by the yes it asks again first ([`Question::StopRecording`]); "Not
+    /// Now", or closing that dialog, leaves the version to announce again
+    /// once the recording has ended. Swift: Sparkle's update alert.
     pub async fn offer(&self, version: &str) {
         if !self.source.ask(Question::Install(version)).await {
             return;
