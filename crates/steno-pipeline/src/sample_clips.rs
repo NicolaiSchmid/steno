@@ -133,21 +133,18 @@ pub(crate) fn sweep_after_merge(
         .filter(|speaker| speaker.sample_clip_url.is_some())
         .map(|speaker| speaker.id)
         .collect();
-    let keeping: Vec<&Speaker> = replaced
-        .iter()
-        .filter(|speaker| speaker.assignment.is_confirmed() && !given_a_clip.contains(&speaker.id))
-        .collect();
-    named.extend(
-        keeping
-            .iter()
-            .filter_map(|speaker| speaker.sample_clip_url.clone()),
-    );
-    let owners: BTreeSet<Uuid> = replaced
+    let mut owners: BTreeSet<Uuid> = replaced
         .iter()
         .chain(committed)
         .map(|speaker| speaker.id)
-        .filter(|id| keeping.iter().all(|speaker| speaker.id != *id))
         .collect();
+    for kept in replaced
+        .iter()
+        .filter(|speaker| speaker.assignment.is_confirmed() && !given_a_clip.contains(&speaker.id))
+    {
+        owners.remove(&kept.id);
+        named.extend(kept.sample_clip_url.clone());
+    }
     Ok(sweep(directory, &owners, &named, probe))
 }
 

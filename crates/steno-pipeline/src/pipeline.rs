@@ -1615,7 +1615,7 @@ impl ProcessingPipeline {
         })
         .await
         .map_err(StoreError::from)
-        .and_then(std::convert::identity);
+        .flatten();
         if let Err(error) = swept {
             tracing::warn!(
                 target: BACKGROUND_RUN_LOG,
@@ -2205,7 +2205,7 @@ impl ProcessingPipeline {
                 let written =
                     off_the_workers(move || sample_clips::write(&layout, &clips, probe.as_ref()))
                         .await
-                        .and_then(std::convert::identity);
+                        .flatten();
                 attributing(PipelineStage::Diarize, written)?;
             }
             Ok(Diarization {
