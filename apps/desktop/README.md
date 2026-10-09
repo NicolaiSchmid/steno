@@ -322,14 +322,15 @@ They reach the user manager two ways:
   Launch at login is on, at each launch and when it is switched on. After
   writing a file the app asks the user manager to reload its units over
   the session bus, so a running session takes the new timeout at once.
-  The write leaves a mark in the app's config directory
-  (`systemd-reload-owed`) that only a reload that went through clears,
-  so a reload that failed, was skipped or was cut off is asked for again
-  at the next launch or switch; with nothing written and nothing owed
-  the app does not reload, since each reload reruns every generator of
-  the user manager (`stop_timeout.rs`). This covers the AppImage, and
-  installs that turned Launch at login on before the drop-ins existed. A
-  directory it cannot write is logged, and the unit keeps 5 s.
+  The write leaves a mark in the support directory
+  (`~/.local/share/Steno/systemd-reload-owed`) that only a reload that
+  went through clears, so a reload that failed, was skipped or was cut
+  off is asked for again at the next launch or switch; with nothing
+  written and nothing owed the app does not reload, since each reload
+  reruns every generator of the user manager (`stop_timeout.rs`). This
+  covers the AppImage, and installs that turned Launch at login on
+  before the drop-ins existed. A directory it cannot write is logged, and
+  the unit keeps 5 s.
 
 While the system manages the login item (`STENO_LOGIN_ITEM=managed`,
 Packaged installs below), the switch writes nothing, though it shows on.
@@ -354,14 +355,15 @@ entry and the autostart unit's drop-in at once, with no reload. While
 the app runs as the autostart unit, the entry stays until the app
 exits, since any other reload of the user manager (a package install,
 another app, `nixos-rebuild switch`) would unload the unit. Settings and
-the tray show the switch off at once; the app marks the choice in its
-config directory (`launch-at-login-off-at-exit`) and removes the entry
-and the drop-in after the exit's save. A mark left by a kill or a crash
-is applied at the next launch that does not run as the unit, so the
-next login still autostarts the app once; an update's relaunch keeps
-it. Turning it on again before the exit clears the mark and leaves the
-entry as it is: the plugin rewrites an entry by emptying it first, and
-a reload that read it empty would unload the unit. A launch as the
+the tray show the switch off at once; the app marks the choice in the
+support directory (`~/.local/share/Steno/launch-at-login-off-at-exit`)
+and removes the entry and the drop-in after the exit's save. A mark
+left by a kill or a crash is applied at the next launch that does not
+run as the unit, so the next login still autostarts the app once; an
+update's relaunch keeps it. Turning it on again before the exit clears
+the mark and leaves the entry as it is: the plugin rewrites an entry by
+emptying it first, and a reload that read it empty would unload the
+unit. A launch as the
 autostart unit that finds no entry (an older release removed it at
 once, or the user did, and then an update relaunched in the unit) puts
 the entry back with the mark, so the unit gets its drop-in and the reload
