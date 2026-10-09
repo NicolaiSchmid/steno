@@ -158,6 +158,18 @@ fn a_check_outside_a_command_republishes_the_general_section() {
     assert_eq!(general["subtitle"], "Update available: 0.12.0");
 }
 
+/// The desktop shell's refusal when no launcher of the build lies at a
+/// path that outlives an upgrade (`packaged::NO_STABLE_PATH` on Linux).
+const NO_STABLE_PATH: &str = "Steno can't open at login from where it's installed now.";
+
+/// Whether the first launch has been counted (`LOGIN_ITEM_REGISTERED_KEY`).
+fn launch_counted(harness: &Harness) -> bool {
+    harness
+        .fakes
+        .preferences
+        .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
+}
+
 /// The first launch registers the login item once when the setting says
 /// so; a login item the system manages (stable plan X5) is never touched,
 /// and that launch is not counted. Rust only.
@@ -172,12 +184,7 @@ fn the_first_launch_registers_the_login_item_unless_the_system_manages_it() {
     harness.host.register_login_item_on_first_launch();
     harness.host.register_login_item_on_first_launch();
     assert_eq!(*harness.fakes.login_item.changes.lock().unwrap(), [true]);
-    assert!(
-        harness
-            .fakes
-            .preferences
-            .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
-    );
+    assert!(launch_counted(&harness));
 
     let harness = Harness::builder()
         .seed(seed_launch_at_login)
@@ -185,36 +192,19 @@ fn the_first_launch_registers_the_login_item_unless_the_system_manages_it() {
         .build();
     harness.host.register_login_item_on_first_launch();
     assert!(harness.fakes.login_item.changes.lock().unwrap().is_empty());
-    assert!(
-        !harness
-            .fakes
-            .preferences
-            .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
-    );
+    assert!(!launch_counted(&harness));
     assert_eq!(harness.fakes.login_item.status(), LoginItemStatus::Managed);
 
     // A registration that fails (on Linux, no launcher at a stable path)
     // does not count the launch, so the next one tries again.
     let harness = Harness::builder().seed(seed_launch_at_login).build();
-    harness.fakes.login_item.fail_changes(Some(
-        "Steno can't open at login from where it's installed now.",
-    ));
+    harness.fakes.login_item.fail_changes(Some(NO_STABLE_PATH));
     harness.host.register_login_item_on_first_launch();
-    assert!(
-        !harness
-            .fakes
-            .preferences
-            .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
-    );
+    assert!(!launch_counted(&harness));
     harness.fakes.login_item.fail_changes(None);
     harness.host.register_login_item_on_first_launch();
     assert_eq!(*harness.fakes.login_item.changes.lock().unwrap(), [true]);
-    assert!(
-        harness
-            .fakes
-            .preferences
-            .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
-    );
+    assert!(launch_counted(&harness));
 }
 
 /// A login item the system manages shows on, with the line that says so,
@@ -269,9 +259,8 @@ fn a_login_item_the_system_manages_shows_on_and_does_not_switch() {
 /// says why. Rust only (stable plan X5).
 #[test]
 fn a_login_item_that_cannot_be_registered_says_why_and_is_not_saved() {
-    let reason = "Steno can't open at login from where it's installed now.";
     let harness = Harness::builder()
-        .seed(move |_, fakes| fakes.login_item.fail_changes(Some(reason)))
+        .seed(|_, fakes| fakes.login_item.fail_changes(Some(NO_STABLE_PATH)))
         .build();
     harness
         .host
@@ -280,7 +269,7 @@ fn a_login_item_that_cannot_be_registered_says_why_and_is_not_saved() {
     assert!(!harness.store.settings().unwrap().launch_at_login);
     let general = harness.snapshot(BridgeTopic::SettingsGeneral);
     assert_eq!(general["loginItem"], "notRegistered");
-    assert_eq!(general["errorDetails"], reason);
+    assert_eq!(general["errorDetails"], NO_STABLE_PATH);
 }
 
 /// On a packaged install (stable plan X5) the Updates row says where
