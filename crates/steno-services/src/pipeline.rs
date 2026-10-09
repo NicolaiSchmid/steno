@@ -82,9 +82,9 @@ impl Current {
 /// [`quit`](Self::quit) reaches the retired ones too, one in-flight set
 /// ([`InFlight`]), so the new one refuses a meeting a retired one still
 /// holds, and one [`ModelWaits`], so
-/// [`resume_unfinished`](Self::resume_unfinished) starts the meetings any
-/// of them left waiting for models and none that a retired one still
-/// runs. Held by `App`, the recorder, the phone intake and
+/// [`resume_waiting`](Self::resume_waiting) starts the meetings any of
+/// them left waiting for models, on the current one (the rules are on
+/// [`ModelWaits`]). Held by `App`, the recorder, the phone intake and
 /// [`HostPipeline`].
 pub struct CurrentPipeline {
     current: Mutex<Current>,
@@ -140,9 +140,10 @@ impl CurrentPipeline {
     /// [`ProcessingPipeline::resume_waiting`] on the current pipeline,
     /// from any thread: the meetings a run on any of its pipelines left
     /// `queued` for missing models since the last resume start on the
-    /// runtime, and a meeting a retired pipeline still runs is left to it.
-    /// Called once a model install finished; a failure is logged.
-    pub fn resume_unfinished(&self) {
+    /// runtime. Called once a model install finished; a failure is logged.
+    /// Not the launch's recovery, which is
+    /// [`ProcessingPipeline::resume_unfinished`] over every queued meeting.
+    pub fn resume_waiting(&self) {
         let _entered = self.runtime.enter();
         match self.current().resume_waiting() {
             Ok(resumed) if !resumed.is_empty() => {
@@ -1410,7 +1411,7 @@ mod tests {
             .await
             .expect("the first job is transcribing");
         current.reload().unwrap();
-        current.resume_unfinished();
+        current.resume_waiting();
         children.open.notify_one();
         eventually("the meeting is ready and every run is done", || {
             meeting_state(&store, held) == MeetingState::Ready
@@ -1476,7 +1477,7 @@ mod tests {
             .await
             .expect("the retired pipeline is transcribing the meeting");
         let before = engine.inner.transcriptions.count();
-        current.resume_unfinished();
+        current.resume_waiting();
         children.open.notify_one();
         held.await.unwrap().unwrap();
         current.current().wait_until_idle().await;
@@ -1693,7 +1694,7 @@ mod tests {
         assert!(master.is_file(), "the recording is kept");
 
         crate::speech::testing::install_every_model(&models);
-        current.resume_unfinished();
+        current.resume_waiting();
         current.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, meeting.id), MeetingState::Ready);
     }

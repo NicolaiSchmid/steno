@@ -173,10 +173,10 @@ impl<M: SpeechModels> ResumingSpeechModels<M> {
 
     /// The app's: an install resumes, on `pipeline`'s current pipeline,
     /// the meetings its pipelines left waiting
-    /// ([`CurrentPipeline::resume_unfinished`]).
+    /// ([`CurrentPipeline::resume_waiting`]).
     #[must_use]
     pub fn resuming(inner: M, pipeline: Arc<CurrentPipeline>) -> Self {
-        Self::new(inner, Box::new(move || pipeline.resume_unfinished()))
+        Self::new(inner, Box::new(move || pipeline.resume_waiting()))
     }
 }
 
