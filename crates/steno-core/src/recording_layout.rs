@@ -4,8 +4,8 @@
 //! `<audio folder>/<MEETING-UUID>/recording.caf`, one `<lane>.wav` sidecar
 //! per lane, `audio.<ext>` for the mixdown, `speakers/<SPEAKER-UUID>.wav`
 //! for the sample clips (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav` for the
-//! clips this port's pipeline writes), and, while a meeting is processed,
-//! the pipeline's `.processing-runs`. The UUID folder is spelled as Swift's
+//! clips the Rust pipeline writes), and, while a meeting is processed, the
+//! pipeline's `.processing-runs`. The UUID folder is spelled as Swift's
 //! `uuidString`: uppercase, hyphenated.
 
 use std::path::{Path, PathBuf};
@@ -50,8 +50,9 @@ impl RecordingLayout {
     }
 
     /// [`Self::from_asset`] when that folder is named after the asset's
-    /// meeting, as [`Self::new`] names it, so no other meeting's files are
-    /// in it; `None` for a master in any other folder. Rust only.
+    /// meeting, as [`Self::new`] names it; `None` for a master in any other
+    /// folder. It says nothing about the files in the folder: a master of
+    /// another meeting may lie there too. Rust only.
     #[must_use]
     pub fn own_folder(asset: &AudioAsset) -> Option<Self> {
         let folder = uuid_string(asset.meeting_id);

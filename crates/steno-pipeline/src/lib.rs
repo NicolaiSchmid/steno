@@ -17,7 +17,7 @@
 //! | [`lane_merger`] | The lanes into one ordered transcript |
 //! | [`speaker_memory`] | The store-backed cosine `SpeakerMemory` |
 //! | [`retention`] | [`RetentionSweep`] over expired assets |
-//! | [`sample_clips`] | The speakers' sample clips written under each run's own names, named by the merge, and the files no speaker row names swept after it |
+//! | [`sample_clips`] | The speakers' sample clips written under each run's own names, named by the merge, and the files of the meeting's speakers that no row names swept after it |
 //! | [`fixtures`] | The synthetic audio fixtures and the WAV writer |
 //! | [`files`] | Durable writes: a file replaced in one step, a recording copied, new folders, a JSON file read and written, set aside when corrupt; its Windows module is the one place in the crate allowed `unsafe` |
 //!

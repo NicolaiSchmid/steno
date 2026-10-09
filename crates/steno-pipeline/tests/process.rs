@@ -2086,31 +2086,105 @@ async fn a_runs_uncommitted_clips_survive_every_other_runs_sweep() {
     assert_eq!(clip_files(&asset), in_flight);
 }
 
-/// A meeting whose master lies in another meeting's folder writes its
-/// clips there under its run's names but sweeps nothing: the folder holds
-/// files that are not its own.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_run_sweeps_only_its_own_meetings_folder() {
+/// A meeting whose master lies in another meeting's folder writes no clip
+/// there and sweeps nothing, and the owner's re-run, which sweeps while the
+/// guest's re-run is held before its merge, leaves the guest's files alone:
+/// a clip of the guest's speaker that no row names stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_meeting_whose_master_lies_in_another_meetings_folder_leaves_its_clips_alone() {
     let world = world(false, None, AudioRetention::KeepForever);
-    let owner = call_meeting(world.now);
-    let owners = call_asset(&world.audio, owner.id, AudioRetention::KeepForever);
-    let layout = RecordingLayout::from_asset(&owners).unwrap();
-    layout.create_directories(true).unwrap();
-    let stray = layout.speakers_directory().join("stray.wav");
-    std::fs::write(&stray, b"a clip no row names").unwrap();
+    let (owners, _) = confirmed_call(&world).await;
+    let owner = owners.meeting_id;
     let mut guest = call_meeting(world.now);
     guest.id = Uuid::new_v4();
     let mut guests = owners.clone();
     guests.id = Uuid::new_v4();
     guests.meeting_id = guest.id;
-
+    let before = clip_files(&owners);
     world.pipeline.enqueue(&guest, &guests).unwrap();
     world.pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, guest.id), MeetingState::Ready);
+    let speakers = world.store.speakers(guest.id).unwrap();
+    assert!(speakers.iter().all(|row| row.sample_clip_url.is_none()));
+    assert_eq!(clip_files(&owners), before, "the guest wrote no clip here");
+    // A clip of the guest's speaker that no row names, as the writer
+    // before per-run names left it.
+    let layout = RecordingLayout::from_asset(&owners).unwrap();
+    let guests_clip = layout.sample_clip(speaker(&speakers, "Speaker 1").id);
+    std::fs::write(&guests_clip, b"the guest's earlier clip").unwrap();
+
+    let (reached, held_there) = std::sync::mpsc::channel();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let wait = Mutex::new(wait);
+    let gate: ClipProbe = Arc::new(move |step| {
+        if step == ClipStep::Merging {
+            reached.send(()).unwrap();
+            wait.lock().unwrap().recv().unwrap();
+        }
+        Ok(())
+    });
+    let held = rerun_pipeline(&world, Some(gate));
+    held.reprocess(guest.id).unwrap();
+    tokio::task::spawn_blocking(move || held_there.recv().unwrap())
+        .await
+        .unwrap();
+    rerun_pipeline(&world, None)
+        .process(owners.id)
+        .await
+        .unwrap();
+    go.send(()).unwrap();
+    held.wait_until_idle().await;
 
     assert_eq!(meeting_state(&world, guest.id), MeetingState::Ready);
-    let named = assert_each_row_names_its_own_clip_of(&world.store, guest.id);
-    assert_eq!(named.len(), 2);
-    assert!(stray.exists(), "another meeting's folder is never swept");
+    let guest_rows = world.store.speakers(guest.id).unwrap();
+    assert!(guest_rows.iter().all(|row| row.sample_clip_url.is_none()));
+    assert!(
+        guests_clip.exists(),
+        "another meeting's clip is never swept"
+    );
+    let mut expected = assert_each_row_names_its_own_clip(&world.store, owner);
+    assert!(expected.is_disjoint(&before), "the owner's re-run swept");
+    expected.insert(guests_clip.file_name().unwrap().to_owned());
+    assert_eq!(clip_files(&owners), expected);
+}
+
+/// A confirmed speaker that a re-run drops, or whose new row gets no clip,
+/// keeps its clip file through that re-run and the next: its row is gone
+/// or names no clip, as before per-run names, and the file stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirmed_speaker_a_rerun_gives_no_clip_keeps_its_clip_file() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let (asset, anna) = confirmed_call(&world).await;
+    let meeting = asset.meeting_id;
+    let ben = speaker(&world.store.speakers(meeting).unwrap(), "Speaker 2").id;
+    world
+        .store
+        .confirm_speaker(ben, &sample_data::person(1, "Ben"))
+        .unwrap();
+    let earlier = clip_files(&asset);
+    assert_eq!(earlier.len(), 2);
+    // One cluster without a clip: "Speaker 1" comes back without one, and
+    // "Speaker 2" is dropped.
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.diarizer = Arc::new(FakeDiarizer::answering(|audio| {
+        let mut result = FakeDiarizer::round_robin(audio.duration(), 1, 1.0);
+        for cluster in &mut result.clusters {
+            cluster.sample_clip_range = None;
+        }
+        result
+    }));
+    let pipeline = ProcessingPipeline::new(dependencies);
+
+    for run in 0..2 {
+        pipeline.process(asset.id).await.unwrap();
+        let speakers = world.store.speakers(meeting).unwrap();
+        let kept = speaker(&speakers, "Speaker 1");
+        assert_eq!(kept.id, anna);
+        assert!(kept.assignment.is_confirmed(), "run {run}");
+        assert_eq!(kept.sample_clip_url, None, "run {run}");
+        assert!(speakers.iter().all(|row| row.id != ben), "run {run}");
+        assert_eq!(clip_files(&asset), earlier, "run {run}: both clips stay");
+    }
 }
 
 /// A call whose tap carried no conversation diarizes its mic lane, which

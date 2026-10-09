@@ -369,22 +369,23 @@ impl Store {
     /// the commit is on the disk when it returns ([`Store::write_durably`],
     /// one WAL sync per processing run): the pipeline removes the
     /// clips the earlier rows named once it has returned, and a power loss
-    /// must not bring those rows back. Rust only: Swift commits with
-    /// `synchronous = NORMAL` and writes its clips in place.
+    /// must not bring those rows back. Returns the rows it replaced, as
+    /// that transaction read them, for that removal. Rust only: Swift
+    /// commits with `synchronous = NORMAL` and writes its clips in place.
     pub fn replace_transcript(
         &self,
         meeting: &Meeting,
         segments: &[TranscriptSegment],
         speakers: &[Speaker],
-    ) -> Result<()> {
+    ) -> Result<Vec<Speaker>> {
         self.write_durably(|transaction| {
             write_processing_results(transaction, meeting)?;
-            let confirmed: BTreeMap<Uuid, SpeakerAssignment> =
-                people::speakers_of_meeting(transaction, meeting.id)?
-                    .into_iter()
-                    .filter(|speaker| speaker.assignment.is_confirmed())
-                    .map(|speaker| (speaker.id, speaker.assignment))
-                    .collect();
+            let replaced = people::speakers_of_meeting(transaction, meeting.id)?;
+            let confirmed: BTreeMap<Uuid, SpeakerAssignment> = replaced
+                .iter()
+                .filter(|speaker| speaker.assignment.is_confirmed())
+                .map(|speaker| (speaker.id, speaker.assignment.clone()))
+                .collect();
             let voices: BTreeSet<Uuid> = confirmed
                 .values()
                 .filter_map(SpeakerAssignment::person_id)
@@ -416,7 +417,7 @@ impl Store {
             for person_id in voices {
                 people::refresh_voice(transaction, person_id)?;
             }
-            Ok(())
+            Ok(replaced)
         })
     }
 
@@ -602,10 +603,10 @@ mod tests {
     }
 
     /// The merge's write switches a kept confirmation and its new clip in
-    /// one commit, under `synchronous = FULL` (2): the pipeline removes the
-    /// earlier clip once it returns, so a power loss must not bring back the
-    /// row that named it. That the commit then survives a power loss is
-    /// SQLite's and cannot be tested.
+    /// one commit, under `synchronous = FULL` (2), and returns the row it
+    /// replaced: the pipeline removes the earlier clip once it returns, so a
+    /// power loss must not bring back the row that named it. That the commit
+    /// then survives a power loss is SQLite's and cannot be tested.
     #[test]
     fn replacing_the_transcript_switches_the_clips_with_the_confirmations_durably() {
         use std::sync::{Arc, Mutex};
@@ -648,9 +649,12 @@ mod tests {
             commits.lock().unwrap().push((level, assignment, clip));
         });
 
+        let earlier = speaker.clone();
         speaker.assignment = SpeakerAssignment::Unknown;
         speaker.sample_clip_url = Some("file:///audio/speakers/new.wav".to_owned());
-        store.replace_transcript(&meeting, &[], &[speaker]).unwrap();
+        let replaced = store.replace_transcript(&meeting, &[], &[speaker]).unwrap();
+
+        assert_eq!(replaced, [earlier], "the rows it replaced, for the sweep");
 
         assert_eq!(
             *seen.lock().unwrap(),

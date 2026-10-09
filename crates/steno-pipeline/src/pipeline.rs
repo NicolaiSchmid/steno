@@ -661,6 +661,8 @@ impl Diarization {
 struct Merged {
     segments: Vec<TranscriptSegment>,
     speakers: Vec<Speaker>,
+    /// The rows the merge replaced, as its transaction read them.
+    replaced: Vec<Speaker>,
 }
 
 /// The sample clip is at most ten seconds.
@@ -1527,7 +1529,7 @@ impl ProcessingPipeline {
         let merged = self
             .merge(&current, &transcription.lanes, &diarized)
             .await?;
-        self.sweep_sample_clips(asset);
+        self.sweep_sample_clips(asset, &merged).await;
         // This run's usage starts from the cleanup pass (None when it was
         // skipped) and the summarize stage adds its own.
         current.llm_usage = self
@@ -1574,32 +1576,52 @@ impl ProcessingPipeline {
         Ok(())
     }
 
-    /// Removes the clip files no speaker row names from the meeting's own
-    /// `speakers/` folder, once the merge has committed the rows this run
-    /// wrote ([`sample_clips::sweep`]): the clips the earlier rows named,
-    /// and those of an earlier run that ended before its commit. This is
-    /// safe for two reasons together, and only for them: the folder is the
-    /// meeting's own ([`RecordingLayout::own_folder`]), so no other
-    /// meeting's run writes clips into it, and the run holds the meeting in
-    /// the in-flight set, so no other run of this meeting has clips there
-    /// that are not committed yet. A master in any other folder is never
-    /// swept, and the sweep must never be pointed at a folder that more
-    /// than one meeting writes into. A failure is logged and never fails
-    /// the run. Rust only: Swift writes its clips in place.
-    fn sweep_sample_clips(&self, asset: &AudioAsset) {
+    /// Removes the clip files of the meeting's speakers that no speaker row
+    /// names from the meeting's own `speakers/` folder, once the merge has
+    /// committed the rows this run wrote ([`sample_clips::sweep_after_merge`]):
+    /// the clips the earlier rows named, and those of an earlier run that
+    /// ended before its commit. A confirmed speaker this run gave no clip
+    /// keeps its files. Three guards keep every uncommitted clip:
+    /// - only files of this meeting's speakers go, and speaker ids derive
+    ///   from the meeting id, so another meeting's clips are never removed;
+    /// - the run holds the meeting in the in-flight set until the sweep
+    ///   returns, so no other run of this meeting has clips there that are
+    ///   not committed yet;
+    /// - only the meeting's own folder ([`RecordingLayout::own_folder`]) is
+    ///   swept, the one folder `diarize` writes clips into; a meeting whose
+    ///   master is not in its own folder sweeps nothing.
+    ///
+    /// The sweep runs off the async workers: on Windows a busy file is
+    /// tried again for a moment. A failure is logged and never fails the
+    /// run. Rust only: Swift writes its clips in place.
+    async fn sweep_sample_clips(&self, asset: &AudioAsset, merged: &Merged) {
         let Some(layout) = RecordingLayout::own_folder(asset) else {
             return;
         };
-        let probe = self.dependencies().clip_probe.as_ref();
-        if sample_clips::reach(probe, ClipStep::Sweeping).is_err() {
+        let probe = self.dependencies().clip_probe.clone();
+        if sample_clips::reach(probe.as_ref(), ClipStep::Sweeping).is_err() {
             return;
         }
-        if let Err(error) = sample_clips::sweep(self.store(), &layout.speakers_directory(), probe) {
+        let store = self.store().clone();
+        let (replaced, committed) = (merged.replaced.clone(), merged.speakers.clone());
+        let swept = off_the_workers(move || {
+            sample_clips::sweep_after_merge(
+                &store,
+                &layout.speakers_directory(),
+                &replaced,
+                &committed,
+                probe.as_ref(),
+            )
+        })
+        .await
+        .map_err(StoreError::from)
+        .and_then(std::convert::identity);
+        if let Err(error) = swept {
             tracing::warn!(
                 target: BACKGROUND_RUN_LOG,
                 meeting_id = %asset.meeting_id,
                 %error,
-                "the sample clips no speaker names were not swept"
+                "the sample clips no speaker row names were not swept"
             );
         }
     }
@@ -2099,11 +2121,14 @@ impl ProcessingPipeline {
     /// `Speaker` with a deterministic id. Each cluster's clip is written as
     /// 16 kHz WAV under `speakers/` beside the master, named for this run
     /// ([`sample_clips`]), so no clip a speaker row names is written over.
-    /// A mic lane in which the diarizer hears
-    /// fewer than two voices is the user alone (headphones, the tap
-    /// permission missing): the stage returns no clusters and no lane,
-    /// writes no clip, and the merge keeps the mic as "me". `handed` is
-    /// reused when it carries `lane`, else the lane is decoded here.
+    /// Clips are written only into the meeting's own folder
+    /// ([`RecordingLayout::own_folder`]): a meeting whose master lies in
+    /// another meeting's folder, or in any other, gets speakers without
+    /// clips and leaves that folder's files alone. A mic lane in which the
+    /// diarizer hears fewer than two voices is the user alone (headphones,
+    /// the tap permission missing): the stage returns no clusters and no
+    /// lane, writes no clip, and the merge keeps the mic as "me". `handed`
+    /// is reused when it carries `lane`, else the lane is decoded here.
     async fn diarize(
         &self,
         asset: &AudioAsset,
@@ -2135,7 +2160,7 @@ impl ProcessingPipeline {
                     ));
                 }
             }
-            let layout = RecordingLayout::from_asset(asset);
+            let layout = RecordingLayout::own_folder(asset);
             let run_id = Uuid::new_v4();
             let mut speakers = Vec::new();
             let mut cluster_speakers = Vec::new();
@@ -2177,11 +2202,10 @@ impl ProcessingPipeline {
                 // that outlives a dropped run leaves files no row names,
                 // which the meeting's next sweep removes.
                 let probe = self.dependencies().clip_probe.clone();
-                let written = tokio::task::spawn_blocking(move || {
-                    sample_clips::write(&layout, &clips, probe.as_ref())
-                })
-                .await
-                .unwrap_or_else(|join| std::panic::resume_unwind(join.into_panic()));
+                let written =
+                    off_the_workers(move || sample_clips::write(&layout, &clips, probe.as_ref()))
+                        .await
+                        .and_then(std::convert::identity);
                 attributing(PipelineStage::Diarize, written)?;
             }
             Ok(Diarization {
@@ -2262,10 +2286,11 @@ impl ProcessingPipeline {
             );
             let mut updated = meeting.clone();
             updated.updated_at = now;
-            store.replace_transcript(&updated, &segments, &all_speakers)?;
+            let replaced = store.replace_transcript(&updated, &segments, &all_speakers)?;
             Ok::<_, StoreError>(Merged {
                 segments,
                 speakers: all_speakers,
+                replaced,
             })
         })
         .await
@@ -2649,6 +2674,20 @@ pub fn ensure_me_participant(
     };
     store.save_participant(&me)?;
     Ok(me)
+}
+
+/// Runs `work` on tokio's blocking pool, off the async workers, and returns
+/// what it returned. A panic in `work` resumes here; a task the runtime
+/// cancelled before it ran (the runtime shutting down) is an error.
+async fn off_the_workers<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|join| match join.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(cancelled) => std::io::Error::other(cancelled),
+        })
 }
 
 /// Clamps to `-1...1`, scales to Int16 and writes a 16 kHz mono WAV, the
