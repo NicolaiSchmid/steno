@@ -950,14 +950,37 @@ still has to draw the window side. `[ ]` is not ported yet.
     `a_second_diarizer_failure_keeps_the_named_room_speaker`,
     `a_job_whose_diarizer_does_not_load_keeps_its_transcript`,
     `a_failing_speaker_match_keeps_the_speakers_unknown`,
-    `a_diarizer_failure_warns_with_its_stage_not_its_reason`). `diarize` moves its
-    sample clips into place only once every one is written, so a failure while writing
-    moves none. Each move is one rename that replaces the earlier clip, so a clip's path
-    always holds a whole clip, and on Windows each staged write and each move is tried
-    again while a file is busy (`steno_core::busy_file`). A move that fails after earlier
-    ones landed leaves those speakers with the new clips, so a kept speaker can then play
-    another run's voice; per-run clip names committed with the merge are a follow-up (see
-    "Open after the port"). Once the app quits, a diarizer failure ends the run
+    `a_diarizer_failure_warns_with_its_stage_not_its_reason`). Sample clips
+    (`crates/steno-pipeline/src/sample_clips.rs`): `diarize` writes each clip under a
+    name of its run's own, `speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`, and syncs it and
+    the folder before the merge; a write that fails removes the files it wrote, so the
+    rows keep naming the earlier clips. The merge's `replace_transcript` switches the
+    rows' `sampleClipURL`s to the new files in the transaction that keeps the
+    confirmations, and commits durably (`synchronous = FULL`). Only then does the run
+    remove the clip files in the meeting's own folder that no speaker row names: the
+    earlier clips, and the files of a run that ended before its commit. So a run that
+    ends at any point leaves each row naming a whole clip of the run that wrote the row,
+    and a confirmed speaker's earlier clip goes only once a durable commit names the new
+    one. The sweep runs while the run holds the meeting in the in-flight set, so no other
+    run has uncommitted clips in that folder; a master outside a folder of its meeting's
+    own is never swept. No migration: the rows name the old fixed-name clips until a
+    later run replaces them, or retention or a confirmation removes them by the name the
+    row holds
+    (`a_rerun_that_ends_at_any_clip_step_leaves_each_speaker_its_own_clip`,
+    `process_again_whose_clip_write_fails_keeps_the_confirmed_clip_playable`,
+    `a_runs_uncommitted_clips_survive_every_other_runs_sweep`,
+    `the_sweep_removes_only_the_clip_files_no_row_names`,
+    `the_sweep_removes_the_run_clip_a_confirmed_row_names`,
+    `confirming_after_the_audio_is_gone_removes_the_run_clip_the_row_names`). On Windows
+    each write, move and removal is tried again while a file is busy
+    (`steno_core::busy_file`). A diarizer that fails writes no clip, so the stored
+    speakers come back with their clips and the sweep keeps them
+    (`a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers`). Swift writes each
+    clip in place at `speakers/<SPEAKER-UUID>.wav`, over the file a row may name, and
+    commits the merge with `synchronous = NORMAL`. A Swift app run over this database
+    (a rollback before the Mac cutover) plays the per-run files the rows name, since it
+    reads each clip by its URL; its own re-run writes `<SPEAKER-UUID>.wav` and names it,
+    and the next Rust merge sweeps whichever clip no row names then. Once the app quits, a diarizer failure ends the run
     unpersisted, so the meeting is processed again at the next launch
     (`a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_launch`).
     Swift fails the meeting.
@@ -968,8 +991,12 @@ still has to draw the window side. `[ ]` is not ported yet.
     `replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices`,
     `replacing_the_transcript_keeps_the_name_suggestions_of_returning_speakers`). The
     ids come from the positional "Speaker N" label, so a re-run whose clustering
-    differs keeps a confirmation on whatever voice gets that label. Swift replaces the
-    assignments and drops the suggestions.
+    differs keeps a confirmation on whatever voice gets that label. A kept confirmation
+    and the clip of the run that wrote the row switch in that one transaction (the
+    sample clips above), so a confirmed speaker never plays the clip of a run that did
+    not map its voice onto it. This closes low 6 of the second code review of #231: a
+    clip write that failed partway left a kept speaker playing another voice.
+    Swift replaces the assignments and drops the suggestions.
   - Cleanup: the pass writes each segment's text by id and leaves the speakers alone,
     and summarize reads the speakers and segments as stored then, so a speaker named
     or merged during the pass stays so and is named in the summary
@@ -2748,13 +2775,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `crates/steno-pipeline/src/files.rs`,
   `Sources/StenoCore/Storage/RecordingIntake.swift`, `crates/steno-llm`. Found: #167,
   #185, #213.
-- **`fix/per-run-speaker-clips`.** Speaker clips written all or none: a move that fails
-  partway through `write_sample_clips` leaves a kept speaker playing another run's
-  voice, with its earlier clip replaced. Per-run clip names, written before the merge
-  and switched to in the merge's transaction, with the old files removed after the
-  commit and a sweep of orphaned clips, close it. Rust only: Swift writes each
-  clip in place. Where: `write_sample_clips` (`crates/steno-pipeline/src/pipeline.rs`);
-  the "Speakers" note under "Pipeline and services (WP6b)". Found: #256.
 
 ## Progress
 
@@ -2824,6 +2844,7 @@ PR off `main`.
 | On Windows two writers of one path in the process rename and flush one after the other, and std's rename and the reopen for the flush are retried on a sharing or lock violation or "access denied" for about 0.9 s, so a durable replace no longer fails because of another writer's flush (`steno-pipeline`) | `fix/windows-parallel-replace` | #252 | open |
 | The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | open |
 | On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
+| Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably before the merge, named in the merge's durable transaction that keeps the confirmations, and the files no speaker row names swept from the meeting's own folder after that commit, under the run's in-flight claim: a run that fails or ends at any point leaves each speaker naming a whole clip of its own run (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #PR | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
