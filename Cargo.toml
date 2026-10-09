@@ -52,6 +52,10 @@ block2 = "0.6"
 # The shell's check for a running Swift app (`NSRunningApplication`); already
 # in the lock through Tauri.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSRunningApplication"] }
+# The login item (`SMAppService.mainApp`, the shell's `autostart`), safe
+# over `objc2-service-management`; already in the lock through
+# `tauri-plugin-autostart`'s `auto-launch`.
+smappservice-rs = "0.1.3"
 # Linux only: the session bus query that tells whether a tray host shows the
 # tray icon (`gio`), the backends GDK may open (`gdk`), and the log writer
 # that saves when GDK reports a lost display (`display_lost`, through

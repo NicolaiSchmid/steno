@@ -148,8 +148,12 @@ fn main() {
             }
         }));
     }
+    // macOS registers the login item with `SMAppService` (`autostart`).
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.plugin(autostart::plugin());
+    }
     builder = builder
-        .plugin(autostart::plugin())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -240,6 +244,8 @@ fn setup(
     }
     #[cfg(target_os = "linux")]
     autostart::remove_earlier_entry(handle);
+    #[cfg(target_os = "macos")]
+    autostart::at_launch_on_mac(host::host(handle).launch_at_login());
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle);

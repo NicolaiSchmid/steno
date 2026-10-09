@@ -4907,6 +4907,7 @@ dependencies = [
  "objc2-foundation",
  "serde",
  "serde_json",
+ "smappservice-rs",
  "steno-bridge",
  "steno-core",
  "steno-host",

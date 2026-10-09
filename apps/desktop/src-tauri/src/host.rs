@@ -711,6 +711,26 @@ impl Host {
     /// The onboarding window is gone, closed by the user or by Finish:
     /// the host counts the pages as seen, as the Swift window's
     /// `onDisappear` did.
+    /// The stored `launch_at_login` setting; none when it cannot be read,
+    /// and with the fixtures. macOS registers its login item from it at
+    /// launch (`autostart::at_launch_on_mac`).
+    #[cfg(target_os = "macos")]
+    pub fn launch_at_login(&self) -> Option<bool> {
+        #[cfg(not(feature = "fixture-host"))]
+        {
+            self.inner
+                .app
+                .store
+                .settings()
+                .ok()
+                .map(|settings| settings.launch_at_login)
+        }
+        #[cfg(feature = "fixture-host")]
+        {
+            None
+        }
+    }
+
     pub fn onboarding_window_closed(&self) {
         #[cfg(not(feature = "fixture-host"))]
         self.inner.host.onboarding_window_closed();
