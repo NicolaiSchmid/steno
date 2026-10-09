@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use steno_core::{
     SecretKey, SecretPlace, SecretStore, StenoPaths, async_trait, protocols::BoundaryResult,
@@ -393,7 +393,7 @@ impl SecretStore for FileSecretStore {
 /// No Swift counterpart (the Keychain does not lock while the app runs).
 pub struct KeepsApiKey {
     inner: Arc<dyn SecretStore>,
-    kept: std::sync::Mutex<Kept>,
+    kept: Mutex<Kept>,
 }
 
 #[derive(Default)]
@@ -409,7 +409,7 @@ impl KeepsApiKey {
     pub fn new(inner: Arc<dyn SecretStore>) -> Self {
         KeepsApiKey {
             inner,
-            kept: std::sync::Mutex::default(),
+            kept: Mutex::default(),
         }
     }
 
@@ -420,10 +420,8 @@ impl KeepsApiKey {
         self.kept().key.clone()
     }
 
-    fn kept(&self) -> std::sync::MutexGuard<'_, Kept> {
-        self.kept
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn kept(&self) -> MutexGuard<'_, Kept> {
+        self.kept.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -471,13 +469,14 @@ impl SecretStore for KeepsApiKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use steno_core::testing::InMemorySecretStore;
 
     /// The kept key follows every read and write of the key, and a failed
     /// read leaves it as it was.
     #[tokio::test]
     async fn the_kept_api_key_follows_reads_and_writes_and_survives_a_failed_read() {
         let key = SecretKey::llm_api_key();
-        let memory = Arc::new(steno_core::testing::InMemorySecretStore::with([(
+        let memory = Arc::new(InMemorySecretStore::with([(
             key.clone(),
             "sk-1".to_owned(),
         )]));
@@ -516,9 +515,10 @@ mod tests {
     #[tokio::test]
     async fn a_failed_write_or_a_read_overtaken_by_a_write_keeps_no_old_key() {
         let key = SecretKey::llm_api_key();
-        let refusing = KeepsApiKey::new(Arc::new(RefusingWrites(
-            steno_core::testing::InMemorySecretStore::with([(key.clone(), "sk-1".to_owned())]),
-        )));
+        let refusing = KeepsApiKey::new(Arc::new(RefusingWrites(InMemorySecretStore::with([(
+            key.clone(),
+            "sk-1".to_owned(),
+        )]))));
         refusing.secret(&key).await.unwrap();
         assert!(refusing.set_secret(&key, Some("sk-2")).await.is_err());
         assert_eq!(refusing.kept_api_key(), None);
@@ -528,10 +528,7 @@ mod tests {
             Arc::new(tokio::sync::Notify::new()),
         );
         let slow = Arc::new(KeepsApiKey::new(Arc::new(SlowReads {
-            inner: steno_core::testing::InMemorySecretStore::with([(
-                key.clone(),
-                "sk-1".to_owned(),
-            )]),
+            inner: InMemorySecretStore::with([(key.clone(), "sk-1".to_owned())]),
             reading: reading.clone(),
             release: release.clone(),
         })));
@@ -551,7 +548,7 @@ mod tests {
     }
 
     /// A store whose writes fail.
-    struct RefusingWrites(steno_core::testing::InMemorySecretStore);
+    struct RefusingWrites(InMemorySecretStore);
 
     #[async_trait]
     impl SecretStore for RefusingWrites {
@@ -566,7 +563,7 @@ mod tests {
 
     /// A store whose reads take the value, then wait for `release`.
     struct SlowReads {
-        inner: steno_core::testing::InMemorySecretStore,
+        inner: InMemorySecretStore,
         reading: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     }
