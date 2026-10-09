@@ -630,10 +630,11 @@ impl Diarization {
     };
 
     /// The one unknown room speaker the diarizer fallback gives the
-    /// segments no stored speaker covers, under the first "Speaker N" no
-    /// row in `taken` uses (compared lower-cased, as the summary's label
-    /// map `SpeakerLabels` does), so it never shares a name with a stored
-    /// speaker: "Speaker 1" when nothing is stored. A mic lane is diarized
+    /// segments no stored speaker covers, under the label after the
+    /// highest stored "Speaker N" in `taken` (read lower-cased, as the
+    /// summary's label map `SpeakerLabels` compares labels), so it never
+    /// shares a name with a stored speaker nor reuses one merged away:
+    /// "Speaker 1" when nothing is stored. A mic lane is diarized
     /// only when it is the room (a call whose tap carried no conversation),
     /// so it becomes the room speaker too and the other party's words never
     /// go to "me". The speaker has no embedding, so confirming it teaches
@@ -646,19 +647,18 @@ impl Diarization {
     /// confirming this row to someone who has another speaker merges the
     /// row away, the mark with it. Rust only: Swift fails the meeting.
     fn room_speaker(meeting_id: Uuid, taken: &[Speaker]) -> Speaker {
-        let taken: Vec<String> = taken
+        let next = taken
             .iter()
-            .map(|speaker| speaker.cluster_label.to_lowercase())
-            .collect();
-        // One of the first `taken.len() + 1` labels is free.
-        let label = (1..=taken.len() + 1)
-            .map(|number| format!("Speaker {number}"))
-            .find(|label| !taken.contains(&label.to_lowercase()))
-            .unwrap_or_default();
+            .filter_map(|speaker| {
+                let label = speaker.cluster_label.to_lowercase();
+                label.strip_prefix("speaker ")?.parse::<u32>().ok()
+            })
+            .max()
+            .map_or(1, |highest| highest.saturating_add(1));
         Speaker {
             id: room_speaker_id(meeting_id),
             meeting_id,
-            cluster_label: label,
+            cluster_label: format!("Speaker {next}"),
             assignment: SpeakerAssignment::Unknown,
             embedding: None,
             sample_clip_range: None,
@@ -2597,7 +2597,7 @@ impl ProcessingPipeline {
     /// the meeting is not delivered the asset is left unstamped and nothing
     /// is posted, not even the stage's progress. With
     /// [`Stamp::Automatic`] it also waits while the meeting's results could
-    /// still need the audio ([`Self::results_need_the_audio`] over the
+    /// still need the audio ([`Self::stored_results_need_the_audio`] over the
     /// stored rows: the diarizer fallback's room speaker, or an empty
     /// lane).
     async fn retention(&self, asset: &AudioAsset, stamp: Stamp) -> Result<()> {
@@ -2610,7 +2610,7 @@ impl ProcessingPipeline {
         if !delivered {
             return Ok(());
         }
-        if stamp == Stamp::Automatic && self.results_need_the_audio(asset)? {
+        if stamp == Stamp::Automatic && self.stored_results_need_the_audio(asset)? {
             tracing::info!(
                 target: BACKGROUND_RUN_LOG,
                 %meeting_id,
@@ -2635,7 +2635,7 @@ impl ProcessingPipeline {
 
     /// [`steno_core::results_need_the_audio`] over the meeting's rows as
     /// stored.
-    fn results_need_the_audio(&self, asset: &AudioAsset) -> Result<bool> {
+    fn stored_results_need_the_audio(&self, asset: &AudioAsset) -> Result<bool> {
         let store = self.store();
         let meeting_id = asset.meeting_id;
         let Some(meeting) = attributing(PipelineStage::Retention, store.meeting(meeting_id))?
@@ -2813,10 +2813,11 @@ pub fn write_wav_16k(path: &Path, buffer: &AudioBuffer16k) -> std::io::Result<()
 mod tests {
     use super::*;
 
-    /// The room speaker takes the first "Speaker N" no stored row uses,
-    /// compared lower-cased as `SpeakerLabels` maps labels back to ids.
+    /// The room speaker takes the label after the highest stored
+    /// "Speaker N", read lower-cased as `SpeakerLabels` maps labels back
+    /// to ids, so the gap at "Speaker 2" is not reused.
     #[test]
-    fn the_room_speaker_takes_the_first_label_no_stored_speaker_uses() {
+    fn the_room_speaker_takes_the_label_after_the_highest_stored_one() {
         let meeting_id = Uuid::new_v4();
         let stored = |label: &str| Speaker {
             cluster_label: label.to_owned(),
@@ -2826,9 +2827,9 @@ mod tests {
             Diarization::room_speaker(meeting_id, &[]).cluster_label,
             "Speaker 1"
         );
-        let taken = [stored("Me"), stored("speaker 1"), stored("Speaker 3")];
+        let taken = [stored("Me"), stored("Speaker 1"), stored("speaker 3")];
         let room = Diarization::room_speaker(meeting_id, &taken);
-        assert_eq!(room.cluster_label, "Speaker 2");
+        assert_eq!(room.cluster_label, "Speaker 4");
         assert_eq!(room.id, room_speaker_id(meeting_id));
         assert_eq!(room.embedding, None);
     }

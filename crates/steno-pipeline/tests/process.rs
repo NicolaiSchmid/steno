@@ -2568,6 +2568,14 @@ async fn a_diarizer_failure_warns_with_its_stage_not_its_reason() {
     let log = steno_pipeline::fixtures::CapturedLog::warnings();
     let world = world(false, None, AudioRetention::KeepForever);
     let reason = "cannot read /Users/someone/Audio/meeting/system.caf";
+    // The helper fails with `reason`, so its absence below means something.
+    let error = steno_core::Diarizer::diarize(
+        failing_diarizer(reason).as_ref(),
+        &steno_core::AudioBuffer16k::new(vec![0.0; 16_000]),
+    )
+    .await
+    .expect_err("the failing diarizer fails");
+    assert!(error.to_string().contains(reason), "{error}");
     let pipeline = with_failing_diarizer(&world, reason);
     // An id of its own picks this run's line out.
     let meeting = enqueue_call(&world, &pipeline);
@@ -4518,9 +4526,12 @@ async fn a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed() {
 }
 
 /// Runs a call of `duration` seconds whose every lane comes out with no
-/// transcript, under "delete after processing", and tells whether its
-/// recording was kept unstamped.
-async fn silent_call_is_kept(duration: f64) -> bool {
+/// transcript, under "delete after processing", over `diarizer`, and
+/// tells the meeting and whether its recording was kept unstamped. No
+/// segment names the room, so no room row is stored even when the
+/// diarizer fails, and the detail reads kept-incomplete exactly when the
+/// recording is kept.
+async fn silent_call(duration: f64, diarizer: FakeDiarizer) -> (Uuid, bool) {
     let world = world_with(
         false,
         None,
@@ -4529,9 +4540,11 @@ async fn silent_call_is_kept(duration: f64) -> bool {
             silent_below_peak: Some(f32::MAX),
             ..FakeSpeechEngine::default()
         },
-        FakeDiarizer::default(),
+        diarizer,
     );
     let mut meeting = call_meeting(world.now);
+    // An id of its own picks this run's log lines out.
+    meeting.id = Uuid::new_v4();
     meeting.duration = duration;
     let asset = call_asset(
         &world.audio,
@@ -4542,7 +4555,60 @@ async fn silent_call_is_kept(duration: f64) -> bool {
     world.pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
     assert_eq!(world.store.segments(meeting.id).unwrap(), Vec::new());
-    expires_at(&world, &asset).is_none()
+    assert!(
+        !has_room_row(&world, meeting.id),
+        "{duration} s: a room row with no segment"
+    );
+    let kept = expires_at(&world, &asset).is_none();
+    assert_eq!(
+        detail_reads_kept_incomplete(&world, meeting.id),
+        kept,
+        "{duration} s"
+    );
+    (meeting.id, kept)
+}
+
+/// [`silent_call`] with a working diarizer.
+async fn silent_call_is_kept(duration: f64) -> bool {
+    silent_call(duration, FakeDiarizer::default()).await.1
+}
+
+/// Whether the diarizer fallback's room row is stored for the meeting.
+fn has_room_row(world: &World, meeting_id: Uuid) -> bool {
+    let room = steno_core::room_speaker_id(meeting_id);
+    world
+        .store
+        .speakers(meeting_id)
+        .unwrap()
+        .iter()
+        .any(|speaker| speaker.id == room)
+}
+
+/// A first run whose diarizer fails over a call with both lanes silent
+/// stores no room row, since no segment names it: the empty-lane arm
+/// alone decides, so 30 s is stamped and 31 s is kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_run_fallback_over_an_empty_call_stores_no_room_row() {
+    let log = steno_pipeline::fixtures::CapturedLog::warnings();
+    for (duration, kept) in [(30.0, false), (31.0, true)] {
+        let (meeting, was_kept) = silent_call(
+            duration,
+            FakeDiarizer {
+                failure: Some("no model".to_owned()),
+                ..FakeDiarizer::default()
+            },
+        )
+        .await;
+        assert_eq!(was_kept, kept, "{duration} s");
+        // The diarizer ran and failed, so the fallback was taken.
+        let text = log.text();
+        assert!(
+            text.lines()
+                .any(|line| line.contains(&meeting.to_string())
+                    && line.contains("stage=\"diarize\"")),
+            "{duration} s: no diarize failure logged: {text}"
+        );
+    }
 }
 
 /// A recording longer than half a minute that came out with no transcript
@@ -4934,6 +5000,35 @@ async fn a_phone_meeting_without_a_duration_gets_the_decoded_length() {
     assert_eq!(expires_at(&world, &asset), None);
 }
 
+/// The one-lane variant: an empty phone recording whose diarizer fails
+/// stores no room row, and its decoded length decides, so 30 s is stamped
+/// and 31 s is kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_run_fallback_over_an_empty_phone_recording_stores_no_room_row() {
+    for (seconds, kept) in [(30, false), (31, true)] {
+        let world = world_with(
+            false,
+            None,
+            AudioRetention::DeleteAfterProcessing,
+            engine_deaf_to_silence(),
+            FakeDiarizer {
+                failure: Some("no model".to_owned()),
+                ..FakeDiarizer::default()
+            },
+        );
+        let (meeting, asset) = phone_recording(&world, &vec![0; seconds * 16_000]);
+        world.pipeline.enqueue(&meeting, &asset).unwrap();
+        world.pipeline.wait_until_idle().await;
+        assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+        assert_eq!(world.store.segments(meeting.id).unwrap(), Vec::new());
+        assert!(
+            !has_room_row(&world, meeting.id),
+            "{seconds} s: a room row with no segment"
+        );
+        assert_eq!(expires_at(&world, &asset).is_none(), kept, "{seconds} s");
+    }
+}
+
 /// Rewrites the system sidecar with `seconds` of the conversation: the
 /// fake engine then yields one-second tap segments up to `seconds`, so a
 /// re-run past the first run's six seconds has speech that no stored
@@ -5157,8 +5252,9 @@ async fn the_room_row_beside_stored_speakers_takes_the_next_free_label() {
     );
 }
 
-/// A label merged away leaves a gap: the room row takes the first free
-/// label, which no stored row uses.
+/// A label merged away is not reused: the room row takes the label after
+/// the highest stored one, so a kept summary that still names the merged
+/// voice never points at the room's speech.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_room_label_skips_every_stored_label() {
     let (world, meeting, _asset, first) = a_diarized_call_with_new_speech(false).await;
@@ -5182,7 +5278,10 @@ async fn the_room_label_skips_every_stored_label() {
     let row = again
         .speaker(steno_core::room_speaker_id(meeting.id))
         .expect("the room row is stored");
-    assert_eq!(row.cluster_label, "Speaker 1", "the first free label");
+    assert_eq!(
+        row.cluster_label, "Speaker 3",
+        "after the highest stored label"
+    );
     let stored: BTreeSet<String> = labels(&merged)
         .iter()
         .map(|label| label.to_lowercase())
@@ -5199,8 +5298,6 @@ async fn the_room_label_skips_every_stored_label() {
 /// re-run's 1.4 s segments put [5.6, 7.0] over the end of the renamed
 /// speaker's stored [5, 6], so the overlap fallback gives it that segment,
 /// and only [7, 8], which overlaps nothing stored, goes to the room row.
-/// A whole-recording room cluster beside the owners would take neither,
-/// but a room fallback placed before the overlap rule would take [5.6, 7].
 #[tokio::test(flavor = "multi_thread")]
 async fn confirmed_and_renamed_speakers_keep_their_segments_on_a_fell_back_rerun() {
     let (world, meeting, _asset, first) = a_diarized_call_with_new_speech(false).await;
