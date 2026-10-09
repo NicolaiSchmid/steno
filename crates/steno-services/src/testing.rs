@@ -186,8 +186,13 @@ pub fn an_hour_later() -> crate::recovery::LiveRecordingCheck {
 
 /// Waits until `done` holds, failing the test with `what` after
 /// [`PATIENCE`].
-pub async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
-    tokio::time::timeout(PATIENCE, async {
+pub async fn eventually(what: &str, done: impl FnMut() -> bool) {
+    eventually_within(PATIENCE, what, done).await;
+}
+
+/// As [`eventually`], failing the test only after `patience`.
+pub async fn eventually_within(patience: Duration, what: &str, mut done: impl FnMut() -> bool) {
+    tokio::time::timeout(patience, async {
         while !done() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
