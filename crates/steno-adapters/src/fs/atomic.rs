@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use steno_core::busy_file;
 use thiserror::Error;
 
 /// A write that did not complete. `path` is the target the caller asked
@@ -21,9 +22,12 @@ pub struct WriteFailure {
 /// `.steno-tmp-<8 hex>-<name>` in the target directory, are `fsync`ed, and
 /// a rename replaces the target in one step; on Unix the directory is
 /// `fsync`ed after the rename so the new name survives a crash too, and on
-/// Windows the renamed file is flushed instead. A failure before the rename
-/// removes the temp file and leaves the target as it was; on Windows a
-/// failed flush after the rename is an error with the new file in place.
+/// Windows the renamed file is flushed instead. On Windows the rename and
+/// the reopen for that flush are tried again while another handle holds
+/// the file for a moment (`steno_core::busy_file`, which the durable writes
+/// in `steno_pipeline::files` share). A failure before the rename removes
+/// the temp file and leaves the target as it was; on Windows a failed
+/// flush after the rename is an error with the new file in place.
 pub struct AtomicFileWriter;
 
 impl AtomicFileWriter {
@@ -33,7 +37,8 @@ impl AtomicFileWriter {
     pub fn write(data: &[u8], target: &Path) -> Result<(), WriteFailure> {
         let temporary = Self::temporary_path(target);
         let outcome = Self::write_bytes(data, &temporary, target).and_then(|()| {
-            fs::rename(&temporary, target).map_err(|error| Self::failure(target, "rename", &error))
+            busy_file::rename(&temporary, target)
+                .map_err(|error| Self::failure(target, "rename", &error))
         });
         if outcome.is_err() {
             let _ = fs::remove_file(&temporary);
@@ -68,25 +73,11 @@ impl AtomicFileWriter {
     /// failed write when it fails: with "delete after processing" the
     /// vault's copy of the mixdown is the only audio left once the sweep has
     /// run, so the export must not count as done before it is on the disk.
-    /// The file is reopened for the flush; a sharing violation (a sync or
-    /// antivirus client that opened the new file) is retried every 10 ms,
-    /// 49 times at most.
+    /// The file is reopened for the flush, tried again while a sync or
+    /// antivirus client holds the new file (`busy_file::retried`).
     #[cfg(not(unix))]
     fn make_rename_durable(target: &Path) -> Result<(), WriteFailure> {
-        /// `ERROR_SHARING_VIOLATION`.
-        const SHARING_VIOLATION: i32 = 32;
-        let open = || OpenOptions::new().write(true).open(target);
-        let mut opened = open();
-        for _ in 0..49 {
-            match &opened {
-                Err(error) if error.raw_os_error() == Some(SHARING_VIOLATION) => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    opened = open();
-                }
-                _ => break,
-            }
-        }
-        opened
+        busy_file::retried(|| OpenOptions::new().write(true).open(target))
             .map_err(|error| Self::failure(target, "open", &error))?
             .sync_all()
             .map_err(|error| Self::failure(target, "fsync", &error))

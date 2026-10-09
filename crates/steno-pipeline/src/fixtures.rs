@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use steno_core::{AudioBuffer16k, AudioLane};
+use steno_core::{AudioBuffer16k, AudioLane, busy_file};
 #[cfg(feature = "testing")]
 pub use testing::{CapturedLog, two_lane_call};
 
@@ -212,15 +212,24 @@ pub fn wav_data(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
     data
 }
 
-/// Writes a 16 kHz mono Int16 WAV atomically.
+/// Writes a 16 kHz mono Int16 WAV atomically (`write_atomically`).
 pub fn write_wav(path: &Path, samples: &[i16]) -> std::io::Result<()> {
     write_atomically(path, &wav_data(samples, 16_000, 1))
 }
 
+/// Writes beside `path`, its extension replaced by `wav.part`, then renames
+/// that temporary over `path`, tried again on Windows while a file is busy
+/// ([`busy_file::rename`]): a freshly written WAV is what an antivirus
+/// client scans first. A failure removes the temporary and leaves `path` as
+/// it was.
 fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let temporary = path.with_extension("wav.part");
-    std::fs::write(&temporary, data)?;
-    std::fs::rename(&temporary, path)
+    let written =
+        std::fs::write(&temporary, data).and_then(|()| busy_file::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
 }
 
 /// The `SplitMix64` generator: tiny, seedable, identical on every platform.
@@ -348,5 +357,40 @@ mod testing {
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A WAV that cannot be moved over its path (a folder holds the name)
+    /// fails the write, leaves the folder as it was and leaves no temporary
+    /// behind. On Windows the refused move is tried again first.
+    #[test]
+    fn a_failed_write_leaves_no_temporary_behind() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("speaker.wav");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("kept"), b"kept").unwrap();
+        write_wav(&path, &[0, 1, -1]).unwrap_err();
+        let names: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["speaker.wav"]);
+        assert_eq!(std::fs::read(path.join("kept")).unwrap(), b"kept");
+    }
+
+    /// A write that fails before its move (a folder holds the temporary's
+    /// name) leaves the earlier file at `path` as it was.
+    #[test]
+    fn a_failed_write_keeps_the_earlier_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("speaker.wav");
+        std::fs::write(&path, b"earlier").unwrap();
+        std::fs::create_dir(path.with_extension("wav.part")).unwrap();
+        write_wav(&path, &[0, 1, -1]).unwrap_err();
+        assert_eq!(std::fs::read(&path).unwrap(), b"earlier");
     }
 }

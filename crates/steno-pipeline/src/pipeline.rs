@@ -37,7 +37,8 @@ use steno_core::{
     MeetingOperation, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer,
     Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
     SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
-    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid,
+    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, busy_file,
+    derived_uuid,
     paths::{file_url, file_url_path},
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
 };
@@ -2590,10 +2591,14 @@ pub fn ensure_me_participant(
     Ok(me)
 }
 
-/// Writes every speaker's sample clip, or on a failure none: each is
-/// written beside its path first and moved into place once all are, so a
-/// failed write never leaves a kept speaker's clip holding another voice.
-/// Rust only: Swift writes each clip in place.
+/// Writes every speaker's sample clip. Each is written beside its path
+/// first and moved into place once all are, in one rename that replaces
+/// the earlier clip ([`busy_file::rename`], which on Windows tries a held
+/// file again), so a failure while writing moves none and a path always
+/// holds a whole clip. A move that fails after earlier ones landed leaves
+/// those speakers with the new clips, so a kept speaker can then play
+/// another run's voice; per-run clip names would close that (plan, "Open
+/// after the port"). Rust only: Swift writes each clip in place.
 fn write_sample_clips(clips: &[(PathBuf, AudioBuffer16k)]) -> std::io::Result<()> {
     let staged = |path: &Path| path.with_extension("wav.partial");
     if let Err(error) = clips
@@ -2607,7 +2612,7 @@ fn write_sample_clips(clips: &[(PathBuf, AudioBuffer16k)]) -> std::io::Result<()
     }
     clips
         .iter()
-        .try_for_each(|(path, _)| std::fs::rename(staged(path), path))
+        .try_for_each(|(path, _)| busy_file::rename(&staged(path), path))
 }
 
 /// Clamps to `-1...1`, scales to Int16 and writes a 16 kHz mono WAV, the

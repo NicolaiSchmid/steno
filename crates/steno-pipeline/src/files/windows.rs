@@ -14,10 +14,9 @@
 //! the file (Windows' FAT driver flushes a file's parent folders with it),
 //! which a written-through rename leaves in the cache.
 //!
-//! [`is_busy`] names the errors of a file another handle holds for a
-//! moment, which the caller tries again, and [`lock_path`] makes this
-//! process's writers of one path (spelled the same) rename and flush one
-//! after the other.
+//! The retries of a file another handle holds for a moment live in
+//! `steno_core::busy_file`; [`lock_path`] makes this process's writers of
+//! one path (spelled the same) rename and flush one after the other.
 //!
 //! [`flush_directory`] flushes a folder's entries: on NTFS the ones
 //! `create_dir_all_durably` and `create_new_dir_durably` made; the FAT
@@ -46,7 +45,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
-    ERROR_LOCK_VIOLATION, ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION, MAX_PATH,
+    ERROR_NOT_SUPPORTED, MAX_PATH,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_APPEND_DATA, FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_DATA, GetDriveTypeW,
@@ -124,21 +123,6 @@ fn refuses_folder_flush(error: &io::Error) -> bool {
                 | ERROR_ACCESS_DENIED
                 | ERROR_INVALID_PARAMETER
                 | ERROR_INVALID_HANDLE
-        )
-    })
-}
-
-/// Whether `error` is Windows refusing a file another handle holds, usually
-/// for a moment: a sharing violation (a sync or antivirus client opened it
-/// without sharing the access asked for) or a lock violation (it locked a
-/// range of it), or "access denied" (a replace of a file such a handle
-/// holds open, or an open of a file being deleted or replaced that
-/// instant).
-pub(super) fn is_busy(error: &io::Error) -> bool {
-    win32_code(error).is_some_and(|code| {
-        matches!(
-            code,
-            ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_ACCESS_DENIED
         )
     })
 }
@@ -450,7 +434,7 @@ mod tests {
             windows_sys::Win32::Foundation::ERROR_CRC,
             windows_sys::Win32::Foundation::ERROR_DISK_FULL,
             windows_sys::Win32::Foundation::ERROR_WRITE_FAULT,
-            ERROR_SHARING_VIOLATION,
+            windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION,
         ] {
             assert!(!refuses_folder_flush(&error(failed)), "{failed}");
         }
@@ -458,9 +442,12 @@ mod tests {
     }
 
     /// A file another handle holds is busy and tried again; a missing file,
-    /// a full disk or an error not from the OS is not.
+    /// a full disk or an error not from the OS is not. Pins the codes
+    /// `steno_core::busy_file` spells as numbers to the Win32 names.
     #[test]
     fn only_a_file_another_handle_holds_is_busy() {
+        use steno_core::busy_file::is_busy;
+        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
         let error = |code: u32| io::Error::from_raw_os_error(i32::try_from(code).unwrap());
         for busy in [
             ERROR_SHARING_VIOLATION,

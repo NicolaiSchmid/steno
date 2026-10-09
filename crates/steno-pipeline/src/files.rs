@@ -26,6 +26,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use steno_core::busy_file::{self, is_busy};
 
 /// The syncs a durable write makes, and its waits before it tries a busy
 /// file again ([`retried`]); the disk and the clock in the product, a
@@ -274,7 +275,7 @@ fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Ren
             rename_with_std(syncs, from, to)?;
             Renamed::WithStd
         };
-        let renamed_file = retried(syncs, is_busy, || OpenOptions::new().write(true).open(to))?;
+        let renamed_file = retried(syncs, || OpenOptions::new().write(true).open(to))?;
         syncs.file(&renamed_file, to)?;
         Ok(renamed)
     }
@@ -288,55 +289,23 @@ fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Ren
 /// `std::fs::rename`, retried on Windows while the file is busy
 /// ([`retried`]); elsewhere tried once.
 fn rename_with_std(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<()> {
-    retried(syncs, is_busy, || std::fs::rename(from, to))
+    retried(syncs, || std::fs::rename(from, to))
 }
 
-/// Whether `error` is Windows refusing a file another handle holds for a
-/// moment (`windows::is_busy`): never elsewhere, where nothing is
-/// retried.
-fn is_busy(error: &std::io::Error) -> bool {
-    #[cfg(windows)]
-    {
-        windows::is_busy(error)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = error;
-        false
-    }
-}
-
-/// How often [`retried`] tries again on Windows.
-const RETRIES: u32 = 9;
-
-/// [`retried`]'s first wait, which doubles with each retry up to
-/// [`LONGEST_WAIT`]: about 0.9 s over the nine retries.
-const FIRST_WAIT: Duration = Duration::from_millis(5);
-
-/// [`retried`]'s longest wait.
-const LONGEST_WAIT: Duration = Duration::from_millis(200);
-
-/// Runs `attempt`. On Windows, where another process (a sync or antivirus
-/// client) or another writer may hold a file for a moment, an error `busy`
-/// accepts is tried again [`RETRIES`] times, after waits of 5 ms doubling
-/// to 200 ms, about 0.9 s in all; elsewhere `attempt` runs once.
+/// `busy_file::retried`, waiting through `syncs`: `attempt` runs, and on
+/// Windows a busy file ([`is_busy`]) is tried again [`busy_file::RETRIES`]
+/// times after waits of 5 ms doubling to 200 ms, about 0.9 s in all;
+/// elsewhere `attempt` runs once.
 fn retried<T>(
     syncs: &dyn Syncs,
-    busy: impl Fn(&std::io::Error) -> bool,
-    mut attempt: impl FnMut() -> std::io::Result<T>,
+    attempt: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    let retries = if cfg!(windows) { RETRIES } else { 0 };
-    let mut delay = FIRST_WAIT;
-    for _ in 0..retries {
-        match attempt() {
-            Err(error) if busy(&error) => {
-                syncs.wait(delay);
-                delay = (delay * 2).min(LONGEST_WAIT);
-            }
-            outcome => return outcome,
-        }
-    }
-    attempt()
+    busy_file::retried_with(
+        busy_file::RETRIES,
+        is_busy,
+        |delay| syncs.wait(delay),
+        attempt,
+    )
 }
 
 /// Removes this file's temporaries in `directory` that are older than
@@ -379,7 +348,9 @@ fn remove_stale_temporaries(directory: &Path, prefix: &str) {
 /// the move is a rename, which replaces a taken name, so a check that the
 /// name is free comes first and is all that guards it there. If the old
 /// name cannot be removed after the link, the error is returned and both
-/// names hold the bytes.
+/// names hold the bytes; on every platform an old name already gone is
+/// no error. On Windows that removal and the rename are tried again while
+/// the file is busy (`steno_core::busy_file`).
 pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
@@ -397,10 +368,12 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
             path.with_file_name(format!("{base}-{attempt}"))
         };
         match std::fs::hard_link(path, &candidate) {
-            Ok(()) => {
-                std::fs::remove_file(path)?;
-                break candidate;
-            }
+            Ok(()) => match busy_file::retried(|| std::fs::remove_file(path)) {
+                // The old name already gone (another `set_aside` removed
+                // it in between) still leaves the bytes at the link.
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+                _ => break candidate,
+            },
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
             // No hard link here (FAT, some network shares, a Linux that
             // protects links to files of other users), so fall back to a
@@ -408,7 +381,7 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
             // read-only folder), the rename fails the same way.
             Err(_) => match candidate.symlink_metadata() {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    std::fs::rename(path, &candidate)?;
+                    busy_file::rename(path, &candidate)?;
                     break candidate;
                 }
                 Err(error) => return Err(error),
@@ -518,6 +491,17 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("preferences.json.corrupt-")
         );
+    }
+
+    /// A file already gone is not set aside: the error says so and no
+    /// copy appears.
+    #[test]
+    fn a_missing_file_is_not_set_aside() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preferences.json");
+        let error = set_aside(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     fn temporaries(directory: &Path) -> Vec<String> {
@@ -656,6 +640,7 @@ mod tests {
             self.events.lock().unwrap().clone()
         }
 
+        #[cfg(windows)]
         fn waits(&self) -> Vec<Duration> {
             self.waits.lock().unwrap().clone()
         }
@@ -848,50 +833,6 @@ mod tests {
         assert_eq!(std::fs::read(&earlier).unwrap(), b"an earlier recording");
     }
 
-    /// An error `busy` accepts is retried nine times on Windows, after
-    /// waits of 5 ms doubling to 200 ms, under a second in all, and not at
-    /// all elsewhere; any other error, or a success, ends the attempts.
-    #[test]
-    fn retried_tries_ten_times_within_a_second_on_windows_and_once_elsewhere() {
-        let syncs = Recorded::new(Path::new("unused"));
-        let attempts = std::cell::Cell::new(0);
-        let outcome: std::io::Result<()> = retried(
-            &syncs,
-            |_| true,
-            || {
-                attempts.set(attempts.get() + 1);
-                Err(std::io::Error::other("busy"))
-            },
-        );
-        assert!(outcome.is_err());
-        let (expected_attempts, expected_waits) = if cfg!(windows) {
-            (10, vec![5, 10, 20, 40, 80, 160, 200, 200, 200])
-        } else {
-            (1, Vec::new())
-        };
-        assert_eq!(attempts.get(), expected_attempts);
-        let waits = syncs.waits();
-        assert_eq!(
-            waits,
-            expected_waits
-                .into_iter()
-                .map(Duration::from_millis)
-                .collect::<Vec<_>>()
-        );
-        assert!(waits.iter().sum::<Duration>() < Duration::from_secs(1));
-        attempts.set(0);
-        let outcome: std::io::Result<()> = retried(
-            &syncs,
-            |_| false,
-            || {
-                attempts.set(attempts.get() + 1);
-                Err(std::io::Error::other("not busy"))
-            },
-        );
-        assert!(outcome.is_err());
-        assert_eq!(attempts.get(), 1);
-    }
-
     /// A folder sync that fails fails the folder creation and the copy, so
     /// the phone intake answers 500 and the phone keeps its copy.
     #[test]
@@ -981,7 +922,7 @@ mod tests {
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
         assert_eq!(
             syncs.waits().first(),
-            Some(&FIRST_WAIT),
+            Some(&busy_file::FIRST_WAIT),
             "refused at least once, then replaced"
         );
         assert_eq!(temporaries(dir.path()), Vec::<String>::new());

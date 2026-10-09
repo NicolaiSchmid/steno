@@ -14,6 +14,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use steno_core::busy_file;
 use steno_core::json::parse_uuid;
 use steno_core::{AudioFormat, RecordingMetadata};
 use uuid::Uuid;
@@ -96,13 +97,22 @@ impl Inbox {
         self.verified(recording_id, format).exists()
     }
 
-    /// Renames the complete partial to its final name.
+    /// Renames the complete partial to its final name. On Windows the
+    /// removal of a verified file there and the rename are tried again
+    /// while another handle (a sync or antivirus client) holds a file for a
+    /// moment (`steno_core::busy_file`); on every platform a verified file
+    /// already gone counts as removed. A failure leaves the partial in
+    /// place, and `complete` answers 500, so the phone keeps its copy and
+    /// tries again.
     pub fn promote(&self, recording_id: Uuid, format: AudioFormat) -> std::io::Result<PathBuf> {
         let destination = self.verified(recording_id, format);
         if destination.exists() {
-            std::fs::remove_file(&destination)?;
+            match busy_file::retried(|| std::fs::remove_file(&destination)) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
         }
-        std::fs::rename(self.partial(recording_id), &destination)?;
+        busy_file::rename(&self.partial(recording_id), &destination)?;
         Ok(destination)
     }
 
@@ -139,10 +149,13 @@ impl Inbox {
     }
 }
 
-/// Write to `temporary`, then rename it over `path`.
+/// Write to `temporary`, then rename it over `path`, tried again on
+/// Windows while another handle holds a file for a moment
+/// (`steno_core::busy_file`). A failure fails the announce, which answers
+/// 500.
 fn write_atomically(path: &Path, temporary: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(temporary, bytes)?;
-    std::fs::rename(temporary, path)
+    busy_file::rename(temporary, path)
 }
 
 #[cfg(test)]
@@ -213,5 +226,46 @@ mod tests {
         inbox.discard(id);
         assert_eq!(files_of(&inbox, id), Vec::<String>::new());
         assert!(inbox.recording_ids().is_empty());
+    }
+
+    /// A partial already gone fails `promote`, so `complete` answers 500,
+    /// and no verified file appears.
+    #[test]
+    fn a_missing_partial_is_not_promoted() {
+        let directory = tempfile::tempdir().unwrap();
+        let inbox = Inbox::new(directory.path().join("inbox"));
+        let id = Uuid::new_v4();
+        inbox.begin(&metadata(id)).unwrap();
+        std::fs::remove_file(inbox.partial(id)).unwrap();
+        let error = inbox.promote(id, AudioFormat::M4aAac).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(!inbox.has_verified(id, AudioFormat::M4aAac));
+    }
+
+    /// On Windows a partial another handle holds without sharing its
+    /// deletion (a sync or antivirus client) refuses the rename past its
+    /// retries: `promote` fails, so `complete` answers 500 and the phone
+    /// keeps its copy, and the partial keeps every byte for the retry.
+    #[cfg(windows)]
+    #[test]
+    fn a_partial_held_past_the_retries_is_not_promoted_and_stays() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        /// `FILE_SHARE_READ | FILE_SHARE_WRITE`, without `FILE_SHARE_DELETE`.
+        const SHARE_READ_WRITE: u32 = 0x1 | 0x2;
+        let directory = tempfile::tempdir().unwrap();
+        let inbox = Inbox::new(directory.path().join("inbox"));
+        let id = Uuid::new_v4();
+        inbox.begin(&metadata(id)).unwrap();
+        std::fs::write(inbox.partial(id), b"aac").unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_READ_WRITE)
+            .open(inbox.partial(id))
+            .unwrap();
+        let error = inbox.promote(id, AudioFormat::M4aAac).unwrap_err();
+        drop(holder);
+        assert!(busy_file::is_busy(&error), "{error:?}");
+        assert!(!inbox.has_verified(id, AudioFormat::M4aAac));
+        assert_eq!(std::fs::read(inbox.partial(id)).unwrap(), b"aac");
     }
 }
