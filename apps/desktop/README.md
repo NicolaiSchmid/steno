@@ -118,9 +118,8 @@ exits reach the shutdown these ways:
   `app-gnome-.scope.d/override.conf` gives `TimeoutStopSec=5s` too. When
   the session ends, systemd sends SIGTERM and, once the stop has waited
   out that `TimeoutStopSec`, `SIGKILL`, while the save may need ten
-  seconds and the process two more to end.
-  Two drop-ins raise both timeouts to 20 s (see Launch at login under
-  systemd).
+  seconds and the process two more to end. Two drop-ins raise both
+  timeouts to 20 s (see Launch at login under systemd).
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).
@@ -321,42 +320,50 @@ They reach the user manager two ways:
   manager that reads `~/.config` has the unit. GNOME's drop-in is
   written at every launch and never removed; the autostart unit's while
   Launch at login is on, at each launch and when it is switched on. After
-  writing a file the app asks the user manager to reload its units over
-  the session bus, so a running session takes the new timeout at once
+  writing a file, and at each launch while one is in place, the app asks
+  the user manager to reload its units over the session bus, so a
+  running session takes the new timeout at once, and a reload that
+  failed or was skipped is made up for at the next launch
   (`stop_timeout.rs`). This covers the AppImage, and installs that turned
   Launch at login on before the drop-ins existed. A directory it cannot
   write is logged, and the unit keeps 5 s.
+
+To check a running Steno: `systemctl --user show 'app-steno*'
+'app-gnome-steno*' -p TimeoutStopUSec -p DropInPaths` shows 20 s and the
+drop-in.
 
 A reload while the autostart entry is gone unloads the running
 autostart unit, and the session's end then stops the app without a
 SIGTERM, before its save. So the app, while it runs as the autostart
 unit, asks for a reload only while the entry stands, and the `postinst`
-skips a user whose Steno runs as that unit without its entry. Turning
-Launch at login off removes the entry and the autostart unit's drop-in,
-and asks for no reload. While the app runs as the autostart unit, the
-entry stays until the app exits, since any other reload of the user
-manager (a package install, another app, `nixos-rebuild switch`) would
-unload the unit. Settings and the tray show the switch off at once; the
-app marks the choice in its config directory
-(`launch-at-login-off-at-exit`) and removes the entry and the drop-in
-after the exit's save. A mark left by a kill or a crash is applied at the
-next launch that does not run as the unit, so the next login still
-autostarts the app once; an update's relaunch keeps it. A launch as the
-autostart unit that finds no entry (an older release removed it at once
-when Launch at login was turned off, or the user removed it, and the
-update's relaunch stayed in the unit) puts the entry back with the
-mark, so the unit gets its drop-in and the reload that applies it, and
-the entry goes again after the save.
+skips a user whose entry is gone unless their autostart unit is known
+to be stopped (`inactive` or `failed`).
+
+Outside the autostart unit, turning Launch at login off removes the
+entry and the autostart unit's drop-in at once, with no reload. While
+the app runs as the autostart unit, the entry stays until the app
+exits, since any other reload of the user manager (a package install,
+another app, `nixos-rebuild switch`) would unload the unit. Settings and
+the tray show the switch off at once; the app marks the choice in its
+config directory (`launch-at-login-off-at-exit`) and removes the entry
+and the drop-in after the exit's save. A mark left by a kill or a crash
+is applied at the next launch that does not run as the unit, so the
+next login still autostarts the app once; an update's relaunch keeps
+it. A launch as the autostart unit that finds no entry (an older
+release removed it at once when Launch at login was turned off, or the
+user removed it, and the update's relaunch stayed in the unit) puts the
+entry back with the mark, so the unit gets its drop-in and the reload
+that applies it, and the entry goes again after the save.
 
 The user's copies stay after the package is removed. They name only
 Steno's units and change nothing once the app is gone.
 
 A package for another distribution installs the same files under its
-`lib/systemd/user/` (stable promotion plan, X6 and X7).
-
-To check a running Steno: `systemctl --user show 'app-steno*'
-'app-gnome-steno*' -p TimeoutStopUSec -p DropInPaths` shows 20 s and the
-drop-in.
+`lib/systemd/user/` (`.plans/2026-10-07-stable-promotion.md`, X6 and
+X7). On Arch, NixOS and home-manager every package change reloads the
+user managers (Arch's systemd package ships a pacman hook that does,
+`nixos-rebuild switch` and `home-manager switch` do), so there only the
+kept entry protects a running unit.
 
 The app logs how long each shutdown took at `warn` (`the shutdown
 ended`, with `elapsed`; on Linux in the journal of the unit), so a real
@@ -379,7 +386,9 @@ more than the save's ten; the user manager itself then gets only 5 s
 (`user@.service` `TimeoutStopSec=5s`), which a drop-in for Steno's unit
 cannot raise, so that path relies on the delay. Elsewhere logind waits 5 s
 by default and the user manager 120 s, so a save that outlasts logind's
-wait finishes under the drop-ins' 20 s.
+wait finishes under the drop-ins' 20 s. Started from a compositor key
+binding without `uwsm-app`, Steno runs in the compositor's own unit
+(uwsm's `wayland-wm@.service`, 10 s), where the drop-ins do not apply.
 
 ## Packaged installs
 
@@ -540,6 +549,10 @@ passes a `steno:` link to the binary (`%u`) and claims the scheme. The
 `.deb` depends on `libayatana-appindicator3-1` explicitly: the Tauri CLI
 adds the tray's library only when it sees the `tray-icon` feature on a
 crate-local `tauri` dependency, and ours is inherited from the workspace.
+It depends on PipeWire too (`libpipewire-0.3-0t64 | libpipewire-0.3-0`
+and `pipewire`), which the CLI does not add: without the `pipewire`
+package's `client.conf` every recording fails at its start
+(`check-bundle.sh` checks both).
 For the same reason the AppImage does not bundle that library; a host
 without it runs the shell without a tray, and closing the main window
 then quits (see above). The icons in `icons/` come from `cargo tauri
@@ -1084,7 +1097,7 @@ raises a second prompt, hides the panels, closes main and reports:
 | Exit | When |
 |---|---|
 | 0 | The main window sent `page.ready`, at least one snapshot reached it, the meeting reached it after its `page.ready`, the tray was built, both panels were visible at the size their page reported and kept it when asked for 40 points more, the prompt's window took the second prompt, both panels hid, and closing main hid it and kept it |
-| 1 | No `page.ready` from main; or `page.ready` but no snapshot: no bridge host answered; or the meeting was lost or published before the page listened; or no tray; or a panel or main that did not do as above |
+| 1 | No `page.ready` from main; or `page.ready` but no snapshot: no bridge host answered; or the meeting was lost or published before the page listened; or no tray; or a panel or main that did not do as above; or, on Linux in a run as the autostart unit, Launch at login turned off that changed the entry at once or set no mark |
 | 2 | At once, when `n` is not a positive number |
 
 `apps/desktop/scripts/smoke-linux.sh [binary] [seconds]` runs that under
@@ -1099,6 +1112,17 @@ fixture-host`. Xvfb has no compositor, so the panels' transparent
 corners render black there; a desktop shows them rounded. Xvfb has no
 tray host either; a smoke run stands in for one, so the built tray counts
 and the run checks the close rule a desktop with a tray gets.
+
+After the run the script checks the stop timeout drop-ins, then runs the
+smoke twice more as the autostart unit, in a throwaway `HOME`: in a
+cgroup named after the unit below a delegated `systemd-run --user`
+scope. The first, with `~/.config/autostart` unwritable, must fail to
+restore the entry and ask for no reload; the second must restore it,
+marked, and remove it and its drop-in after the shutdown's line. Without
+a user manager that starts the scope it skips them, unless
+`STENO_REQUIRE_UNIT_SMOKE` is set, as in CI. Its last launch is over a
+database it cannot open, which must refuse (exit 3) and leave an entry
+marked to go in place.
 
 `scripts/pipewire-headless.sh apps/desktop/scripts/lost-display-linux.sh
 [binary] [seconds]` checks end to end that a recording is saved when the
@@ -1163,7 +1187,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop`, `linux/*-stop-timeout.conf` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles); the stop timeout drop-ins for the autostart unit and GNOME's scope (see Launch at login under systemd) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display `stop_timeout.rs`, on Linux: the systemd drop-ins for the stop timeout |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display. `stop_timeout.rs`, on Linux: the systemd drop-ins for the stop timeout |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items and their words per platform, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/platform.rs` | The initialization script that tells every page its platform |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
