@@ -578,10 +578,7 @@ impl Host {
             }
             BridgeTopic::MeetingDetail => {
                 self.sync_detail(inner);
-                let withheld = self.key_withheld(inner);
-                if let Some(detail) = inner.detail.as_mut() {
-                    detail.key_withheld = withheld;
-                }
+                self.follow_key_withheld(inner);
                 let playing = inner
                     .detail
                     .as_ref()
@@ -1104,27 +1101,30 @@ impl Host {
         }
         // A key saved, or the import's step over, may release a withheld
         // key without a settings change: the detail follows it as well.
-        let withheld = self.key_withheld(inner);
-        if let Some(detail) = inner.detail.as_mut()
-            && detail.key_withheld != withheld
-        {
-            detail.key_withheld = withheld;
+        if self.follow_key_withheld(inner) {
             inner.publisher.schedule(BridgeTopic::MeetingDetail);
         }
         self.refresh_subtitles(inner);
     }
 
-    /// Whether the API key is withheld for the stored endpoint now
+    /// Sets the open detail's `key_withheld` to whether the API key is
+    /// withheld for the stored endpoint now
     /// ([`WithheldApiKey`](crate::services::WithheldApiKey)), as the
-    /// pipeline asks it.
-    fn key_withheld(&self, inner: &Inner) -> bool {
-        match (
-            &self.shared.services.withheld_api_key,
-            &inner.app.stored_settings,
-        ) {
-            (Some(withheld), Some(settings)) => withheld.withheld(settings),
-            _ => false,
-        }
+    /// pipeline asks it; true when that changed it.
+    fn follow_key_withheld(&self, inner: &mut Inner) -> bool {
+        let withheld = self
+            .shared
+            .services
+            .withheld_api_key
+            .as_ref()
+            .zip(inner.app.stored_settings.as_ref())
+            .is_some_and(|(withheld, settings)| withheld.withheld(settings));
+        let Some(detail) = inner.detail.as_mut() else {
+            return false;
+        };
+        let changed = detail.key_withheld != withheld;
+        detail.key_withheld = withheld;
+        changed
     }
 
     /// Every Settings section's `load`, as `SettingsBridge.load()` ran them
