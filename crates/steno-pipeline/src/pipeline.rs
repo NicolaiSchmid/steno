@@ -459,9 +459,9 @@ pub struct PipelineDependencies {
     /// and [`with_in_flight`](Self::with_in_flight) shares the caller's.
     pub in_flight: InFlight,
     /// Called at each step of a run's sample clips, for the tests that end
-    /// a run there as a crash would; `None` from [`new`](Self::new).
-    #[cfg(any(test, feature = "testing"))]
-    pub clip_probe: Option<ClipProbe>,
+    /// a run there as a crash would; `None` unless a test build sets it
+    /// with [`with_clip_probe`](Self::with_clip_probe).
+    clip_probe: Option<ClipProbe>,
 }
 
 impl PipelineDependencies {
@@ -490,7 +490,6 @@ impl PipelineDependencies {
             clock: Arc::new(SystemClock::default()),
             quit_latch: QuitLatch::default(),
             in_flight: InFlight::default(),
-            #[cfg(any(test, feature = "testing"))]
             clip_probe: None,
         }
     }
@@ -829,22 +828,6 @@ impl ProcessingPipeline {
     #[must_use]
     pub fn dependencies(&self) -> &PipelineDependencies {
         &self.inner.dependencies
-    }
-
-    /// The test probe of the clip steps; always `None` in the product.
-    #[cfg_attr(
-        not(any(test, feature = "testing")),
-        allow(clippy::unused_self, clippy::missing_const_for_fn)
-    )]
-    fn clip_probe(&self) -> Option<ClipProbe> {
-        #[cfg(any(test, feature = "testing"))]
-        {
-            self.inner.dependencies.clip_probe.clone()
-        }
-        #[cfg(not(any(test, feature = "testing")))]
-        {
-            None
-        }
     }
 
     fn store(&self) -> &Arc<Store> {
@@ -1539,7 +1522,7 @@ impl ProcessingPipeline {
         }
         attributing(
             PipelineStage::Merge,
-            sample_clips::reach(self.clip_probe().as_ref(), ClipStep::Merging),
+            sample_clips::reach(self.dependencies().clip_probe.as_ref(), ClipStep::Merging),
         )?;
         let merged = self
             .merge(&current, &transcription.lanes, &diarized)
@@ -1607,13 +1590,11 @@ impl ProcessingPipeline {
         let Some(layout) = RecordingLayout::own_folder(asset) else {
             return;
         };
-        let probe = self.clip_probe();
-        if sample_clips::reach(probe.as_ref(), ClipStep::Sweeping).is_err() {
+        let probe = self.dependencies().clip_probe.as_ref();
+        if sample_clips::reach(probe, ClipStep::Sweeping).is_err() {
             return;
         }
-        if let Err(error) =
-            sample_clips::sweep(self.store(), &layout.speakers_directory(), probe.as_ref())
-        {
+        if let Err(error) = sample_clips::sweep(self.store(), &layout.speakers_directory(), probe) {
             tracing::warn!(
                 target: BACKGROUND_RUN_LOG,
                 meeting_id = %asset.meeting_id,
@@ -2195,7 +2176,7 @@ impl ProcessingPipeline {
                 // Off the async workers: each clip is synced. A write
                 // that outlives a dropped run leaves files no row names,
                 // which the meeting's next sweep removes.
-                let probe = self.clip_probe();
+                let probe = self.dependencies().clip_probe.clone();
                 let written = tokio::task::spawn_blocking(move || {
                     sample_clips::write(&layout, &clips, probe.as_ref())
                 })
