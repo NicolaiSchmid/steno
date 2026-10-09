@@ -752,7 +752,9 @@ fn holds_no_master(folder: &Path, meeting_id: Uuid) -> bool {
 /// read is skipped, and only a folder whose id has no row is looked into.
 /// A master that neither a row nor the record names is another install's
 /// (a second computer syncing the same folder, a second database over it)
-/// or older than the record: it is left alone, and its id logged.
+/// or written before this version kept the record (the Swift app, an
+/// earlier release): it is left alone, and the launch logs one line with
+/// their count and the first few ids.
 fn orphans(
     folders: &[PathBuf],
     ids: &HashSet<Uuid>,
@@ -760,6 +762,7 @@ fn orphans(
 ) -> Vec<Orphan> {
     let mut seen = HashSet::new();
     let mut found = Vec::new();
+    let mut unrecorded = Vec::new();
     for folder in folders {
         let entries = match std::fs::read_dir(folder) {
             Ok(entries) => entries,
@@ -790,12 +793,28 @@ fn orphans(
                     modified,
                 });
             } else {
-                tracing::warn!(%meeting_id, "a recording with no meeting that this install has no record of is left alone");
+                unrecorded.push(meeting_id);
             }
         }
     }
+    if !unrecorded.is_empty() {
+        let first: Vec<String> = unrecorded
+            .iter()
+            .take(UNRECORDED_IDS_LOGGED)
+            .map(Uuid::to_string)
+            .collect();
+        tracing::warn!(
+            count = unrecorded.len(),
+            first = %first.join(", "),
+            "recordings with no meeting that this install has no record of are left alone"
+        );
+    }
     found
 }
+
+/// How many ids of the masters [`orphans`] leaves alone its one log line
+/// names.
+const UNRECORDED_IDS_LOGGED: usize = 3;
 
 /// The meeting and asset an orphan's master gives: a CAF the Mac wrote is
 /// [salvaged](salvage) as a call (two channels) or an in-person recording
