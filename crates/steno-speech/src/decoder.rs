@@ -109,6 +109,18 @@ pub struct DecodeStats {
     pub runaways: usize,
 }
 
+impl DecodeStats {
+    /// Adds another worker's counts.
+    pub(crate) fn add(&mut self, other: &DecodeStats) {
+        self.windows += other.windows;
+        self.decoder_calls += other.decoder_calls;
+        self.joint_calls += other.joint_calls;
+        self.recoveries_tried += other.recoveries_tried;
+        self.recoveries_accepted += other.recoveries_accepted;
+        self.runaways += other.runaways;
+    }
+}
+
 /// The prediction network and the joint over one window's encoder frames:
 /// the calls the loop makes, with the backend's own error.
 pub trait TdtModel {
