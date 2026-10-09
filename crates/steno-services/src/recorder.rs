@@ -803,13 +803,6 @@ impl CaptureRecorder {
         });
     }
 
-    /// Forgets the entry of a start that failed: nothing was recorded. One
-    /// that stays is forgotten by a later launch, once the failed row is
-    /// durable or the folder provably holds no master.
-    fn forget_failed_start(&self, meeting_id: Uuid) {
-        let _ = self.forget_recording(meeting_id);
-    }
-
     /// Notes `folder` as the one meeting `meeting_id` is recorded into,
     /// before its row is written, and among the known folders
     /// ([`crate::audio_folders`]). A failure is logged and the recording
@@ -877,7 +870,10 @@ impl CaptureRecorder {
             .begin(meeting_id, source(mode), None, None, &[], started_at)
             .is_err()
         {
-            self.forget_failed_start(meeting_id);
+            // Nothing was recorded. An entry that stays is forgotten by a
+            // later launch, once the failed row is durable or the folder
+            // provably holds no master.
+            let _ = self.forget_recording(meeting_id);
             return Err(refused("meeting", "Steno could not create the meeting."));
         }
         let begun = BegunMeeting {
@@ -894,7 +890,7 @@ impl CaptureRecorder {
             begun.disarm();
             let reason = capture_refused(&error);
             let _ = intake.fail(meeting_id, &format!("{COULD_NOT_START} {reason}"));
-            self.forget_failed_start(meeting_id);
+            let _ = self.forget_recording(meeting_id);
             return Err(reason);
         }
         let shared = Arc::new(Mutex::new(None::<LaneLevels>));
@@ -1324,7 +1320,7 @@ impl Drop for BegunMeeting<'_> {
         let _ = session.stop();
         let _ = std::fs::remove_dir_all(&self.folder);
         let _ = self.recorder.intake().fail(self.meeting_id, START_PANICKED);
-        self.recorder.forget_failed_start(self.meeting_id);
+        let _ = self.recorder.forget_recording(self.meeting_id);
     }
 }
 
@@ -1482,13 +1478,22 @@ impl Recorder for CaptureRecorder {
         }
     }
 
+    /// A write that fails after its rename (a folder that does not flush
+    /// on Windows) has forgotten the entry already: on any failure the
+    /// store is checkpointed durably, so the row no longer needs it.
     fn forget_recording(&self, meeting_id: Uuid) -> std::io::Result<Option<PathBuf>> {
         crate::audio_folders::forget(&self.support_directory, &[meeting_id])
             .map(|mut forgotten| forgotten.remove(&meeting_id))
             .inspect_err(|error| {
-                tracing::warn!(%meeting_id, "a meeting was not deleted: its recording's folder could not be forgotten");
                 // The error can name the user's folder: debug alone.
                 tracing::debug!(%meeting_id, %error, "a recording folder not forgotten");
+                if let Err(error) = self.store.checkpoint_durably() {
+                    tracing::warn!(
+                        %meeting_id,
+                        "a recording's folder could not be forgotten, and its meeting's row could not be made durable"
+                    );
+                    tracing::debug!(%meeting_id, %error, "store not checkpointed");
+                }
             })
     }
 
@@ -3020,6 +3025,37 @@ mod tests {
         let entries = crate::audio_folders::recorded(&support).unwrap();
         assert_eq!(entries.get(&meeting_id), None);
         assert_eq!(*levels.lock().unwrap(), [2]);
+    }
+
+    /// A forget that fails (here a read-only support folder; on Windows
+    /// also a folder flush after the rename, which leaves the entry gone)
+    /// checkpoints the store durably: after a power loss the row is still
+    /// there, with or without its entry, so the master is never left with
+    /// neither.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_forget_then_a_power_loss_keeps_the_row() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let harness = harness(&[]);
+        harness.store.checkpoint_durably().unwrap();
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        stop(&harness.recorder).await;
+        harness.recorder.pipeline.current().wait_until_idle().await;
+        let support = harness.dir.path().join("support");
+
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = harness.recorder.forget_recording(meeting_id);
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(failed.is_err(), "{failed:?}");
+        // What a write that failed after its rename leaves.
+        crate::audio_folders::forget(&support, &[meeting_id]).unwrap();
+
+        let after = harness.dir.path().join("after-power-loss.sqlite");
+        std::fs::copy(harness.dir.path().join("steno.sqlite"), &after).unwrap();
+        let store = Arc::new(Store::open(&after).unwrap());
+        assert!(store.meeting(meeting_id).unwrap().is_some());
+        assert!(store.asset(meeting_id).unwrap().is_some());
     }
 
     #[test]

@@ -251,9 +251,11 @@ pub trait Recorder: Send + Sync {
     /// recovery goes first, so the launch does not adopt a master whose
     /// removal failed or is not done yet. Returns the folder it forgot,
     /// which the host records again ([`Self::restore_recording`]) when the
-    /// delete does not go through: one refused, or one whose commit
-    /// fails. An error is an entry that stays, and the host refuses the
-    /// delete before any row goes. Rust only.
+    /// delete does not go through: one refused, one whose commit fails or
+    /// one a panic unwinds. On an error the host refuses the delete before
+    /// any row goes; the entry stays, or, when the write failed after its
+    /// rename, the store is checkpointed durably, so the row no longer
+    /// needs it. Rust only.
     fn forget_recording(&self, meeting_id: Uuid) -> std::io::Result<Option<PathBuf>>;
     /// Records `folder` again as the one meeting `meeting_id` was recorded
     /// into, after [`Self::forget_recording`] forgot it for a delete that
