@@ -10,8 +10,12 @@ _pkgname=steno-desktop
 pkgver=0.1.0rc3
 pkgrel=1
 _version=${pkgver/rc/-rc.}
-# From 0.11.0 the tags are v<version> (stable plan D1).
-_tag=desktop-v$_version
+# Up to 0.1.0-rc.* the tags are desktop-v<version>; from 0.11.0 they are
+# v<version> (stable plan D1).
+case $pkgver in
+  0.1.0rc*) _tag=desktop-v$_version ;;
+  *) _tag=v$_version ;;
+esac
 pkgdesc='Bot-free meeting recorder that transcribes on this computer'
 arch=('x86_64')
 url='https://github.com/NicolaiSchmid/steno'
@@ -37,7 +41,9 @@ depends=(
 )
 optdepends=(
   'gnome-shell-extension-appindicator: the tray icon on GNOME'
+  'gnome-keyring: a Secret Service that keeps the pairing and the API key'
   'xdg-desktop-portal-gtk: the file chooser on Hyprland'
+  'xdg-utils: opens links and folders'
 )
 provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname")
@@ -51,11 +57,12 @@ source=(
   'gnome-scope-stop-timeout.conf'
   'LICENSE'
 )
-# The release signing key, apps/desktop/release-signing-key.asc.
+# The release signing key: apps/desktop/release-signing-key.asc, also
+# keys/pgp/ here.
 validpgpkeys=('048B527950E4F609B90E63495F8810A6E6D4DB46')
 sha256sums=('2f2dfb3b3452a5473e7de6ab44a3733cf143871cf7da14d708a78ffc532e60e5'
             '8d4bc8496033be5835365d35adcfd60dea5521813ea347550216a6af3cc34007'
-            'bca8bbf4ccc7b0f2b71026978a367ff8567e87fd3a549af16c0882d257be8b33'
+            '82b4fab9295ef6e73cb593de396ec807c9d6de623df5331705cf3b2281f0c478'
             '8be20b6744998a6ba94422ba008e9d927f77eb525ea1c1c165e73c6e5954c8e8'
             '9c1f94b44d7b0e260e4a8ebcad2fee81b6dcb948ea37e4aecfb1e3953e8a4028'
             '4adbf25a93d2acbdb0e1feb850b1a4e88b64ebfdf2063ae917a3827732fe7a86')
@@ -73,7 +80,7 @@ package() {
   install -Dm755 steno-desktop.sh "$pkgdir/usr/bin/$_pkgname"
 
   # The stop timeout drop-ins (stable plan P5): the .deb installs them from
-  # the first release after #227; until then they come from here. Arch's
+  # the first release that contains #227; until then they come from here. Arch's
   # systemd reloads the user managers after the install
   # (30-systemd-daemon-reload-user.hook), so no install script does.
   local units="$pkgdir/usr/lib/systemd/user"

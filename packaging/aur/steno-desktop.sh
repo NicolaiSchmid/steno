@@ -5,7 +5,8 @@
 #
 # STENO_DISTRIBUTION=aur: pacman delivers the updates, so the in-app updater
 # stays off and Settings says so. STENO_EXEC_PATH: the path the autostart
-# entry names, this file, which outlives every upgrade.
+# entry names. It is this file's, which stays the same across upgrades.
+# The app reads both from the first release that contains #261.
 export STENO_DISTRIBUTION=aur
 export STENO_EXEC_PATH=/usr/bin/steno-desktop
 exec /usr/lib/steno-desktop/steno-desktop "$@"
