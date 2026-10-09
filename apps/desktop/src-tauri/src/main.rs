@@ -561,9 +561,10 @@ fn onboarding_closed(app: &tauri::AppHandle) {
 /// (`autostart::remove_earlier_entry_at_exit`): only once the save is
 /// over, since until then the unit the app runs as needs the entry.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
+    let shutdown = host::host(app).shutdown_action();
     #[cfg(target_os = "linux")]
     let app = app.clone();
-    timed_then(host::host(&app).shutdown_action(), move || {
+    timed_then(shutdown, move || {
         #[cfg(target_os = "linux")]
         {
             autostart::turn_off_at_exit(&app);
