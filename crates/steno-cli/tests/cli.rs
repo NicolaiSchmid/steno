@@ -870,32 +870,58 @@ fn aec_bench_runs_on_the_synthetic_fixtures() {
 }
 
 /// `dev onsets` prints where a sound starts in each channel, from
-/// `--after` on: a click at 0.25 s and a tone from 1.5 s in a 16 kHz WAV.
+/// `--after` on, in a two-channel 16 kHz WAV (a call master's channel 1 is
+/// the system lane): on the first a click at 0.25 s and a tone from 1.5 s,
+/// on the second a click at 0.5 s and a quieter tone from 1.25 s.
 #[test]
 fn dev_onsets_finds_the_first_loud_sample_of_each_channel() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     let path = home.join("tone.wav");
-    let mut samples = vec![0i16; 32_000];
-    samples[4_000] = 16_000;
-    for (index, sample) in samples[24_000..].iter_mut().enumerate() {
-        *sample = if index % 16 < 8 { 8_000 } else { -8_000 };
+    let channel = |click: usize, tone: usize, level: i16| {
+        let mut samples = vec![0i16; 32_000];
+        samples[click] = 16_000;
+        for (index, sample) in samples[tone..].iter_mut().enumerate() {
+            *sample = if index % 16 < 8 { level } else { -level };
+        }
+        samples
+    };
+    let (first, second) = (channel(4_000, 24_000, 8_000), channel(8_000, 20_000, 4_000));
+    // A 16-bit PCM WAV: `RIFF`, `fmt ` (two channels at 16 kHz), `data`.
+    let data: Vec<u8> = first
+        .iter()
+        .zip(&second)
+        .flat_map(|(a, b)| [a.to_le_bytes(), b.to_le_bytes()].concat())
+        .collect();
+    let size = u32::try_from(data.len()).unwrap();
+    let mut wav = b"RIFF".to_vec();
+    wav.extend_from_slice(&(36 + size).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    for field in [16u32, 0x0002_0001, 16_000, 64_000, 0x0010_0004] {
+        wav.extend_from_slice(&field.to_le_bytes());
     }
-    let mut writer = steno_audio::writer::WavStreamWriter::create(&path, 16_000).unwrap();
-    writer.write(&samples).unwrap();
-    writer.finish().unwrap();
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&size.to_le_bytes());
+    wav.extend_from_slice(&data);
+    std::fs::write(&path, wav).unwrap();
     let file = path.to_str().unwrap();
 
     let from_start = steno(&["dev", "onsets", file], home);
     assert_eq!(from_start.status, 0, "{}", from_start.stderr);
     assert_eq!(
         from_start.stdout.trim(),
-        format!("{file} channel 0: onset 0.250 s, peak -6.2 dBFS")
+        format!(
+            "{file} channel 0: onset 0.250 s, peak -6.2 dBFS\n\
+             {file} channel 1: onset 0.500 s, peak -6.2 dBFS"
+        )
     );
     let after = steno(&["dev", "onsets", "--after", "1", file], home);
     assert_eq!(
         after.stdout.trim(),
-        format!("{file} channel 0: onset 1.500 s, peak -12.2 dBFS")
+        format!(
+            "{file} channel 0: onset 1.500 s, peak -12.2 dBFS\n\
+             {file} channel 1: onset 1.250 s, peak -18.3 dBFS"
+        )
     );
     let quiet = steno(&["dev", "onsets", "--threshold", "-3", file], home);
     assert!(quiet.stdout.contains("no onset"), "{}", quiet.stdout);
@@ -907,7 +933,7 @@ fn dev_onsets_finds_the_first_loud_sample_of_each_channel() {
 
 /// A call recorded with `--keep-raw-mic` keeps the microphone before echo
 /// cancellation as `mic.raw.caf` beside the master, and says where: the
-/// second take of the stable plan's A9 check on the Mac reads the tone's
+/// second take of the stable plan's A10 step 2 on the Mac reads the tone's
 /// residual there when the cancellation hides it.
 #[test]
 fn record_keeps_the_raw_mic_when_asked() {

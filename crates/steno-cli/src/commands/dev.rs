@@ -432,7 +432,7 @@ impl CaptureSpike {
 
 // onsets
 
-/// For the stable plan's A9 check on the Mac: where a tone played into a
+/// For the stable plan's A10 step 2 on the Mac: where a tone played into a
 /// call recording starts in each channel of the master (`recording.caf`:
 /// channel 0 the microphone, 1 the system lane), the lane WAVs or
 /// `mic.raw.caf`, so the onsets can be compared.
