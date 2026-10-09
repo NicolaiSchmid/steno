@@ -11,7 +11,8 @@
 //! macOS menu bar (`menu`), the actions behind both menus (`actions`), the
 //! recorder state the shell follows (`recording`), the panels (`panels`)
 //! and their geometry (`panel_geometry`), window lifetime (`windows`; the
-//! close and exit rules are in this file), launch at login (`autostart`),
+//! close and exit rules are in this file), launch at login (`autostart`,
+//! and on a packaged install `packaged`),
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
 //! instance, on Linux the logout and shutdown clients (`session_end`), and
@@ -84,6 +85,7 @@ mod host;
 #[cfg(target_os = "macos")]
 mod menu;
 mod navigation;
+mod packaged;
 mod panel_geometry;
 mod panels;
 mod permissions;
@@ -231,6 +233,8 @@ fn setup(
     if onboarding {
         windows::open(handle, windows::BridgeWindow::Onboarding, None, None)?;
     }
+    #[cfg(target_os = "linux")]
+    autostart::at_launch(handle);
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle);

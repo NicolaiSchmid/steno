@@ -112,8 +112,19 @@ pub fn open(app: &AppHandle, window: BridgeWindow) {
 }
 
 /// Checks for an update and offers it, off the caller's thread; the
-/// tray's item and `updates.check` from Settings both ask.
+/// tray's item and `updates.check` from Settings both ask. On a packaged
+/// install (`steno_services::updates::updates_are_managed`) nothing is
+/// checked, and a message says what the General section says.
 pub fn check_for_updates(app: &AppHandle) {
+    if steno_services::updates::updates_are_managed() {
+        use tauri_plugin_dialog::{DialogExt as _, MessageDialogKind};
+        app.dialog()
+            .message(steno_host::settings::snapshots::MANAGED_UPDATES)
+            .title("Steno")
+            .kind(MessageDialogKind::Info)
+            .show(|_| {});
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move { updater::check_and_offer(&app).await });
 }

@@ -100,12 +100,15 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let platform = Platform::CURRENT;
     let record = MenuAction::Record.item(app, shortcut(platform, "Cmd+Shift+R"))?;
     let in_person = MenuAction::RecordInPerson.item(app, None)?;
+    // A login item the system manages shows checked and cannot be
+    // switched (`autostart`).
+    let login_item = autostart::status(app);
     let launch_at_login = CheckMenuItem::with_id(
         app,
         MenuAction::LaunchAtLogin.as_str(),
         MenuAction::LaunchAtLogin.label(),
-        true,
-        autostart::status(app).is_on(),
+        login_item != autostart::LoginItemStatus::Managed,
+        login_item.is_on(),
         None::<&str>,
     )?;
     let menu = Menu::with_items(

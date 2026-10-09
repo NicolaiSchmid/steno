@@ -6,14 +6,22 @@
 //! `ShellLoginItem` is the host's `LoginItem` over this module (`WP6b`), so
 //! the General section reads and switches the real registration.
 //!
+//! On Linux outside an `AppImage` the shell writes the `autostart` entry
+//! itself, in the plugin's form and file, so that it names a path that
+//! outlives an upgrade (`packaged::write_entry`) rather than the plugin's
+//! `current_exe()`. When the system starts the app at login
+//! (`STENO_LOGIN_ITEM=managed`, `packaged`), the status is `Managed` and
+//! nothing here changes the registration.
+//!
 //! Swift: `LoginItemController.swift`, `LoginItemStatus` in `AppProtocols.swift`.
 
 use steno_core::protocols::BoundaryResult;
 pub use steno_host::services::LoginItemStatus;
 use tauri::AppHandle;
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_autostart::{AutoLaunchManager, MacosLauncher, ManagerExt};
 
 use crate::bridge::{BridgeError, failed};
+use crate::packaged;
 
 /// The status from the plugin's answer; a registration the plugin could
 /// not read is `NotFound`, its reason logged.
@@ -34,20 +42,54 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None)
 }
 
+/// The registration; `Managed` while the system starts the app at login.
 pub fn status(app: &AppHandle) -> LoginItemStatus {
+    if packaged::login_item_is_managed() {
+        return LoginItemStatus::Managed;
+    }
     status_from_plugin(app.autolaunch().is_enabled())
 }
 
 /// Registers or removes the login item; a plugin failure is `failed`,
-/// which the page shows as it would any other refused command.
+/// which the page shows as it would any other refused command. Changes
+/// nothing while the system manages the login item.
 pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
+    if packaged::login_item_is_managed() {
+        tracing::debug!("launch at login is the system's; the login item stays as it is");
+        return Ok(());
+    }
     let manager = app.autolaunch();
     let result = if enabled {
-        manager.enable()
+        enable(app, &manager)
     } else {
         manager.disable()
     };
     result.map_err(failed)
+}
+
+/// Writes the login item: on Linux outside an `AppImage` the entry that
+/// names a stable path (`packaged::write_entry`), elsewhere the plugin's.
+fn enable(
+    app: &AppHandle,
+    manager: &AutoLaunchManager,
+) -> Result<(), tauri_plugin_autostart::Error> {
+    #[cfg(target_os = "linux")]
+    if tauri::Manager::env(app).appimage.is_none() {
+        return Ok(packaged::write_entry(&app.package_info().name)?);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
+    manager.enable()
+}
+
+/// At launch while the system manages the login item, on Linux: an
+/// entry an earlier build wrote into the Nix store goes
+/// (`packaged::remove_store_entry`).
+#[cfg(target_os = "linux")]
+pub fn at_launch(app: &AppHandle) {
+    if packaged::login_item_is_managed() {
+        packaged::remove_store_entry(&app.package_info().name);
+    }
 }
 
 /// Where the user manages login items; `None` where there is no such
