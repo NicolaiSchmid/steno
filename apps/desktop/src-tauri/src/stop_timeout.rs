@@ -428,7 +428,7 @@ mod tests {
     /// A `systemctl` for the postinst: logs each call to `$FAKE/calls`,
     /// lists `$FAKE/managers`, answers `is-active` with `$FAKE/<user>`
     /// (`error`: a failed call, which prints nothing on stdout), and fails
-    /// a reload for a user with `$FAKE/<user>.fails`.
+    /// the reload of the user `fails`.
     const FAKE_SYSTEMCTL: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE/calls"
 case $1 in
@@ -442,7 +442,7 @@ case $1 in
     [ "$state" = error ] && { echo "Failed to connect to bus" >&2; exit 1; }
     echo "$state"
     [ "$state" = active ] ;;
-  daemon-reload) [ ! -e "$FAKE/$user.fails" ] ;;
+  daemon-reload) [ "$user" != fails ] ;;
   *) exit 9 ;;
 esac
 "#;
@@ -465,7 +465,6 @@ esac
         argument: Option<&str>,
         systemd: bool,
         users: &[(&str, bool, &str)],
-        failing_reload: &str,
     ) -> (std::process::ExitStatus, Vec<String>) {
         use std::fmt::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
@@ -503,15 +502,17 @@ esac
             ".config/autostart/{}.desktop",
             linux["productName"].as_str().unwrap()
         );
+        let write_entry = |home: &Path| {
+            std::fs::create_dir_all(home.join(&entry).parent().unwrap()).unwrap();
+            std::fs::write(home.join(&entry), b"").unwrap();
+        };
         let (mut managers, mut passwd) = (String::new(), String::new());
         // One manager whose uid has no passwd entry, which is skipped.
         managers.push_str("user@999.service loaded active running User Manager for UID 999\n");
         for (uid, (user, has_entry, state)) in (1000..).zip(users) {
             let home = root.join("home").join(user);
-            std::fs::create_dir_all(&home).unwrap();
             if *has_entry {
-                std::fs::create_dir_all(home.join(&entry).parent().unwrap()).unwrap();
-                std::fs::write(home.join(&entry), b"").unwrap();
+                write_entry(&home);
             }
             std::fs::write(fake.join(user), state).unwrap();
             writeln!(
@@ -521,12 +522,10 @@ esac
             .unwrap();
             writeln!(passwd, "{user}:x:{uid}:{uid}::{}:/bin/sh", home.display()).unwrap();
         }
-        std::fs::write(fake.join(format!("{failing_reload}.fails")), b"").unwrap();
         std::fs::write(fake.join("managers"), managers).unwrap();
         std::fs::write(fake.join("passwd"), passwd).unwrap();
         let root_home = root.join("root");
-        std::fs::create_dir_all(root_home.join(&entry).parent().unwrap()).unwrap();
-        std::fs::write(root_home.join(&entry), b"").unwrap();
+        write_entry(&root_home);
 
         let path = std::env::join_paths(
             std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
@@ -565,7 +564,7 @@ esac
             ("starting", false, "activating"),
             ("stopping", false, "deactivating"),
         ];
-        let (status, calls) = run_postinst("postinst", Some("configure"), true, &users, "fails");
+        let (status, calls) = run_postinst("postinst", Some("configure"), true, &users);
         assert!(status.success(), "{status}");
         let mut expected = vec![
             "list-units --type=service --state=running --plain --no-legend user@*.service"
@@ -594,7 +593,7 @@ esac
             (None, true),
             (Some("configure"), false),
         ] {
-            let (status, calls) = run_postinst("postinst-idle", argument, systemd, &users, "");
+            let (status, calls) = run_postinst("postinst-idle", argument, systemd, &users);
             assert!(status.success(), "{argument:?} {systemd}: {status}");
             assert_eq!(calls, Vec::<String>::new(), "{argument:?} {systemd}");
         }
