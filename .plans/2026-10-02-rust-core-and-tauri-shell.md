@@ -1758,9 +1758,9 @@ parity item until a plan says otherwise:
   its own process from the tap, records nothing until another app plays
   (`.plans/spikes/2026-10-01-spike-rust-capture.md`), and keeps that until
   the handoff. Rust includes its own process in the tap and starts a
-  silent output IOProc, input streams off, on the aggregate's clock master
-  (the system output, read from the aggregate) before the aggregate's
-  IOProc, so with nothing playing the first callback comes within 100 ms
+  silent output IOProc (its input streams set off for it) on the
+  aggregate's clock master (the system output, read from the aggregate)
+  before the aggregate's IOProc, so with nothing playing the first callback comes within 100 ms
   of `start` returning and 200 ms of the call to `start` (`tests/live.rs`).
   No in-app playback while recording, enforced by `steno_audio::Playback`.
 - **The files are synced while recording, the relay holds 20 s, and the

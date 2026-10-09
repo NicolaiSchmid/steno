@@ -466,9 +466,10 @@ after the port".
 - The menu bar's queue and five recent meetings.
 - The macOS Record and Find Meetings menu items; the page answers ⌘⇧R and ⌘F.
 - The clip player. It plays from Steno's own process, which the call capture's
-  tap includes (A10): it asks `steno_audio::Playback` for every playback and
-  plays nothing while a recording runs (no in-app playback while recording,
-  enforced by `Playback`).
+  tap includes (A10), so the rule is no in-app playback while recording: it
+  asks `steno_audio::Playback` before every clip. It is native; the web UI
+  plays nothing, since its `<audio>` would play from WebKit's media process,
+  which the tap includes and `Playback` cannot see.
 - Layer-shell panels on wlroots, Hyprland and Plasma (X2's rules cover them
   until then).
 - The speech settings without a Settings row, which
@@ -758,9 +759,8 @@ Each lands before `0.11.0-rc.1`.
       the system output, read once from the aggregate itself (its main
       sub-device), never on the default output. The `info` line `the silent
       output runs on <name> (audio device <id>), the aggregate's clock
-      master` names it. Its input streams are off
-      (`kAudioDevicePropertyIOProcStreamUsage`), so it opens no input of its
-      own.
+      master` names it. Its input streams are set off for its IOProc (read
+      back as off), through `kAudioDevicePropertyIOProcStreamUsage`.
     - It starts once the aggregate is built and before the aggregate's
       IOProc, and is stopped and destroyed last, after the tap, on a `start`
       that fails part way too. Started before the aggregate is built, it
@@ -781,7 +781,9 @@ Each lands before `0.11.0-rc.1`.
     today; the clip player (What follows) will be the first.
     - While a recording runs, the gate refuses playback ("Playback is off
       while Steno records. It works again once the recording stops.").
-    - Playback that runs when a recording starts is stopped first.
+    - Playback that runs when a recording starts is stopped first. A player
+      starts through its permit, under the gate's lock, so none starts once
+      a recording holds the gate.
     - The capture session takes the hold before its backend (and the tap)
       starts, keeps it across every rebuild, and releases it after the
       teardown; a drop guard releases it on an error or a panic.
@@ -801,8 +803,9 @@ Each lands before `0.11.0-rc.1`.
     - Unit: the gate, alone and in the capture session: refused while
       recording and across a rebuild, held at every backend start and stop,
       released after a failed or panicking start and after a device loss,
-      running playback stopped, two sessions; a session made without a gate
-      of its own holds the process's (`Playback::global`).
+      running playback stopped, a start refused once a hold is taken and a
+      start under way finished before the hold, two sessions; a session made
+      without a gate of its own holds the process's (`Playback::global`).
     - Unit: a system output that switched before its listener is judged as
       a change; the stream usage the silent IOProc writes names its proc,
       with every stream off.
@@ -826,7 +829,7 @@ Each lands before `0.11.0-rc.1`.
       (0 callbacks), the input usage not written, the system output's
       re-read never reporting, the zero-fill skipping the last buffer.
     - Not exercised on Forge (built-in speakers only): a system output that
-      changes mid-call, and a headset. Nicolai's steps 4 and 5.
+      changes mid-call, and a headset. Nicolai's steps 3 to 5.
   - **Nicolai**, on his Mac in a GUI session, with A10's branch checked out
     and its CLI built (`cargo build --release -p steno-cli`; the commands run
     from the checkout's root). Before every step: the terminal app has
@@ -857,17 +860,20 @@ Each lands before `0.11.0-rc.1`.
          5 s later. Pass when `grep "first callback" ~/a10.log` prints
          `the capture's first callback (system tap) came N ms after its
          start` with N at most 100 (its start is the aggregate's
-         `AudioDeviceStart`, the last HAL step of `start`), and
+         `AudioDeviceStart`, a few ms before `start` returns), and
          `target/release/steno dev onsets <the meeting's recording.caf>`
          puts the tone's onset in the system channel and its residual in the
          echo-cancelled mic channel within 50 ms (if the cancellation hides
-         the residual, a second take with `steno record --mode call
-         --keep-raw-mic --out ~/a10-raw` keeps the raw mic as `mic.raw.caf`).
+         the residual, a second take with `target/release/steno record
+         --mode call --keep-raw-mic --out ~/a10-raw` keeps the raw mic as
+         `mic.raw.caf`).
     3. A hands-free headset: pair a Bluetooth headset as the output, keep the
-       built-in microphone as the input, and run step 1's command. Pass when
-       the headset stays in its stereo profile and the output's rate stays at
-       44.1 or 48 kHz, not 16 or 24 (`system_profiler SPAudioDataType`, the
-       headset's "Current SampleRate", read while it records).
+       built-in microphone as the input, and run step 1's command with
+       `--seconds 60`. While it records, in a second Terminal window, read the
+       headset's "Current SampleRate" with `system_profiler SPAudioDataType |
+       grep -A8 "<the headset's name>"`. Pass when the headset stays at 44.1
+       or 48 kHz. A switch to 16 or 24 kHz is compared with main while
+       `afplay` plays. The aggregate's own inputs are A11's, not A10's.
     4. Alerts on the speakers, the output on a headset: in System Settings,
        Sound, set "Play sound effects through" to the Mac's speakers and the
        output to a headset, then run step 2's `cargo test` command with
@@ -883,8 +889,7 @@ Each lands before `0.11.0-rc.1`.
        1, then `the silent output runs on <the new device>`, and no `did not
        start` line; when the `mic ... dBFS  system ... dBFS` lines go on
        after each `device resumed`; and when the summary prints `duration`
-       within 1 s of 60 and the same N in `nonzero mic: X of N` and
-       `nonzero system: Y of N` (both lanes the full length).
+       within 1 s of 60.
   - Owner: audio. It lands before `0.11.0-rc.1`, with its own pipeline.
 
 ### P: no data lost (D3)
