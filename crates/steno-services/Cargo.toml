@@ -14,7 +14,6 @@ base64.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 fs4.workspace = true
-keyring.workspace = true
 png.workspace = true
 qrcode.workspace = true
 serde.workspace = true
@@ -43,6 +42,16 @@ uuid.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 steno-speech-coreml = { path = "../steno-speech-coreml" }
 
+# The Keychain (`secrets::KeyringSecretStore`); Linux builds the crate
+# without using it.
+[target.'cfg(not(windows))'.dependencies]
+keyring.workspace = true
+
+# The credential store (`secrets::credentials`): `CredReadW`, `CredWriteW`,
+# `CredDeleteW` and `CredFree`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Security_Credentials"] }
+
 # The Secret Service client (`secrets::SecretServiceStore`).
 [target.'cfg(target_os = "linux")'.dependencies]
 base64.workspace = true
@@ -58,6 +67,12 @@ rusqlite.workspace = true
 tempfile.workspace = true
 # The paused clock of the update check's timeout test.
 tokio = { workspace = true, features = ["test-util"] }
+
+# The Windows tests write entries as the `keyring` crate wrote them before
+# the services kept credentials on this computer, and read the services'
+# entries back through it.
+[target.'cfg(windows)'.dev-dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
 
 [lints]
 workspace = true

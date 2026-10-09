@@ -303,6 +303,30 @@ jobs:
           done
           if grep -qF "SKIPPED" "$log"; then echo "::error::a durable writes test skipped"; exit 1; fi
 
+      # The credential store tests against the runner's own credential
+      # store, again with their output, the same start-line greps as above
+      # (`--workspace` keeps the Test step's feature set). Each test writes only under `steno-test-<uuid>` target names and
+      # deletes them again; `cmdkey /list` then shows that none is left.
+      - name: Credential store tests, with output (Windows)
+        if: matrix.name == 'windows'
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/credentials.log"
+          tests=(
+            secrets::credentials::windows::tests::on_windows_a_written_secret_is_kept_on_this_computer_and_reads_through_the_keyring_crate
+            secrets::credentials::windows::tests::on_windows_an_entry_the_keyring_crate_wrote_reads_and_moves_to_this_computer
+            secrets::credentials::windows::tests::on_windows_a_write_replaces_the_credential_of_the_same_target_name
+          )
+          cargo test --workspace --lib --locked -- --exact --nocapture \
+            "${tests[@]}" 2>&1 | tee "$log"
+          for test in "${tests[@]}"; do
+            grep -qF "test $test ... " "$log" || { echo "::error::$test did not run"; exit 1; }
+            if grep -qF "test $test ... ignored" "$log"; then echo "::error::$test is ignored"; exit 1; fi
+          done
+          if cmdkey.exe /list | grep -F "steno-test-"; then
+            echo "::error::a credential store test left its credential behind"; exit 1
+          fi
+
       # The step fails unless as many tests passed as the file has live
       # tests: a `cfg` or a filter that left none to run would pass with
       # "0 passed". A live test is one whose `#[ignore]` reason starts
