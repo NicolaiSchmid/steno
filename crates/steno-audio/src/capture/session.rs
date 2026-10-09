@@ -579,6 +579,15 @@ impl CaptureSession {
     /// 500 ms, 1 s, 2 s, then 4 s every time). A streak of rebuilds counts
     /// its restarts across them (see the module doc). The longer steps are
     /// Rust only: Swift ended the recording after its attempts.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use steno_audio::CaptureSession;
+    ///
+    /// assert_eq!(CaptureSession::restart_backoff(1), Duration::from_millis(250));
+    /// assert_eq!(CaptureSession::restart_backoff(4), Duration::from_secs(2));
+    /// assert_eq!(CaptureSession::restart_backoff(9), Duration::from_secs(4));
+    /// ```
     #[must_use]
     pub fn restart_backoff(attempt: usize) -> Duration {
         let steps = Self::RESTART_BACKOFF.len();
@@ -1678,11 +1687,21 @@ impl Core {
                     unanswered: active.streak.unanswered,
                     ..Streak::default()
                 };
+                // While a `warn` line about earlier restarts stands
+                // unanswered (a stream that delivers a few seconds and
+                // stalls, over and over), the stall's own line goes to
+                // `debug`, so such a stream logs about once a minute too.
                 if reason == DeviceChangeReason::DeliveryStalled {
-                    tracing::warn!(
-                        "the capture delivered nothing for over {} ms; restarting it",
-                        CaptureSession::STALL_TIMEOUT.as_millis()
-                    );
+                    let millis = CaptureSession::STALL_TIMEOUT.as_millis();
+                    if active.streak.unanswered {
+                        tracing::debug!(
+                            "the capture delivered nothing for over {millis} ms; restarting it"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "the capture delivered nothing for over {millis} ms; restarting it"
+                        );
+                    }
                 }
             }
             (

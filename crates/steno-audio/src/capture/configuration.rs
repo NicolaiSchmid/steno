@@ -292,11 +292,12 @@ pub enum DeviceChangeReason {
     /// Linux and Windows backends never report it.
     SampleRateChanged,
     /// The capture stopped delivering: no frame reached the sink for
-    /// longer than `CaptureSession::STALL_TIMEOUT` after it had delivered
-    /// (a device whose driver or owner hangs, a graph that stopped
-    /// running). The session's watchdog reports it, on every platform, and
-    /// its rebuild's restarts go on until one runs, whatever they fail
-    /// with. Rust only.
+    /// longer than `CaptureSession::STALL_TIMEOUT` from its start or its
+    /// last frame (a device whose driver or owner hangs, a graph that
+    /// stopped running, a Mac call capture whose silent output did not
+    /// start). The session's watchdog reports it, over a watched backend
+    /// (`CaptureBackend::delivers_continuously`), and its rebuild's
+    /// restarts go on until one runs, whatever they fail with. Rust only.
     DeliveryStalled,
     /// The audio service restarted or went away: `coreaudiod` on macOS,
     /// taking the capture's aggregate device with it, or on Linux the
@@ -332,7 +333,10 @@ pub enum CaptureNotice {
     /// stream that delivers a moment and stalls again soon, and the warning
     /// stands through their resumes. Sent once until `Delivering`, then
     /// again when the restarts go on once more; the stream is still the one
-    /// that stopped. Rust only.
+    /// that stopped. Not sent for a stream whose stall comes 10 s or more
+    /// after each resume: every such stall begins a new streak, which
+    /// resumes on its first restart, and only the recorder's note after the
+    /// stop counts the silence their gaps took. Rust only.
     StillRestarting {
         /// The restarts so far.
         attempt: usize,
