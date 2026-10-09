@@ -1916,24 +1916,20 @@ fn whole_clip_samples(path: &Path) -> u32 {
     size / 2
 }
 
-/// [`assert_each_row_names_its_own_clip_of`], and "Speaker 1" is still
-/// confirmed as Anna.
+/// Asserts that "Speaker 1" is still confirmed as Anna and that every
+/// speaker row of `meeting_id` with a clip names a whole WAV whose length
+/// is the row's clip range, the clip of the run that wrote the row. Returns
+/// the file names the rows name.
 fn assert_each_row_names_its_own_clip(store: &Store, meeting_id: Uuid) -> BTreeSet<OsString> {
+    let speakers = store.speakers(meeting_id).unwrap();
     assert_eq!(
-        speaker(&store.speakers(meeting_id).unwrap(), "Speaker 1").assignment,
+        speaker(&speakers, "Speaker 1").assignment,
         steno_core::SpeakerAssignment::Confirmed {
             person_id: sample_data::person(0, "Anna").id
         }
     );
-    assert_each_row_names_its_own_clip_of(store, meeting_id)
-}
-
-/// Asserts that every speaker row of `meeting_id` with a clip names a
-/// whole WAV whose length is the row's clip range, the clip of the run that
-/// wrote the row. Returns the file names the rows name.
-fn assert_each_row_names_its_own_clip_of(store: &Store, meeting_id: Uuid) -> BTreeSet<OsString> {
     let mut named = BTreeSet::new();
-    for speaker in store.speakers(meeting_id).unwrap() {
+    for speaker in speakers {
         let Some(url) = &speaker.sample_clip_url else {
             continue;
         };
@@ -1948,6 +1944,26 @@ fn assert_each_row_names_its_own_clip_of(store: &Store, meeting_id: Uuid) -> BTr
         named.insert(path.file_name().unwrap().to_owned());
     }
     named
+}
+
+/// A probe that holds a run at [`ClipStep::Merging`], with the receiver
+/// that hears when a run is held there and the sender that lets it go.
+fn held_at_merging() -> (
+    ClipProbe,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (reached, held_there) = std::sync::mpsc::channel();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let wait = Mutex::new(wait);
+    let gate: ClipProbe = Arc::new(move |step| {
+        if step == ClipStep::Merging {
+            reached.send(()).unwrap();
+            wait.lock().unwrap().recv().unwrap();
+        }
+        Ok(())
+    });
+    (gate, held_there, go)
 }
 
 /// The names of the files in the meeting's `speakers/`.
@@ -2053,16 +2069,7 @@ async fn a_runs_uncommitted_clips_survive_every_other_runs_sweep() {
     let (asset, _) = confirmed_call(&world).await;
     let meeting = asset.meeting_id;
     let earlier = clip_files(&asset);
-    let (reached, held_there) = std::sync::mpsc::channel();
-    let (go, wait) = std::sync::mpsc::channel::<()>();
-    let wait = Mutex::new(wait);
-    let gate: ClipProbe = Arc::new(move |step| {
-        if step == ClipStep::Merging {
-            reached.send(()).unwrap();
-            wait.lock().unwrap().recv().unwrap();
-        }
-        Ok(())
-    });
+    let (gate, held_there, go) = held_at_merging();
     let pipeline = rerun_pipeline(&world, Some(gate));
     let run = tokio::spawn(async move { pipeline.process(asset.id).await });
     tokio::task::spawn_blocking(move || held_there.recv().unwrap())
@@ -2113,16 +2120,7 @@ async fn a_meeting_whose_master_lies_in_another_meetings_folder_leaves_its_clips
     let guests_clip = layout.sample_clip(speaker(&speakers, "Speaker 1").id);
     std::fs::write(&guests_clip, b"the guest's earlier clip").unwrap();
 
-    let (reached, held_there) = std::sync::mpsc::channel();
-    let (go, wait) = std::sync::mpsc::channel::<()>();
-    let wait = Mutex::new(wait);
-    let gate: ClipProbe = Arc::new(move |step| {
-        if step == ClipStep::Merging {
-            reached.send(()).unwrap();
-            wait.lock().unwrap().recv().unwrap();
-        }
-        Ok(())
-    });
+    let (gate, held_there, go) = held_at_merging();
     let held = rerun_pipeline(&world, Some(gate));
     held.reprocess(guest.id).unwrap();
     tokio::task::spawn_blocking(move || held_there.recv().unwrap())
