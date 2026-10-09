@@ -33,6 +33,7 @@ use steno_speech::{
 };
 
 use crate::model_gate::{GatedDiarizer, GatedSpeechEngine, InstalledCheck};
+use crate::pipeline::ModelsInstalled;
 
 /// Threads for one ONNX operator; the plan measured at four.
 pub const ONNX_THREADS: usize = 4;
@@ -295,6 +296,8 @@ pub struct SpeechEngines {
     build: BuildEngine,
     diarizer: Arc<dyn Diarizer>,
     kept: std::sync::Mutex<KeptEngines>,
+    /// The gates' checks, together ([`Self::models_installed`]).
+    installed: ModelsInstalled,
 }
 
 /// The engines [`SpeechEngines`] hands out again.
@@ -326,7 +329,7 @@ impl SpeechEngines {
     /// speech engine's for the runtime it runs on, and the diarizer's.
     pub(crate) fn with_checks(
         mut setup: SpeechSetup,
-        speech_installed: Arc<dyn Fn(SpeechRuntime) -> bool + Send + Sync>,
+        speech_installed: ModelsInstalled,
         diarizer_installed: InstalledCheck,
     ) -> Self {
         // The default already; set so a setup that allows downloads (the
@@ -335,15 +338,23 @@ impl SpeechEngines {
         let over = setup.clone();
         let mut engines = Self::with_builder(
             setup,
-            Box::new(move |runtime| {
-                let installed = speech_installed.clone();
-                Arc::new(GatedSpeechEngine::new(
-                    engine_on(runtime, &over),
-                    Arc::new(move || installed(runtime)),
-                ))
+            Box::new({
+                let speech_installed = speech_installed.clone();
+                move |runtime| {
+                    let installed = speech_installed.clone();
+                    Arc::new(GatedSpeechEngine::new(
+                        engine_on(runtime, &over),
+                        Arc::new(move || installed(runtime)),
+                    ))
+                }
             }),
         );
-        engines.diarizer = Arc::new(GatedDiarizer::new(engines.diarizer, diarizer_installed));
+        engines.diarizer = Arc::new(GatedDiarizer::new(
+            engines.diarizer,
+            diarizer_installed.clone(),
+        ));
+        engines.installed =
+            Arc::new(move |runtime| speech_installed(runtime) && diarizer_installed());
         engines
     }
 
@@ -358,7 +369,19 @@ impl SpeechEngines {
             setup,
             build,
             kept: std::sync::Mutex::default(),
+            installed: Arc::new(|_| true),
         }
+    }
+
+    /// Whether the gates would let a pipeline whose speech engine runs on
+    /// `runtime` through now: its speech models and the diarizer's are
+    /// installed. Always, for engines from [`Self::with_builder`], which
+    /// have no gates. What the app's reload asks before it resumes the
+    /// meetings waiting for models
+    /// ([`CurrentPipeline::resuming_when`](crate::pipeline::CurrentPipeline::resuming_when)).
+    #[must_use]
+    pub fn models_installed(&self, runtime: SpeechRuntime) -> bool {
+        (self.installed)(runtime)
     }
 
     /// What the engines are built from.

@@ -541,7 +541,12 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         &runtime,
         &damaged_audio,
     );
-    let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
+    let pipeline = Arc::new(
+        CurrentPipeline::new(make()?, make, runtime.clone()).resuming_when({
+            let engines = engines.clone();
+            Arc::new(move |on| engines.models_installed(on))
+        }),
+    );
     let sweep = RetentionSweep::new(store.clone());
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
 

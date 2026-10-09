@@ -45,6 +45,11 @@ pub struct BuiltPipeline {
 /// settings and the API key.
 pub type MakeDependencies = Arc<dyn Fn() -> Result<BuiltPipeline, BuildError> + Send + Sync>;
 
+/// Whether the models a pipeline whose speech engine runs on the runtime
+/// needs are installed now: the app's gates' checks
+/// ([`SpeechEngines::models_installed`](crate::speech::SpeechEngines::models_installed)).
+pub type ModelsInstalled = Arc<dyn Fn(SpeechRuntime) -> bool + Send + Sync>;
+
 /// The pipeline [`CurrentPipeline`] holds, with the engine it was built
 /// with, swapped together.
 struct Current {
@@ -93,6 +98,9 @@ pub struct CurrentPipeline {
     quit_latch: QuitLatch,
     in_flight: InFlight,
     model_waits: ModelWaits,
+    /// Whether a reload resumes the waiting meetings
+    /// ([`resuming_when`](Self::resuming_when)).
+    models_installed: ModelsInstalled,
 }
 
 impl CurrentPipeline {
@@ -113,7 +121,19 @@ impl CurrentPipeline {
             quit_latch,
             in_flight,
             model_waits,
+            models_installed: Arc::new(|_| true),
         }
+    }
+
+    /// Reloads resume the waiting meetings only while `installed` holds
+    /// for the new pipeline's runtime, so a settings save with the models
+    /// still missing leaves their cards asking for the download instead
+    /// of starting each meeting only to see it refused again. Without it
+    /// every reload resumes them.
+    #[must_use]
+    pub fn resuming_when(mut self, installed: ModelsInstalled) -> Self {
+        self.models_installed = installed;
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Current> {
@@ -141,9 +161,10 @@ impl CurrentPipeline {
     /// from any thread: the meetings a run on any of its pipelines left
     /// `queued` for missing models since the last resume start on the
     /// runtime. Called once a model install from Settings or onboarding
-    /// finished, and after every [`reload`](Self::reload), so models the
-    /// `steno` command installed into the app's models directory are
-    /// picked up at the next settings change (or the next launch); it
+    /// finished, and after a [`reload`](Self::reload) that finds them
+    /// installed, so models the `steno` command installed into the app's
+    /// models directory are picked up at the next settings change (or the
+    /// next launch); it
     /// returns at once when nothing waits. A failure, a busy store
     /// included, is logged and not retried: the meetings stay `queued`
     /// for the next of these or the launch's recovery. Not the launch's
@@ -175,8 +196,10 @@ impl CurrentPipeline {
     /// with its claims, while the stored engine id runs where it did, and
     /// the diarizer ([`SpeechEngines`](crate::speech::SpeechEngines)), so
     /// the retired pipeline's jobs and the new one's share them and the
-    /// one sidecar child. Then it resumes the meetings waiting for models
-    /// on the new pipeline ([`resume_waiting`](Self::resume_waiting)).
+    /// one sidecar child. Then, when their models are installed
+    /// ([`resuming_when`](Self::resuming_when)), it resumes the meetings
+    /// waiting for them on the new pipeline
+    /// ([`resume_waiting`](Self::resume_waiting)).
     pub fn reload(&self) -> Result<(), BuildError> {
         let replacement = Current::new(
             (self.make)()?,
@@ -184,10 +207,13 @@ impl CurrentPipeline {
             &self.in_flight,
             &self.model_waits,
         );
+        let runtime = replacement.engine.runtime;
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
         self.runtime
             .spawn(async move { retired.wait_until_idle().await });
-        self.resume_waiting();
+        if (self.models_installed)(runtime) {
+            self.resume_waiting();
+        }
         Ok(())
     }
 
@@ -1340,25 +1366,30 @@ mod tests {
     }
 
     /// A `CurrentPipeline` whose every pipeline, reloads included, shares
-    /// `engine` behind one gate that refuses until the returned flag is set.
+    /// `engine` behind one gate that refuses until the returned flag is set,
+    /// and one event bus; its reloads resume only once the flag is set, as
+    /// the app's do.
     fn gated_current(
         store: &Arc<Store>,
         engine: Arc<dyn SpeechEngine>,
     ) -> (Arc<AtomicBool>, CurrentPipeline) {
         let (installed, check) = crate::model_gate::testing::flag(false);
         let shared = steno_pipeline::SharedSpeechEngine::new(Arc::new(
-            crate::model_gate::GatedSpeechEngine::new(engine, check),
+            crate::model_gate::GatedSpeechEngine::new(engine, check.clone()),
         ));
+        let events = steno_pipeline::MeetingEventBus::new();
         let make: MakeDependencies = {
             let store = store.clone();
             Arc::new(move || {
-                Ok(on_the_sidecar(
-                    fake_dependencies(&store, "fake-engine").with_speech_engine(shared.clone()),
-                ))
+                let mut dependencies =
+                    fake_dependencies(&store, "fake-engine").with_speech_engine(shared.clone());
+                dependencies.events = events.clone();
+                Ok(on_the_sidecar(dependencies))
             })
         };
         let current =
-            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current())
+                .resuming_when(Arc::new(move |_| check()));
         (installed, current)
     }
 
@@ -1534,6 +1565,34 @@ mod tests {
         assert_eq!(
             current.current().dependencies().model_waits.waiting(),
             Vec::<Uuid>::new()
+        );
+    }
+
+    /// A settings save while the models are still missing leaves the
+    /// meetings waiting for them waiting: the reload starts none of them,
+    /// so no card leaves "Download the speech models in Settings" for
+    /// `decode` and comes back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_with_the_models_still_missing_leaves_the_waiting_meetings_waiting() {
+        let (dir, store) = temp_store();
+        let (_installed, current) = gated_current(&store, Arc::new(FakeSpeechEngine::default()));
+        let waiting = enqueue_call(dir.path(), &current.current());
+        current.current().wait_until_idle().await;
+        let mut events = current.current().dependencies().events.subscribe();
+
+        current.reload().unwrap();
+        current.current().wait_until_idle().await;
+        let mut progress = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let steno_core::MeetingEvent::Progress { progress: p, .. } = event {
+                progress.push(p.stage);
+            }
+        }
+        assert_eq!(progress, Vec::<PipelineStage>::new(), "no run started");
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
+        assert_eq!(
+            current.current().dependencies().model_waits.waiting(),
+            [waiting]
         );
     }
 
