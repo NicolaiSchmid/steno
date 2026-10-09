@@ -8,10 +8,9 @@
 //! `steno process --meeting <id>` processes a stored meeting again from its
 //! recording, and reports as above: a meeting the app offers "Process
 //! again" for (a failed one), through the pipeline's `process_again`, or
-//! with `--allow-ready` a ready one too, through `reprocess`. A ready
-//! meeting processed again re-delivers its note, and without an LLM
-//! endpoint its cleaned transcript goes back to the raw text. Rust only:
-//! Swift's CLI had no such flag.
+//! with `--allow-ready` a ready one too, through `reprocess` (see
+//! `--allow-ready` for what that replaces). Rust only: Swift's CLI had no
+//! such flag.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -63,9 +62,10 @@ pub struct Process {
         conflicts_with_all = ["input", "system_lane", "source", "title", "template", "audio_folder"]
     )]
     pub meeting: Option<Uuid>,
-    /// With --meeting, process a ready meeting again too. It re-delivers
-    /// the meeting's note, and without an LLM endpoint its cleaned
-    /// transcript goes back to the raw text.
+    /// With --meeting, process a ready meeting again too. It delivers the
+    /// meeting's note again, replacing the one in the vault even if you
+    /// edited it; without an LLM endpoint its cleaned transcript goes back
+    /// to the raw text.
     // `requires` alone lets `<INPUT> --allow-ready` through: clap counts
     // `--meeting` as satisfied once its conflict, `<INPUT>`, is present.
     #[arg(long = "allow-ready", requires = "meeting", conflicts_with = "input")]
