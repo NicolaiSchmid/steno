@@ -82,7 +82,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use steno_core::protocols::BoundaryResult;
-use steno_core::{SecretKey, SecretStore, async_trait};
+use steno_core::{SecretKey, SecretPlace, SecretStore, async_trait};
 use steno_handover::FingerprintRecord;
 use steno_host::onboarding::OnboardingViewModel;
 use steno_host::services::{Preferences as _, SwiftImport, SwiftImportStage, SwiftImportStatus};
@@ -586,6 +586,9 @@ impl SecretStore for GatedSecrets {
             }
         }
         Ok(())
+    }
+    fn place(&self) -> Option<SecretPlace> {
+        self.inner.place()
     }
 }
 

@@ -919,6 +919,124 @@ fn a_gated_empty_key_write_leaves_the_stored_key_in_place() {
     assert_eq!(read(&*step.raw, &key), None);
 }
 
+/// The graph's store is the import's gate over the app's `KeepsApiKey`,
+/// as `build` wraps them: an empty key write the gate swallows never
+/// reaches `KeepsApiKey`, so the key it kept for the pipeline stays; once
+/// a saved key opened the gate, `KeepsApiKey` keeps and drops the key as it
+/// does without an import.
+#[test]
+fn a_write_the_gate_swallows_leaves_the_kept_key_and_an_open_gate_writes_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = SecretKey::llm_api_key();
+    let memory = Arc::new(InMemorySecretStore::with([(
+        key.clone(),
+        "sk-swift".to_owned(),
+    )]));
+    let kept = Arc::new(crate::secrets::KeepsApiKey::new(memory.clone()));
+    assert_eq!(read(&*kept, &key).as_deref(), Some("sk-swift"));
+    let graph = GraphImport::new(
+        pending(launch_at_home(
+            preferences(&dir),
+            Arc::new(FakeKeychain::swift_app()),
+        )),
+        kept.clone(),
+        record_in(dir.path()),
+    );
+    for cleared in [None, Some("")] {
+        set(&*graph.secrets, &key, cleared);
+        assert_eq!(
+            kept.kept_api_key().as_deref(),
+            Some("sk-swift"),
+            "{cleared:?}"
+        );
+        assert_eq!(read(&*memory, &key).as_deref(), Some("sk-swift"));
+    }
+
+    set(&*graph.secrets, &key, Some("sk-typed"));
+    assert_eq!(kept.kept_api_key().as_deref(), Some("sk-typed"));
+    memory.fail_reads(Some("the keychain is locked"));
+    assert!(RUNTIME.block_on(graph.secrets.secret(&key)).is_err());
+    assert_eq!(
+        kept.kept_api_key().as_deref(),
+        Some("sk-typed"),
+        "a failed read keeps the key"
+    );
+    memory.fail_reads(None);
+    set(&*graph.secrets, &key, None);
+    assert_eq!(kept.kept_api_key(), None, "an open gate's removal drops it");
+    assert_eq!(read(&*memory, &key), None);
+}
+
+/// The pipeline reads the key through the gate, as `build` wires it
+/// ([`crate::app::PipelineSecrets`]): behind a pending import its build
+/// asks the store behind the gate for no API key, though the
+/// `KeepsApiKey` it falls back on wraps that store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pipeline_reads_the_key_through_the_gate_and_not_the_store_behind_it() {
+    let (dir, store) = crate::testing::temp_store();
+    let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+    let mut settings = store.settings().unwrap();
+    settings.llm_provider = steno_core::LlmProvider::Endpoint;
+    settings.llm_base_url = Some("http://127.0.0.1:9/v1".to_owned());
+    settings.llm_model = Some("model".to_owned());
+    store.save_settings(&settings).unwrap();
+    let raw = Arc::new(CountingSecrets::default());
+    raw.inner
+        .set_secret(&SecretKey::llm_api_key(), Some("sk-swift"))
+        .await
+        .unwrap();
+    let kept = Arc::new(crate::secrets::KeepsApiKey::new(raw.clone()));
+    let graph = GraphImport::new(
+        pending(launch_at_home(
+            preferences(&dir),
+            Arc::new(FakeKeychain::swift_app()),
+        )),
+        kept.clone(),
+        record_in(dir.path()),
+    );
+    let built = crate::app::pipeline_dependencies(
+        &store,
+        &crate::speech::SpeechEngines::new(crate::speech::SpeechSetup::new(
+            &store.settings().unwrap(),
+            &paths,
+        )),
+        &crate::app::PipelineSecrets {
+            secrets: graph.secrets.clone(),
+            kept,
+            key_gate: Some(graph.gate.clone()),
+        },
+        &crate::llm::codex_store(),
+        &steno_pipeline::MeetingEventBus::new(),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    assert!(built.dependencies.summarizer.is_none());
+    assert!(
+        !raw.read_the_key(),
+        "the build read the key behind the gate"
+    );
+}
+
+/// The gate says where the store behind it keeps the secrets, so Settings
+/// word the key's place as without an import.
+#[test]
+fn the_gate_reports_the_place_of_the_store_behind_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = Arc::new(crate::FileSecretStore::new(
+        dir.path().join("secrets.json"),
+        std::collections::BTreeMap::new(),
+    ));
+    let graph = GraphImport::new(
+        pending(launch_at_home(
+            preferences(&dir),
+            Arc::new(FakeKeychain::swift_app()),
+        )),
+        file,
+        record_in(dir.path()),
+    );
+    assert_eq!(graph.secrets.place(), Some(SecretPlace::File));
+}
+
 /// A refused key read is remembered: the next launch, whose import still
 /// waits for the identity, answers no key without asking the keychain
 /// (so nothing prompts before the step), and so does every launch after
