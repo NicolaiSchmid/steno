@@ -21,7 +21,9 @@
 # again, as a crash or an update of the daemon would, with
 # `scripts/pipewire-headless.sh --kill-daemons` and then `--start-daemons`
 # (the environment it exports says where; the new daemons are ended with
-# the rest when the command is done).
+# the rest when the command is done). `$STENO_PIPEWIRE_HEADLESS_ROOT/daemon-starts`
+# then says how many daemons the latest start went through: it starts them
+# again, up to three times, while they send no metadata changes.
 #
 # Needs `pipewire`, `wireplumber`, `pw-cli`, `pw-dump`, `pw-link`,
 # `pw-metadata` and `pw-play` on PATH, `stdbuf` and `timeout` (coreutils),
@@ -167,11 +169,14 @@ broadcasts_metadata() {
 }
 
 # Starts the daemons until one sends metadata changes (three starts at
-# most); false when none did.
+# most), writing how many it started to `$root/daemon-starts`: a recording
+# may resume on a daemon this ends again, and rebuild once more; false when
+# none did.
 start_checked() {
   local try
   for try in 1 2 3; do
     start_daemons || return 1
+    echo "$try" >"$root/daemon-starts"
     broadcasts_metadata && break
     if [[ $try -eq 3 ]]; then
       echo "pipewire-headless: the daemon sends no metadata changes after 3 starts" >&2

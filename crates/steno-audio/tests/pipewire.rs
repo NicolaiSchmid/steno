@@ -71,7 +71,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -957,17 +957,35 @@ fn harness(call: &str) {
     assert!(status.success(), "{call}: {status}");
 }
 
+/// The daemons the harness started at its latest start, one to three
+/// (`start_checked` in the harness starts them again while they send no
+/// metadata changes).
+fn daemon_starts() -> usize {
+    let root = std::env::var("STENO_PIPEWIRE_HEADLESS_ROOT").expect("run under the harness");
+    std::fs::read_to_string(Path::new(&root).join("daemon-starts"))
+        .expect("the harness's count of daemon starts")
+        .trim()
+        .parse()
+        .expect("a count")
+}
+
 /// The PipeWire daemon killed mid-recording, as a crash or an update of
 /// it does, and started again a few seconds later: the capture's lost
 /// connection is reported as the audio service restarting, the restarts go
 /// on while the daemon is gone, and once it is back the recording resumes
-/// on it, never `DeviceLost`, its gap covering the outage so the master
-/// stays on wall time. The daemons this test starts are the ones the
-/// tests after it run on.
+/// on it, never `DeviceLost`, its gaps covering the outage so the master
+/// stays on wall time. The harness may start the daemons more than once
+/// before they send metadata changes, ending the ones before: a recording
+/// that resumed on such a short-lived daemon loses it too and rebuilds
+/// again, so there is at most one rebuild per daemon start, and each gap
+/// stays within `MAXIMUM_GAP`. The daemons this test starts are the ones
+/// the tests after it run on.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_daemon_killed_and_started_again_resumes_the_recording() {
     const OUTAGE: Duration = Duration::from_secs(3);
+    // How long no notice follows the last resume.
+    const QUIET: Duration = Duration::from_secs(2);
     show_logs();
     let directory = tempfile::tempdir().expect("tempdir");
     let session = CaptureSession::with_backend(
@@ -999,41 +1017,65 @@ fn a_daemon_killed_and_started_again_resumes_the_recording() {
     );
     harness("--start-daemons");
     let back = killed.elapsed();
+    let starts = daemon_starts();
+    // Every notice until a resume that `QUIET` follows.
     let deadline = Instant::now() + Duration::from_secs(30);
-    let gap = loop {
-        match notices.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(CaptureNotice::DeviceResumed { gap_seconds, .. }) => break gap_seconds,
+    let mut gaps = Vec::new();
+    loop {
+        let wait = if gaps.is_empty() {
+            deadline.saturating_duration_since(Instant::now())
+        } else {
+            QUIET
+        };
+        match notices.recv_timeout(wait) {
+            Ok(CaptureNotice::DeviceResumed { gap_seconds, .. }) => {
+                println!(
+                    "resumed {:.2} s after the kill with a {gap_seconds:.2} s gap",
+                    killed.elapsed().as_secs_f64()
+                );
+                gaps.push(gap_seconds);
+            }
             Ok(notice) => println!(
                 "{notice:?} {:.2} s after the kill",
                 killed.elapsed().as_secs_f64()
             ),
+            Err(RecvTimeoutError::Timeout) if !gaps.is_empty() => break,
             Err(error) => panic!("no resume once the daemon is back: {error:?}"),
         }
-    };
+        assert!(Instant::now() < deadline, "the notices end: {gaps:?}");
+    }
     println!(
-        "daemon back {:.2} s after the kill, resumed {:.2} s after it with a {gap:.2} s gap",
-        back.as_secs_f64(),
-        killed.elapsed().as_secs_f64()
+        "daemon back {:.2} s after the kill, {starts} daemon starts, gaps {gaps:?}",
+        back.as_secs_f64()
     );
-    std::thread::sleep(Duration::from_secs(2));
+    // The master ends somewhere within the stop, which a loaded host can
+    // stretch to half a second.
+    let stopping = began.elapsed().as_secs_f64();
     let result = session.stop().expect("the recording");
     let wall = began.elapsed().as_secs_f64();
     let statistics = &result.statistics;
     println!(
-        "the master: {:.3} s against {wall:.3} s of wall time, gap {:.3} s",
+        "the master: {:.3} s against {stopping:.3} to {wall:.3} s of wall time, gap {:.3} s",
         statistics.duration, statistics.gap_seconds
     );
     assert!(!statistics.ended_on_device_loss);
-    assert_eq!(statistics.device_changes, 1);
     assert!(
-        statistics.gap_seconds >= OUTAGE.as_secs_f64()
-            && statistics.gap_seconds <= CaptureSession::MAXIMUM_GAP.as_secs_f64(),
-        "the gap covers the outage: {:.3} s",
-        statistics.gap_seconds
+        (1..=starts).contains(&statistics.device_changes),
+        "at most one rebuild per daemon start: {} for {starts}",
+        statistics.device_changes
     );
     assert!(
-        (wall - statistics.duration).abs() < 0.5,
-        "the master on wall time: {:.3} s against {wall:.3} s",
+        gaps.iter()
+            .all(|gap| *gap <= CaptureSession::MAXIMUM_GAP.as_secs_f64()),
+        "each gap within MAXIMUM_GAP: {gaps:?}"
+    );
+    assert!(
+        gaps.iter().sum::<f64>() >= OUTAGE.as_secs_f64(),
+        "the gaps cover the outage: {gaps:?}"
+    );
+    assert!(
+        statistics.duration > stopping - 0.5 && statistics.duration < wall + 0.5,
+        "the master on wall time: {:.3} s against {stopping:.3} to {wall:.3} s",
         statistics.duration
     );
 }
