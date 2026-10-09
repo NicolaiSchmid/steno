@@ -8,7 +8,7 @@ mod common;
 
 use std::sync::{Arc, Condvar, Mutex};
 
-use steno_host::services::{LoginItem as _, SpeechModels as _};
+use steno_host::services::{LoginItem as _, Preferences as _, SpeechModels as _};
 
 use common::*;
 use serde_json::{Value, json};
@@ -156,6 +156,99 @@ fn a_check_outside_a_command_republishes_the_general_section() {
     assert_eq!(general["updates"]["outcome"], "available");
     assert_eq!(general["updates"]["detail"], "0.12.0");
     assert_eq!(general["subtitle"], "Update available: 0.12.0");
+}
+
+/// The first launch registers the login item once when the setting says
+/// so; a login item the system manages (stable plan X5) is never touched,
+/// and that launch is not counted. Rust only.
+#[test]
+fn the_first_launch_registers_the_login_item_unless_the_system_manages_it() {
+    let seed_launch_at_login = |store: &steno_core::Store, _: &steno_host::fakes::FakeServices| {
+        let mut settings = store.settings().unwrap();
+        settings.launch_at_login = true;
+        store.save_settings(&settings).unwrap();
+    };
+    let harness = Harness::builder().seed(seed_launch_at_login).build();
+    harness.host.register_login_item_on_first_launch();
+    harness.host.register_login_item_on_first_launch();
+    assert_eq!(*harness.fakes.login_item.changes.lock().unwrap(), [true]);
+    assert!(
+        harness
+            .fakes
+            .preferences
+            .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
+    );
+
+    let harness = Harness::builder()
+        .seed(seed_launch_at_login)
+        .seed(|_, fakes| fakes.login_item.set_status(LoginItemStatus::Managed))
+        .build();
+    harness.host.register_login_item_on_first_launch();
+    assert!(harness.fakes.login_item.changes.lock().unwrap().is_empty());
+    assert!(
+        !harness
+            .fakes
+            .preferences
+            .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
+    );
+    assert_eq!(harness.fakes.login_item.status(), LoginItemStatus::Managed);
+}
+
+/// A login item the system manages shows on, with the line that says so,
+/// and the switch changes neither the login item nor the setting. Rust
+/// only (stable plan X5).
+#[test]
+fn a_login_item_the_system_manages_shows_on_and_does_not_switch() {
+    let harness = Harness::builder()
+        .seed(|_, fakes| fakes.login_item.set_status(LoginItemStatus::Managed))
+        .build();
+    let general = harness.snapshot(BridgeTopic::SettingsGeneral);
+    assert_eq!(general["loginItem"], "enabled");
+    assert_eq!(
+        general["loginItemNote"],
+        steno_host::settings::snapshots::MANAGED_LOGIN_ITEM
+    );
+
+    for value in [false, true] {
+        harness
+            .host
+            .settings_general_set_launch_at_login(SetBoolParams { value })
+            .unwrap();
+    }
+    assert!(harness.fakes.login_item.changes.lock().unwrap().is_empty());
+    assert!(!harness.store.settings().unwrap().launch_at_login);
+    let general = harness.snapshot(BridgeTopic::SettingsGeneral);
+    assert_eq!(general["loginItem"], "enabled");
+    assert!(general.get("error").is_none());
+
+    let plain = Harness::builder().build();
+    assert!(
+        plain
+            .snapshot(BridgeTopic::SettingsGeneral)
+            .get("loginItemNote")
+            .is_none()
+    );
+}
+
+/// On a packaged install (stable plan X5) the Updates row says where
+/// updates come from, offers no check, and `updates.check` checks nothing.
+/// Rust only.
+#[test]
+fn a_packaged_install_offers_no_update_check() {
+    let harness = Harness::builder().updates_managed().build();
+    let updates = &harness.snapshot(BridgeTopic::SettingsGeneral)["updates"];
+    assert_eq!(updates["canCheck"], false);
+    assert_eq!(
+        updates["managedNote"],
+        steno_host::settings::snapshots::MANAGED_UPDATES
+    );
+    harness.host.updates_check().unwrap();
+    assert_eq!(*harness.fakes.updater.checks.lock().unwrap(), 0);
+
+    let plain = Harness::builder().build();
+    let updates = &plain.snapshot(BridgeTopic::SettingsGeneral)["updates"];
+    assert_eq!(updates["canCheck"], true);
+    assert!(updates.get("managedNote").is_none());
 }
 
 /// Swift: `testAudioSavesDeviceFolderAndRetention`, `testAudioSwitchingToForeverKeepsRecordingsOnDisk`,

@@ -48,8 +48,14 @@ impl GeneralSettingsViewModel {
         self.login_item.is_on()
     }
 
-    /// The login item and the setting together. Swift: `AppEnvironment.setLaunchAtLogin`.
+    /// The login item and the setting together; neither changes while the
+    /// system manages the login item (`LoginItemStatus::Managed`).
+    /// Swift: `AppEnvironment.setLaunchAtLogin`.
     pub fn set_launch_at_login(&mut self, enabled: bool, store: &Store, services: &Services) {
+        self.login_item = services.login_item.status();
+        if self.login_item == LoginItemStatus::Managed {
+            return;
+        }
         let outcome = services.login_item.set_enabled(enabled).and_then(|()| {
             update_settings(store, |settings| settings.launch_at_login = enabled)?;
             Ok(())

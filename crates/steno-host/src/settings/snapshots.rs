@@ -22,13 +22,30 @@ use super::transcription::{AssetState, SpeechSettingsViewModel};
 use crate::services::{ListenerState, LoginItemStatus, Services, SpeechModels, UpdateOutcome};
 use crate::speech::ModelAsset;
 
-fn login_item(status: LoginItemStatus) -> GeneralLoginItem {
-    match status {
+/// The General section's line under launch at login when the system
+/// manages it (`LoginItemStatus::Managed`). Rust only.
+pub const MANAGED_LOGIN_ITEM: &str =
+    "Your system opens Steno when you log in and manages this setting.";
+/// The Updates row's line on a packaged install (`HostConfig::updates_managed`).
+/// Rust only.
+pub const MANAGED_UPDATES: &str = "Updates come from your package manager.";
+
+/// The contract's login item, and the line under it when the system
+/// manages it: on, which the page shows locked.
+fn login_item(status: LoginItemStatus) -> (GeneralLoginItem, Option<String>) {
+    let item = match status {
         LoginItemStatus::NotRegistered => GeneralLoginItem::NotRegistered,
         LoginItemStatus::Enabled => GeneralLoginItem::Enabled,
         LoginItemStatus::RequiresApproval => GeneralLoginItem::RequiresApproval,
         LoginItemStatus::NotFound => GeneralLoginItem::NotFound,
-    }
+        LoginItemStatus::Managed => {
+            return (
+                GeneralLoginItem::Enabled,
+                Some(MANAGED_LOGIN_ITEM.to_owned()),
+            );
+        }
+    };
+    (item, None)
 }
 
 /// The libraries Steno ships with, for the Acknowledgements dialog; the
@@ -103,7 +120,9 @@ pub fn general(
     services: &Services,
     subtitle: &str,
     version: &str,
+    updates_managed: bool,
 ) -> GeneralSettingsSnapshot {
+    let (login_item, login_item_note) = login_item(general.login_item);
     let (outcome, detail) = match services.updater.last_outcome() {
         UpdateOutcome::NotChecked => (GeneralUpdatesOutcome::NotChecked, None),
         UpdateOutcome::UpToDate => (GeneralUpdatesOutcome::UpToDate, None),
@@ -113,7 +132,8 @@ pub fn general(
     GeneralSettingsSnapshot {
         subtitle: subtitle.to_owned(),
         version: version.to_owned(),
-        login_item: login_item(general.login_item),
+        login_item,
+        login_item_note,
         detection_enabled: general.detection_enabled,
         default_template_id: general.default_template_id.clone(),
         templates: SummaryTemplate::bundled()
@@ -127,12 +147,13 @@ pub fn general(
         calendar_permission: general.calendar_permission,
         requesting_calendar: general.requesting_calendar,
         updates: GeneralUpdates {
-            can_check: services.updater.can_check_for_updates(),
+            can_check: !updates_managed && services.updater.can_check_for_updates(),
             automatically_checks: services.updater.automatically_checks(),
             automatically_downloads: services.updater.automatically_downloads(),
             last_check_at: services.updater.last_check_at(),
             outcome,
             detail,
+            managed_note: updates_managed.then(|| MANAGED_UPDATES.to_owned()),
         },
         acknowledgements: acknowledgements(services.speech_models.as_ref()),
         error: general.errors.error.clone(),

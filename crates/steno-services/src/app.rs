@@ -781,7 +781,9 @@ fn log_operation_failure(event: &MeetingEvent) {
 }
 
 impl App {
-    /// The host over this graph, with the viewer's zone and the version.
+    /// The host over this graph, with the viewer's zone, the version and
+    /// whether a package manager delivers the updates
+    /// ([`updates_are_managed`](crate::updates::updates_are_managed)).
     pub fn host(&self) -> Result<Host, steno_host::host::HostError> {
         Host::new(
             self.store.clone(),
@@ -790,6 +792,7 @@ impl App {
                 version: self.version.clone(),
                 zone: self.zone,
                 platform: steno_bridge::Platform::CURRENT,
+                updates_managed: crate::updates::updates_are_managed(),
             },
         )
     }

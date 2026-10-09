@@ -79,22 +79,28 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
-/// `SMAppService.Status`, spelled without `ServiceManagement`.
-/// Swift: `LoginItemStatus`.
+/// `SMAppService.Status`, spelled without `ServiceManagement`, and
+/// `Managed`. Swift: `LoginItemStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginItemStatus {
     NotRegistered,
     Enabled,
     RequiresApproval,
     NotFound,
+    /// The system starts the app at login and owns the setting: a package
+    /// says so (`STENO_LOGIN_ITEM=managed`, which the NixOS module sets for
+    /// its user service; stable plan X5). The host never registers, changes
+    /// or removes the login item then, and the General section shows it on
+    /// and locked. Rust only.
+    Managed,
 }
 
 impl LoginItemStatus {
     /// What a toggle shows: registered, whether or not the user has
-    /// approved it in System Settings yet.
+    /// approved it in System Settings yet, or started by the system.
     #[must_use]
     pub fn is_on(self) -> bool {
-        matches!(self, Self::Enabled | Self::RequiresApproval)
+        matches!(self, Self::Enabled | Self::RequiresApproval | Self::Managed)
     }
 }
 
