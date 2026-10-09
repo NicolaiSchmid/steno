@@ -1366,8 +1366,10 @@ still has to draw the window side. `[ ]` is not ported yet.
     So a save that outlasts a session manager's or logind's wait still ends, at
     most `SHUTDOWN_PATIENCE` after it began, unless the process is killed first
     (systemd's `SIGKILL` once a stop has waited out the unit's `TimeoutStopSec`,
-    90 s unless the unit sets another, xfce4-session's `SIGKILL` 15 s after its
-    `Stop`, which the shell calls off by unregistering first, or a second SIGTERM).
+    90 s unless the unit sets another, and 5 s for the autostart unit and GNOME's
+    app scope, which the drop-ins of the next item raise to 20 s; xfce4-session's
+    `SIGKILL` 15 s after its `Stop`, which the shell calls off by unregistering
+    first; or a second SIGTERM).
     On KDE Plasma this is the save: ksmserver speaks XSMP to X11 clients, which
     GTK 3 does not, and KWin closes only native Wayland windows at a logout, not
     the shell's, which run under XWayland.
@@ -1391,10 +1393,11 @@ still has to draw the window side. `[ ]` is not ported yet.
     writes with `TimeoutStopSec=5s`. On GNOME the app runs in
     `app-gnome-steno\x2ddesktop-<pid>.scope`, at login and from the dash alike, and
     gnome-session's `app-gnome-.scope.d/override.conf` gives that scope 5 s too.
-    Either way systemd kills the app 5 s after SIGTERM, before a save that needs
-    `SHUTDOWN_PATIENCE` (10 s) plus `EXIT_GRACE` (2 s), and Launch at login is on by
-    default. Two drop-ins in `apps/desktop/src-tauri/linux/` raise the timeout to 20 s:
-    `[Service]` as `10-steno.conf` for the unit, `[Scope]` as `zz-steno.conf` for the
+    Either way systemd's `SIGKILL` follows SIGTERM once the stop has waited out that
+    `TimeoutStopSec`, 5 s, before a save that needs `SHUTDOWN_PATIENCE` (10 s) plus
+    `EXIT_GRACE` (2 s), and Launch at login is on by default. Two drop-ins in
+    `apps/desktop/src-tauri/linux/` raise the timeout to 20 s: `[Service]` as
+    `10-steno.conf` for the unit, `[Scope]` as `zz-steno.conf` for the
     scope, named to sort after `override.conf`. The `.deb` installs both under
     `/usr/lib/systemd/user/`, and its `postinst` (`linux/deb-postinst.sh`) reloads
     every running user manager, so an app autostarted before the upgrade gets them
@@ -3047,9 +3050,9 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   display under Xvfb and headless sway, and real logouts only in xfce4-session 4.20.4
   (X11, and Wayland under labwc); GNOME's logout dialog for the inhibitor is read from
   gnome-session's source only. The writer recognises GDK's lost-display lines by GTK
-  3.24.52's wording; a GTK that rewords them falls back to the unsaved exit. The 5 s stop timeout of an
-  autostarted app under systemd, and of GNOME's app scope, is raised to 20 s by
-  drop-ins (#227, the shutdown items). Where:
+  3.24.52's wording; a GTK that rewords them falls back to the unsaved exit. The 5 s
+  stop timeout of an autostarted app under systemd, and of GNOME's app scope, is raised
+  to 20 s by drop-ins (#227, the shutdown items). Where:
   `apps/desktop/src-tauri/src/session_end.rs`,
   `apps/desktop/src-tauri/src/display_lost.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185, #203, #220.

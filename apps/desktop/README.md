@@ -89,9 +89,10 @@ exits reach the shutdown these ways:
   by GTK 3.24.52's wording; a GTK that rewords them ends the app unsaved
   again. Only a kill ends the save early: systemd's `SIGKILL` once a
   stop has waited out the unit's `TimeoutStopSec` (90 s unless the unit
-  sets another), xfce4-session's `SIGKILL` 15 seconds after it told the
-  app to leave, which the app calls off by unregistering first, or a
-  second SIGTERM.
+  sets another; the autostart unit and GNOME's app scope set 5 s, which
+  Steno's drop-ins raise to 20 s, see below), xfce4-session's `SIGKILL`
+  15 seconds after it told the app to leave, which the app calls off by
+  unregistering first, or a second SIGTERM.
 - While a recording runs the app holds the portal's logout inhibitor
   ("A meeting is being recorded") and releases it when the recording
   stops. GNOME then lists Steno in its logout dialog, also for
@@ -115,8 +116,9 @@ exits reach the shutdown these ways:
   gnome-shell an app from the dash or the app grid, in a scope of its
   own, `app-gnome-steno\x2ddesktop-<pid>.scope`, which gnome-session's
   `app-gnome-.scope.d/override.conf` gives `TimeoutStopSec=5s` too. When
-  the session ends, systemd sends SIGTERM and kills the app 5 s later,
-  while the save may need ten seconds and the process two more to end.
+  the session ends, systemd sends SIGTERM and, once the stop has waited
+  out that `TimeoutStopSec`, `SIGKILL`, while the save may need ten
+  seconds and the process two more to end.
   Two drop-ins raise both timeouts to 20 s (see Launch at login under
   systemd).
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
