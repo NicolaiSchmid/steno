@@ -614,7 +614,7 @@ impl UpdateSchedule {
     /// Installs the kept package while holding the gate; true when the
     /// relaunch is under way.
     async fn install_when_idle(&self) -> bool {
-        let Some(hold) = self.gate.try_hold() else {
+        let Some(_hold) = self.gate.try_hold() else {
             return false;
         };
         let Some(_one) = OneInstall::start(&self.installing) else {
@@ -623,11 +623,9 @@ impl UpdateSchedule {
         let Some(staged) = self.state().staged.take() else {
             return false;
         };
-        let installed = self
-            .install_now(&staged.version, staged.package, None)
-            .await;
-        drop(hold);
-        installed == Installed::Relaunching
+        self.install_now(&staged.version, staged.package, None)
+            .await
+            == Installed::Relaunching
     }
 
     /// Announces the found update unless it was announced or shown in this

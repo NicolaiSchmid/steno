@@ -483,16 +483,15 @@ impl Drop for HeldStarts {
         let Some(recorder) = self.0.upgrade() else {
             return;
         };
-        let cleared = {
-            let mut inner = recorder.inner();
-            inner.start_holds -= 1;
-            let refused = inner.status.error.as_deref() == Some(INSTALLING_UPDATE);
-            let cleared = inner.start_holds == 0 && refused;
-            if cleared {
-                inner.status.error = None;
-            }
-            cleared
-        };
+        let mut inner = recorder.inner();
+        inner.start_holds -= 1;
+        let cleared = inner.start_holds == 0
+            && inner
+                .status
+                .error
+                .take_if(|error| *error == INSTALLING_UPDATE)
+                .is_some();
+        drop(inner);
         if cleared {
             recorder.notify();
         }

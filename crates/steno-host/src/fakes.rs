@@ -434,8 +434,8 @@ impl Drop for FakeStartHold {
         let mut status = lock(&self.status);
         let mut holds = lock(&self.holds);
         *holds -= 1;
-        if *holds == 0 && status.error.as_deref() == Some(INSTALLING_UPDATE) {
-            status.error = None;
+        if *holds == 0 {
+            status.error.take_if(|error| *error == INSTALLING_UPDATE);
         }
     }
 }
