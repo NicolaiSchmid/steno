@@ -2,8 +2,8 @@
 # Arch Linux container, verifies the .deb against the release key, installs
 # it and checks the files (packaging/check-aur.sh). It also runs when the
 # drop-ins in apps/desktop/src-tauri/linux, which the check compares with,
-# the release key or LICENSE change, and weekly, so a package that Arch
-# renames or splits fails here before it fails for users.
+# the release key, LICENSE or SpeexDSP's COPYING change, and weekly, so a
+# package that Arch renames or splits fails here before it fails for users.
 name: AUR CI
 
 on:
@@ -13,6 +13,7 @@ on:
       - 'apps/desktop/src-tauri/linux/**'
       - 'apps/desktop/release-signing-key.asc'
       - 'LICENSE'
+      - 'crates/steno-audio/vendor/speexdsp/COPYING'
       - '.github/workflows/aur-ci.yml'
   push:
     branches: ['main']
@@ -21,6 +22,7 @@ on:
       - 'apps/desktop/src-tauri/linux/**'
       - 'apps/desktop/release-signing-key.asc'
       - 'LICENSE'
+      - 'crates/steno-audio/vendor/speexdsp/COPYING'
       - '.github/workflows/aur-ci.yml'
   schedule:
     - cron: '17 6 * * 1'

@@ -20,6 +20,7 @@ below first.
 | `/usr/share/applications/steno-desktop.desktop`, `/usr/share/icons/hicolor/*/apps/steno-desktop.png` | The `.deb`, unchanged. The entry's `Exec=steno-desktop` finds the wrapper on `PATH` |
 | `/usr/lib/systemd/user/app-steno\x2ddesktop@autostart.service.d/10-steno.conf`, `/usr/lib/systemd/user/app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf` | The stop timeout drop-ins (P5): the `.deb`'s from the first release that contains #227; until then the copies here |
 | `/usr/share/licenses/steno-desktop-bin/LICENSE` | [`LICENSE`](LICENSE), a copy of the repository's |
+| `/usr/share/licenses/steno-desktop-bin/speexdsp-COPYING` | [`speexdsp-COPYING`](speexdsp-COPYING), a copy of `crates/steno-audio/vendor/speexdsp/COPYING`: the binary compiles in SpeexDSP's echo canceller, and its BSD licence asks for the notice with the binary |
 
 There is no install script. Arch's `systemd` package reloads every running
 user manager after any package changes a file under `usr/lib/systemd/user/`
@@ -124,7 +125,7 @@ OpenPGP signatures"), copy the new public key over `keys/pgp/` too.
 and the installed files in a throwaway Arch container (the AUR package job
 in `.github/workflows/aur-ci.yml` runs it on every pull request that touches
 this directory, the drop-ins in `apps/desktop/src-tauri/linux/`, the release
-key or `LICENSE`). From the checkout's root:
+key, `LICENSE` or SpeexDSP's `COPYING`). From the checkout's root:
 
 ```sh
 docker run --rm --cpus=2 --memory=4g -v "$PWD":/src:ro \
@@ -135,7 +136,8 @@ docker run --rm --cpus=2 --memory=4g -v "$PWD":/src:ro \
 
 The AUR repository holds the files `makepkg` needs, flat at its root:
 `PKGBUILD`, `.SRCINFO`, `.gitignore`, every local file in `source=` (today
-`steno-desktop.sh`, the two `.conf` files and `LICENSE`) and `keys/pgp/`,
+`steno-desktop.sh`, the two `.conf` files, `LICENSE` and
+`speexdsp-COPYING`) and `keys/pgp/`,
 the release key. Not this README.
 
 **The first push is by hand** (Nicolai, at gate G3, with a release that
@@ -145,7 +147,7 @@ contains #227 and #261), from an AUR account with an SSH key added under
 ```sh
 git clone ssh://aur@aur.archlinux.org/steno-desktop-bin.git /tmp/aur-steno
 cd /tmp/aur-steno
-cp -r <checkout>/packaging/aur/{PKGBUILD,.SRCINFO,.gitignore,steno-desktop.sh,LICENSE,keys} .
+cp -r <checkout>/packaging/aur/{PKGBUILD,.SRCINFO,.gitignore,steno-desktop.sh,LICENSE,speexdsp-COPYING,keys} .
 cp <checkout>/packaging/aur/*.conf .  # until Bump step 3 deletes them
 git add -A
 git commit -m "steno-desktop-bin 0.11.0-1"

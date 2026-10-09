@@ -9,7 +9,8 @@
 # - .SRCINFO differs from `makepkg --printsrcinfo`;
 # - keys/pgp/ holds another key than apps/desktop/release-signing-key.asc,
 #   validpgpkeys names another fingerprint, or source= lacks the .deb's .asc;
-# - LICENSE differs from the repository's;
+# - LICENSE differs from the repository's, or speexdsp-COPYING from
+#   crates/steno-audio/vendor/speexdsp/COPYING;
 # - the .deb's checksum or its signature from the release key does not
 #   verify, makepkg skipped the signature check, or the package does not
 #   build and install;
@@ -58,7 +59,9 @@ grep -qxF $'\tsource = '"$deb.asc" "$work/.SRCINFO" \
 echo "ok: the PKGBUILD checks the .deb's .asc against the release key $fpr"
 
 cmp -s "$root/LICENSE" "$work/LICENSE" || die "packaging/aur/LICENSE is not the repository's LICENSE"
-echo "ok: LICENSE is the repository's"
+cmp -s "$root/crates/steno-audio/vendor/speexdsp/COPYING" "$work/speexdsp-COPYING" \
+  || die "packaging/aur/speexdsp-COPYING is not crates/steno-audio/vendor/speexdsp/COPYING"
+echo "ok: LICENSE is the repository's, speexdsp-COPYING the vendored SpeexDSP's"
 
 as_builder "gpg --batch --import keys/pgp/$fpr.asc"
 as_builder 'makepkg -si --noconfirm' 2>&1 | tee /tmp/makepkg.log
@@ -82,7 +85,8 @@ for path in \
   '/usr/lib/systemd/user/app-steno\x2ddesktop@autostart.service.d/10-steno.conf' \
   '/usr/lib/systemd/user/app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf' \
   /usr/share/applications/steno-desktop.desktop \
-  /usr/share/licenses/$pkgname/LICENSE; do
+  /usr/share/licenses/$pkgname/LICENSE \
+  /usr/share/licenses/$pkgname/speexdsp-COPYING; do
   grep -qxF "$path" <<<"$files" || die "the package does not install $path"
 done
 [[ -x /usr/lib/steno-desktop/steno-desktop && -x /usr/lib/steno-desktop/steno-speech-sidecar ]] \
