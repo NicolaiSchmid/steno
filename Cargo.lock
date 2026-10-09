@@ -4808,7 +4808,6 @@ dependencies = [
  "steno-pipeline",
  "steno-services",
  "steno-speech",
- "steno-speech-coreml",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

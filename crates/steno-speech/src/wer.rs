@@ -1,15 +1,23 @@
-//! The parity scorer: word error rate of one transcript against another
-//! and the agreement of word start times where the words match. The
-//! normalisation is the spike's (`spikes/coreml-rs/tools/wer.py`): lower
-//! case, every character that is not a letter, digit or underscore
-//! becomes a space, whitespace collapses. The 8.7 % of the spike report
-//! was measured this way, so the numbers stay comparable.
+//! The word error rate of one transcript against another, and the
+//! agreement of word start times where the words match: the FLEURS gate,
+//! the `CoreML` parity harness against the Swift transcripts and the
+//! CLI's `dev bakeoff` all score with it. The normaliser is spike F's
+//! (`spikes/onnx-speech/fleurs/score_fleurs.py`), so the gate is measured
+//! the way the spike table was.
+//! Swift: `Sources/StenoSpeech/Bakeoff/WordErrorRate.swift`, whose
+//! normaliser also folds umlauts.
 
-/// Lower-cased words with punctuation stripped.
+/// Spike F's normaliser: lower case, `%` to `prozent`, `€` to `euro`, `$`
+/// to `dollar`, every run of characters that are not letters or digits a
+/// word boundary.
 #[must_use]
-pub fn normalize(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+pub fn normalise(text: &str) -> Vec<String> {
+    let text = text
+        .to_lowercase()
+        .replace('%', " prozent ")
+        .replace('€', " euro ")
+        .replace('$', " dollar ");
+    text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .map(str::to_owned)
         .collect()
@@ -75,18 +83,23 @@ pub fn align<T: PartialEq>(reference: &[T], hypothesis: &[T]) -> Vec<Edit> {
     edits
 }
 
-/// Edits and reference length of `hypothesis` against `reference`.
+/// The edits of a hypothesis against a reference, and both lengths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WordErrors {
-    /// Levenshtein distance over words.
-    pub edits: usize,
-    /// Words in the reference (Swift) text.
+    pub substitutions: usize,
+    pub deletions: usize,
+    pub insertions: usize,
     pub reference_words: usize,
-    /// Words in the hypothesis (Rust) text.
     pub hypothesis_words: usize,
 }
 
 impl WordErrors {
+    /// The Levenshtein distance over words.
+    #[must_use]
+    pub fn edits(&self) -> usize {
+        self.substitutions + self.deletions + self.insertions
+    }
+
     /// Edits over reference words; `0` for two empty texts, `1` for an
     /// empty reference against a non-empty hypothesis.
     #[must_use]
@@ -94,42 +107,45 @@ impl WordErrors {
         if self.reference_words == 0 {
             return if self.hypothesis_words == 0 { 0.0 } else { 1.0 };
         }
-        // Word counts are far below 2^53.
-        #[allow(clippy::cast_precision_loss)]
-        let rate = self.edits as f64 / self.reference_words as f64;
-        rate
+        self.edits() as f64 / self.reference_words as f64
     }
 
-    /// Add another file's counts.
+    /// Adds another file's counts.
     pub fn add(&mut self, other: WordErrors) {
-        self.edits += other.edits;
+        self.substitutions += other.substitutions;
+        self.deletions += other.deletions;
+        self.insertions += other.insertions;
         self.reference_words += other.reference_words;
         self.hypothesis_words += other.hypothesis_words;
     }
 }
 
-/// Word error rate of `hypothesis` against `reference`, both normalised.
+/// The word errors of `hypothesis` against `reference`, both normalised.
 #[must_use]
 pub fn word_errors(reference: &str, hypothesis: &str) -> WordErrors {
-    let reference = normalize(reference);
-    let hypothesis = normalize(hypothesis);
-    let edits = align(&reference, &hypothesis)
-        .iter()
-        .filter(|edit| !matches!(edit, Edit::Match(..)))
-        .count();
-    WordErrors {
-        edits,
+    let reference = normalise(reference);
+    let hypothesis = normalise(hypothesis);
+    let mut errors = WordErrors {
         reference_words: reference.len(),
         hypothesis_words: hypothesis.len(),
+        ..WordErrors::default()
+    };
+    for edit in align(&reference, &hypothesis) {
+        match edit {
+            Edit::Match(..) => {}
+            Edit::Substitute(..) => errors.substitutions += 1,
+            Edit::Delete(_) => errors.deletions += 1,
+            Edit::Insert(_) => errors.insertions += 1,
+        }
     }
+    errors
 }
 
 /// A word with its start time, the unit the timing comparison aligns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimedText {
-    /// The normalised word.
     pub word: String,
-    /// Start in seconds.
+    /// Seconds.
     pub start: f64,
 }
 
@@ -147,27 +163,25 @@ pub struct TimingAgreement {
 }
 
 impl TimingAgreement {
-    /// Fraction of matched words within 10 ms, `1` when nothing matched.
+    /// The share of matched words within 10 ms, `1` when nothing matched.
     #[must_use]
     pub fn fraction_within_10ms(&self) -> f64 {
         if self.matched == 0 {
             return 1.0;
         }
-        #[allow(clippy::cast_precision_loss)]
-        let fraction = self.within_10ms as f64 / self.matched as f64;
-        fraction
+        self.within_10ms as f64 / self.matched as f64
     }
 }
 
-/// Align the words (one normalised key per word; words that normalise to
-/// nothing are skipped) and compare start times where they match.
+/// Aligns the words (one normalised key per word; words that normalise to
+/// nothing are skipped) and compares start times where they match.
 #[must_use]
 pub fn timing_agreement(reference: &[TimedText], hypothesis: &[TimedText]) -> TimingAgreement {
     fn keyed(words: &[TimedText]) -> Vec<(String, f64)> {
         words
             .iter()
             .filter_map(|word| {
-                let key = normalize(&word.word).join("");
+                let key = normalise(&word.word).join("");
                 (!key.is_empty()).then_some((key, word.start))
             })
             .collect()
@@ -191,9 +205,7 @@ pub fn timing_agreement(reference: &[TimedText], hypothesis: &[TimedText]) -> Ti
         total_abs += delta;
     }
     if agreement.matched > 0 {
-        #[allow(clippy::cast_precision_loss)]
-        let matched = agreement.matched as f64;
-        agreement.mean_abs_seconds = total_abs / matched;
+        agreement.mean_abs_seconds = total_abs / agreement.matched as f64;
     }
     agreement
 }
@@ -203,50 +215,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalisation_matches_the_spike_script() {
+    fn the_normaliser_is_spike_f_s() {
         assert_eq!(
-            normalize("Hallo, Welt! Co-Pilot's 30%"),
-            vec!["hallo", "welt", "co", "pilot", "s", "30"]
+            normalise("Der pH-Wert liegt bei 7, 50% also!"),
+            [
+                "der", "ph", "wert", "liegt", "bei", "7", "50", "prozent", "also"
+            ]
         );
-        assert_eq!(normalize("  Ärger_über  "), vec!["ärger_über"]);
-        assert_eq!(normalize("..."), Vec::<String>::new());
+        assert_eq!(
+            normalise("  Ärger_über 3€ "),
+            ["ärger", "über", "3", "euro"]
+        );
+        assert!(normalise("...").is_empty());
     }
 
     #[test]
-    fn word_errors_count_substitutions_insertions_and_deletions() {
-        let errors = word_errors("the cat sat on the mat", "the cat sits on mat");
-        assert_eq!(errors.edits, 2);
-        assert_eq!(errors.reference_words, 6);
-        assert!((errors.rate() - 2.0 / 6.0).abs() < 1e-12);
+    fn word_errors_count_substitutions_deletions_and_insertions() {
+        let errors = word_errors("eins zwei drei vier", "eins zwo drei");
+        assert_eq!(
+            (
+                errors.edits(),
+                errors.substitutions,
+                errors.deletions,
+                errors.insertions
+            ),
+            (2, 1, 1, 0)
+        );
+        assert!((errors.rate() - 0.5).abs() < 1e-12);
         assert_eq!(word_errors("", "").rate(), 0.0);
         assert_eq!(word_errors("", "x").rate(), 1.0);
-        assert_eq!(word_errors("a b", "").edits, 2);
-        assert_eq!(word_errors("a b", "a x b").edits, 1);
-        assert_eq!(
-            align(&["a", "b"], &["a", "x", "b"]),
-            vec![Edit::Match(0, 0), Edit::Insert(1), Edit::Match(1, 2)]
-        );
+        assert_eq!(word_errors("a b", "a x b").insertions, 1);
         let mut total = WordErrors::default();
         total.add(errors);
         total.add(word_errors("a", "b"));
-        assert_eq!(total.edits, 3);
-        assert_eq!(total.reference_words, 7);
+        assert_eq!((total.edits(), total.reference_words), (3, 5));
     }
 
     #[test]
     fn alignment_pairs_matches_and_names_the_edits() {
-        let edits = align(&["a", "b", "c"], &["a", "x", "c", "d"]);
         assert_eq!(
-            edits,
-            vec![
+            align(&["a", "b", "c"], &["a", "x", "c", "d"]),
+            [
                 Edit::Match(0, 0),
                 Edit::Substitute(1, 1),
                 Edit::Match(2, 2),
                 Edit::Insert(3)
             ]
         );
-        let edits = align(&["a", "b"], &["b"]);
-        assert_eq!(edits, vec![Edit::Delete(0), Edit::Match(1, 0)]);
+        assert_eq!(
+            align(&["a", "b"], &["b"]),
+            [Edit::Delete(0), Edit::Match(1, 0)]
+        );
     }
 
     #[test]
@@ -255,9 +274,8 @@ mod tests {
             word: word.to_owned(),
             start,
         };
-        // "hallo" starts exactly on the inclusive 10 ms edge (plus the
-        // rounding allowance), "gut" 15 ms late (over 10 ms, under 100 ms),
-        // "welt" 50 ms late.
+        // "hallo" on the inclusive 10 ms edge (plus the rounding
+        // allowance), "gut" 15 ms late, "welt" 50 ms late.
         let reference = [
             timed("Hallo", 0.0),
             timed("Welt.", 0.5),

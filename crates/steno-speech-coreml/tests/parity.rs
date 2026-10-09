@@ -7,9 +7,14 @@
 //! ```
 //!
 //! `STENO_CALIBRATION_BASELINE` defaults to `<corpus>/../baseline-bakeoff`;
-//! `STENO_PARITY_MAX_WER` (percent, default 2) is the gate on the mean of
-//! the per-file WERs. Without the corpus variable the test passes and says
-//! so, so `--ignored` runs elsewhere do not fail for the wrong reason.
+//! `STENO_PARITY_MAX_WER` (percent, default 10) is the gate on the mean of
+//! the per-file WERs. The engine runs the shared pipeline, whose windows
+//! are not `FluidAudio`'s, so its text is no longer the Swift app's word for
+//! word: 8.46 % on the corpus when A2 of
+//! `.plans/2026-10-07-stable-promotion.md` landed, from 0.00 % before, while
+//! FLEURS German improved from 5.46 % to 4.87 %. Without the corpus variable
+//! the test passes and says so, so `--ignored` runs elsewhere do not fail
+//! for the wrong reason.
 
 #![cfg(target_os = "macos")]
 
@@ -29,7 +34,7 @@ fn rust_transcripts_match_the_swift_baseline() {
     let max_wer: f64 = std::env::var("STENO_PARITY_MAX_WER")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(2.0);
+        .unwrap_or(10.0);
     let options = Options {
         out: std::env::var_os("STENO_PARITY_OUT").map(PathBuf::from),
         ..Options::default()

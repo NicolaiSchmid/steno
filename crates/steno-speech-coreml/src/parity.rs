@@ -1,16 +1,18 @@
-//! The parity harness: every `<name>.wav` of the calibration corpus
-//! through the pipeline, scored against `<name>.parakeet-v3.json`, the
-//! `RawSegment` array Steno's Swift engine produced for the same file
-//! (`steno bakeoff` output). Reports WER of the Rust text against the
-//! Swift text, word-start agreement where the words match, wall time and
-//! RTFx per file, and the load average around the run, because the
-//! decoder loop is thousands of small CoreML calls whose cost is CPU
-//! scheduling.
+//! The parity harness: every `<name>.wav` of a corpus through the
+//! engine, scored against `<name>.parakeet-v3.json`, the `RawSegment`
+//! array Steno's Swift engine produced for the same file (`steno bakeoff`
+//! output). Reports WER of the Rust text against the Swift text,
+//! word-start agreement where the words match, wall time and RTFx per
+//! file, and the load average around the run, because the decoder loop is
+//! thousands of small CoreML calls whose cost is CPU scheduling.
+//! Swift: `Sources/StenoSpeech/Bakeoff/BakeoffRunner.swift`.
 //!
 //! Manual: `cargo run --release -p steno-speech-coreml --bin
 //! steno-coreml-parity -- ~/steno-spikes/corpus
 //! ~/steno-spikes/baseline-bakeoff` on Forge, or the ignored test in
 //! `tests/parity.rs` with `STENO_CALIBRATION_CORPUS` set.
+//! `crates/steno-speech-coreml/scripts/fleurs-forge.sh` runs it over
+//! FLEURS German against a base revision and scores both.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -18,15 +20,12 @@ use std::process::Command;
 use std::time::Instant;
 
 use steno_core::RawSegment;
+use steno_speech::DecodeStats;
+use steno_speech::wav::read_pcm16;
+use steno_speech::wer::{TimedText, TimingAgreement, WordErrors, timing_agreement, word_errors};
 
 use crate::SpeechError;
-use crate::backend::Backend;
-use crate::chunking::sample_seconds;
-use crate::engine::default_model_directory;
-use crate::pipeline::{Config, Stats, Transcriber};
-use crate::segments::raw_segments;
-use crate::wav::read_mono_16k;
-use crate::wer::{TimedText, TimingAgreement, WordErrors, timing_agreement, word_errors};
+use crate::engine::{CoreMlParakeetEngine, WORKERS, default_model_directory, pipeline_config};
 
 /// How to run the harness.
 #[derive(Debug, Clone)]
@@ -35,8 +34,8 @@ pub struct Options {
     pub models: Option<PathBuf>,
     /// Where to write `<name>.rust.json`; nothing is written when unset.
     pub out: Option<PathBuf>,
-    /// Parallel windows.
-    pub concurrency: usize,
+    /// Chunks decoded at once.
+    pub workers: usize,
 }
 
 impl Default for Options {
@@ -44,7 +43,7 @@ impl Default for Options {
         Options {
             models: None,
             out: None,
-            concurrency: Config::default().concurrency,
+            workers: WORKERS,
         }
     }
 }
@@ -60,8 +59,10 @@ pub struct FileResult {
     pub wall_seconds: f64,
     /// Merged tokens.
     pub tokens: usize,
-    /// Counters and timings of the run.
-    pub stats: Stats,
+    /// Chunks the layout chose.
+    pub chunks: usize,
+    /// Counters of the run.
+    pub stats: DecodeStats,
     /// Word errors of the Rust text against the Swift text.
     pub errors: WordErrors,
     /// Word-start agreement where the text matches.
@@ -89,8 +90,8 @@ pub struct Report {
     pub total: WordErrors,
     /// Time to load the four models and the vocabulary.
     pub model_load_seconds: f64,
-    /// Parallel windows.
-    pub concurrency: usize,
+    /// Chunks decoded at once.
+    pub workers: usize,
     /// `vm.loadavg` before the first file.
     pub load_before: String,
     /// `vm.loadavg` after the last file.
@@ -126,13 +127,13 @@ impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "models loaded in {:.2} s, {} parallel windows, load average before {} after {}",
-            self.model_load_seconds, self.concurrency, self.load_before, self.load_after
+            "models loaded in {:.2} s, {} workers, load average before {} after {}",
+            self.model_load_seconds, self.workers, self.load_before, self.load_after
         )?;
         writeln!(f)?;
         writeln!(
             f,
-            "| File | Audio s | Wall s | RTFx | Windows | Tokens | Recoveries accepted/tried | Repaired tokens/probes | Swift words | Rust words | Edits | WER vs Swift | Starts within 10 ms |"
+            "| File | Audio s | Wall s | RTFx | Chunks | Windows | Tokens | Recoveries accepted/tried | Swift words | Rust words | Edits | WER vs Swift | Starts within 10 ms |"
         )?;
         writeln!(
             f,
@@ -141,20 +142,19 @@ impl fmt::Display for Report {
         for file in &self.files {
             writeln!(
                 f,
-                "| {} | {:.2} | {:.2} | {:.0} | {} | {} | {}/{} | {}/{} | {} | {} | {} | {:.2} % | {}/{} ({:.1} %) |",
+                "| {} | {:.2} | {:.2} | {:.0} | {} | {} | {} | {}/{} | {} | {} | {} | {:.2} % | {}/{} ({:.1} %) |",
                 file.name,
                 file.audio_seconds,
                 file.wall_seconds,
                 file.rtfx(),
+                file.chunks,
                 file.stats.windows,
                 file.tokens,
                 file.stats.recoveries_accepted,
                 file.stats.recoveries_tried,
-                file.stats.repaired_tokens,
-                file.stats.repair_probes,
                 file.errors.reference_words,
                 file.errors.hypothesis_words,
-                file.errors.edits,
+                file.errors.edits(),
                 file.errors.rate() * 100.0,
                 file.timing.within_10ms,
                 file.timing.matched,
@@ -167,7 +167,7 @@ impl fmt::Display for Report {
             self.mean_rtfx(),
             self.total.reference_words,
             self.total.hypothesis_words,
-            self.total.edits,
+            self.total.edits(),
             self.total.rate() * 100.0,
             self.mean_file_wer() * 100.0,
         )
@@ -233,15 +233,8 @@ pub fn run(
         .clone()
         .unwrap_or_else(default_model_directory);
     let load_before = load_average();
-    let backend = Backend::load(&models)?;
-    let model_load_seconds = backend.load_seconds();
-    let transcriber = Transcriber::with_config(
-        backend,
-        Config {
-            concurrency: options.concurrency,
-            ..Config::default()
-        },
-    );
+    let engine = CoreMlParakeetEngine::with_config(&models, pipeline_config(), options.workers);
+    let model_load_seconds = engine.load_seconds()?;
     eprintln!(
         "models loaded from {} in {model_load_seconds:.2} s",
         models.display()
@@ -268,38 +261,40 @@ pub fn run(
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
         let baseline = read_baseline(baseline_dir, &name)?;
-        let audio = read_mono_16k(wav)?;
-        let audio_seconds = sample_seconds(audio.len());
+        let audio = read_pcm16(wav)?;
+        // Corpus files are minutes long; seconds stay far below 2^53.
+        #[allow(clippy::cast_precision_loss)]
+        let audio_seconds = audio.len() as f64 / steno_speech::SAMPLE_RATE as f64;
 
         let started = Instant::now();
-        let transcript = transcriber.transcribe(&audio)?;
+        let transcript = engine.transcribe_samples(&audio, None)?;
         let wall_seconds = started.elapsed().as_secs_f64();
 
-        let tokens = transcript.tokens;
-        let segments = raw_segments(&tokens, transcriber.vocab(), audio_seconds);
-        let errors = word_errors(&joined_text(&baseline), &joined_text(&segments));
-        let timing = timing_agreement(&timed_words(&baseline), &timed_words(&segments));
+        let segments = &transcript.segments;
+        let errors = word_errors(&joined_text(&baseline), &joined_text(segments));
+        let timing = timing_agreement(&timed_words(&baseline), &timed_words(segments));
         total.add(errors);
 
         if let Some(out) = &options.out {
-            let json = serde_json::to_string_pretty(&segments)?;
+            let json = serde_json::to_string_pretty(segments)?;
             std::fs::write(out.join(format!("{name}.rust.json")), json)?;
         }
         let result = FileResult {
             name,
             audio_seconds,
             wall_seconds,
-            tokens: tokens.len(),
+            tokens: transcript.tokens.len(),
+            chunks: transcript.chunks.len(),
             stats: transcript.stats,
             errors,
             timing,
         };
         eprintln!(
-            "{}: {wall_seconds:.2} s, RTFx {:.0}, WER {:.2} %, {} windows, {} tokens",
+            "{}: {wall_seconds:.2} s, RTFx {:.0}, WER {:.2} %, {} chunks, {} tokens",
             result.name,
             result.rtfx(),
             errors.rate() * 100.0,
-            result.stats.windows,
+            result.chunks,
             result.tokens
         );
         files.push(result);
@@ -308,7 +303,7 @@ pub fn run(
         files,
         total,
         model_load_seconds,
-        concurrency: options.concurrency,
+        workers: options.workers,
         load_before,
         load_after: load_average(),
     })

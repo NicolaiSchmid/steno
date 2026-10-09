@@ -1,7 +1,10 @@
-//! `SpeechEngine` over the CoreML pipeline: the Rust twin of
-//! `StenoSpeech.ParakeetEngine` for `parakeet-v3`. Models load on the
-//! first `prepare` (or the first `transcribe`) from the Swift app's model
-//! directory and stay loaded for the engine's lifetime.
+//! `SpeechEngine` over the CoreML models and the shared pipeline:
+//! `steno_speech`'s [`Transcriber`] (the VAD layout, the decode loop, the
+//! merge, the segmentation and the language tagger) over four [`Backend`]
+//! workers. Models load on the first `prepare` (or the first `transcribe`)
+//! from the Swift app's model directory and stay loaded for the engine's
+//! lifetime.
+//! Swift: `Sources/StenoSpeech/Engines/ParakeetEngine.swift`.
 //!
 //! `transcribe` runs the pipeline on the calling thread: it takes seconds
 //! and the boundary is documented as such (`steno_core::protocols`); the
@@ -15,22 +18,43 @@ use std::sync::{Arc, Mutex};
 use steno_core::{
     AudioBuffer16k, BoundaryResult, LanguageTag, RawSegment, SpeechEngine, StenoPaths, async_trait,
 };
+use steno_speech::{
+    AdaptiveEnergyVad, ChunkerConfig, LanguageTagger, PARAKEET_V3_ID, PARAKEET_V3_LANGUAGES,
+    PipelineConfig, Transcriber, Transcript, VadConfig,
+};
 
 use crate::SpeechError;
-use crate::backend::Backend;
-use crate::pipeline::{Config, Transcriber};
-use crate::segments::raw_segments;
+use crate::backend::{Backend, MAX_WINDOW_SAMPLES, Models};
 
-/// The engine id Steno stores in `Settings.speechEngineID`
-/// (`SpeechEngineID.parakeetV3`).
-pub const ENGINE_ID: &str = "parakeet-v3";
+/// The engine id, the ONNX engine's: the same model and setting.
+pub const ENGINE_ID: &str = PARAKEET_V3_ID;
 
-/// The 25 European languages of Parakeet TDT v3 (NVIDIA model card;
-/// `SpeechEngineID.parakeetV3Languages`).
-pub const LANGUAGES: [&str; 25] = [
-    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt",
-    "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
-];
+/// Chunks decoded at once (`ASRConfig.parallelChunkConcurrency`).
+pub const WORKERS: usize = 4;
+
+/// The shared pipeline's defaults with two chunker settings of the
+/// engine's own, measured on FLEURS German `cat/` (A2 in
+/// `.plans/2026-10-07-stable-promotion.md`):
+///
+/// - the clamp is the models' 15 s window;
+/// - no pause is long enough to be skipped: with the energy detector a
+///   chunk that began just before speech after a long pause lost words
+///   (5.86 % mean WER against 5.09 % without the skip), and a quiet
+///   stretch the detector takes for silence is still decoded.
+#[must_use]
+pub fn pipeline_config() -> PipelineConfig {
+    // 240,000 samples is exactly 15 s, so the clamp is the window.
+    #[allow(clippy::cast_precision_loss)]
+    let max_seconds = MAX_WINDOW_SAMPLES as f32 / steno_speech::SAMPLE_RATE as f32;
+    PipelineConfig {
+        chunker: ChunkerConfig {
+            max_seconds,
+            long_pause_seconds: f32::INFINITY,
+            ..ChunkerConfig::default()
+        },
+        ..PipelineConfig::default()
+    }
+}
 
 /// `Models/fluidaudio/parakeet-tdt-0.6b-v3` under the support directory:
 /// where `StenoSpeech.ModelStore` installs the asset the Swift app uses.
@@ -51,16 +75,17 @@ pub fn model_directory(support_directory: &Path) -> PathBuf {
 /// Parakeet TDT v3 on CoreML behind `SpeechEngine`.
 pub struct CoreMlParakeetEngine {
     model_directory: PathBuf,
-    config: Config,
+    config: PipelineConfig,
+    workers: usize,
     languages: BTreeSet<LanguageTag>,
-    transcriber: Mutex<Option<Arc<Transcriber>>>,
+    transcriber: Mutex<Option<Transcriber<Backend>>>,
 }
 
 impl std::fmt::Debug for CoreMlParakeetEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CoreMlParakeetEngine")
             .field("model_directory", &self.model_directory)
-            .field("config", &self.config)
+            .field("workers", &self.workers)
             .field("loaded", &self.is_loaded())
             .finish_non_exhaustive()
     }
@@ -70,18 +95,21 @@ impl CoreMlParakeetEngine {
     /// An engine over the models in `model_directory`; nothing loads yet.
     #[must_use]
     pub fn new(model_directory: impl Into<PathBuf>) -> CoreMlParakeetEngine {
-        CoreMlParakeetEngine::with_config(model_directory, Config::default())
+        CoreMlParakeetEngine::with_config(model_directory, pipeline_config(), WORKERS)
     }
 
+    /// With `config` and `workers` chunks decoded at once (at least one).
     #[must_use]
     pub fn with_config(
         model_directory: impl Into<PathBuf>,
-        config: Config,
+        config: PipelineConfig,
+        workers: usize,
     ) -> CoreMlParakeetEngine {
         CoreMlParakeetEngine {
             model_directory: model_directory.into(),
             config,
-            languages: LANGUAGES
+            workers: workers.max(1),
+            languages: PARAKEET_V3_LANGUAGES
                 .iter()
                 .map(|tag| LanguageTag::from(*tag))
                 .collect(),
@@ -106,39 +134,65 @@ impl CoreMlParakeetEngine {
         self.transcriber.lock().is_ok_and(|t| t.is_some())
     }
 
-    /// The transcriber, loading the models on first use. `loadLocal` in
-    /// Swift never touches the network and neither does this: a missing
-    /// model directory is an error, not a download (the model store owns
-    /// downloads).
-    fn loaded(&self) -> Result<Arc<Transcriber>, SpeechError> {
+    /// Runs `work` on the transcriber, loading the models on first use.
+    /// `loadLocal` in Swift never touches the network and neither does
+    /// this: a missing model directory is an error, not a download (the
+    /// model store owns downloads).
+    fn with_transcriber<T>(
+        &self,
+        work: impl FnOnce(&mut Transcriber<Backend>) -> Result<T, SpeechError>,
+    ) -> Result<T, SpeechError> {
         let mut slot = self
             .transcriber
             .lock()
             .map_err(|_| SpeechError::CoreMl("engine lock poisoned".to_owned()))?;
-        if let Some(transcriber) = slot.as_ref() {
-            return Ok(Arc::clone(transcriber));
+        if slot.is_none() {
+            let models = Arc::new(Models::load(&self.model_directory)?);
+            let vocab = models.vocab().clone();
+            let backend = Backend::new(models);
+            let more = vec![backend.clone(); self.workers - 1];
+            *slot = Some(
+                Transcriber::new(
+                    backend,
+                    vocab,
+                    Box::new(AdaptiveEnergyVad {
+                        config: VadConfig::default(),
+                    }),
+                    LanguageTagger::new(),
+                    self.config.clone(),
+                )
+                .with_workers(more),
+            );
         }
-        let backend = Backend::load(&self.model_directory)?;
-        let transcriber = Arc::new(Transcriber::with_config(backend, self.config));
-        *slot = Some(Arc::clone(&transcriber));
-        Ok(transcriber)
+        let transcriber = slot.as_mut().expect("loaded above");
+        work(transcriber)
+    }
+
+    /// The models' load time; loads them when they are not yet.
+    pub fn load_seconds(&self) -> Result<f64, SpeechError> {
+        self.with_transcriber(|t| Ok(t.backend().models().load_seconds()))
+    }
+
+    /// The whole transcript of 16 kHz mono `samples`, for the harness;
+    /// `hint` steers the language tagger only.
+    pub fn transcribe_samples(
+        &self,
+        samples: &[f32],
+        hint: Option<&LanguageTag>,
+    ) -> Result<Transcript, SpeechError> {
+        self.with_transcriber(|t| Ok(t.transcribe(samples, hint)?))
     }
 
     /// `transcribe` without the trait: the segments for `audio`.
     pub fn transcribe_buffer(
         &self,
         audio: &AudioBuffer16k,
+        hint: Option<&LanguageTag>,
     ) -> Result<Vec<RawSegment>, SpeechError> {
         if audio.is_empty() {
             return Ok(Vec::new());
         }
-        let transcriber = self.loaded()?;
-        let transcript = transcriber.transcribe(&audio.samples)?;
-        Ok(raw_segments(
-            &transcript.tokens,
-            transcriber.vocab(),
-            audio.duration(),
-        ))
+        Ok(self.transcribe_samples(&audio.samples, hint)?.segments)
     }
 }
 
@@ -153,19 +207,20 @@ impl SpeechEngine for CoreMlParakeetEngine {
     }
 
     async fn prepare(&self) -> BoundaryResult<()> {
-        self.loaded()?;
+        self.with_transcriber(|_| Ok(()))?;
         Ok(())
     }
 
     /// `hint` is never sent to the model: Parakeet runs unpinned, as the
     /// Swift engine does (its `Language` parameter only separates Latin
-    /// from Cyrillic script), so Denglish comes out mixed.
+    /// from Cyrillic script), so Denglish comes out mixed. It steers the
+    /// language tagger.
     async fn transcribe(
         &self,
         audio: &AudioBuffer16k,
-        _hint: Option<&LanguageTag>,
+        hint: Option<&LanguageTag>,
     ) -> BoundaryResult<Vec<RawSegment>> {
-        Ok(self.transcribe_buffer(audio)?)
+        Ok(self.transcribe_buffer(audio, hint)?)
     }
 }
 
@@ -187,6 +242,10 @@ mod tests {
         assert_eq!(
             model_directory(Path::new("/tmp/Steno")),
             PathBuf::from("/tmp/Steno/Models/fluidaudio/parakeet-tdt-0.6b-v3")
+        );
+        assert_eq!(
+            steno_speech::sample_count(pipeline_config().chunker.max_seconds),
+            MAX_WINDOW_SAMPLES
         );
     }
 

@@ -91,6 +91,10 @@ pub enum SpeechError {
     /// next call starts a fresh one.
     #[error("speech sidecar: {0}")]
     Sidecar(#[from] SidecarError),
+    /// A backend outside this crate failed (the `CoreML` one); its own
+    /// error says how.
+    #[error(transparent)]
+    Backend(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// How the speech sidecar failed. Every variant but

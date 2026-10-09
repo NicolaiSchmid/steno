@@ -3,13 +3,13 @@
 //! merge, pieces to words to segments, and the language tag. A chunk is a
 //! range the layout chose; a window is the range actually decoded, the
 //! chunk itself or, after a recovery, the chunk with more audio around it.
-//! Generic over [`SpeechBackend`], so a fake backend drives it in tests;
-//! the `CoreML` crate shares the decode loop but not yet this pipeline;
-//! the WP4 notes in the plan list where the two differ.
+//! Generic over [`SpeechBackend`]: the ONNX and the `CoreML` engines run
+//! it, and a fake backend drives it in tests.
 //! Swift: `Sources/StenoSpeech/Engines/ParakeetEngine.swift` and
 //! `ParakeetMapping.swift`, with `FluidAudio`'s `ChunkProcessor` in between.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use steno_core::{LanguageTag, RawSegment, TimedWord};
 
@@ -87,10 +87,15 @@ fn join_words(words: &[TimedWord]) -> String {
         .join(" ")
 }
 
-/// One backend, its vocabulary, a detector and the configuration; owns
-/// everything it needs, so it can move to a worker thread.
+/// One backend or more, the vocabulary, a detector and the configuration;
+/// owns everything it needs, so it can move to a worker thread. With more
+/// than one backend ([`Transcriber::with_workers`]) the chunks decode in
+/// parallel, one backend per thread; the merge sees them in order, so the
+/// transcript does not depend on the number of workers.
 pub struct Transcriber<B: SpeechBackend> {
-    backend: B,
+    /// The first decodes every chunk when it is alone and the probes of
+    /// [`Transcriber::decode_range`].
+    workers: Vec<B>,
     vocab: Vocab,
     vad: Box<dyn VoiceActivityDetector>,
     tagger: LanguageTagger,
@@ -107,7 +112,7 @@ impl<B: SpeechBackend> Transcriber<B> {
         config: PipelineConfig,
     ) -> Self {
         Transcriber {
-            backend,
+            workers: vec![backend],
             vocab,
             vad,
             tagger,
@@ -115,9 +120,26 @@ impl<B: SpeechBackend> Transcriber<B> {
         }
     }
 
+    /// Adds backends that decode chunks in parallel with the first, one
+    /// thread each; `CoreML` runs four, as `FluidAudio` does
+    /// (`parallelChunkConcurrency`). ONNX Runtime spreads one call over
+    /// its own threads, so the ONNX engine runs one.
+    #[must_use]
+    pub fn with_workers(mut self, more: impl IntoIterator<Item = B>) -> Self {
+        self.workers.extend(more);
+        self
+    }
+
+    /// The first backend.
     #[must_use]
     pub fn backend(&self) -> &B {
-        &self.backend
+        &self.workers[0]
+    }
+
+    /// How many chunks decode at once.
+    #[must_use]
+    pub fn workers(&self) -> usize {
+        self.workers.len()
     }
 
     #[must_use]
@@ -140,14 +162,7 @@ impl<B: SpeechBackend> Transcriber<B> {
         let speech = self.vad.speech_regions(samples)?;
         let chunks = layout(samples, &speech, &self.config.chunker);
         let mut stats = DecodeStats::default();
-        let mut windows = Vec::with_capacity(chunks.len());
-        for chunk in &chunks {
-            let mut tokens = self.decode_range(samples, chunk.range.clone(), &mut stats)?;
-            if self.looks_empty(&tokens, &speech, &chunk.range) {
-                tokens = self.recover(samples, &chunk.range, tokens, &mut stats)?;
-            }
-            windows.push(tokens);
-        }
+        let windows = self.decode_chunks(samples, &chunks, &speech, &mut stats)?;
         let tokens = merge_all(
             &windows,
             f64::from(self.config.chunker.overlap_seconds),
@@ -167,8 +182,148 @@ impl<B: SpeechBackend> Transcriber<B> {
         })
     }
 
-    /// Decodes one window of the recording; token frames are absolute.
+    /// Decodes one window of the recording on the first backend; token
+    /// frames are absolute.
     pub fn decode_range(
+        &mut self,
+        samples: &[f32],
+        range: Range<usize>,
+        stats: &mut DecodeStats,
+    ) -> Result<Vec<Token>, SpeechError> {
+        self.chunk_decoder(0).decode_range(samples, range, stats)
+    }
+
+    /// The text of `tokens`, for probes and tests.
+    #[must_use]
+    pub fn render(&self, tokens: &[Token]) -> String {
+        join_words(&TokenAggregator.words(&timed_pieces(tokens, &self.vocab)))
+    }
+
+    fn chunk_decoder(&mut self, worker: usize) -> ChunkDecoder<'_, B> {
+        ChunkDecoder {
+            backend: &mut self.workers[worker],
+            vocab: &self.vocab,
+            config: &self.config,
+        }
+    }
+
+    #[cfg(test)]
+    fn recover(
+        &mut self,
+        samples: &[f32],
+        range: &Range<usize>,
+        original: Vec<Token>,
+        stats: &mut DecodeStats,
+    ) -> Result<Vec<Token>, SpeechError> {
+        self.chunk_decoder(0)
+            .recover(samples, range, original, stats)
+    }
+
+    /// Every chunk's tokens, in chunk order: on the one backend in turn,
+    /// or on every backend at once, each taking the next chunk as it
+    /// finishes one. After an error no worker starts another chunk, and
+    /// the error of the earliest chunk is returned.
+    fn decode_chunks(
+        &mut self,
+        samples: &[f32],
+        chunks: &[Chunk],
+        speech: &[Range<usize>],
+        stats: &mut DecodeStats,
+    ) -> Result<Vec<Vec<Token>>, SpeechError> {
+        if self.workers.len() == 1 || chunks.len() <= 1 {
+            let mut decoder = self.chunk_decoder(0);
+            return chunks
+                .iter()
+                .map(|chunk| decoder.decode_chunk(samples, &chunk.range, speech, stats))
+                .collect();
+        }
+        let (vocab, config) = (&self.vocab, &self.config);
+        let next = AtomicUsize::new(0);
+        let failed = AtomicBool::new(false);
+        let mut slots: Vec<Option<Result<Vec<Token>, SpeechError>>> =
+            chunks.iter().map(|_| None).collect();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = self
+                .workers
+                .iter_mut()
+                .take(chunks.len())
+                .map(|backend| {
+                    let (next, failed) = (&next, &failed);
+                    scope.spawn(move || {
+                        let mut decoder = ChunkDecoder {
+                            backend,
+                            vocab,
+                            config,
+                        };
+                        let mut stats = DecodeStats::default();
+                        let mut done = Vec::new();
+                        while !failed.load(Ordering::Relaxed) {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(chunk) = chunks.get(index) else {
+                                break;
+                            };
+                            let tokens =
+                                decoder.decode_chunk(samples, &chunk.range, speech, &mut stats);
+                            if tokens.is_err() {
+                                failed.store(true, Ordering::Relaxed);
+                            }
+                            done.push((index, tokens));
+                        }
+                        (done, stats)
+                    })
+                })
+                .collect();
+            for handle in handles {
+                // A worker's panic is the caller's, as on one thread.
+                let (done, worker_stats) = handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                stats.add(&worker_stats);
+                for (index, tokens) in done {
+                    slots[index] = Some(tokens);
+                }
+            }
+        });
+        // Workers take chunks in order and finish every chunk they take,
+        // so without an error every slot is filled.
+        let mut windows = Vec::with_capacity(chunks.len());
+        for slot in slots {
+            match slot {
+                Some(Ok(tokens)) => windows.push(tokens),
+                Some(Err(error)) => return Err(error),
+                None => {}
+            }
+        }
+        Ok(windows)
+    }
+}
+
+/// One backend's view of a transcription: decodes a chunk and, when it
+/// looks empty, retries it with more audio around it.
+struct ChunkDecoder<'a, B: ?Sized> {
+    backend: &'a mut B,
+    vocab: &'a Vocab,
+    config: &'a PipelineConfig,
+}
+
+impl<B: SpeechBackend + ?Sized> ChunkDecoder<'_, B> {
+    /// The chunk's tokens, recovered when the first decode looks empty.
+    fn decode_chunk(
+        &mut self,
+        samples: &[f32],
+        range: &Range<usize>,
+        speech: &[Range<usize>],
+        stats: &mut DecodeStats,
+    ) -> Result<Vec<Token>, SpeechError> {
+        let tokens = self.decode_range(samples, range.clone(), stats)?;
+        if self.looks_empty(&tokens, speech, range) {
+            return self.recover(samples, range, tokens, stats);
+        }
+        Ok(tokens)
+    }
+
+    /// Decodes one window of the recording; token frames are absolute.
+    fn decode_range(
         &mut self,
         samples: &[f32],
         range: Range<usize>,
@@ -178,18 +333,12 @@ impl<B: SpeechBackend> Transcriber<B> {
         let features = self.backend.features(&samples[range.clone()])?;
         let encoded = self.backend.encode(&features)?;
         decode_window(
-            &mut self.backend,
+            &mut *self.backend,
             &encoded,
             range.start / FRAME_SAMPLES,
             &self.config.decoder,
             stats,
         )
-    }
-
-    /// The text of `tokens`, for probes and tests.
-    #[must_use]
-    pub fn render(&self, tokens: &[Token]) -> String {
-        join_words(&TokenAggregator.words(&timed_pieces(tokens, &self.vocab)))
     }
 
     /// Word starts among `tokens` whose frame lies inside `range`, so a
@@ -217,11 +366,11 @@ impl<B: SpeechBackend> Transcriber<B> {
         original: Vec<Token>,
         stats: &mut DecodeStats,
     ) -> Result<Vec<Token>, SpeechError> {
-        let max = sample_count(self.config.chunker.max_seconds);
+        let config = self.config;
+        let max = sample_count(config.chunker.max_seconds);
         let original_words = self.words_inside(&original, range);
         let (mut best, mut best_words) = (original, original_words);
-        let extensions = self.config.recovery.extensions_seconds.clone();
-        for (before, after) in extensions {
+        for &(before, after) in &config.recovery.extensions_seconds {
             let start = range.start.saturating_sub(sample_count(before));
             let end = (range.end + sample_count(after)).min(samples.len());
             if end - start > max || (start == range.start && end == range.end) {
@@ -237,8 +386,8 @@ impl<B: SpeechBackend> Transcriber<B> {
         }
         if best_words > original_words {
             stats.recoveries_accepted += 1;
-            let overlap = sample_count(self.config.chunker.overlap_seconds);
-            keep_chunk_and_overlap(&mut best, range, overlap, &self.vocab);
+            let overlap = sample_count(config.chunker.overlap_seconds);
+            keep_chunk_and_overlap(&mut best, range, overlap, self.vocab);
         }
         Ok(best)
     }
@@ -468,12 +617,13 @@ mod tests {
     }
 
     /// 9 s of speech energy the fake decodes to nothing (piece 0), one word
-    /// at `word_frame`; chunks of about 8 s.
+    /// at `word_frame`; chunks of about 8 s with 1.5 s of overlap.
     fn empty_chunk_fixture(word_frame: usize) -> (PipelineConfig, Vec<f32>) {
         let config = PipelineConfig {
             chunker: ChunkerConfig {
                 target_seconds: 8.0,
                 search_seconds: 1.0,
+                overlap_seconds: 1.5,
                 long_pause_seconds: 100.0,
                 ..ChunkerConfig::default()
             },
@@ -544,6 +694,34 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].frame <= w[1].frame)
         );
+    }
+
+    #[test]
+    fn chunks_decoded_on_several_workers_merge_as_on_one() {
+        let config = PipelineConfig {
+            chunker: ChunkerConfig {
+                target_seconds: 6.0,
+                search_seconds: 1.0,
+                max_seconds: 9.0,
+                ..ChunkerConfig::default()
+            },
+            ..PipelineConfig::default()
+        };
+        let mut samples = vec![0.0f32; 36 * SAMPLE_RATE];
+        for word in 1..=20u32 {
+            let frame = 12 + (word as usize - 1) * 20;
+            overlay(&mut samples, &audio(36.0, frame, &[word, 20 + word]));
+        }
+        fill_noise(&mut samples, SAMPLE_RATE + 1..34 * SAMPLE_RATE);
+        let mut one = transcriber(config.clone(), 0);
+        let alone = one.transcribe(&samples, None).unwrap();
+        let vocab = vocab();
+        let mut three =
+            transcriber(config, 0).with_workers((0..2).map(|_| FrameTokenBackend::new(&vocab, 0)));
+        assert_eq!(three.workers(), 3);
+        let parallel = three.transcribe(&samples, None).unwrap();
+        assert!(alone.chunks.len() >= 4, "{:?}", alone.chunks);
+        assert_eq!(parallel, alone);
     }
 
     #[test]

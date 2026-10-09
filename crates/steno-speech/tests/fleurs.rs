@@ -101,7 +101,7 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
             path.file_stem().unwrap().to_string_lossy(),
             score.reference_words,
             common::normalise(&hypothesis).len(),
-            score.wer() * 100.0,
+            score.rate() * 100.0,
             score.substitutions,
             score.deletions,
             score.insertions,
@@ -110,9 +110,9 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
             transcript.stats.recoveries_tried,
             audio_seconds / wall
         );
-        wers.push(score.wer());
+        wers.push(score.rate());
         total_words += score.reference_words;
-        total_errors += score.errors;
+        total_errors += score.edits();
         subs += score.substitutions;
         dels += score.deletions;
         ins += score.insertions;
@@ -212,9 +212,9 @@ fn fleurs_wer_from_44k1_is_at_most_a_tenth_of_a_point_over_48k() {
             );
             let transcript = transcriber.transcribe(lane, None).unwrap();
             let score = common::score(&reference, &transcript.text());
-            wers[index].push(score.wer());
-            errors[index] += score.errors;
-            row[index] = score.wer();
+            wers[index].push(score.rate());
+            errors[index] += score.edits();
+            row[index] = score.rate();
             file_words = score.reference_words;
         }
         words += file_words;

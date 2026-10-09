@@ -28,8 +28,7 @@ use steno_host::services::SpeechModels;
 use steno_host::speech::ModelAsset;
 use steno_pipeline::{SharedSpeechEngine, WeakSpeechEngine};
 use steno_speech::{
-    LanguageTagger, ModelStore, OnnxSpeechEngine, SidecarConfig, SidecarSpeechEngine,
-    SpeechRuntime, SpeechSettings,
+    ModelStore, OnnxSpeechEngine, SidecarConfig, SidecarSpeechEngine, SpeechRuntime, SpeechSettings,
 };
 
 /// Threads for one ONNX operator; the plan measured at four.
@@ -269,9 +268,7 @@ fn engine_on(runtime: SpeechRuntime, setup: &SpeechSetup) -> Arc<dyn SpeechEngin
             let coreml = steno_speech_coreml::CoreMlParakeetEngine::new(coreml_model_directory(
                 &setup.models_directory,
             ));
-            return Arc::new(LanguageTaggingEngine::new(Arc::new(OneCallAtATime::new(
-                Arc::new(coreml),
-            ))));
+            return Arc::new(OneCallAtATime::new(Arc::new(coreml)));
         }
     }
     let _ = runtime;
@@ -460,54 +457,6 @@ async fn off_the_workers<T>(future: impl std::future::Future<Output = T>) -> T {
             tokio::task::block_in_place(|| handle.block_on(future))
         }
         _ => future.await,
-    }
-}
-
-/// An engine whose segments come back without a language, with
-/// `steno_speech`'s tagger run over them, so the meeting's language is
-/// elected the way the ONNX path elects it. The `CoreML` backend writes
-/// `language: None`; Swift tagged after the engine the same way
-/// (`Sources/StenoSpeech/Engines/ParakeetMapping.swift`).
-pub struct LanguageTaggingEngine {
-    inner: Arc<dyn SpeechEngine>,
-    tagger: LanguageTagger,
-}
-
-impl LanguageTaggingEngine {
-    #[must_use]
-    pub fn new(inner: Arc<dyn SpeechEngine>) -> Self {
-        LanguageTaggingEngine {
-            inner,
-            tagger: LanguageTagger::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl SpeechEngine for LanguageTaggingEngine {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-
-    fn supported_languages(&self) -> &BTreeSet<LanguageTag> {
-        self.inner.supported_languages()
-    }
-
-    async fn prepare(&self) -> BoundaryResult<()> {
-        self.inner.prepare().await
-    }
-
-    async fn transcribe(
-        &self,
-        audio: &AudioBuffer16k,
-        hint: Option<&LanguageTag>,
-    ) -> BoundaryResult<Vec<RawSegment>> {
-        let segments = self.inner.transcribe(audio, hint).await?;
-        Ok(self.tagger.tag(segments, hint))
-    }
-
-    async fn release(&self) -> BoundaryResult<()> {
-        self.inner.release().await
     }
 }
 
@@ -1615,34 +1564,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn the_tagging_engine_fills_in_the_language_an_engine_left_out() {
-        let inner = Arc::new(FakeSpeechEngine {
-            language: None,
-            text_prefix: "the quick brown fox jumps over the lazy dog and".to_owned(),
-            ..FakeSpeechEngine::default()
-        });
-        let engine = LanguageTaggingEngine::new(inner.clone());
-        assert_eq!(engine.id(), inner.id());
-        let audio = AudioBuffer16k::new(vec![0.0; 16_000 * 3]);
-        let segments = engine.transcribe(&audio, None).await.unwrap();
-        assert_eq!(segments.len(), 3);
-        assert!(
-            segments
-                .iter()
-                .all(|segment| segment.language.as_ref().map(LanguageTag::as_str) == Some("en")),
-            "{segments:?}"
-        );
-        let hinted = engine.transcribe(&audio, Some(&"de".into())).await.unwrap();
-        assert!(hinted.iter().all(|segment| segment.language.is_some()));
-    }
-
     /// The pipeline releases the engine it holds, which on the Mac is the
-    /// `CoreML` engine inside both wrappers: each passes the call on.
+    /// `CoreML` engine inside the wrapper: it passes the call on.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_wrappers_pass_a_release_on_to_the_engine_they_wrap() {
+    async fn the_wrapper_passes_a_release_on_to_the_engine_it_wraps() {
         let inner = Arc::new(FakeSpeechEngine::default());
-        let engine = LanguageTaggingEngine::new(Arc::new(OneCallAtATime::new(inner.clone())));
+        let engine = OneCallAtATime::new(inner.clone());
         engine.release().await.unwrap();
         assert_eq!(inner.releases.count(), 1);
     }

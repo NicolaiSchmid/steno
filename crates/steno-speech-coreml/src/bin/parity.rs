@@ -2,7 +2,7 @@
 //! pipeline, scored against the Swift app's transcripts.
 //!
 //! ```text
-//! steno-coreml-parity [--models DIR] [--out DIR] [--concurrency N] <corpus-dir> <baseline-dir>
+//! steno-coreml-parity [--models DIR] [--out DIR] [--workers N] <corpus-dir> <baseline-dir>
 //! ```
 //!
 //! `corpus-dir` holds `<name>.wav` (16 kHz mono), `baseline-dir` holds
@@ -19,7 +19,7 @@ fn main() {
 
     use steno_speech_coreml::parity::{Options, run};
 
-    const USAGE: &str = "usage: steno-coreml-parity [--models DIR] [--out DIR] [--concurrency N] <corpus-dir> <baseline-dir>";
+    const USAGE: &str = "usage: steno-coreml-parity [--models DIR] [--out DIR] [--workers N] <corpus-dir> <baseline-dir>";
 
     fn usage() -> ! {
         eprintln!("{USAGE}");
@@ -37,8 +37,8 @@ fn main() {
             }
             "--models" => options.models = Some(args.next().map_or_else(|| usage(), PathBuf::from)),
             "--out" => options.out = Some(args.next().map_or_else(|| usage(), PathBuf::from)),
-            "--concurrency" => {
-                options.concurrency = args
+            "--workers" => {
+                options.workers = args
                     .next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(|| usage());

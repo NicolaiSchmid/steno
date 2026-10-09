@@ -31,9 +31,6 @@ steno-llm = { path = "../steno-llm" }
 steno-pipeline = { path = "../steno-pipeline" }
 steno-services = { path = "../steno-services" }
 steno-speech = { path = "../steno-speech" }
-# On every platform, unlike the services crate: `dev bakeoff` scores with its
-# platform-independent `wer` module; the CoreML half compiles on macOS only.
-steno-speech-coreml = { path = "../steno-speech-coreml" }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 uuid.workspace = true
