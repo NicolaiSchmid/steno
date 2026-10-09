@@ -3,8 +3,6 @@
 //! sources are the Mac's (`DefaultsCommand`, `LoginKeychain`); off the Mac
 //! nothing implements them, as nothing is imported there.
 
-use std::fmt;
-
 /// The Swift app's `UserDefaults` domain.
 pub trait SwiftDefaults: Send + Sync {
     /// The domain as a property list, in any of the formats the `plist`
@@ -59,22 +57,13 @@ pub enum ApiKeyItem {
 
 /// A keychain read that did not happen: the user chose Deny, or the item
 /// could not be read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{}{}", if *.denied { "denied: " } else { "" }, .detail)]
 pub struct KeychainRefusal {
     /// The user, or a disabled prompt, refused it.
     pub denied: bool,
     /// What failed, for the log.
     pub detail: String,
-}
-
-impl fmt::Display for KeychainRefusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.denied {
-            write!(f, "denied ({})", self.detail)
-        } else {
-            f.write_str(&self.detail)
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -223,10 +212,7 @@ mod mac {
 
     impl SwiftKeychain for LoginKeychain {
         fn swift_certificate(&self) -> Result<Option<Vec<u8>>, String> {
-            Ok(self
-                .certificates()?
-                .first()
-                .map(SecCertificate::to_der))
+            Ok(self.certificates()?.first().map(SecCertificate::to_der))
         }
 
         fn api_key_item(&self) -> Result<ApiKeyItem, String> {

@@ -4,11 +4,12 @@
 //! identifier, so it reads the Swift app's defaults domain by name and asks
 //! macOS, once per keychain item, for what the Swift app stored there.
 //!
-//! A *desktop-id build* below is a build of this app under the desktop
-//! identifier (D5 of `.plans/2026-10-07-stable-promotion.md`) that ran on
-//! this Mac before the update, for example a release candidate: it files
-//! its keychain entries under the same service and accounts as the Swift
-//! app, but macOS lists that build, not this one, on their access lists.
+//! A *desktop-id build* below is a build of this app under the beta's
+//! identifier, `uno.schmid.steno.desktop` (D5 of
+//! `.plans/2026-10-07-stable-promotion.md`), that ran on this Mac before
+//! the update: it filed its keychain entries under the same service and
+//! accounts as the Swift app, and macOS lists that build, not this one, on
+//! their access lists.
 //!
 //! Two halves, both macOS only in the product (the logic is
 //! platform-independent and tested everywhere over fakes):
@@ -76,20 +77,23 @@ use steno_host::services::{Preferences as _, SwiftImport, SwiftImportStage, Swif
 use tokio::sync::watch;
 
 pub use identity::{ImportedIdentityError, decode_pkcs12, store_imported_identity};
+pub use sources::{ApiKeyItem, KeychainRefusal, SwiftDefaults, SwiftKeychain};
 #[cfg(target_os = "macos")]
 pub use sources::{DefaultsCommand, LoginKeychain};
-pub use sources::{ApiKeyItem, KeychainRefusal, SwiftDefaults, SwiftKeychain};
 
 use crate::block_on;
 use crate::platform::FilePreferences;
 
-/// The Swift app's bundle identifier, its `UserDefaults` domain.
+/// The Swift app's bundle identifier, its `UserDefaults` domain. Swift:
+/// `PRODUCT_BUNDLE_IDENTIFIER` in `apps/macos/project.yml`.
 pub const SWIFT_DEFAULTS_DOMAIN: &str = "uno.schmid.steno.mac";
-/// The label of the Swift handover certificate and key
-/// (`IdentityKeychain.defaultLabel`).
+/// The label of the Swift handover certificate and key. Swift:
+/// `IdentityKeychain.defaultLabel` in
+/// `Sources/StenoHandover/Identity/IdentityKeychain.swift`.
 pub const SWIFT_IDENTITY_LABEL: &str = "Steno handover identity";
-/// The label the Swift app gives the API key item (`Steno <key>`,
-/// `KeychainSecretStore`); the `keyring` crate sets none.
+/// The label the Swift app gives the API key item, `Steno <key>`; the
+/// `keyring` crate sets none. Swift: `KeychainSecretStore` in
+/// `apps/macos/Steno/Services/KeychainSecretStore.swift`.
 pub const SWIFT_API_KEY_LABEL: &str = "Steno llm-api-key";
 /// Set once the import is over: the identity came over, or there was none.
 pub const IMPORT_RAN_KEY: &str = "steno.swiftImportRan";
@@ -107,7 +111,10 @@ pub const AUTOMATIC_CHECKS_KEY: &str = "steno.updates.automaticChecks";
 /// Sparkle's `SUAutomaticallyUpdate`, for the updater's schedule (S4).
 pub const AUTOMATIC_DOWNLOAD_KEY: &str = "steno.updates.automaticDownload";
 
-/// The Swift domain's keys the launch half copies, and where to.
+/// The Swift domain's keys the launch half copies, and where to. Swift:
+/// `OnboardingViewModel.onboardingCompletedKey` in
+/// `apps/macos/Steno/Onboarding/OnboardingViewModel.swift`; Sparkle writes
+/// its two keys itself (`apps/macos/Steno/Services/UpdaterController.swift`).
 const COPIED: [(&str, &str); 3] = [
     (
         OnboardingViewModel::COMPLETED_KEY,
@@ -352,6 +359,15 @@ pub enum HandoverGate {
     Waiting(WaitReason),
 }
 
+impl HandoverGate {
+    /// Whether the listener may be built: only once the identity is in
+    /// place, never while the step is pending or waits.
+    #[must_use]
+    pub fn opens_listener(self) -> bool {
+        self == HandoverGate::Ready
+    }
+}
+
 /// Why the handover waits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitReason {
@@ -359,8 +375,9 @@ pub enum WaitReason {
     ImportDenied,
 }
 
-/// What the step lets through to the API key reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the step lets through to the API key reads. Its `Debug` leaves
+/// the key out.
+#[derive(Clone, PartialEq, Eq)]
 enum KeyGate {
     /// Nothing: every read answers no key.
     Closed,
@@ -369,6 +386,17 @@ enum KeyGate {
     Read(Option<String>),
     /// The secret store answers.
     Open,
+}
+
+impl std::fmt::Debug for KeyGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeyGate::Closed => f.write_str("Closed"),
+            KeyGate::Read(None) => f.write_str("Read(None)"),
+            KeyGate::Read(Some(_)) => f.write_str("Read(Some(<redacted>))"),
+            KeyGate::Open => f.write_str("Open"),
+        }
+    }
 }
 
 /// The shared state of a pending import: the handover gate and the key
@@ -538,7 +566,7 @@ impl GraphImport {
                 stage: SwiftImportStage::Pending,
                 items: self.items,
                 bundle: None,
-                failure: None,
+                error: None,
             }),
             running: Mutex::new(()),
         }
@@ -563,7 +591,7 @@ struct StepState {
     /// The decoded identity a failed store left, so Try again repeats the
     /// store alone, without a second export prompt.
     bundle: Option<String>,
-    failure: Option<&'static str>,
+    error: Option<&'static str>,
 }
 
 /// The onboarding step's half of the import (module doc).
@@ -678,7 +706,7 @@ impl SwiftImport for ImportStep {
                 + u8::from(items.other_key)
                 + u8::from(state.bundle.is_none())
                 + u8::from(items.replaces_identity),
-            failure: state.failure.map(str::to_owned),
+            error: state.error.map(str::to_owned),
         }
     }
 
@@ -700,17 +728,17 @@ impl SwiftImport for ImportStep {
             let other_key = std::mem::take(&mut self.state().items.other_key);
             self.open_key(other_key);
         }
-        let failure = self.import_identity().err();
+        let error = self.import_identity().err();
         {
             let mut state = self.state();
-            state.stage = if failure.is_none() {
+            state.stage = if error.is_none() {
                 SwiftImportStage::Done
             } else {
                 SwiftImportStage::Waiting
             };
-            state.failure = failure;
+            state.error = error;
         }
-        if failure.is_none() {
+        if error.is_none() {
             self.preferences.set_flag(IMPORT_RAN_KEY, true);
             self.gate.set_handover(HandoverGate::Ready);
         } else {

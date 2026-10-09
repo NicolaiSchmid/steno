@@ -155,10 +155,7 @@ impl SwiftKeychain for FakeKeychain {
         passphrase: &str,
     ) -> Result<Vec<u8>, KeychainRefusal> {
         self.calls.lock().unwrap().push("export");
-        self.exported
-            .lock()
-            .unwrap()
-            .push(certificate_der.to_vec());
+        self.exported.lock().unwrap().push(certificate_der.to_vec());
         match self.export_refusal.lock().unwrap().clone() {
             Some(refusal) => Err(refusal),
             None => Ok(identity_pkcs12(passphrase)),
@@ -270,7 +267,7 @@ fn without_a_swift_certificate_the_import_is_over_at_launch_and_a_second_launch_
     assert!(preferences.flag(OnboardingViewModel::COMPLETED_KEY));
 
     // The next launch: the import ran, so nothing is read or written,
-    // even with a certificate now in the keychain and the flag removed.
+    // even with a certificate now in the keychain.
     *keychain.certificate.lock().unwrap() = Some(identity_der());
     keychain.calls.lock().unwrap().clear();
     let fresh = Arc::new(FilePreferences::in_support_directory(dir.path()));
@@ -480,7 +477,7 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
     );
     let status = step.import.run();
     assert_eq!(status.stage, SwiftImportStage::Done);
-    assert_eq!(status.failure, None);
+    assert_eq!(status.error, None);
     assert_eq!(
         step.keychain.calls(),
         [
@@ -524,7 +521,7 @@ fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_agai
         step.keychain.deny_export();
         let status = step.import.run();
         assert_eq!(status.stage, SwiftImportStage::Waiting);
-        assert_eq!(status.failure.as_deref(), Some(DENIED_EXPORT));
+        assert_eq!(status.error.as_deref(), Some(DENIED_EXPORT));
         assert_eq!(
             read(&*step.raw, &HandoverIdentity::secret_key()),
             before,
@@ -583,8 +580,14 @@ fn a_desktop_id_key_and_identity_count_as_prompts_and_not_now_reads_neither() {
     );
     assert!(!step.keychain.calls().contains(&"read key"));
     assert_eq!(step.import.run().stage, SwiftImportStage::Done);
-    assert!(!step.keychain.calls().contains(&"read key"), "not the Swift key");
-    assert_eq!(read(&*step.graph.secrets, &key).as_deref(), Some("sk-swift"));
+    assert!(
+        !step.keychain.calls().contains(&"read key"),
+        "not the Swift key"
+    );
+    assert_eq!(
+        read(&*step.graph.secrets, &key).as_deref(),
+        Some("sk-swift")
+    );
 }
 
 /// A store that fails while it replaces a stored entry reads as that
@@ -604,7 +607,7 @@ fn a_refused_replace_counts_as_denied_and_try_again_repeats_only_the_store() {
         } else {
             FAILED_EXPORT
         };
-        assert_eq!(status.failure.as_deref(), Some(expected));
+        assert_eq!(status.error.as_deref(), Some(expected));
         assert_eq!(
             status.prompts,
             u8::from(existing.is_some()),
@@ -658,7 +661,7 @@ fn an_export_of_another_certificate_is_refused() {
     *step.keychain.certificate.lock().unwrap() = Some(other.certificate_der().to_vec());
     let status = step.import.run();
     assert_eq!(status.stage, SwiftImportStage::Waiting);
-    assert_eq!(status.failure.as_deref(), Some(FAILED_EXPORT));
+    assert_eq!(status.error.as_deref(), Some(FAILED_EXPORT));
     assert_eq!(read(&*step.raw, &HandoverIdentity::secret_key()), None);
 }
 
@@ -691,6 +694,16 @@ fn a_denied_key_read_leaves_the_key_empty_and_the_identity_still_comes_over() {
     );
 }
 
+/// The gate's `Debug` never prints the key the step read.
+#[test]
+fn the_gate_s_debug_leaves_the_key_out() {
+    let step = step(FakeKeychain::swift_app(), None);
+    step.import.run();
+    let printed = format!("{:?}", step.graph.gate);
+    assert!(printed.contains("Read(Some(<redacted>))"), "{printed}");
+    assert!(!printed.contains("sk-swift"), "{printed}");
+}
+
 /// While the gate hides the key (before the step, after Not now), a
 /// cleared key field or a keyless preset saves no key: the write never
 /// reaches the store, so the Swift app's item stays, and the gate stays
@@ -719,7 +732,10 @@ fn a_gated_empty_key_write_leaves_the_stored_key_in_place() {
     }
     write(Some("sk-typed"));
     assert_eq!(read(&*step.raw, &key).as_deref(), Some("sk-typed"));
-    assert_eq!(read(&*step.graph.secrets, &key).as_deref(), Some("sk-typed"));
+    assert_eq!(
+        read(&*step.graph.secrets, &key).as_deref(),
+        Some("sk-typed")
+    );
     // Open now: a cleared field removes the key, as without an import.
     write(None);
     assert_eq!(read(&*step.raw, &key), None);
@@ -759,13 +775,16 @@ fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
     assert_eq!(read(&*graph.secrets, &key), None);
     let step = graph.step(RUNTIME.handle().clone(), Box::new(|| {}));
     assert_eq!(step.status().prompts, 1, "the identity alone");
-    assert_eq!(
-        step.run().stage,
-        SwiftImportStage::Done
-    );
+    assert_eq!(step.run().stage, SwiftImportStage::Done);
     assert_eq!(read(&*graph.secrets, &key), None);
     assert!(
-        first.raw.reads.lock().unwrap().iter().all(|read| read != SecretKey::LLM_API_KEY),
+        first
+            .raw
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|read| read != SecretKey::LLM_API_KEY),
         "the keychain was asked for the key"
     );
     assert!(!keychain.calls().contains(&"read key"));
@@ -774,11 +793,19 @@ fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
     let over = key_denied_secrets(&first.preferences, first.raw.clone());
     assert_eq!(read(&*over, &key), None);
     assert!(
-        first.raw.reads.lock().unwrap().iter().all(|read| read != SecretKey::LLM_API_KEY),
+        first
+            .raw
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|read| read != SecretKey::LLM_API_KEY),
         "the keychain was asked for the key"
     );
     // ...until the user saves one, which clears the flag for good.
-    RUNTIME.block_on(over.set_secret(&key, Some("sk-new"))).unwrap();
+    RUNTIME
+        .block_on(over.set_secret(&key, Some("sk-new")))
+        .unwrap();
     assert_eq!(read(&*over, &key).as_deref(), Some("sk-new"));
     assert!(!first.preferences.flag(KEY_DENIED_KEY));
     assert_flags_only(first.dir.path());
@@ -795,7 +822,9 @@ async fn a_graph_after_a_refused_key_read_reads_no_key() {
     std::fs::create_dir_all(&paths.support_directory).unwrap();
     std::fs::write(
         paths.support_directory.join("preferences.json"),
-        format!(r#"{{"{IMPORT_RAN_KEY}": true, "{KEY_READ_KEY}": true, "{KEY_DENIED_KEY}": true}}"#),
+        format!(
+            r#"{{"{IMPORT_RAN_KEY}": true, "{KEY_READ_KEY}": true, "{KEY_DENIED_KEY}": true}}"#
+        ),
     )
     .unwrap();
     let file = crate::FileSecretStore::new(
@@ -806,7 +835,10 @@ async fn a_graph_after_a_refused_key_read_reads_no_key() {
     file.set_secret(&key, Some("sk-swift")).await.unwrap();
     let app = crate::build(test_options(paths)).unwrap();
     assert_eq!(app.secrets.secret(&key).await.unwrap(), None);
-    assert_eq!(file.secret(&key).await.unwrap().as_deref(), Some("sk-swift"));
+    assert_eq!(
+        file.secret(&key).await.unwrap().as_deref(),
+        Some("sk-swift")
+    );
     app.shutdown();
 }
 
@@ -945,6 +977,54 @@ async fn a_graph_over_a_pending_import_reads_no_key_and_binds_no_listener_until_
     app.shutdown();
 }
 
+/// After a denied export the gate waits: the gated listener stays closed
+/// and no identity is minted, though no phone is paired, until Try again
+/// brings the Swift identity over; then the listener opens on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_waiting_gate_keeps_the_listener_closed_until_the_identity_came_over() {
+    use std::task::{Context, Poll, Waker};
+    use steno_host::services::Handover as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+    let secrets_path = paths.support_directory.join("secrets.json");
+    let keychain = Arc::new(FakeKeychain::swift_app());
+    keychain.deny_export();
+    let app = build_over(paths, keychain.clone());
+    let step = app.services.swift_import.clone().unwrap();
+    let run = || {
+        let step = step.clone();
+        tokio::task::spawn_blocking(move || step.run())
+    };
+    assert_eq!(run().await.unwrap().stage, SwiftImportStage::Waiting);
+
+    let gated = app.gated_handover.clone().unwrap();
+    let (opened, was_opened) = tokio::sync::oneshot::channel();
+    let mut follow = std::pin::pin!(gated.clone().follow(move || {
+        let _ = opened.send(());
+    }));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(follow.as_mut().poll(&mut context) == Poll::Pending);
+    assert!(gated.service().is_none(), "no listener while waiting");
+    assert!(
+        !std::fs::read_to_string(&secrets_path)
+            .unwrap_or_default()
+            .contains(HandoverIdentity::SECRET_KEY),
+        "no identity minted"
+    );
+
+    keychain.allow_export();
+    assert_eq!(run().await.unwrap().stage, SwiftImportStage::Done);
+    follow.await;
+    was_opened.await.unwrap();
+    assert_eq!(
+        gated.mac_id(),
+        "FCF0D2A1-D2CE-48F7-BAFF-E17FD2E9C814",
+        "the listener is over the Swift identity"
+    );
+    app.shutdown();
+}
+
 /// A paired phone proves that an identity existed: with `preferences.json`
 /// gone, the Swift certificate gone before the step and the stored
 /// identity missing or unreadable, the gate opens but no listener is built
@@ -984,8 +1064,12 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
             "nothing left to import"
         );
         let gated = app.gated_handover.clone().unwrap();
-        gated.clone().follow(|| panic!("no listener opens")).await;
+        let mut failure = gated.failure();
+        let follow = tokio::spawn(gated.clone().follow(|| panic!("no listener opens")));
+        failure.wait_for(Option::is_some).await.unwrap();
         assert!(gated.service().is_none(), "unreadable: {unreadable}");
+        assert!(!follow.is_finished(), "follow waits for the next ready");
+        follow.abort();
         let secrets = std::fs::read(&secrets_path).unwrap_or_default();
         assert!(
             !String::from_utf8_lossy(&secrets).contains(HandoverIdentity::SECRET_KEY),

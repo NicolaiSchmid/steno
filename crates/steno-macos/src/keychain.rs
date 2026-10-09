@@ -295,3 +295,33 @@ pub mod fixture {
         KeychainError::check("SecKeychainDelete", status)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::KeychainError;
+
+    /// Deny, a wrong password and a prompt that could not come up read as
+    /// a refusal (the step's Try again, then Always Allow); any other
+    /// status as an item that could not be used.
+    #[test]
+    fn only_a_refused_prompt_is_denied() {
+        let error = |status| KeychainError {
+            call: "SecItemExport",
+            status,
+        };
+        for status in [
+            KeychainError::USER_CANCELED,
+            KeychainError::AUTH_FAILED,
+            KeychainError::INTERACTION_NOT_ALLOWED,
+        ] {
+            assert!(error(status).is_denied(), "{status}");
+        }
+        for status in [
+            security_framework_sys::base::errSecItemNotFound,
+            security_framework_sys::base::errSecParam,
+            -1,
+        ] {
+            assert!(!error(status).is_denied(), "{status}");
+        }
+    }
+}

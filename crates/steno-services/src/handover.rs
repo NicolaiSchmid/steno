@@ -259,7 +259,7 @@ impl Handover for ListenerHandover {
 }
 
 /// What `start` and `revoke` answer while the import waits.
-pub const WAITING_FOR_IMPORT: &str = "Phone handover waits until Steno has brought over this Mac's phone pairing from the previous Steno app.";
+pub const WAITING_FOR_IMPORT: &str = "Phones can upload again once Steno has brought over this Mac's phone pairing from the previous version.";
 
 /// The host's `Handover` while the Swift import is pending
 /// (`crate::swift_import`): no listener and no identity read until the
@@ -272,6 +272,8 @@ pub struct GatedHandover {
     gate: tokio::sync::watch::Receiver<HandoverGate>,
     make: MakeListener,
     listener: std::sync::OnceLock<Arc<ListenerHandover>>,
+    /// Why the last build failed, until one succeeds.
+    failure: tokio::sync::watch::Sender<Option<String>>,
 }
 
 /// Builds the listener once the gate opened: loads the identity the
@@ -290,40 +292,58 @@ impl GatedHandover {
             gate,
             make,
             listener: std::sync::OnceLock::new(),
+            failure: tokio::sync::watch::Sender::new(None),
         }
+    }
+
+    /// Why the last build of the listener failed (a guard refused to
+    /// mint), `None` before the first build and once one succeeded.
+    #[must_use]
+    pub fn failure(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.failure.subscribe()
     }
 
     /// Waits for the gate to say [`HandoverGate::Ready`], then builds the
     /// listener, starts it when a phone is paired (as the launch does) and
     /// calls `changed`. Never builds a listener while the gate waits, so
     /// no identity is read or minted before the import put one in place.
+    /// A build that fails (a guard refused to mint) waits for the gate to
+    /// say ready again and builds again, so whatever puts the identity in
+    /// place opens the listener by setting the gate once more. Returns once
+    /// the listener is open, or when the gate is gone.
     pub async fn follow(self: Arc<Self>, changed: impl FnOnce() + Send + 'static) {
         let mut gate = self.gate.clone();
-        if gate
-            .wait_for(|gate| *gate == HandoverGate::Ready)
-            .await
-            .is_err()
-        {
-            return;
-        }
-        let this = self.clone();
-        let built = tokio::task::spawn_blocking(move || (this.make)()).await;
-        let listener = match built
-            .map_err(|error| error.to_string())
-            .and_then(|made| made)
-        {
-            Ok(listener) => listener,
-            Err(error) => {
-                tracing::warn!(%error, "phone handover is unavailable");
+        loop {
+            // `wait_for` marks the value it accepted as seen, so the
+            // `changed` below waits for the next one.
+            if gate.wait_for(|gate| gate.opens_listener()).await.is_err() {
                 return;
             }
-        };
-        let service = listener.listener().cloned();
-        let _ = self.listener.set(listener);
-        if let Some(service) = service {
-            start_if_paired(&service).await;
+            let this = self.clone();
+            let built = tokio::task::spawn_blocking(move || (this.make)()).await;
+            match built
+                .map_err(|error| error.to_string())
+                .and_then(|made| made)
+            {
+                Ok(listener) => {
+                    self.failure.send_replace(None);
+                    let service = listener.listener().cloned();
+                    let _ = self.listener.set(listener);
+                    if let Some(service) = service {
+                        start_if_paired(&service).await;
+                    }
+                    changed();
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "phone handover is unavailable");
+                    self.failure.send_replace(Some(error));
+                    if gate.changed().await.is_err() {
+                        return;
+                    }
+                }
+            }
         }
-        changed();
     }
 
     /// The listener's service, once open.
@@ -400,7 +420,12 @@ impl Handover for GatedHandover {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use steno_core::testing::FakeHandoverIntake;
+
     use super::*;
+    use crate::swift_import::WaitReason;
 
     #[test]
     fn the_fingerprint_file_records_and_reads_back() {
@@ -418,5 +443,70 @@ mod tests {
         );
         std::fs::write(dir.path().join("support/handover-identity.json"), b"{").unwrap();
         assert!(file.recorded().is_err(), "a damaged record is no empty one");
+    }
+
+    /// Only a gate that says ready opens the listener.
+    #[test]
+    fn only_a_ready_gate_opens_the_listener() {
+        assert!(HandoverGate::Ready.opens_listener());
+        assert!(!HandoverGate::Pending.opens_listener());
+        assert!(!HandoverGate::Waiting(WaitReason::ImportDenied).opens_listener());
+    }
+
+    /// A build that fails is tried again at the next ready, not dropped:
+    /// whatever puts the identity in place opens the listener by setting
+    /// the gate once more.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_build_is_tried_again_at_the_next_ready() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (gate, receiver) = tokio::sync::watch::channel(HandoverGate::Pending);
+        let (called, mut calls) = tokio::sync::mpsc::unbounded_channel();
+        let attempts = AtomicUsize::new(0);
+        let runtime = tokio::runtime::Handle::current();
+        let listener_store = store.clone();
+        let gated = Arc::new(GatedHandover::new(
+            store,
+            receiver,
+            Box::new(move || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                called.send(attempt).unwrap();
+                if attempt == 0 {
+                    return Err("refused to mint".to_owned());
+                }
+                let identity =
+                    HandoverIdentity::mint("Steno on a test", chrono::Utc::now()).unwrap();
+                let mac_id = identity.mac_id();
+                Ok(Arc::new(ListenerHandover::over(
+                    Arc::new(service(
+                        HandoverConfiguration::default(),
+                        listener_store.clone(),
+                        Arc::new(FakeHandoverIntake::default()),
+                        identity,
+                    )),
+                    mac_id,
+                    listener_store.clone(),
+                    runtime.clone(),
+                )))
+            }),
+        ));
+        let (opened, mut was_opened) = tokio::sync::oneshot::channel();
+        let mut follow = tokio::spawn(gated.clone().follow(move || {
+            let _ = opened.send(());
+        }));
+
+        gate.send_replace(HandoverGate::Ready);
+        assert_eq!(calls.recv().await, Some(0));
+        let mut failure = gated.failure();
+        failure.wait_for(Option::is_some).await.unwrap();
+        assert!(gated.service().is_none());
+        gate.send_replace(HandoverGate::Ready);
+        tokio::select! {
+            call = calls.recv() => assert_eq!(call, Some(1)),
+            ended = &mut follow => panic!("follow ended after the failed build: {ended:?}"),
+        }
+        (&mut was_opened).await.unwrap();
+        follow.await.unwrap();
+        assert!(gated.service().is_some());
+        assert_eq!(*gated.failure().borrow(), None);
     }
 }

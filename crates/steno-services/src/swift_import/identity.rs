@@ -1,6 +1,6 @@
 //! The exported Swift identity on its way into the secret store: the
 //! PKCS#12 file `SecItemExport` wrote, decoded into the PEM bundle
-//! `steno-handover` reads, checked, and stored with its fingerprint.
+//! `steno-handover` reads, checked, and stored under `handover-identity`.
 
 use base64::Engine as _;
 use p12_keystore::{KeyStore, KeyStoreEntry, Pkcs12ImportPolicy};
@@ -60,10 +60,11 @@ pub fn decode_pkcs12(
 
 /// Stores an imported identity: the PEM bundle under
 /// [`HandoverIdentity::SECRET_KEY`], replacing whatever identity was there
-/// (a desktop-id build's, D5). The one place the import writes the
-/// identity. Once the handover's fingerprint record lands (#221), this
-/// becomes `HandoverIdentity::store(secrets, &record)`, which records the
-/// new fingerprint with it, so the guard accepts the Swift identity.
+/// (a desktop-id build's, as the [module doc](super) defines it). The one
+/// place the import writes the identity. Once the handover's fingerprint
+/// record lands (#221), this becomes `HandoverIdentity::store(secrets,
+/// &record)`, which records the new fingerprint with it, so the guard
+/// accepts the Swift identity.
 pub async fn store_imported_identity(
     secrets: &dyn SecretStore,
     bundle: &str,

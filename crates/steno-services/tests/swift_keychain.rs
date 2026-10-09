@@ -140,9 +140,7 @@ fn the_swift_identity_exports_from_a_keychain_and_keeps_its_fingerprint_and_mac_
     assert!(!swift.has_stored_identity().unwrap(), "no entry yet");
 
     let passphrase = "a passphrase for this export";
-    let exported = swift
-        .export_identity(&certificate_der, passphrase)
-        .unwrap();
+    let exported = swift.export_identity(&certificate_der, passphrase).unwrap();
     let (identity, _bundle) = decode_pkcs12(&exported, passphrase, &certificate_der).unwrap();
     assert_eq!(hex(&identity.fingerprint()), FINGERPRINT);
     assert_eq!(
@@ -185,6 +183,9 @@ fn the_swift_identity_exports_from_a_keychain_and_keeps_its_fingerprint_and_mac_
         .account(steno_core::SecretKey::LLM_API_KEY)
         .delete()
         .unwrap();
-    add_password(steno_core::SecretKey::LLM_API_KEY, Some(SWIFT_API_KEY_LABEL));
+    add_password(
+        steno_core::SecretKey::LLM_API_KEY,
+        Some(SWIFT_API_KEY_LABEL),
+    );
     assert_eq!(swift.api_key_item().unwrap(), ApiKeyItem::Swift);
 }

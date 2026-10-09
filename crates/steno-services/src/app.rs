@@ -1,4 +1,5 @@
-//! [`build`]: the one function that turns the settings into the running
+//! [`build`] (and [`build_with_import`], the shell's, with the Swift
+//! import): the one function that turns the settings into the running
 //! object graph, and [`App`], what it hands back. Swift: `AppEnvironment.live`
 //! and `AppController.launch`.
 
@@ -468,9 +469,13 @@ fn gated_secrets(
 /// stored, while the store has a paired phone (or cannot say) and the
 /// stored identity is missing or cannot be read: a paired phone proves
 /// that an identity existed, and a new one would make every phone pair
-/// again. The import's gate opens the listener only after the Swift
-/// identity was stored, so this holds only when the identity was lost
-/// since, or the Swift certificate disappeared before the step.
+/// again. Both listeners ask it first, the one built at launch and the
+/// gated one: the import's gate opens the listener only after the Swift
+/// identity was stored, so there this holds only when the identity was
+/// lost since, or the Swift certificate disappeared before the step; at
+/// launch it holds when the identity was lost, or the launch half missed
+/// the Swift certificate. Once #221 merges, its guard in
+/// `HandoverIdentity::load_or_create` takes this one's place.
 fn refuse_to_mint_over_paired_phones(
     store: &Store,
     secrets: &Arc<dyn SecretStore>,
@@ -646,7 +651,8 @@ pub fn build_with_import(
     let handover = if gated_handover.is_some() {
         None
     } else {
-        handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
+        refuse_to_mint_over_paired_phones(&store, &secrets, &runtime)
+            .and_then(|()| handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime))
             .inspect_err(|error| warnings.push(format!("Phone handover is unavailable: {error}")))
             .ok()
     };
@@ -997,6 +1003,21 @@ impl App {
         {
             block_on(&self.runtime, handover.stop());
         }
+    }
+
+    /// The handover listener, if it runs: the one built at launch, or the
+    /// gated one once its gate opened.
+    #[must_use]
+    pub fn handover_service(&self) -> Option<Arc<HandoverService>> {
+        self.handover
+            .as_deref()
+            .and_then(ListenerHandover::listener)
+            .cloned()
+            .or_else(|| {
+            self.gated_handover
+                .as_ref()
+                .and_then(|gated| gated.service())
+        })
     }
 
     /// Everything that happens once at launch, in order:
@@ -2263,6 +2284,45 @@ mod tests {
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
             lock_patience: std::time::Duration::ZERO,
         }
+    }
+
+    /// A phone is paired but the stored identity is gone: the launch
+    /// builds no listener, so no new identity is minted that every phone
+    /// would have to pair with again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_launch_mints_no_identity_over_paired_phones() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let first = build(options_under(&support)).unwrap();
+        assert!(first.handover.is_some());
+        first
+            .store
+            .save_paired_device(
+                &PairedDevice {
+                    id: uuid::Uuid::new_v4(),
+                    name: "Phone".to_owned(),
+                    paired_at: chrono::Utc::now(),
+                    last_seen_at: None,
+                },
+                &[1; 32],
+            )
+            .unwrap();
+        first.shutdown();
+        drop(first);
+        let secrets = support.join("secrets.json");
+        std::fs::remove_file(&secrets).unwrap();
+
+        let again = build(options_under(&support)).unwrap();
+        assert!(again.handover.is_none());
+        assert!(
+            again
+                .startup_warnings
+                .iter()
+                .any(|warning| warning.contains("none is minted")),
+            "{:?}",
+            again.startup_warnings
+        );
+        assert!(!secrets.exists(), "an identity was minted");
     }
 
     /// A second app on one database is refused before it opens the
