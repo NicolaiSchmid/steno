@@ -940,8 +940,9 @@ still has to draw the window side. `[ ]` is not ported yet.
     under the host's lock for Settings' save, and the first launch's mint of the
     identity on the main thread may too.
   - A keyring locked again while the app runs fails a pipeline rebuild's read; the
-    pipeline then keeps the key it last read or saved (`KeepsApiKey`), never one the
-    user removed or changed since.
+    pipeline then keeps the key it last read or saved (`KeepsApiKey`), also after a
+    save the keyring refused, never one the user removed or changed since. A bus error
+    or a provider that stops answering after the choice reads as a locked keyring.
   - The move: the first launch with a provider copies the file's entries into the
     service, reads them back and marks the file (`"movedToSecretService": true`); a
     later launch whose own connection reads every value back deletes the entries, and

@@ -210,7 +210,7 @@ pub fn pipeline_dependencies(
     let api_key = api_key(secrets, runtime).unwrap_or_else(|warning| {
         let kept = secrets.kept_api_key();
         if kept.is_some() {
-            tracing::warn!("{warning}; the pipeline keeps the key it last read");
+            tracing::warn!("{warning}; the pipeline keeps the key it last had");
         } else {
             tracing::warn!("{warning}");
         }

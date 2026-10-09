@@ -388,9 +388,12 @@ impl SecretStore for FileSecretStore {
 /// read, and the pipeline then keeps the key it had
 /// ([`KeepsApiKey::kept_api_key`]) instead of running without summaries
 /// until the next start. Every call passes through unchanged, so Settings
-/// still see the failure. A write of the key replaces the kept one, a
-/// removal or a failed write clears it, and a read that a write overtook
-/// keeps nothing, so the kept key never outlives a removal or a change.
+/// still see the failure. A write of the key replaces the kept one, and a
+/// removal clears it, even one that failed, as the user asked for no key.
+/// A failed write keeps the key it had, as a write the keyring refused
+/// (its prompt dismissed) changed nothing. A read that a write overtook
+/// keeps nothing, so the kept key never outlives a removal or a change
+/// that went through.
 /// No Swift counterpart (the Keychain does not lock while the app runs).
 pub struct KeepsApiKey {
     inner: Arc<dyn SecretStore>,
@@ -415,13 +418,14 @@ impl KeepsApiKey {
     }
 
     /// The API key the last successful read or write through the store
-    /// saw; `None` after a removal, a failed write, or a read of no key.
+    /// saw; `None` after a removal (failed or not) or a read of no key. A
+    /// failed write leaves it as it was.
     #[must_use]
     pub fn kept_api_key(&self) -> Option<String> {
-        self.kept().key.clone()
+        self.state().key.clone()
     }
 
-    fn kept(&self) -> MutexGuard<'_, Kept> {
+    fn state(&self) -> MutexGuard<'_, Kept> {
         self.kept.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -439,10 +443,10 @@ impl SecretStore for KeepsApiKey {
         if key.as_str() != SecretKey::LLM_API_KEY {
             return self.inner.secret(key).await;
         }
-        let writes = self.kept().writes;
+        let writes = self.state().writes;
         let read = self.inner.secret(key).await;
         if let Ok(value) = &read {
-            let mut kept = self.kept();
+            let mut kept = self.state();
             if kept.writes == writes {
                 kept.key.clone_from(value);
             }
@@ -453,11 +457,12 @@ impl SecretStore for KeepsApiKey {
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
         let written = self.inner.set_secret(key, value).await;
         if key.as_str() == SecretKey::LLM_API_KEY {
-            let mut kept = self.kept();
+            let mut kept = self.state();
             kept.writes += 1;
-            kept.key = value
-                .filter(|value| written.is_ok() && !value.is_empty())
-                .map(str::to_owned);
+            let value = value.filter(|value| !value.is_empty());
+            if written.is_ok() || value.is_none() {
+                kept.key = value.map(str::to_owned);
+            }
         }
         written
     }
@@ -511,10 +516,11 @@ mod tests {
         assert_eq!(store.kept_api_key(), None, "only the API key is kept");
     }
 
-    /// A write the store refuses clears the kept key, as the stored one
-    /// may be gone; a read that began before a write keeps nothing.
+    /// A write the store refuses (a dismissed prompt) keeps the key it
+    /// had, a removal it refuses clears it, and a read that began before a
+    /// write keeps nothing.
     #[tokio::test]
-    async fn a_failed_write_or_a_read_overtaken_by_a_write_keeps_no_old_key() {
+    async fn a_failed_write_keeps_the_key_and_a_failed_removal_clears_it() {
         let key = SecretKey::llm_api_key();
         let refusing = KeepsApiKey::new(Arc::new(RefusingWrites(InMemorySecretStore::with([(
             key.clone(),
@@ -522,6 +528,11 @@ mod tests {
         )]))));
         refusing.secret(&key).await.unwrap();
         assert!(refusing.set_secret(&key, Some("sk-2")).await.is_err());
+        assert_eq!(refusing.kept_api_key().as_deref(), Some("sk-1"));
+        assert!(refusing.set_secret(&key, Some("")).await.is_err());
+        assert_eq!(refusing.kept_api_key(), None, "the user asked for no key");
+        refusing.secret(&key).await.unwrap();
+        assert!(refusing.set_secret(&key, None).await.is_err());
         assert_eq!(refusing.kept_api_key(), None);
 
         let (reading, release) = (
