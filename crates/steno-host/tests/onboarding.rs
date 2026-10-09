@@ -762,3 +762,90 @@ fn current_is_the_first_unhandled_step() {
         "the last one when everything is handled"
     );
 }
+
+/// The Swift import's step (Rust only): it comes before page 1 while the
+/// import has work left, whatever the copied flag says, shows the prompts
+/// while they are up, and moves on once the identity came over.
+#[test]
+fn the_import_step_comes_first_and_moves_on_once_the_identity_came_over() {
+    let plain = Harness::builder().build();
+    assert!(
+        plain
+            .snapshot(BridgeTopic::Onboarding)
+            .get("swiftImport")
+            .is_none(),
+        "no import, no step"
+    );
+
+    let harness = Harness::builder()
+        .with_swift_import(2)
+        .seed(|_, fakes| {
+            fakes
+                .preferences
+                .set_flag(OnboardingViewModel::COMPLETED_KEY, true);
+        })
+        .build();
+    assert!(harness.host.should_open_onboarding(), "the import opens it");
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["page"], "import");
+    assert_eq!(
+        onboarding["swiftImport"],
+        json!({"state": "ready", "prompts": 2})
+    );
+
+    harness.host.onboarding_import().unwrap();
+    let published: Vec<_> = harness
+        .sink
+        .all(BridgeTopic::Onboarding)
+        .iter()
+        .map(|snapshot| snapshot["swiftImport"]["state"].clone())
+        .collect();
+    assert_eq!(
+        published.first(),
+        Some(&json!("importing")),
+        "the page saw the prompts coming"
+    );
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["swiftImport"]["state"], "done");
+    assert_eq!(onboarding["page"], "setup", "every permission granted");
+    let import = harness.fakes.swift_import.as_ref().unwrap();
+    assert_eq!(*import.runs.lock().unwrap(), 1);
+    assert!(
+        !harness.host.should_open_onboarding(),
+        "nothing left to ask"
+    );
+}
+
+#[test]
+fn a_denied_export_stays_on_the_step_with_try_again_until_the_user_goes_on() {
+    let harness = Harness::builder().with_swift_import(2).build();
+    let import = harness.fakes.swift_import.clone().unwrap();
+    import.deny_export("macOS did not let Steno read this Mac's phone pairing.");
+    harness.host.onboarding_import().unwrap();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["page"], "import");
+    assert_eq!(onboarding["swiftImport"]["state"], "waiting");
+    assert_eq!(
+        onboarding["swiftImport"]["error"],
+        "macOS did not let Steno read this Mac's phone pairing."
+    );
+
+    harness.host.onboarding_skip_import().unwrap();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["page"], "setup");
+    assert_eq!(onboarding["swiftImport"]["state"], "waiting");
+    assert_eq!(*import.skips.lock().unwrap(), 1);
+    assert!(
+        harness.host.should_open_onboarding(),
+        "the step returns while the identity waits"
+    );
+}
+
+#[test]
+fn closing_the_window_over_the_step_skips_it() {
+    let harness = Harness::builder().with_swift_import(1).build();
+    harness.host.onboarding_window_closed();
+    let import = harness.fakes.swift_import.as_ref().unwrap();
+    assert_eq!(*import.skips.lock().unwrap(), 1);
+    assert_eq!(*import.runs.lock().unwrap(), 0);
+}

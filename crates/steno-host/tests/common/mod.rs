@@ -135,6 +135,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// Adds a pending Swift import whose step brings up `prompts` prompts.
+    pub fn with_swift_import(mut self, prompts: u8) -> Self {
+        self.fakes.swift_import = Some(Arc::new(steno_host::fakes::FakeSwiftImport::new(prompts)));
+        self
+    }
+
     /// What the destructive prompt answers.
     pub fn confirm(mut self, confirmed: bool) -> Self {
         self.confirm = confirmed;

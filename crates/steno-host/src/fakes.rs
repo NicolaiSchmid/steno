@@ -21,7 +21,8 @@ use crate::services::{
     FileSystem, FolderUsage, Handover, INSTALLING_UPDATE, InputDevice, LeftRecording,
     ListenerState, LlmService, LoginItem, LoginItemStatus, Opener, PairingCode, Permissions,
     Pipeline, Preferences, ProcessAgainRefusal, QrEncoder, Recorder, RecorderStatus, Services,
-    SpeechModels, StartHold, UpdateOutcome, Updater, permission_is_required,
+    SpeechModels, StartHold, SwiftImport, SwiftImportStage, SwiftImportStatus, UpdateOutcome,
+    Updater, permission_is_required,
 };
 use crate::speech::ModelAsset;
 
@@ -1080,6 +1081,63 @@ impl Preferences for FakePreferences {
     }
 }
 
+/// The import step: `Pending` until a run or a skip, then the outcome a
+/// test set for runs (`Done` by default) or `Waiting` for a skip; counts
+/// the runs and the skips.
+#[derive(Debug)]
+pub struct FakeSwiftImport {
+    pub status: Mutex<SwiftImportStatus>,
+    /// What [`SwiftImport::run`] moves to.
+    pub run_outcome: Mutex<SwiftImportStatus>,
+    pub runs: Mutex<usize>,
+    pub skips: Mutex<usize>,
+}
+
+impl FakeSwiftImport {
+    /// Pending, with `prompts` prompts; a run brings the identity over.
+    #[must_use]
+    pub fn new(prompts: u8) -> Self {
+        let status = |stage| SwiftImportStatus {
+            stage,
+            prompts,
+            failure: None,
+        };
+        FakeSwiftImport {
+            status: Mutex::new(status(SwiftImportStage::Pending)),
+            run_outcome: Mutex::new(status(SwiftImportStage::Done)),
+            runs: Mutex::new(0),
+            skips: Mutex::new(0),
+        }
+    }
+
+    /// A run leaves the identity behind with `failure`.
+    pub fn deny_export(&self, failure: &str) {
+        let mut outcome = lock(&self.run_outcome);
+        outcome.stage = SwiftImportStage::Waiting;
+        outcome.failure = Some(failure.to_owned());
+    }
+}
+
+impl SwiftImport for FakeSwiftImport {
+    fn status(&self) -> SwiftImportStatus {
+        lock(&self.status).clone()
+    }
+
+    fn run(&self) -> SwiftImportStatus {
+        *lock(&self.runs) += 1;
+        let outcome = lock(&self.run_outcome).clone();
+        lock(&self.status).clone_from(&outcome);
+        outcome
+    }
+
+    fn skip(&self) -> SwiftImportStatus {
+        *lock(&self.skips) += 1;
+        let mut status = lock(&self.status);
+        status.stage = SwiftImportStage::Waiting;
+        status.clone()
+    }
+}
+
 /// Every fake at once, with a handle on each: what a test without a shell builds
 /// its [`Services`] from. Swift: `AppEnvironment.preview()`.
 pub struct FakeServices {
@@ -1102,6 +1160,7 @@ pub struct FakeServices {
     pub preferences: Arc<FakePreferences>,
     /// The core's own fake, behind the one core boundary the host consumes.
     pub secrets: Arc<InMemorySecretStore>,
+    pub swift_import: Option<Arc<FakeSwiftImport>>,
 }
 
 impl FakeServices {
@@ -1131,6 +1190,7 @@ impl FakeServices {
             opener: Arc::new(FakeOpener::default()),
             preferences: Arc::new(FakePreferences::default()),
             secrets: Arc::new(InMemorySecretStore::new()),
+            swift_import: None,
         }
     }
 
@@ -1170,6 +1230,10 @@ impl FakeServices {
             opener: self.opener.clone(),
             preferences: self.preferences.clone(),
             secrets: self.secrets.clone(),
+            swift_import: self
+                .swift_import
+                .clone()
+                .map(|import| import as Arc<dyn SwiftImport>),
         }
     }
 }

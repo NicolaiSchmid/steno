@@ -576,6 +576,48 @@ pub trait Preferences: Send + Sync {
     fn set_flag(&self, key: &str, value: bool);
 }
 
+/// Where the import of the Swift app's keychain items stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwiftImportStage {
+    /// The onboarding step has not run at this launch.
+    Pending,
+    /// The handover identity did not come over (denied, failed or
+    /// skipped): phone handover waits until the step runs again.
+    Waiting,
+    /// The identity is in place, the key read or left empty.
+    Done,
+}
+
+/// The import step's state for the onboarding page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwiftImportStatus {
+    pub stage: SwiftImportStage,
+    /// The keychain prompts a run brings up: one per item it reads (the
+    /// API key when it is the Swift app's and has not been read, then the
+    /// handover identity).
+    pub prompts: u8,
+    /// Why the last run left the identity behind, for the step's line.
+    pub failure: Option<String>,
+}
+
+/// The second half of the import of the Swift app's API key and handover
+/// identity on the Mac's first launch after the update (plan
+/// `.plans/2026-10-07-stable-promotion.md`, S6), behind the onboarding
+/// step. `None` in [`Services`] when nothing is to be imported: the
+/// launch half found no Swift handover certificate, or the import ran
+/// before. The fake answers the outcome a test set and counts the runs.
+/// Rust only: the Swift app had no such step.
+pub trait SwiftImport: Send + Sync {
+    fn status(&self) -> SwiftImportStatus;
+    /// Reads the key (once) and exports the identity. Blocks on the
+    /// keychain prompts, so the host calls it with its lock released, as
+    /// it does the permission prompts.
+    fn run(&self) -> SwiftImportStatus;
+    /// The user went past the step without it: both reads count as
+    /// denied, and phone handover waits.
+    fn skip(&self) -> SwiftImportStatus;
+}
+
 /// Everything the host is handed at construction, one `Arc` each so a test
 /// keeps a handle on the fake it reads back. Swift: `AppEnvironment`.
 #[derive(Clone)]
@@ -600,6 +642,8 @@ pub struct Services {
     pub opener: Arc<dyn Opener>,
     pub preferences: Arc<dyn Preferences>,
     pub secrets: Arc<dyn steno_core::SecretStore>,
+    /// The onboarding step of the Swift import, while it has work to do.
+    pub swift_import: Option<Arc<dyn SwiftImport>>,
 }
 
 /// `std::fs` as the [`FileSystem`]: the product's implementation, which

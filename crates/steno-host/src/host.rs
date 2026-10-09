@@ -1,5 +1,5 @@
 //! The bridge host over the real store: one [`Host`] owns every view model
-//! of the three windows and answers all 75 methods, after
+//! of the three windows and answers all 77 methods, after
 //! `Web/{MainWindowBridge,SettingsBridge,OnboardingBridge}.swift` and the
 //! controller state of `AppController.swift` the bridges read. Commands
 //! map one to one onto the view models' methods, so no rule lives here;
@@ -941,6 +941,13 @@ impl Host {
     /// opened again begins on page 1, not finished.
     pub fn onboarding_window_closed(&self) {
         OnboardingViewModel::mark_completed(&self.shared.services);
+        // Closing the window over the import step skips it: phone
+        // handover waits, and the step returns at the next launch.
+        if let Some(import) = &self.shared.services.swift_import
+            && import.status().stage == crate::services::SwiftImportStage::Pending
+        {
+            import.skip();
+        }
         let key = self.read_key();
         {
             let mut inner = self.lock();
@@ -1309,6 +1316,24 @@ impl Host {
         };
         self.publish();
         outcome
+    }
+
+    /// The import's outcome on the step, and everything it may have
+    /// changed: the API key the Summaries sections read and the listener
+    /// the Phones section and the main window's phone card show.
+    fn finish_swift_import(&self, status: crate::services::SwiftImportStatus, skipped: bool) {
+        let (store, services) = (&self.shared.store, &self.shared.services);
+        self.onboarding_command(|inner| {
+            let key = self.read_key();
+            inner
+                .onboarding
+                .finish_import(status, skipped, store, services, key);
+            self.reload_sections(inner);
+            inner.phones.load(services);
+            inner.phones.refresh(services);
+            inner.app.phone = Self::phone_card(services);
+            inner.publisher.schedule(BridgeTopic::App);
+        });
     }
 
     /// Page 1 moves on by itself once every step is handled, as the Swift
@@ -2284,6 +2309,28 @@ impl BridgeHost for Host {
 
     fn onboarding_finish(&self) -> Outcome<()> {
         self.onboarding_command(|inner| inner.onboarding.finish(&self.shared.services));
+        Ok(())
+    }
+
+    /// Three steps, as [`Self::onboarding_request`]: the page sees
+    /// `importing` while the keychain prompts are up, the import runs with
+    /// the lock released, then the outcome.
+    fn onboarding_import(&self) -> Outcome<()> {
+        let Some(import) = self.shared.services.swift_import.clone() else {
+            return Ok(());
+        };
+        self.onboarding_command(|inner| inner.onboarding.begin_import());
+        let status = import.run();
+        self.finish_swift_import(status, false);
+        Ok(())
+    }
+
+    fn onboarding_skip_import(&self) -> Outcome<()> {
+        let Some(import) = self.shared.services.swift_import.clone() else {
+            return Ok(());
+        };
+        let status = import.skip();
+        self.finish_swift_import(status, true);
         Ok(())
     }
 
