@@ -218,7 +218,7 @@ pub fn pid_in(description: &str) -> Option<u32> {
 }
 
 /// Whether this is a smoke run, which registers and removes nothing.
-fn smoke_run() -> bool {
+pub fn smoke_run() -> bool {
     std::env::var_os(crate::smoke::SECONDS_VARIABLE).is_some()
 }
 

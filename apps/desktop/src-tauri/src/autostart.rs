@@ -321,7 +321,7 @@ fn with_off_at_exit(status: LoginItemStatus, mark: Option<&std::path::Path>) -> 
 /// item but the agent's removal, and nothing at all in a smoke run.
 #[cfg(target_os = "macos")]
 pub fn at_launch_on_mac(launch_at_login: Option<bool>) {
-    if std::env::var_os(crate::smoke::SECONDS_VARIABLE).is_some() {
+    if main_app::smoke_run() {
         return;
     }
     let launch_at_login = launch_at_login.filter(|_| !packaged::login_item_is_managed());

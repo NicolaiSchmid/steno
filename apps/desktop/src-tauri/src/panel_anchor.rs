@@ -30,7 +30,7 @@ use crate::panel_geometry::PanelAnchor;
 
 /// The file's name, in the support directory and in the earlier config
 /// directory alike.
-pub const FILE_NAME: &str = "panel-anchor.json";
+const FILE_NAME: &str = "panel-anchor.json";
 
 /// The anchor's file, and the earlier one to read once.
 pub struct AnchorFile {
