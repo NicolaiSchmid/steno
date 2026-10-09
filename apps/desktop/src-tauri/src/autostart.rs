@@ -18,7 +18,7 @@
 use steno_core::protocols::BoundaryResult;
 pub use steno_host::services::LoginItemStatus;
 use tauri::AppHandle;
-use tauri_plugin_autostart::{AutoLaunchManager, MacosLauncher, ManagerExt};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use crate::bridge::{BridgeError, failed};
 use crate::packaged;
@@ -60,7 +60,7 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
     }
     let manager = app.autolaunch();
     let result = if enabled {
-        enable(app, &manager)
+        enable(app)
     } else {
         manager.disable()
     };
@@ -69,17 +69,12 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
 
 /// Writes the login item: on Linux outside an `AppImage` the entry that
 /// names a stable path (`packaged::write_entry`), elsewhere the plugin's.
-fn enable(
-    app: &AppHandle,
-    manager: &AutoLaunchManager,
-) -> Result<(), tauri_plugin_autostart::Error> {
+fn enable(app: &AppHandle) -> Result<(), tauri_plugin_autostart::Error> {
     #[cfg(target_os = "linux")]
     if tauri::Manager::env(app).appimage.is_none() {
         return Ok(packaged::write_entry(&app.package_info().name)?);
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = app;
-    manager.enable()
+    app.autolaunch().enable()
 }
 
 /// At launch while the system manages the login item, on Linux: an
