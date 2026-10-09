@@ -271,8 +271,8 @@ mod tests {
         /// How many of the next writes and moves fail.
         failing_writes: usize,
         /// The next reads, one per entry, front first: `None` reads what is
-        /// stored, `Some(Ok(()))` finds nothing, `Some(Err)` fails.
-        odd_reads: Vec<Option<io::Result<()>>>,
+        /// stored, `Some(error)` fails with it.
+        failing_reads: Vec<Option<io::Error>>,
         /// Another program's change just before the next move.
         before_move: Option<Meddling>,
         /// Another program's change just after the next move succeeded.
@@ -301,12 +301,10 @@ mod tests {
     impl CredentialSet for FakeSet {
         fn read(&mut self, target_name: &str) -> io::Result<Option<Credential>> {
             self.calls.push(Call::Read(target_name.to_owned()));
-            if !self.odd_reads.is_empty() {
-                match self.odd_reads.remove(0) {
-                    Some(Err(error)) => return Err(error),
-                    Some(Ok(())) => return Ok(None),
-                    None => {}
-                }
+            if !self.failing_reads.is_empty()
+                && let Some(error) = self.failing_reads.remove(0)
+            {
+                return Err(error);
             }
             Ok(self.stored(target_name).cloned())
         }
@@ -495,9 +493,7 @@ mod tests {
     fn a_failed_read_is_an_error_and_writes_nothing() {
         let roaming = written_by_the_keyring_crate("sk-1");
         let mut set = FakeSet::with(roaming.clone());
-        set.odd_reads = vec![Some(Err(io::Error::other(
-            "the credential manager is busy",
-        )))];
+        set.failing_reads = vec![Some(io::Error::other("the credential manager is busy"))];
         let error = read_secret(&mut set, &SecretKey::llm_api_key()).unwrap_err();
         assert_eq!(error.to_string(), "the credential manager is busy");
         assert_eq!(set.calls, [Call::Read(TARGET.to_owned())]);
@@ -560,8 +556,7 @@ mod tests {
         let rewritten: Meddling = |credentials| {
             credentials.insert(TARGET.to_owned(), written_by_the_keyring_crate("sk-2"));
         };
-        let unreadable = || vec![None, Some(Err(io::Error::other("busy")))];
-        for (after_move, odd_reads, left) in [
+        for (after_move, failing_reads, left) in [
             (Some(removed), vec![], None),
             (
                 Some(rewritten),
@@ -570,7 +565,7 @@ mod tests {
             ),
             (
                 None,
-                unreadable(),
+                vec![None, Some(io::Error::other("busy"))],
                 Some(Credential {
                     persist: LOCAL_MACHINE,
                     ..written_by_the_keyring_crate("sk-1")
@@ -579,7 +574,7 @@ mod tests {
         ] {
             let mut set = FakeSet::with(written_by_the_keyring_crate("sk-1"));
             set.after_move = after_move;
-            set.odd_reads = odd_reads;
+            set.failing_reads = failing_reads;
             assert_eq!(
                 read_secret(&mut set, &SecretKey::llm_api_key())
                     .unwrap()
