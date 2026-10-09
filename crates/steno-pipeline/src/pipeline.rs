@@ -370,15 +370,20 @@ impl InFlight {
 /// 3. A refused run that finds another count than when it started records
 ///    nothing: that resume skipped its meeting, which was in flight, and
 ///    may have followed the install of its models. The meeting starts
-///    again at once instead.
+///    again at once instead, on the newest pipeline built over the value
+///    (after a reload, the current one), so it runs on the settings saved
+///    last.
 #[derive(Debug, Clone, Default)]
 pub struct ModelWaits(Arc<Mutex<Waits>>);
 
-/// The waiting meetings and the resume count, under one lock.
+/// The waiting meetings, the resume count and the newest pipeline, under
+/// one lock.
 #[derive(Debug, Default)]
 struct Waits {
     waiting: BTreeSet<Uuid>,
     resumes: u64,
+    /// The pipeline a restart goes to (rule 3), while it lives.
+    newest: Weak<Inner>,
 }
 
 impl ModelWaits {
@@ -417,6 +422,18 @@ impl ModelWaits {
     /// Puts back meetings a resume took and could not start.
     fn put_back(&self, meetings: impl IntoIterator<Item = Uuid>) {
         self.lock().waiting.extend(meetings);
+    }
+
+    /// Makes `pipeline`, just built over the value, the one a restart goes
+    /// to (rule 3).
+    fn built(&self, pipeline: &ProcessingPipeline) {
+        self.lock().newest = Arc::downgrade(&pipeline.inner);
+    }
+
+    /// The newest pipeline built over the value, while it lives.
+    fn newest(&self) -> Option<ProcessingPipeline> {
+        let inner = self.lock().newest.upgrade()?;
+        Some(ProcessingPipeline { inner })
     }
 
     fn lock(&self) -> MutexGuard<'_, Waits> {
@@ -985,12 +1002,14 @@ fn required<T, E: fmt::Display + 'static>(
 impl ProcessingPipeline {
     #[must_use]
     pub fn new(dependencies: PipelineDependencies) -> Self {
-        ProcessingPipeline {
+        let pipeline = ProcessingPipeline {
             inner: Arc::new(Inner {
                 dependencies,
                 state: Mutex::new(State::default()),
             }),
-        }
+        };
+        pipeline.inner.dependencies.model_waits.built(&pipeline);
+        pipeline
     }
 
     #[must_use]
@@ -1615,7 +1634,8 @@ impl ProcessingPipeline {
     /// Waits for every background task: the processing `enqueue`, the
     /// resumes and a refused run's restart started, and the re-exports of
     /// `redeliver_unfinished`. A refused run is waited for until its
-    /// meeting waits or starts again (rule 1 on [`ModelWaits`]). The CLI
+    /// meeting waits or starts again (rule 1 on [`ModelWaits`]); a restart
+    /// on another pipeline (rule 3) is that pipeline's to wait for. The CLI
     /// and the tests call it before reading results.
     pub async fn wait_until_idle(&self) {
         loop {
@@ -1790,7 +1810,8 @@ impl ProcessingPipeline {
 
     /// Once nothing holds a refused run's meeting, records it as waiting
     /// for its models, or, when a resume ran since the run started, starts
-    /// it again in the background (rules 1 and 3 on [`ModelWaits`]). Once the pipeline quits, the next launch's resume
+    /// it again in the background on the newest pipeline (rules 1 and 3 on
+    /// [`ModelWaits`]). Once the pipeline quits, the next launch's resume
     /// processes it.
     fn wait_for_models(&self, refused: Refused) {
         let Refused {
@@ -1806,7 +1827,8 @@ impl ProcessingPipeline {
             %meeting_id,
             "a resume ran during the refused run; processing again"
         );
-        if let Err(failure) = self.start_waiting(BTreeSet::from([meeting_id])) {
+        let newest = waits.newest().unwrap_or_else(|| self.clone());
+        if let Err(failure) = newest.start_waiting(BTreeSet::from([meeting_id])) {
             tracing::warn!(
                 target: BACKGROUND_RUN_LOG,
                 %meeting_id,

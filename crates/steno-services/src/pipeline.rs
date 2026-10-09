@@ -1753,6 +1753,88 @@ mod tests {
         assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
     }
 
+    /// A speech engine whose first transcription decides its model is
+    /// missing and waits at a gate (`entered`, then `open`) before it
+    /// returns the refusal; every later call is refused at once.
+    #[derive(Default)]
+    struct RefusingAfterAGate {
+        used: AtomicBool,
+        entered: tokio::sync::Notify,
+        open: tokio::sync::Notify,
+        inner: FakeSpeechEngine,
+    }
+
+    #[async_trait]
+    impl SpeechEngine for RefusingAfterAGate {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+
+        fn supported_languages(&self) -> &std::collections::BTreeSet<LanguageTag> {
+            self.inner.supported_languages()
+        }
+
+        async fn prepare(&self) -> BoundaryResult<()> {
+            self.inner.prepare().await
+        }
+
+        async fn transcribe(
+            &self,
+            _audio: &AudioBuffer16k,
+            _hint: Option<&LanguageTag>,
+        ) -> BoundaryResult<Vec<RawSegment>> {
+            if !self.used.swap(true, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.open.notified().await;
+            }
+            Err(Box::new(PipelineFailure::models_missing(
+                PipelineStage::Transcribe,
+            )))
+        }
+    }
+
+    /// A run being refused on a pipeline a reload then retired, whose
+    /// meeting an install's resume skipped because it was in flight,
+    /// starts the meeting again on the current pipeline, built from the
+    /// settings saved last, not on the retired one's dependencies (whose
+    /// engine here still refuses).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_run_on_a_retired_pipeline_starts_its_meeting_again_on_the_current_one() {
+        let (dir, store) = temp_store();
+        let refusing = Arc::new(RefusingAfterAGate::default());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let make: MakeDependencies = {
+            let (store, refusing, builds) = (store.clone(), refusing.clone(), builds.clone());
+            Arc::new(move || {
+                let dependencies = fake_dependencies(&store, "fake-engine");
+                Ok(on_the_sidecar(if builds.fetch_add(1, Ordering::SeqCst) == 0 {
+                    dependencies.with_speech_engine(steno_pipeline::SharedSpeechEngine::new(
+                        refusing.clone(),
+                    ))
+                } else {
+                    dependencies
+                }))
+            })
+        };
+        let current =
+            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+        let meeting = enqueue_call(dir.path(), &current.current());
+        tokio::time::timeout(PATIENCE, refusing.entered.notified())
+            .await
+            .expect("the run is transcribing");
+        current.reload().unwrap();
+        current.resume_waiting();
+        refusing.open.notify_one();
+        eventually("the meeting is ready", || {
+            meeting_state(&store, meeting) == MeetingState::Ready
+        })
+        .await;
+        assert_eq!(
+            current.current().dependencies().model_waits.waiting(),
+            Vec::<Uuid>::new()
+        );
+    }
+
     /// An install's resume starts only the meetings a run left waiting for
     /// models: a queued meeting no run refused stays queued for the
     /// launch's recovery, which then processes it.
