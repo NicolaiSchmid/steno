@@ -1463,6 +1463,8 @@ fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
         version: "0.0.0".to_owned(),
         make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
         lock_patience: std::time::Duration::ZERO,
+        update_source: None,
+        install_gate: Arc::new(crate::updates::NeverIdle),
     }
 }
 
@@ -1473,6 +1475,95 @@ fn build_over(paths: steno_core::StenoPaths, keychain: Arc<FakeKeychain>) -> cra
         Some(pending(launch_at_home(preferences, keychain)))
     })
     .unwrap()
+}
+
+/// An update source that finds nothing, for a graph whose updater is the
+/// update schedule (S4).
+struct NoUpdates;
+
+#[async_trait]
+impl crate::updates::UpdateSource for NoUpdates {
+    async fn check(&self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    async fn download(&self, _version: &str) -> Result<Vec<u8>, String> {
+        Ok(Vec::new())
+    }
+    async fn install(&self, _version: &str, _package: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+    async fn relaunch(&self) {}
+    async fn ask(&self, _question: crate::updates::Question<'_>) -> bool {
+        false
+    }
+    fn tell_install_failed(&self, _message: &str) {}
+    fn announce(&self, _version: &str) {}
+}
+
+/// Sparkle's two choices come over into exactly the flags the update
+/// schedule (S4) reads, through the graph's one `preferences.json`: with
+/// the Swift app's automatic checks off and automatic downloads on (both
+/// the opposite of the schedule's defaults), the host's updater answers
+/// the Swift app's choices, with the import pending or over at launch,
+/// and a flag the updater sets after the step keeps the step's flags
+/// beside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_update_schedule_reads_the_flags_the_launch_half_copied() {
+    let domain = br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>steno.onboardingCompleted</key>
+	<true/>
+</dict>
+</plist>
+"#;
+    for certificate in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+        let keychain = Arc::new(FakeKeychain::swift_app());
+        if !certificate {
+            *keychain.certificate.lock().unwrap() = None;
+        }
+        let options = crate::AppOptions {
+            update_source: Some(Arc::new(NoUpdates)),
+            ..test_options(paths.clone())
+        };
+        let app = crate::build_with_import(options, |preferences| {
+            match launch(
+                &at_home(),
+                preferences,
+                &FakeDefaults::new(domain.to_vec()),
+                keychain,
+            ) {
+                Launch::Pending(pending) => Some(pending),
+                _ => None,
+            }
+        })
+        .unwrap();
+        assert_eq!(app.import_gate.is_some(), certificate);
+        let updater = app.services.updater.clone();
+        assert!(!updater.automatically_checks(), "pending: {certificate}");
+        assert!(updater.automatically_downloads(), "pending: {certificate}");
+
+        if let Some(step) = app.services.swift_import.clone() {
+            let status = tokio::task::spawn_blocking(move || step.run())
+                .await
+                .unwrap();
+            assert_eq!(status.stage, SwiftImportStage::Done);
+        }
+        updater.set_automatically_checks(true);
+        let on_disk = FilePreferences::in_support_directory(&paths.support_directory);
+        assert_eq!(on_disk.stored_flag(AUTOMATIC_CHECKS_KEY), Some(true));
+        assert_eq!(on_disk.stored_flag(AUTOMATIC_DOWNLOAD_KEY), Some(true));
+        assert!(on_disk.flag(IMPORT_RAN_KEY), "pending: {certificate}");
+        assert!(on_disk.flag(OnboardingViewModel::COMPLETED_KEY));
+        app.shutdown();
+    }
 }
 
 /// A second app that the database's lock refuses (#225) runs no launch

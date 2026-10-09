@@ -700,12 +700,9 @@ pub fn build_with_import(
         .map(|import| import_step(import, &pipeline, &runtime));
 
     let clock = Arc::new(WallClock);
-    let preferences: Arc<dyn Preferences> = match &import {
-        Some(import) => import.preferences.clone(),
-        None => Arc::new(FilePreferences::new(
-            paths.support_directory.join("preferences.json"),
-        )),
-    };
+    // The one `preferences.json` the launch half, the import's step, the
+    // update schedule and the host share.
+    let preferences: Arc<dyn Preferences> = preferences;
     let updates = options.update_source.map(|source| {
         UpdateSchedule::new(ScheduleParts {
             source,

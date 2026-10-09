@@ -35,7 +35,7 @@
 //! | The step | [`ImportStep`], [`DENIED_EXPORT`], [`FAILED_EXPORT`] |
 //! | Sources (`sources.rs`) | [`SwiftDefaults`], [`SwiftKeychain`], [`ApiKeyItem`], [`KeychainRefusal`]; on the Mac `DefaultsCommand` and `LoginKeychain` |
 //! | Identity (`identity.rs`) | [`decode_pkcs12`], [`store_imported_identity`], [`ImportedIdentityError`] |
-//! | Flags in `preferences.json` | [`IMPORT_RAN_KEY`], [`KEY_READ_KEY`], [`KEY_DENIED_KEY`], [`AUTOMATIC_CHECKS_KEY`], [`AUTOMATIC_DOWNLOAD_KEY`] |
+//! | Flags in `preferences.json` | [`IMPORT_RAN_KEY`], [`KEY_READ_KEY`], [`KEY_DENIED_KEY`]; Sparkle's two flags are copied into the update schedule's [`AUTOMATIC_CHECKS_KEY`](crate::updates::AUTOMATIC_CHECKS_KEY) and [`AUTOMATIC_DOWNLOAD_KEY`](crate::updates::AUTOMATIC_DOWNLOAD_KEY) |
 //! | In the keychain | [`IMPORT_DONE_ENTRY`], the marker Pair again keeps |
 //! | The Swift app's names | [`SWIFT_DEFAULTS_DOMAIN`], [`SWIFT_IDENTITY_LABEL`], [`SWIFT_API_KEY_LABEL`] |
 //!
@@ -102,6 +102,7 @@ pub use sources::{DefaultsCommand, LoginKeychain};
 
 use crate::block_on;
 use crate::platform::FilePreferences;
+use crate::updates::{AUTOMATIC_CHECKS_KEY, AUTOMATIC_DOWNLOAD_KEY};
 
 /// The Swift app's bundle identifier, its `UserDefaults` domain. Swift:
 /// `PRODUCT_BUNDLE_IDENTIFIER` in `apps/macos/project.yml`.
@@ -137,10 +138,6 @@ pub const KEY_READ_KEY: &str = "steno.swiftImportKeyRead";
 /// asking the keychain ([`key_denied_secrets`]), so the key brings up no
 /// prompt at any launch, during the import or after it.
 pub const KEY_DENIED_KEY: &str = "steno.swiftImportKeyDenied";
-/// Sparkle's `SUEnableAutomaticChecks`, for the updater's schedule (S4).
-pub const AUTOMATIC_CHECKS_KEY: &str = "steno.updates.automaticChecks";
-/// Sparkle's `SUAutomaticallyUpdate`, for the updater's schedule (S4).
-pub const AUTOMATIC_DOWNLOAD_KEY: &str = "steno.updates.automaticDownload";
 
 /// The Swift domain's keys the launch half copies, and where to. Swift:
 /// `OnboardingViewModel.onboardingCompletedKey` in

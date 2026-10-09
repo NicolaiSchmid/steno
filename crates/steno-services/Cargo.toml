@@ -17,8 +17,8 @@ fs4.workspace = true
 png.workspace = true
 qrcode.workspace = true
 # The Swift import's platform-independent half: the defaults domain as a
-# property list and the exported identity's PKCS#12.
-base64.workspace = true
+# property list and the exported identity's PKCS#12 (with `base64`, also
+# the QR code's).
 p12-keystore.workspace = true
 plist.workspace = true
 serde.workspace = true
