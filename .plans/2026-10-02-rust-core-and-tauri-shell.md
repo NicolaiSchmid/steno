@@ -962,10 +962,10 @@ still has to draw the window side. `[ ]` is not ported yet.
     Settings form whose key field holds no unsaved edit and whose key no load or save
     wrote while it was read) and a handover that waited reads its identity again and
     starts. The crash recovery (meetings left queued or processing, unfinished exports,
-    interrupted recordings) waits for the choice, so it runs on the pipeline with the
-    key; a quit before the answer hands no listener over. A write may wait on the user,
-    under the host's lock for Settings' save, and the first launch's mint of the
-    identity on the main thread may too.
+    interrupted recordings and recordings with no meeting (P3)) waits for the choice, so
+    it runs on the pipeline with the key; a quit before the answer hands no listener
+    over. A write may wait on the user, under the host's lock for Settings' save, and
+    the first launch's mint of the identity on the main thread may too.
   - A keyring locked again while the app runs fails a pipeline rebuild's read; the
     pipeline then keeps the key it last read or saved (`KeepsApiKey`), also after a
     save the keyring refused, never one the user removed or changed since. A bus error

@@ -8,7 +8,7 @@
 //!
 //! | File | What it holds | Written by | Read by |
 //! |------|---------------|------------|---------|
-//! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written: a recording's from its start until its start fails (nothing was recorded), it is deleted (forgotten before its rows go) or a launch finds its row durable and no longer `recording`; a phone upload's from before its copy until its admission commits durably (`AdmissionRecord`); one with no row until a launch adopts its master (from then on as any row's) or finds that its folder holds none, or a header with no audio | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first, and adopts only a recording with no meeting that this record names ([`crate::recovery`]) |
+//! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written: a recording's from its start until its start fails (nothing was recorded), it is deleted (forgotten before its rows go, and recorded again when the delete is refused or its commit fails) or a launch finds its row durable and no longer `recording`; a phone upload's from before its copy until its admission commits durably or its copy is gone (`AdmissionRecord`); one with no row until a launch adopts its master (from then on as any row's) or finds that its folder holds none (a CAF cut inside its header holds none), or a header with no audio | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first, and adopts only a recording with no meeting that this record names ([`crate::recovery`]) |
 //! | `KNOWN_FILE` | Every audio folder a recording was written to or the setting left, oldest first | `remember` | `known`: crash recovery looks in these folders after the two that decide a meeting ([`crate::recovery`]) |
 //!
 //! A reader returns the error of a file that cannot be read or does not
@@ -304,7 +304,11 @@ mod tests {
         assert!(recorded(dir.path()).unwrap().is_empty());
         record(dir.path(), first, Path::new("/a")).unwrap();
         record(dir.path(), second, Path::new("/b")).unwrap();
-        forget(dir.path(), &[first]).unwrap();
+        assert_eq!(
+            forget(dir.path(), &[first]).unwrap(),
+            BTreeMap::from([(first, PathBuf::from("/a"))])
+        );
+        assert!(forget(dir.path(), &[first]).unwrap().is_empty());
         assert_eq!(
             recorded(dir.path()).unwrap(),
             BTreeMap::from([(second, PathBuf::from("/b"))])

@@ -923,32 +923,42 @@ fn adopted(
 }
 
 /// The launch's adoption of recordings with no meeting, after the rows
-/// left `recording` are reconciled: a meeting folder (named by a UUID) in
+/// left `recording` are reconciled. A meeting folder (named by a UUID) in
 /// the settings' audio folder, a folder a recording was recorded into, a
-/// known folder or a stored asset's folder, that holds a non-empty master,
-/// has no row, and is named in the record of recording folders
-/// ([`crate::audio_folders`]), which a recording's start and a phone
-/// upload's copy write before the row, both as the launch listed it and as
-/// read again after the rows: a delete forgets its entry before its rows
-/// go, so a meeting deleted while the launch ran is not adopted back. Each
-/// is adopted where it is, as a `queued` meeting with that id
-/// ([`adopted`]), its meeting and asset inserted in one transaction that
-/// fails when a row with the id was written meanwhile, and processed
+/// known folder or a stored asset's folder is adopted when it holds a
+/// master that may hold audio, has no row, and is named in the record of
+/// recording folders. Each is adopted where it is, as a `queued` meeting
+/// with that id ([`adopted`]), its meeting and asset inserted in one
+/// transaction that fails when a row with the id was written meanwhile,
+/// and processed
 /// ([`ProcessingPipeline::enqueue_new`](steno_pipeline::ProcessingPipeline::enqueue_new)).
-/// Its entry stays: the insert commits under `synchronous = NORMAL`, so a
-/// power loss can still take it, and a later launch forgets the entry
-/// once its row is durable (`forget_settled`). An entry with no row is
-/// forgotten here only when its folder provably holds no master
-/// (`holds_no_master`) or its master is a header with no audio
-/// ([`Unrecoverable::Empty`]); one whose audio folder is empty, missing or
-/// unreadable stays, and is logged at debug. A master modified within
-/// [`LiveRecordingCheck::fresh_within`] is left for the next launch:
-/// another process (a phone upload still being admitted, the Swift app) may
-/// be writing it. One that cannot be read now, or whose rows cannot be
-/// saved, is left for the next launch too. A master the record does not
-/// name is left alone ([`orphans`]), and nothing in the handover inbox is
-/// adopted: it holds files, not meeting folders. Returns the ids adopted.
-/// Rust only: Swift had no recovery.
+/// Returns the ids adopted.
+///
+/// The record ([`crate::audio_folders`]) is the evidence that a master is
+/// this install's: a recording's start and a phone upload's copy write
+/// their entry before the row. An entry counts only when it is both in
+/// the launch's listing and in a read after the rows. A delete forgets its
+/// entry before its rows go, and records it again when it does not go
+/// through (refused, or its commit failed), so a meeting deleted while the
+/// launch ran is not adopted back, and one whose delete was refused keeps
+/// its evidence. A master the record does not name is left alone
+/// ([`orphans`]), and nothing in the handover inbox is adopted: it holds
+/// files, not meeting folders.
+///
+/// An adopted master's entry stays: the insert commits under
+/// `synchronous = NORMAL`, so a power loss can still take it, and a later
+/// launch forgets the entry once its row is durable (`forget_settled`).
+/// An entry with no row is forgotten here only when its folder provably
+/// holds no master (`holds_no_master`, which counts a CAF cut inside its
+/// header as none) or its master is a header with no audio
+/// ([`Unrecoverable::Empty`]); the file stays either way. One whose audio
+/// folder is empty, missing or unreadable stays, and is logged at debug.
+/// A master modified within [`LiveRecordingCheck::fresh_within`] is left
+/// for the next launch: another process (a phone upload still being
+/// admitted, the Swift app) may be writing it. One that cannot be read
+/// (a channel count the salvage does not take) or whose rows cannot be
+/// saved keeps its entry for the next launch too, and the launch names
+/// them all in one line. Rust only: Swift had no recovery.
 pub(crate) fn adopt_orphans(
     store: &Store,
     pipeline: &steno_pipeline::ProcessingPipeline,
