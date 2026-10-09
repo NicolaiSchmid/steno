@@ -2840,15 +2840,16 @@ touch and admission lines; each fix is ported to Swift before cutover.
   backend (inside the process, so nothing it starts inherits it) when
   `WAYLAND_DISPLAY` and `DISPLAY` are set and the user set no `GDK_BACKEND`, because
   GTK 3 on Wayland cannot place a window, keep it on top or report its moves, which
-  the panels need. A `GDK_BACKEND` list (a value with `,` or `*`, as Omarchy's
-  `wayland,x11,*`) counts as unset (#267). A user's single `GDK_BACKEND=wayland`, or
-  a session without XWayland, runs natively with panels that neither float nor keep
-  their place; a native path
-  would need the layer-shell protocol and is later work (the stable plan's "What
-  follows"). On Linux the panels are titled "Steno bubble" and "Steno prompt", where
-  the Swift panels and the shell's on macOS and Windows say "Steno", so Hyprland's
-  window rules (`apps/desktop/src-tauri/linux/hyprland-steno.lua`) can float, pin
-  and leave unfocused the panels only.
+  the panels need. A `GDK_BACKEND` list that names `x11` or `*` (Omarchy's
+  `wayland,x11,*`), or a lone `*`, counts as unset (#267); a list naming neither
+  stays the user's. A user's single `GDK_BACKEND=wayland`, or a session without
+  XWayland, runs natively with panels that neither float nor keep their place; a
+  native path would need the layer-shell protocol and is later work (the stable
+  plan's "What follows"). On Linux the panels are titled "Steno bubble" and "Steno
+  prompt", where the shell's panels on macOS and Windows say "Steno" (the Swift
+  panels have no title), so Hyprland's window rules
+  (`apps/desktop/src-tauri/linux/hyprland-steno.lua`, which the `.deb` installs in
+  `/usr/share/steno-desktop/`) can float, pin and leave unfocused the panels only.
 - Linux shows the tray only where a status notifier host runs (KDE, most desktop
   panels, GNOME with the AppIndicator extension); elsewhere closing the main window
   quits, where the Swift `NSStatusItem` is always in the menu bar.
