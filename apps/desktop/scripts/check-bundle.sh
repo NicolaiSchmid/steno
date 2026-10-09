@@ -21,10 +21,10 @@
 #   app       macos/*.app, into Contents/MacOS/; also the bundle id and
 #             the Swift app's SUPublicEDKey, as tauri.conf.json and
 #             Info.plist give them, in the merged Info.plist. With
-#             --signed, also the
-#             Developer ID signature, hardened runtime, timestamp and team
-#             of the app, its executable and the sidecar, the two
-#             entitlements, the stapled ticket and Gatekeeper's verdict
+#             --signed, also the Developer ID signature, hardened
+#             runtime, timestamp and team of the app, its executable and
+#             the sidecar, the two entitlements, the stapled ticket and
+#             Gatekeeper's verdict
 #   dmg       nothing of its own: the image holds the .app checked above
 #   msi       msi/*.msi, unpacked by an administrative install; the install
 #             directory also holds DirectML.dll and the Visual C++ runtime

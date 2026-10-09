@@ -17,15 +17,15 @@
 //! the page remounts and its countdown starts afresh.
 //!
 //! Both panels hang from one anchor, the top-centre point of the frame, so
-//! the prompt turns into the bubble without moving; the user drags a
-//! panel by its background (`data-tauri-drag-region` in the page), the
-//! anchor follows and is saved (`panel_anchor`). A saved anchor on a screen that is gone
-//! falls back to the default: top centre of the main screen, 8 pt under
-//! its top edge. The page measures itself and reports its size in device
-//! pixels through `panel_call("resize")` (`bridge::ResizeParams::logical`
-//! turns it into points); the shell sizes the window from that, as the
-//! Swift root reported through `contentSizeDidChange`. The geometry is
-//! `panel_geometry.rs`.
+//! the prompt turns into the bubble without moving; the user drags a panel
+//! by its background (`data-tauri-drag-region` in the page), the anchor
+//! follows and is saved (`panel_anchor`). A saved anchor on a screen that
+//! is gone falls back to the default: top centre of the main screen, 8 pt
+//! under its top edge. The page measures itself and reports its size in
+//! device pixels through `panel_call("resize")`
+//! (`bridge::ResizeParams::logical` turns it into points); the shell sizes
+//! the window from that, as the Swift root reported through
+//! `contentSizeDidChange`. The geometry is `panel_geometry.rs`.
 //!
 //! Swift: `FloatingPanel.swift`, `FloatingPanelModel.swift`,
 //! `FloatingContent.swift`.
