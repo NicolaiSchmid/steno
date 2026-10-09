@@ -911,6 +911,66 @@ fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
     assert!(allowed.stderr.contains("transcribe"), "{}", allowed.stderr);
 }
 
+/// `steno process --meeting` writes what the decoder replaced by silence
+/// into `damaged-audio.json` beside the database, where the app reads it:
+/// a phone meeting whose recording becomes the fixture with three
+/// undecodable packets is marked with them after the run.
+#[test]
+fn process_meeting_writes_the_damage_beside_the_database() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let audio = home.join("audio");
+    let first = steno(
+        &[
+            "process",
+            fixtures_root()
+                .join("audio/conversation-mic-6s.wav")
+                .to_str()
+                .unwrap(),
+            "--source",
+            "phone",
+            "--db",
+            db.to_str().unwrap(),
+            "--audio-folder",
+            audio.to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(first.status, 0, "{}", first.stderr);
+    let meeting_id = first.stdout.trim().to_owned();
+    let id = uuid::Uuid::parse_str(&meeting_id).unwrap();
+    let store = steno_core::Store::open(&db).unwrap();
+    let mut asset = store.asset(id).unwrap().unwrap();
+    let master = steno_core::paths::file_url_path(&asset.url).unwrap();
+    let damaged = master.with_file_name("recording.m4a");
+    std::fs::copy(
+        fixtures_root().join("audio/tone-440-44k1-500ms-damaged.m4a"),
+        &damaged,
+    )
+    .unwrap();
+    asset.url = steno_core::paths::file_url(&damaged, false);
+    asset.format = steno_core::AudioFormat::M4aAac;
+    store.save_asset(&asset).unwrap();
+    drop(store);
+    let marks = || steno_pipeline::DamagedAudio::in_directory(home);
+    assert_eq!(marks().parts(id), 0, "the WAV decoded clean");
+
+    let again = steno(
+        &[
+            "process",
+            "--meeting",
+            &meeting_id,
+            "--allow-ready",
+            "--db",
+            db.to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(again.status, 0, "{}", again.stderr);
+    assert_eq!(marks().parts(id), 3);
+}
+
 /// `--meeting` stands instead of the input, `--allow-ready` needs it, and
 /// an id no meeting has is a usage error that says so.
 #[test]

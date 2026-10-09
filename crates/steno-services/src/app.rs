@@ -1344,6 +1344,33 @@ mod tests {
         assert_eq!(disk.database_folder.as_deref(), database.parent());
     }
 
+    /// The build drops the damage marks of meetings that are gone and
+    /// keeps the others: a mark for a stored meeting and one for a meeting
+    /// deleted since, and after the next build only the first is in the
+    /// file.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_build_drops_the_damage_marks_of_deleted_meetings() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let app = build(options_under(&support)).unwrap();
+        let kept = steno_core::testing::sample_data::meeting();
+        app.store.save_meeting(&kept).unwrap();
+        drop(app);
+        let deleted = uuid::Uuid::new_v4();
+        let damage = steno_core::AudioDamage {
+            parts: 3,
+            seconds: 0.07,
+        };
+        let marks = DamagedAudio::in_directory(&support);
+        marks.record(kept.id, damage).unwrap();
+        marks.record(deleted, damage).unwrap();
+        let app = build(options_under(&support)).unwrap();
+        let marks = DamagedAudio::in_directory(&support);
+        assert_eq!(marks.damage(kept.id), damage);
+        assert!(marks.damage(deleted).is_none());
+        drop(app);
+    }
+
     /// What `App::launch` does to a meeting a previous process left
     /// recording with no audio in the audio folder, which is there: it
     /// fails with Swift's reason.
