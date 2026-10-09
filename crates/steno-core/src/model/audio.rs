@@ -205,6 +205,7 @@ pub fn results_need_the_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MeetingState;
     use crate::json::to_column_string;
 
     #[test]
@@ -318,6 +319,42 @@ mod tests {
             &[segment(meeting.id, AudioLane::Mixed)],
             &phone
         ));
+    }
+
+    /// A failed meeting is offered "Process again" whatever its rows; a
+    /// ready one only while its results need the audio (here the diarizer
+    /// fallback's room row) and its asset is on record; an unfinished one
+    /// never ([`Meeting::offers_process_again`]).
+    #[test]
+    fn a_failed_meeting_and_a_ready_one_kept_incomplete_offer_process_again() {
+        let mut meeting = crate::testing::sample_data::meeting();
+        meeting.duration = 6.0;
+        let asset = call_asset(meeting.id);
+        let both = [
+            segment(meeting.id, AudioLane::Mic),
+            segment(meeting.id, AudioLane::System),
+        ];
+        let room = [speaker(meeting.id, room_speaker_id(meeting.id))];
+        for state in [
+            MeetingState::Recording,
+            MeetingState::Queued,
+            MeetingState::Processing,
+        ] {
+            meeting.state = state;
+            assert!(
+                !meeting.offers_process_again(&room, &both, Some(&asset)),
+                "{:?}",
+                meeting.state
+            );
+        }
+        meeting.state = MeetingState::Ready;
+        assert!(!meeting.offers_process_again(&[], &both, Some(&asset)));
+        assert!(meeting.offers_process_again(&room, &both, Some(&asset)));
+        assert!(!meeting.offers_process_again(&room, &both, None));
+        meeting.state = MeetingState::Failed {
+            reason: "decode: unreadable".to_owned(),
+        };
+        assert!(meeting.offers_process_again(&[], &both, None));
     }
 
     #[test]

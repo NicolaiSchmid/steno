@@ -763,7 +763,9 @@ mod tests {
     }
 
     /// `meeting` saved in `state` with a six-second call recorded under
-    /// `audio`.
+    /// `audio`, and that duration: a ready one with no transcript is under
+    /// the empty-lane bound, so its results are complete
+    /// (`steno_core::results_need_the_audio`).
     fn recorded_meeting(
         store: &Store,
         audio: &std::path::Path,
@@ -772,6 +774,7 @@ mod tests {
         let mut meeting = sample_data::meeting();
         meeting.id = Uuid::new_v4();
         meeting.state = state;
+        meeting.duration = 6.0;
         let asset = steno_pipeline::fixtures::two_lane_call(
             audio,
             meeting.id,

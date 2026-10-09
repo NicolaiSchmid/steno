@@ -174,13 +174,14 @@ public enum BridgeSamples {
     canProcessAgain: false, canRerunSummary: true, isBusy: false)
 
   /// `meetingDetail` ready and exported, its recording kept because the
-  /// speakers or the transcript may be incomplete. Only the Rust host sends
-  /// this kind.
+  /// speakers or the transcript may be incomplete, so Process again is
+  /// offered. Only the Rust host sends this kind.
   public static let meetingDetailKeptIncomplete: MeetingDetailSnapshot = {
     var detail = meetingDetail
     detail.retention = .init(
       kind: .keptIncomplete, deletesAt: nil, keepsAudio: false, showsKeepToggle: true,
       filesExist: true)
+    detail.canProcessAgain = true
     return detail
   }()
 

@@ -134,7 +134,8 @@ pub enum ReprocessError {
         state: MeetingStateKind,
     },
     /// The meeting is finished, but [`process_again`] does not offer it
-    /// ([`Meeting::offers_process_again`]): today, it is ready.
+    /// ([`Meeting::offers_process_again`]): it is ready, and its results do
+    /// not need the recording.
     ///
     /// [`process_again`]: ProcessingPipeline::process_again
     #[error("meeting {0} is not offered to be processed again")]
@@ -970,27 +971,33 @@ impl ProcessingPipeline {
     /// the CLI; a button shows its own words for each variant. Needs a
     /// `tokio` runtime. Rust only: Swift had no such action.
     pub fn reprocess(&self, meeting_id: Uuid) -> std::result::Result<(), ReprocessError> {
-        self.reprocess_if(meeting_id, |_| true)
+        self.reprocess_if(meeting_id, |_, _| Ok(true))
     }
 
     /// "Process again" as the app and `steno process --meeting` offer it:
     /// [`reprocess`](Self::reprocess), refused with
     /// [`ReprocessError::NotOffered`] unless the meeting it reads
-    /// [offers it](Meeting::offers_process_again), so a caller's stale view
-    /// of a meeting that has since become ready cannot run it again. Rust
-    /// only.
+    /// [offers it](Meeting::offers_process_again) over its stored speakers,
+    /// segments and asset, so a caller's stale view of a meeting that has
+    /// since become ready and complete cannot run it again. Rust only.
     pub fn process_again(&self, meeting_id: Uuid) -> std::result::Result<(), ReprocessError> {
-        self.reprocess_if(meeting_id, Meeting::offers_process_again)
+        self.reprocess_if(meeting_id, |meeting, asset| {
+            let store = self.store();
+            let speakers = attributing(PipelineStage::Decode, store.speakers(meeting.id))?;
+            let segments = attributing(PipelineStage::Decode, store.segments(meeting.id))?;
+            Ok(meeting.offers_process_again(&speakers, &segments, asset))
+        })
     }
 
     /// [`reprocess`](Self::reprocess) for a finished meeting `offered`
-    /// accepts. The asset is claimed first and the meeting read and checked
-    /// under the claim, so the meeting read is the one the run starts from:
-    /// a run that ends just before the claim has saved its row by then.
+    /// accepts, given its asset. The asset is claimed first and the meeting
+    /// read and checked under the claim, so the meeting read is the one the
+    /// run starts from: a run that ends just before the claim has saved its
+    /// rows by then.
     fn reprocess_if(
         &self,
         meeting_id: Uuid,
-        offered: fn(&Meeting) -> bool,
+        offered: impl FnOnce(&Meeting, Option<&AudioAsset>) -> Result<bool>,
     ) -> std::result::Result<(), ReprocessError> {
         if self.quitting() {
             return Err(ReprocessError::Quitting);
@@ -1009,7 +1016,7 @@ impl ProcessingPipeline {
         if !matches!(state, MeetingStateKind::Ready | MeetingStateKind::Failed) {
             return Err(ReprocessError::Unfinished { meeting_id, state });
         }
-        if !offered(&meeting) {
+        if !offered(&meeting, asset.as_ref())? {
             return Err(ReprocessError::NotOffered(meeting_id));
         }
         let (mut asset, claim) = asset
@@ -2942,6 +2949,9 @@ mod tests {
                 reason: "summarize: the endpoint did not answer".to_owned(),
             };
             meeting.summary = None;
+            // The six-second call's length: ready with no transcript, it is
+            // complete, so not offered (`results_need_the_audio`).
+            meeting.duration = 6.0;
             let asset = crate::fixtures::two_lane_call(
                 &dir.path().join("audio"),
                 meeting.id,

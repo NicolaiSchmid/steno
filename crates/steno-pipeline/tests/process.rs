@@ -3031,6 +3031,29 @@ async fn process_again_refuses_a_ready_meeting_and_runs_a_failed_one() {
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
 }
 
+/// A ready meeting whose results may be incomplete is offered "Process
+/// again" too: after a diarizer fallback stored the room row, the
+/// pipeline's own read accepts it, and once a working diarizer replaced
+/// the row the meeting is complete and refused again.
+#[tokio::test(flavor = "multi_thread")]
+async fn process_again_runs_a_ready_meeting_kept_incomplete() {
+    let world = world(false, None, AudioRetention::DeleteAfterProcessing);
+    let fell_back = with_failing_diarizer(&world, "no model");
+    let meeting = enqueue_call(&world, &fell_back);
+    fell_back.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    assert!(has_room_row(&world, meeting));
+
+    world.pipeline.process_again(meeting).unwrap();
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    assert!(!has_room_row(&world, meeting), "the diarizer worked");
+    assert_eq!(
+        world.pipeline.process_again(meeting),
+        Err(ReprocessError::NotOffered(meeting))
+    );
+}
+
 /// The retention sweep keeps the asset row when it removes a ready
 /// meeting's files, so `reprocess` checks the disk: a meeting whose master
 /// is gone is refused before anything is saved, so its transcript stays,

@@ -1038,6 +1038,38 @@ fn an_incomplete_meeting_says_why_its_recording_is_kept() {
     assert_eq!(detail["retention"]["filesExist"], true);
 }
 
+/// A ready meeting kept incomplete is offered "Process again" (the line
+/// names it as the way out), and the click reaches the pipeline; the same
+/// meeting with every lane transcribed is not offered it.
+#[test]
+fn a_ready_meeting_kept_incomplete_offers_process_again() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+        })
+        .build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        false
+    );
+
+    empty_the_mic_lane(&harness.store);
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["retention"]["kind"], "keptIncomplete");
+    assert_eq!(detail["canProcessAgain"], true);
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"],
+        Value::Null
+    );
+    assert_eq!(
+        *harness.fakes.pipeline.processed_again.lock().unwrap(),
+        [uuid(MEETING)]
+    );
+}
+
 /// `ui.confirmDestructive` hands the page's prompt to the shell's dialog
 /// as sent and replies with the answer, a decline included.
 #[test]
@@ -1758,7 +1790,8 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
     let pipeline = &harness.fakes.pipeline;
     let error_line = || harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"].clone();
 
-    // The selection is the ready meeting: only a failed one is processed again.
+    // The selection is the ready meeting with every lane transcribed: not
+    // offered.
     assert_eq!(
         harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
         false
@@ -1766,7 +1799,7 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
     harness.host.meeting_process_again().unwrap();
     assert_eq!(
         error_line(),
-        "Only a failed meeting can be processed again."
+        "Only a failed meeting, or one whose results may be incomplete, can be processed again."
     );
     assert!(pipeline.processed_again.lock().unwrap().is_empty());
 
@@ -1799,7 +1832,7 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         (Refusal::Busy, "This meeting is already being processed."),
         (
             Refusal::NotOffered,
-            "Only a failed meeting can be processed again.",
+            "Only a failed meeting, or one whose results may be incomplete, can be processed again.",
         ),
         (Refusal::MeetingGone, "This meeting no longer exists."),
         (

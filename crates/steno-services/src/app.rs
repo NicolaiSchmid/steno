@@ -1570,10 +1570,10 @@ mod tests {
     }
 
     /// The detail is loaded while the meeting is failed; the store then
-    /// marks it ready behind the host's back (as a Try again run does
-    /// before the host's `store_changed` reload). The click is refused
-    /// under the pipeline's own read: the ready meeting is not queued
-    /// again, and the error line says why.
+    /// marks it ready with both lanes transcribed behind the host's back
+    /// (as a Try again run does before the host's `store_changed` reload).
+    /// The click is refused under the pipeline's own read: the ready,
+    /// complete meeting is not queued again, and the error line says why.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_on_a_stale_failed_detail_refuses_a_ready_meeting() {
         use steno_bridge::BridgeMethod;
@@ -1585,9 +1585,22 @@ mod tests {
             "failed"
         );
 
-        store
-            .set_state(id, steno_core::MeetingState::Ready, chrono::Utc::now())
-            .unwrap();
+        let mut meeting = store.meeting(id).unwrap().unwrap();
+        meeting.state = steno_core::MeetingState::Ready;
+        let segments: Vec<_> = [steno_core::AudioLane::Mic, steno_core::AudioLane::System]
+            .into_iter()
+            .map(|lane| steno_core::TranscriptSegment {
+                id: uuid::Uuid::new_v4(),
+                meeting_id: id,
+                start: 0.0,
+                end: 1.0,
+                speaker_id: None,
+                lane,
+                text: "Hello.".to_owned(),
+                raw_text: "Hello.".to_owned(),
+            })
+            .collect();
+        store.replace_transcript(&meeting, &segments, &[]).unwrap();
         call(&host, BridgeMethod::MeetingProcessAgain, None);
         assert_eq!(
             store.meeting(id).unwrap().unwrap().state,
@@ -1596,9 +1609,41 @@ mod tests {
         );
         assert_eq!(
             host.snapshot(BridgeTopic::MeetingDetail).unwrap()["error"],
-            "Only a failed meeting can be processed again."
+            "Only a failed meeting, or one whose results may be incomplete, can be processed again."
         );
         app.pipeline.current().wait_until_idle().await;
+    }
+
+    /// A ready meeting kept incomplete (here a long call with no
+    /// transcript, marked ready behind the host's back) is offered
+    /// "Process again" through the host too, and the run takes it to ready.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_through_the_host_runs_a_ready_meeting_kept_incomplete() {
+        use steno_bridge::BridgeMethod;
+        let (dir, store) = temp_store();
+        let (app, host, id) =
+            failed_meeting_selected(&dir, &store, "transcribe: the model is not installed");
+        store
+            .set_state(id, steno_core::MeetingState::Ready, chrono::Utc::now())
+            .unwrap();
+        host.store_changed();
+        let detail = host.snapshot(BridgeTopic::MeetingDetail).unwrap();
+        assert_eq!(detail["state"], "ready", "{detail}");
+        assert_eq!(detail["canProcessAgain"], true, "{detail}");
+
+        call(&host, BridgeMethod::MeetingProcessAgain, None);
+        let detail = host.snapshot(BridgeTopic::MeetingDetail).unwrap();
+        assert_eq!(detail.get("error"), None, "{detail}");
+        app.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            store.meeting(id).unwrap().unwrap().state,
+            steno_core::MeetingState::Ready
+        );
+        assert_ne!(
+            store.segments(id).unwrap(),
+            Vec::new(),
+            "the run transcribed it"
+        );
     }
 
     /// A recording in progress, stopped from the sidebar or the tray (Stop,

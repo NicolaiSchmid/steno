@@ -169,7 +169,7 @@ describe("MeetingDetail", () => {
 		expect(toggle).toHaveAttribute("aria-checked", "true");
 	});
 
-	it("says why an incomplete meeting keeps its recording and offers the delete", async () => {
+	it("says why an incomplete meeting keeps its recording and offers Process again and the delete", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=kept-incomplete");
 		renderWithBridge(<MeetingDetail initialMenuOpen />, harness);
@@ -182,6 +182,9 @@ describe("MeetingDetail", () => {
 		expect(
 			callsTo(harness.transport, "meeting.deleteRecordingNow"),
 		).toHaveLength(1);
+		expect(screen.getByTestId("process-again")).toBeEnabled();
+		await user.click(screen.getByTestId("process-again"));
+		expect(callsTo(harness.transport, "meeting.processAgain")).toHaveLength(1);
 	});
 
 	it("follows the host's keep flag and hides the switch when told to", async () => {
