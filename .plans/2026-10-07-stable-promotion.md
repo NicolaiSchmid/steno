@@ -561,13 +561,17 @@ Every package is written in parallel except where a dependency is named:
     off, Sparkle's default) in `preferences.json`. A check is also due when the
     stored time is in the future (the clock was set back), and a check that has
     not answered after 60 seconds fails. A found update raises the "Install and
-    Relaunch" dialog once per version in a run, not while a recording runs.
-    Automatic downloads wait for P25's gate: the schedule downloads by itself
-    only while `InstallGate::is_idle_now` says idle and installs only with a
-    hold from `InstallGate::try_hold`; the stand-in `NeverIdle` is never idle,
-    so it downloads nothing, and P25's gate turns the download on.
-    `updates_are_managed` is X5's switch. The QR code is
-    the `qrcode` crate's, level M, as a greyscale PNG.
+    Relaunch" dialog once per version in a run, not while a recording starts,
+    runs or stops, and a yes given once a recording has started asks again
+    before it installs. Automatic downloads wait for P25's gate: the schedule
+    downloads by itself only while `InstallGate::is_idle_now` says idle and
+    installs only with a hold from `InstallGate::try_hold`; the stand-in
+    `NeverIdle` is never idle, so it downloads nothing, and P25's gate turns
+    automatic downloads on. P25 also re-reads the automatic-downloads flag when
+    a download ends and before the install: a switch turned off during the
+    transfer finds nothing kept yet, so today the same tick would still keep
+    and install the package. `updates_are_managed` is X5's switch. The QR code
+    is the `qrcode` crate's, level M, as a greyscale PNG.
 - **S5 Handover on a changing network** (`fix/handover-republish`).
   - Re-register the Bonjour record when the interfaces change, on every
     platform.

@@ -2683,34 +2683,42 @@ touch and admission lines; each fix is ported to Swift before cutover.
   `fix/recording-recovery` (#233) makes a Rust launch leave a `recording` row alone
   while its master still grows.
 - Updates: Sparkle checks daily on its own (`SUEnableAutomaticChecks`,
-  `SUScheduledCheckInterval` 86400 in `apps/macos/project.yml`). The Rust app's
-  update schedule (`steno_services::updates`, S4) checks at launch and every hour
-  when the last check is missing, a day old or in the future. Its flags are the
-  booleans `steno.updates.automaticChecks` and `steno.updates.automaticDownload` in
+  `SUScheduledCheckInterval` 86400 in `apps/macos/project.yml`). The Rust app's update
+  schedule (`steno_services::updates`, S4) checks at launch and every hour when the
+  last check is missing, a day old or in the future. Its flags are the booleans
+  `steno.updates.automaticChecks` and `steno.updates.automaticDownload` in
   `preferences.json`, where the Mac's first launch copies Sparkle's
-  `SUEnableAutomaticChecks` and `SUAutomaticallyUpdate` (S6); a missing key reads as
-  a fresh Sparkle install, checks on and downloads off. The last check time is
-  `lastCheckAt` (RFC 3339 UTC) in `update-check.json` in the support directory, a
-  file of its own written with `replace_file` after a check that succeeded (Swift:
-  `SULastCheckTime`, which the import leaves behind); a failed check is tried again
-  at the next hourly tick, and a file that does not parse reads as no check yet.
-  The tray's and Settings' check records through the same schedule, and a check that
-  has not answered after 60 seconds fails, so a stalled request cannot hold the next
-  one. Where Sparkle showed its alert for a found update, the schedule raises the
-  shell's "Install and Relaunch" dialog once per version in a run, and not while a
-  recording starts, runs or stops: the first tick after it ends raises it. Automatic
-  downloads wait for P25's `InstallGate` (stable plan): its stand-in `NeverIdle`
-  never gives a hold, so until P25 lands the flag downloads nothing and every install
-  waits for the user's yes; with the gate the schedule downloads by itself only while
+  `SUEnableAutomaticChecks` and `SUAutomaticallyUpdate` (S6); a missing key reads as a
+  fresh Sparkle install, checks on and downloads off. The last check time is
+  `lastCheckAt` (RFC 3339 UTC) in `update-check.json` in the support directory, a file
+  of its own written with `replace_file` after a check that succeeded (Swift:
+  `SULastCheckTime`, which the import leaves behind); a failed check is tried again at
+  the next hourly tick, and a file that does not parse reads as no check yet. The
+  tray's and Settings' check records through the same schedule, and a check that has
+  not answered after 60 seconds fails, so a stalled request cannot hold the next one.
+  Where Sparkle showed its alert for a found update, the schedule raises the shell's
+  "Install and Relaunch" dialog once per version in a run, and not while a recording
+  starts, runs or stops: the first tick after it ends raises it. A yes given once a
+  recording has started since the dialog came up asks again ("Installing stops and
+  saves the recording in progress.", "Install and Relaunch" or "Not Now"), and "Not
+  Now" leaves the version to be raised again after the recording. Automatic downloads
+  wait for P25's `InstallGate` (stable plan): its stand-in `NeverIdle` never gives a
+  hold, so until P25 lands the flag downloads nothing and every install waits for the
+  user's yes; with the gate the schedule downloads by itself only while
   `InstallGate::is_idle_now` says idle (a recording or a processing job has the disk
-  and the network to itself) and installs only with a hold from `try_hold`. Sparkle installed a download at quit.
+  and the network to itself), keeps the package until an install takes it, and
+  installs only with a hold from `try_hold`. Sparkle installed a download at quit.
   Settings' footer ("installed when you relaunch Steno", `general-section.tsx`)
-  describes Sparkle; in the Rust app the dialog's yes installs at once, and the
-  shared copy follows when the Swift app retires (`.plans/2026-10-04-mac-cutover.md`).
-  A packaged install (`STENO_DISTRIBUTION=aur|nix`, the environment before the
-  build's value; stable plan X5, `updates_are_managed`) runs no schedule, and its
-  checks, the tray's included, fail without a request. A smoke run (`STENO_SMOKE_SECONDS`) passes no update source, so it never
-  checks. The network is the updater's: the same lane manifests, nothing new sent.
+  describes Sparkle; in the Rust app the dialog's yes installs at once, after a second
+  confirm when a recording has started since the dialog came up, and the shared copy
+  follows when the Swift app retires (`.plans/2026-10-04-mac-cutover.md`). One install
+  runs at a time, and the install is of the version the dialog named. A packaged
+  install (`STENO_DISTRIBUTION=aur|nix`, the environment before the build's value;
+  stable plan X5, `updates_are_managed`) runs no schedule, and its checks, the tray's
+  included, fail without a request; the tray says the package manager delivers the
+  updates. A smoke run (`STENO_SMOKE_SECONDS`) passes no update source, so it never
+  checks on its own, and the tray's check there has the same 60 second limit. The
+  network is the updater's: the same lane manifests, nothing new sent.
 
 ### Bridge
 
@@ -3048,7 +3056,7 @@ PR off `main`.
 | Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
 | A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
 | Stable plan A9: the AAC priming trimmed from the edit list, the gapless tag or, in the phone recorder's layout alone, AVFoundation's default; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | open |
-| S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while recording, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | open |
+| S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops and a second confirm before a yes ends one, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
