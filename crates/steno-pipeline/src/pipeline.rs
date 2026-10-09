@@ -832,6 +832,10 @@ impl ProcessingPipeline {
     }
 
     /// The test probe of the clip steps; always `None` in the product.
+    #[cfg_attr(
+        not(any(test, feature = "testing")),
+        allow(clippy::unused_self, clippy::missing_const_for_fn)
+    )]
     fn clip_probe(&self) -> Option<ClipProbe> {
         #[cfg(any(test, feature = "testing"))]
         {
