@@ -11,8 +11,7 @@
 //!   logits split.
 //! - [`features`]: the `NeMo` mel preprocessor in Rust.
 //! - [`vocab`]: `tokens.txt`, word boundaries, the splice-safe set.
-//! - [`decoder`]: the greedy TDT loop over one encoder window, over
-//!   [`TdtModel`].
+//! - [`decoder`]: the greedy TDT loop over one encoder window.
 //! - [`vad`]: [`VoiceActivityDetector`], Silero through ONNX Runtime, and
 //!   energy detectors: a fixed threshold for tests, one that follows the
 //!   recording's level for the `CoreML` engine.
@@ -126,10 +125,7 @@ pub use backend::{
     JointDecision, ModelShape, SAMPLE_RATE, SpeechBackend, sample_count, split_logits,
 };
 pub use chunker::{Chunk, ChunkerConfig, Cut};
-pub use decoder::{
-    DecodeStats, Decoded, DecoderConfig, TdtModel, Token, TokenBudget, TokenDuration, WindowEnd,
-    confidence, decode_frames,
-};
+pub use decoder::{DecodeStats, DecoderConfig, Token, confidence};
 pub use engine::{OnnxSpeechEngine, PARAKEET_V3_ID, PARAKEET_V3_LANGUAGES};
 pub use error::{SidecarError, SpeechError};
 pub use features::MelExtractor;
