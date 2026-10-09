@@ -2,8 +2,9 @@
 # desktop-release.yml builds the `.deb`: the web UI, the speech sidecar
 # (apps/desktop/scripts/stage-sidecar.sh), then `cargo tauri build` with
 # tauri.release.conf.json, whose `.deb` tree becomes $out. Every hash is in
-# the tree (the crates' in Cargo.lock, the web UI's below), so any tag
-# builds as it is. Item X7 of .plans/2026-10-07-stable-promotion.md.
+# the tree (the crates' in Cargo.lock, the web UI's below), so every tag
+# from the first one with this file builds as it is. Item X7 of
+# .plans/2026-10-07-stable-promotion.md.
 {
   lib,
   rustPlatform,
@@ -29,10 +30,11 @@
   fs = lib.fileset;
   # Everything but what no Rust or web build reads (the Swift app, the
   # phone, the site, plans, docs and the Nix files themselves), so editing
-  # those leaves the package as it was.
+  # those leaves the package as it was. Each may be missing: the Mac
+  # cutover deletes the Swift app.
   src = fs.toSource {
     inherit root;
-    fileset = fs.difference root (fs.unions [
+    fileset = fs.difference root (fs.unions (map fs.maybeMissing [
       ../.agents
       ../.claude
       ../.github
@@ -48,11 +50,12 @@
       ../Tests
       ../flake.lock
       ../flake.nix
-    ]);
+    ]));
   };
   web = ../apps/macos/web;
-  # The CLI the release builds with (desktop-release.yml pins 2.12.1);
-  # nixpkgs' 2.11 refuses tauri.conf.json's `bundleVCRuntime`.
+  # The CLI the release builds with (desktop-release.yml pins 2.12.1, and
+  # the flake's package check fails when the two differ); nixpkgs' 2.11
+  # refuses tauri.conf.json's `bundleVCRuntime`.
   tauri = cargo-tauri.overrideAttrs (final: _: {
     version = "2.12.1";
     src = fetchFromGitHub {
@@ -121,12 +124,13 @@ in
 
     env = {
       # nixpkgs' ONNX Runtime, linked dynamically, in place of the build
-      # `ort` downloads, which the sandbox forbids. Its telemetry stays off
-      # as everywhere: `init_environment` in crates/steno-speech/src/onnx.rs.
+      # `ort` downloads (pyke's, 1.28.0), which the sandbox forbids. Its
+      # telemetry stays off as everywhere: `init_environment` in
+      # crates/steno-speech/src/onnx.rs.
       ORT_LIB_LOCATION = "${lib.getLib onnxruntime}/lib";
       ORT_PREFER_DYNAMIC_LINK = "1";
-      # The build-time default of the distribution switch (X5): updates come
-      # from the package manager. The wrapper sets it too.
+      # The build-time default of the distribution switch, for X5 to read:
+      # updates then come from the package manager. The wrapper sets it too.
       STENO_DISTRIBUTION = "nix";
     };
 
@@ -166,8 +170,11 @@ in
       wrapGApp "$out/bin/steno-desktop" --set-default STENO_DISTRIBUTION nix
     '';
 
-    # The library the tray opens, by store path (`postPatch`).
-    passthru.trayLibrary = "${lib.getLib libayatana-appindicator}/lib/libayatana-appindicator3.so.1";
+    passthru = {
+      # The library the tray opens, by store path (`postPatch`).
+      trayLibrary = "${lib.getLib libayatana-appindicator}/lib/libayatana-appindicator3.so.1";
+      tauriCli = tauri;
+    };
 
     meta = {
       description = "Bot-free meeting recorder: records calls locally, transcribes and summarises on-device";
