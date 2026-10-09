@@ -352,4 +352,4 @@ that is acceptable for a personal open-source project.
 
 ## License
 
-MIT.
+MIT, see [`LICENSE`](LICENSE).
