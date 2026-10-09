@@ -68,11 +68,10 @@
     # nixpkgs tests the CLI at its own version.
     doCheck = false;
   });
-  workspace = (lib.importTOML ../Cargo.toml).workspace.package;
 in
   rustPlatform.buildRustPackage (finalAttrs: {
     pname = "steno-desktop";
-    inherit (workspace) version;
+    inherit ((lib.importTOML ../Cargo.toml).workspace.package) version;
     inherit src;
 
     # Keeps the JSON in `tauriBuildFlags` one argument.
@@ -163,17 +162,12 @@ in
     # beside the wrapped one: the wrapper execs
     # $out/bin/.steno-desktop-wrapped, whose `current_exe` is in $out/bin.
     dontWrapGApps = true;
-    preFixup = ''
-      gappsWrapperArgs+=(--set-default STENO_DISTRIBUTION nix)
-    '';
     postFixup = ''
-      wrapGApp "$out/bin/steno-desktop"
+      wrapGApp "$out/bin/steno-desktop" --set-default STENO_DISTRIBUTION nix
     '';
 
-    passthru = {
-      # The library the tray opens, by store path (`postPatch`).
-      trayLibrary = "${lib.getLib libayatana-appindicator}/lib/libayatana-appindicator3.so.1";
-    };
+    # The library the tray opens, by store path (`postPatch`).
+    passthru.trayLibrary = "${lib.getLib libayatana-appindicator}/lib/libayatana-appindicator3.so.1";
 
     meta = {
       description = "Bot-free meeting recorder: records calls locally, transcribes and summarises on-device";
