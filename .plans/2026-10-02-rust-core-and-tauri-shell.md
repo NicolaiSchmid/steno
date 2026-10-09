@@ -962,18 +962,20 @@ still has to draw the window side. `[ ]` is not ported yet.
     folder: it removes a clip file of one of the meeting's speakers (by the speaker id
     the file name starts with: one this run gave a clip or one the merge replaced)
     that no speaker row of any meeting names, matched by file name in any ASCII case.
-    That takes the earlier clips and the files of a run that ended before its commit;
-    a speaker the merge did not replace that this run gave no clip keeps its files in
-    this run, and a later run or retention sweeps them. So a run that ends at any point leaves each row naming a whole
-    clip, of the run that wrote the row or, for a confirmed speaker that run gave no
-    clip, the one its row named before, and a confirmed speaker's earlier clip goes
-    only once a durable commit names the new one. A confirmed speaker that comes back
-    without a clip keeps naming and playing its clip, which retention removes with
-    the audio. A confirmed speaker the re-run drops loses its row but keeps every
-    clip file it had: the files stay, unnamed and not played, until a later run or
-    retention finds the speaker id their name starts with among the meeting's
-    speakers or gives it a clip; if none does, they stay past the retention period
-    until the meeting is deleted, as in Swift. The sweep runs while
+    That takes the earlier clips and the files of a run that ended before its commit.
+    A speaker the merge did not replace that this run gave no clip keeps its files in
+    this run, under the rule for a dropped confirmed speaker below. So a run that ends
+    at any point leaves each row naming no clip, a whole clip of the run that wrote
+    the row, or, for a confirmed speaker that run gave no clip, the one its row named
+    before, and a confirmed speaker's earlier clip goes only once a durable commit
+    names the new one. A confirmed speaker that comes back without a clip keeps
+    naming and playing its clip, which retention removes with the audio. A confirmed
+    speaker the re-run drops loses its row but keeps every clip file it had, unnamed
+    and not played. A later run removes such a file only if it gives the speaker id
+    the file name starts with a clip, or replaces that id's row while the row is
+    unconfirmed; retention removes it only when it removes the meeting's audio while
+    that id is one of the meeting's speakers. Otherwise the file stays past any
+    retention period until the meeting is deleted, as in Swift. The sweep runs while
     the run holds the meeting in the in-flight set, so no other run of the meeting
     has uncommitted clips in that folder, and speaker ids derive from the meeting id,
     so another meeting's clips are never the sweep's. Clips are written only into the
