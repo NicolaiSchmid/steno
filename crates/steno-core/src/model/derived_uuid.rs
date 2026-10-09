@@ -28,6 +28,16 @@ pub fn derived_uuid(base: Uuid, salt: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+/// The id of the one unknown room speaker a meeting falls back to when its
+/// diarizer fails (the pipeline's `Diarization::one_room_speaker`): its own
+/// id, so a later run that diarizes never inherits its confirmation, and
+/// the sign [`results_need_the_audio`](crate::results_need_the_audio)
+/// reads. Rust only: Swift fails the meeting.
+#[must_use]
+pub fn room_speaker_id(meeting_id: Uuid) -> Uuid {
+    derived_uuid(meeting_id, "speaker-room")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

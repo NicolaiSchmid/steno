@@ -23,12 +23,15 @@ mod tasks;
 mod template;
 mod transcript;
 
-pub use audio::{AudioAsset, AudioFormat, AudioRetention, AudioRetentionKind};
+pub use audio::{
+    AudioAsset, AudioFormat, AudioRetention, AudioRetentionKind, EMPTY_LANE_MAXIMUM_SECONDS,
+    results_need_the_audio,
+};
 pub use audio_buffer::AudioBuffer16k;
 pub use delivery::{
     DeliveredFile, Delivery, DeliveryReceipt, DeliveryStatus, DeliveryStatusKind, FileOwnership,
 };
-pub use derived_uuid::derived_uuid;
+pub use derived_uuid::{derived_uuid, room_speaker_id};
 pub use events::{MeetingEvent, MeetingOperation, ProcessingProgress};
 pub use handover::{
     HandoverReceipt, HandoverState, HandoverStateKind, PairedDevice, RecordingMetadata,

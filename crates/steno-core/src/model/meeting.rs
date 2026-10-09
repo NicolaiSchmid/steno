@@ -265,11 +265,17 @@ impl Meeting {
 
     /// Copies the columns the pipeline owns from `results`: language,
     /// state, summary, usage and `updatedAt`, plus the title and its origin
-    /// unless the stored origin is `user` (a rename during a run stays).
-    /// The template is the user's alone: the summary's `template_id`
-    /// records which one made it. Rust only: Swift's
-    /// `writeProcessingResults` copies the template, title and origin.
+    /// unless the stored origin is `user` (a rename during a run stays),
+    /// and the duration when the stored one is not positive (a phone
+    /// recording whose metadata announced none gets the length the run
+    /// decoded). The template is the user's alone: the summary's
+    /// `template_id` records which one made it. Rust only: Swift's
+    /// `writeProcessingResults` copies the template, title and origin, and
+    /// never the duration.
     pub fn apply_processing_results(&mut self, results: &Meeting) {
+        if self.duration <= 0.0 {
+            self.duration = results.duration;
+        }
         if self.title_origin != TitleOrigin::User {
             self.title.clone_from(&results.title);
             self.title_origin = results.title_origin;
