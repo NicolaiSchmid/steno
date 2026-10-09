@@ -124,6 +124,11 @@ pub struct HostConfig {
     /// computer". The shell passes `Platform::CURRENT`; the parity tests
     /// pass the Mac, whose words are Swift's.
     pub platform: Platform,
+    /// A package manager delivers the updates (stable plan X5,
+    /// `steno_services::updates::updates_are_managed`): the General
+    /// section offers no check and says where updates come from, and
+    /// `updates.check` checks nothing. Rust only.
+    pub updates_managed: bool,
 }
 
 impl Default for HostConfig {
@@ -132,6 +137,7 @@ impl Default for HostConfig {
             version: "0".to_owned(),
             zone: crate::labels::utc(),
             platform: Platform::CURRENT,
+            updates_managed: false,
         }
     }
 }
@@ -590,6 +596,7 @@ impl Host {
                 &self.shared.services,
                 inner.subtitle(SettingsSection::General),
                 &self.shared.config.version,
+                self.shared.config.updates_managed,
             )),
             BridgeTopic::SettingsRecording => to_value(settings_snapshots::recording(
                 &inner.audio,
@@ -891,11 +898,19 @@ impl Host {
         )
     }
 
-    /// The first launch registers the login item when the setting says so.
-    /// Swift: `AppController.registerLoginItemOnFirstLaunch`.
+    /// The first launch registers the login item when the setting says so;
+    /// a login item the system manages is left alone, and the first launch
+    /// is not counted, so a later install that leaves launch at login to the
+    /// app still registers it once. Nor is a launch counted whose
+    /// registration failed (on Linux, no launcher at a path that outlives
+    /// an upgrade), so a later launch tries again; the failure is not
+    /// shown. Swift: `AppController.registerLoginItemOnFirstLaunch`, which
+    /// counts the launch before it registers.
     pub fn register_login_item_on_first_launch(&self) {
         let preferences = &self.shared.services.preferences;
-        if preferences.flag(LOGIN_ITEM_REGISTERED_KEY) {
+        if preferences.flag(LOGIN_ITEM_REGISTERED_KEY)
+            || self.shared.services.login_item.status() == crate::services::LoginItemStatus::Managed
+        {
             return;
         }
         let Ok(settings) = self.shared.store.settings() else {
@@ -904,11 +919,11 @@ impl Host {
         if !settings.launch_at_login {
             return;
         }
-        preferences.set_flag(LOGIN_ITEM_REGISTERED_KEY, true);
-        if self.shared.services.login_item.status()
-            == crate::services::LoginItemStatus::NotRegistered
-        {
-            let _ = self.shared.services.login_item.set_enabled(true);
+        let registered = self.shared.services.login_item.status()
+            != crate::services::LoginItemStatus::NotRegistered
+            || self.shared.services.login_item.set_enabled(true).is_ok();
+        if registered {
+            preferences.set_flag(LOGIN_ITEM_REGISTERED_KEY, true);
         }
         let mut inner = self.lock();
         inner.general.login_item = self.shared.services.login_item.status();
@@ -2219,7 +2234,9 @@ impl BridgeHost for Host {
     // system
 
     fn updates_check(&self) -> Outcome<()> {
-        self.shared.services.updater.check_for_updates();
+        if !self.shared.config.updates_managed {
+            self.shared.services.updater.check_for_updates();
+        }
         self.settings_command(BridgeTopic::SettingsGeneral, |_| {});
         Ok(())
     }

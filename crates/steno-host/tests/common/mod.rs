@@ -126,6 +126,7 @@ pub struct HarnessBuilder {
     change_services: Vec<ChangeServices>,
     page_ready: bool,
     platform: Platform,
+    updates_managed: bool,
 }
 
 impl HarnessBuilder {
@@ -178,6 +179,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// A package manager delivers the updates (`HostConfig::updates_managed`).
+    pub fn updates_managed(mut self) -> Self {
+        self.updates_managed = true;
+        self
+    }
+
     /// Leaves the page not ready, for tests of the readiness gate.
     pub fn without_page_ready(mut self) -> Self {
         self.page_ready = false;
@@ -211,6 +218,7 @@ impl HarnessBuilder {
                 version: VERSION.to_owned(),
                 zone: steno_host::labels::utc(),
                 platform: self.platform,
+                updates_managed: self.updates_managed,
             },
         )
         .unwrap()
@@ -253,6 +261,7 @@ impl Harness {
             change_services: Vec::new(),
             page_ready: true,
             platform: Platform::Macos,
+            updates_managed: false,
         }
     }
 

@@ -781,7 +781,9 @@ fn log_operation_failure(event: &MeetingEvent) {
 }
 
 impl App {
-    /// The host over this graph, with the viewer's zone and the version.
+    /// The host over this graph, with the viewer's zone, the version and
+    /// whether a package manager delivers the updates
+    /// ([`updates_are_managed`](crate::updates::updates_are_managed)).
     pub fn host(&self) -> Result<Host, steno_host::host::HostError> {
         Host::new(
             self.store.clone(),
@@ -790,6 +792,7 @@ impl App {
                 version: self.version.clone(),
                 zone: self.zone,
                 platform: steno_bridge::Platform::CURRENT,
+                updates_managed: crate::updates::updates_are_managed(),
             },
         )
     }
@@ -1212,6 +1215,46 @@ mod tests {
                 .map(|kind| kind.as_str())
                 .collect();
         assert_eq!(listed, expected);
+    }
+
+    /// Set in the child [`the_host_says_whether_a_package_manager_delivers_the_updates`]
+    /// runs.
+    const DISTRIBUTION_CHILD: &str = "STENO_DISTRIBUTION_TEST_CHILD";
+
+    /// The shell's host says a package manager delivers the updates exactly
+    /// when [`updates_are_managed`](crate::updates::updates_are_managed)
+    /// does: here, and in a child of this test binary told the opposite
+    /// through the environment (stable plan X5).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_host_says_whether_a_package_manager_delivers_the_updates() {
+        let managed = crate::updates::updates_are_managed();
+        let dir = tempfile::tempdir().unwrap();
+        let app = build(options_under(&dir.path().join("support"))).unwrap();
+        let general = app
+            .host()
+            .unwrap()
+            .snapshot(BridgeTopic::SettingsGeneral)
+            .unwrap();
+        assert_eq!(general["updates"]["managedNote"].is_string(), managed);
+        if std::env::var_os(DISTRIBUTION_CHILD).is_some() {
+            return;
+        }
+        let name = "app::tests::the_host_says_whether_a_package_manager_delivers_the_updates";
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--test-threads=1"])
+            .env(DISTRIBUTION_CHILD, "1")
+            .env(
+                crate::updates::DISTRIBUTION_VARIABLE,
+                if managed { "appimage" } else { "nix" },
+            )
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// The recorder's disk watch reads the volume of the database's folder

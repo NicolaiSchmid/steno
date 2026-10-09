@@ -84,6 +84,11 @@ impl FakeLoginItem {
         }
     }
 
+    /// What `status` answers from now on, as the system would report it.
+    pub fn set_status(&self, status: LoginItemStatus) {
+        *lock(&self.status) = status;
+    }
+
     /// Makes every `set_enabled` fail with `text`; `None` lets it through.
     pub fn fail_changes(&self, text: Option<&str>) {
         *lock(&self.failure) = text.map(str::to_owned);

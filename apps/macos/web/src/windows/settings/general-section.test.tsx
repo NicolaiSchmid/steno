@@ -1,6 +1,8 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import type { GeneralSettingsSnapshot } from "@/bridge/contract";
+import { loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { GeneralSection } from "./general-section";
 
@@ -74,6 +76,40 @@ describe("GeneralSection", () => {
 		expect(screen.getByTestId("update-status")).toHaveTextContent(
 			"Update available: 0.10.1",
 		);
+	});
+
+	it("shows a packaged install's login item locked and no update check", async () => {
+		const fixture = (await loadFixtureSnapshots())[
+			"settings.general"
+		] as GeneralSettingsSnapshot;
+		const loginItemNote =
+			"Your system opens Steno when you log in and manages this setting.";
+		const managedNote = "Updates come from your package manager.";
+		const harness = await createBridgeHarness("", {
+			"settings.general": {
+				...fixture,
+				loginItemNote,
+				updates: { ...fixture.updates, canCheck: false, managedNote },
+			} satisfies GeneralSettingsSnapshot,
+		});
+		renderWithBridge(<GeneralSection />, harness);
+		expect(screen.getByTestId("launch-at-login")).toHaveAttribute(
+			"aria-disabled",
+			"true",
+		);
+		expect(screen.getByTestId("launch-at-login")).toHaveAttribute(
+			"aria-checked",
+			"true",
+		);
+		await userEvent.setup().click(screen.getByTestId("launch-at-login"));
+		expect(
+			callsTo(harness.transport, "settings.general.setLaunchAtLogin"),
+		).toEqual([]);
+		expect(screen.getByText(loginItemNote)).toBeInTheDocument();
+		expect(screen.getByTestId("update-status")).toHaveTextContent(managedNote);
+		expect(screen.queryByTestId("check-for-updates")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("auto-check")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("auto-install")).not.toBeInTheDocument();
 	});
 
 	it("opens the acknowledgements and lists models and libraries", async () => {

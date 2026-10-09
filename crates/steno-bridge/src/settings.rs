@@ -49,6 +49,12 @@ pub struct GeneralUpdates {
     pub outcome: GeneralUpdatesOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Where updates come from when a package manager delivers them (stable
+    /// plan X5), which the Updates row shows instead of its check and its
+    /// switches. The Rust host sets it; the Swift app has no such field and
+    /// never sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_note: Option<String>,
 }
 
 /// A summary template with the sentence shown under the picker.
@@ -85,6 +91,12 @@ pub struct GeneralSettingsSnapshot {
     pub subtitle: String,
     pub version: String,
     pub login_item: GeneralLoginItem,
+    /// The line under launch at login when the system starts the app and
+    /// owns the setting (stable plan X5); the page then shows the switch on
+    /// and locked. The Rust host sets it; the Swift app has no such field
+    /// and never sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_item_note: Option<String>,
     pub detection_enabled: bool,
     #[serde(rename = "defaultTemplateID")]
     pub default_template_id: String,

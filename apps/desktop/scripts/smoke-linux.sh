@@ -9,12 +9,23 @@
 # crop per window and per panel (`magick` from ImageMagick 7, `convert`
 # from 6); the windows carry what the host's database holds (nothing on
 # a fresh runner). Xvfb has no compositor, so the panels' transparent
-# corners render black there. Then it launches the binary once more over a
-# database it cannot open, in a throwaway XDG_DATA_HOME, and expects the
-# refusal: the "not starting" line and exit 3, and fails (exit 1)
-# otherwise.
+# corners render black there.
 #
-#   [STENO_SMOKE_DPI=<dpi>] apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
+# Then two runs with the login item the system's (STENO_LOGIN_ITEM=managed,
+# packaged.rs), each in a throwaway HOME holding an autostart entry an
+# earlier build wrote, whose Exec starts a program in /nix/store. The
+# first must remove it. The second runs as the autostart unit, inside a
+# cgroup named after the unit below a delegated `systemd-run --user`
+# scope: the entry must still be there halfway through the run, and gone
+# after the exit, which removes it after the shutdown. Without a user manager
+# that starts the scope the second run is skipped, unless
+# STENO_REQUIRE_UNIT_SMOKE is set (CI), which fails instead.
+#
+# Then it launches the binary once more over a database it cannot open,
+# in a throwaway XDG_DATA_HOME, and expects the refusal: the "not
+# starting" line and exit 3, and fails (exit 1) otherwise.
+#
+#   [STENO_SMOKE_DPI=<dpi>] [STENO_REQUIRE_UNIT_SMOKE=1] apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
 #
 # Needs the web dist embedded (pnpm build in apps/macos/web before cargo
 # build) and the runtime libraries the binary links; on NixOS run it inside
@@ -72,12 +83,65 @@ xvfb-run --auto-servernum --server-args="$server_args" bash -c '
   wait "$app"
 ' _ "$binary" "$seconds" "$screens"
 
+fail() { echo "smoke: $*" >&2; exit 1; }
+entry() { echo "$1/.config/autostart/steno-desktop.desktop"; }
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+
+# Runs "$@" in a cgroup named after the autostart unit, below a delegated
+# scope of the user manager's.
+as_unit() {
+  systemd-run --user --scope -p Delegate=yes --quiet bash -c '
+    cgroup="/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/app-steno\x2ddesktop@autostart.service"
+    mkdir "$cgroup" && echo 0 > "$cgroup/cgroup.procs" && exec "$@"
+  ' _ "$@"
+}
+
+# One managed run in the throwaway HOME $1, with an earlier build's entry,
+# its output, both streams, in $1/output; $2 runs the binary (as_unit, or
+# empty). Halfway through, it notes in $1/halfway whether the entry is
+# still there.
+managed_run() {
+  mkdir -p "$(dirname "$(entry "$1")")"
+  printf '[Desktop Entry]\nType=Application\nName=steno-desktop\nExec=/nix/store/aaaa-steno-desktop/bin/.steno-desktop-wrapped \n' \
+    > "$(entry "$1")"
+  HOME="$1" XDG_CONFIG_HOME="$1/.config" XDG_DATA_HOME="$1/.local/share" \
+    XDG_CACHE_HOME="$1/.cache" STENO_LOGIN_ITEM=managed \
+    RUST_LOG=warn,steno_desktop::packaged=info STENO_SMOKE_SECONDS=8 \
+    xvfb-run --auto-servernum --server-args="$server_args" bash -c "
+      $(declare -f as_unit)
+      $2 \"\$1\" & app=\$!
+      sleep 4
+      [[ -e \"\$3\" ]] && echo there > \"\$4\" || echo gone > \"\$4\"
+      wait \"\$app\"
+    " _ "$binary" "$2" "$(entry "$1")" "$1/halfway" > "$1/output" 2>&1 \
+    || { cat "$1/output" >&2; fail "a managed run failed"; }
+}
+
+managed_run "$scratch/managed" ""
+[[ ! -e "$(entry "$scratch/managed")" ]] \
+  || { cat "$scratch/managed/output" >&2; fail "managed, the launch did not remove an earlier build's store entry"; }
+echo "smoke: managed, an earlier build's store entry went at launch"
+if as_unit true 2>/dev/null; then
+  managed_run "$scratch/unit" as_unit
+  if [[ "$(cat "$scratch/unit/halfway")" != there || -e "$(entry "$scratch/unit")" ]] \
+    || ! grep -qF "goes when Steno exits" "$scratch/unit/output" \
+    || ! grep -qF "removed the autostart entry an earlier build wrote" "$scratch/unit/output"; then
+    cat "$scratch/unit/output" >&2
+    fail "managed, as the autostart unit, the earlier build's entry did not stay until the exit and go then"
+  fi
+  echo "smoke: managed, as the autostart unit, an earlier build's store entry stayed while the app ran and went at the exit"
+elif [[ -n "${STENO_REQUIRE_UNIT_SMOKE:-}" ]]; then
+  fail "no user manager started a delegated scope (systemd-run --user --scope), and STENO_REQUIRE_UNIT_SMOKE is set"
+else
+  echo "smoke: no user manager started a delegated scope; the managed run as the autostart unit is skipped"
+fi
+
 # Then a launch over a database it cannot open, in a throwaway support
 # directory: the shell must refuse with its dialog (`refuse_to_start`),
 # which nobody closes here, and exit 3 once the smoke's wait ends, instead
 # of panicking.
-refusal="$(mktemp -d)"
-trap 'rm -rf "$refusal"' EXIT
+refusal="$scratch/refusal"
 mkdir -p "$refusal/Steno"
 printf 'not a database\n' > "$refusal/Steno/steno.sqlite"
 # Both streams go to one file: Debian's xvfb-run sends the command's

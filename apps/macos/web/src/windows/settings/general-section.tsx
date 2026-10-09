@@ -134,11 +134,13 @@ export function GeneralSection() {
 							aria-label="Open Steno at login"
 							checked={launchAtLogin}
 							data-testid="launch-at-login"
+							disabled={general.loginItemNote !== undefined}
 							onCheckedChange={(value) =>
 								send(client, "settings.general.setLaunchAtLogin", { value })
 							}
 						/>
 					}
+					description={general.loginItemNote}
 					label="Open Steno at login"
 				>
 					{general.loginItem === "requiresApproval" ? (
@@ -217,66 +219,79 @@ export function GeneralSection() {
 				/>
 			</FormCard>
 
-			<FormCard
-				footer="Updates are checked once a day and installed when you relaunch Steno."
-				title="Updates"
-			>
-				<FormRow
-					control={
-						<Button
-							data-testid="check-for-updates"
-							disabled={!updates.canCheck}
-							onClick={() => send(client, "updates.check")}
-							size="sm"
-							variant="outline"
-						>
-							Check for Updates
-						</Button>
-					}
-					description={
-						<span data-testid="update-status">{updateStatusText(updates)}</span>
-					}
-					label={`Steno ${general.version}`}
+			{updates.managedNote ? (
+				<FormCard title="Updates">
+					<FormRow
+						description={
+							<span data-testid="update-status">{updates.managedNote}</span>
+						}
+						label={`Steno ${general.version}`}
+					/>
+				</FormCard>
+			) : (
+				<FormCard
+					footer="Updates are checked once a day and installed when you relaunch Steno."
+					title="Updates"
 				>
-					{updates.outcome === "failed" && updates.detail ? (
-						<Disclosure data-testid="update-failure">
-							{updates.detail}
-						</Disclosure>
-					) : null}
-				</FormRow>
-				<FormRow
-					control={
-						<Switch
-							aria-label="Check for updates automatically"
-							checked={updates.automaticallyChecks}
-							data-testid="auto-check"
-							onCheckedChange={(automaticallyChecks) =>
-								send(client, "settings.general.setAutomaticUpdates", {
-									automaticallyChecks,
-									automaticallyDownloads: updates.automaticallyDownloads,
-								})
-							}
-						/>
-					}
-					label="Check for updates automatically"
-				/>
-				<FormRow
-					control={
-						<Switch
-							aria-label="Install updates automatically"
-							checked={updates.automaticallyDownloads}
-							data-testid="auto-install"
-							onCheckedChange={(automaticallyDownloads) =>
-								send(client, "settings.general.setAutomaticUpdates", {
-									automaticallyChecks: updates.automaticallyChecks,
-									automaticallyDownloads,
-								})
-							}
-						/>
-					}
-					label="Install updates automatically"
-				/>
-			</FormCard>
+					<FormRow
+						control={
+							<Button
+								data-testid="check-for-updates"
+								disabled={!updates.canCheck}
+								onClick={() => send(client, "updates.check")}
+								size="sm"
+								variant="outline"
+							>
+								Check for Updates
+							</Button>
+						}
+						description={
+							<span data-testid="update-status">
+								{updateStatusText(updates)}
+							</span>
+						}
+						label={`Steno ${general.version}`}
+					>
+						{updates.outcome === "failed" && updates.detail ? (
+							<Disclosure data-testid="update-failure">
+								{updates.detail}
+							</Disclosure>
+						) : null}
+					</FormRow>
+					<FormRow
+						control={
+							<Switch
+								aria-label="Check for updates automatically"
+								checked={updates.automaticallyChecks}
+								data-testid="auto-check"
+								onCheckedChange={(automaticallyChecks) =>
+									send(client, "settings.general.setAutomaticUpdates", {
+										automaticallyChecks,
+										automaticallyDownloads: updates.automaticallyDownloads,
+									})
+								}
+							/>
+						}
+						label="Check for updates automatically"
+					/>
+					<FormRow
+						control={
+							<Switch
+								aria-label="Install updates automatically"
+								checked={updates.automaticallyDownloads}
+								data-testid="auto-install"
+								onCheckedChange={(automaticallyDownloads) =>
+									send(client, "settings.general.setAutomaticUpdates", {
+										automaticallyChecks: updates.automaticallyChecks,
+										automaticallyDownloads,
+									})
+								}
+							/>
+						}
+						label="Install updates automatically"
+					/>
+				</FormCard>
+			)}
 
 			<div className="flex">
 				<AcknowledgementsDialog acknowledgements={general.acknowledgements} />

@@ -145,6 +145,24 @@ fn general_settings_snapshot_error_details() {
     assert_eq!(json["errorDetails"], "SMAppService returned 1");
 }
 
+/// The packaged-install lines (stable plan X5) are absent unless set.
+#[test]
+fn general_settings_snapshot_managed_notes() {
+    let mut general: GeneralSettingsSnapshot = fixture("settings.general");
+    let before = encoded(&general);
+    assert!(before.get("loginItemNote").is_none());
+    assert!(before["updates"].get("managedNote").is_none());
+
+    general.login_item_note = Some("Your system opens Steno.".into());
+    general.updates.managed_note = Some("Updates come from your package manager.".into());
+    let json = encoded(&general);
+    assert_eq!(json["loginItemNote"], "Your system opens Steno.");
+    assert_eq!(
+        json["updates"]["managedNote"],
+        "Updates come from your package manager."
+    );
+}
+
 #[test]
 fn general_updates_last_check_and_detail() {
     let updates = GeneralUpdates {
@@ -154,6 +172,7 @@ fn general_updates_last_check_and_detail() {
         last_check_at: Some(Utc.with_ymd_and_hms(2026, 9, 29, 12, 48, 0).unwrap()),
         outcome: GeneralUpdatesOutcome::Failed,
         detail: Some("The update server did not answer.".into()),
+        managed_note: None,
     };
     assert_eq!(
         encoded(&updates),

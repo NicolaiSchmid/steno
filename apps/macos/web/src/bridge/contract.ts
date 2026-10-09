@@ -483,6 +483,11 @@ export const generalSettingsSnapshot = z
 			"requiresApproval",
 			"notFound",
 		]),
+		/**
+		 * Sent by the Rust host when the system starts Steno at login and owns
+		 * the setting (a package's service): the switch shows on and locked.
+		 */
+		loginItemNote: z.string().optional(),
 		detectionEnabled: z.boolean(),
 		defaultTemplateID: z.string(),
 		templates: z.array(settingsTemplate),
@@ -496,6 +501,11 @@ export const generalSettingsSnapshot = z
 				lastCheckAt: isoDate.optional(),
 				outcome: z.enum(["notChecked", "upToDate", "available", "failed"]),
 				detail: z.string().optional(),
+				/**
+				 * Sent by the Rust host when a package manager delivers the updates:
+				 * the row shows it instead of the check and the switches.
+				 */
+				managedNote: z.string().optional(),
 			})
 			.strict(),
 		acknowledgements: z.array(acknowledgement),
