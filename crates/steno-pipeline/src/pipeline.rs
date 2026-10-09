@@ -633,13 +633,13 @@ impl Diarization {
     /// segments no stored speaker covers, under the first "Speaker N" no
     /// row in `taken` uses (compared lower-cased, as the summary's label
     /// map `SpeakerLabels` does), so it never shares a name with a stored
-    /// speaker: "Speaker 1" when nothing is stored. A mic lane is diarized only when
-    /// it is the room (a call whose tap carried no conversation), so it
-    /// becomes the room speaker too and the other party's words never go
-    /// to "me". The speaker has no embedding, so confirming it teaches no
-    /// voice and matching never sees it, and an id of its own, so a later
-    /// run that diarizes never inherits its confirmation. Two merges the
-    /// user makes change it, and both are the user resolving the gap:
+    /// speaker: "Speaker 1" when nothing is stored. A mic lane is diarized
+    /// only when it is the room (a call whose tap carried no conversation),
+    /// so it becomes the room speaker too and the other party's words never
+    /// go to "me". The speaker has no embedding, so confirming it teaches
+    /// no voice and matching never sees it, and an id of its own, so a
+    /// later run that diarizes never inherits its confirmation. Two merges
+    /// the user makes change it, and both are the user resolving the gap:
     /// confirming a diarized speaker to the room's person merges that
     /// speaker into this row with its own embedding (what a plain
     /// confirmation teaches, nothing from the room's segments), and

@@ -106,15 +106,16 @@ impl Store {
 
     /// [`Store::save_asset`] committed under `synchronous = FULL` with
     /// `fullfsync` ([`Store::write_durably`]). Every stamp and every keep
-    /// goes this way. The clears before a re-run and in the crash-loop guard
-    /// do not need it: a rollback restores the stamped ready meeting with
-    /// its old results, or a `processing` row the sweep skips. A stamp: once it is on disk the sweep may delete the
+    /// goes this way. A stamp: once it is on disk the sweep may delete the
     /// recording, and a durable commit also syncs every commit before it,
     /// the meeting's transcript and summary among them, so a power loss can
     /// never leave the recording deleted and its results rolled back. A
     /// cleared stamp: a power loss can never bring back the stamp the user's
-    /// keep removed, for the sweep to delete what they kept. Rust only:
-    /// Swift writes retention at its store's default level.
+    /// keep removed, for the sweep to delete what they kept. The clears
+    /// before a re-run and in the crash-loop guard do not need it: a
+    /// rollback restores the stamped ready meeting with its old results, or
+    /// a `processing` row the sweep skips. Rust only: Swift writes
+    /// retention at its store's default level.
     pub fn save_asset_durably(&self, asset: &AudioAsset) -> Result<()> {
         self.write_durably(|transaction| save(transaction, asset))
     }
