@@ -1,11 +1,14 @@
 //! Removes the audio of every asset whose expiry has passed.
 //! Swift: `Sources/StenoCore/Storage/RetentionSweep.swift`.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use steno_core::{Store, StoreError, paths::file_url_path};
+use steno_core::{RecordingLayout, Store, StoreError, paths::file_url_path};
+
+use crate::sample_clips;
 
 /// Why a sweep stopped short: files it could not remove, or a store read
 /// or write that failed.
@@ -28,7 +31,12 @@ fn listed(failures: &[(PathBuf, std::io::Error)]) -> String {
 
 /// Master, sidecars and mixdown go together with the sample clips of the
 /// meeting's confirmed speakers. Unconfirmed speakers keep their clips
-/// until confirmation or deletion. The asset row keeps its URLs and loses
+/// until confirmation or deletion. The clip files of the meeting's speakers
+/// that no row names, left by a run that ended before its sweep, go too
+/// ([`sample_clips`]). A clip file whose name starts with the id of no
+/// current speaker of the meeting, such as a file of a confirmed speaker
+/// a re-run dropped, stays past the retention period until the meeting
+/// is deleted, as in Swift. The asset row keeps its URLs and loses
 /// `expires_at` once every file is gone, so a sweep runs once per expiry.
 /// A missing file is skipped; a file that cannot be removed leaves the
 /// stamp in place for the next sweep and never stops the sweep from
@@ -53,30 +61,42 @@ impl RetentionSweep {
         let mut removed = Vec::new();
         let mut failures = Vec::new();
         for listed in self.store.expired_assets(now)? {
-            self.store
-                .sweep_expired_asset(listed.id, now, |asset, confirmed_with_clips| {
-                    let files: Vec<PathBuf> = asset
-                        .expirable_files()
-                        .iter()
-                        .chain(
-                            confirmed_with_clips
-                                .iter()
-                                .filter_map(|s| s.sample_clip_url.as_ref()),
-                        )
-                        .filter_map(|url| file_url_path(url))
-                        .collect();
-                    let mut clean = true;
-                    for path in files.into_iter().filter(|path| path.exists()) {
-                        match std::fs::remove_file(&path) {
-                            Ok(()) => removed.push(path),
-                            Err(error) => {
-                                clean = false;
-                                failures.push((path, error));
-                            }
+            self.store.sweep_expired_asset(listed.id, now, |expired| {
+                let files: Vec<PathBuf> = expired
+                    .asset
+                    .expirable_files()
+                    .iter()
+                    .chain(
+                        expired
+                            .confirmed_with_clips()
+                            .filter_map(|s| s.sample_clip_url.as_ref()),
+                    )
+                    .filter_map(|url| file_url_path(url))
+                    .collect();
+                let mut clean = true;
+                for path in files.into_iter().filter(|path| path.exists()) {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => removed.push(path),
+                        Err(error) => {
+                            clean = false;
+                            failures.push((path, error));
                         }
                     }
-                    clean
-                })?;
+                }
+                // The meeting is not processing, and the write lock
+                // keeps a run from starting, so no clip here is a
+                // run's uncommitted one.
+                if let Some(layout) = RecordingLayout::own_folder(&expired.asset) {
+                    let owners: BTreeSet<_> = expired.speakers.iter().map(|s| s.id).collect();
+                    removed.extend(sample_clips::sweep(
+                        &layout.speakers_directory(),
+                        &owners,
+                        &expired.sample_clip_urls,
+                        None,
+                    ));
+                }
+                clean
+            })?;
         }
         if failures.is_empty() {
             Ok(removed)
@@ -103,6 +123,7 @@ impl RetentionSweep {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::Path;
 
     use chrono::Duration;
     use steno_core::testing::sample_data;
@@ -191,6 +212,116 @@ mod tests {
         );
     }
 
+    /// A ready meeting whose master in its own folder expired an hour
+    /// before `now`, with a speaker confirmed as Anna and an unconfirmed
+    /// one, each naming its clip of one run. Returns the layout, the
+    /// master, the run's id and the two speakers' ids.
+    fn expired_meeting_with_run_clips(
+        store: &Store,
+        dir: &Path,
+        now: DateTime<Utc>,
+    ) -> (RecordingLayout, PathBuf, Uuid, Uuid, Uuid) {
+        let person = sample_data::person(0, "Anna");
+        store.save_person(&person).unwrap();
+        let mut meeting = sample_data::meeting();
+        meeting.state = MeetingState::Ready;
+        let layout = RecordingLayout::new(&dir.join("audio"), meeting.id);
+        layout.create_directories(true).unwrap();
+        let master = layout.master(AudioFormat::Wav16kInt16);
+        std::fs::write(&master, b"wav").unwrap();
+        let asset = AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: file_url(&master, false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: vec![AudioLane::Mixed],
+            sidecars_16k: BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepDays(1),
+            expires_at: Some(now - Duration::hours(1)),
+        };
+        store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        let run = Uuid::new_v4();
+        let (confirmed, unconfirmed) = (Uuid::new_v4(), Uuid::new_v4());
+        for (id, assignment) in [
+            (
+                confirmed,
+                SpeakerAssignment::Confirmed {
+                    person_id: person.id,
+                },
+            ),
+            (unconfirmed, SpeakerAssignment::Unknown),
+        ] {
+            let clip = layout.run_sample_clip(id, run);
+            std::fs::write(&clip, b"clip").unwrap();
+            store
+                .save_speaker(&Speaker {
+                    id,
+                    meeting_id: meeting.id,
+                    cluster_label: format!("SPEAKER_{id}"),
+                    assignment,
+                    embedding: None,
+                    sample_clip_range: None,
+                    sample_clip_url: Some(file_url(&clip, false)),
+                    cluster_confidence: 1.0,
+                })
+                .unwrap();
+        }
+        (layout, master, run, confirmed, unconfirmed)
+    }
+
+    /// A clip a run wrote under its own name goes by the name its row
+    /// holds: the confirmed speaker's, not an unconfirmed speaker's.
+    #[test]
+    fn the_sweep_removes_the_run_clip_a_confirmed_row_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let now = Utc::now();
+        let (layout, master, run, confirmed, unconfirmed) =
+            expired_meeting_with_run_clips(&store, dir.path(), now);
+
+        let removed = RetentionSweep::new(store.clone()).run(now).unwrap();
+        assert_eq!(
+            removed,
+            vec![master, layout.run_sample_clip(confirmed, run)]
+        );
+        assert!(layout.run_sample_clip(unconfirmed, run).exists());
+    }
+
+    /// With the audio go the clip files of the meeting's speakers that no
+    /// row names, the leftovers of runs that ended before their sweep; the
+    /// clip an unconfirmed row names, and a file of a speaker the meeting
+    /// no longer has (a confirmed speaker a re-run dropped), stay.
+    #[test]
+    fn the_sweep_removes_the_clips_no_row_names_of_the_meetings_speakers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let now = Utc::now();
+        let (layout, master, run, confirmed, unconfirmed) =
+            expired_meeting_with_run_clips(&store, dir.path(), now);
+        let leftovers = [
+            layout.sample_clip(confirmed),
+            layout.run_sample_clip(unconfirmed, Uuid::new_v4()),
+        ];
+        let dropped = layout.sample_clip(Uuid::new_v4());
+        for path in leftovers.iter().chain([&dropped]) {
+            std::fs::write(path, b"an earlier run's clip").unwrap();
+        }
+
+        let mut removed = RetentionSweep::new(store.clone()).run(now).unwrap();
+        assert_eq!(
+            removed[..2],
+            [master, layout.run_sample_clip(confirmed, run)]
+        );
+        let mut swept = removed.split_off(2);
+        swept.sort();
+        let mut expected = leftovers.to_vec();
+        expected.sort();
+        assert_eq!(swept, expected);
+        assert!(layout.run_sample_clip(unconfirmed, run).exists());
+        assert!(dropped.exists(), "a speaker the meeting no longer has");
+    }
+
     /// The sweep checks each asset again in the write that removes its
     /// files: a meeting `reprocess` queued after the list was read keeps
     /// its audio and its row.
@@ -228,7 +359,7 @@ mod tests {
         meeting.state = MeetingState::Queued;
         store.save_meeting(&meeting).unwrap();
         let swept = store
-            .sweep_expired_asset(asset.id, now, |_, _| {
+            .sweep_expired_asset(asset.id, now, |_| {
                 panic!("a queued meeting's files are not removed")
             })
             .unwrap();

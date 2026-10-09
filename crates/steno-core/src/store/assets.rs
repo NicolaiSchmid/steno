@@ -74,6 +74,30 @@ fn expired_sql(filter: &str) -> String {
     )
 }
 
+/// What [`Store::sweep_expired_asset`] hands its `remove`, read in the
+/// write that removes the files. Rust only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpiredAsset {
+    /// The asset as stored.
+    pub asset: AudioAsset,
+    /// Every speaker of the asset's meeting.
+    pub speakers: Vec<Speaker>,
+    /// Every `sampleClipURL` a speaker row names, of every meeting
+    /// ([`Store::sample_clip_urls`]).
+    pub sample_clip_urls: Vec<String>,
+}
+
+impl ExpiredAsset {
+    /// The meeting's confirmed speakers that have a sample clip: their
+    /// clips go with the audio, and they lose `sampleClipURL`. Unconfirmed
+    /// speakers keep their clips until confirmation or deletion.
+    pub fn confirmed_with_clips(&self) -> impl Iterator<Item = &Speaker> {
+        self.speakers.iter().filter(|speaker| {
+            speaker.assignment.is_confirmed() && speaker.sample_clip_url.is_some()
+        })
+    }
+}
+
 impl Store {
     /// Inserts or replaces the asset (GRDB's `save`).
     pub fn save_asset(&self, asset: &AudioAsset) -> Result<()> {
@@ -147,21 +171,22 @@ impl Store {
 
     /// Sweeps one asset of [`Store::expired_assets`] in one write. When the
     /// asset is still due at `now` (stamped, expired, and its meeting not
-    /// recording, queued or processing), `remove` gets the asset as stored
-    /// and the meeting's confirmed speakers that have a sample clip, removes
-    /// their files and returns whether every one went; then those speakers
-    /// lose `sampleClipURL` and the asset loses `expiresAt`. Returns whether
-    /// the asset was swept. The write lock is held from the check through
-    /// the removal, so a run that `enqueue` or `reprocess` saves `queued` in
-    /// a write of its own comes either before the check, and the asset is
-    /// skipped, or after the files are gone. The store waits on the
-    /// removal, a few files on the audio folder's disk. Rust only: Swift's
-    /// sweep acts on the list it read first, and Swift has no `reprocess`.
+    /// recording, queued or processing), `remove` gets the [`ExpiredAsset`]
+    /// as stored, removes the asset's files and the clips of
+    /// [`ExpiredAsset::confirmed_with_clips`], and returns whether every one
+    /// went; then those speakers lose `sampleClipURL` and the asset loses
+    /// `expiresAt`. Returns whether the asset was swept. The write lock is
+    /// held from the check through the removal, so a run that `enqueue` or
+    /// `reprocess` saves `queued` in a write of its own comes either before
+    /// the check, and the asset is skipped, or after the files are gone. The
+    /// store waits on the removal, a few files on the audio folder's disk.
+    /// Rust only: Swift's sweep acts on the list it read first, and Swift
+    /// has no `reprocess`.
     pub fn sweep_expired_asset(
         &self,
         asset_id: Uuid,
         now: chrono::DateTime<chrono::Utc>,
-        remove: impl FnOnce(&AudioAsset, &[Speaker]) -> bool,
+        remove: impl FnOnce(&ExpiredAsset) -> bool,
     ) -> Result<bool> {
         self.write(|transaction| {
             let Some(asset) = transaction
@@ -174,21 +199,19 @@ impl Store {
             else {
                 return Ok(false);
             };
-            let confirmed_with_clips: Vec<Speaker> =
-                people::speakers_of_meeting(transaction, asset.meeting_id)?
-                    .into_iter()
-                    .filter(|speaker| {
-                        speaker.assignment.is_confirmed() && speaker.sample_clip_url.is_some()
-                    })
-                    .collect();
-            if !remove(&asset, &confirmed_with_clips) {
+            let expired = ExpiredAsset {
+                speakers: people::speakers_of_meeting(transaction, asset.meeting_id)?,
+                sample_clip_urls: people::sample_clip_urls(transaction)?,
+                asset,
+            };
+            if !remove(&expired) {
                 return Ok(false);
             }
-            let ids: Vec<Uuid> = confirmed_with_clips.iter().map(|s| s.id).collect();
-            people::clear_sample_clips(transaction, asset.meeting_id, &ids)?;
+            let ids: Vec<Uuid> = expired.confirmed_with_clips().map(|s| s.id).collect();
+            people::clear_sample_clips(transaction, expired.asset.meeting_id, &ids)?;
             transaction.execute(
                 "UPDATE audioAsset SET expiresAt = NULL WHERE id = ?1",
-                [DbUuid(asset.id)],
+                [DbUuid(expired.asset.id)],
             )?;
             Ok(true)
         })

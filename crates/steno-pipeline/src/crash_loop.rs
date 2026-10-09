@@ -43,7 +43,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use steno_core::json::uuid_string;
 use steno_core::{AudioAsset, RecordingLayout};
 
 use crate::QuitLatch;
@@ -71,21 +70,13 @@ pub(crate) struct RunCount {
 }
 
 impl RunCount {
-    /// The count in the master's folder when that folder is named after
-    /// the meeting's id, as the recording layout names it, so two meetings
-    /// never share one count. Any other folder (`files_to_remove` makes the
-    /// same check) leaves the meeting unguarded.
+    /// The count in the master's folder when that folder is the meeting's
+    /// own ([`RecordingLayout::own_folder`]), so two meetings never share
+    /// one count. Any other folder (`files_to_remove` makes the same check)
+    /// leaves the meeting unguarded.
     pub(crate) fn of(asset: &AudioAsset) -> Self {
-        let folder = uuid_string(asset.meeting_id);
         Self {
-            path: RecordingLayout::from_asset(asset)
-                .filter(|layout| {
-                    layout
-                        .directory
-                        .file_name()
-                        .is_some_and(|name| name == folder.as_str())
-                })
-                .map(|layout| layout.processing_runs()),
+            path: RecordingLayout::own_folder(asset).map(|layout| layout.processing_runs()),
         }
     }
 

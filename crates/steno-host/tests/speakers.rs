@@ -390,3 +390,65 @@ fn playback_follows_the_clip_files() {
     );
     let _ = json!(null);
 }
+
+/// Confirming a speaker once its meeting's audio is gone removes the clip
+/// its row names, under the name of the run that wrote it, and no other
+/// file: not an earlier clip of that speaker no row names, not another
+/// speaker's clip.
+#[test]
+fn confirming_after_the_audio_is_gone_removes_the_run_clip_the_row_names() {
+    use steno_core::paths::file_url;
+    use steno_core::{RecordingLayout, Speaker, Store, testing::sample_data};
+    use steno_host::speakers::{OptionKind, SpeakersViewModel};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+    let anna = sample_data::person(0, "Anna");
+    store.save_person(&anna).unwrap();
+    let meeting = sample_data::meeting();
+    store.save_meeting(&meeting).unwrap();
+    let layout = RecordingLayout::new(&dir.path().join("audio"), meeting.id);
+    layout.create_directories(true).unwrap();
+    let run = uuid::Uuid::new_v4();
+    let (confirmed, other) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let unnamed = layout.sample_clip(confirmed);
+    std::fs::write(&unnamed, b"an earlier run's clip").unwrap();
+    for (id, label) in [(confirmed, "Speaker 1"), (other, "Speaker 2")] {
+        let clip = layout.run_sample_clip(id, run);
+        std::fs::write(&clip, b"clip").unwrap();
+        store
+            .save_speaker(&Speaker {
+                id,
+                meeting_id: meeting.id,
+                cluster_label: label.to_owned(),
+                assignment: SpeakerAssignment::Unknown,
+                embedding: None,
+                sample_clip_range: None,
+                sample_clip_url: Some(file_url(&clip, false)),
+                cluster_confidence: 1.0,
+            })
+            .unwrap();
+    }
+    let mut speakers = SpeakersViewModel::default();
+    speakers.update(
+        store.export(meeting.id).unwrap(),
+        &store,
+        &steno_host::services::RealFileSystem,
+    );
+
+    let option = steno_host::speakers::SpeakerOption {
+        kind: OptionKind::Person(anna),
+        tag: None,
+    };
+    assert!(speakers.select(&option, confirmed, &store, meeting.started_at));
+
+    assert!(!layout.run_sample_clip(confirmed, run).exists());
+    assert!(unnamed.exists(), "a file no row names is not confirm's");
+    assert!(layout.run_sample_clip(other, run).exists());
+    let stored = store.speakers(meeting.id).unwrap();
+    let row = stored
+        .iter()
+        .find(|speaker| speaker.id == confirmed)
+        .unwrap();
+    assert_eq!(row.sample_clip_url, None);
+}
