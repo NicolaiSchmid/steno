@@ -209,7 +209,17 @@ impl RecorderStatus {
 pub trait Recorder: Send + Sync {
     fn status(&self) -> RecorderStatus;
     /// Starts a recording; `call_app` is the app the detection prompt named.
+    /// While a [`StartHold`] lives the start is refused, and the status's
+    /// error says [`INSTALLING_UPDATE`].
     fn start(&self, mode: CaptureMode, call_app: Option<&str>);
+    /// Holds every recording start off until the hold is dropped, for an
+    /// install that relaunches the app. A recording already starting,
+    /// running or stopping goes on: the hold is taken under the lock a
+    /// start checks it under, so [`Self::status`] read after it says what
+    /// an install would stop, and no start begins after that read. Dropping
+    /// the last hold clears the refusal's error. Rust only: Sparkle
+    /// installed at quit.
+    fn hold_starts(&self) -> StartHold;
     fn stop(&self);
     fn toggle(&self);
     /// "Keep recording": disarms the auto-stop.
@@ -230,6 +240,13 @@ pub trait Recorder: Send + Sync {
     /// the recorder kept for its recovery goes too. Rust only.
     fn forget_recording(&self, meeting_id: Uuid);
 }
+
+/// What [`Recorder::hold_starts`] returns: recording starts are refused
+/// until it is dropped.
+pub type StartHold = Box<dyn Send>;
+
+/// The error a start refused under a [`StartHold`] leaves in the status.
+pub const INSTALLING_UPDATE: &str = "Steno is installing an update and relaunches in a moment.";
 
 /// A meeting left `recording`, as [`Recorder::left_recording`] finds it
 /// on disk.

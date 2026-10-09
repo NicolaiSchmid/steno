@@ -18,10 +18,10 @@ use uuid::Uuid;
 
 use crate::services::{
     AudioDevices, AutoStopStatus, ClipPlayer, Clock, CodexModel, CodexModelsError, ExportValidator,
-    FileSystem, FolderUsage, Handover, InputDevice, LeftRecording, ListenerState, LlmService,
-    LoginItem, LoginItemStatus, Opener, PairingCode, Permissions, Pipeline, Preferences, QrEncoder,
-    Recorder, RecorderStatus, Services, SpeechModels, UpdateOutcome, Updater,
-    permission_is_required,
+    FileSystem, FolderUsage, Handover, INSTALLING_UPDATE, InputDevice, LeftRecording,
+    ListenerState, LlmService, LoginItem, LoginItemStatus, Opener, PairingCode, Permissions,
+    Pipeline, Preferences, QrEncoder, Recorder, RecorderStatus, Services, SpeechModels, StartHold,
+    UpdateOutcome, Updater, permission_is_required,
 };
 use crate::speech::ModelAsset;
 
@@ -274,10 +274,13 @@ impl Updater for FakeUpdater {
 /// A recorder that runs the state machine without a capture session: start
 /// goes straight to `recording` with a fresh meeting id, stop back to idle;
 /// levels, the auto-stop and the messages are whatever the test sets.
+/// A start under a [`StartHold`] is refused, as the capture recorder's is.
 /// Swift: the `RecordingController` over the synthetic backend, reduced to
 /// what the window reads.
 pub struct FakeRecorder {
-    status: Mutex<RecorderStatus>,
+    status: Arc<Mutex<RecorderStatus>>,
+    /// The start holds alive.
+    holds: Arc<Mutex<usize>>,
     clock: Arc<dyn Clock>,
     permissions: Arc<dyn Permissions>,
     pub starts: Mutex<Vec<(CaptureMode, Option<String>)>>,
@@ -295,7 +298,8 @@ impl FakeRecorder {
     #[must_use]
     pub fn new(clock: Arc<dyn Clock>, permissions: Arc<dyn Permissions>) -> Self {
         FakeRecorder {
-            status: Mutex::new(RecorderStatus::idle()),
+            status: Arc::new(Mutex::new(RecorderStatus::idle())),
+            holds: Arc::default(),
             clock,
             permissions,
             starts: Mutex::new(Vec::new()),
@@ -334,6 +338,10 @@ impl Recorder for FakeRecorder {
         if status.state != RecordingState::Idle {
             return;
         }
+        if *lock(&self.holds) > 0 {
+            status.error = Some(INSTALLING_UPDATE.to_owned());
+            return;
+        }
         status.state = RecordingState::Recording;
         status.started_at = Some(self.clock.now());
         status.mode = Some(mode);
@@ -341,6 +349,16 @@ impl Recorder for FakeRecorder {
         status.meeting_id = Some(Uuid::new_v4());
         status.warning = None;
         status.error = None;
+    }
+
+    fn hold_starts(&self) -> StartHold {
+        // The status's lock first, as `start` takes it.
+        let _status = lock(&self.status);
+        *lock(&self.holds) += 1;
+        Box::new(FakeStartHold {
+            status: self.status.clone(),
+            holds: self.holds.clone(),
+        })
     }
 
     fn stop(&self) {
@@ -401,6 +419,24 @@ impl Recorder for FakeRecorder {
 
     fn forget_recording(&self, meeting_id: Uuid) {
         lock(&self.forgotten).push(meeting_id);
+    }
+}
+
+/// [`FakeRecorder::hold_starts`]'s hold: the last one dropped clears the
+/// refusal's error.
+struct FakeStartHold {
+    status: Arc<Mutex<RecorderStatus>>,
+    holds: Arc<Mutex<usize>>,
+}
+
+impl Drop for FakeStartHold {
+    fn drop(&mut self) {
+        let mut status = lock(&self.status);
+        let mut holds = lock(&self.holds);
+        *holds -= 1;
+        if *holds == 0 && status.error.as_deref() == Some(INSTALLING_UPDATE) {
+            status.error = None;
+        }
     }
 }
 

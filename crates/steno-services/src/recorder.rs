@@ -42,7 +42,8 @@ use steno_audio::{
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
 use steno_host::services::{
-    LaneLevels, LeftRecording, Permissions, Recorder, RecorderStatus, SpeechModels,
+    INSTALLING_UPDATE, LaneLevels, LeftRecording, Permissions, Recorder, RecorderStatus,
+    SpeechModels, StartHold,
 };
 use steno_host::speech::ModelAsset;
 use steno_pipeline::{LocalRecordingIntake, LocalRecordingIntakeError, RecordingResult};
@@ -468,6 +469,34 @@ struct Inner {
     /// Set by [`CaptureRecorder::stop_for_quit`]: the app is ending, so
     /// no recording starts any more.
     quitting: bool,
+    /// The [`Recorder::hold_starts`] holds alive: while there is one, a
+    /// start is refused with [`INSTALLING_UPDATE`].
+    start_holds: usize,
+}
+
+/// [`CaptureRecorder`]'s [`StartHold`]: the last one dropped clears the
+/// refusal's error.
+struct HeldStarts(Weak<CaptureRecorder>);
+
+impl Drop for HeldStarts {
+    fn drop(&mut self) {
+        let Some(recorder) = self.0.upgrade() else {
+            return;
+        };
+        let cleared = {
+            let mut inner = recorder.inner();
+            inner.start_holds -= 1;
+            let refused = inner.status.error.as_deref() == Some(INSTALLING_UPDATE);
+            let cleared = inner.start_holds == 0 && refused;
+            if cleared {
+                inner.status.error = None;
+            }
+            cleared
+        };
+        if cleared {
+            recorder.notify();
+        }
+    }
 }
 
 /// The meeting source a capture in `mode` records.
@@ -638,6 +667,7 @@ impl CaptureRecorder {
                 status: RecorderStatus::idle(),
                 active: None,
                 quitting: false,
+                start_holds: 0,
             }),
             changes: Condvar::new(),
             changed: Mutex::new(None),
@@ -1298,6 +1328,12 @@ impl Recorder for CaptureRecorder {
             if inner.quitting || inner.status.state != RecordingState::Idle {
                 return;
             }
+            if inner.start_holds > 0 {
+                inner.status.error = Some(INSTALLING_UPDATE.to_owned());
+                drop(inner);
+                self.notify();
+                return;
+            }
             inner.status.state = RecordingState::Starting;
             inner.status.error = None;
             inner.status.warning = None;
@@ -1316,6 +1352,11 @@ impl Recorder for CaptureRecorder {
         }
         std::mem::forget(unwinding);
         self.notify();
+    }
+
+    fn hold_starts(&self) -> StartHold {
+        self.inner().start_holds += 1;
+        Box::new(HeldStarts(self.this.clone()))
     }
 
     fn stop(&self) {
@@ -2123,6 +2164,37 @@ mod tests {
         });
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
         assert_eq!(harness.store.all_meetings().unwrap(), []);
+    }
+
+    /// While an install holds starts off, a start (the sidebar's, the
+    /// tray's or the prompt's Record) records nothing and says why; a
+    /// recording under way when the hold was taken goes on. Dropping the
+    /// hold clears the message, and the next start records.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_during_an_install_is_refused_with_a_message() {
+        let harness = harness(&[]);
+        let hold = harness.recorder.hold_starts();
+        let starter = harness.recorder.clone();
+        on_own_thread(PATIENCE, "the start returned", move || {
+            starter.start(CaptureMode::InPerson, None);
+        });
+        let status = harness.recorder.status();
+        assert_eq!(status.state, RecordingState::Idle);
+        assert_eq!(status.error.as_deref(), Some(INSTALLING_UPDATE));
+        assert_eq!(harness.store.all_meetings().unwrap(), []);
+
+        drop(hold);
+        assert_eq!(harness.recorder.status().error, None);
+        let starter = harness.recorder.clone();
+        on_own_thread(PATIENCE, "the start returned", move || {
+            starter.start(CaptureMode::InPerson, None);
+        });
+        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+        let hold = harness.recorder.hold_starts();
+        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+        drop(hold);
+        quit(&harness.recorder);
+        assert_eq!(harness.store.all_meetings().unwrap().len(), 1);
     }
 
     /// Starts at the same moment begin one recording between them: the
