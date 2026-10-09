@@ -95,13 +95,23 @@ fn sidecar_of(result: &steno_audio::capture::CaptureResult, lane: AudioLane) -> 
     WavFile::read_16k_mono(&file_url_path(&result.asset.sidecars_16k[&lane]).unwrap()).unwrap()
 }
 
-/// Collects states until the predicate matches.
+/// Collects states until the predicate matches, waiting up to `RECV` for
+/// each.
 fn collect_states(
     states: &Receiver<CaptureState>,
+    done: impl FnMut(&CaptureState) -> bool,
+) -> Vec<CaptureState> {
+    collect_states_within(states, RECV, done)
+}
+
+/// [`collect_states`], waiting up to `patience` for each state.
+fn collect_states_within(
+    states: &Receiver<CaptureState>,
+    patience: Duration,
     mut done: impl FnMut(&CaptureState) -> bool,
 ) -> Vec<CaptureState> {
     let mut seen = Vec::new();
-    while let Ok(state) = states.recv_timeout(RECV) {
+    while let Ok(state) = states.recv_timeout(patience) {
         let finished = done(&state);
         seen.push(state);
         if finished {
@@ -311,8 +321,11 @@ fn a_rebuild_that_panics_ends_in_device_lost_with_the_recording() {
     .unwrap();
     let states = session.states();
     session.start(Uuid::new_v4()).unwrap();
-    let seen = collect_states(&states, until_failed);
-    assert!(seen.contains(&CaptureState::Stopping));
+    // The session sends `Stopping`, then `Failed` once the finalise is
+    // done, in that order; a minute for the finalise, since a loaded Windows
+    // runner once took over `RECV` to unwind the restart's panic and finish.
+    let seen = collect_states_within(&states, Duration::from_secs(60), until_failed);
+    assert!(seen.contains(&CaptureState::Stopping), "{seen:?}");
     let result = session.stop().unwrap();
     assert_eq!(
         *seen.last().unwrap(),
