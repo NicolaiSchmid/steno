@@ -376,8 +376,8 @@ impl SpeechEngines {
     /// Whether the gates would let a pipeline whose speech engine runs on
     /// `runtime` through now: its speech models and the diarizer's are
     /// installed. Always, for engines from [`Self::with_builder`], which
-    /// have no gates. What the app's reload asks before it resumes the
-    /// meetings waiting for models
+    /// have no gates. What the app asks before an install or a reload
+    /// resumes the meetings waiting for models
     /// ([`CurrentPipeline::resuming_when`](crate::pipeline::CurrentPipeline::resuming_when)).
     #[must_use]
     pub fn models_installed(&self, runtime: SpeechRuntime) -> bool {
@@ -1221,6 +1221,26 @@ mod tests {
             "{error}"
         );
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// `models_installed` holds only while both gates would let a run
+    /// through: the speech engine's models on the runtime and the
+    /// diarizer's.
+    #[test]
+    fn models_installed_needs_the_speech_models_and_the_diarizers() {
+        let dir = tempfile::tempdir().unwrap();
+        for (speech, diarizer) in [(false, false), (true, false), (false, true), (true, true)] {
+            let engines = SpeechEngines::with_checks(
+                testing::setup(dir.path(), SpeechSettings::default()),
+                Arc::new(move |_| speech),
+                Arc::new(move || diarizer),
+            );
+            assert_eq!(
+                engines.models_installed(SpeechRuntime::OnnxSidecar),
+                speech && diarizer,
+                "speech {speech}, diarizer {diarizer}"
+            );
+        }
     }
 
     /// The diarizer's acknowledgement lines carry the licences

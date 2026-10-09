@@ -98,7 +98,7 @@ pub struct CurrentPipeline {
     quit_latch: QuitLatch,
     in_flight: InFlight,
     model_waits: ModelWaits,
-    /// Whether a reload resumes the waiting meetings
+    /// Whether a resume starts the waiting meetings
     /// ([`resuming_when`](Self::resuming_when)).
     models_installed: ModelsInstalled,
 }
@@ -125,11 +125,13 @@ impl CurrentPipeline {
         }
     }
 
-    /// Reloads resume the waiting meetings only while `installed` holds
-    /// for the new pipeline's runtime, so a settings save with the models
-    /// still missing leaves their cards asking for the download instead
-    /// of starting each meeting only to see it refused again. Without it
-    /// every reload resumes them.
+    /// [`resume_waiting`](Self::resume_waiting), an install's or a
+    /// reload's, starts the waiting meetings only while `installed` holds
+    /// for the current pipeline's runtime, so an install that leaves
+    /// another model missing (the diarizer's finished before Parakeet v3)
+    /// or a settings save with the models still missing leaves their cards
+    /// asking for the download instead of starting each meeting only to
+    /// see it refused again. Without it every resume starts them.
     #[must_use]
     pub fn resuming_when(mut self, installed: ModelsInstalled) -> Self {
         self.models_installed = installed;
@@ -158,21 +160,26 @@ impl CurrentPipeline {
     }
 
     /// [`ProcessingPipeline::resume_waiting`] on the current pipeline,
-    /// from any thread: the meetings a run on any of its pipelines left
-    /// `queued` for missing models since the last resume start on the
-    /// runtime. Called once a model install from Settings or onboarding
-    /// finished, and after a [`reload`](Self::reload) that finds them
-    /// installed, so models the `steno` command installed into the app's
-    /// models directory are picked up at the next settings change (or the
-    /// next launch); it
-    /// returns at once when nothing waits. A failure, a busy store
-    /// included, is logged and not retried: the meetings stay `queued`
-    /// for the next of these or the launch's recovery. Not the launch's
-    /// recovery itself, which is [`ProcessingPipeline::resume_unfinished`]
-    /// over every queued meeting.
+    /// from any thread, once its models are installed
+    /// ([`resuming_when`](Self::resuming_when)): the meetings a run on any
+    /// of its pipelines left `queued` for missing models since the last
+    /// resume start on the runtime. Called once a model install from
+    /// Settings or onboarding finished, and after every
+    /// [`reload`](Self::reload), so models the `steno` command installed
+    /// into the app's models directory are picked up at the next settings
+    /// change (or the next launch); it returns at once while a model is
+    /// missing or nothing waits. A failure, a busy store included, is
+    /// logged and not retried: the meetings stay `queued` for the next of
+    /// these or the launch's recovery. Not the launch's recovery itself,
+    /// which is [`ProcessingPipeline::resume_unfinished`] over every
+    /// queued meeting.
     pub fn resume_waiting(&self) {
         let _entered = self.runtime.enter();
-        match self.current().resume_waiting() {
+        let (pipeline, engine) = self.current_with_engine();
+        if !(self.models_installed)(engine.runtime) {
+            return;
+        }
+        match pipeline.resume_waiting() {
             Ok(resumed) if !resumed.is_empty() => {
                 tracing::info!(count = resumed.len(), "resumed meetings waiting for models");
             }
@@ -196,9 +203,8 @@ impl CurrentPipeline {
     /// with its claims, while the stored engine id runs where it did, and
     /// the diarizer ([`SpeechEngines`](crate::speech::SpeechEngines)), so
     /// the retired pipeline's jobs and the new one's share them and the
-    /// one sidecar child. Then, when their models are installed
-    /// ([`resuming_when`](Self::resuming_when)), it resumes the meetings
-    /// waiting for them on the new pipeline
+    /// one sidecar child. Then it resumes the meetings waiting for models
+    /// on the new pipeline once they are installed
     /// ([`resume_waiting`](Self::resume_waiting)).
     pub fn reload(&self) -> Result<(), BuildError> {
         let replacement = Current::new(
@@ -207,13 +213,10 @@ impl CurrentPipeline {
             &self.in_flight,
             &self.model_waits,
         );
-        let runtime = replacement.engine.runtime;
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
         self.runtime
             .spawn(async move { retired.wait_until_idle().await });
-        if (self.models_installed)(runtime) {
-            self.resume_waiting();
-        }
+        self.resume_waiting();
         Ok(())
     }
 
@@ -1575,13 +1578,32 @@ mod tests {
     /// `decode` and comes back.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_with_the_models_still_missing_leaves_the_waiting_meetings_waiting() {
+        a_resume_with_the_models_still_missing_leaves_the_waiting_meetings_waiting(|current| {
+            current.reload().unwrap();
+        })
+        .await;
+    }
+
+    /// The same for an install that leaves another model missing (the
+    /// diarizer's finished, Parakeet v3's not yet): its resume starts none.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_install_with_a_model_still_missing_leaves_the_waiting_meetings_waiting() {
+        a_resume_with_the_models_still_missing_leaves_the_waiting_meetings_waiting(
+            CurrentPipeline::resume_waiting,
+        )
+        .await;
+    }
+
+    async fn a_resume_with_the_models_still_missing_leaves_the_waiting_meetings_waiting(
+        resume: impl FnOnce(&CurrentPipeline),
+    ) {
         let (dir, store) = temp_store();
         let (_installed, current) = gated_current(&store, Arc::new(FakeSpeechEngine::default()));
         let waiting = enqueue_call(dir.path(), &current.current());
         current.current().wait_until_idle().await;
         let mut events = current.current().dependencies().events.subscribe();
 
-        current.reload().unwrap();
+        resume(&current);
         current.current().wait_until_idle().await;
         let mut progress = Vec::new();
         while let Ok(event) = events.try_recv() {

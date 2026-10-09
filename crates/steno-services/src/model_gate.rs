@@ -5,7 +5,8 @@
 //! no failure reason on its row and is processed once Settings or
 //! onboarding installed the models ([`ResumingSpeechModels`] then resumes
 //! it), or at the next pipeline reload or launch when the `steno` command
-//! installed them ([`CurrentPipeline::resume_waiting`]). The speech
+//! installed them ([`CurrentPipeline::resume_waiting`], which starts the
+//! waiting meetings only once every model the gates check is installed). The speech
 //! sidecar and the diarizer never download either
 //! ([`Install::Never`](steno_speech::Install::Never)), so a file removed
 //! between the gate's check and the load is refused too, never fetched; an
@@ -160,8 +161,9 @@ impl Diarizer for GatedDiarizer {
 
 /// The host's model service with one addition: once a download from
 /// Settings or onboarding installed its models, `resume` runs, so the
-/// meetings a run left `queued` for them are processed. Every other call
-/// goes to `inner` as it is.
+/// meetings a run left `queued` for them are processed (the app's, once
+/// every model is installed: [`CurrentPipeline::resume_waiting`]). Every
+/// other call goes to `inner` as it is.
 pub struct ResumingSpeechModels<M> {
     inner: M,
     resume: Box<dyn Fn() + Send + Sync>,

@@ -707,11 +707,12 @@ still has to draw the window side. `[ ]` is not ported yet.
   (`FailureKind::ModelsMissing`): the meeting stays `queued` with no failure reason on
   its row, the `ModelsMissing` event gives its progress entry the stage
   `modelsMissing` and the title "Download the speech models in Settings", and a
-  download from Settings or onboarding resumes the meetings runs left waiting since
-  the last resume (`ResumingSpeechModels`, `ModelWaits`, `resume_waiting`), never one a
-  pipeline a reload retired still runs; a run refused while such a resume ran goes
-  again. Every pipeline reload resumes them too, so models the `steno` command
-  installed are picked up at the next settings change or launch. A resume the store
+  download from Settings or onboarding that leaves every model installed resumes the
+  meetings runs left waiting since the last resume (`ResumingSpeechModels`,
+  `ModelWaits`, `resume_waiting`), never one a pipeline a reload retired still runs; a
+  run refused while such a resume ran goes again. A reload that finds the models
+  installed resumes them too (`CurrentPipeline::resuming_when`), so models the `steno`
+  command installed are picked up at the next settings change or launch. A resume the store
   refuses (busy) is logged, not retried. Any
   stored engine id other than `parakeet-v3` (Whisper, Ultra and DE from the Swift app)
   becomes `parakeet-v3` at launch (`Store::retire_speech_engine`), with a one-time
