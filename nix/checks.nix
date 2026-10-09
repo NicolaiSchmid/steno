@@ -11,9 +11,9 @@
 }: let
   lib = pkgs.lib;
   conf = lib.importJSON ../apps/desktop/src-tauri/tauri.conf.json;
-  # The `.deb`'s systemd user files (P5's stop timeout drop-ins, none until
-  # #227 lands), as `<path below lib/systemd/user/> <file in src-tauri/>`
-  # lines: the package holds each one where the `.deb` puts it.
+  # The `.deb`'s systemd user files (P5's stop timeout drop-ins), as
+  # `<path below lib/systemd/user/> <file in src-tauri/>` lines: the package
+  # holds each one where the `.deb` puts it.
   userUnitFiles = lib.concatStrings (lib.mapAttrsToList (
     target: source: let
       below = lib.removePrefix "/usr/lib/systemd/user/" target;

@@ -78,9 +78,9 @@ in {
     environment.systemPackages = lib.mkIf (cfg.users == []) [cfg.package];
     users.users = lib.genAttrs cfg.users (_: {packages = [cfg.package];});
 
-    # The package's stop timeout drop-ins for the unit the XDG autostart
-    # generator makes and for GNOME's app scope, once P5 (#227) lands:
-    # `systemd.packages` links lib/systemd/user/ into the user units as well.
+    # The package's stop timeout drop-ins (P5) for the unit the XDG autostart
+    # generator makes and for GNOME's app scope: `systemd.packages` links
+    # lib/systemd/user/ into the user units as well.
     systemd.packages = [cfg.package];
 
     systemd.user.services.steno = lib.mkIf cfg.launchAtLogin {
