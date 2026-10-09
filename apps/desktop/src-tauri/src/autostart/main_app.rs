@@ -349,6 +349,34 @@ mod system {
             }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The system's agents folder and launchd, under a label no job
+        /// has and in a folder of the test's own: the file is read and
+        /// deleted, and launchd answers that no such job is loaded. Nothing
+        /// is booted out or registered.
+        #[test]
+        fn the_system_agents_read_and_remove_by_label() {
+            let folder = tempfile::tempdir().unwrap();
+            let agents = UserLaunchAgents {
+                directory: Some(folder.path().to_path_buf()),
+            };
+            let label = format!(
+                "com.nicolaischmid.steno.desktop.test-{}",
+                std::process::id()
+            );
+            assert_eq!(agents.read(&label).unwrap(), None);
+            std::fs::write(folder.path().join(format!("{label}.plist")), "<plist/>").unwrap();
+            assert_eq!(agents.read(&label).unwrap().as_deref(), Some("<plist/>"));
+            assert_eq!(agents.job(&label), Job::NotLoaded);
+            agents.remove(&label).unwrap();
+            assert_eq!(agents.read(&label).unwrap(), None);
+            assert!(service_target(&label).unwrap().starts_with("gui/"));
+        }
+    }
 }
 
 #[cfg(test)]
