@@ -99,8 +99,10 @@ pub const TICK: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 pub const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// The outcome of a check that ran into [`CHECK_TIMEOUT`].
 pub const CHECK_TIMED_OUT: &str = "The update check timed out.";
-/// The outcome of a check asked for on a packaged install.
-pub const MANAGED_CHECK: &str = "This copy of Steno is updated by its package manager.";
+/// The outcome of a check asked for on a packaged install: the line the
+/// General section shows there too
+/// (`steno_host::settings::snapshots::MANAGED_UPDATES`).
+pub const MANAGED_CHECK: &str = steno_host::settings::snapshots::MANAGED_UPDATES;
 
 /// The variable a package sets to say it delivers the updates
 /// ([`updates_are_managed`]).
