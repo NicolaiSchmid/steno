@@ -937,23 +937,8 @@ impl App {
             }
         });
 
-        let interrupted = Interrupted::list(&self.store, &self.paths.support_directory);
         let recover = self.recover_unfinished();
-        let reconcile = {
-            let (store, pipeline) = (self.store.clone(), self.pipeline.clone());
-            let (check, zone, runtime) = (
-                self.live_recording_check.clone(),
-                self.zone,
-                self.runtime.clone(),
-            );
-            let (host, recorder) = (host.clone(), self.recorder.clone());
-            move || {
-                let adopted =
-                    reconcile_at_launch(&store, &pipeline, &interrupted, &check, zone, &runtime);
-                recorder.note_adopted(adopted.len());
-                host.store_changed();
-            }
-        };
+        let reconcile = self.reconcile_listed(host);
         let unlocked = self
             .secrets_unlocked
             .lock()
@@ -1049,6 +1034,27 @@ impl App {
                     tracing::warn!(%error, "unfinished exports could not be re-exported");
                 }
             }
+        }
+    }
+
+    /// The launch's reconcile of the recordings it lists now
+    /// ([`reconcile_at_launch`]): the main window says when one with no
+    /// meeting was adopted (`CaptureRecorder::note_adopted`), and the list
+    /// is refreshed.
+    fn reconcile_listed(&self, host: &Arc<Host>) -> impl FnOnce() + Send + 'static {
+        let interrupted = Interrupted::list(&self.store, &self.paths.support_directory);
+        let (store, pipeline) = (self.store.clone(), self.pipeline.clone());
+        let (check, zone, runtime) = (
+            self.live_recording_check.clone(),
+            self.zone,
+            self.runtime.clone(),
+        );
+        let (host, recorder) = (host.clone(), self.recorder.clone());
+        move || {
+            let adopted =
+                reconcile_at_launch(&store, &pipeline, &interrupted, &check, zone, &runtime);
+            recorder.note_adopted(adopted.len());
+            host.store_changed();
         }
     }
 
