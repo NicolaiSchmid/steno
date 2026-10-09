@@ -246,56 +246,13 @@ final class MeetingDetailViewModel: Identifiable {
 
   // MARK: - Process again
 
-  /// "Process again": a failed meeting whose recording is on this Mac. The
-  /// page draws the button from the same two facts in the snapshot (`state`
-  /// and `retention.filesExist`).
-  var canProcessAgain: Bool { meeting?.state.isFailed == true && recordingFilesExist }
-
-  /// Runs the failed meeting again from `decode` with its recording: the
-  /// stored meeting and asset are read afresh, the retention stamp an
-  /// earlier run left goes (so a run that fails again keeps the audio; the
-  /// retention stage stamps it anew), and `enqueue` saves the meeting
-  /// queued and starts the run. A refusal is the error line in the user's
-  /// words; the Rust host's `process_again` says the same.
-  func processAgain() async {
-    guard meeting?.state.isFailed == true else {
-      error = Self.onlyFailedMeetings
-      return
-    }
-    guard !isBusy else {
-      error = Self.alreadyProcessing
-      return
-    }
-    isBusy = true
-    defer { isBusy = false }
-    do {
-      guard let stored = try await store.meeting(id: id) else {
-        error = "This meeting no longer exists."
-        return
-      }
-      guard stored.state.isFailed else {
-        error = Self.onlyFailedMeetings
-        return
-      }
-      guard var asset = try await store.asset(meetingID: id),
-        FileManager.default.fileExists(atPath: asset.url.path)
-      else {
-        error = "The recording is no longer on this Mac, so the meeting cannot be processed again."
-        return
-      }
-      asset.expiresAt = nil
-      try await pipeline().enqueue(stored, asset: asset)
-      error = nil
-    } catch is PipelineFailure {
-      // `enqueue` throws only when the meeting or its asset is in flight.
-      error = Self.alreadyProcessing
-    } catch {
-      self.error = "Processing could not start: \(error)"
-    }
+  /// "Process again" is the Rust app's: the Swift app ships no further
+  /// release (D9 of the stable promotion plan), never offers it
+  /// (`canProcessAgain` is `false` in the snapshot) and answers a call with
+  /// a refusal on the error line, changing nothing.
+  func processAgain() {
+    error = "Process again needs the new Steno app."
   }
-
-  private static let onlyFailedMeetings = "Only a failed meeting can be processed again."
-  private static let alreadyProcessing = "This meeting is already being processed."
 
   // MARK: - Recording line
 
