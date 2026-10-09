@@ -15,13 +15,20 @@
 //! wrote goes, at launch, or at the exit while the app runs as the unit
 //! made from it (`remove_earlier_entry`, `remove_earlier_entry_at_exit`).
 //!
-//! On Linux the entry comes with the systemd drop-ins that give the app
-//! the time its save needs when the session stops it (`stop_timeout`).
-//! Launch at login turned off while the app runs as the autostart unit
-//! (`stop_timeout`) goes off when the app exits (`OFF_AT_EXIT`):
-//! removing the entry then would let any reload of the user manager
-//! unload the running unit, and the session's end would stop the app
-//! without the SIGTERM that saves its recording.
+//! On Linux, with the systemd side in `stop_timeout`:
+//!
+//! - **The drop-ins** follow the entry (`set_enabled`, `sync_at_launch`,
+//!   both through `stop_timeout`).
+//! - **The deferral**: Launch at login turned off while the app runs as
+//!   the autostart unit only sets the mark (`OFF_AT_EXIT`, `defers_off`);
+//!   removing the entry then would let any reload of the user manager
+//!   unload the running unit, and the session's end would stop the app
+//!   without the SIGTERM that saves its recording.
+//! - **The exit** removes a marked entry after the save
+//!   (`turn_off_at_exit`), except at an update's relaunch (`relaunching`).
+//! - **The launch** (`sync_at_launch`, `AtLaunch`) applies a mark a kill
+//!   left, puts back an entry missing while the app runs as the unit, and
+//!   syncs the drop-ins.
 //!
 //! Swift: `LoginItemController.swift`, `LoginItemStatus` in `AppProtocols.swift`.
 
@@ -229,7 +236,8 @@ pub fn relaunching() {
 /// on Wayland, which relaunches the app when the session goes on
 /// (`session_end::SaveAndQuit::of`); xfce4-session starts autostart
 /// entries itself, so that app is not the autostart unit, and a relaunch
-/// that were would put the entry back (`AtLaunch::Restore`).
+/// that did run as the unit would put the entry back
+/// (`AtLaunch::Restore`).
 #[cfg(target_os = "linux")]
 pub fn turn_off_at_exit(app: &AppHandle) {
     if packaged::login_item_is_managed() {
@@ -238,7 +246,7 @@ pub fn turn_off_at_exit(app: &AppHandle) {
     let Some(mark) = off_at_exit(app) else {
         return;
     };
-    if !turns_off_at_exit(
+    if !exit_turns_off(
         mark.exists(),
         RELAUNCHING.load(std::sync::atomic::Ordering::Relaxed),
     ) {
@@ -259,7 +267,7 @@ pub fn turn_off_at_exit(app: &AppHandle) {
 /// the exit is an update's relaunch (`relaunching`), whose next process
 /// runs on in the same unit.
 #[cfg(target_os = "linux")]
-fn turns_off_at_exit(marked: bool, relaunching: bool) -> bool {
+fn exit_turns_off(marked: bool, relaunching: bool) -> bool {
     marked && !relaunching
 }
 
@@ -299,7 +307,7 @@ enum AtLaunch {
     /// reload that applies it, and outlives any other reload until it has
     /// stopped.
     Restore,
-    /// No entry: its drop-in goes, and a mark left behind.
+    /// No entry: its drop-in goes, and so does a mark left behind.
     Gone,
     /// The entry could not be read: only GNOME's drop-in is installed.
     Unread,
@@ -547,10 +555,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_exit_removes_a_marked_entry_unless_it_relaunches() {
-        assert!(turns_off_at_exit(true, false));
-        assert!(!turns_off_at_exit(true, true));
-        assert!(!turns_off_at_exit(false, false));
-        assert!(!turns_off_at_exit(false, true));
+        assert!(exit_turns_off(true, false));
+        assert!(!exit_turns_off(true, true));
+        assert!(!exit_turns_off(false, false));
+        assert!(!exit_turns_off(false, true));
     }
 
     /// The launch keeps a standing entry's drop-in, also for a marked

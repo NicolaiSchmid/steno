@@ -57,12 +57,12 @@
 //! the save in progress, or one it starts, has ended. So a save that
 //! outlasts a session manager's or logind's wait still ends, at most
 //! `SHUTDOWN_PATIENCE` after it began, unless something kills the process
-//! first: systemd's `SIGKILL` once a stop has waited its timeout, 90 s by
-//! default and 5 s for the autostart unit and GNOME's app scope, which the
-//! drop-ins of `stop_timeout` raise to 20 s, or xfce4-session's 15 seconds
-//! after its `Stop`, which the app calls off by unregistering before it
-//! saves. On KDE Plasma, which does
-//! not ask the app, that is the save.
+//! first: systemd's `SIGKILL` once a stop has waited its timeout (90 s by
+//! default; 5 s for the autostart unit and GNOME's app scope, which the
+//! drop-ins of `stop_timeout` raise to 20 s); or xfce4-session's 15
+//! seconds after its `Stop`, which the app calls off by unregistering
+//! before it saves. On KDE Plasma, which does not ask the app, that is the
+//! save.
 //!
 //! None of it follows sleep or the screen lock: a recording goes on
 //! through both, as it does on the Mac. A bus that is missing or refuses, a
