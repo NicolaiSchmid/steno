@@ -105,7 +105,10 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
         {
             let as_unit = stop_timeout::runs_as_autostart_unit();
             if switch_entry(app, off_at_exit(app).as_deref(), enabled, as_unit)? {
-                stop_timeout::sync(app.autolaunch().is_enabled().ok());
+                stop_timeout::sync(
+                    app.autolaunch().is_enabled().ok(),
+                    config_dir(app).as_deref(),
+                );
             } else {
                 tracing::info!("Launch at login goes off when the app exits");
             }
@@ -408,16 +411,16 @@ fn login_item_after(step: AtLaunch, switch: impl FnOnce(bool) -> bool) -> Option
 /// system manages the login item, only GNOME's drop-in.
 #[cfg(target_os = "linux")]
 pub fn sync_at_launch(app: &AppHandle) {
-    if packaged::login_item_is_managed() {
-        stop_timeout::sync_at_launch(None);
-        return;
-    }
-    let login_item = launch(
-        app,
-        off_at_exit(app).as_deref(),
-        stop_timeout::runs_as_autostart_unit(),
-    );
-    stop_timeout::sync_at_launch(login_item);
+    let login_item = if packaged::login_item_is_managed() {
+        None
+    } else {
+        launch(
+            app,
+            off_at_exit(app).as_deref(),
+            stop_timeout::runs_as_autostart_unit(),
+        )
+    };
+    stop_timeout::sync(login_item, config_dir(app).as_deref());
 }
 
 /// The launch's step (`at_launch`) on `entry`, with the mark at `mark`,

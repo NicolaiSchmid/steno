@@ -18,21 +18,27 @@
 //!   `TimeoutStopSec=5s`. Its drop-in is installed at every launch,
 //!   whatever Launch at login says, and never removed.
 //!
-//! The `.deb` installs both under `/usr/lib/systemd/user` (`files` in
-//! `tauri.conf.json`); the app writes the same files into the user's own
-//! unit directory (`sync`) for the `AppImage` and installs from before the
-//! drop-ins, and has the user manager reload its units when it wrote one,
-//! and at each launch while one is in place (`sync_at_launch`), so a
-//! reload that failed or was skipped is made up for. It never reloads
-//! while the app runs as the autostart unit (`runs_as_autostart_unit`)
-//! unless the unit's entry stands (`may_reload`): once the autostart entry
-//! is gone, a reload unloads the unit, and the session's end then stops
-//! the app without a SIGTERM. For the same reason Launch at login, turned
-//! off while the app runs as that unit, goes off at the exit
-//! (`autostart::set_enabled`). The `.deb`'s `postinst` reloads the user
-//! managers too, so an app already running when the package is upgraded
-//! gets the 20 s, and skips a user whose entry is gone unless their
-//! autostart unit is known to be stopped (`linux/deb-postinst.sh`).
+//! How they get in place:
+//!
+//! - **The `.deb`** installs both under `/usr/lib/systemd/user` (`files`
+//!   in `tauri.conf.json`). Its `postinst` reloads the user managers, so
+//!   an app already running when the package is upgraded gets the 20 s,
+//!   and skips a user whose entry is gone unless their autostart unit is
+//!   known to be stopped (`linux/deb-postinst.sh`).
+//! - **The user's copies**: the app writes the same files into the user's
+//!   own unit directory (`sync`, at each launch and at each switch of
+//!   Launch at login), for the `AppImage` and installs from before the
+//!   drop-ins. A write leaves a reload owed (`RELOAD_OWED`) until a reload
+//!   goes through, so one that failed, was skipped or was cut off by a
+//!   kill is made up for at the next `sync`. With nothing written and
+//!   nothing owed there is no reload: each one reruns every generator of
+//!   the user manager.
+//! - **The reload rule** (`may_reload`): as the autostart unit
+//!   (`runs_as_autostart_unit`) the app reloads only while the unit's
+//!   entry stands. Once the entry is gone, a reload unloads the unit, and
+//!   the session's end then stops the app without a SIGTERM. For the same
+//!   reason Launch at login, turned off while the app runs as that unit,
+//!   goes off at the exit (`autostart::set_enabled`).
 //!
 //! Rust only: the Swift app is a macOS login item.
 
@@ -80,6 +86,7 @@ impl DropIn {
     };
 
     /// Both, as the `.deb` ships them.
+    #[cfg(test)]
     const ALL: [Self; 2] = [Self::AUTOSTART, Self::GNOME_SCOPE];
 
     /// The drop-in's path below a unit directory: `<unit>.d/<file name>`.
@@ -99,67 +106,67 @@ impl DropIn {
     }
 }
 
+/// The mark of a reload the user manager owes, in the app's config
+/// directory: set when `sync` writes a drop-in, cleared only by a reload
+/// that went through (`settle`). A file, so the debt outlives a kill
+/// before the reload.
+const RELOAD_OWED: &str = "systemd-reload-owed";
+
 /// Brings the user's copies in line with Launch at login: installs GNOME's
 /// scope drop-in, and the autostart unit's for `Some(true)`; removes the
 /// autostart unit's for `Some(false)`; leaves it for `None` (the entry
-/// could not be read). Has the user manager reload when it wrote a file
-/// and `may_reload` allows it. A failure is logged and changes nothing
-/// else: Launch at login works without the drop-ins.
-pub fn sync(login_item: Option<bool>) {
-    sync_from(login_item, false);
-}
-
-/// `sync` at a launch, which also has the user manager reload when a
-/// drop-in was already in place: an earlier reload may have failed, or
-/// been skipped while the app ran as the autostart unit without its
-/// entry, and the manager would read the drop-in only at the next login.
-/// One reload per launch, under the same `may_reload`.
-pub fn sync_at_launch(login_item: Option<bool>) {
-    sync_from(login_item, true);
-}
-
-fn sync_from(login_item: Option<bool>, at_launch: bool) {
+/// could not be read). Has the user manager reload when it wrote a file or
+/// a reload is owed (`RELOAD_OWED` in `config_dir`, the app's config
+/// directory), as `may_reload` allows. A failure is logged and changes
+/// nothing else: Launch at login works without the drop-ins.
+pub fn sync(login_item: Option<bool>, config_dir: Option<&Path>) {
     let Some(home) = home() else {
         tracing::warn!("no home directory for the stop timeout drop-ins");
         return;
     };
+    let owed = config_dir.map(|directory| directory.join(RELOAD_OWED));
     sync_in(
         &home,
+        owed.as_deref(),
         login_item,
         runs_as_autostart_unit(),
-        at_launch,
-        reload_user_manager,
+        || reload_user_manager(owed.clone()),
     );
 }
 
-/// `sync` under `home`, for an app that runs as the autostart unit or not:
-/// calls `reload` once when it wrote a file, or `at_launch` when a
-/// drop-in is in place, never after a removal alone, and only as
-/// `may_reload` allows.
+/// `sync` under `home`, with the owed reload's mark at `owed`, for an app
+/// that runs as the autostart unit or not: a write sets the mark, and
+/// `reload` runs once when the mark is there (always, with no place for
+/// it), as `may_reload` allows. A removal alone owes no reload.
 fn sync_in(
     home: &Path,
+    owed: Option<&Path>,
     login_item: Option<bool>,
     as_autostart_unit: bool,
-    at_launch: bool,
     reload: impl FnOnce(),
 ) {
     let mut wrote = change(&DropIn::GNOME_SCOPE, home, true);
     if let Some(on) = login_item {
         wrote |= change(&DropIn::AUTOSTART, home, on);
     }
-    let in_place = || {
-        DropIn::ALL
-            .iter()
-            .any(|drop_in| drop_in.user_path(home).exists())
-    };
-    let reloads = wrote || (at_launch && in_place());
-    if !reloads {
+    if wrote && let Some(owed) = owed {
+        mark_owed(owed, true);
+    }
+    if !(wrote || owed.is_none_or(Path::exists)) {
         return;
     }
     if may_reload(login_item, as_autostart_unit) {
         reload();
     } else {
         tracing::debug!("no reload while the app runs as the autostart unit without its entry");
+    }
+}
+
+/// Sets (`on`) or clears the owed reload's mark at `owed`; a failure is
+/// logged.
+fn mark_owed(owed: &Path, on: bool) {
+    if let Err(error) = crate::autostart::set_mark(owed, on) {
+        tracing::debug!(%error, on, "the mark of an owed reload");
     }
 }
 
@@ -277,28 +284,37 @@ fn runs_in(cgroup: &str, unit: &str) -> bool {
 
 /// Asks the systemd user manager on the session bus to reload its units
 /// (`systemctl --user daemon-reload`), on a thread of its own so a slow
-/// bus holds nothing. A failure is logged: a drop-in the manager has not
-/// read may wait for the next login.
-fn reload_user_manager() {
+/// bus holds nothing, then settles the owed reload at `owed` (`settle`).
+fn reload_user_manager(owed: Option<PathBuf>) {
     crate::session_end::spawn_client(
         "steno-reload",
         "a stop timeout drop-in may wait for the next login",
-        || {
-            match Builder::session()
+        move || {
+            let reloaded = Builder::session()
                 .and_then(crate::session_end::patient)
-                .and_then(|session| reload(&session))
-            {
-                Ok(()) => tracing::debug!("the systemd user manager reloaded its units"),
-                Err(error) => {
-                    tracing::warn!(
-                        "the systemd user manager did not reload its units; a stop timeout drop-in may wait for the next login"
-                    );
-                    tracing::debug!(%error, "the systemd user manager's reload");
-                }
-            }
+                .and_then(|session| reload(&session));
+            settle(owed.as_deref(), &reloaded);
             Ok(())
         },
     );
+}
+
+/// After a reload: one that went through clears the owed reload's mark at
+/// `owed`; one that failed is logged and sets it again (a reload that went
+/// through meanwhile may have cleared it), so the next `sync` asks again.
+fn settle(owed: Option<&Path>, reloaded: &zbus::Result<()>) {
+    match reloaded {
+        Ok(()) => tracing::debug!("the systemd user manager reloaded its units"),
+        Err(error) => {
+            tracing::warn!(
+                "the systemd user manager did not reload its units; a stop timeout drop-in waits for the next launch or login"
+            );
+            tracing::debug!(%error, "the systemd user manager's reload");
+        }
+    }
+    if let Some(owed) = owed {
+        mark_owed(owed, reloaded.is_err());
+    }
 }
 
 // systemd's manager: its bus name, object path and interface.
@@ -715,18 +731,21 @@ esac
     /// `sync` installs GNOME's drop-in always and the autostart unit's
     /// while Launch at login is on, and reloads once per write, never
     /// after a removal alone: that reload would unload a running
-    /// autostarted Steno's unit.
+    /// autostarted Steno's unit. Each reload here goes through and clears
+    /// the mark.
     #[test]
     fn sync_follows_the_login_item_and_reloads_after_a_write() {
         let root = scratch("sync");
+        let owed = root.join(RELOAD_OWED);
         let (scope, service) = (
             DropIn::GNOME_SCOPE.user_path(&root),
             DropIn::AUTOSTART.user_path(&root),
         );
         let reloads = Cell::new(0);
         let sync = |login_item| {
-            sync_in(&root, login_item, false, false, || {
+            sync_in(&root, Some(&owed), login_item, false, || {
                 reloads.set(reloads.get() + 1);
+                settle(Some(&owed), &Ok(()));
             });
         };
 
@@ -745,63 +764,88 @@ esac
         sync(Some(false));
         assert!(scope.exists() && !service.exists(), "GNOME's stays");
         assert_eq!(reloads.get(), 2, "a removal does not reload");
+        assert!(!owed.exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// A launch reloads once while a drop-in is in place, though it wrote
-    /// nothing: the reload after the write may have failed, or been
-    /// skipped as the autostart unit without its entry. It reloads under
-    /// the same rule (`may_reload`).
+    /// A write owes a reload until one goes through: a reload that failed,
+    /// or one skipped as the autostart unit without its entry, is asked
+    /// for again at the next `sync`, though it writes nothing, under the
+    /// same rule (`may_reload`). With no place for the mark, every `sync`
+    /// reloads.
     #[test]
-    fn a_launch_reloads_while_a_drop_in_is_in_place() {
-        let root = scratch("launch");
+    fn an_owed_reload_is_asked_for_until_one_goes_through() {
+        let root = scratch("owed");
+        let owed = root.join("config").join(RELOAD_OWED);
         let reloads = Cell::new(0);
-        let launch = |login_item, as_unit| {
-            sync_in(&root, login_item, as_unit, true, || {
+        let sync = |login_item, as_unit, went_through: bool| {
+            sync_in(&root, Some(&owed), login_item, as_unit, || {
                 reloads.set(reloads.get() + 1);
+                let reloaded = if went_through {
+                    Ok(())
+                } else {
+                    Err(zbus::Error::Failure("no manager".into()))
+                };
+                settle(Some(&owed), &reloaded);
             });
         };
-        sync_in(&root, Some(true), false, false, || {});
-        for (login_item, as_unit, reloaded) in [
-            (Some(true), false, 1),
-            (Some(true), true, 1),
-            (None, false, 1),
-            (None, true, 0),
-        ] {
-            reloads.set(0);
-            launch(login_item, as_unit);
-            assert_eq!(reloads.get(), reloaded, "{login_item:?} {as_unit}");
+        sync(Some(true), false, false);
+        assert_eq!(reloads.get(), 1);
+        assert!(owed.exists(), "a failed reload stays owed");
+        sync(None, true, true);
+        assert_eq!(reloads.get(), 1, "skipped as the unit without its entry");
+        assert!(owed.exists());
+        sync(Some(true), true, true);
+        assert_eq!(reloads.get(), 2, "the owed reload, with nothing written");
+        assert!(!owed.exists());
+        sync(Some(true), true, true);
+        sync(Some(false), false, true);
+        assert_eq!(reloads.get(), 2, "nothing written, nothing owed");
+
+        for _ in 0..2 {
+            sync_in(&root, None, Some(false), false, || {
+                reloads.set(reloads.get() + 1);
+            });
         }
-        reloads.set(0);
-        launch(Some(false), true);
-        assert_eq!(reloads.get(), 0, "as the unit without its entry");
-        launch(Some(false), false);
-        assert_eq!(reloads.get(), 1, "outside the unit, for GNOME's drop-in");
+        assert_eq!(reloads.get(), 4, "no place for the mark");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// As the autostart unit, the launch writes GNOME's drop-in (the first
+    /// As the autostart unit, `sync` writes GNOME's drop-in (the first
     /// launch of this build, a `.deb` install) but reloads only while the
     /// entry stands: with the entry gone, or unread, the reload could
-    /// unload the unit the app runs in.
+    /// unload the unit the app runs in, and stays owed.
     #[test]
     fn as_the_autostart_unit_it_reloads_only_while_the_entry_stands() {
-        for at_launch in [false, true] {
-            for (login_item, reloaded) in [(Some(false), false), (None, false), (Some(true), true)]
-            {
-                let root = scratch("as-unit");
-                let reloads = Cell::new(0);
-                sync_in(&root, login_item, true, at_launch, || {
-                    reloads.set(reloads.get() + 1);
-                });
-                assert!(
-                    DropIn::GNOME_SCOPE.user_path(&root).exists(),
-                    "{login_item:?}"
-                );
-                assert_eq!(reloads.get(), usize::from(reloaded), "{login_item:?}");
-                std::fs::remove_dir_all(&root).unwrap();
-            }
+        for (login_item, reloaded) in [(Some(false), false), (None, false), (Some(true), true)] {
+            let root = scratch("as-unit");
+            let owed = root.join(RELOAD_OWED);
+            let reloads = Cell::new(0);
+            sync_in(&root, Some(&owed), login_item, true, || {
+                reloads.set(reloads.get() + 1);
+            });
+            assert!(
+                DropIn::GNOME_SCOPE.user_path(&root).exists(),
+                "{login_item:?}"
+            );
+            assert_eq!(reloads.get(), usize::from(reloaded), "{login_item:?}");
+            assert!(owed.exists(), "{login_item:?}");
+            std::fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    /// A reload that went through clears the mark, and a failed one sets
+    /// it, also after a success cleared it meanwhile.
+    #[test]
+    fn a_reload_settles_the_owed_mark() {
+        let root = scratch("settle");
+        let owed = root.join(RELOAD_OWED);
+        settle(Some(&owed), &Err(zbus::Error::Failure("no manager".into())));
+        assert!(owed.exists());
+        settle(Some(&owed), &Ok(()));
+        assert!(!owed.exists());
+        settle(None, &Ok(()));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
