@@ -47,7 +47,8 @@ pub struct MeetingDetailViewModel {
     /// The API key is withheld from the pipeline now for the stored
     /// endpoint ([`WithheldApiKey`](crate::services::WithheldApiKey)), set
     /// by the host as it builds the snapshot and after every command: a
-    /// skipped summary says so, and none re-runs.
+    /// skipped summary says so, none re-runs, and no failed meeting is
+    /// processed again (it would complete without its cleanup and summary).
     pub key_withheld: bool,
     pub vault_configured: bool,
     /// The launch stopped re-exporting the meeting
@@ -176,7 +177,8 @@ impl MeetingDetailViewModel {
     }
 
     /// "Process again": the meeting is one it is offered for
-    /// ([`Meeting::offers_process_again`]) and its recording is on disk.
+    /// ([`Meeting::offers_process_again`]), its recording is on disk, and
+    /// the API key is not withheld ([`key_withheld`](Self::key_withheld)).
     /// The snapshot's `canProcessAgain`, and the guard of
     /// [`process_again`](Self::process_again), so the button and the action
     /// cannot drift apart.
@@ -186,12 +188,15 @@ impl MeetingDetailViewModel {
     }
 
     /// Why the detail itself refuses "Process again": the meeting is not
-    /// one it is offered for, or its recording is gone.
+    /// one it is offered for, its recording is gone, or the API key is
+    /// withheld.
     fn process_again_refusal(&self) -> Option<ProcessAgainRefusal> {
         if !self.meeting().is_some_and(Meeting::offers_process_again) {
             Some(ProcessAgainRefusal::NotOffered)
         } else if !self.recording_files_exist {
             Some(ProcessAgainRefusal::RecordingGone)
+        } else if self.key_withheld {
+            Some(ProcessAgainRefusal::KeyWithheld)
         } else {
             None
         }
@@ -295,10 +300,10 @@ impl MeetingDetailViewModel {
     /// "Process again", offered while [`can_process_again`] holds: the
     /// pipeline saves the meeting queued and runs it from the start with
     /// its recording; the caller's reload then shows it queued. A refusal,
-    /// the detail's own (not offered, or the recording gone) or the
-    /// pipeline's, is the error line in [`process_again_refusal_line`]'s
-    /// words; one while the app quits shows nothing. Rust only: the Swift
-    /// app refuses it.
+    /// the detail's own (not offered, the recording gone, or the key
+    /// withheld) or the pipeline's, is the error line in
+    /// [`process_again_refusal_line`]'s words; one while the app quits
+    /// shows nothing. Rust only: the Swift app refuses it.
     ///
     /// [`can_process_again`]: Self::can_process_again
     pub fn process_again(&mut self, pipeline: &dyn Pipeline, platform: Platform) {
@@ -470,6 +475,9 @@ pub fn process_again_refusal_line(
             )
             .to_owned(),
         ProcessAgainRefusal::Busy => "This meeting is already being processed.".to_owned(),
+        ProcessAgainRefusal::KeyWithheld => {
+            "Steno can't use your API key yet. Enter your API key in Settings, then process the meeting again.".to_owned()
+        }
         ProcessAgainRefusal::Quitting => return None,
         ProcessAgainRefusal::CouldNotStart(reason) => {
             format!("Processing could not start: {reason}")

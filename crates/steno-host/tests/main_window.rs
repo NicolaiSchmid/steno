@@ -2219,6 +2219,60 @@ fn process_again_words_a_gone_recording_through_the_detail() {
     );
 }
 
+/// While the API key is withheld for the stored endpoint (the Swift
+/// import's gate), a failed meeting with its recording on disk is not
+/// offered "Process again": the run would complete with no cleanup and no
+/// summary, and the button would then be gone for good. A stale click is
+/// refused before the pipeline is asked, in plain words. Once a key is
+/// saved it is offered and reaches the pipeline.
+#[test]
+fn process_again_waits_for_a_withheld_key() {
+    let harness = Harness::builder()
+        .with_withheld_api_key(true)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            configure_llm(store, "qwen3-8b");
+            give_the_failed_meeting_a_recording(store, fakes);
+        })
+        .build();
+    let pipeline = &harness.fakes.pipeline;
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(MEETING_FAILED),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        false
+    );
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"],
+        "Steno can't use your API key yet. Enter your API key in Settings, then process the meeting again."
+    );
+    assert!(pipeline.processed_again.lock().unwrap().is_empty());
+
+    *harness
+        .fakes
+        .withheld_api_key
+        .as_ref()
+        .unwrap()
+        .withheld
+        .lock()
+        .unwrap() = false;
+    harness.host.store_changed();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        true
+    );
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        *pipeline.processed_again.lock().unwrap(),
+        [uuid(MEETING_FAILED)]
+    );
+}
+
 /// Off the Mac the recording is "on this computer".
 #[test]
 fn process_again_words_a_gone_recording_for_the_platform() {

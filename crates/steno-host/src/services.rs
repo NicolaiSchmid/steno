@@ -343,6 +343,10 @@ pub enum ProcessAgainRefusal {
     /// The meeting is queued or processing, or another operation holds
     /// it.
     Busy,
+    /// The detail's own, never the pipeline's: the API key is withheld
+    /// ([`WithheldApiKey`]), so the run would complete with no cleanup and
+    /// no summary, and Process again would be gone once a key is saved.
+    KeyWithheld,
     /// The app is exiting; the next launch can process the meeting again.
     Quitting,
     /// The store failed reading the meeting or saving it queued: the
@@ -633,8 +637,8 @@ pub trait WithheldApiKey: Send + Sync {
     /// Whether the key is withheld for an endpoint that needs it, which
     /// then runs no summary: the pipeline asks the same. The meeting
     /// detail then says why a summary was skipped, and offers no re-run
-    /// until the key is there. `ChatGPT` summaries (the Codex backend) need
-    /// no key, so for them this is false.
+    /// and no Process again until the key is there. `ChatGPT` summaries
+    /// (the Codex backend) need no key, so for them this is false.
     fn withheld(&self, settings: &Settings) -> bool;
 }
 
