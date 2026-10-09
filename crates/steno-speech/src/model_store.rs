@@ -2705,6 +2705,14 @@ mod tests {
             sha256: digest(b"notes"),
             size: 5,
         });
+        // A file in a folder of the asset, as in a CoreML bundle: its
+        // partials sit beside it, not at the top.
+        asset.files.push(ModelFile {
+            name: "bundle/model.onnx".to_owned(),
+            source: None,
+            sha256: digest(&body),
+            size: body.len() as u64,
+        });
         let directory = store.directory(&asset);
         fs::create_dir_all(&directory).unwrap();
         let minute = Duration::from_secs(60);
@@ -2743,8 +2751,22 @@ mod tests {
             ("model.onnx.partial.x.0", b"half", now - 2 * STALE_PARTIAL),
             ("other.onnx.partial.1.0", b"half", now - 2 * STALE_PARTIAL),
         ];
-        for (name, contents, modified) in files {
-            let path = directory.join(name);
+        let bundle = directory.join("bundle");
+        fs::create_dir_all(&bundle).unwrap();
+        let nested = [
+            ("model.onnx", &body[..], now - 2 * STALE_PARTIAL),
+            (
+                &*format!("model.onnx.partial.{other}.0"),
+                b"half",
+                now - 11 * minute,
+            ),
+        ];
+        let written = files
+            .iter()
+            .map(|file| (&directory, file))
+            .chain(nested.iter().map(|file| (&bundle, file)));
+        for (folder, &(name, contents, modified)) in written {
+            let path = folder.join(name);
             fs::write(&path, contents).unwrap();
             File::options()
                 .write(true)
@@ -2759,9 +2781,15 @@ mod tests {
             .iter()
             .map(|(name, _, _)| (*name).to_owned())
             .filter(|name| *name != format!("model.onnx.partial.{other}.0"))
+            .chain(["bundle".to_owned()])
             .collect();
         expected.sort();
         assert_eq!(left, expected);
+        let in_bundle: Vec<_> = fs::read_dir(&bundle)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(in_bundle, ["model.onnx"]);
     }
 
     /// The largest file a GitHub release takes.
