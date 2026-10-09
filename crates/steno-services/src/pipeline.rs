@@ -1339,6 +1339,29 @@ mod tests {
         }
     }
 
+    /// A `CurrentPipeline` whose every pipeline, reloads included, shares
+    /// `engine` behind one gate that refuses until the returned flag is set.
+    fn gated_current(
+        store: &Arc<Store>,
+        engine: Arc<dyn SpeechEngine>,
+    ) -> (Arc<AtomicBool>, CurrentPipeline) {
+        let (installed, check) = crate::model_gate::testing::flag(false);
+        let shared = steno_pipeline::SharedSpeechEngine::new(Arc::new(
+            crate::model_gate::GatedSpeechEngine::new(engine, check),
+        ));
+        let make: MakeDependencies = {
+            let store = store.clone();
+            Arc::new(move || {
+                Ok(on_the_sidecar(
+                    fake_dependencies(&store, "fake-engine").with_speech_engine(shared.clone()),
+                ))
+            })
+        };
+        let current =
+            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+        (installed, current)
+    }
+
     /// Enqueues a two-lane call in `audio` on `pipeline` as a meeting of
     /// its own; its id.
     fn enqueue_call(audio: &std::path::Path, pipeline: &ProcessingPipeline) -> Uuid {
@@ -1452,21 +1475,8 @@ mod tests {
     async fn a_resume_after_a_reload_skips_a_waiting_meeting_the_retired_pipeline_holds() {
         let (dir, store) = temp_store();
         let children = Arc::new(Children::default());
-        let (installed, check) = crate::model_gate::testing::flag(false);
         let engine = Arc::new(FakeSidecar::new(&children));
-        let shared = steno_pipeline::SharedSpeechEngine::new(Arc::new(
-            crate::model_gate::GatedSpeechEngine::new(engine.clone(), check),
-        ));
-        let make: MakeDependencies = {
-            let store = store.clone();
-            Arc::new(move || {
-                Ok(on_the_sidecar(
-                    fake_dependencies(&store, "fake-engine").with_speech_engine(shared.clone()),
-                ))
-            })
-        };
-        let current =
-            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+        let (installed, current) = gated_current(&store, engine.clone());
         // The reload comes first, as its own resume would start a meeting
         // waiting by then; the run on the retired pipeline then leaves the
         // meeting waiting.
@@ -1512,20 +1522,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_resumes_a_meeting_waiting_for_models_installed_meanwhile() {
         let (dir, store) = temp_store();
-        let (installed, check) = crate::model_gate::testing::flag(false);
-        let shared = steno_pipeline::SharedSpeechEngine::new(Arc::new(
-            crate::model_gate::GatedSpeechEngine::new(Arc::new(FakeSpeechEngine::default()), check),
-        ));
-        let make: MakeDependencies = {
-            let store = store.clone();
-            Arc::new(move || {
-                Ok(on_the_sidecar(
-                    fake_dependencies(&store, "fake-engine").with_speech_engine(shared.clone()),
-                ))
-            })
-        };
-        let current =
-            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+        let (installed, current) = gated_current(&store, Arc::new(FakeSpeechEngine::default()));
         let waiting = enqueue_call(dir.path(), &current.current());
         current.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);

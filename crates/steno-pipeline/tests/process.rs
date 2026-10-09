@@ -4464,6 +4464,9 @@ async fn a_row_failed_without_an_attempt_waits_a_day() {
     assert_eq!(export_retries(&world).count(id), 1);
 }
 
+/// How long a test waits for a held fake to be reached.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Where [`Uninstalled`] refuses while its models are missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {
@@ -4701,12 +4704,9 @@ async fn a_resumed_meeting_posts_progress_before_the_engines_load() {
         .hold
         .store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(pipeline.resume_waiting().unwrap(), [meeting]);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        diarizer.entered.notified(),
-    )
-    .await
-    .expect("the engines are loading");
+    tokio::time::timeout(PATIENCE, diarizer.entered.notified())
+        .await
+        .expect("the engines are loading");
     let posted = drain(&mut events);
     assert!(
         posted.iter().any(|event| matches!(
@@ -4787,12 +4787,9 @@ async fn an_install_during_the_refusing_run_still_processes_the_meeting() {
     let waits = dependencies.model_waits.clone();
     let pipeline = ProcessingPipeline::new(dependencies);
     let meeting = enqueue_call(&world, &pipeline);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        diarizer.entered.notified(),
-    )
-    .await
-    .unwrap();
+    tokio::time::timeout(PATIENCE, diarizer.entered.notified())
+        .await
+        .unwrap();
     diarizer
         .installed
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -4828,12 +4825,9 @@ async fn a_refused_run_whose_newest_pipeline_is_gone_starts_its_meeting_again_it
     let pipeline = ProcessingPipeline::new(dependencies);
     drop(ProcessingPipeline::new(pipeline.dependencies().clone()));
     let meeting = enqueue_call(&world, &pipeline);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        diarizer.entered.notified(),
-    )
-    .await
-    .unwrap();
+    tokio::time::timeout(PATIENCE, diarizer.entered.notified())
+        .await
+        .unwrap();
     diarizer
         .installed
         .store(true, std::sync::atomic::Ordering::SeqCst);
