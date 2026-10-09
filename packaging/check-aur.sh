@@ -12,15 +12,15 @@
 # - LICENSE differs from the repository's, or speexdsp-COPYING from
 #   crates/steno-audio/vendor/speexdsp/COPYING;
 # - the .deb's checksum or its signature from the release key does not
-#   verify, makepkg skipped the signature check, or the package does not
-#   build and install;
+#   verify, makepkg skipped either check, or the package does not build
+#   and install;
 # - namcap reports an error;
 # - a file is missing: the binary and the sidecar side by side in
 #   /usr/lib/steno-desktop, the /usr/bin wrapper, the drop-ins, the
-#   desktop entry, the license;
-# - the wrapper's commands are not exactly the three that set
-#   STENO_DISTRIBUTION=aur and STENO_EXEC_PATH=/usr/bin/steno-desktop and
-#   run the binary;
+#   desktop entry, the licenses;
+# - the wrapper is not executable, or its commands are not exactly the three
+#   that set STENO_DISTRIBUTION=aur and STENO_EXEC_PATH=/usr/bin/steno-desktop
+#   and run the binary;
 # - an installed drop-in differs from apps/desktop/src-tauri/linux/
 #   (once that directory holds it);
 # - a binary needs a library that is not installed, or the sidecar does
@@ -65,12 +65,15 @@ echo "ok: LICENSE is the repository's, speexdsp-COPYING the vendored SpeexDSP's"
 
 as_builder "gpg --batch --import keys/pgp/$fpr.asc"
 as_builder 'makepkg -si --noconfirm' 2>&1 | tee /tmp/makepkg.log
-# makepkg prints this header only when it checks a signature, and the
-# .deb's result on the line after it.
-awk '/^==> Verifying source file signatures with gpg/ { getline; print; exit }' /tmp/makepkg.log \
-  | grep -qE '_amd64\.deb \.\.\. Passed' \
-  || die "makepkg did not verify the .deb's signature"
-echo "ok: built, verified against the release key and installed"
+# makepkg prints each header only when it runs that check, and the .deb's
+# result (the first source) on the line after it.
+passed() {
+  awk -v h="^==> $1" '$0 ~ h { getline; print; exit }' /tmp/makepkg.log \
+    | grep -qE '_amd64\.deb \.\.\. Passed'
+}
+passed 'Validating source files with sha256sums' || die "makepkg did not check the .deb's checksum"
+passed 'Verifying source file signatures with gpg' || die "makepkg did not verify the .deb's signature"
+echo "ok: built, checked against its checksum and the release key, and installed"
 
 namcap "$work/PKGBUILD" "$work"/*.pkg.tar.zst | tee /tmp/namcap
 ! grep -q ' E: ' /tmp/namcap || die "namcap reports an error"
@@ -94,15 +97,16 @@ done
 [[ ! -e /usr/bin/steno-speech-sidecar ]] || die "the sidecar is still in /usr/bin"
 echo "ok: the binary and the sidecar sit side by side in /usr/lib/steno-desktop"
 
+[[ -x /usr/bin/steno-desktop ]] || die "the wrapper is not executable"
+[[ "$(head -n 1 /usr/bin/steno-desktop)" == '#!/bin/sh' ]] || die "the wrapper is not a sh script"
 # Every line but comments and blank ones, so nothing overrides the
 # variables or runs first.
-[[ "$(head -n 1 /usr/bin/steno-desktop)" == '#!/bin/sh' ]] || die "the wrapper is not a sh script"
 grep -vE '^[[:space:]]*(#|$)' /usr/bin/steno-desktop \
   | diff -u <(printf '%s\n' 'export STENO_DISTRIBUTION=aur' \
     'export STENO_EXEC_PATH=/usr/bin/steno-desktop' \
     'exec /usr/lib/steno-desktop/steno-desktop "$@"') - \
   || die "the wrapper's commands differ from the three expected"
-echo "ok: the wrapper sets STENO_DISTRIBUTION and STENO_EXEC_PATH, then runs the binary"
+echo "ok: the wrapper is an executable sh script that sets STENO_DISTRIBUTION and STENO_EXEC_PATH, then runs the binary"
 
 linux="$root/apps/desktop/src-tauri/linux"
 drop_in() {
