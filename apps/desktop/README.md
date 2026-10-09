@@ -261,8 +261,18 @@ login itself. Two environment variables tell the app (stable plan X5,
 
 | Variable | Set by | What the app does |
 |---|---|---|
-| `STENO_DISTRIBUTION=aur` or `=nix` | the Nix package at build time (`env`) and in its wrapper; the AUR package's `/usr/bin` wrapper | Checks for no update: the tray's Check for Updates says "Updates come from your package manager.", and Settings > General shows that line in place of the check and the two switches. A value in the environment wins over the one the build was given (`steno_services::updates::updates_are_managed`) |
-| `STENO_LOGIN_ITEM=managed` | the NixOS module, for its user service and the session (`environment.sessionVariables`) | Leaves launch at login to the system: it never writes, rewrites or removes the autostart entry, the first launch registers nothing, Settings shows the switch on and locked with "Your system opens Steno when you log in and manages this setting.", and the tray's item is checked and disabled. The one entry it removes is one an earlier build wrote: its `Exec` starts a program in `/nix/store`, or names one of the paths in step 3 below. That entry goes at launch, unless the app runs as the unit systemd made from it (`app-steno\x2ddesktop@autostart.service`): then it goes when Steno exits, after the save, since a reload of the user manager without the entry would leave the recorder in a unit no logout stops |
+| `STENO_DISTRIBUTION=aur` or `=nix` | the Nix package at build time (`env`) and in its wrapper; the AUR package's `/usr/bin` wrapper | Never checks for updates: the tray's Check for Updates says "Updates come from your package manager.", and Settings > General shows that line in place of the check and the two switches. A value in the environment wins over the one the build was given (`steno_services::updates::updates_are_managed`) |
+| `STENO_LOGIN_ITEM=managed` | the NixOS module, for its user service and the session (`environment.sessionVariables`) | Leaves launch at login to the system: it never writes, rewrites or removes the autostart entry, the first launch registers nothing, Settings shows the switch on and locked with "Your system opens Steno when you log in and manages this setting.", and the tray's item is checked and disabled. It removes one entry, below |
+
+With `STENO_LOGIN_ITEM=managed`, the one entry the app removes is one an
+earlier build wrote: its `Exec` starts a program in `/nix/store`, or
+names one of the paths in step 3 below. That entry goes at launch,
+unless the app runs as the unit systemd made from it
+(`app-steno\x2ddesktop@autostart.service`): then it goes when Steno
+exits, after the save, since a reload of the user manager without the
+entry would leave the recorder in a unit no logout stops. Without the
+variable, such an entry stays as it is; if Steno no longer opens at
+login, turn Launch at login off and on again.
 
 Without `STENO_LOGIN_ITEM=managed`, the entry the app writes on Linux
 (`~/.config/autostart/steno-desktop.desktop`, the plugin's file and form)
@@ -289,26 +299,29 @@ Nix is `<out>/bin/.steno-desktop-wrapped` in the store
 
 A path with a control character, `%` or `\` is never named: systemd's
 XDG autostart generator would skip the entry. With none of these paths,
-turning launch at login on writes nothing, the switch turns back off,
+turning Launch at login on writes nothing, the switch turns back off,
 and Settings says "Opening Steno at login could not be changed." with
-the reason "Steno can't open at login from where it's installed now."
-The setting is not saved, and the first launch, which registers the
-login item by itself, tries again at the next launch. A development
-build from `target/` is such a case.
+the reason "Steno can't open at login from where it's installed now.
+Restart Steno, or install it with your package manager." The setting
+is not saved. When the first launch's own registration fails, that
+launch is not counted, so the next one tries again. A development
+build from `target/` is such a case, and so is a running build whose
+profile now links to a newer one, until Steno restarts.
 
 What a package sets:
 
-- **Nix** (`nix/package.nix`): `STENO_DISTRIBUTION=nix` in the build's
-  `env` and in the wrapper. The module (`nix/module.nix`) sets
-  `STENO_LOGIN_ITEM=managed` on its service and in
-  `environment.sessionVariables` when it starts Steno at login; without
-  the module, the profile's path is found by itself.
+- **Nix** (stable plan X7, #259: `nix/package.nix`):
+  `STENO_DISTRIBUTION=nix` in the build's `env` and in the wrapper. The
+  module (`nix/module.nix`) sets `STENO_LOGIN_ITEM=managed` on its
+  service and in `environment.sessionVariables` when it starts Steno at
+  login; without the module, the app finds the profile's path itself
+  (step 3).
 - **AUR** (stable plan X6): `STENO_DISTRIBUTION=aur` in the `/usr/bin`
   wrapper, and `STENO_EXEC_PATH=/usr/bin/steno-desktop` when the wrapper
   runs a binary elsewhere (`/usr/lib/steno-desktop/`). A package whose
   `/usr/bin/steno-desktop` is the binary itself, or a link to it, needs
-  no `STENO_EXEC_PATH`, but still a wrapper that sets
-  `STENO_DISTRIBUTION=aur`, or the build's value.
+  no `STENO_EXEC_PATH`; it still needs `STENO_DISTRIBUTION=aur`, from a
+  wrapper or from the build's environment.
 
 ## Run
 

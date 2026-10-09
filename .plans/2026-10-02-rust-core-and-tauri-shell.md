@@ -2666,8 +2666,9 @@ touch and admission lines; each fix is ported to Swift before cutover.
   stops. Otherwise the Linux entry names a stable path (`$APPIMAGE`,
   `STENO_EXEC_PATH`, or the first of `/usr/bin`, `/usr/local/bin` and the Nix profiles
   that resolves into the running binary's directory), never `current_exe()`; with none,
-  turning launch at login on fails with "Steno can't open at login from where it's
-  installed now." and the setting is not saved
+  turning Launch at login on fails with "Steno can't open at login from where it's
+  installed now. Restart Steno, or install it with your package manager." and the
+  setting is not saved
   (`apps/desktop/src-tauri/src/packaged.rs`, `apps/desktop/README.md` "Packaged
   installs").
 - The menu bar on macOS carries the application, Edit and Window menus; the Swift
