@@ -11,8 +11,9 @@
 #
 #   deb       deb/*.deb, unpacked with dpkg-deb -x, into usr/bin/; also
 #             the stop timeout drop-ins for the autostart unit and GNOME's
-#             scope under usr/lib/systemd/user/, and the postinst that
-#             reloads the user managers for them
+#             scope under usr/lib/systemd/user/, the postinst that
+#             reloads the user managers for them, and the dependency on
+#             PipeWire
 #   appimage  appimage/*.AppImage, unpacked with --appimage-extract, into
 #             usr/bin/
 #   app       macos/*.app, into Contents/MacOS/. With --signed, also the
@@ -113,7 +114,14 @@ check_deb() {
     || die "the .deb has no executable postinst"
   cmp -s "$scratch/deb-control/postinst" "$linux/deb-postinst.sh" \
     || die "the .deb's postinst is not linux/deb-postinst.sh"
-  echo "ok: the .deb's postinst reloads the user managers"
+  echo "ok: the .deb's postinst is linux/deb-postinst.sh"
+  # PipeWire's library, and its client.conf (pipewire-bin, through
+  # pipewire), without which every recording fails at its start.
+  local depends
+  depends="$(dpkg-deb -f "$deb" Depends)"
+  [[ "$depends" == *libpipewire-0.3-0* && ", $depends," == *", pipewire,"* ]] \
+    || die "the .deb does not depend on PipeWire: $depends"
+  echo "ok: the .deb depends on PipeWire ($depends)"
 }
 
 check_appimage() {
