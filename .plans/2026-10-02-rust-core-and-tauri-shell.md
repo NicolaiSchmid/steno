@@ -1500,9 +1500,16 @@ still has to draw the window side. `[ ]` is not ported yet.
   selected meeting) is answered through the host's `Pipeline::process_again`, whose
   `ProcessAgainRefusal` the detail words on its error line (nothing while the app
   quits). The host decides when it is offered: the detail snapshot's
-  `canProcessAgain`, `Meeting::offers_process_again` (a failed meeting today) and the
-  master on disk, and the pipeline's `process_again` checks the same rule under its
-  own read, so a stale detail cannot run a ready meeting again. The Swift app sends
+  `canProcessAgain`, `Meeting::offers_process_again` (a failed meeting, and since #241
+  a ready one whose results could still need the recording,
+  `steno_core::results_need_the_audio` over its stored speakers, segments and asset,
+  so the detail's `keptIncomplete` line offers what it names) and the master on disk,
+  and the pipeline's `process_again` checks the same rule under its own read of those
+  rows, so a stale detail cannot run a ready, complete meeting again
+  (`a_failed_meeting_and_a_ready_one_kept_incomplete_offer_process_again`,
+  `process_again_runs_a_ready_meeting_kept_incomplete`,
+  `a_ready_meeting_kept_incomplete_offers_process_again`,
+  `process_again_through_the_host_runs_a_ready_meeting_kept_incomplete`). The Swift app sends
   `canProcessAgain: false` and refuses the method in words. `steno process --meeting
   <id>` is Rust only and takes a ready meeting only with `--allow-ready`.
 - Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds
