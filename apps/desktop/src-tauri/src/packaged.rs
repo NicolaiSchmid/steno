@@ -26,8 +26,12 @@
 //!   directory, so a profile's `bin/steno-desktop` counts while it links
 //!   to this build. An `AppImage` keeps the plugin's own entry, which
 //!   names `$APPIMAGE`. With no such path the app writes no entry, and
-//!   turning launch at login on fails with
+//!   turning Launch at login on fails with
 //!   [`NO_STABLE_PATH`](linux::NO_STABLE_PATH).
+//!
+//! On Linux only (`linux`): `write_entry`, `remove_earlier_entry` at
+//! launch and `remove_earlier_entry_at_exit`; elsewhere only
+//! `login_item_is_managed` applies.
 //!
 //! Rust only: the Swift app is a bundle `SMAppService` registers.
 

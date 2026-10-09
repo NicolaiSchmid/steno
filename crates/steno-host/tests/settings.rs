@@ -160,7 +160,7 @@ fn a_check_outside_a_command_republishes_the_general_section() {
 
 /// The desktop shell's refusal when no launcher of the build lies at a
 /// path that outlives an upgrade (`packaged::NO_STABLE_PATH` on Linux).
-const NO_STABLE_PATH: &str = "Steno can't open at login from where it's installed now.";
+const NO_STABLE_PATH: &str = "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager.";
 
 /// Whether the first launch has been counted (`LOGIN_ITEM_REGISTERED_KEY`).
 fn launch_counted(harness: &Harness) -> bool {

@@ -13,10 +13,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// (the AUR package's `/usr/bin` wrapper, stable plan X6).
 pub const EXEC_PATH_VARIABLE: &str = "STENO_EXEC_PATH";
 
-/// Why turning launch at login on fails when no launcher of this build
+/// Why turning Launch at login on fails when no launcher of this build
 /// lies at a path that outlives an upgrade ([`write_entry`]); the General
 /// section shows it under its error.
-pub const NO_STABLE_PATH: &str = "Steno can't open at login from where it's installed now.";
+pub const NO_STABLE_PATH: &str = "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager.";
 
 /// The binary's name, in every package.
 const BINARY: &str = "steno-desktop";
@@ -71,8 +71,14 @@ fn candidates_here() -> Vec<PathBuf> {
 /// The first of `candidates` that launches this build: one that exists
 /// and, with every link resolved, lies in the directory that
 /// `current_exe` resolves into. The candidate itself is returned, not
-/// where it resolves to.
+/// where it resolves to. Once an upgrade has replaced the running binary
+/// in place, Linux appends ` (deleted)` to `current_exe`; the path
+/// without it is where the new build lies.
 fn stable_path(candidates: &[PathBuf], current_exe: &Path) -> Option<PathBuf> {
+    let current_exe = current_exe
+        .to_str()
+        .and_then(|path| path.strip_suffix(" (deleted)"))
+        .map_or(current_exe, Path::new);
     let resolved = current_exe.canonicalize().ok()?;
     let directory = resolved.parent()?;
     candidates
@@ -162,7 +168,8 @@ fn entry(app_name: &str, exec: &Path) -> String {
 /// plain characters, else quoted as the Desktop Entry Specification says
 /// (`"`, `` ` ``, `$` and `\` escaped inside the quotes, `%` doubled),
 /// then with `\` escaped once more for the string value. The app never
-/// names a path with `%` or `\` ([`nameable`]).
+/// names a path with `%` or `\` ([`nameable`]); the branches keep
+/// [`is_earlier_entry`]'s comparison exact for any candidate.
 fn exec_value(path: &str) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+".contains(c);
     if path.chars().all(plain) {
@@ -231,7 +238,7 @@ fn is_earlier_entry(entry: &str, candidates: &[PathBuf]) -> bool {
 enum Removal {
     /// It stays: the system does not manage the login item, or the entry
     /// is not an earlier build's.
-    None,
+    Keep,
     /// It goes now.
     Now,
     /// It goes at the exit, after the save: the app runs as the unit the
@@ -241,9 +248,10 @@ enum Removal {
     AtExit,
 }
 
+/// What [`at_launch`] does with the entry: see [`Removal`].
 fn removal(managed: bool, earlier: bool, as_autostart_unit: bool) -> Removal {
     match (managed && earlier, as_autostart_unit) {
-        (false, _) => Removal::None,
+        (false, _) => Removal::Keep,
         (true, false) => Removal::Now,
         (true, true) => Removal::AtExit,
     }
@@ -285,9 +293,9 @@ fn at_launch(
         std::fs::read_to_string(path).is_ok_and(|entry| is_earlier_entry(&entry, candidates));
     let removal = removal(managed, earlier, as_autostart_unit);
     match removal {
-        Removal::None => {}
+        Removal::Keep => {}
         Removal::Now => {
-            remove_earlier_entry_at(path, candidates);
+            remove_if_earlier(path, candidates);
         }
         Removal::AtExit => tracing::info!(
             "the autostart entry an earlier build wrote goes when Steno exits: Steno runs as the unit made from it"
@@ -300,22 +308,29 @@ fn at_launch(
 /// for the exit goes, if it is still an earlier build's. Not for an
 /// update's relaunch (`relaunching`), whose next process runs on in the
 /// same unit. A kill before this leaves the entry for the next launch.
+/// The one save that may not end the process is the one at an Xfce query
+/// on Wayland, which relaunches the app when the session goes on
+/// (`session_end::SaveAndQuit::of`); xfce4-session starts autostart
+/// entries itself, so that app is not the autostart unit and never
+/// leaves the entry for the exit.
 pub fn remove_earlier_entry_at_exit(app_name: &str, relaunching: bool) {
     if !removes_at_exit(EARLIER_ENTRY_AT_EXIT.load(Ordering::Relaxed), relaunching) {
         return;
     }
     if let Some(path) = entry_path_here(app_name) {
-        remove_earlier_entry_at(&path, &candidates_here());
+        remove_if_earlier(&path, &candidates_here());
     }
 }
 
+/// Whether the exit removes the entry: it waited for the exit
+/// (`deferred`), and the exit is not an update's relaunch.
 fn removes_at_exit(deferred: bool, relaunching: bool) -> bool {
     deferred && !relaunching
 }
 
 /// Removes the entry at `path` when it is an earlier build's; true when
 /// it did.
-fn remove_earlier_entry_at(path: &Path, candidates: &[PathBuf]) -> bool {
+fn remove_if_earlier(path: &Path, candidates: &[PathBuf]) -> bool {
     let Ok(entry) = std::fs::read_to_string(path) else {
         return false;
     };
@@ -504,6 +519,9 @@ mod tests {
         );
         // A development build elsewhere names nothing.
         assert_eq!(stable_path(&candidate, &elsewhere.join(BINARY)), None);
+        // An upgrade replaced the binary in place.
+        let replaced = PathBuf::from(format!("{} (deleted)", bin.join(BINARY).display()));
+        assert_eq!(stable_path(&candidate, &replaced), Some(bin.join(BINARY)));
     }
 
     /// What an `Exec` key may name, by its text: the store check holds
@@ -617,7 +635,7 @@ mod tests {
     }
 
     /// With no launcher at a stable path nothing is written, and turning
-    /// launch at login on fails with the words the General section shows.
+    /// Launch at login on fails with the words the General section shows.
     #[test]
     fn no_stable_path_is_an_error_that_says_so() {
         let dir = tempfile::tempdir().unwrap();
@@ -664,9 +682,9 @@ mod tests {
         assert_eq!(removal(true, true, false), Removal::Now);
         assert_eq!(removal(true, true, true), Removal::AtExit);
         for as_unit in [false, true] {
-            assert_eq!(removal(false, true, as_unit), Removal::None);
-            assert_eq!(removal(true, false, as_unit), Removal::None);
-            assert_eq!(removal(false, false, as_unit), Removal::None);
+            assert_eq!(removal(false, true, as_unit), Removal::Keep);
+            assert_eq!(removal(true, false, as_unit), Removal::Keep);
+            assert_eq!(removal(false, false, as_unit), Removal::Keep);
         }
         assert!(removes_at_exit(true, false));
         assert!(
@@ -689,12 +707,12 @@ mod tests {
 
         assert_eq!(
             at_launch(&path, true, &[], false),
-            Removal::None,
+            Removal::Keep,
             "no entry"
         );
 
         write(store);
-        assert_eq!(at_launch(&path, false, &[], false), Removal::None);
+        assert_eq!(at_launch(&path, false, &[], false), Removal::Keep);
         assert!(path.exists(), "an unmanaged launch keeps it");
         assert_eq!(at_launch(&path, true, &[], false), Removal::Now);
         assert!(!path.exists(), "outside the unit it goes at once");
@@ -703,12 +721,12 @@ mod tests {
         assert_eq!(at_launch(&path, true, &[], true), Removal::AtExit);
         assert!(path.exists(), "as the unit it stays while the app runs");
         assert!(removes_at_exit(true, false));
-        assert!(remove_earlier_entry_at(&path, &[]));
+        assert!(remove_if_earlier(&path, &[]));
         assert!(!path.exists(), "gone after the exit");
 
         write(Path::new("/opt/steno/steno-desktop"));
-        assert_eq!(at_launch(&path, true, &[], false), Removal::None);
-        assert!(!remove_earlier_entry_at(&path, &[]));
+        assert_eq!(at_launch(&path, true, &[], false), Removal::Keep);
+        assert!(!remove_if_earlier(&path, &[]));
         assert!(path.exists(), "an entry no earlier build wrote stays");
     }
 

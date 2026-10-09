@@ -158,16 +158,20 @@ pub fn launch_at_login_command(value: bool) -> (&'static str, Value) {
 
 /// Switches launch at login, moves the tray's check mark and tells the
 /// host through `window`, for the tray's item and for Settings alike.
+/// The host hears of a failed switch too: it tries again and, failing,
+/// shows why in Settings > General.
 /// Swift: `MenuBarViewModel.setLaunchAtLogin`.
 pub fn set_launch_at_login(
     app: &AppHandle,
     window: &WebviewWindow,
     value: bool,
 ) -> Result<(), BridgeError> {
-    autostart::set_enabled(app, value)?;
-    tray::note_login_item(app);
+    let switched = autostart::set_enabled(app, value);
     let (method, params) = launch_at_login_command(value);
-    app.state::<Host>().call(window, method, params)?;
+    let told = app.state::<Host>().call(window, method, params);
+    tray::note_login_item(app);
+    switched?;
+    told?;
     Ok(())
 }
 

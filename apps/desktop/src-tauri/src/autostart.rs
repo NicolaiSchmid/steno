@@ -135,7 +135,7 @@ pub fn relaunching() {
 /// After the shutdown of an exit, on Linux: an earlier build's entry that
 /// waited for the exit, because the app ran as the unit made from it,
 /// goes now (`packaged::remove_earlier_entry_at_exit`). Not for an
-/// update's relaunch.
+/// update's relaunch; an Xfce query's relaunch never runs as that unit.
 #[cfg(target_os = "linux")]
 pub fn at_exit(app: &AppHandle) {
     packaged::remove_earlier_entry_at_exit(
