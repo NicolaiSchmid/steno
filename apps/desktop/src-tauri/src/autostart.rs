@@ -23,7 +23,8 @@
 //!   the autostart unit only sets the mark (`OFF_AT_EXIT`, `defers_off`);
 //!   removing the entry then would let any reload of the user manager
 //!   unload the running unit, and the session's end would stop the app
-//!   without the SIGTERM that saves its recording.
+//!   without the SIGTERM that saves its recording. Turned on again, it
+//!   clears the mark and leaves the entry unwritten (`switch_entry`).
 //! - **The exit** removes a marked entry after the save
 //!   (`turn_off_at_exit`), except at an update's relaunch (`relaunching`).
 //! - **The launch** (`sync_at_launch`, `AtLaunch`) applies a mark a kill
@@ -94,30 +95,31 @@ pub fn switchable(status: LoginItemStatus) -> bool {
 
 /// Registers or removes the login item; a plugin failure is `failed`,
 /// which the page shows as it would any other refused command. Changes
-/// nothing while the system manages the login item. On Linux the drop-ins
-/// follow (`stop_timeout::sync`), and turning it off while the app runs as
-/// the autostart unit only marks it to go at the exit (`OFF_AT_EXIT`);
-/// turning it on again clears the mark.
+/// nothing while the system manages the login item. On Linux the switch
+/// goes through `switch_entry`, and the drop-ins follow the entry as it
+/// then stands (`stop_timeout::sync`) unless turning it off waits for the
+/// exit.
 pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
     change_unless_managed(packaged::login_item_is_managed(), || {
         #[cfg(target_os = "linux")]
         {
-            let deferred = defers_off(enabled, stop_timeout::runs_as_autostart_unit());
-            mark_off_at_exit(app, deferred)?;
-            if deferred {
+            let as_unit = stop_timeout::runs_as_autostart_unit();
+            if switch_entry(app, off_at_exit(app).as_deref(), enabled, as_unit)? {
+                stop_timeout::sync(app.autolaunch().is_enabled().ok());
+            } else {
                 tracing::info!("Launch at login goes off when the app exits");
-                return Ok(());
             }
+            Ok(())
         }
-        let result = if enabled {
-            enable(app)
-        } else {
-            app.autolaunch().disable()
-        };
-        result.map_err(failed)?;
-        #[cfg(target_os = "linux")]
-        stop_timeout::sync(Some(enabled));
-        Ok(())
+        #[cfg(not(target_os = "linux"))]
+        {
+            let result = if enabled {
+                enable(app)
+            } else {
+                app.autolaunch().disable()
+            };
+            result.map_err(failed)
+        }
     })
 }
 
@@ -159,6 +161,69 @@ pub fn remove_earlier_entry(app: &AppHandle) {
     packaged::remove_earlier_entry(&app.package_info().name);
 }
 
+/// The result of an `Entry` call.
+#[cfg(target_os = "linux")]
+type EntryResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// The autostart entry as the switch and the launch change and read it
+/// (`enable`, and the plugin's `disable` and `is_enabled`): a trait, so
+/// the tests drive both over a fake.
+#[cfg(target_os = "linux")]
+trait Entry {
+    fn enable(&self) -> EntryResult<()>;
+    fn disable(&self) -> EntryResult<()>;
+    fn is_enabled(&self) -> EntryResult<bool>;
+}
+
+#[cfg(target_os = "linux")]
+impl Entry for AppHandle {
+    fn enable(&self) -> EntryResult<()> {
+        Ok(enable(self)?)
+    }
+
+    fn disable(&self) -> EntryResult<()> {
+        Ok(self.autolaunch().disable()?)
+    }
+
+    fn is_enabled(&self) -> EntryResult<bool> {
+        Ok(self.autolaunch().is_enabled()?)
+    }
+}
+
+/// Switches `entry` to `enabled` with the mark at `mark`, for an app that
+/// runs as the autostart unit or not (`as_unit`). False when turning it
+/// off only set the mark and waits for the exit (`defers_off`), true when
+/// the entry is now as asked. Turning it on clears the mark, which calls
+/// off a removal still waiting for the exit; as the unit, an entry that is
+/// still there is left as it is, since the plugin rewrites an entry by
+/// emptying it first, and a reload that read it empty would unload the
+/// running unit. A mark or entry that could not be changed is `failed`,
+/// and the switch stays where it was.
+#[cfg(target_os = "linux")]
+fn switch_entry(
+    entry: &impl Entry,
+    mark: Option<&std::path::Path>,
+    enabled: bool,
+    as_unit: bool,
+) -> Result<bool, BridgeError> {
+    let deferred = defers_off(enabled, as_unit);
+    let mark = mark.ok_or_else(|| failed("the app has no config directory"))?;
+    set_mark(mark, deferred).map_err(|error| failed(error.kind()))?;
+    if deferred {
+        return Ok(false);
+    }
+    if enabled && as_unit && entry.is_enabled().unwrap_or(false) {
+        return Ok(true);
+    }
+    let result = if enabled {
+        entry.enable()
+    } else {
+        entry.disable()
+    };
+    result.map_err(failed)?;
+    Ok(true)
+}
+
 /// Whether switching Launch at login to `enabled` waits for the exit: only
 /// turning it off while the app runs as the autostart unit
 /// (`as_autostart_unit`), whose entry the unit needs until it has stopped.
@@ -173,25 +238,20 @@ fn defers_off(enabled: bool, as_autostart_unit: bool) -> bool {
 /// Linux.
 const OFF_AT_EXIT: &str = "launch-at-login-off-at-exit";
 
-fn off_at_exit(app: &AppHandle) -> Option<std::path::PathBuf> {
+/// The app's config directory, which holds the marks (`OFF_AT_EXIT`,
+/// and `stop_timeout`'s owed reload).
+fn config_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
     use tauri::Manager as _;
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|directory| directory.join(OFF_AT_EXIT))
+    app.path().app_config_dir().ok()
 }
 
-/// Sets (`on`) or clears the mark; a failure is `failed`, so the switch
-/// stays where it was.
-#[cfg(target_os = "linux")]
-fn mark_off_at_exit(app: &AppHandle, on: bool) -> Result<(), BridgeError> {
-    let mark = off_at_exit(app).ok_or_else(|| failed("the app has no config directory"))?;
-    set_mark(&mark, on).map_err(|error| failed(error.kind()))
+fn off_at_exit(app: &AppHandle) -> Option<std::path::PathBuf> {
+    config_dir(app).map(|directory| directory.join(OFF_AT_EXIT))
 }
 
 /// Creates (`on`) or removes the file at `mark`; removing none is fine.
 #[cfg(target_os = "linux")]
-fn set_mark(mark: &std::path::Path, on: bool) -> std::io::Result<()> {
+pub fn set_mark(mark: &std::path::Path, on: bool) -> std::io::Result<()> {
     if on {
         if let Some(directory) = mark.parent() {
             std::fs::create_dir_all(directory)?;
@@ -300,9 +360,9 @@ enum AtLaunch {
     /// An entry marked to go at an exit that never came (a kill, a crash),
     /// and the app no longer runs as its unit: it goes now.
     TurnOff,
-    /// No entry while the app runs as the autostart unit: an older release
-    /// turned Launch at login off at once, or the user removed the entry,
-    /// and an update's relaunch stayed in the unit. The entry comes back,
+    /// No entry while the app runs as the autostart unit (an older release
+    /// removed it at once, or the user did, and then an update relaunched
+    /// in the unit). The entry comes back,
     /// marked to go at the exit, so the unit gets its drop-in and the
     /// reload that applies it, and outlives any other reload until it has
     /// stopped.
@@ -349,29 +409,35 @@ fn login_item_after(step: AtLaunch, switch: impl FnOnce(bool) -> bool) -> Option
 #[cfg(target_os = "linux")]
 pub fn sync_at_launch(app: &AppHandle) {
     if packaged::login_item_is_managed() {
-        stop_timeout::sync(None);
+        stop_timeout::sync_at_launch(None);
         return;
     }
-    let mark = off_at_exit(app);
-    let manager = app.autolaunch();
-    let step = at_launch(
-        status_from_plugin(manager.is_enabled()),
-        mark.as_deref().is_some_and(std::path::Path::exists),
+    let login_item = launch(
+        app,
+        off_at_exit(app).as_deref(),
         stop_timeout::runs_as_autostart_unit(),
     );
-    let switch = |on| -> Result<(), Box<dyn std::error::Error>> {
-        if on {
-            restore(
-                mark.as_deref(),
-                || enable(app),
-                || manager.is_enabled(),
-            )
-        } else {
-            Ok(manager.disable()?)
-        }
-    };
+    stop_timeout::sync_at_launch(login_item);
+}
+
+/// The launch's step (`at_launch`) on `entry`, with the mark at `mark`,
+/// for an app that runs as the autostart unit or not (`as_unit`): the
+/// login item the drop-ins then follow (`login_item_after`). A mark left
+/// where no entry is is cleared.
+#[cfg(target_os = "linux")]
+fn launch(entry: &impl Entry, mark: Option<&std::path::Path>, as_unit: bool) -> Option<bool> {
+    let step = at_launch(
+        status_from_plugin(entry.is_enabled()),
+        mark.is_some_and(std::path::Path::exists),
+        as_unit,
+    );
     let login_item = login_item_after(step, |on| {
-        let Err(error) = switch(on) else {
+        let switched = if on {
+            restore(entry, mark)
+        } else {
+            entry.disable()
+        };
+        let Err(error) = switched else {
             return true;
         };
         let failure = if on {
@@ -385,11 +451,11 @@ pub fn sync_at_launch(app: &AppHandle) {
     });
     // No entry is left: a mark has nothing more to turn off.
     if login_item == Some(false)
-        && let Some(mark) = &mark
+        && let Some(mark) = mark
     {
         clear_mark(mark);
     }
-    stop_timeout::sync_at_launch(login_item);
+    login_item
 }
 
 /// Puts the entry back for `AtLaunch::Restore`, with the mark at `mark`
@@ -398,15 +464,11 @@ pub fn sync_at_launch(app: &AppHandle) {
 /// so the drop-ins and the reload never follow an entry that is not
 /// there.
 #[cfg(target_os = "linux")]
-fn restore<E: std::error::Error + 'static>(
-    mark: Option<&std::path::Path>,
-    enable: impl FnOnce() -> Result<(), E>,
-    is_enabled: impl FnOnce() -> Result<bool, E>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn restore(entry: &impl Entry, mark: Option<&std::path::Path>) -> EntryResult<()> {
     let mark = mark.ok_or("the app has no config directory")?;
     set_mark(mark, true)?;
-    enable()?;
-    if !is_enabled()? {
+    entry.enable()?;
+    if !entry.is_enabled()? {
         return Err("no autostart entry was written".into());
     }
     Ok(())
@@ -601,34 +663,166 @@ mod tests {
         }
     }
 
-    /// The restore marks the entry before it enables it, and fails, with
-    /// the mark left for the launch to clear, when there is no config
-    /// directory, `enable` fails, or the entry is not there after it.
+    /// An entry in memory: whether it stands, whether `enable` writes it
+    /// (`writes`; otherwise it reports success and writes nothing, as an
+    /// install the system manages may), whether `enable` and `disable`
+    /// fail (`refuses`) or `is_enabled` does (`unreadable`), and the
+    /// changes asked for, each with whether the mark at `mark` was there.
+    #[cfg(target_os = "linux")]
+    struct FakeEntry {
+        stands: std::cell::Cell<bool>,
+        writes: bool,
+        refuses: bool,
+        unreadable: bool,
+        mark: std::path::PathBuf,
+        calls: std::cell::RefCell<Vec<(&'static str, bool)>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl FakeEntry {
+        fn new(stands: bool, mark: &std::path::Path) -> Self {
+            Self {
+                stands: stands.into(),
+                writes: true,
+                refuses: false,
+                unreadable: false,
+                mark: mark.to_owned(),
+                calls: Vec::new().into(),
+            }
+        }
+
+        fn call(&self, name: &'static str) -> EntryResult<()> {
+            self.calls.borrow_mut().push((name, self.mark.exists()));
+            if self.refuses {
+                return Err("refused".into());
+            }
+            Ok(())
+        }
+
+        fn calls(&self) -> Vec<(&'static str, bool)> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    /// No change asked of a `FakeEntry`.
+    #[cfg(target_os = "linux")]
+    const NO_CALLS: [(&str, bool); 0] = [];
+
+    #[cfg(target_os = "linux")]
+    impl Entry for FakeEntry {
+        fn enable(&self) -> EntryResult<()> {
+            self.call("enable")?;
+            if self.writes {
+                self.stands.set(true);
+            }
+            Ok(())
+        }
+
+        fn disable(&self) -> EntryResult<()> {
+            self.call("disable")?;
+            self.stands.set(false);
+            Ok(())
+        }
+
+        fn is_enabled(&self) -> EntryResult<bool> {
+            if self.unreadable {
+                return Err("unread".into());
+            }
+            Ok(self.stands.get())
+        }
+    }
+
+    /// As the autostart unit, turning Launch at login off only sets the
+    /// mark, and turning it on again clears it without rewriting the entry
+    /// (an emptied entry, read by a reload, would unload the unit). Without
+    /// an entry, or outside the unit, the switch changes the entry at once.
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_restore_fails_without_the_entry_it_wrote() {
-        use std::io::Error;
-        let root = std::env::temp_dir().join(format!("steno-restore-{}", std::process::id()));
+    fn on_again_as_the_unit_calls_off_the_removal_and_keeps_the_entry() {
+        let root = std::env::temp_dir().join(format!("steno-switch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mark = root.join(OFF_AT_EXIT);
-        let enable_marked = || {
-            assert!(mark.exists(), "enabled before the mark");
-            Ok::<(), Error>(())
+        let entry = FakeEntry::new(true, &mark);
+        assert!(!switch_entry(&entry, Some(&mark), false, true).unwrap());
+        assert!(mark.exists() && entry.stands.get());
+        assert!(switch_entry(&entry, Some(&mark), true, true).unwrap());
+        assert!(!mark.exists() && entry.stands.get());
+        assert_eq!(entry.calls(), NO_CALLS, "the entry was rewritten");
+
+        let gone = FakeEntry::new(false, &mark);
+        assert!(switch_entry(&gone, Some(&mark), true, true).unwrap());
+        assert_eq!(gone.calls(), [("enable", false)]);
+        let outside = FakeEntry::new(true, &mark);
+        assert!(switch_entry(&outside, Some(&mark), false, false).unwrap());
+        assert!(switch_entry(&outside, Some(&mark), true, false).unwrap());
+        assert_eq!(outside.calls(), [("disable", false), ("enable", false)]);
+        assert!(!mark.exists());
+
+        let refused = FakeEntry {
+            refuses: true,
+            ..FakeEntry::new(false, &mark)
         };
-        assert!(restore(Some(&mark), enable_marked, || Ok(true)).is_ok());
-        std::fs::remove_file(&mark).unwrap();
-        assert!(restore(Some(&mark), enable_marked, || Ok(false)).is_err());
-        assert!(
-            restore(
-                Some(&mark),
-                || Err(Error::other("refused")),
-                || -> Result<bool, Error> { panic!("read after a failed enable") }
-            )
-            .is_err()
+        assert!(switch_entry(&refused, Some(&mark), true, true).is_err());
+        assert!(switch_entry(&refused, None, true, false).is_err());
+        assert_eq!(refused.calls(), [("enable", false)], "no mark, no call");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The launch on the plugin's calls: a restore marks the entry before
+    /// it enables it, and counts only an entry it reads back, so an
+    /// `enable` that wrote nothing leaves no entry, no mark, and no reload
+    /// for the drop-ins; a marked entry outside the unit goes; an entry it
+    /// cannot read or change stays as it was.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_launch_restores_only_an_entry_it_reads_back() {
+        let root = std::env::temp_dir().join(format!("steno-launch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mark = root.join(OFF_AT_EXIT);
+        let restored = FakeEntry::new(false, &mark);
+        assert_eq!(launch(&restored, Some(&mark), true), Some(true));
+        assert_eq!(
+            restored.calls(),
+            [("enable", true)],
+            "enabled before the mark"
         );
-        assert!(restore(Some(&mark), enable_marked, || Err(Error::other("unread"))).is_err());
-        let unreached = || -> Result<(), Error> { panic!("enabled without a mark") };
-        assert!(restore(None, unreached, || Ok(true)).is_err());
+        assert!(mark.exists() && restored.stands.get());
+
+        std::fs::remove_file(&mark).unwrap();
+        let unwritten = FakeEntry {
+            writes: false,
+            ..FakeEntry::new(false, &mark)
+        };
+        assert_eq!(launch(&unwritten, Some(&mark), true), Some(false));
+        assert!(!mark.exists(), "a mark without an entry stays");
+        let refused = FakeEntry {
+            refuses: true,
+            ..FakeEntry::new(false, &mark)
+        };
+        assert_eq!(launch(&refused, Some(&mark), true), Some(false));
+        let no_directory = FakeEntry::new(false, &mark);
+        assert_eq!(launch(&no_directory, None, true), Some(false));
+        assert_eq!(no_directory.calls(), NO_CALLS, "enabled without a mark");
+
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&mark, b"").unwrap();
+        let kept = FakeEntry {
+            refuses: true,
+            ..FakeEntry::new(true, &mark)
+        };
+        assert_eq!(launch(&kept, Some(&mark), false), Some(true));
+        assert!(mark.exists(), "the mark stays for the next launch");
+        let marked = FakeEntry::new(true, &mark);
+        assert_eq!(launch(&marked, Some(&mark), false), Some(false));
+        assert_eq!(marked.calls(), [("disable", true)]);
+        assert!(!mark.exists() && !marked.stands.get());
+
+        let unread = FakeEntry {
+            unreadable: true,
+            ..FakeEntry::new(true, &mark)
+        };
+        assert_eq!(launch(&unread, Some(&mark), true), None);
+        assert_eq!(unread.calls(), NO_CALLS);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

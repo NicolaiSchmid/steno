@@ -12,7 +12,8 @@
 //! closing Settings kept it and opening it again on a section loaded a
 //! fresh page there, and closing onboarding kept it and told the host once
 //! (`windows::Kept`), and on Linux, in a run as the autostart unit,
-//! turning Launch at login off left the entry and set the mark
+//! turning Launch at login off left the entry and set the mark, and on
+//! again cleared it without rewriting the entry
 //! (`check_login_item_waits_for_the_exit`); 1 otherwise; a value that is
 //! not a positive number ends the run at once with 2. Screenshots of the
 //! Xvfb root during the wait are the review evidence; the windows carry
@@ -183,8 +184,9 @@ pub enum Outcome {
     /// the message says which.
     WindowsFailed(String),
     /// On Linux, as the autostart unit: turning Launch at login off
-    /// changed the entry at once, set no mark, or still read as on; the
-    /// message says which.
+    /// changed the entry at once, set no mark, or still read as on, or
+    /// turning it on again kept the mark or rewrote the entry; the message
+    /// says which.
     #[cfg(target_os = "linux")]
     LoginItemFailed(String),
 }
@@ -482,9 +484,11 @@ fn check_onboarding_is_kept(app: &AppHandle) -> Result<(), String> {
 /// On Linux, in a run as the autostart unit (`smoke-linux.sh`'s runs in
 /// that unit), turns Launch at login off as the General section does: the
 /// entry stays as it was, marked to go at the exit, and reads as off
-/// (`autostart::set_enabled`). The log line says whether the entry stands,
-/// which the script checks against what the launch should have left.
-/// Nothing to check outside the unit.
+/// (`autostart::set_enabled`). Where the entry stands, it turns it on
+/// again, which clears the mark and leaves the entry unwritten, and then
+/// off once more. The log line says whether the entry stands, which the
+/// script checks against what the launch should have left. Nothing to
+/// check outside the unit.
 #[cfg(target_os = "linux")]
 fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt as _;
@@ -496,17 +500,52 @@ fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
             .is_enabled()
             .map_err(|error| format!("reading the entry: {error}"))
     };
+    let switch = |on| {
+        crate::autostart::set_enabled(app, on).map_err(|error| {
+            let on = if on { "on" } else { "off" };
+            format!("turning it {on} failed: {}", error.message)
+        })
+    };
     let before = entry()?;
-    crate::autostart::set_enabled(app, false)
-        .map_err(|error| format!("turning it off failed: {}", error.message))?;
-    if entry()? != before {
-        return Err("turning it off as the autostart unit changed the entry at once".into());
-    }
-    if !crate::autostart::marked_off_at_exit(app) {
-        return Err("turning it off as the autostart unit set no mark".into());
-    }
-    if crate::autostart::status(app).is_on() {
-        return Err("turned off, it still reads as on".into());
+    let turn_off = || {
+        switch(false)?;
+        if entry()? != before {
+            return Err(
+                "turning it off as the autostart unit changed the entry at once".to_owned(),
+            );
+        }
+        if !crate::autostart::marked_off_at_exit(app) {
+            return Err("turning it off as the autostart unit set no mark".into());
+        }
+        if crate::autostart::status(app).is_on() {
+            return Err("turned off, it still reads as on".into());
+        }
+        Ok(())
+    };
+    turn_off()?;
+    if before {
+        // The plugin's file (auto-launch): $HOME/.config/autostart.
+        let written = || {
+            std::env::home_dir()
+                .map(|home| {
+                    home.join(".config/autostart")
+                        .join(format!("{}.desktop", app.package_info().name))
+                })
+                .and_then(|file| {
+                    std::fs::metadata(file)
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                })
+        };
+        let at = written();
+        switch(true)?;
+        if crate::autostart::marked_off_at_exit(app) || !crate::autostart::status(app).is_on() {
+            return Err("turned on again as the autostart unit, it still goes at the exit".into());
+        }
+        if at.is_none() || written() != at {
+            return Err("turned on again as the autostart unit, the entry was rewritten".into());
+        }
+        turn_off()?;
     }
     let entry = if before { "stands" } else { "is absent" };
     stderr_line!(
