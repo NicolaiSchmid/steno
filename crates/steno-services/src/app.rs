@@ -514,7 +514,8 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let runtime = options.runtime;
     let zone = local_zone();
 
-    // The one `preferences.json` the update schedule and the host share.
+    // The one `preferences.json` the engine notice, the update schedule and
+    // the host share.
     let preferences: Arc<dyn Preferences> =
         preferences_retiring_the_engine(&store, &paths, &mut warnings);
     // The speech settings and the models directory are read once, here:
