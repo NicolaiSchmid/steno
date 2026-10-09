@@ -1486,17 +1486,33 @@ impl Recorder for CaptureRecorder {
         crate::audio_folders::forget(&self.support_directory, &[meeting_id])
             .map(|mut forgotten| forgotten.remove(&meeting_id))
             .inspect_err(|error| {
+                tracing::warn!(%meeting_id, "a meeting was not deleted: its recording's folder could not be forgotten");
                 // The error can name the user's folder: debug alone.
                 tracing::debug!(%meeting_id, %error, "a recording folder not forgotten");
             })
     }
 
+    /// When the entry cannot be written again, a durable checkpoint makes
+    /// the row survive a power loss, so the row no longer needs it.
     fn restore_recording(&self, meeting_id: Uuid, folder: &Path) {
-        if let Err(error) =
-            crate::audio_folders::record(&self.support_directory, meeting_id, folder)
-        {
-            tracing::warn!(%meeting_id, "a meeting that was not deleted lost its recording's folder");
-            tracing::debug!(%meeting_id, %error, "recording folder not written again");
+        let Err(error) = crate::audio_folders::record(&self.support_directory, meeting_id, folder)
+        else {
+            return;
+        };
+        // The error can name the user's folder: debug alone.
+        tracing::debug!(%meeting_id, %error, "recording folder not written again");
+        match self.store.checkpoint_durably() {
+            Ok(()) => tracing::warn!(
+                %meeting_id,
+                "a meeting that was not deleted lost its recording's folder; its row was made durable instead"
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    %meeting_id,
+                    "a meeting that was not deleted lost its recording's folder, and its row could not be made durable"
+                );
+                tracing::debug!(%meeting_id, %error, "store not checkpointed");
+            }
         }
     }
 }
@@ -2971,6 +2987,39 @@ mod tests {
         assert!(failed.is_err(), "{failed:?}");
         let entries = crate::audio_folders::recorded(&support).unwrap();
         assert_eq!(entries.get(&meeting_id), Some(&folder));
+    }
+
+    /// A restore that cannot write the record (a read-only support folder)
+    /// checkpoints the store durably instead: one commit under
+    /// `synchronous = FULL` (2), the checkpoint's WAL restart, so the row
+    /// survives a power loss without its entry.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restore_that_fails_checkpoints_the_store_durably() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let harness = harness(&[]);
+        let meeting_id = Uuid::new_v4();
+        let support = harness.dir.path().join("support");
+        let folder = harness.dir.path().join("audio");
+        crate::audio_folders::record(&support, meeting_id, &folder).unwrap();
+        let forgotten = harness.recorder.forget_recording(meeting_id).unwrap();
+        assert_eq!(forgotten.as_deref(), Some(folder.as_path()));
+        let levels: Arc<Mutex<Vec<i64>>> = Arc::default();
+        let seen = levels.clone();
+        harness.store.probe_commits(move |connection| {
+            let level = connection
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            seen.lock().unwrap().push(level);
+        });
+
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o555)).unwrap();
+        harness.recorder.restore_recording(meeting_id, &folder);
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let entries = crate::audio_folders::recorded(&support).unwrap();
+        assert_eq!(entries.get(&meeting_id), None);
+        assert_eq!(*levels.lock().unwrap(), [2]);
     }
 
     #[test]

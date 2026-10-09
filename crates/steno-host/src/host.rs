@@ -102,7 +102,7 @@ use crate::main_window::{
 };
 use crate::onboarding::{self, OnboardingViewModel};
 use crate::publisher::{RECORDING_INTERVAL, TopicPublisher};
-use crate::services::Services;
+use crate::services::{Recorder, Services};
 use crate::settings::{
     AudioSettingsViewModel, GeneralSettingsViewModel, KeyRead, LlmPreset, LlmSettingsViewModel,
     ObsidianSettingsViewModel, PhonesSettingsViewModel, SpeechSettingsViewModel, llm::Probe,
@@ -1425,6 +1425,31 @@ fn wire_option(option: &ModelOption) -> SpeakerOption {
     }
 }
 
+/// The entry a confirmed delete forgot ([`Recorder::forget_recording`]),
+/// recorded again when dropped unless the rows went (`folder` taken): a
+/// delete refused (the pipeline took the meeting up while the prompt was
+/// open), not committed, or unwound by a panic keeps its row, and until
+/// the row is durable its entry is what lets a launch adopt the master.
+/// Only while the row is still there: a second prompt for the meeting,
+/// answered after the first one deleted it, records nothing again. Rust
+/// only.
+struct ForgottenEntry<'a> {
+    recorder: &'a dyn Recorder,
+    store: &'a Store,
+    meeting_id: Uuid,
+    folder: Option<PathBuf>,
+}
+
+impl Drop for ForgottenEntry<'_> {
+    fn drop(&mut self) {
+        if let Some(folder) = self.folder.take()
+            && matches!(self.store.meeting(self.meeting_id), Ok(Some(_)))
+        {
+            self.recorder.restore_recording(self.meeting_id, &folder);
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 impl BridgeHost for Host {
     fn page_ready(&self) -> Outcome<()> {
@@ -1530,9 +1555,19 @@ impl BridgeHost for Host {
             // master still there (a removal not done yet, or one that
             // failed). An entry that stays would bring the meeting back at
             // the next launch: the delete is refused before any row goes.
-            let recorder = &self.shared.services.recorder;
-            let Ok(forgotten) = recorder.forget_recording(params.meeting_id) else {
+            let Ok(folder) = self
+                .shared
+                .services
+                .recorder
+                .forget_recording(params.meeting_id)
+            else {
                 return Err(BridgeError::failed(COULD_NOT_DELETE));
+            };
+            let mut forgotten = ForgottenEntry {
+                recorder: &*self.shared.services.recorder,
+                store: &self.shared.store,
+                meeting_id: params.meeting_id,
+                folder,
             };
             let now = self.now();
             let mut deleted = false;
@@ -1559,11 +1594,8 @@ impl BridgeHost for Host {
                     }
                 },
             );
-            // Refused (the pipeline took the meeting up while the prompt
-            // was open) or not committed: the row stays, and until it is
-            // durable its entry is what lets a launch adopt the master.
-            if !deleted && let Some(folder) = forgotten {
-                recorder.restore_recording(params.meeting_id, &folder);
+            if deleted {
+                forgotten.folder = None;
             }
         }
         Ok(ConfirmReply { confirmed })

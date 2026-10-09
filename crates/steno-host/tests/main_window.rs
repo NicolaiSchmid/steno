@@ -10,6 +10,7 @@ mod common;
 use steno_host::services::Recorder as _;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::*;
@@ -553,6 +554,90 @@ fn a_delete_that_does_not_go_through_keeps_the_recorders_entry() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// A delete that a panic unwinds before its commit (here inside the
+/// write, as the commit runs) keeps the row, and the recorder's entry is
+/// recorded again as the drop guard unwinds.
+#[test]
+fn a_delete_unwound_before_its_commit_keeps_the_recorders_entry() {
+    let armed = Arc::new(AtomicBool::new(false));
+    let arm = armed.clone();
+    let harness = Harness::builder()
+        .confirm_with(move |_, _| {
+            arm.store(true, Ordering::SeqCst);
+            true
+        })
+        .seed(populate_sample)
+        .build();
+    harness.store.probe_commits(move |_| {
+        assert!(
+            !armed.swap(false, Ordering::SeqCst),
+            "a panic before the delete's commit"
+        );
+    });
+    let audio = harness.audio_folder();
+    harness
+        .fakes
+        .recorder
+        .recorded
+        .lock()
+        .unwrap()
+        .insert(uuid(MEETING), audio.clone());
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        harness.host.meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+    }));
+    assert!(unwound.is_err());
+    assert!(harness.store.meeting(uuid(MEETING)).unwrap().is_some());
+    assert_eq!(
+        harness
+            .fakes
+            .recorder
+            .recorded
+            .lock()
+            .unwrap()
+            .get(&uuid(MEETING)),
+        Some(&audio),
+        "the entry is recorded again"
+    );
+}
+
+/// Two delete prompts for one meeting: the second, answered after the
+/// first deleted the meeting, finds no row and records no entry for a
+/// meeting that is gone.
+#[test]
+fn a_second_delete_prompt_records_no_entry_for_a_deleted_meeting() {
+    let harness = Harness::builder()
+        .confirm_with(|host, _| {
+            // The first prompt's delete, done while this one is open.
+            host.store().delete_meeting(uuid(MEETING)).unwrap();
+            true
+        })
+        .seed(populate_sample)
+        .build();
+    let audio = harness.audio_folder();
+    harness
+        .fakes
+        .recorder
+        .recorded
+        .lock()
+        .unwrap()
+        .insert(uuid(MEETING), audio);
+    let reply = harness
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap();
+    assert!(reply.confirmed);
+    assert!(harness.store.meeting(uuid(MEETING)).unwrap().is_none());
+    assert_eq!(
+        *harness.fakes.recorder.forgotten.lock().unwrap(),
+        [uuid(MEETING)]
+    );
+    assert!(harness.fakes.recorder.recorded.lock().unwrap().is_empty());
 }
 
 /// The detail heading derives the title as the list does (Swift:

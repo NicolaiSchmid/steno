@@ -259,7 +259,8 @@ pub trait Recorder: Send + Sync {
     /// into, after [`Self::forget_recording`] forgot it for a delete that
     /// did not go through: the row stays, and until it is durable a power
     /// loss can still take it, so the entry is what lets the next launch
-    /// adopt its master. A failure is logged. Rust only.
+    /// adopt its master. On a failure the store is checkpointed durably,
+    /// so the row no longer needs the entry; both are logged. Rust only.
     fn restore_recording(&self, meeting_id: Uuid, folder: &Path);
 }
 
