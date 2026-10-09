@@ -1,6 +1,6 @@
 # `programs.steno`: Steno on NixOS. The package, launch at login as a
 # systemd user service, PipeWire, and GNOME Keyring as the Secret Service
-# where nothing else provides one. Item X7 of
+# where no other Secret Service or SSH agent runs. Item X7 of
 # .plans/2026-10-07-stable-promotion.md. The handover port in the firewall
 # is X4's and not here yet.
 {packages}: {
@@ -46,8 +46,15 @@ in {
         Start Steno with the graphical session, as the systemd user service
         `steno.service`, which sets `STENO_LOGIN_ITEM=managed`. X5 reads
         it: the app then leaves launch at login to the system and writes no
-        autostart entry of its own. A rebuild never restarts or stops a
-        running Steno; the new version starts at the next login. Needs a
+        autostart entry of its own. A rebuild never restarts or stops
+        `steno.service`, whatever changed; the new version starts at the
+        next login, or at the next launch after quitting. One that changes
+        PipeWire's units, as most nixpkgs bumps do, restarts PipeWire: a
+        recording in progress then reconnects with a second or two of
+        silence, and if PipeWire is not back within about 2 s, the
+        recording ends and what was recorded is saved. Turning the module
+        or this option off leaves a running Steno until it quits or the
+        session ends. Needs a
         session that reaches `graphical-session.target`: GNOME, Plasma, or
         Hyprland with `programs.hyprland.withUWSM`.
       '';
@@ -107,16 +114,19 @@ in {
     services.pipewire.enable = lib.mkDefault true;
     security.rtkit.enable = lib.mkDefault true;
 
-    # GNOME Keyring as the Secret Service for the app's secrets once #221
-    # moves them there (until then they are a 0600 file). Not where another
-    # one runs (Plasma's KWallet, pass-secret-service), and not beside
-    # `programs.ssh.startAgent`: the keyring brings gcr's SSH agent, which
-    # nixpkgs refuses next to it. Never set to false, so a desktop's own
-    # `mkDefault true` does not conflict.
+    # GNOME Keyring as the Secret Service for the app's secrets (without
+    # one they stay in a 0600 file). Not where another one runs (Plasma's
+    # KWallet, pass-secret-service), and not beside another SSH agent,
+    # because the keyring brings gcr's: nixpkgs refuses it next to
+    # `programs.ssh.startAgent`, and next to GnuPG's SSH support gcr's
+    # socket takes the session's SSH_AUTH_SOCK, so SSH through gpg-agent
+    # stops working. Never set to false, so a desktop's own `mkDefault true`
+    # does not conflict.
     services.gnome.gnome-keyring.enable = lib.mkIf (!(
       config.services.desktopManager.plasma6.enable
       || config.services.passSecretService.enable
       || config.programs.ssh.startAgent
+      || config.programs.gnupg.agent.enableSSHSupport
     )) (lib.mkDefault true);
 
     services.logind.settings.Login = lib.mkIf (cfg.inhibitDelayMaxSec != null) {

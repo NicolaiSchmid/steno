@@ -1,7 +1,7 @@
 # The Linux checks behind `nix flake check`: the package's layout, libraries
 # and wrapper, and the NixOS module evaluated in minimal systems (a
 # system-wide and a per-user install down to the user units it generates,
-# and one with an SSH agent of its own).
+# and one each with OpenSSH's and GnuPG's SSH agent).
 {
   nixpkgs,
   self,
@@ -46,19 +46,29 @@
       programs.steno.inhibitDelayMaxSec = 15;
     }
   ];
-  # Its own SSH agent: the keyring default must stay off and evaluate.
+  # Another SSH agent: the keyring default must stay off and evaluate.
   withAgent = system [{programs.ssh.startAgent = true;}];
+  withGpgAgent = system [
+    {
+      programs.gnupg.agent = {
+        enable = true;
+        enableSSHSupport = true;
+      };
+    }
+  ];
   userUnits = config: config.environment.etc."systemd/user".source;
   installs = config: lib.elem steno config.environment.systemPackages;
   # What `nixos-rebuild` would refuse with.
   evaluates = config: lib.all (a: a.assertion) config.assertions;
 
-  # The release's CLI is the one the package builds with.
+  # Every Tauri CLI the release installs is the one the package builds with.
   tauriVersion = steno.passthru.tauriCli.version;
-  releaseWorkflow = builtins.readFile ../.github/workflows/desktop-release.yml;
+  releaseTauriVersions = map lib.head (lib.filter lib.isList (builtins.split
+    "@tauri-apps/cli@([^ ]+) "
+    (builtins.readFile ../.github/workflows/desktop-release.yml)));
 in {
-  package = assert lib.assertMsg (lib.hasInfix "@tauri-apps/cli@${tauriVersion} " releaseWorkflow)
-  "nix/package.nix builds with Tauri CLI ${tauriVersion}, desktop-release.yml with another";
+  package = assert lib.assertMsg (releaseTauriVersions != [] && lib.all (v: v == tauriVersion) releaseTauriVersions)
+  "nix/package.nix builds with Tauri CLI ${tauriVersion}, desktop-release.yml with ${toString releaseTauriVersions}";
     pkgs.runCommand "steno-package-check" {
       nativeBuildInputs = [pkgs.file];
       inherit userUnitFiles;
@@ -73,8 +83,10 @@ in {
       # The wrapper execs the real binary in the same directory, so the
       # sidecar beside it is the one `SidecarConfig::beside_current_exe`
       # finds; the sidecar itself is not wrapped.
-      grep -q "$bin/.steno-desktop-wrapped" "$bin/steno-desktop"
-      grep -q 'STENO_DISTRIBUTION' "$bin/steno-desktop"
+      grep -q "$bin/.steno-desktop-wrapped" "$bin/steno-desktop" \
+        || { echo "the wrapper does not exec .steno-desktop-wrapped"; exit 1; }
+      grep -q 'STENO_DISTRIBUTION' "$bin/steno-desktop" \
+        || { echo "the wrapper misses STENO_DISTRIBUTION"; exit 1; }
       # GTK's schemas, without which the file chooser aborts the app, and
       # GIO's TLS module.
       grep -qF 'gsettings-schemas/${pkgs.gtk3.name}' "$bin/steno-desktop" \
@@ -86,19 +98,24 @@ in {
         libs="$($ldd "$bin/$elf")"
         if grep 'not found' <<< "$libs"; then echo "$elf misses a library"; exit 1; fi
         # nixpkgs' ONNX Runtime, linked.
-        grep -q "$onnxruntime/lib/libonnxruntime.so" <<< "$libs"
+        grep -q "$onnxruntime/lib/libonnxruntime.so" <<< "$libs" \
+          || { echo "$elf does not link nixpkgs' ONNX Runtime"; exit 1; }
       done
 
       # The tray opens libayatana-appindicator by this store path.
-      test -f "$tray"
-      grep -qaF "$tray" "$bin/.steno-desktop-wrapped"
+      test -f "$tray" || { echo "the tray's library is missing"; exit 1; }
+      grep -qaF "$tray" "$bin/.steno-desktop-wrapped" \
+        || { echo "the binary does not name the tray's library"; exit 1; }
 
-      grep -q '^Exec=steno-desktop %u$' ${steno}/share/applications/steno-desktop.desktop
+      grep -q '^Exec=steno-desktop %u$' ${steno}/share/applications/steno-desktop.desktop \
+        || { echo "the desktop entry's Exec is not steno-desktop %u"; exit 1; }
 
       while IFS=$'\t' read -r below source; do
         [ -n "$below" ] || continue
-        cmp "${steno}/lib/systemd/user/$below" "$src/$source"
-        cmp "${steno}/share/systemd/user/$below" "$src/$source"
+        cmp "${steno}/lib/systemd/user/$below" "$src/$source" \
+          || { echo "lib/systemd/user/$below differs from $source"; exit 1; }
+        cmp "${steno}/share/systemd/user/$below" "$src/$source" \
+          || { echo "share/systemd/user/$below differs from $source"; exit 1; }
         echo "ok: lib/systemd/user/$below, also under share/"
       done <<< "$userUnitFiles"
       touch $out
@@ -107,10 +124,12 @@ in {
   module = assert installs systemWide.config;
   assert !(installs perUser.config);
   assert lib.elem steno perUser.config.users.users.alice.packages;
-  assert evaluates systemWide.config && evaluates perUser.config && evaluates withAgent.config;
+  assert evaluates systemWide.config && evaluates perUser.config;
+  assert evaluates withAgent.config && evaluates withGpgAgent.config;
   assert systemWide.config.services.pipewire.enable;
   assert systemWide.config.services.gnome.gnome-keyring.enable;
   assert !withAgent.config.services.gnome.gnome-keyring.enable;
+  assert !withGpgAgent.config.services.gnome.gnome-keyring.enable;
   assert !(systemWide.config.services.logind.settings.Login ? InhibitDelayMaxSec);
   assert perUser.config.services.logind.settings.Login.InhibitDelayMaxSec == 15;
     pkgs.runCommand "steno-module-check" {
@@ -119,27 +138,32 @@ in {
       perUserUnits = userUnits perUser.config;
     } ''
       set -euo pipefail
+      # $unit holds the line, else the check names the line it lacks.
+      has() { grep -qxF "$1" "$unit" || { echo "$unit lacks $1"; exit 1; }; }
       for units in "$systemWideUnits" "$perUserUnits"; do
         unit="$units/steno.service"
         cat "$unit"
-        grep -qx 'TimeoutStopSec=20s' "$unit"
-        grep -qx 'Type=exec' "$unit"
-        grep -qx 'Slice=app.slice' "$unit"
+        has 'TimeoutStopSec=20s'
+        has 'Type=exec'
+        has 'Slice=app.slice'
         # A switch leaves a running Steno alone.
-        grep -qx 'X-RestartIfChanged=false' "$unit"
-        grep -qx 'X-StopOnRemoval=false' "$unit"
-        grep -qx 'Environment="STENO_LOGIN_ITEM=managed"' "$unit"
-        grep -qx 'PartOf=graphical-session.target' "$unit"
-        if grep -q '^Environment="PATH=' "$unit"; then echo "the unit sets PATH"; exit 1; fi
-        test -e "$units/graphical-session.target.wants/steno.service"
+        has 'X-RestartIfChanged=false'
+        has 'X-StopOnRemoval=false'
+        has 'Environment="STENO_LOGIN_ITEM=managed"'
+        has 'PartOf=graphical-session.target'
+        if grep -q '^Environment="PATH=' "$unit"; then echo "steno.service sets PATH"; exit 1; fi
+        test -e "$units/graphical-session.target.wants/steno.service" \
+          || { echo "graphical-session.target does not want steno.service"; exit 1; }
         while IFS=$'\t' read -r below source; do
           [ -n "$below" ] || continue
-          test -e "$units/$below"
+          test -e "$units/$below" || { echo "the user units lack $below"; exit 1; }
         done <<< "$userUnitFiles"
       done
-      grep -qx 'ExecStart=/run/current-system/sw/bin/steno-desktop' "$systemWideUnits/steno.service"
-      grep -qx 'ExecStart=/etc/profiles/per-user/%u/bin/steno-desktop' "$perUserUnits/steno.service"
-      grep -qx 'ConditionPathExists=/etc/profiles/per-user/%u/bin/steno-desktop' "$perUserUnits/steno.service"
+      unit="$systemWideUnits/steno.service"
+      has 'ExecStart=/run/current-system/sw/bin/steno-desktop'
+      unit="$perUserUnits/steno.service"
+      has 'ExecStart=/etc/profiles/per-user/%u/bin/steno-desktop'
+      has 'ConditionPathExists=/etc/profiles/per-user/%u/bin/steno-desktop'
       touch $out
     '';
 }
