@@ -258,7 +258,8 @@ impl Handover for ListenerHandover {
     }
 }
 
-/// What `start` and `revoke` answer while the import waits.
+/// What `start` and `revoke` answer while the import waits, before a
+/// listener build failed.
 pub const WAITING_FOR_IMPORT: &str = "Phones can upload again once Steno has brought over this Mac's phone pairing from the previous version.";
 
 /// The host's `Handover` while the Swift import is pending
@@ -348,10 +349,18 @@ impl GatedHandover {
             .get()
             .and_then(|listener| listener.listener().cloned())
     }
-}
 
-fn waiting() -> steno_core::BoxError {
-    WAITING_FOR_IMPORT.into()
+    /// What `start` and `revoke` answer without a listener: why the last
+    /// build failed, once the gate opened and a guard refused to mint (the
+    /// import is over by then), else that the handover waits for the
+    /// import.
+    fn waiting(&self) -> steno_core::BoxError {
+        self.failure
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| WAITING_FOR_IMPORT.to_owned())
+            .into()
+    }
 }
 
 impl Handover for GatedHandover {
@@ -376,7 +385,7 @@ impl Handover for GatedHandover {
     }
 
     fn start(&self) -> BoundaryResult<()> {
-        self.listener.get().ok_or_else(waiting)?.start()
+        self.listener.get().ok_or_else(|| self.waiting())?.start()
     }
 
     fn stop(&self) {
@@ -404,7 +413,10 @@ impl Handover for GatedHandover {
     }
 
     fn revoke(&self, device_id: Uuid) -> BoundaryResult<()> {
-        self.listener.get().ok_or_else(waiting)?.revoke(device_id)
+        self.listener
+            .get()
+            .ok_or_else(|| self.waiting())?
+            .revoke(device_id)
     }
 
     fn receipts(&self) -> Vec<HandoverReceipt> {
@@ -452,7 +464,8 @@ mod tests {
 
     /// A build that fails is tried again at the next ready, not dropped:
     /// whatever puts the identity in place opens the listener by setting
-    /// the gate once more.
+    /// the gate once more. Until then starting the listener or revoking a
+    /// phone answers why the build failed, not that the import waits.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_build_is_tried_again_at_the_next_ready() {
         let store = Arc::new(Store::in_memory().unwrap());
@@ -491,11 +504,22 @@ mod tests {
             let _ = opened.send(());
         }));
 
+        assert_eq!(
+            gated.start().unwrap_err().to_string(),
+            WAITING_FOR_IMPORT,
+            "before the gate opened"
+        );
         gate.send_replace(HandoverGate::Ready);
         assert_eq!(calls.recv().await, Some(0));
         let mut failure = gated.failure();
         failure.wait_for(Option::is_some).await.unwrap();
         assert!(gated.service().is_none());
+        // The import is over: the answer is why the build failed.
+        assert_eq!(gated.start().unwrap_err().to_string(), "refused to mint");
+        assert_eq!(
+            gated.revoke(Uuid::nil()).unwrap_err().to_string(),
+            "refused to mint"
+        );
         gate.send_replace(HandoverGate::Ready);
         tokio::select! {
             call = calls.recv() => assert_eq!(call, Some(1)),
