@@ -13,6 +13,8 @@ serde_json.workspace = true
 tauri-build.workspace = true
 
 [dependencies]
+# The update source the services' update schedule drives (`updater`).
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # The contract's types (errors, topics, windows, sections, params), so the

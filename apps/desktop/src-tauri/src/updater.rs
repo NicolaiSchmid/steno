@@ -1,6 +1,9 @@
 //! Updates over `tauri-plugin-updater`: a signed manifest per lane on the
 //! GitHub release, checked on request from the tray or from Settings
-//! (`updates.check`). The lane follows the installed version, as Sparkle's
+//! (`updates.check`), and daily by the update schedule
+//! (`steno_services::updates`), which drives [`ShellUpdates`], records each
+//! check's outcome and time for the General section, and installs by
+//! itself only through its install gate. The lane follows the installed version, as Sparkle's
 //! channel does in the Swift app: a pre-release build ("0.11.0-rc.1") reads
 //! the beta lane's manifest first and falls back to the stable one; a
 //! stable build reads the stable manifest only. No setting.
@@ -19,15 +22,14 @@
 //!
 //! Swift: `UpdaterController.swift`, `UpdateChannels.swift`.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, PoisonError};
 
+use steno_services::updates::{UpdateSchedule, UpdateSource};
 use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind,
 };
-use tauri_plugin_updater::UpdaterExt;
-
-use crate::bridge::{BridgeError, failed};
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// The stable lane: the rolling `desktop-stable` release, which carries the
 /// newest release's manifest.
@@ -54,88 +56,157 @@ pub fn endpoints(version: &str) -> Vec<Url> {
     urls
 }
 
-/// What the last check found; the General section shows it.
-/// `steno_host::services::UpdateOutcome` is the same; `WP6b` keeps that one
-/// when it implements the host's `Updater` over this module.
-///
-/// Swift: `UpdateCheckOutcome`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum UpdateOutcome {
-    #[default]
-    NotChecked,
-    UpToDate,
-    Available(String),
-    Failed(String),
-}
-
-impl UpdateOutcome {
-    /// The raw value on the wire (`GeneralSettingsSnapshot.Updates.Outcome`);
-    /// the host's, for its General snapshot.
-    #[allow(dead_code)]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::NotChecked => "notChecked",
-            Self::UpToDate => "upToDate",
-            Self::Available(_) => "available",
-            Self::Failed(_) => "failed",
-        }
-    }
-}
-
-/// The last outcome, managed state the host reads for its snapshot.
-#[derive(Debug, Default)]
-pub struct Updates {
-    last: Mutex<UpdateOutcome>,
-}
-
-impl Updates {
-    /// The host reads this for the General section (`WP6b`).
-    #[allow(dead_code)]
-    pub fn last(&self) -> UpdateOutcome {
-        self.last
-            .lock()
-            .map(|last| last.clone())
-            .unwrap_or_default()
-    }
-
-    fn record(&self, outcome: UpdateOutcome) {
-        if let Ok(mut last) = self.last.lock() {
-            *last = outcome;
-        }
-    }
-}
-
 /// The plugin; `check` supplies the lanes per build and `tauri.conf.json`
 /// the public key.
 pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry, tauri_plugin_updater::Config> {
     tauri_plugin_updater::Builder::new().build()
 }
 
-/// Checks the lanes and records the outcome. The update itself, when there
-/// is one, is returned for the caller to offer; a check that could not run
-/// is `failed` with the updater's words.
-pub async fn check(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, BridgeError> {
-    let version = app.package_info().version.to_string();
-    let handle = app.clone();
-    let outcome = async {
-        let updater = app
+/// The update source the schedule drives, managed state: the update the
+/// last check found and, once downloaded, its verified bytes, which an
+/// install the user agrees to uses instead of downloading again.
+pub struct ShellUpdates {
+    app: AppHandle,
+    found: Mutex<Option<Update>>,
+    /// The version and the bytes [`UpdateSource::download`] kept.
+    downloaded: Mutex<Option<(String, Vec<u8>)>>,
+}
+
+impl ShellUpdates {
+    pub fn new(app: AppHandle) -> Self {
+        ShellUpdates {
+            app,
+            found: Mutex::new(None),
+            downloaded: Mutex::new(None),
+        }
+    }
+
+    /// Asks the lanes. The update itself, when there is one, is kept for
+    /// the download and the install.
+    async fn ask_the_lanes(&self) -> Result<Option<Update>, String> {
+        let version = self.app.package_info().version.to_string();
+        let handle = self.app.clone();
+        let update = self
+            .app
             .updater_builder()
             .endpoints(endpoints(&version))
-            .map_err(failed)?
+            .map_err(|error| error.to_string())?
             // Windows: the installer ends the process itself.
             .on_before_exit(move || crate::shut_down_before_exit(&handle))
             .build()
-            .map_err(failed)?;
-        updater.check().await.map_err(failed)
+            .map_err(|error| error.to_string())?
+            .check()
+            .await
+            .map_err(|error| error.to_string())?;
+        lock(&self.found).clone_from(&update);
+        Ok(update)
     }
-    .await;
-    let updates = app.state::<Updates>();
-    match &outcome {
-        Ok(Some(update)) => updates.record(UpdateOutcome::Available(update.version.clone())),
-        Ok(None) => updates.record(UpdateOutcome::UpToDate),
-        Err(error) => updates.record(UpdateOutcome::Failed(error.message.clone())),
+
+    /// Installs the found update (from the kept bytes when they are its
+    /// version, else downloading it now), runs the shutdown and relaunches.
+    /// The relaunch bypasses the exit request, so the shutdown runs first
+    /// (`shut_down_before_exit`), as Sparkle's relaunch went through
+    /// `applicationShouldTerminate`; on Windows the installer's own exit
+    /// runs it (`ask_the_lanes`). An install that fails after that shutdown
+    /// ran (Windows: the installer did not launch) ends the app once its
+    /// message is closed: the recorder and the pipeline start nothing after
+    /// a shutdown, and the next Quit would run none.
+    async fn install(&self) -> Result<(), String> {
+        let app = &self.app;
+        let Some(update) = lock(&self.found).clone() else {
+            return Err("No update was found to install.".to_owned());
+        };
+        let kept = lock(&self.downloaded)
+            .take_if(|(version, _)| *version == update.version)
+            .map(|(_, bytes)| bytes);
+        let installed = match kept {
+            Some(bytes) => update.install(bytes),
+            None => update.download_and_install(|_, _| {}, || {}).await,
+        };
+        match installed {
+            Ok(()) => {
+                let handle = app.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    crate::shut_down_before_exit(&handle);
+                })
+                .await;
+                app.restart()
+            }
+            Err(error) => {
+                let shut_down = app.state::<steno_services::app::ExitGate>().released();
+                let handle = app.clone();
+                dialog(
+                    app,
+                    MessageDialogKind::Error,
+                    format!("The update could not be installed: {error}"),
+                )
+                .show(move |_| {
+                    if shut_down {
+                        handle.exit(0);
+                    }
+                });
+                Err(error.to_string())
+            }
+        }
     }
-    outcome
+}
+
+#[async_trait::async_trait]
+impl UpdateSource for ShellUpdates {
+    async fn check(&self) -> Result<Option<String>, String> {
+        Ok(self.ask_the_lanes().await?.map(|update| update.version))
+    }
+
+    async fn download(&self) -> Result<(), String> {
+        let Some(update) = lock(&self.found).clone() else {
+            return Err("No update was found to download.".to_owned());
+        };
+        if lock(&self.downloaded)
+            .as_ref()
+            .is_some_and(|(version, _)| *version == update.version)
+        {
+            return Ok(());
+        }
+        let bytes = update
+            .download(|_, _| {}, || {})
+            .await
+            .map_err(|error| error.to_string())?;
+        *lock(&self.downloaded) = Some((update.version, bytes));
+        Ok(())
+    }
+
+    async fn install_and_relaunch(&self) -> Result<(), String> {
+        self.install().await
+    }
+
+    fn announce(&self, version: &str) {
+        let (app, version) = (self.app.clone(), version.to_owned());
+        tauri::async_runtime::spawn(async move { offer(&app, &version).await });
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The shell's update source.
+fn source(app: &AppHandle) -> Arc<ShellUpdates> {
+    app.state::<Arc<ShellUpdates>>().inner().clone()
+}
+
+/// The schedule that records each check, when the host runs one (not for
+/// the fixture host, nor in a smoke run).
+fn schedule(app: &AppHandle) -> Option<Arc<UpdateSchedule>> {
+    app.try_state::<crate::host::Host>()?.updates()
+}
+
+/// Checks the lanes; through the schedule when there is one, so the
+/// General section shows the outcome and the time.
+async fn check(app: &AppHandle) -> Result<Option<String>, String> {
+    match schedule(app) {
+        Some(schedule) => schedule.check_now().await,
+        None => source(app).check().await,
+    }
 }
 
 /// A message from the updater, one button unless the caller adds more.
@@ -148,39 +219,33 @@ fn dialog(
 }
 
 /// The tray's Check for Updates: checks, then asks before installing,
-/// as Sparkle's standard driver does, and relaunches when the user agrees.
-/// The relaunch bypasses the exit request, so the shutdown runs first
-/// (`shut_down_before_exit`), as Sparkle's relaunch went through
-/// `applicationShouldTerminate`; on Windows the installer's own exit runs
-/// it (`check`). An install that fails after that shutdown ran (Windows:
-/// the installer did not launch) ends the app once its message is
-/// closed: the recorder and the pipeline start nothing after a shutdown,
-/// and the next Quit would run none.
+/// as Sparkle's standard driver does.
 pub async fn check_and_offer(app: &AppHandle) {
-    let update = match check(app).await {
-        Ok(Some(update)) => update,
+    match check(app).await {
+        Ok(Some(version)) => offer(app, &version).await,
         Ok(None) => {
             dialog(app, MessageDialogKind::Info, "Steno is up to date.").show(|_| {});
-            return;
         }
-        Err(error) => {
+        Err(message) => {
             dialog(
                 app,
                 MessageDialogKind::Error,
-                format!("The update check failed: {}", error.message),
+                format!("The update check failed: {message}"),
             )
             .show(|_| {});
-            return;
         }
-    };
+    }
+}
+
+/// Asks whether to install `version` now, and installs and relaunches when
+/// the user agrees: after the tray's check, and when the schedule found an
+/// update it does not install by itself (Sparkle's update alert).
+async fn offer(app: &AppHandle, version: &str) {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     dialog(
         app,
         MessageDialogKind::Info,
-        format!(
-            "Steno {} is available. Install it and relaunch?",
-            update.version
-        ),
+        format!("Steno {version} is available. Install it and relaunch?"),
     )
     .buttons(MessageDialogButtons::OkCancelCustom(
         "Install and Relaunch".into(),
@@ -192,31 +257,10 @@ pub async fn check_and_offer(app: &AppHandle) {
     if receiver.await != Ok(true) {
         return;
     }
-    match update.download_and_install(|_, _| {}, || {}).await {
-        Ok(()) => {
-            let handle = app.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || {
-                crate::shut_down_before_exit(&handle);
-            })
-            .await;
-            app.restart()
-        }
-        Err(error) => {
-            app.state::<Updates>()
-                .record(UpdateOutcome::Failed(error.to_string()));
-            let shut_down = app.state::<steno_services::app::ExitGate>().released();
-            let handle = app.clone();
-            dialog(
-                app,
-                MessageDialogKind::Error,
-                format!("The update could not be installed: {error}"),
-            )
-            .show(move |_| {
-                if shut_down {
-                    handle.exit(0);
-                }
-            });
-        }
+    if let Err(message) = source(app).install().await
+        && let Some(schedule) = schedule(app)
+    {
+        schedule.install_failed(message);
     }
 }
 
@@ -260,17 +304,5 @@ mod tests {
             config["plugins"]["updater"]["endpoints"],
             serde_json::json!([STABLE_ENDPOINT])
         );
-    }
-
-    #[test]
-    fn the_outcome_spells_as_the_contract_does() {
-        assert_eq!(UpdateOutcome::NotChecked.as_str(), "notChecked");
-        assert_eq!(UpdateOutcome::UpToDate.as_str(), "upToDate");
-        assert_eq!(UpdateOutcome::Available("1.0".into()).as_str(), "available");
-        assert_eq!(UpdateOutcome::Failed("x".into()).as_str(), "failed");
-        let updates = Updates::default();
-        assert_eq!(updates.last(), UpdateOutcome::NotChecked);
-        updates.record(UpdateOutcome::UpToDate);
-        assert_eq!(updates.last(), UpdateOutcome::UpToDate);
     }
 }

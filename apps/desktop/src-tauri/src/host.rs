@@ -14,9 +14,10 @@
 //! commands are answered as `apps/macos/web/src/bridge/mock-transport.ts`
 //! answers them, so the UI runs without a database.
 //!
-//! The host reaches back into the shell through four seams, all wired here:
+//! The host reaches back into the shell through five seams, all wired here:
 //! the `Opener` (`ShellOpener`, over `dialogs` and `windows`), the login
-//! item (`autostart::ShellLoginItem`), the destructive alert
+//! item (`autostart::ShellLoginItem`), the update source the services'
+//! update schedule drives (`updater::ShellUpdates`), the destructive alert
 //! (`dialogs::confirm_destructive`) and the folder chooser, whose panel the
 //! shell shows itself before it calls the host (`dialogs.rs`), so the
 //! host's `choose_folder` callback answers with the folder the call
@@ -568,6 +569,15 @@ impl Host {
         options.login_item = Some(Arc::new(crate::autostart::ShellLoginItem {
             app: app.clone(),
         }));
+        // A smoke run checks for no update, so it neither reaches the
+        // network nor raises the update alert over the windows it shows.
+        if std::env::var_os(crate::smoke::SECONDS_VARIABLE).is_none() {
+            options.update_source = Some(
+                app.state::<Arc<crate::updater::ShellUpdates>>()
+                    .inner()
+                    .clone(),
+            );
+        }
         let graph = runtime.block_on(async { steno_services::build(options) })?;
         for warning in &graph.startup_warnings {
             tracing::warn!("{warning}");
@@ -593,6 +603,19 @@ impl Host {
     #[cfg(feature = "fixture-host")]
     pub fn fixtures() -> Self {
         Host {}
+    }
+
+    /// The update schedule, which records every check; `None` for the
+    /// fixtures and in a smoke run.
+    pub fn updates(&self) -> Option<std::sync::Arc<steno_services::updates::UpdateSchedule>> {
+        #[cfg(not(feature = "fixture-host"))]
+        {
+            self.inner.app.updates.clone()
+        }
+        #[cfg(feature = "fixture-host")]
+        {
+            None
+        }
     }
 
     /// Whether onboarding should open at launch.
