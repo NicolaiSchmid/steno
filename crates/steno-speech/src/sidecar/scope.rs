@@ -43,16 +43,16 @@ const PATIENCE: Duration = Duration::from_secs(2);
 /// Where the app runs: its unit and the slice that holds it, as named in
 /// its cgroup's path.
 #[derive(Debug, PartialEq, Eq)]
-struct Placement<'a> {
-    unit: &'a str,
-    slice: &'a str,
+struct Placement {
+    unit: String,
+    slice: String,
 }
 
 /// The app's unit and slice from `/proc/self/cgroup`, when the app runs
 /// in a scope or service of a systemd user manager (a path through
 /// `user@<uid>.service`) directly under a slice; `None` otherwise, and on
 /// cgroup v1, which has no `0::` line.
-fn placement(cgroup: &str) -> Option<Placement<'_>> {
+fn placement(cgroup: &str) -> Option<Placement> {
     let path = cgroup.lines().find_map(|line| line.strip_prefix("0::"))?;
     let mut parts = path.rsplit('/');
     let unit = parts.next()?;
@@ -62,7 +62,10 @@ fn placement(cgroup: &str) -> Option<Placement<'_>> {
     (in_user_manager
         && kind(slice) == Some("slice")
         && matches!(kind(unit), Some("scope" | "service")))
-    .then_some(Placement { unit, slice })
+    .then(|| Placement {
+        unit: unit.to_owned(),
+        slice: slice.to_owned(),
+    })
 }
 
 /// A unit's type, the part of its name after the last dot. A name that
@@ -80,12 +83,12 @@ fn scope_name(pid: u32) -> String {
 }
 
 /// What the scope is started with.
-fn properties<'a>(pid: u32, placement: &Placement<'a>) -> Vec<(&'static str, Value<'a>)> {
+fn properties(pid: u32, placement: &Placement) -> Vec<(&'static str, Value<'_>)> {
     vec![
         ("Description", Value::from("Steno speech sidecar")),
         ("PIDs", Value::from(vec![pid])),
-        ("Slice", Value::from(placement.slice)),
-        ("PartOf", Value::from(vec![placement.unit])),
+        ("Slice", Value::from(placement.slice.as_str())),
+        ("PartOf", Value::from(vec![placement.unit.as_str()])),
         // A scope `systemd-oomd` killed ends failed; it is collected
         // then, not kept for `systemctl --user --failed`.
         ("CollectMode", Value::from("inactive-or-failed")),
@@ -107,21 +110,17 @@ fn start_scope(connection: &Connection, pid: u32, placement: &Placement) -> zbus
     Ok(name)
 }
 
-/// Moves the child `pid` into a scope of its own when `cgroup` (the
-/// app's `/proc/self/cgroup`) places the app in a user unit, over the
-/// user bus in `runtime_dir`. The scope's name, or `None` when the app is
-/// not in a user unit and nothing was asked. A bus that has not taken the
-/// connection by `deadline` is not asked: the spawn stopped waiting then,
-/// and a child that died since may be reaped and its pid reused.
+/// Moves the child `pid` into a scope of its own beside the app's unit
+/// at `placement`, over the user bus in `runtime_dir`; the scope's name.
+/// A bus that has not taken the connection by `deadline` is not asked:
+/// the spawn stopped waiting then, and a child that died since may be
+/// reaped and its pid reused.
 fn move_with(
     pid: u32,
-    cgroup: &str,
+    placement: &Placement,
     runtime_dir: &Path,
     deadline: Instant,
-) -> zbus::Result<Option<String>> {
-    let Some(placement) = placement(cgroup) else {
-        return Ok(None);
-    };
+) -> zbus::Result<String> {
     let stream = UnixStream::connect(runtime_dir.join("bus"))?;
     let connection = Builder::async_io_unix_stream(stream)
         .method_timeout(PATIENCE)
@@ -131,34 +130,39 @@ fn move_with(
             "the user bus took the connection too late".to_owned(),
         ));
     }
-    start_scope(&connection, pid, &placement).map(Some)
+    start_scope(&connection, pid, placement)
 }
 
-/// [`move_with`] on a thread of its own, waited for `patience` at most:
-/// the method timeout does not cover the connection's set-up, so a bus
-/// that accepts and never answers would otherwise hold the spawn. Such a
-/// thread is left to the bus.
+/// [`move_with`] on a thread of its own, waited for `patience` at most,
+/// when `cgroup` (the app's `/proc/self/cgroup`) places the app in a user
+/// unit; `None` when it does not and nothing was asked. The method
+/// timeout does not cover the connection's set-up, so a bus that accepts
+/// and never answers would otherwise hold the spawn. Such a thread is
+/// left to the bus.
 fn move_within(
     pid: u32,
-    cgroup: String,
+    cgroup: &str,
     runtime_dir: PathBuf,
     patience: Duration,
 ) -> zbus::Result<Option<String>> {
-    if placement(&cgroup).is_none() {
+    let Some(placement) = placement(cgroup) else {
         return Ok(None);
-    }
+    };
     let deadline = Instant::now() + patience;
     let (done, outcome) = mpsc::channel();
     std::thread::Builder::new()
         .name(format!("sidecar-{pid}-scope"))
         .spawn(move || {
-            let _ = done.send(move_with(pid, &cgroup, &runtime_dir, deadline));
+            let _ = done.send(move_with(pid, &placement, &runtime_dir, deadline));
         })?;
-    outcome.recv_timeout(patience).unwrap_or_else(|_| {
-        Err(zbus::Error::Failure(
-            "the user bus did not answer in time".to_owned(),
-        ))
-    })
+    outcome
+        .recv_timeout(patience)
+        .unwrap_or_else(|_| {
+            Err(zbus::Error::Failure(
+                "the user bus did not answer in time".to_owned(),
+            ))
+        })
+        .map(Some)
 }
 
 /// Moves the just-spawned child `pid` into a scope of its own when the
@@ -174,7 +178,7 @@ pub(super) fn move_to_own_scope(pid: u32) {
     else {
         return;
     };
-    match move_within(pid, cgroup, PathBuf::from(runtime_dir), PATIENCE) {
+    match move_within(pid, &cgroup, PathBuf::from(runtime_dir), PATIENCE) {
         Ok(Some(scope)) => tracing::info!(pid, %scope, "speech sidecar in a scope of its own"),
         Ok(None) => tracing::debug!(
             pid,
@@ -201,8 +205,8 @@ mod tests {
         assert_eq!(
             placement(UWSM),
             Some(Placement {
-                unit: "app-Hyprland-steno\\x2ddesktop-1234.scope",
-                slice: "app-graphical.slice",
+                unit: "app-Hyprland-steno\\x2ddesktop-1234.scope".to_owned(),
+                slice: "app-graphical.slice".to_owned(),
             })
         );
         assert_eq!(
@@ -210,8 +214,8 @@ mod tests {
                 "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-steno\\x2ddesktop@autostart.service"
             ),
             Some(Placement {
-                unit: "app-steno\\x2ddesktop@autostart.service",
-                slice: "app.slice",
+                unit: "app-steno\\x2ddesktop@autostart.service".to_owned(),
+                slice: "app.slice".to_owned(),
             })
         );
         // A hybrid system's v1 lines are skipped for the unified one.
@@ -336,7 +340,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let scope = move_within(4242, UWSM.to_owned(), daemon.dir.path().into(), PATIENCE).unwrap();
+        let scope = move_within(4242, UWSM, daemon.dir.path().into(), PATIENCE).unwrap();
         assert_eq!(
             scope.as_deref(),
             Some("app-steno\\x2dspeech\\x2dsidecar-4242.scope")
@@ -368,7 +372,7 @@ mod tests {
         assert_eq!(
             move_within(
                 4242,
-                "0::/system.slice/steno.service".to_owned(),
+                "0::/system.slice/steno.service",
                 "/nonexistent".into(),
                 PATIENCE
             )
@@ -381,20 +385,16 @@ mod tests {
     #[test]
     fn no_bus_a_bus_without_the_user_manager_and_a_silent_bus_are_errors_to_log() {
         let away = || Instant::now() + PATIENCE;
-        assert!(move_with(1, UWSM, Path::new("/nonexistent"), away()).is_err());
+        let uwsm = placement(UWSM).unwrap();
+        assert!(move_with(1, &uwsm, Path::new("/nonexistent"), away()).is_err());
 
         // A socket that takes the connection and never answers: the wait
         // ends at its patience.
         let silent = tempfile::tempdir().unwrap();
         let _listener = std::os::unix::net::UnixListener::bind(silent.path().join("bus")).unwrap();
         let asked = Instant::now();
-        let error = move_within(
-            1,
-            UWSM.to_owned(),
-            silent.path().into(),
-            Duration::from_millis(200),
-        )
-        .unwrap_err();
+        let error =
+            move_within(1, UWSM, silent.path().into(), Duration::from_millis(200)).unwrap_err();
         assert!(
             asked.elapsed() < Duration::from_secs(2),
             "{:?}",
@@ -405,13 +405,13 @@ mod tests {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let error = move_with(1, UWSM, daemon.dir.path(), away()).unwrap_err();
+        let error = move_with(1, &uwsm, daemon.dir.path(), away()).unwrap_err();
         assert!(
             matches!(&error, zbus::Error::MethodError(name, ..) if name.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown"),
             "{error}"
         );
         // A bus that took the connection after the deadline is not asked.
-        let error = move_with(1, UWSM, daemon.dir.path(), Instant::now()).unwrap_err();
+        let error = move_with(1, &uwsm, daemon.dir.path(), Instant::now()).unwrap_err();
         assert!(error.to_string().contains("too late"), "{error}");
     }
 }
