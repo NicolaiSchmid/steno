@@ -557,11 +557,14 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   release (`.plans/2026-10-07-stable-promotion.md`, D3). The QR encoder and the
   update schedule, which blocked it, landed with S4 (`feat/rust-update-schedule`):
   `steno_services::qr` and `steno_services::updates`.
-  The phone handover identity: on first launch on macOS the cutover either imports the
-  Swift `SecIdentity` (certificate plus private key, exported from the keychain item
-  `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
-  entry `handover-identity`, or accepts that phones re-pair and says so in the release
-  notes; the cutover plan decides which.
+  The phone handover identity: on the first launch on macOS after the update the app
+  imports the Swift `SecIdentity` (certificate plus private key, exported from the
+  keychain item `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes, as
+  PKCS#12 through `crates/steno-macos`) into the Rust PEM entry `handover-identity`,
+  behind an onboarding step, together with the Swift API key and three preferences;
+  a denied export never mints a new identity, and handover waits with Try again
+  (`crates/steno-services/src/swift_import/`, S6 of
+  `.plans/2026-10-07-stable-promotion.md`, `feat/swift-import`).
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
   WP10a: WASAPI capture (#175); WP10b: DirectML for the speech encoder behind a
   probe, with the CPU as the fallback (speech-stack decision 4; gate G4 open, no
@@ -3149,6 +3152,7 @@ PR off `main`.
 | A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
 | Stable plan A9: the AAC priming trimmed from the edit list, the gapless tag or, in the phone recorder's layout alone, AVFoundation's default; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | open |
 | S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | open |
+| WP9b import of the Swift app's preferences, API key and handover identity on the Mac's first launch after the update, behind an onboarding step; `steno-macos` for the PKCS#12 export (S6 of `.plans/2026-10-07-stable-promotion.md`) | `feat/swift-import` | | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
