@@ -33,9 +33,10 @@ fn launch_time() -> DateTime<Utc> {
 /// download for `download_release` while `download_stalls` is; a download
 /// with `busy_after_download` set leaves the gate busy, and one with
 /// `record_during_download` set starts a recording through the recorder
-/// (the user's Record meanwhile). The install and the relaunch each try a
-/// Record too and record whether it was refused, and whether the gate's
-/// hold was alive at the install.
+/// (the user's Record meanwhile). With `start_ends_at_the_confirm` set, a
+/// recording still starting has its meeting id by the confirm's answer.
+/// The install and the relaunch each try a Record too and record whether
+/// it was refused, and whether the gate's hold was alive at the install.
 #[derive(Default)]
 struct FakeSource {
     answers: Mutex<VecDeque<Result<Option<String>, String>>>,
@@ -47,6 +48,7 @@ struct FakeSource {
     download_release: tokio::sync::Notify,
     busy_after_download: AtomicBool,
     record_during_download: AtomicBool,
+    start_ends_at_the_confirm: AtomicBool,
     download_fails: AtomicBool,
     installs: AtomicUsize,
     installed: Mutex<Vec<String>>,
@@ -166,6 +168,17 @@ impl UpdateSource for FakeSource {
             Question::Install(version) => format!("install {version}"),
             Question::StopRecording => "stop the recording".to_owned(),
         });
+        if question == Question::StopRecording
+            && self.start_ends_at_the_confirm.load(Ordering::SeqCst)
+        {
+            let recorder = self.recorder();
+            assert_eq!(recorder.status().state, RecordingState::Starting);
+            recorder.set_status(RecorderStatus {
+                state: RecordingState::Recording,
+                meeting_id: Some(Uuid::new_v4()),
+                ..RecorderStatus::idle()
+            });
+        }
         lock(&self.replies).pop_front().unwrap_or(false)
     }
 
@@ -835,6 +848,29 @@ async fn a_confirmed_yes_does_not_stop_a_later_recording() {
     at_once(offer).await.unwrap();
     assert_eq!(world.source.steps(), ["download"]);
     assert!(schedule.state().staged.is_some());
+}
+
+/// A confirm that came up while a recording was still starting, before it
+/// had a meeting id, names the recording under way at its yes: the install
+/// goes ahead and stops that one.
+#[tokio::test]
+async fn a_confirm_raised_during_a_start_names_the_recording_at_its_yes() {
+    let world = World::new();
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    world.recording(RecordingState::Starting);
+    world
+        .source
+        .start_ends_at_the_confirm
+        .store(true, Ordering::SeqCst);
+    world.source.reply(&[true, true]);
+    schedule.offer("0.12.0").await;
+    assert_eq!(
+        world.source.asked(),
+        ["install 0.12.0", "stop the recording"]
+    );
+    assert_eq!(world.source.steps(), ["download", "install", "relaunch"]);
 }
 
 /// A put-off install whose version a check replaced during the download

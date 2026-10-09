@@ -490,7 +490,10 @@ impl UpdateSchedule {
     /// before a recording started, so when the recorder is no longer idle
     /// by the yes it asks again first ([`Question::StopRecording`]); "Not
     /// Now", or closing that dialog, leaves the version to announce again
-    /// once the recording has ended. Swift: Sparkle's update alert.
+    /// once the recording has ended. The confirm's yes names the recording
+    /// it may stop; one still starting when the confirm came up has no
+    /// meeting id yet, so the yes names the one under way when it is given.
+    /// Swift: Sparkle's update alert.
     pub async fn offer(&self, version: &str) {
         if !self.source.ask(Question::Install(version)).await {
             return;
@@ -501,7 +504,9 @@ impl UpdateSchedule {
                 self.announce_again(version);
                 return;
             }
-            status.meeting_id
+            status
+                .meeting_id
+                .or_else(|| self.recorder.status().meeting_id)
         } else {
             None
         };
