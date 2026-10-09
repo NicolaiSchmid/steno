@@ -537,9 +537,7 @@ fn gated_handover(
     Arc::new(GatedHandover::new(
         store.clone(),
         import.gate.subscribe(),
-        Box::new(move || {
-            handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
-        }),
+        Box::new(move || handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)),
     ))
 }
 
@@ -1040,10 +1038,10 @@ impl App {
             .and_then(ListenerHandover::listener)
             .cloned()
             .or_else(|| {
-            self.gated_handover
-                .as_ref()
-                .and_then(|gated| gated.service())
-        })
+                self.gated_handover
+                    .as_ref()
+                    .and_then(|gated| gated.service())
+            })
     }
 
     /// Everything that happens once at launch, in order:

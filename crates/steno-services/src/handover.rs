@@ -344,7 +344,9 @@ impl GatedHandover {
     /// The listener's service, once open.
     #[must_use]
     pub fn service(&self) -> Option<Arc<HandoverService>> {
-        self.listener.get().and_then(|listener| listener.listener().cloned())
+        self.listener
+            .get()
+            .and_then(|listener| listener.listener().cloned())
     }
 }
 
