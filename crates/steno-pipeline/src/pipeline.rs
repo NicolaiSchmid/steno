@@ -360,13 +360,15 @@ impl InFlight {
 ///
 /// 1. A refused run records its meeting as waiting only once it holds the
 ///    meeting no more: its mark in [`InFlight`] and its asset claim are
-///    released first. So a resume never finds a waiting meeting held. The
-///    run's background entry stays until the record (or the restart of
-///    rule 3), so [`ProcessingPipeline::wait_until_idle`] waits for it.
+///    released first. So a resume never finds a waiting meeting held by
+///    the run that left it. The run's background entry stays until the
+///    record (or the restart of rule 3), so
+///    [`ProcessingPipeline::wait_until_idle`] waits for it.
 /// 2. A resume ([`ProcessingPipeline::resume_unfinished`],
 ///    [`ProcessingPipeline::resume_waiting`]) counts itself and takes the
-///    waiting meetings. It starts those no run holds on any pipeline
-///    sharing the [`InFlight`] set and puts the others back.
+///    waiting meetings. It starts those no operation holds on any pipeline
+///    sharing the [`InFlight`] set; [`ProcessingPipeline::resume_waiting`]
+///    puts the others back.
 /// 3. A refused run that finds another count than when it started records
 ///    nothing: that resume skipped its meeting, which was in flight, and
 ///    may have followed the install of its models. The meeting starts
@@ -1251,8 +1253,8 @@ impl ProcessingPipeline {
     /// ([`ModelWaits`]) alone, which no run holds: the services call it
     /// once a model install finished, while other meetings may still run
     /// on a pipeline a reload retired. A waiting meeting another operation
-    /// holds (a reprocess) stays waiting, and so do all of them when the
-    /// store fails.
+    /// holds (a summary rerun or a re-export) stays waiting, and so do all
+    /// of them when the store fails.
     pub fn resume_waiting(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
@@ -1721,13 +1723,12 @@ impl ProcessingPipeline {
     /// instead, waiting for a resume ([`ModelWaits`]), and the call returns
     /// the refusal; when a resume ran during the run, the meeting starts
     /// again in the background. A failing `diarize` or `match_speakers`
-    /// does not fail it: the transcript is kept with the
-    /// speakers stored for the meeting, or, when none are stored, one
-    /// unknown speaker for the diarized lane. Once `persist` has marked the
-    /// meeting `ready` nothing downgrades it, not an error or a panic later
-    /// in the run: the meeting is delivered and its retention applied, and
-    /// the panic's or the `retention` error's failure is returned to the
-    /// caller.
+    /// does not fail it: the transcript is kept with the speakers stored
+    /// for the meeting, or, when none are stored, one unknown speaker for
+    /// the diarized lane. Once `persist` has marked the meeting `ready`
+    /// nothing downgrades it, not an error or a panic later in the run: the
+    /// meeting is delivered and its retention applied, and the panic's or
+    /// the `retention` error's failure is returned to the caller.
     /// Once the pipeline [quits](Self::quit), a failure is returned and
     /// not persisted, and a call made after it fails at once: the meeting
     /// stays `queued` or `processing`, which the next launch's
@@ -3069,6 +3070,15 @@ impl Drop for AssetClaim {
     }
 }
 
+/// A run refused for missing models, for
+/// [`ProcessingPipeline::wait_for_models`]: its meeting and the resume
+/// count when it started.
+#[derive(Clone, Copy)]
+struct Refused {
+    meeting_id: Uuid,
+    resumes_seen: u64,
+}
+
 /// A background run's entry in `running` (by asset id, or a key of its
 /// own for a re-export) and the processing run's claim, which
 /// [`ProcessingPipeline::spawn_tracked`] releases first. Dropping the mark
@@ -3079,15 +3089,6 @@ struct Running {
     pipeline: ProcessingPipeline,
     key: Uuid,
     claim: Option<AssetClaim>,
-}
-
-/// A run refused for missing models, for
-/// [`ProcessingPipeline::wait_for_models`]: its meeting and the resume
-/// count when it started.
-#[derive(Clone, Copy)]
-struct Refused {
-    meeting_id: Uuid,
-    resumes_seen: u64,
 }
 
 impl Drop for Running {

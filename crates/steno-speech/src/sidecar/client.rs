@@ -87,10 +87,8 @@ pub struct SidecarConfig {
     /// app passes its support directory, `None` writes none.
     pub crash_log_directory: Option<PathBuf>,
     /// Whether the engine downloads a missing model before it starts a
-    /// child. [`Install::Never`] by default, what the app's pipelines run
-    /// with: a missing file is [`SpeechError::NotInstalled`] and nothing is
-    /// fetched, as Settings and onboarding install the models. The `steno`
-    /// command turns it to [`Install::Allowed`] for its explicit commands.
+    /// child: [`Install::Never`] by default; the `steno` command sets
+    /// [`Install::Allowed`].
     pub install: Install,
 }
 

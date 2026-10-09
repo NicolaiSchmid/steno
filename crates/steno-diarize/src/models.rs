@@ -60,10 +60,7 @@ pub const SEGMENTATION_REPO: &str = "csukuangfj/sherpa-onnx-pyannote-segmentatio
 /// at, so the bytes never change under the manifest's checksum.
 pub const SEGMENTATION_REVISION: &str = "9403a6902bb58e3d5ae8c7e77c3422de279db2e0";
 
-/// Whether building the diarizer's backend may download its models:
-/// [`ensure`] under [`Install::Allowed`], [`installed`] under
-/// [`Install::Never`], whose missing file is [`DiarizeError::NotInstalled`].
-/// The speech sidecar takes the same policy (`steno_speech::SidecarConfig`).
+/// The install policy the speech sidecar shares; see [`paths`].
 pub use steno_speech::Install;
 
 /// The asset: [`SEGMENTATION_FILE`] and [`EMBEDDING_FILE`] with their
