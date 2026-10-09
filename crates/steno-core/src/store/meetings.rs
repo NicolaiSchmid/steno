@@ -366,11 +366,14 @@ impl Store {
     /// The `sampleClipURL`s of `speakers` are written in the same
     /// transaction, so a kept confirmation and the clip of the run that
     /// produced the row switch together. A kept confirmation whose new row
-    /// has no clip keeps its earlier `sampleClipURL` and `sampleClipRange`
-    /// (an extension of decision 5), so the clip the user confirmed stays
-    /// playable and no sweep or retention pass takes it for a leftover; that
-    /// clip can come from an earlier run than the row's embedding (the "me"
-    /// row has none). Every call commits so that the commit is on the disk
+    /// has no clip keeps the earlier `sampleClipURL` and its
+    /// `sampleClipRange` when its stored row names one (an extension of
+    /// decision 5), so the clip the user confirmed stays playable and no
+    /// sweep or retention pass takes it for a leftover; that clip can come
+    /// from an earlier run than the row's embedding (the "me" row has none).
+    /// The kept clip follows the confirmation, not the cluster: a re-run
+    /// that maps another cluster onto the confirmed id keeps the clip the
+    /// user confirmed. Every call commits so that the commit is on the disk
     /// when it returns ([`Store::write_durably`], one WAL sync per
     /// processing run): the pipeline removes the clips the earlier rows
     /// named once it has returned, and a power loss must not bring those
@@ -389,7 +392,8 @@ impl Store {
             let replaced = people::speakers_of_meeting(transaction, meeting.id)?;
             // The stored confirmed rows, by id. A row this run writes under
             // one of their ids takes the stored confirmation, and the stored
-            // clip and range only when this run gives it none.
+            // clip and range only when this run gives it none and the stored
+            // row names one.
             let confirmed: BTreeMap<Uuid, &Speaker> = replaced
                 .iter()
                 .filter(|speaker| speaker.assignment.is_confirmed())
@@ -414,7 +418,7 @@ impl Store {
                 speaker.meeting_id = meeting.id;
                 if let Some(kept) = confirmed.get(&speaker.id) {
                     speaker.assignment = kept.assignment.clone();
-                    if speaker.sample_clip_url.is_none() {
+                    if speaker.sample_clip_url.is_none() && kept.sample_clip_url.is_some() {
                         speaker.sample_clip_url.clone_from(&kept.sample_clip_url);
                         speaker.sample_clip_range = kept.sample_clip_range;
                     }

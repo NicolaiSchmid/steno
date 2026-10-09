@@ -645,6 +645,13 @@ fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_
     store
         .confirm_speaker(speakers[0].id, &common::person())
         .unwrap();
+    // The master is not on the disk, so the confirmation dropped the clip;
+    // name it again, as a confirmation does while the audio is there.
+    let mut confirmed = store.speakers(meeting.id).unwrap()[0].clone();
+    confirmed
+        .sample_clip_url
+        .clone_from(&speakers[0].sample_clip_url);
+    store.save_speaker(&confirmed).unwrap();
     let mut unconfirmed = speakers[1].clone();
     unconfirmed.sample_clip_url = Some("file:///tmp/clip-2.wav".to_owned());
     unconfirmed.sample_clip_range = Some(TimeRange {
@@ -653,6 +660,7 @@ fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_
     });
     store.save_speaker(&unconfirmed).unwrap();
     let earlier = store.speakers(meeting.id).unwrap();
+    assert!(earlier[0].sample_clip_url.is_some());
     assert!(earlier[1].sample_clip_url.is_some());
 
     let mut rerun = speakers.clone();
@@ -678,6 +686,31 @@ fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_
     let stored = store.speakers(meeting.id).unwrap();
     assert_eq!(stored[0].sample_clip_url, rerun[0].sample_clip_url);
     assert_eq!(stored[0].sample_clip_range, rerun[0].sample_clip_range);
+}
+
+/// A confirmed speaker whose stored row names no clip keeps nothing of it:
+/// a re-run that gives it a range without a clip stores that range.
+#[test]
+fn a_confirmed_speaker_without_a_clip_takes_the_reruns_range() {
+    let (store, meeting) = populated();
+    let speakers = common::speakers(meeting.id);
+    store
+        .confirm_speaker(speakers[1].id, &common::person())
+        .unwrap();
+    let earlier = store.speakers(meeting.id).unwrap();
+    assert!(earlier[1].assignment.is_confirmed());
+    assert_eq!(earlier[1].sample_clip_url, None);
+
+    let mut rerun = speakers.clone();
+    rerun[1].sample_clip_range = Some(TimeRange {
+        lower: 5.0,
+        upper: 6.0,
+    });
+    store.replace_transcript(&meeting, &[], &rerun).unwrap();
+    let stored = store.speakers(meeting.id).unwrap();
+    assert!(stored[1].assignment.is_confirmed());
+    assert_eq!(stored[1].sample_clip_url, None);
+    assert_eq!(stored[1].sample_clip_range, rerun[1].sample_clip_range);
 }
 
 /// A re-run's transcript keeps the model's name suggestion for a speaker
