@@ -50,7 +50,8 @@ static OUTPUT: OnceLock<LineQueue> = OnceLock::new();
 /// handover identity, a re-run or re-export that failed in the background)
 /// is seen. A second call does nothing. A panic writes out the queued
 /// lines (waiting at most a quarter of a second) before its message, so
-/// the lines that explain a crash are not lost with it.
+/// the lines that explain a crash are not lost with it; a panic inside
+/// [`steno_core::crash_log::expected`] does neither.
 ///
 /// A line that cannot be written is dropped: one that finds the queue full
 /// (see the module doc), and one stderr refuses (after a closed terminal
@@ -77,6 +78,11 @@ pub fn log_to_stderr(default_filter: &str) {
     if installed.is_ok() && OUTPUT.set(queue).is_ok() {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic| {
+            // A panic its caller catches and logs (the decoder's) waits
+            // for nothing and prints nothing.
+            if steno_core::crash_log::is_expected() {
+                return;
+            }
             if let Some(queue) = OUTPUT.get() {
                 queue.flush_within(PANIC_FLUSH_PATIENCE);
             }
