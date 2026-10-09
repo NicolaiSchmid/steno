@@ -1,7 +1,9 @@
 # The AUR package (packaging/aur): builds it from the release .deb in an
 # Arch Linux container, verifies the .deb against the release key, installs
-# it and checks the files (packaging/check-aur.sh). The drop-ins are
-# compared with apps/desktop/src-tauri/linux, so a change there runs it too.
+# it and checks the files (packaging/check-aur.sh). It also runs when the
+# drop-ins in apps/desktop/src-tauri/linux, which the check compares with,
+# the release key or LICENSE change, and weekly, so a package that Arch
+# renames or splits fails here before it fails for users.
 name: AUR CI
 
 on:
@@ -10,6 +12,7 @@ on:
       - 'packaging/**'
       - 'apps/desktop/src-tauri/linux/**'
       - 'apps/desktop/release-signing-key.asc'
+      - 'LICENSE'
       - '.github/workflows/aur-ci.yml'
   push:
     branches: ['main']
@@ -17,7 +20,10 @@ on:
       - 'packaging/**'
       - 'apps/desktop/src-tauri/linux/**'
       - 'apps/desktop/release-signing-key.asc'
+      - 'LICENSE'
       - '.github/workflows/aur-ci.yml'
+  schedule:
+    - cron: '17 6 * * 1'
 
 concurrency:
   group: aur-ci-${{ github.ref }}
@@ -31,6 +37,8 @@ jobs:
     name: AUR package
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Unpinned on purpose: the package targets current Arch, and
+    # check-aur.sh runs pacman -Syu anyway.
     container: archlinux:base-devel
     steps:
       - uses: actions/checkout@v4
