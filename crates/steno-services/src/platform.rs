@@ -115,12 +115,15 @@ impl FilePreferences {
 
 impl Preferences for FilePreferences {
     fn flag(&self, key: &str) -> bool {
+        self.stored_flag(key).unwrap_or(false)
+    }
+
+    fn stored_flag(&self, key: &str) -> Option<bool> {
         self.values
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(key)
             .and_then(Value::as_bool)
-            .unwrap_or(false)
     }
 
     fn set_flag(&self, key: &str, value: bool) {

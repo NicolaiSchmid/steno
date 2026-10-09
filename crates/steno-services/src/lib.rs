@@ -21,10 +21,12 @@
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
 //! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json` and `audio-folders.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the first-launch flags |
+//! | [`updates`] | The host's `Updater`: the daily update schedule over the shell's updater, its flags, the last check time, the install gate and the packaged-install switch |
+//! | [`qr`] | The host's `QrEncoder`: the pairing code as a PNG |
 //!
 //! What stays a fake here is named in [`build`]'s doc: the platform
-//! services the shell does not supply yet (permissions, updater, clip
-//! player, QR encoder; the login item when the shell passes none), each
+//! services the shell does not supply yet (permissions, clip player; the
+//! updater and the login item when the shell passes none), each
 //! with its reason and owner in the plan's "Pipeline and services (WP6b)"
 //! list.
 //!
@@ -88,12 +90,14 @@ pub mod llm;
 pub mod logs;
 pub mod pipeline;
 pub mod platform;
+pub mod qr;
 pub mod recorder;
 pub mod recovery;
 pub mod secrets;
 pub mod speech;
 #[cfg(test)]
 mod testing;
+pub mod updates;
 
 pub use app::{App, AppOptions, BuildError, build, lock_database, open_store};
 pub use logs::{LOG_FILTER, flush_logs, log_to_stderr};

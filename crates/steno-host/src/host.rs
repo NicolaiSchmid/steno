@@ -829,6 +829,19 @@ impl Host {
         self.publish();
     }
 
+    /// An update check started or ended, outside a command (the daily
+    /// schedule, the tray's Check for Updates): the General section and the
+    /// overview's subtitle follow. Rust only: the Swift view model observed
+    /// `UpdaterController`.
+    pub fn updates_changed(&self) {
+        {
+            let mut inner = self.lock();
+            inner.publisher.schedule(BridgeTopic::SettingsGeneral);
+            self.refresh_subtitles(&mut inner);
+        }
+        self.publish();
+    }
+
     /// The pairing poll, which the shell drives: every two seconds while
     /// `settings.iphone` shows a code (Swift's `pairingPoll`), a phone that
     /// arrived closes the code and a code that ran out closes itself. The

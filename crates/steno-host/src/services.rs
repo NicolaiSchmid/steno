@@ -127,8 +127,9 @@ pub enum UpdateOutcome {
     Failed(String),
 }
 
-/// Sparkle today, the Tauri updater at cutover (WP8). The fake holds the
-/// flags and counts the checks. Swift: `UpdaterControlling`.
+/// Sparkle in the Swift app; in this one the update schedule over the
+/// Tauri updater (`steno_services::updates`). The fake holds the flags and
+/// counts the checks. Swift: `UpdaterControlling`.
 pub trait Updater: Send + Sync {
     fn can_check_for_updates(&self) -> bool;
     fn automatically_checks(&self) -> bool;
@@ -399,7 +400,7 @@ pub trait Handover: Send + Sync {
     fn receipts(&self) -> Vec<HandoverReceipt>;
 }
 
-/// Draws a QR code as a PNG, base64 (the shell implements it in WP6b).
+/// Draws a QR code as a PNG, base64 (`steno_services::qr` implements it).
 /// The fake answers the image a test set, whatever the text. Swift:
 /// `QRCode.png(for:)` in `apps/macos/Steno/Services/QRCode.swift`.
 pub trait QrEncoder: Send + Sync {
@@ -481,11 +482,16 @@ pub trait Opener: Send + Sync {
     fn close_window(&self, window: BridgeWindow);
 }
 
-/// The two flags the Swift app kept in `UserDefaults`: whether onboarding
-/// has finished and whether the login item was registered once. The shell
+/// The flags the Swift app kept in `UserDefaults`: whether onboarding has
+/// finished, whether the login item was registered once, and Sparkle's
+/// automatic-check and automatic-download flags (the updater's). The shell
 /// (WP6b) keeps them in its own settings file; the fake holds a map.
 pub trait Preferences: Send + Sync {
+    /// False when the key is missing or holds no boolean.
     fn flag(&self, key: &str) -> bool;
+    /// `None` when the key is missing or holds no boolean, for a flag
+    /// whose default is not false (the updater's automatic checks).
+    fn stored_flag(&self, key: &str) -> Option<bool>;
     fn set_flag(&self, key: &str, value: bool);
 }
 
