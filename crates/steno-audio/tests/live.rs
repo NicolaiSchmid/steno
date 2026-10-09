@@ -8,10 +8,13 @@
 //! that a UID naming no device records the default input.
 //! Call mode's tap aggregate runs only while a process the tap includes
 //! drives the output, so the capture starts a silent output `IOProc` of its
-//! own first (A10, see `capture::live::backend`): with nothing playing, the
-//! call tests assert the first callback within 100 ms of the start and
-//! about one second of frames per second; without the silent output
-//! they fail with no callback at all. Nothing may play during those runs.
+//! own on the aggregate's clock master before the aggregate's `IOProc`
+//! (A10, see `capture::live::backend`): with nothing playing, the call
+//! tests assert the first callback within 100 ms of `start` returning,
+//! within 200 ms of the call to `start` while the machine is quiet, and
+//! about one second of frames per second; without the silent output they
+//! fail with no callback at all, and a `start` that fails fails them too.
+//! Nothing may play during those runs.
 //! Each run happens on its own thread joined with a deadline, so a hang
 //! fails instead of stalling the suite.
 //! Swift: `Tests/StenoAudioTests/LiveCaptureBackendTests.swift`.
@@ -20,14 +23,15 @@
 #![allow(clippy::doc_markdown)]
 
 use std::sync::Arc;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 use steno_audio::capture::live::AudioDevices;
 use steno_audio::{CaptureBackend, CaptureInput, LaneFrameSink, LiveCaptureBackend};
 use steno_core::AudioLane;
 
-/// Runs `work` on a thread and waits at most `limit` for its result.
+/// Runs `work` on a thread and waits at most `limit` for its result; a
+/// panic in `work` fails the test too.
 fn within<T: Send + 'static>(
     limit: Duration,
     what: &str,
@@ -39,7 +43,10 @@ fn within<T: Send + 'static>(
     });
     receiver
         .recv_timeout(limit)
-        .unwrap_or_else(|_| panic!("{what} did not return within {limit:?}"))
+        .unwrap_or_else(|error| match error {
+            RecvTimeoutError::Timeout => panic!("{what} did not return within {limit:?}"),
+            RecvTimeoutError::Disconnected => panic!("{what} panicked (its message is above)"),
+        })
 }
 
 fn peak(samples: &[f32]) -> f32 {
@@ -181,13 +188,37 @@ fn in_person_capture_starts_and_stops_within_bounds() {
 }
 
 /// The bound on the first callback after `start` returns, for a call
-/// capture with nothing playing.
+/// capture with nothing playing: what A10 changes.
 const FIRST_CALLBACK: Duration = Duration::from_millis(100);
+
+/// The bound on the first callback after the call to `start`, so that a
+/// slower setup cannot hide behind [`FIRST_CALLBACK`]. Asserted only below
+/// [`QUIET_LOAD`]: `start` itself took 54 to 100 ms on a quiet Mac and up to
+/// 844 ms on a busy one.
+const END_TO_END: Duration = Duration::from_millis(200);
+
+/// The one-minute load average below which [`END_TO_END`] is asserted.
+const QUIET_LOAD: f64 = 4.0;
+
+/// The one-minute load average (`sysctl vm.loadavg`), `None` when it does
+/// not read.
+fn load_average() -> Option<f64> {
+    let output = std::process::Command::new("sysctl")
+        .args(["-n", "vm.loadavg"])
+        .output()
+        .ok()?;
+    String::from_utf8(output.stdout)
+        .ok()?
+        .split_whitespace()
+        .find_map(|field| field.parse().ok())
+}
 
 /// What one call capture measured.
 struct CallRun {
     /// The first callback after `start` returned.
     first: Option<Duration>,
+    /// How long `start` itself took.
+    setup: Duration,
     /// Frames on every lane, in seconds at the stream's rate.
     seconds: f64,
     elapsed: Duration,
@@ -197,22 +228,20 @@ struct CallRun {
 
 /// Starts a call capture on `backend`, records `length` (drained every
 /// 10 ms, so the rings never fill), stops, and prints what it measured.
-/// `None` when the start failed (printed, not failed).
+/// A `start` that fails (the tap or the aggregate refused) fails the test.
 #[allow(clippy::cast_precision_loss)]
-fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> Option<CallRun> {
+fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> CallRun {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let starting = Instant::now();
-    let stream = match backend.start(&lanes, None, Arc::clone(&sink)) {
-        Ok(stream) => stream,
-        Err(error) => {
-            println!(
-                "SKIPPED {what}: start failed after {:?}: {error}",
+    let stream = backend
+        .start(&lanes, None, Arc::clone(&sink))
+        .unwrap_or_else(|error| {
+            panic!(
+                "{what}: start failed after {:?}: {error}",
                 starting.elapsed()
-            );
-            return None;
-        }
-    };
+            )
+        });
     let started = Instant::now();
     println!("{what}: started in {:?}: {stream:?}", started - starting);
     let mut first = None;
@@ -253,25 +282,41 @@ fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> Optio
         sink.dropped_samples(),
         stopping.elapsed()
     );
-    Some(CallRun {
+    CallRun {
         first,
+        setup: started - starting,
         seconds,
         elapsed,
         system_peak,
-    })
+    }
 }
 
 /// What a call capture with nothing playing must show: its first callback
-/// within [`FIRST_CALLBACK`] of the start and about as many seconds of
-/// frames as it ran.
+/// within [`FIRST_CALLBACK`] of `start` returning, within [`END_TO_END`] of
+/// the call to `start` while the load is under [`QUIET_LOAD`] (always
+/// printed), and about as many seconds of frames as it ran.
 fn assert_ran_from_the_start(run: &CallRun) {
     let first = run
         .first
         .expect("call mode's IOProc never ran with nothing playing");
     assert!(
         first <= FIRST_CALLBACK,
-        "the first callback came {first:?} after the start, more than {FIRST_CALLBACK:?}"
+        "the first callback came {first:?} after start returned, more than {FIRST_CALLBACK:?}"
     );
+    let end_to_end = run.setup + first;
+    println!(
+        "first callback {first:?} after start returned (bound {FIRST_CALLBACK:?}), \
+         {end_to_end:?} after start was called (bound {END_TO_END:?})"
+    );
+    match load_average() {
+        Some(load) if load < QUIET_LOAD => assert!(
+            end_to_end <= END_TO_END,
+            "the first callback came {end_to_end:?} after start was called, more than \
+             {END_TO_END:?} at load {load}"
+        ),
+        Some(load) => println!("end-to-end bound not checked: load {load}"),
+        None => println!("end-to-end bound not checked: load unknown"),
+    }
     assert!(
         run.seconds >= run.elapsed.as_secs_f64() - 0.2,
         "{:.2} s of frames in {:?}",
@@ -283,10 +328,10 @@ fn assert_ran_from_the_start(run: &CallRun) {
 /// Plays nothing itself, and nothing else may play during the run: the
 /// call capture's own silent output keeps its tap aggregate running, so
 /// the first callback comes within [`FIRST_CALLBACK`] of `start` returning
-/// and four seconds hold about four seconds of frames on every lane. The
-/// system lane is all zeros too, which over SSH proves nothing about its
-/// content (a session without the capture grant gets a silent tap anyway);
-/// it does show the silent output itself reaches it as zeros.
+/// (and [`END_TO_END`] of the call) and four seconds hold about four
+/// seconds of frames on every lane. The system lane is all zeros too,
+/// which over SSH proves nothing about its content (a session without the
+/// capture grant gets a silent tap anyway).
 #[test]
 #[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
 fn call_capture_runs_from_its_start_with_nothing_playing() {
@@ -297,18 +342,14 @@ fn call_capture_runs_from_its_start_with_nothing_playing() {
             Duration::from_secs(4),
         )
     });
-    let Some(run) = run else {
-        return;
-    };
     assert_ran_from_the_start(&run);
     assert_eq!(run.system_peak, 0.0, "the system lane is digital silence");
 }
 
 /// A rebuild as the session runs it after a device change, `stop()` and
 /// `start` again on the same backend: the rebuilt capture starts its silent
-/// output again and runs from its start too. Forge cannot change its
-/// default output (built-in speakers only), so the device change itself is
-/// not exercised here.
+/// output again and runs from its start too. A Mac with one output cannot
+/// change it, so the device change itself is not exercised here.
 #[test]
 #[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
 fn a_rebuilt_call_capture_keeps_its_silent_output() {
@@ -317,14 +358,12 @@ fn a_rebuilt_call_capture_keeps_its_silent_output() {
         "two starts, captures, stops",
         || {
             let backend = LiveCaptureBackend::new();
-            let first = call_run(&backend, "before the rebuild", Duration::from_secs(1))?;
-            let second = call_run(&backend, "after the rebuild", Duration::from_secs(2))?;
-            Some((first, second))
+            let first = call_run(&backend, "before the rebuild", Duration::from_secs(1));
+            let second = call_run(&backend, "after the rebuild", Duration::from_secs(2));
+            (first, second)
         },
     );
-    let Some((first, second)) = runs else {
-        return;
-    };
+    let (first, second) = runs;
     assert_ran_from_the_start(&first);
     assert_ran_from_the_start(&second);
 }
