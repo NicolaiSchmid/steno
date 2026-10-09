@@ -2310,6 +2310,96 @@ async fn a_dropped_confirmed_speaker_that_comes_back_without_a_clip_keeps_its_fi
     );
 }
 
+/// A confirmation the user makes while a re-run is held after writing its
+/// clips, before its merge, is kept by the merge, and the sweep reads it in
+/// the merge's transaction: given a clip, the speaker names the new one;
+/// given none, it keeps naming its earlier clip; dropped, its earlier file
+/// stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_confirmation_during_a_rerun_keeps_the_speakers_clip() {
+    for (clusters, clipless) in [(2, &[][..]), (2, &["Speaker 2"][..]), (1, &[][..])] {
+        let world = world(false, None, AudioRetention::KeepForever);
+        let (asset, _) = confirmed_call(&world).await;
+        let meeting = asset.meeting_id;
+        let speakers = world.store.speakers(meeting).unwrap();
+        let ben = speaker(&speakers, "Speaker 2").id;
+        let bens_clip = speaker(&speakers, "Speaker 2").sample_clip_url.clone();
+        let bens_file = file_url_path(bens_clip.as_ref().unwrap())
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_owned();
+        let (gate, held_there, go) = held_at_merging();
+        let mut dependencies = rerun_with_clipless(&world, clusters, clipless, 1.0)
+            .dependencies()
+            .clone();
+        dependencies = dependencies.with_clip_probe(gate);
+        let pipeline = ProcessingPipeline::new(dependencies);
+        let run = tokio::spawn(async move { pipeline.process(asset.id).await });
+        tokio::task::spawn_blocking(move || held_there.recv().unwrap())
+            .await
+            .unwrap();
+        world
+            .store
+            .confirm_speaker(ben, &sample_data::person(1, "Ben"))
+            .unwrap();
+        go.send(()).unwrap();
+        run.await.unwrap().unwrap();
+
+        let case = format!("{clusters} clusters, clipless {clipless:?}");
+        let named = assert_each_row_names_its_own_clip(&world.store, meeting);
+        let rows = world.store.speakers(meeting).unwrap();
+        let files = clip_files(&asset);
+        if let Some(row) = rows.iter().find(|row| row.id == ben) {
+            assert!(row.assignment.is_confirmed(), "{case}");
+            if clipless.is_empty() {
+                assert_ne!(row.sample_clip_url, bens_clip, "{case}");
+            } else {
+                assert_eq!(row.sample_clip_url, bens_clip, "{case}");
+            }
+            assert_eq!(files, named, "{case}: only named clips stay");
+        } else {
+            let mut expected = named.clone();
+            expected.insert(bens_file.clone());
+            assert_eq!(files, expected, "{case}: the dropped file stays");
+        }
+    }
+}
+
+/// Retention that comes due while a re-run is held after writing its
+/// clips, before its merge, removes nothing: the meeting is processing.
+/// Once let go, the run commits rows that name clips on the disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_during_a_held_rerun_removes_nothing() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let (mut asset, _) = confirmed_call(&world).await;
+    asset.retention = AudioRetention::KeepDays(1);
+    asset.expires_at = Some(world.now - Duration::hours(1));
+    world.store.save_asset(&asset).unwrap();
+    let earlier = clip_files(&asset);
+    let (gate, held_there, go) = held_at_merging();
+    let pipeline = rerun_pipeline(&world, Some(gate));
+    let id = asset.id;
+    let run = tokio::spawn(async move { pipeline.process(id).await });
+    tokio::task::spawn_blocking(move || held_there.recv().unwrap())
+        .await
+        .unwrap();
+    let in_flight: BTreeSet<OsString> = clip_files(&asset).difference(&earlier).cloned().collect();
+    assert_eq!(in_flight.len(), 2);
+
+    let removed = RetentionSweep::new(world.store.clone())
+        .run(world.now)
+        .unwrap();
+    assert_eq!(removed, Vec::<PathBuf>::new());
+    assert!(in_flight.is_subset(&clip_files(&asset)));
+    go.send(()).unwrap();
+    run.await.unwrap().unwrap();
+    assert_eq!(
+        assert_each_row_names_its_own_clip(&world.store, asset.meeting_id),
+        in_flight
+    );
+}
+
 /// A call whose tap carried no conversation diarizes its mic lane, which
 /// is the room. When that diarizer fails, the mic lane becomes the one
 /// room speaker, not "me", so the other party's words are never the
