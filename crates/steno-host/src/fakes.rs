@@ -17,12 +17,12 @@ use steno_core::{AudioRetention, HandoverReceipt, ObsidianSettings, PairedDevice
 use uuid::Uuid;
 
 use crate::services::{
-    AudioDevices, AutoStopStatus, ClipPlayer, Clock, CodexModel, CodexModelsError, ExportValidator,
-    FileSystem, FolderUsage, Handover, INSTALLING_UPDATE, InputDevice, LeftRecording,
-    ListenerState, LlmService, LoginItem, LoginItemStatus, Opener, PairingCode, Permissions,
-    Pipeline, Preferences, ProcessAgainRefusal, QrEncoder, Recorder, RecorderStatus, Services,
-    SpeechModels, StartHold, SwiftImport, SwiftImportStage, SwiftImportStatus, UpdateOutcome,
-    Updater, permission_is_required,
+    ApiKeyGate, AudioDevices, AutoStopStatus, ClipPlayer, Clock, CodexModel, CodexModelsError,
+    ExportValidator, FileSystem, FolderUsage, Handover, INSTALLING_UPDATE, InputDevice,
+    LeftRecording, ListenerState, LlmService, LoginItem, LoginItemStatus, Opener, PairingCode,
+    Permissions, Pipeline, Preferences, ProcessAgainRefusal, QrEncoder, Recorder, RecorderStatus,
+    Services, SpeechModels, StartHold, SwiftImport, SwiftImportStage, SwiftImportStatus,
+    UpdateOutcome, Updater, permission_is_required,
 };
 use crate::speech::ModelAsset;
 
@@ -1154,6 +1154,18 @@ impl SwiftImport for FakeSwiftImport {
     }
 }
 
+/// An [`ApiKeyGate`] a test sets: withholds the key while `withheld`.
+#[derive(Debug, Default)]
+pub struct FakeApiKeyGate {
+    pub withheld: Mutex<bool>,
+}
+
+impl ApiKeyGate for FakeApiKeyGate {
+    fn key_withheld(&self) -> bool {
+        *lock(&self.withheld)
+    }
+}
+
 /// Every fake at once, with a handle on each: what a test without a shell builds
 /// its [`Services`] from. Swift: `AppEnvironment.preview()`.
 pub struct FakeServices {
@@ -1177,6 +1189,7 @@ pub struct FakeServices {
     /// The core's own fake, behind the one core boundary the host consumes.
     pub secrets: Arc<InMemorySecretStore>,
     pub swift_import: Option<Arc<FakeSwiftImport>>,
+    pub api_key_gate: Option<Arc<FakeApiKeyGate>>,
 }
 
 impl FakeServices {
@@ -1207,6 +1220,7 @@ impl FakeServices {
             preferences: Arc::new(FakePreferences::default()),
             secrets: Arc::new(InMemorySecretStore::new()),
             swift_import: None,
+            api_key_gate: None,
         }
     }
 
@@ -1250,6 +1264,10 @@ impl FakeServices {
                 .swift_import
                 .clone()
                 .map(|import| import as Arc<dyn SwiftImport>),
+            api_key_gate: self
+                .api_key_gate
+                .clone()
+                .map(|gate| gate as Arc<dyn ApiKeyGate>),
         }
     }
 }

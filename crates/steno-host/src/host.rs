@@ -578,6 +578,15 @@ impl Host {
             }
             BridgeTopic::MeetingDetail => {
                 self.sync_detail(inner);
+                let withheld = self
+                    .shared
+                    .services
+                    .api_key_gate
+                    .as_ref()
+                    .is_some_and(|gate| gate.key_withheld());
+                if let Some(detail) = inner.detail.as_mut() {
+                    detail.key_withheld = withheld;
+                }
                 let playing = inner
                     .detail
                     .as_ref()

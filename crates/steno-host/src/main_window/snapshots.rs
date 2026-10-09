@@ -452,7 +452,11 @@ pub fn detail_snapshot(
             kind: match summary_status {
                 SummaryStatus::Pending => DetailSummaryStatusKind::Pending,
                 SummaryStatus::Present => DetailSummaryStatusKind::Present,
-                SummaryStatus::SkippedUnconfigured => DetailSummaryStatusKind::SkippedUnconfigured,
+                // The bridge has no kind of its own for a withheld key: its
+                // row opens Settings > Summaries, as an unconfigured one.
+                SummaryStatus::SkippedUnconfigured | SummaryStatus::SkippedKeyWithheld => {
+                    DetailSummaryStatusKind::SkippedUnconfigured
+                }
                 SummaryStatus::SkippedRunnable => DetailSummaryStatusKind::SkippedRunnable,
             },
             title: skipped.map(|row| row.title.to_owned()),

@@ -1003,6 +1003,8 @@ export const fixtureSchemas = {
 	"params.ui.confirmDestructive": confirmDestructiveParams,
 	"reply.confirm": confirmReply,
 	"reply.chosenPath": chosenPathReply,
-	// Written by the Rust bridge alone (the Swift app has no import step).
+	// Written by the Rust bridge alone (the Swift app has no import step,
+	// and never withholds the API key).
 	"onboarding.import": onboardingSnapshot,
+	"meeting.detail.keyWithheld": meetingDetailSnapshot,
 } as const satisfies Record<string, z.ZodTypeAny>;

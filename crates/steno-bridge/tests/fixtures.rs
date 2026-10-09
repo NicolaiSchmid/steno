@@ -1,7 +1,8 @@
 //! Every fixture in `apps/macos/web/fixtures/bridge/` decodes into its Rust
 //! type and re-encodes byte for byte. The mapping from file name to type
 //! mirrors `BridgeSamples.fixtures` in `Sources/StenoBridge/BridgeSamples.swift`,
-//! followed by the fixtures the Rust bridge alone owns (the import step);
+//! followed by the fixtures the Rust bridge alone owns (the import step,
+//! a summary skipped for a withheld API key);
 //! `contract.ts` is checked for every string enum the crate spells, top level
 //! and nested. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 
@@ -113,6 +114,10 @@ const FIXTURES: &[(&str, Reencode)] = &[
     ("reply.chosenPath", reencode::<ChosenPathReply>),
     // Rust only, after Swift's list (`BridgeFixturesTests.rustOnly`).
     ("onboarding.import", reencode::<OnboardingSnapshot>),
+    (
+        "meeting.detail.keyWithheld",
+        reencode::<MeetingDetailSnapshot>,
+    ),
 ];
 
 fn index() -> Vec<String> {

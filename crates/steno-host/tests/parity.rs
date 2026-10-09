@@ -745,6 +745,29 @@ fn onboarding_permissions() {
     );
 }
 
+/// `meeting.detail.keyWithheld` has no Swift sample (the Swift app read
+/// its API key itself); it is written in the recorder's format, and this
+/// proves the host produces it: the sample meeting processed without a
+/// summary while the Swift import's gate withholds the key.
+#[test]
+fn meeting_detail_key_withheld() {
+    let harness = Harness::builder()
+        .with_api_key_gate(true)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            configure_llm(store, "qwen3-8b");
+            set_retention(store, AudioRetention::KeepDays(30));
+            drop_sample_summary(store);
+        })
+        .build();
+    let _ = harness.snapshot(BridgeTopic::MeetingsList);
+    assert_parity(
+        "meeting.detail.keyWithheld",
+        &harness.snapshot(BridgeTopic::MeetingDetail),
+        &[],
+    );
+}
+
 /// `onboarding.import` has no Swift sample (the Swift app has no import
 /// step); it is written in the recorder's format, and this proves the host
 /// produces it: the step after a denied export, on a fresh install.

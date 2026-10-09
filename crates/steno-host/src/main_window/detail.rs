@@ -44,6 +44,10 @@ pub struct MeetingDetailViewModel {
     /// `Settings::default_retention`, followed through the settings.
     pub default_retention: AudioRetention,
     pub llm_configured: bool,
+    /// The API key is withheld from the pipeline now
+    /// ([`ApiKeyGate`](crate::services::ApiKeyGate)), set by the host as it
+    /// builds the snapshot: a skipped summary says so, and none re-runs.
+    pub key_withheld: bool,
     pub vault_configured: bool,
     /// The launch stopped re-exporting the meeting
     /// ([`Pipeline::export_keeps_failing`]), read with the deliveries.
@@ -73,6 +77,7 @@ impl MeetingDetailViewModel {
                 settings.default_retention
             }),
             llm_configured: settings.is_some_and(llm_configured),
+            key_withheld: false,
             vault_configured: settings.is_some_and(vault_configured),
             export_keeps_failing: false,
             error: None,
@@ -166,7 +171,7 @@ impl MeetingDetailViewModel {
     /// "Re-run summary", "Run summary" and the failed row's "Try again".
     #[must_use]
     pub fn can_rerun_summary(&self) -> bool {
-        self.can_rerun() && self.llm_configured && self.has_transcript()
+        self.can_rerun() && self.llm_configured && !self.key_withheld && self.has_transcript()
     }
 
     /// "Process again": the meeting is one it is offered for
@@ -200,7 +205,12 @@ impl MeetingDetailViewModel {
 
     #[must_use]
     pub fn summary_status(&self) -> SummaryStatus {
-        SummaryStatus::of(self.meeting(), self.llm_configured)
+        match SummaryStatus::of(self.meeting(), self.llm_configured) {
+            SummaryStatus::SkippedRunnable if self.key_withheld => {
+                SummaryStatus::SkippedKeyWithheld
+            }
+            status => status,
+        }
     }
 
     #[must_use]

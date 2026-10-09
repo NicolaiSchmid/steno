@@ -1568,6 +1568,53 @@ fn the_detail_footer_and_summary_rows_follow_the_store() {
     );
 }
 
+/// A meeting processed while the API key was withheld (the Swift import's
+/// gate) has no summary though an endpoint is set: while the gate still
+/// withholds the key the row says so in plain words and opens Settings,
+/// with no re-run on offer; once a key is saved it is the runnable row.
+#[test]
+fn a_summary_skipped_for_a_withheld_key_says_so_until_the_key_is_saved() {
+    let harness = Harness::builder()
+        .with_api_key_gate(true)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            configure_llm(store, "qwen3-8b");
+            drop_sample_summary(store);
+        })
+        .build();
+    let _ = harness.snapshot(BridgeTopic::MeetingsList);
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    let status = &detail["summaryStatus"];
+    assert_eq!(status["kind"], "skippedUnconfigured", "{status}");
+    assert_eq!(status["title"], "Summary skipped");
+    assert_eq!(
+        status["body"],
+        steno_host::setup::copy::SUMMARY_KEY_WITHHELD_BODY
+    );
+    assert!(
+        status["body"]
+            .as_str()
+            .unwrap()
+            .starts_with("Steno can't use your API key yet")
+    );
+    assert_eq!(status["actionTitle"], "Set up summaries");
+    assert_eq!(detail["canRerunSummary"], false, "no key, no re-run");
+
+    *harness
+        .fakes
+        .api_key_gate
+        .as_ref()
+        .unwrap()
+        .withheld
+        .lock()
+        .unwrap() = false;
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["summaryStatus"]["kind"], "skippedRunnable");
+    assert_eq!(detail["summaryStatus"]["actionTitle"], "Run summary");
+    assert_eq!(detail["canRerunSummary"], true);
+}
+
 /// Swift: `openURLAcceptsOnlyWebAndMailLinks`, `theAppPublishCarryingADeepLinkConsumesIt`.
 #[test]
 fn open_url_takes_https_and_mail_links_and_only_onboarding_closes_itself() {

@@ -49,5 +49,6 @@
   "params.ui.confirmDestructive",
   "reply.confirm",
   "reply.chosenPath",
-  "onboarding.import"
+  "onboarding.import",
+  "meeting.detail.keyWithheld"
 ]

@@ -518,6 +518,14 @@ impl ImportGate {
     }
 }
 
+/// The meeting detail asks the gate the pipeline asks
+/// ([`ImportGate::key_withheld`]).
+impl steno_host::services::ApiKeyGate for ImportGate {
+    fn key_withheld(&self) -> bool {
+        ImportGate::key_withheld(self)
+    }
+}
+
 /// The secret store the graph reads through while an import is pending:
 /// the API key as the [`KeyGate`] allows, everything else as the store
 /// behind it answers.

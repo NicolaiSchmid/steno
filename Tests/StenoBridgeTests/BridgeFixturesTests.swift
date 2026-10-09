@@ -22,8 +22,9 @@ import Testing
 
   /// Fixtures the Rust bridge alone owns (`crates/steno-bridge/tests/fixtures.rs`),
   /// listed at the end of `index.json`: the import step of the Tauri app,
-  /// which the Swift app never shows.
-  static let rustOnly = ["onboarding.import"]
+  /// which the Swift app never shows, and a summary skipped while the import
+  /// withheld the API key, which the Swift app never skips.
+  static let rustOnly = ["onboarding.import", "meeting.detail.keyWithheld"]
 
   static func url(_ name: String) -> URL {
     fixturesDirectory.appendingPathComponent("\(name).json")

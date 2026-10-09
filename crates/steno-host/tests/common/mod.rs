@@ -141,6 +141,14 @@ impl HarnessBuilder {
         self
     }
 
+    /// Adds a gate over the API key that withholds it while `withheld`.
+    pub fn with_api_key_gate(mut self, withheld: bool) -> Self {
+        self.fakes.api_key_gate = Some(Arc::new(steno_host::fakes::FakeApiKeyGate {
+            withheld: std::sync::Mutex::new(withheld),
+        }));
+        self
+    }
+
     /// What the destructive prompt answers.
     pub fn confirm(mut self, confirmed: bool) -> Self {
         self.confirm = confirmed;
@@ -660,6 +668,14 @@ pub fn populate_sample(store: &Store, fakes: &FakeServices) {
             None,
         ))
         .unwrap();
+}
+
+/// The sample meeting as processed without the LLM passes: no summary, no
+/// tasks, no decisions.
+pub fn drop_sample_summary(store: &Store) {
+    let mut bare = sample_meeting();
+    bare.summary = None;
+    store.replace_summary(&bare, &[], &[], &[]).unwrap();
 }
 
 /// The settings with an LM Studio endpoint configured, no vault.

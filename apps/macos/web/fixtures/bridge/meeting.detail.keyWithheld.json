@@ -1,0 +1,133 @@
+{
+  "canRerunSummary" : false,
+  "decisions" : [
+
+  ],
+  "durationSeconds" : 2738,
+  "export" : {
+    "canReexport" : false,
+    "canReveal" : false,
+    "message" : "Not exported: no Obsidian vault is configured.",
+    "status" : "notConfigured"
+  },
+  "id" : "00000000-0000-0000-0000-000000000001",
+  "isBusy" : false,
+  "language" : "de",
+  "notes" : "",
+  "retention" : {
+    "deletesAt" : "2026-10-29T12:50:00.000Z",
+    "filesExist" : true,
+    "keepsAudio" : false,
+    "kind" : "deletesOn",
+    "showsKeepToggle" : true
+  },
+  "source" : "call",
+  "speakers" : [
+    {
+      "assignment" : "confirmed",
+      "clusterLabel" : "Speaker 1",
+      "colorIndex" : 7,
+      "displayName" : "Nicolai",
+      "email" : "nicolai@example.com",
+      "hasClip" : true,
+      "id" : "00000000-0000-0000-0000-000000000014",
+      "isPlaying" : false,
+      "personID" : "00000000-0000-0000-0000-00000000000A"
+    },
+    {
+      "assignment" : "confirmed",
+      "clusterLabel" : "Speaker 2",
+      "colorIndex" : 4,
+      "displayName" : "Jérôme",
+      "hasClip" : true,
+      "id" : "00000000-0000-0000-0000-000000000015",
+      "isPlaying" : false,
+      "personID" : "00000000-0000-0000-0000-00000000000B"
+    },
+    {
+      "assignment" : "suggested",
+      "clusterLabel" : "Speaker 3",
+      "colorIndex" : 1,
+      "displayName" : "Anna",
+      "hasClip" : true,
+      "id" : "00000000-0000-0000-0000-000000000016",
+      "isPlaying" : false,
+      "personID" : "00000000-0000-0000-0000-00000000000C",
+      "suggestionName" : "Anna"
+    },
+    {
+      "assignment" : "unknown",
+      "clusterLabel" : "Speaker 4",
+      "colorIndex" : 0,
+      "displayName" : "Speaker 4",
+      "hasClip" : false,
+      "id" : "00000000-0000-0000-0000-000000000017",
+      "isPlaying" : false
+    }
+  ],
+  "startedAt" : "2026-09-29T12:50:00.000Z",
+  "state" : "ready",
+  "summary" : [
+
+  ],
+  "summaryStatus" : {
+    "actionTitle" : "Set up summaries",
+    "body" : "Steno can't use your API key yet, so this meeting has no summary. Save the key in Settings, then run the summary. The transcript is complete.",
+    "kind" : "skippedUnconfigured",
+    "title" : "Summary skipped"
+  },
+  "tab" : "summary",
+  "tags" : [
+    "strategie",
+    "q4"
+  ],
+  "tasks" : [
+
+  ],
+  "templateID" : "default",
+  "templates" : [
+    {
+      "id" : "default",
+      "name" : "Default"
+    },
+    {
+      "id" : "customer-discovery",
+      "name" : "Customer Discovery"
+    },
+    {
+      "id" : "daily-standup",
+      "name" : "Daily Standup"
+    },
+    {
+      "id" : "interview",
+      "name" : "Interview"
+    }
+  ],
+  "title" : "Produktstrategie 90/10",
+  "transcript" : [
+    {
+      "endSeconds" : 41,
+      "id" : "00000000-0000-0000-0000-000000000064",
+      "speakerID" : "00000000-0000-0000-0000-000000000014",
+      "speakerName" : "Nicolai",
+      "startSeconds" : 12,
+      "text" : "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen."
+    },
+    {
+      "endSeconds" : 65,
+      "id" : "00000000-0000-0000-0000-000000000065",
+      "speakerID" : "00000000-0000-0000-0000-000000000015",
+      "speakerName" : "Jérôme",
+      "startSeconds" : 41,
+      "text" : "Das geht nur, wenn wir das Budget entsprechend umschichten. Ich rechne bis Freitag zwei Szenarien."
+    },
+    {
+      "endSeconds" : 90,
+      "id" : "00000000-0000-0000-0000-000000000066",
+      "speakerID" : "00000000-0000-0000-0000-000000000017",
+      "speakerName" : "Speaker 4",
+      "startSeconds" : 65,
+      "text" : "Die Partner sollten das nicht aus zweiter Hand hören."
+    }
+  ]
+}

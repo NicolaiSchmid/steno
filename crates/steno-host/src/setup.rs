@@ -51,6 +51,11 @@ pub enum SummaryStatus {
     SkippedUnconfigured,
     /// Ready without a summary; an endpoint exists now, so "Run summary" works.
     SkippedRunnable,
+    /// Ready without a summary; an endpoint exists, but the API key is
+    /// withheld ([`ApiKeyGate`](crate::services::ApiKeyGate)), so the row
+    /// says the key is not available yet and opens Settings > Summaries.
+    /// Rust only.
+    SkippedKeyWithheld,
 }
 
 impl SummaryStatus {
@@ -83,13 +88,22 @@ impl SummaryStatus {
                 action: SkippedAction::SetUpSummaries,
                 footnote: None,
             }),
+            (SummaryStatus::SkippedKeyWithheld, DetailTab::Summary) => Some(SkippedRow {
+                title: copy::SUMMARY_SKIPPED_TITLE,
+                body: copy::SUMMARY_KEY_WITHHELD_BODY,
+                action: SkippedAction::SetUpSummaries,
+                footnote: None,
+            }),
             (SummaryStatus::SkippedRunnable, DetailTab::Summary) => Some(SkippedRow {
                 title: copy::SUMMARY_RUNNABLE_TITLE,
                 body: copy::SUMMARY_RUNNABLE_BODY,
                 action: SkippedAction::RunSummary,
                 footnote: Some(copy::SUMMARY_RUNNABLE_FOOTNOTE),
             }),
-            (SummaryStatus::SkippedUnconfigured, DetailTab::Tasks) => Some(SkippedRow {
+            (
+                SummaryStatus::SkippedUnconfigured | SummaryStatus::SkippedKeyWithheld,
+                DetailTab::Tasks,
+            ) => Some(SkippedRow {
                 title: copy::TASKS_SKIPPED_TITLE,
                 body: copy::TASKS_SKIPPED_BODY,
                 action: SkippedAction::SetUpSummaries,
@@ -246,6 +260,8 @@ pub mod copy {
     pub const SUMMARY_SKIPPED_TITLE: &str = "Summary skipped";
     pub const SUMMARY_SKIPPED_BODY: &str =
         "No LLM endpoint is configured. The transcript is complete.";
+    /// A summary skipped while the API key was withheld (Rust only).
+    pub const SUMMARY_KEY_WITHHELD_BODY: &str = "Steno can't use your API key yet, so this meeting has no summary. Save the key in Settings, then run the summary. The transcript is complete.";
     pub const SUMMARY_RUNNABLE_TITLE: &str = "No summary yet";
     pub const SUMMARY_RUNNABLE_BODY: &str =
         "This meeting was processed before an LLM endpoint was configured.";

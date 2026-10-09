@@ -646,6 +646,9 @@ pub fn build_with_import(
     let speech = engines.setup();
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
+    let api_key_gate = key_gate
+        .clone()
+        .map(|gate| gate as Arc<dyn steno_host::services::ApiKeyGate>);
     let pipeline_secrets = PipelineSecrets {
         secrets: secrets.clone(),
         kept,
@@ -741,6 +744,7 @@ pub fn build_with_import(
         preferences,
         secrets: secrets.clone(),
         swift_import,
+        api_key_gate,
     };
 
     Ok(App {

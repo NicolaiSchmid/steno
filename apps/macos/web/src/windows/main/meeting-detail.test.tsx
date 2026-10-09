@@ -121,6 +121,24 @@ describe("MeetingDetail", () => {
 		expect(screen.getByTestId("process-again")).toBeEnabled();
 	});
 
+	it("says a summary was skipped because the API key is not available yet", async () => {
+		const withheld = (await loadFixtureSnapshots())[
+			"meeting.detail.keyWithheld"
+		] as MeetingDetailSnapshot;
+		const harness = await createBridgeHarness("", {
+			"meeting.detail": withheld,
+		});
+		renderWithBridge(<MeetingDetail />, harness);
+		const status = await screen.findByTestId("summary-status");
+		expect(status).toHaveTextContent("Summary skipped");
+		expect(status).toHaveTextContent(
+			"Steno can't use your API key yet, so this meeting has no summary.",
+		);
+		expect(
+			within(status).getByTestId("summary-status-action"),
+		).toHaveTextContent("Set up summaries");
+	});
+
 	it("keeps Re-run summary for when the host allows it", async () => {
 		const detail = await fixtureDetail();
 		const harness = await createBridgeHarness("", {
