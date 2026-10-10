@@ -444,18 +444,22 @@ launcher moves only Steno into a scope after starting it (GNOME), and
 that unit's stop ends it while Steno saves: in a `uwsm-app`-style scope
 it was gone 0.26 s into the stop, and in one of two runs Steno went with
 it, unsaved; started as GNOME starts apps, Steno lost 3 of 3 recordings
-(the runs are listed under Hyprland). From the release after it, Steno
-finds its mount server at launch by the image's FUSE connection (Linux
-6.16 and later) and the pipe the runtime keeps open to it
-(`src/appimage.rs`), however the image was started, and moves every
-process that matches into `app-steno\x2ddesktop\x2dimage-<pid>.scope` in
-`app.slice`, also when Steno itself stays in its unit. No session's end
-stops that scope. The mount server ends by itself once Steno has exited,
-together with every program Steno started that still holds the image's
-pipe (a browser it opened a link in), since those may run Steno's
-bundled libraries from the mount. Each move is logged ("moved the
-AppImage's mount server"). A move that fails, or a mount server Steno
-cannot find, logs a warning.
+(the runs are listed under Hyprland).
+
+From the release after 0.1.0-rc.3 on, Steno finds its mount server at
+launch by the image's FUSE connection (Linux 6.16 and later) and the pipe
+the runtime keeps open to it (`src/appimage.rs`), however the image was
+started, and moves every process that matches into
+`app-steno\x2ddesktop\x2dimage-<pid>.scope` in `app.slice`, also when
+Steno itself stays in its unit. No session's end stops that scope. The
+mount server ends by itself once Steno has exited, together with every
+program Steno started that still holds the image's pipe (a browser it
+opened a link in), since those may run Steno's bundled libraries from the
+mount. After an update, the updated Steno is one of those programs, so
+the replaced image's mount, and the disk space of its deleted file, stay
+until the updated Steno quits. Each move is logged ("moved the AppImage's
+mount server"). A move that fails, or a mount server Steno cannot find,
+logs a warning.
 In a login's `session-<n>.scope` (Hyprland without uwsm), outside the
 user manager, the mount server stays beside Steno, with a warning, and
 that scope's stop ends both.

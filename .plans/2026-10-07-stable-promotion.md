@@ -1793,15 +1793,16 @@ interrupted" after one. On the GNOME machine,
      meeting is recovered with `failed` as `endReason` and processes (P3).
   7. Quit the `.deb`'s Steno; the AppImage starts (`pgrep -a steno-desktop`
      shows only its path) and finds the same meetings.
-  8. **GNOME, AppImage.** Note `uname -r`. Start the release's AppImage from
-     the app grid, through a desktop entry with `Exec=<path to the AppImage>`
-     (or the one an AppImage integration tool wrote), and start a recording.
-     `systemctl --user list-units 'app-steno*'` lists
-     `app-steno\x2ddesktop\x2dimage-<pid>.scope`, and `journalctl --user -b |
-     grep 'mount server'` prints one line per scope, 'moved the AppImage's
-     mount server <pid> into a scope of its own,
-     app-steno\x2ddesktop\x2dimage-<pid>.scope', and no warning. Log out with
-     the system menu, log back in and check the meeting.
+  8. **GNOME, AppImage.** Note `uname -r`. Quit Steno, note the time, start
+     the release's AppImage from the app grid, through a desktop entry with
+     `Exec=<path to the AppImage>` (or the one an AppImage integration tool
+     wrote), and start a recording. While it records, `journalctl --user
+     --since '<launch time>' | grep 'mount server'` prints one line, "moved
+     the AppImage's mount server <pid> into a scope of its own,
+     app-steno\x2ddesktop\x2dimage-<pid>.scope, which the session's end does
+     not stop", and no warning, and `systemctl --user list-units 'app-steno*'`
+     lists that scope. Then log out with the system menu, log back in and
+     check the meeting.
 - **Omarchy** (Omarchy 4, Arch with Hyprland on Wayland).
   1. Before step 0: import the release key from a checkout (`gpg --import
      packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`), so
@@ -1840,19 +1841,19 @@ interrupted" after one. On the GNOME machine,
      through the system menu, which is `uwsm stop`. Also `hyprctl dispatch exit`
      while recording: after logging back in, the meeting is saved with `quit` as
      `endReason` (X1). Then the same logout with Steno started by a key binding
-     without `uwsm-app` (`bind = SUPER SHIFT, S, exec, steno-desktop`): `cat
-     /proc/$(pidof -s steno-desktop)/cgroup` ends in
-     `app-steno\x2ddesktop-<pid>.scope`, `journalctl --user -b | grep 'moved into
-     a scope of its own'` names `wayland-wm@hyprland.desktop.service`, and the
-     meeting is saved the same way (#272). Then the same with
-     `exec-once = steno-desktop` in `hyprland.conf`, after logging out and in.
-     Then quit Steno, run the release's AppImage with `uwsm-app -- <path>`,
-     record and log out: `systemctl --user list-units 'app-steno*'` lists
-     `app-steno\x2ddesktop\x2dimage-<pid>.scope`, and `journalctl --user -b |
-     grep 'mount server'` prints one line per scope, 'moved the AppImage's
-     mount server <pid> into a scope of its own,
-     app-steno\x2ddesktop\x2dimage-<pid>.scope', and no warning; the meeting is
-     saved the same way.
+     without `uwsm-app` (`bind = SUPER SHIFT, S, exec, steno-desktop`), noting
+     the launch time: `cat /proc/$(pidof -s steno-desktop)/cgroup` ends in
+     `app-steno\x2ddesktop-<pid>.scope`, `journalctl --user --since '<launch
+     time>' | grep 'moved into a scope of its own'` names
+     `wayland-wm@hyprland.desktop.service`, and the meeting is saved the same
+     way (#272). Then the same with `exec-once = steno-desktop` in
+     `hyprland.conf`, after logging out and in, with the login time as the
+     launch time. Then quit Steno, note the time, run the release's AppImage
+     with `uwsm-app -- <path>` and start a recording. While it records,
+     `journalctl --user --since '<launch time>' | grep 'mount server'` prints
+     one line, "moved the AppImage's mount server <pid> ...", and no warning,
+     and `systemctl --user list-units 'app-steno*'` lists that scope. Then log
+     out: the meeting is saved the same way.
   7. In the Steno that a login started, Settings says updates come from the
      package manager (X5), and `~/.config/autostart/steno-desktop.desktop`'s
      `Exec` names `/usr/bin/steno-desktop`.
