@@ -19,3 +19,13 @@ pub use fake_activity::FakeProcessAudioActivity;
 pub use fixtures::{AudioFixtures, SplitMix64};
 pub use manual_clock::ManualClock;
 pub use synthetic::{SyntheticCaptureBackend, SyntheticEcho, SyntheticLane};
+
+/// Whether a backend's `start` or `stop` on this thread logs its own lines
+/// at `debug`: inside the session's restarts once their streak logged a
+/// failure (`capture::start_log`). For a test backend that logs as the
+/// live ones do, so that a test counting the capture's lines sees a start
+/// or a stop the session left loud. Rust only.
+#[must_use]
+pub fn start_log_is_quiet() -> bool {
+    crate::capture::start_log::is_quiet()
+}

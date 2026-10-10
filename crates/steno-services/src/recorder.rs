@@ -28,17 +28,31 @@
 //! reports no size, or more space free than it holds (some network and
 //! FUSE file systems), counts as unreadable and never warns, stops or
 //! refuses a recording. Rust only: Swift had no disk check.
+//!
+//! The session's notices are followed too: while its restarts go on past
+//! `CaptureSession::RESTART_ATTEMPTS`, until audio arrives again, the
+//! status warns "No audio from `<device>`. Still trying.", naming the
+//! microphone only when a stall of it started the rebuild and its clock
+//! drives the capture (an in-person capture, any capture on Windows), and
+//! "No audio is arriving. Still trying." otherwise: a Mac call capture runs
+//! on the output's clock and a Linux one on the graph's driver, which may
+//! be the sink. After the stop a note says about how many seconds of the
+//! recording are missing, the gaps filled with silence and the wall time
+//! the master does not hold beyond the clocks' drift (0.1 %), once that is
+//! more than about a second, and from which device on the same terms.
+//! Rust only.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{FixedOffset, Utc};
 use steno_audio::{
     CaptureConfiguration, CaptureError, CaptureNotice, CaptureSession, CaptureState,
-    CaptureStatistics, CaptureStream, FRAMES_PER_SECOND, LaneLevels as AudioLevels,
+    CaptureStatistics, CaptureStream, DeviceChangeReason, FRAMES_PER_SECOND,
+    LaneLevels as AudioLevels,
 };
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
@@ -398,6 +412,12 @@ struct Active {
     /// so a rebuild can set and clear it; written at the start and by
     /// `notice_thread`, cleared by `clear_messages`.
     fallback: Arc<Mutex<Fallback>>,
+    /// A device that stopped delivering, as the notices tell it; written
+    /// by `notice_thread`. Rust only.
+    outage: Arc<Mutex<Outage>>,
+    /// When the session began recording, for the audio missing from the
+    /// master against wall time after the stop ([`missing_audio_note`]).
+    recording_since: Instant,
     /// Re-reads the microphone after each rebuild, joined once the session
     /// is dropped; none when it could not be spawned, and the fallback
     /// warning stays as the start left it.
@@ -468,6 +488,92 @@ impl Fallback {
     }
 }
 
+/// A device that stopped delivering in a recording, as the session's
+/// notices tell it. Rust only.
+#[derive(Default)]
+struct Outage {
+    /// The microphone whose stall the latest rebuild followed
+    /// ([`DeviceChangeReason::DeliveryStalled`]) when its clock drives the
+    /// capture ([`microphone_is_the_master`]), the one known to have
+    /// stopped delivering; `None` when that rebuild followed another
+    /// change, or another clock stalled, which says nothing of which device
+    /// is silent. Named by the warning and the note after the stop
+    /// ([`missing_audio_note`]).
+    stalled: Option<String>,
+    /// Whether the session's restarts went on past
+    /// `CaptureSession::RESTART_ATTEMPTS` (`StillRestarting`) and no audio
+    /// arrived since ([`no_audio_warning`]); cleared by `Delivering`, not
+    /// by a resume (a stream that resumes may stall again soon), and once
+    /// dismissed.
+    still_trying: bool,
+    /// The capture is recovering: from a `DeviceChanged` until it is back,
+    /// at its `DeviceResumed` when no `StillRestarting` is outstanding
+    /// (`restarting`), else at `Delivering`; a dismissal leaves it. The
+    /// call auto-stop's countdown neither arms nor ends the recording
+    /// meanwhile, and once the capture is back the notice thread calls
+    /// [`CaptureRecorder::resume_auto_stop`] (S2 in
+    /// `.plans/2026-10-07-stable-promotion.md`): a restart of the audio
+    /// service empties the call detector's process list too, so the call
+    /// app seems to have let go of the microphone. Rust only.
+    recovering: bool,
+    /// A `StillRestarting` came and no `Delivering` since: a resume then
+    /// does not end the recovery, since the stream may stall again soon.
+    /// Unlike `still_trying`, a dismissal leaves it. Rust only.
+    restarting: bool,
+}
+
+impl Outage {
+    /// Follows `notice` for the warning and the recovery (the stalled
+    /// device aside, which the notice thread reads from the session);
+    /// `true` when it ends a recovery, so the auto-stop resumes.
+    fn follow(&mut self, notice: &CaptureNotice) -> bool {
+        match notice {
+            CaptureNotice::DeviceChanged(_) => {
+                self.recovering = true;
+                false
+            }
+            CaptureNotice::StillRestarting { .. } => {
+                self.still_trying = true;
+                self.restarting = true;
+                false
+            }
+            CaptureNotice::DeviceResumed { .. } => {
+                !self.restarting && std::mem::take(&mut self.recovering)
+            }
+            CaptureNotice::Delivering => {
+                self.still_trying = false;
+                self.restarting = false;
+                std::mem::take(&mut self.recovering)
+            }
+        }
+    }
+
+    /// The user dismissed the messages: the warning goes until the
+    /// restarts go on once more; the recovery stands.
+    fn dismiss(&mut self) {
+        self.still_trying = false;
+    }
+}
+
+/// Whether the microphone's clock drives a capture in `mode`, so that a
+/// stall is the microphone's: an in-person capture records it alone, and
+/// the WASAPI backend makes it the master stream whenever a lane needs
+/// it. A Mac call capture runs on the output's clock (the aggregate's
+/// master) and a Linux one on the graph's driver, which may be the sink.
+/// The WASAPI rule is the one its `delivers_continuously` states
+/// (steno-audio `capture/live/wasapi`); a change there comes here too. The
+/// session asks the backend the near question for its restarts
+/// ([`CaptureBackend::stall_may_be_the_microphone`]: whether a stall may be
+/// the microphone's, so that the default input in its place may help),
+/// which says "may" where this rule must be sure before it names a device:
+/// a Linux call answers `true` there and `false` here. A change to either
+/// goes to the other. Rust only.
+///
+/// [`CaptureBackend::stall_may_be_the_microphone`]: steno_audio::CaptureBackend::stall_may_be_the_microphone
+fn microphone_is_the_master(mode: CaptureMode) -> bool {
+    mode == CaptureMode::InPerson || cfg!(windows)
+}
+
 struct Inner {
     status: RecorderStatus,
     active: Option<Active>,
@@ -535,6 +641,60 @@ fn fallback_input(stream: Option<&CaptureStream>) -> Option<String> {
     )
 }
 
+/// The device `stream` records, as the warnings about missing audio name
+/// it: its microphone's name, else "the microphone".
+fn device_name(stream: Option<&CaptureStream>) -> String {
+    stream
+        .and_then(|stream| stream.input.as_ref()?.name.clone())
+        .unwrap_or_else(|| "the microphone".to_owned())
+}
+
+/// The share of wall time a device clock may run apart from the wall
+/// clock, which the note about missing audio leaves out: 0.1 %, twice the
+/// 500 ppm a cheap device drifts.
+const CLOCK_DRIFT: f64 = 0.001;
+
+/// The warning while no audio arrives and the session keeps restarting
+/// the capture, naming the device when it is known to be the one that
+/// stopped delivering (`stalled`). Rust only.
+fn no_audio_warning(stalled: Option<&str>) -> String {
+    match stalled {
+        Some(device) => format!("No audio from {device}. Still trying."),
+        None => "No audio is arriving. Still trying.".to_owned(),
+    }
+}
+
+/// The seconds a recording's master is missing, for
+/// [`missing_audio_note`]: the `gap_seconds` filled with silence, and the
+/// wall time (`wall` seconds) the master's `duration` does not hold (a gap
+/// past `MAXIMUM_GAP`, a stop inside one) beyond what the device clocks
+/// drift from the wall clock ([`CLOCK_DRIFT`]; 300 to 500 ppm: 2 to 4 s in
+/// two hours). Rust only.
+fn missing_seconds(gap_seconds: f64, wall: f64, duration: f64) -> f64 {
+    gap_seconds + (wall - duration - wall * CLOCK_DRIFT).max(0.0)
+}
+
+/// The note after a recording whose master holds `missing` seconds of
+/// silence written for gaps, or of wall time it does not hold at all,
+/// when that is more than about a second; it names the cause only when
+/// the latest gap followed a stall of `stalled`. Rust only.
+fn missing_audio_note(missing: f64, stalled: Option<&str>) -> Option<String> {
+    if missing.is_nan() || missing <= 1.0 {
+        return None;
+    }
+    // Rounded to the nearest second.
+    let seconds = Duration::try_from_secs_f64(missing + 0.5).ok()?.as_secs();
+    let missing = if seconds == 1 {
+        "About 1 second of the recording is missing".to_owned()
+    } else {
+        format!("About {seconds} seconds of the recording are missing")
+    };
+    Some(match stalled {
+        Some(device) => format!("{missing}: no audio arrived from {device}."),
+        None => format!("{missing}."),
+    })
+}
+
 /// The warning while the recording is on the fallback `input`.
 fn fallback_warning(input: &str) -> String {
     format!("Recording from {input}. The microphone chosen in Settings is not available.")
@@ -577,33 +737,60 @@ fn forward_levels(
         .ok()
 }
 
-/// The thread that re-reads the microphone into `fallback` after each
-/// rebuild ([`CaptureNotice::DeviceResumed`] on `notices`), since a rebuild
-/// may record another one, and calls `hook`. It holds `session` weakly, so
-/// dropping the session ends the notices and the thread. None when it
-/// could not be spawned, and the fallback warning stays as the start left
-/// it.
-fn follow_the_microphone(
+/// The thread that follows the session's notices and calls `hook`: a
+/// rebuild's start notes into `outage` the microphone it replaces when a
+/// stall of it started it, in a capture in `mode` that runs on the
+/// microphone's clock, and none otherwise; restarts that go on past
+/// `RESTART_ATTEMPTS` mark it there as still trying until audio arrives
+/// again (`Delivering`); the resume re-reads the microphone into
+/// `fallback`, since a rebuild may record another one; and the end of a
+/// recovery ([`Outage::recovering`]) resumes `recorder`'s auto-stop, with
+/// the outage's lock released, since the recorder takes its own lock and
+/// then the outage's. It holds `session` and `recorder` weakly, so
+/// dropping the session ends the notices and the thread, and the
+/// recorder, which holds the thread's handle, makes no cycle; a stop joins
+/// the thread without the recorder's lock. None when it could not be
+/// spawned, and the warnings stay as the start left them.
+fn follow_the_notices(
     notices: Receiver<CaptureNotice>,
+    mode: CaptureMode,
     fallback: Arc<Mutex<Fallback>>,
+    outage: Arc<Mutex<Outage>>,
     session: Weak<CaptureSession>,
+    recorder: Weak<CaptureRecorder>,
     hook: Hook,
 ) -> Option<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("steno-notices".into())
         .spawn(move || {
             while let Ok(notice) = notices.recv() {
-                if !matches!(notice, CaptureNotice::DeviceResumed { .. }) {
-                    continue;
-                }
                 let Some(session) = session.upgrade() else {
                     return;
                 };
-                fallback
+                let mut outage = outage
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .set(fallback_input(session.stream().as_ref()));
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let back = outage.follow(&notice);
+                match notice {
+                    // The stream is still the replaced one until the resume.
+                    CaptureNotice::DeviceChanged(reason) => {
+                        outage.stalled = (reason == DeviceChangeReason::DeliveryStalled
+                            && microphone_is_the_master(mode))
+                        .then(|| device_name(session.stream().as_ref()));
+                    }
+                    CaptureNotice::DeviceResumed { .. } => {
+                        fallback
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .set(fallback_input(session.stream().as_ref()));
+                    }
+                    CaptureNotice::StillRestarting { .. } | CaptureNotice::Delivering => {}
+                }
+                drop(outage);
                 drop(session);
+                if back && let Some(recorder) = recorder.upgrade() {
+                    recorder.resume_auto_stop();
+                }
                 if let Some(hook) = &hook {
                     hook();
                 }
@@ -745,7 +932,8 @@ impl CaptureRecorder {
                 inner.calls.opened(app_name);
             }
             MicrophoneActivity::Released => {
-                if !self.arm_auto_stop(&mut inner, |calls, now| calls.released(now, false)) {
+                let recovering = Self::capture_recovering(&inner);
+                if !self.arm_auto_stop(&mut inner, |calls, now| calls.released(now, recovering)) {
                     return;
                 }
             }
@@ -808,14 +996,28 @@ impl CaptureRecorder {
         true
     }
 
+    /// Whether the capture of the recording in progress is recovering
+    /// ([`Outage::recovering`]), so the auto-stop waits. Takes the outage's
+    /// lock under the recorder's, as the status does. Rust only.
+    fn capture_recovering(inner: &Inner) -> bool {
+        inner.active.as_ref().is_some_and(|active| {
+            active
+                .outage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recovering
+        })
+    }
+
     /// The auto-stop's countdown `number` ran out: the recording stops and
     /// is saved as Stop does, with the call's end reason, unless the
-    /// countdown was disarmed meanwhile or the recording is already
-    /// stopping.
+    /// countdown was disarmed meanwhile, the recording is already
+    /// stopping, or its capture is recovering (the countdown stays armed
+    /// for [`Self::resume_auto_stop`] to replace).
     fn call_ended(&self, number: u64) {
         let (active, reason) = {
             let mut inner = self.inner();
-            if inner.status.state != RecordingState::Recording {
+            if inner.status.state != RecordingState::Recording || Self::capture_recovering(&inner) {
                 return;
             }
             let Some(reason) = inner.calls.elapsed(number) else {
@@ -1032,10 +1234,15 @@ impl CaptureRecorder {
         let mut fallback = Fallback::default();
         fallback.set(fallback_input(session.stream().as_ref()));
         let fallback = Arc::new(Mutex::new(fallback));
-        let notice_thread = follow_the_microphone(
+        let outage = Arc::new(Mutex::new(Outage::default()));
+        let recording_since = Instant::now();
+        let notice_thread = follow_the_notices(
             notices,
+            mode,
             fallback.clone(),
+            outage.clone(),
             Arc::downgrade(&session),
+            self.this.clone(),
             self.hook(),
         );
         {
@@ -1055,6 +1262,8 @@ impl CaptureRecorder {
                 levels: shared,
                 level_thread,
                 fallback,
+                outage,
+                recording_since,
                 notice_thread,
                 disk_warning: DiskWarning {
                     stops: disk.stops,
@@ -1249,6 +1458,7 @@ impl CaptureRecorder {
             })
         };
         let meeting_id = active.meeting_id;
+        let wall = active.recording_since.elapsed().as_secs_f64();
         let outcome = match active.session.stop() {
             Ok(result) => {
                 log_dropped_frames(meeting_id, &result.statistics);
@@ -1275,14 +1485,15 @@ impl CaptureRecorder {
                         None,
                     ),
                 );
+                let missing = missing_seconds(statistics.gap_seconds, wall, statistics.duration);
                 match completed {
-                    Ok(_) => Ok((recording_warning(active.mode, &statistics), ended)),
+                    Ok(_) => Ok((recording_warning(active.mode, &statistics), missing, ended)),
                     Err(error) => Err(not_saved(meeting_id, &error)),
                 }
             }
             Err(failure) => self
                 .recover_failed_stop(&intake, &active, &failure, &reason)
-                .map(|()| (Some(RECOVERED_AFTER_A_FAILURE.to_owned()), error)),
+                .map(|()| (Some(RECOVERED_AFTER_A_FAILURE.to_owned()), 0.0, error)),
         };
         // The folder recorded for the meeting stays whatever the outcome:
         // a saved meeting's commit is not durable yet (`synchronous =
@@ -1298,7 +1509,14 @@ impl CaptureRecorder {
             let _ = thread.join();
         }
         // Read once the notice thread is gone, so its last rebuild counts.
-        let outcome = outcome.map(|(warning, ended)| {
+        let outcome = outcome.map(|(warning, missing, ended)| {
+            let stalled = active
+                .outage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stalled
+                .clone();
+            let missing = missing_audio_note(missing, stalled.as_deref());
             let note = active
                 .fallback
                 .lock()
@@ -1306,7 +1524,7 @@ impl CaptureRecorder {
                 .was_on
                 .as_deref()
                 .map(fallback_note);
-            let warning = [warning, note]
+            let warning = [warning, missing, note]
                 .into_iter()
                 .flatten()
                 .reduce(|warning, note| format!("{warning} {note}"));
@@ -1484,9 +1702,18 @@ impl Recorder for CaptureRecorder {
                 .current
                 .as_deref()
                 .map(fallback_warning);
+            let no_audio = {
+                let outage = active
+                    .outage
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                outage
+                    .still_trying
+                    .then(|| no_audio_warning(outage.stalled.as_deref()))
+            };
             // Every warning that applies, the disk's first; the status's
             // own is `None` while recording.
-            status.warning = [active.disk_warning.shown(), fallback]
+            status.warning = [active.disk_warning.shown(), no_audio, fallback]
                 .into_iter()
                 .flatten()
                 .reduce(|warning, next| format!("{warning} {next}"));
@@ -1576,6 +1803,11 @@ impl Recorder for CaptureRecorder {
                 .fallback
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Fallback::default();
+            active
+                .outage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .dismiss();
             active.disk_warning.dismiss();
         }
         drop(inner);
@@ -2307,6 +2539,332 @@ mod tests {
                  Steno recorded from Built-in Audio while the microphone chosen in Settings \
                  was not available."
             )
+        );
+    }
+
+    /// Captures on "USB Microphone" over the synthetic backend at wall-clock
+    /// speed and the wall clock, set up by `options` (a stall or a change
+    /// `BEFORE_THE_OUTAGE` in, and the restarts after it), under a recorder.
+    fn stalling_harness(options: fn(SyntheticOptions) -> SyntheticOptions) -> Harness {
+        let capture: MakeCaptureSession = Arc::new(move |configuration: CaptureConfiguration| {
+            let tone = SyntheticOptions::tones(
+                &configuration.lanes(),
+                &[(AudioLane::Mixed, 440.0)],
+                600.0,
+            )
+            .real_time(true);
+            let on_usb = CaptureStream {
+                input: Some(input(Some("USB Microphone"), false)),
+                ..CaptureStream::SYNTHETIC
+            };
+            let tone = tone.stream(on_usb.clone()).stream_after_restart(on_usb);
+            CaptureSession::with_backend(
+                configuration,
+                Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options(
+                    tone,
+                ))),
+                None,
+                CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+                Arc::new(steno_audio::SystemClock::new()),
+            )
+            .map_err(|error| error.to_string())
+        });
+        harness_capturing(
+            models_with(&[]),
+            "parakeet-v3",
+            platform_rule(SpeechSettings::default()),
+            capture,
+        )
+    }
+
+    /// Records over `harness` until `warning` shows, within `patience`,
+    /// and checks the meter reads silence then and the warning stands for
+    /// `holds` more; stops, checks the note after the stop ends with
+    /// `cause` and returns the seconds it says are missing.
+    async fn until_still_trying(
+        harness: &Harness,
+        warning: &str,
+        cause: &str,
+        patience: Duration,
+        holds: Duration,
+    ) -> u64 {
+        let status = || harness.recorder.status();
+        start(&harness.recorder).await;
+        eventually("a level from the tone", || {
+            status().levels.is_some_and(|levels| levels.mic > 0.1)
+        })
+        .await;
+        assert_eq!(status().warning, None);
+        until_the_warning(harness, warning, patience).await;
+        let mic = status().levels.map(|levels| levels.mic);
+        assert!(
+            mic.is_some_and(|mic| mic < 1e-6),
+            "the meter reads silence: {mic:?}"
+        );
+        let held = std::time::Instant::now() + holds;
+        while std::time::Instant::now() < held {
+            assert_eq!(status().warning.as_deref(), Some(warning), "it stands");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stop(&harness.recorder).await;
+        let note = status().warning.unwrap_or_default();
+        let seconds: u64 = note
+            .strip_prefix("About ")
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|seconds| seconds.parse().ok())
+            .unwrap_or_else(|| panic!("the note: {note}"));
+        assert_eq!(
+            note,
+            format!("About {seconds} seconds of the recording are missing{cause}")
+        );
+        // Before the harness waits for the pipeline's runs, so none starts
+        // after that wait and writes into the folder it removed.
+        eventually("the pipeline picked the saved meeting up", || {
+            harness.engine.transcriptions.count() > 0
+        })
+        .await;
+        seconds
+    }
+
+    /// Waits up to `patience` for the recorder to show `warning`, as it
+    /// does once the restarts pass the attempts.
+    async fn until_the_warning(harness: &Harness, warning: &str, patience: Duration) {
+        let deadline = std::time::Instant::now() + patience;
+        while harness.recorder.status().warning.as_deref() != Some(warning) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the warning once the restarts pass the attempts: {:?}",
+                harness.recorder.status().warning
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Seconds of tone before the device stops delivering: long enough for
+    /// the meter to show a level on a loaded host first.
+    const BEFORE_THE_OUTAGE: f64 = 3.0;
+    /// How long the warning may take to show after the start: the tone,
+    /// the stall's 2 s, and four restarts that wait 2 s each for a frame.
+    const STILL_TRYING_WITHIN: Duration = Duration::from_secs(30);
+    const STILL_TRYING_ON_USB: &str = "No audio from USB Microphone. Still trying.";
+    const FROM_USB: &str = ": no audio arrived from USB Microphone.";
+
+    /// A device that stops delivering and whose restarts keep failing (a
+    /// graph that does not run): once they pass `RESTART_ATTEMPTS` the
+    /// recorder warns that no audio arrives from it, naming it, and the
+    /// meter reads silence rather than the last level; after the stop a
+    /// note says about how much of the recording is missing and from
+    /// which device.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_device_that_stops_delivering_is_named_while_steno_keeps_trying() {
+        let harness = stalling_harness(|options| {
+            options
+                .stall_after(BEFORE_THE_OUTAGE)
+                .restarts_that_fail(usize::MAX)
+                .restarts_do_not_run()
+        });
+        let seconds = until_still_trying(
+            &harness,
+            STILL_TRYING_ON_USB,
+            FROM_USB,
+            STILL_TRYING_WITHIN,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(seconds >= 3, "{seconds} s");
+    }
+
+    /// The same warning when the restarts start but deliver nothing, with
+    /// no chosen microphone to fall back from (a clock master that hangs on
+    /// the Mac or on Windows, where such a device still starts): each
+    /// restart waits `STALL_TIMEOUT` for a first frame, so the warning
+    /// comes about ten seconds after the stall.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restarts_that_start_but_deliver_nothing_show_the_warning() {
+        let harness = stalling_harness(|options| {
+            options
+                .stall_after(BEFORE_THE_OUTAGE)
+                .restarts_stall_after(0.0)
+        });
+        let seconds = until_still_trying(
+            &harness,
+            STILL_TRYING_ON_USB,
+            FROM_USB,
+            STILL_TRYING_WITHIN,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(seconds >= 10, "{seconds} s");
+    }
+
+    /// A call that delivers nothing from its start (a Mac call capture
+    /// whose silent output did not start, with nothing playing): its
+    /// restarts warn without naming the microphone, whose clock does not
+    /// drive a call capture there, and so does the note after the stop. On
+    /// Windows the microphone drives it, and is named.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_with_nothing_playing_warns_without_naming_the_microphone() {
+        let harness =
+            stalling_harness(|options| options.stall_after(0.0).restarts_stall_after(0.0));
+        let warning = if cfg!(windows) {
+            STILL_TRYING_ON_USB
+        } else {
+            "No audio is arriving. Still trying."
+        };
+        let starting = harness.recorder.clone();
+        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
+            .await
+            .unwrap();
+        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+        until_the_warning(&harness, warning, STILL_TRYING_WITHIN).await;
+        stop(&harness.recorder).await;
+        let note = harness.recorder.status().warning.unwrap_or_default();
+        assert!(note.contains("of the recording are missing"), "{note}");
+        assert_eq!(note.contains("USB Microphone"), cfg!(windows), "{note}");
+        eventually("the pipeline picked the saved meeting up", || {
+            harness.engine.transcriptions.count() > 0
+        })
+        .await;
+    }
+
+    /// Restarts that go on after a device change rather than a stall name
+    /// no device: nothing says the one recorded is the one that is silent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restarts_after_another_change_blame_no_device() {
+        let harness = stalling_harness(|options| {
+            options
+                .change_device_after(BEFORE_THE_OUTAGE)
+                .restarts_that_fail(usize::MAX)
+                .restarts_do_not_run()
+        });
+        let seconds = until_still_trying(
+            &harness,
+            "No audio is arriving. Still trying.",
+            ".",
+            STILL_TRYING_WITHIN,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(seconds >= 1, "{seconds} s");
+    }
+
+    /// An ordinary device change, whose restarts did not go on past the
+    /// attempts, recovers at its resume, which resumes the auto-stop once;
+    /// a later resume ends no recovery.
+    #[test]
+    fn a_device_change_recovers_at_its_resume() {
+        let resumed = CaptureNotice::DeviceResumed {
+            attempt: 1,
+            gap_seconds: 0.3,
+        };
+        let mut outage = Outage::default();
+        assert!(!outage.follow(&CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DefaultInputChanged
+        )));
+        assert!(outage.recovering);
+        assert!(outage.follow(&resumed), "back at the resume");
+        assert!(!outage.recovering);
+        assert!(!outage.follow(&resumed), "nothing to end");
+    }
+
+    /// Restarts that went on past the attempts recover only once audio is
+    /// back (`Delivering`): neither their resumes, a stream that stalls
+    /// again and resumes, nor a dismissal of the warning ends the
+    /// recovery, while the dismissal does end the warning.
+    #[test]
+    fn restarts_that_went_on_recover_only_once_audio_is_back() {
+        let resumed = CaptureNotice::DeviceResumed {
+            attempt: CaptureSession::RESTART_ATTEMPTS + 1,
+            gap_seconds: 4.0,
+        };
+        let mut outage = Outage::default();
+        assert!(!outage.follow(&CaptureNotice::DeviceChanged(
+            DeviceChangeReason::AudioServiceRestarted
+        )));
+        assert!(!outage.follow(&CaptureNotice::StillRestarting {
+            attempt: CaptureSession::RESTART_ATTEMPTS,
+        }));
+        assert!(outage.still_trying);
+        outage.dismiss();
+        assert!(!outage.still_trying, "the warning went");
+        assert!(
+            outage.recovering && outage.restarting,
+            "the recovery stands"
+        );
+        assert!(!outage.follow(&resumed));
+        assert!(!outage.follow(&CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DeliveryStalled
+        )));
+        assert!(!outage.follow(&resumed));
+        assert!(outage.recovering);
+        assert!(outage.follow(&CaptureNotice::Delivering), "back");
+        assert!(!outage.recovering && !outage.restarting && !outage.still_trying);
+        assert!(!outage.follow(&CaptureNotice::Delivering), "nothing to end");
+        outage.follow(&CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DefaultInputChanged,
+        ));
+        assert!(
+            outage.follow(&resumed),
+            "the next change is back at its resume"
+        );
+    }
+
+    /// Only a microphone whose clock drives the capture is named for a
+    /// stall: an in-person capture's, and a call's on Windows alone.
+    #[test]
+    fn only_a_microphone_that_drives_the_capture_is_blamed_for_a_stall() {
+        assert!(microphone_is_the_master(CaptureMode::InPerson));
+        assert_eq!(microphone_is_the_master(CaptureMode::Call), cfg!(windows));
+    }
+
+    /// Two hours of wall time against a master 2 s shorter is the device
+    /// clocks' drift, no note; a real shortfall, or a gap filled with
+    /// silence, still gives one.
+    #[test]
+    fn the_missing_seconds_leave_the_clock_drift_out() {
+        assert_eq!(missing_seconds(0.0, 7200.0, 7198.0), 0.0);
+        assert_eq!(
+            missing_audio_note(missing_seconds(0.0, 7200.0, 7198.0), None),
+            None
+        );
+        let short = missing_seconds(0.0, 7200.0, 7180.0);
+        assert!((short - 12.8).abs() < 1e-9, "{short}");
+        assert_eq!(
+            missing_audio_note(short, None).as_deref(),
+            Some("About 13 seconds of the recording are missing.")
+        );
+        assert_eq!(missing_seconds(3.0, 60.0, 60.0), 3.0);
+    }
+
+    /// The note comes from about a second on, and names a device only when
+    /// the latest gap followed its stall; so does the warning.
+    #[test]
+    fn the_missing_audio_note_comes_from_about_a_second_on() {
+        assert_eq!(missing_audio_note(1.0, Some("USB Microphone")), None);
+        assert_eq!(
+            missing_audio_note(1.2, Some("USB Microphone")).as_deref(),
+            Some(
+                "About 1 second of the recording is missing: no audio arrived from USB Microphone."
+            )
+        );
+        assert_eq!(
+            missing_audio_note(12.6, Some("the microphone")).as_deref(),
+            Some(
+                "About 13 seconds of the recording are missing: no audio arrived from the \
+                 microphone."
+            )
+        );
+        assert_eq!(
+            missing_audio_note(12.6, None).as_deref(),
+            Some("About 13 seconds of the recording are missing.")
+        );
+        assert_eq!(
+            no_audio_warning(Some("USB Microphone")),
+            "No audio from USB Microphone. Still trying."
+        );
+        assert_eq!(
+            no_audio_warning(None),
+            "No audio is arriving. Still trying."
         );
     }
 

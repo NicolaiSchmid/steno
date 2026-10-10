@@ -14,7 +14,7 @@ use steno_audio::testing::SyntheticCaptureBackend;
 use steno_audio::testing::synthetic::SyntheticOptions;
 use steno_audio::{
     CaptureBackend, CaptureConfiguration, CaptureMode, CaptureNotice, CaptureSession, CaptureState,
-    LaneLevels, LiveCaptureBackend, SpeexEchoCanceller, SystemClock,
+    DeviceChangeReason, LaneLevels, LiveCaptureBackend, SpeexEchoCanceller, SystemClock,
 };
 use steno_core::{AudioLane, EchoCanceller, RecordingLayout, paths::file_url_path};
 use uuid::Uuid;
@@ -77,13 +77,35 @@ pub struct Record {
 #[must_use]
 pub fn notice_line(notice: &CaptureNotice) -> String {
     match notice {
-        CaptureNotice::DeviceChanged(reason) => format!("device change: {reason:?}, reconnecting"),
+        CaptureNotice::DeviceChanged(reason) => {
+            format!("{}; reconnecting", reason_words(*reason))
+        }
+        CaptureNotice::StillRestarting { attempt } => {
+            format!(
+                "no audio after {attempt} restarts; still trying until audio arrives or you stop"
+            )
+        }
+        CaptureNotice::Delivering => "audio is arriving again".to_owned(),
         CaptureNotice::DeviceResumed {
             attempt,
             gap_seconds,
         } => {
             format!("device resumed: attempt {attempt}, gap {gap_seconds:.2} s")
         }
+    }
+}
+
+/// What a device change means, in plain words.
+fn reason_words(reason: DeviceChangeReason) -> &'static str {
+    match reason {
+        DeviceChangeReason::DefaultOutputChanged => "the default output moved",
+        DeviceChangeReason::DefaultInputChanged => "the default microphone changed",
+        DeviceChangeReason::OutputDeviceGone => "the output device is gone",
+        DeviceChangeReason::InputDeviceGone => "the microphone is gone",
+        DeviceChangeReason::SampleRateChanged => "the devices' sample rate changed",
+        DeviceChangeReason::DeliveryStalled => "no audio arrives from the devices",
+        DeviceChangeReason::AudioServiceRestarted => "the audio service restarted",
+        DeviceChangeReason::ChosenInputRecheck => "the chosen microphone is back",
     }
 }
 

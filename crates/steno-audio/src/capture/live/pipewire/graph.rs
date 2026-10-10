@@ -57,6 +57,9 @@ pub(crate) struct NodeEntry {
     pub description: Option<String>,
     /// `object.serial`, unique for the daemon's lifetime.
     pub serial: Option<u64>,
+    /// A Bluetooth node (`device.api` `bluez5`): linking a stream to its
+    /// input switches the headset's profile, under the output too.
+    pub bluetooth: bool,
 }
 
 /// Whether a node of `media_class` is something a microphone lane can
@@ -221,6 +224,7 @@ impl Graph {
                     .filter(|name| !name.is_empty())
                     .map(str::to_owned),
                 serial: serial(&props),
+                bluetooth: props("device.api") == Some("bluez5"),
             },
         );
         chosen
@@ -404,6 +408,13 @@ impl Graph {
     /// unplugged since it was chosen does not fail the capture.
     pub fn known_source<'a>(&self, uid: Option<&'a str>) -> Option<&'a str> {
         uid.filter(|&uid| self.mic(Some(uid)).is_ok())
+    }
+
+    /// Whether `uid` names a Bluetooth source, which a probe must not link
+    /// (`Capture::probe`).
+    pub fn is_bluetooth_source(&self, uid: &str) -> bool {
+        self.source_named(Some(uid))
+            .is_some_and(|(_, node)| node.bluetooth)
     }
 
     /// The source a capture asked for `uid` would record now: the chosen

@@ -6,12 +6,15 @@
 //! [`LaneFrameSink`] protocol the IOProc uses, in callbacks of
 //! `callback_frames`. By default it runs as fast as the rings accept (a
 //! 30 s recording takes milliseconds); `real_time` paces it at wall-clock
-//! speed for the CLI.
+//! speed for the CLI. `start` returns once the producer has offered its
+//! first callback to the sink (or stalled, reported a change or ended
+//! first), as the PipeWire backend returns after its first cycle, so the
+//! session's wait for a restarted stream's first frame finds it at once.
 //!
 //! Device changes, so the session's rebuild runs on CI exactly as in
-//! production: `change_device_after` reports `DefaultInputChanged` after
-//! exactly that many seconds of one `start` and ends the producer thread,
-//! like a microphone that moved; it fires `changes` times per backend
+//! production: `change_device_after` reports `DefaultInputChanged` (or
+//! `change_reason`) after exactly that many seconds of one `start` and
+//! ends the producer thread, like a microphone that moved; it fires `changes` times per backend
 //! instance (one by default), not once per `start`, or the rebuilt backend
 //! would report again and loop. `restarts_that_fail` makes that many
 //! `start` calls after the first fail with `InputDeviceUnavailable`, the
@@ -26,6 +29,16 @@
 //! at any rate. `seconds` counts per `start`, so a restarted backend
 //! delivers again, and `frames_delivered` sums over starts (in each
 //! start's rate).
+//!
+//! Stalls, for the session's watchdog (Rust only): `stall_after` makes the
+//! first start's producer deliver that many seconds and then nothing, as a
+//! device whose driver hangs, until [`SyntheticCaptureBackend::resume_delivery`]
+//! or the stop, and `restarts_stall_after` every restart's;
+//! `restarts_do_not_run` makes the failing restarts fail with
+//! [`CaptureError::DidNotRun`], as a graph that stays stalled. The
+//! session watches the backend only with `delivers_continuously` (which
+//! `stall_after` sets): by default a producer whose `seconds` ran out is
+//! the end of a test's audio, not a stall.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -113,6 +126,8 @@ pub struct SyntheticOptions {
     pub change_device_after: Option<f64>,
     /// How many starts report one.
     pub changes: usize,
+    /// What a change reports: `DefaultInputChanged` unless set. Rust only.
+    pub change_reason: DeviceChangeReason,
     /// How many restarts after a change fail before one succeeds.
     pub restarts_that_fail: usize,
     /// The stream the first start reports, when it should differ.
@@ -123,6 +138,17 @@ pub struct SyntheticOptions {
     pub start_panics_once_running: bool,
     /// The stream the restarted backend reports, when it should differ.
     pub stream_after_restart: Option<CaptureStream>,
+    /// What [`CaptureBackend::delivers_continuously`] answers.
+    pub delivers_continuously: bool,
+    /// Seconds into the first start after which its producer delivers
+    /// nothing until `resume_delivery` or the stop.
+    pub stall_after: Option<f64>,
+    /// The failing restarts fail with `DidNotRun`, not
+    /// `InputDeviceUnavailable`.
+    pub restarts_do_not_run: bool,
+    /// Seconds into every restart after which its producer delivers
+    /// nothing until `resume_delivery` or the stop.
+    pub restarts_stall_after: Option<f64>,
 }
 
 impl SyntheticOptions {
@@ -154,11 +180,16 @@ impl SyntheticOptions {
             real_time: false,
             change_device_after: None,
             changes: 1,
+            change_reason: DeviceChangeReason::DefaultInputChanged,
             restarts_that_fail: 0,
             stream: None,
             restart_panics: false,
             start_panics_once_running: false,
             stream_after_restart: None,
+            delivers_continuously: false,
+            stall_after: None,
+            restarts_do_not_run: false,
+            restarts_stall_after: None,
         }
     }
 
@@ -180,6 +211,14 @@ impl SyntheticOptions {
     #[must_use]
     pub fn changes(mut self, count: usize) -> Self {
         self.changes = count;
+        self
+    }
+
+    /// What a change reports, `DefaultInputChanged` by default: an
+    /// `AudioServiceRestarted`, say. Rust only.
+    #[must_use]
+    pub fn change_reason(mut self, reason: DeviceChangeReason) -> Self {
+        self.change_reason = reason;
         self
     }
 
@@ -224,6 +263,35 @@ impl SyntheticOptions {
         self.real_time = real_time;
         self
     }
+
+    /// Say the backend delivers continuously, so the session watches it.
+    #[must_use]
+    pub fn delivers_continuously(mut self, continuously: bool) -> Self {
+        self.delivers_continuously = continuously;
+        self
+    }
+
+    /// Stall the first start this many seconds in; the session watches it.
+    #[must_use]
+    pub fn stall_after(mut self, seconds: f64) -> Self {
+        self.stall_after = Some(seconds);
+        self.delivers_continuously = true;
+        self
+    }
+
+    /// Fail the failing restarts with `DidNotRun`.
+    #[must_use]
+    pub fn restarts_do_not_run(mut self) -> Self {
+        self.restarts_do_not_run = true;
+        self
+    }
+
+    /// Stall every restart this many seconds in.
+    #[must_use]
+    pub fn restarts_stall_after(mut self, seconds: f64) -> Self {
+        self.restarts_stall_after = Some(seconds);
+        self
+    }
 }
 
 /// The test double for the live backend; see the module doc.
@@ -236,6 +304,8 @@ pub struct SyntheticCaptureBackend {
     stop_requested: Arc<AtomicBool>,
     frames_delivered: Arc<AtomicUsize>,
     completion: Arc<Completion>,
+    /// Raised by `resume_delivery` for a stalled producer.
+    resumed: Arc<AtomicBool>,
 }
 
 struct State {
@@ -267,6 +337,7 @@ impl SyntheticCaptureBackend {
             stop_requested: Arc::new(AtomicBool::new(false)),
             frames_delivered: Arc::new(AtomicUsize::new(0)),
             completion: Arc::new(Completion::default()),
+            resumed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -296,10 +367,17 @@ impl SyntheticCaptureBackend {
     }
 
     /// Blocks until the producer thread of the latest `start` has delivered
-    /// `seconds` of audio, reported a device change or been stopped. Tests
-    /// wait on this instead of wall time.
+    /// `seconds` of audio, reported a device change, stalled or been
+    /// stopped. Tests wait on this instead of wall time.
     pub fn wait_until_finished(&self) {
         self.completion.wait();
+    }
+
+    /// Lets a producer stalled by `stall_after` deliver the rest of its
+    /// `seconds`; `wait_until_finished` then waits for that.
+    pub fn resume_delivery(&self) {
+        self.completion.reset();
+        self.resumed.store(true, Ordering::Release);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -322,6 +400,8 @@ impl SyntheticCaptureBackend {
 }
 
 impl CaptureBackend for SyntheticCaptureBackend {
+    // One producer loop with its knobs side by side.
+    #[allow(clippy::too_many_lines)]
     fn start(
         &self,
         lanes: &[AudioLane],
@@ -343,7 +423,11 @@ impl CaptureBackend for SyntheticCaptureBackend {
         }
         if is_restart && state.failing_restarts_remaining > 0 {
             state.failing_restarts_remaining -= 1;
-            return Err(CaptureError::InputDeviceUnavailable);
+            return Err(if self.options.restarts_do_not_run {
+                CaptureError::DidNotRun("the synthetic graph did not run".into())
+            } else {
+                CaptureError::InputDeviceUnavailable
+            });
         }
         self.stop_requested.store(false, Ordering::Release);
         self.completion.reset();
@@ -364,12 +448,26 @@ impl CaptureBackend for SyntheticCaptureBackend {
         } else {
             None
         };
+        self.resumed.store(false, Ordering::Release);
+        let mut stall_frame = if is_restart {
+            self.options.restarts_stall_after
+        } else {
+            self.options.stall_after
+        }
+        .map(|s| (s * rate) as usize);
+        let resumed = Arc::clone(&self.resumed);
         let changes_remaining = Arc::clone(&self.changes_remaining);
+        let change_reason = self.options.change_reason;
         let real_time = self.options.real_time;
         let callback_frames = self.options.callback_frames;
         let stop = Arc::clone(&self.stop_requested);
         let delivered_counter = Arc::clone(&self.frames_delivered);
         let completion = Arc::clone(&self.completion);
+        // Raised once the producer offered its first callback, or will
+        // offer none for now, so `start` returns with the sink's count
+        // moved, as the live backends do once their first callback ran.
+        let first = Arc::new(Completion::default());
+        let first_offered = Arc::clone(&first);
         let lane_count = lanes.len();
         let delivered_before = delivered_counter.load(Ordering::Relaxed);
         let thread = std::thread::Builder::new()
@@ -382,15 +480,30 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         && delivered >= change
                     {
                         changes_remaining.fetch_sub(1, Ordering::Relaxed);
-                        sink.report_device_change(DeviceChangeReason::DefaultInputChanged);
+                        // Before the report: its handler takes the lock
+                        // the session's `start` holds.
+                        first_offered.finish();
+                        sink.report_device_change(change_reason);
                         break;
                     }
-                    // The callback before a change is clipped to it, so the
-                    // change lands on the exact frame and a test can count
-                    // what each start delivered.
+                    if stall_frame == Some(delivered) {
+                        stall_frame = None;
+                        first_offered.finish();
+                        completion.finish();
+                        while !resumed.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        continue;
+                    }
+                    // The callback before a change or a stall is clipped to
+                    // it, so it lands on the exact frame and a test can
+                    // count what each start delivered.
                     let mut frames = callback_frames.min(total_frames - delivered);
                     if let Some(change) = change_frame {
                         frames = frames.min(change - delivered);
+                    }
+                    if let Some(stall) = stall_frame.filter(|stall| *stall > delivered) {
+                        frames = frames.min(stall - delivered);
                     }
                     if real_time {
                         // Positive sample counts in seconds.
@@ -400,6 +513,9 @@ impl CaptureBackend for SyntheticCaptureBackend {
                             std::thread::sleep(due - now);
                         }
                     } else {
+                        if !sink.rings().has_room(frames) {
+                            first_offered.finish();
+                        }
                         let mut spins = 0;
                         while !sink.rings().has_room(frames) && !stop.load(Ordering::Acquire) {
                             spins += 1;
@@ -417,17 +533,19 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         }
                         sink.end_callback();
                     }
+                    first_offered.finish();
                     delivered += frames;
                     delivered_counter.store(delivered_before + delivered, Ordering::Relaxed);
                 }
+                first_offered.finish();
                 completion.finish();
             })
             .expect("spawn synthetic producer");
         state.thread = Some(thread);
-        if self.options.start_panics_once_running && state.start_count == 1 {
-            drop(state);
-            panic!("the synthetic backend's start panics once it runs");
-        }
+        let panics = self.options.start_panics_once_running && state.start_count == 1;
+        drop(state);
+        first.wait();
+        assert!(!panics, "the synthetic backend's start panics once it runs");
         Ok(stream)
     }
 
@@ -437,6 +555,10 @@ impl CaptureBackend for SyntheticCaptureBackend {
             self.stop_requested.store(true, Ordering::Release);
             let _ = thread.join();
         }
+    }
+
+    fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
+        self.options.delivers_continuously
     }
 }
 

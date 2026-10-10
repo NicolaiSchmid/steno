@@ -24,7 +24,7 @@
 //! its link reported as the input gone (in person or during a call), a lost
 //! monitor link as the output gone, both links lost (the monitor's first)
 //! as the output gone, and the capture's connection closed from outside as
-//! the output gone (the input in person); a report stuck in its handler
+//! the audio service restarting; a report stuck in its handler
 //! not holding `stop()` past its 2 s bound, with no frame after it and the
 //! capture torn down once the handler returns.
 //!
@@ -45,7 +45,13 @@
 //! microphone announced later is a change, and the restart records it. A
 //! chosen source that is listed but never runs (its owner stopped) leaves
 //! the recording on the default source, at the start and after the
-//! rebuild its arrival causes.
+//! rebuild its arrival causes. A chosen source whose owner stops
+//! mid-recording is reported by the session's stall watchdog, retried
+//! while the stopped owner holds the graph up, and recorded again once it
+//! resumes. A daemon killed mid-recording and started again (the harness's
+//! `--kill-daemons` and `--start-daemons`) is reported as the audio service
+//! restarting, and the recording resumes on the new daemon with its gap
+//! covering the outage.
 //!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
@@ -65,7 +71,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -646,7 +652,15 @@ impl StalledSource {
     /// The loopback's other half, a sink.
     const SINK: &str = "steno-test-stalled-in";
 
+    /// Listed, configured and stopped.
     fn create() -> Self {
+        let source = Self::running();
+        source.stop_owner();
+        source
+    }
+
+    /// Listed and configured, its owner still running.
+    fn running() -> Self {
         let child = Command::new("pw-loopback")
             .args([
                 "--capture-props",
@@ -687,8 +701,15 @@ impl StalledSource {
             ports(Self::NAME, "output") && ports(Self::SINK, "input")
         };
         assert!(eventually(SETTLE, configured), "the stalled source's ports");
-        assert!(tool("kill", &["-STOP", &source.child.id().to_string()]));
         source
+    }
+
+    fn stop_owner(&self) {
+        assert!(tool("kill", &["-STOP", &self.child.id().to_string()]));
+    }
+
+    fn resume_owner(&self) {
+        assert!(tool("kill", &["-CONT", &self.child.id().to_string()]));
     }
 }
 
@@ -826,6 +847,300 @@ fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
     assert!(
         (wall - master).abs() < 1.0,
         "the master stays on wall time: {master:.2} s against {wall:.2} s"
+    );
+}
+
+/// The chosen source records, then its owner stops mid-recording (no
+/// notification of any kind): the session's watchdog reports the stall
+/// `STALL_TIMEOUT` later, the rebuild's restarts fail while the stopped
+/// owner holds the graph up (`DidNotRun`, the default's try included) and
+/// go on past `RESTART_ATTEMPTS`, saying so, instead of ending the
+/// recording, and once the owner resumes a later restart runs and the
+/// recording goes on, its gap filled.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
+    show_logs();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let session = session_choosing_the_stalled_source(directory.path());
+    let notices = session.notices();
+    let source = StalledSource::running();
+    session.start(Uuid::new_v4()).expect("the start");
+    assert_eq!(
+        session
+            .stream()
+            .and_then(|stream| stream.input)
+            .map(|input| input.uid),
+        Some(StalledSource::NAME.to_owned()),
+        "on the chosen source"
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    source.stop_owner();
+    let stopped = Instant::now();
+    assert_eq!(
+        notices.recv_timeout(Duration::from_secs(5)),
+        Ok(CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DeliveryStalled
+        )),
+        "the watchdog"
+    );
+    println!(
+        "stall reported {:.2} s after the stop",
+        stopped.elapsed().as_secs_f64()
+    );
+    // The restarts pass `RESTART_ATTEMPTS` while the graph does not run
+    // (each waits out the 3 s start deadline on the source and on the
+    // default); before the fix the recording ended there.
+    assert_eq!(
+        notices.recv_timeout(Duration::from_secs(40)),
+        Ok(CaptureNotice::StillRestarting {
+            attempt: CaptureSession::RESTART_ATTEMPTS
+        }),
+        "past the attempts"
+    );
+    println!(
+        "still restarting {:.2} s after the stop",
+        stopped.elapsed().as_secs_f64()
+    );
+    assert!(
+        matches!(session.state(), CaptureState::Recording { .. }),
+        "{:?}",
+        session.state()
+    );
+    source.resume_owner();
+    let resumed = notices.recv_timeout(Duration::from_secs(20));
+    println!("after the owner resumed: {resumed:?}");
+    assert!(
+        matches!(
+            resumed,
+            Ok(CaptureNotice::DeviceResumed { attempt, .. })
+                if attempt > CaptureSession::RESTART_ATTEMPTS
+        ),
+        "a restart past the attempts ran"
+    );
+    let input = session
+        .stream()
+        .and_then(|stream| stream.input)
+        .map(|input| input.uid);
+    assert!(
+        input.as_deref() == Some(StalledSource::NAME) || input.as_deref() == Some(MIC),
+        "{input:?}"
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    let result = session.stop().expect("the recording");
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 1);
+    println!(
+        "the master: {:.2} s, gap {:.2} s",
+        result.statistics.duration, result.statistics.gap_seconds
+    );
+    assert!(
+        result.statistics.duration > 2.0 + CaptureSession::MAXIMUM_GAP.as_secs_f64(),
+        "what came before the stall, the gap and after: {:.2} s",
+        result.statistics.duration
+    );
+}
+
+/// Runs the harness script with `call` (`--kill-daemons`,
+/// `--start-daemons`) on the daemon and WirePlumber this test runs under,
+/// for at most 60 s.
+fn harness(call: &str) {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/pipewire-headless.sh");
+    let status = Command::new("timeout")
+        .arg("60")
+        .arg("bash")
+        .arg(&script)
+        .arg(call)
+        .stdin(Stdio::null())
+        .status()
+        .expect("the harness script");
+    assert!(status.success(), "{call}: {status}");
+}
+
+/// The daemons the harness started at its latest start, one to three
+/// (`start_checked` in the harness starts them again while they send no
+/// metadata changes).
+fn daemon_starts() -> usize {
+    let root = std::env::var("STENO_PIPEWIRE_HEADLESS_ROOT").expect("run under the harness");
+    std::fs::read_to_string(Path::new(&root).join("daemon-starts"))
+        .expect("the harness's count of daemon starts")
+        .trim()
+        .parse()
+        .expect("a count")
+}
+
+/// The PipeWire daemon killed mid-recording, as a crash or an update of
+/// it does, and started again a few seconds later: the capture's lost
+/// connection is reported as the audio service restarting, the restarts go
+/// on while the daemon is gone, and once it is back the recording resumes
+/// on it, never `DeviceLost`, its gaps covering the outage so the master
+/// stays on wall time. The harness may start the daemons more than once
+/// before they send metadata changes, ending the ones before: a recording
+/// that resumed on such a short-lived daemon loses it too and rebuilds
+/// again, so there is at most one rebuild per daemon start, and each gap
+/// stays within `MAXIMUM_GAP`. The daemons this test starts are the ones
+/// the tests after it run on.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_daemon_killed_and_started_again_resumes_the_recording() {
+    const OUTAGE: Duration = Duration::from_secs(3);
+    // How long no notice follows the last resume.
+    const QUIET: Duration = Duration::from_secs(2);
+    show_logs();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let session = CaptureSession::with_backend(
+        CaptureConfiguration::new(CaptureMode::InPerson, directory.path()),
+        Arc::new(LiveCaptureBackend::new()),
+        None,
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        Arc::new(SystemClock::new()),
+    )
+    .expect("the session");
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).expect("the start");
+    let began = Instant::now();
+    std::thread::sleep(Duration::from_secs(2));
+    harness("--kill-daemons");
+    let killed = Instant::now();
+    assert_eq!(
+        notices.recv_timeout(Duration::from_secs(5)),
+        Ok(CaptureNotice::DeviceChanged(
+            DeviceChangeReason::AudioServiceRestarted
+        )),
+        "the lost connection"
+    );
+    std::thread::sleep(OUTAGE.saturating_sub(killed.elapsed()));
+    assert!(
+        matches!(session.state(), CaptureState::Recording { .. }),
+        "{:?}",
+        session.state()
+    );
+    harness("--start-daemons");
+    let back = killed.elapsed();
+    let starts = daemon_starts();
+    // Every notice until a resume that `QUIET` follows.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut gaps = Vec::new();
+    loop {
+        let wait = if gaps.is_empty() {
+            deadline.saturating_duration_since(Instant::now())
+        } else {
+            QUIET
+        };
+        match notices.recv_timeout(wait) {
+            Ok(CaptureNotice::DeviceResumed { gap_seconds, .. }) => {
+                println!(
+                    "resumed {:.2} s after the kill with a {gap_seconds:.2} s gap",
+                    killed.elapsed().as_secs_f64()
+                );
+                gaps.push(gap_seconds);
+            }
+            Ok(notice) => println!(
+                "{notice:?} {:.2} s after the kill",
+                killed.elapsed().as_secs_f64()
+            ),
+            Err(RecvTimeoutError::Timeout) if !gaps.is_empty() => break,
+            Err(error) => panic!("no resume once the daemon is back: {error:?}"),
+        }
+        assert!(Instant::now() < deadline, "the notices end: {gaps:?}");
+    }
+    println!(
+        "daemon back {:.2} s after the kill, {starts} daemon starts, gaps {gaps:?}",
+        back.as_secs_f64()
+    );
+    // The master ends somewhere within the stop, which a loaded host can
+    // stretch to half a second.
+    let stopping = began.elapsed().as_secs_f64();
+    let result = session.stop().expect("the recording");
+    let wall = began.elapsed().as_secs_f64();
+    let statistics = &result.statistics;
+    println!(
+        "the master: {:.3} s against {stopping:.3} to {wall:.3} s of wall time, gap {:.3} s",
+        statistics.duration, statistics.gap_seconds
+    );
+    assert!(!statistics.ended_on_device_loss);
+    assert!(
+        (1..=starts).contains(&statistics.device_changes),
+        "at most one rebuild per daemon start: {} for {starts}",
+        statistics.device_changes
+    );
+    assert!(
+        gaps.iter()
+            .all(|gap| *gap <= CaptureSession::MAXIMUM_GAP.as_secs_f64()),
+        "each gap within MAXIMUM_GAP: {gaps:?}"
+    );
+    assert!(
+        gaps.iter().sum::<f64>() >= OUTAGE.as_secs_f64(),
+        "the gaps cover the outage: {gaps:?}"
+    );
+    assert!(
+        statistics.duration > stopping - 0.5 && statistics.duration < wall + 0.5,
+        "the master on wall time: {:.3} s against {stopping:.3} to {wall:.3} s",
+        statistics.duration
+    );
+}
+
+/// Asking whether a chosen source runs costs the recording nothing,
+/// whether it runs or not: while a recording on the default source goes
+/// on, probes of a source whose owner is stopped answer `false`, one once
+/// the owner resumed `true`, and the recording got no report, no gap and
+/// no dropped frame, its master within 0.1 s of wall time. The probe's own
+/// stream is not the recording's, so a stopped owner that wedges what it
+/// is linked to wedges the probe alone.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn probing_a_chosen_source_costs_the_recording_nothing() {
+    show_logs();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let backend = Arc::new(LiveCaptureBackend::new());
+    assert!(backend.probes_inputs());
+    let session = CaptureSession::with_backend(
+        CaptureConfiguration::new(CaptureMode::InPerson, directory.path()),
+        backend.clone(),
+        None,
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        Arc::new(SystemClock::new()),
+    )
+    .expect("the session");
+    let stalled = StalledSource::create();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).expect("the start");
+    let started = Instant::now();
+    for ask in 1..=3 {
+        let asked = Instant::now();
+        assert!(
+            !backend.probe_input(StalledSource::NAME),
+            "ask {ask}: its owner is stopped"
+        );
+        println!(
+            "ask {ask} answered after {:.2} s",
+            asked.elapsed().as_secs_f64()
+        );
+    }
+    assert!(!backend.probe_input("steno-test-no-such-source"));
+    stalled.resume_owner();
+    assert!(
+        eventually(Duration::from_secs(10), || backend
+            .probe_input(StalledSource::NAME)),
+        "once its owner runs"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let wall = started.elapsed().as_secs_f64();
+    let result = session.stop().expect("the recording");
+    assert_eq!(notices.try_recv().ok(), None, "no device change, no stall");
+    let statistics = &result.statistics;
+    assert_eq!(statistics.device_changes, 0);
+    assert_eq!(statistics.gap_seconds, 0.0);
+    assert!(
+        statistics.dropped_frames.is_empty(),
+        "{:?}",
+        statistics.dropped_frames
+    );
+    let master = statistics.duration;
+    println!("the master: {master:.3} s against {wall:.3} s of wall time");
+    assert!(
+        (wall - master).abs() < 0.1,
+        "every frame while the probes ran: {master:.3} s against {wall:.3} s"
     );
 }
 
@@ -1261,24 +1576,19 @@ fn a_monitor_then_a_microphone_link_removed_are_reported_as_the_output_gone() {
     );
 }
 
+/// The capture's connection closed from outside, in a call and in
+/// person, is the daemon's change, not a device's: the session restarts
+/// until a start runs, as after a daemon that went away.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_connection_closed_from_outside_during_a_call_is_reported_as_the_output_gone() {
-    assert_reported_after(
-        &CALL,
-        destroy_own_client,
-        DeviceChangeReason::OutputDeviceGone,
-    );
-}
-
-#[test]
-#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_connection_closed_from_outside_in_person_is_reported_as_the_input_gone() {
-    assert_reported_after(
-        &[AudioLane::Mixed],
-        destroy_own_client,
-        DeviceChangeReason::InputDeviceGone,
-    );
+fn a_connection_closed_from_outside_is_reported_as_the_audio_service_restarting() {
+    for lanes in [&CALL[..], &[AudioLane::Mixed]] {
+        assert_reported_after(
+            lanes,
+            destroy_own_client,
+            DeviceChangeReason::AudioServiceRestarted,
+        );
+    }
 }
 
 /// The `steno-capture` nodes in the graph.

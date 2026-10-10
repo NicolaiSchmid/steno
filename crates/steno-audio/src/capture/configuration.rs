@@ -140,9 +140,20 @@ pub enum CaptureError {
     /// audio before the start's deadline (its description). On Linux,
     /// PipeWire ran no first cycle, as for a source whose owner stalls, a
     /// Bluetooth headset still switching profile, or a sink whose monitor
-    /// does not run yet; which node held the graph up is not known. The
-    /// session answers it on a chosen microphone by trying the default
-    /// input at once. Rust only; reads as [`Self::BackendFailed`].
+    /// does not run yet; which node held the graph up is not known. Also
+    /// a daemon that stopped answering the start, or a start thread that
+    /// did not answer, while the connection held (a node whose owner
+    /// stopped before the session manager configured it holds both up).
+    /// The session gives it too, on every platform, for a rebuild's
+    /// restart whose stream offered no frame within
+    /// `CaptureSession::STALL_TIMEOUT` over a watched backend. The session
+    /// answers it on a chosen microphone by trying the default input at
+    /// once, except where a stall cannot be the microphone's
+    /// (`CaptureBackend::stall_may_be_the_microphone`: a Mac call capture
+    /// keeps the chosen one), and a rebuild's restarts that keep failing
+    /// with it go on, backing off up to
+    /// `CaptureSession::RESTART_BACKOFF_LONGEST`, until one runs. Rust
+    /// only; reads as [`Self::BackendFailed`].
     #[error("capture backend failed: {0}")]
     DidNotRun(String),
     /// `start` while not idle, `stop` while not recording.
@@ -261,7 +272,8 @@ pub struct LaneLevels {
 }
 
 /// What the backend's listener found different after a notification burst
-/// settled. The synthetic backend reports `DefaultInputChanged`.
+/// settled. The synthetic backend reports `DefaultInputChanged` unless told
+/// otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceChangeReason {
     /// The default output device moved; the system lane follows it once
@@ -280,23 +292,70 @@ pub enum DeviceChangeReason {
     /// macOS only: PipeWire's adapter and the WASAPI engine resample, so the
     /// Linux and Windows backends never report it.
     SampleRateChanged,
+    /// The capture stopped delivering: no frame reached the sink for
+    /// longer than `CaptureSession::STALL_TIMEOUT` from its start or its
+    /// last frame (a device whose driver or owner hangs, a graph that
+    /// stopped running, a Mac call capture whose silent output did not
+    /// start). The session's watchdog reports it, over a watched backend
+    /// (`CaptureBackend::delivers_continuously`), and its rebuild's
+    /// restarts go on until one runs, whatever they fail with. Rust only.
+    DeliveryStalled,
+    /// The audio service restarted or went away: `coreaudiod` on macOS,
+    /// taking the capture's aggregate device with it, or on Linux the
+    /// connection to the PipeWire daemon lost (a daemon killed or
+    /// restarted). The rebuild's restarts go on until one runs, so the
+    /// recording resumes once the service is back. Not on Windows. Rust
+    /// only.
+    AudioServiceRestarted,
+    /// The chosen microphone, which did not open and which the session
+    /// replaced with the default input, delivered to a probe on a stream
+    /// of its own (`CaptureSession::CHOSEN_INPUT_RECHECK`), so the rebuild
+    /// returns to it. Linux only (`CaptureBackend::probes_inputs`). Rust
+    /// only.
+    ChosenInputRecheck,
 }
 
 /// What `CaptureSession::notices` carries while the state stays
-/// `Recording`: the rebuild beginning and the new backend running. Device
-/// loss is not a notice; `states` carries `Failed(DeviceLost)`.
+/// `Recording`: the rebuild beginning, its restarts going on past
+/// `CaptureSession::RESTART_ATTEMPTS`, the new backend running, and audio
+/// arriving again after those restarts. Device loss is not a notice;
+/// `states` carries `Failed(DeviceLost)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CaptureNotice {
     /// A change was reported; the rebuild begins.
     DeviceChanged(DeviceChangeReason),
-    /// `attempt` is the restart that succeeded (1 when the first did);
-    /// `gap_seconds` the silence written for this gap.
+    /// The first `attempt` restarts (`RESTART_ATTEMPTS`) failed in a way
+    /// that may pass (a graph that does not run, a restarted stream that
+    /// delivered nothing within `CaptureSession::STALL_TIMEOUT`, any
+    /// failure after a stall or a restart of the audio service), so the
+    /// session goes on restarting until one runs or the stop; nothing is
+    /// recorded meanwhile, and the warning stands until `Delivering`. The
+    /// restarts count across a streak of rebuilds, each resuming on a
+    /// stream that delivers a moment and stalls again soon, and the warning
+    /// stands through their resumes. Sent once until `Delivering`, then
+    /// again when the restarts go on once more; the stream is still the one
+    /// that stopped. Not sent for a stream whose stall comes 10 s or more
+    /// after each resume: every such stall begins a new streak, which
+    /// resumes on its first restart, and only the recorder's note after the
+    /// stop counts the silence their gaps took. Rust only.
+    StillRestarting {
+        /// The restarts so far.
+        attempt: usize,
+    },
+    /// `attempt` is the restart that succeeded, counted from the first of
+    /// its streak (1 when the first did); `gap_seconds` the silence written
+    /// for this gap. A stream that resumes may stall again soon, so this
+    /// does not end the warning; `Delivering` does.
     DeviceResumed {
         /// Restarts it took.
         attempt: usize,
         /// Silence written for the gap, seconds.
         gap_seconds: f64,
     },
+    /// Audio is back after `StillRestarting`: the stream a rebuild resumed
+    /// on has delivered for 10 s (with that `DeviceResumed` over a backend
+    /// that is not watched), so the warning ends. Rust only.
+    Delivering,
 }
 
 /// What `stop()` reports beside the asset.
