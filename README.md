@@ -352,4 +352,6 @@ that is acceptable for a personal open-source project.
 
 ## License
 
-MIT.
+MIT, see [`LICENSE`](LICENSE), except where a directory or file carries its own
+licence: `crates/steno-audio/vendor/speexdsp` (BSD) and
+`spikes/onnx-speech/export/export_parakeet_v3.py` (Apache-2.0).

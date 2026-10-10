@@ -1,0 +1,51 @@
+# The AUR package (packaging/aur): builds it from the release .deb in an
+# Arch Linux container, verifies the .deb against the release key, installs
+# it and checks the files (packaging/check-aur.sh). It also runs when the
+# drop-ins in apps/desktop/src-tauri/linux, which the check compares with,
+# the release key, LICENSE or SpeexDSP's COPYING change, and weekly, so a
+# package that Arch renames or splits fails here before it fails for users.
+name: AUR CI
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - 'apps/desktop/src-tauri/linux/autostart-service-stop-timeout.conf'
+      - 'apps/desktop/src-tauri/linux/gnome-scope-stop-timeout.conf'
+      - 'apps/desktop/release-signing-key.asc'
+      - 'LICENSE'
+      - 'crates/steno-audio/vendor/speexdsp/COPYING'
+      - '.github/workflows/aur-ci.yml'
+  push:
+    branches: ['main']
+    paths:
+      - 'packaging/**'
+      - 'apps/desktop/src-tauri/linux/autostart-service-stop-timeout.conf'
+      - 'apps/desktop/src-tauri/linux/gnome-scope-stop-timeout.conf'
+      - 'apps/desktop/release-signing-key.asc'
+      - 'LICENSE'
+      - 'crates/steno-audio/vendor/speexdsp/COPYING'
+      - '.github/workflows/aur-ci.yml'
+  schedule:
+    - cron: '17 6 * * 1'
+
+concurrency:
+  group: aur-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  aur:
+    name: AUR package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Unpinned on purpose: the package targets current Arch, and
+    # check-aur.sh runs pacman -Syu anyway.
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build, install and check the package
+        run: bash packaging/check-aur.sh

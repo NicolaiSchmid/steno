@@ -1128,12 +1128,13 @@ verified: a signature on a build that is never published stays on the
 runner.
 
 Before the key expires, extend it where the secret key is kept, then
-commit the new public key and the new date in the block above, and
-replace the secret:
+commit the new public key (also as the AUR package's copy) and the new
+date in the block above, and replace the secret:
 
 ```sh
 gpg --quick-set-expire 048B527950E4F609B90E63495F8810A6E6D4DB46 3y
 gpg --armor --export 048B527950E4F609B90E63495F8810A6E6D4DB46 > apps/desktop/release-signing-key.asc
+cp apps/desktop/release-signing-key.asc packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc
 gpg --armor --export-secret-keys 048B527950E4F609B90E63495F8810A6E6D4DB46 | gh secret set LINUX_GPG_PRIVATE_KEY
 ```
 
