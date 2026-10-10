@@ -7,11 +7,19 @@
 //! Settings, Launch at login, Check for Updates, Quit (Exit on Windows).
 //! Only the Mac's menu shows shortcut hints (`shortcut`).
 //!
+//! Every action is in the menu (`MENU`), and a click on the icon does
+//! nothing the menu does not: macOS and Windows open the menu on a left
+//! click as on a right one, and on Linux the host decides what a left
+//! click does. KDE Plasma and GNOME's `AppIndicator` extension open the
+//! menu; a host that sends `Activate` instead, as Omarchy's bar may, gets
+//! an error back (libayatana-appindicator does not implement it), and
+//! there only a right click opens the menu.
+//!
 //! The tray also keeps the process alive: with it, closing the main window
 //! hides it and the process stays, as the Swift menu bar app stays; without
-//! a tray the window closes and the process ends with it (`main.rs`). On
-//! Linux a tray that was built still counts as none while nothing shows
-//! its icon (`has_host`).
+//! a tray the window closes and the process quits with it, saving a
+//! recording in progress first (`main.rs`). On Linux a tray that was built
+//! still counts as none while nothing shows its icon (`has_host`).
 //!
 //! The items are `actions::MenuAction`s and their handler is
 //! `actions::on_menu_event`, registered once by `main.rs`: Tauri hands
@@ -21,9 +29,6 @@
 //!
 //! Swift: `MenuBarView.swift`, `MenuBarLabel` and `MenuBarLabelPresentation`
 //! in `StenoApp.swift` and `FloatingContent.swift`.
-
-#[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{
     AppHandle, Manager, Wry,
@@ -88,17 +93,43 @@ pub struct Tray {
 /// menu shows one as the Swift menus did, while Windows' notification
 /// area menu and a Linux status notifier menu show none, and a key
 /// pressed there with the menu closed does nothing.
-const fn shortcut(platform: Platform, mac: &'static str) -> Option<&'static str> {
-    match platform {
-        Platform::Macos => Some(mac),
-        Platform::Windows | Platform::Linux => None,
+const fn shortcut(platform: Platform, action: MenuAction) -> Option<&'static str> {
+    match (platform, action) {
+        (Platform::Macos, MenuAction::Record) => Some("Cmd+Shift+R"),
+        (Platform::Macos, MenuAction::OpenSettings) => Some("Cmd+,"),
+        (Platform::Macos, MenuAction::Quit) => Some("Cmd+Q"),
+        _ => None,
     }
 }
+
+/// One row of the tray's menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Row {
+    Item(MenuAction),
+    Separator,
+}
+
+/// The tray's menu, top to bottom: every `MenuAction` once, so nothing
+/// waits on a click the host may not pass on. Quit is the shell's own
+/// item, not muda's predefined Quit, which ends the process without
+/// `ExitRequested`, so the shell could not shut down cleanly.
+const MENU: [Row; 10] = [
+    Row::Item(MenuAction::Record),
+    Row::Item(MenuAction::RecordInPerson),
+    Row::Separator,
+    Row::Item(MenuAction::OpenMain),
+    Row::Item(MenuAction::OpenSettings),
+    Row::Separator,
+    Row::Item(MenuAction::LaunchAtLogin),
+    Row::Item(MenuAction::CheckForUpdates),
+    Row::Separator,
+    Row::Item(MenuAction::Quit),
+];
 
 /// Builds the menu and the icon and manages `Tray`.
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let platform = Platform::CURRENT;
-    let record = MenuAction::Record.item(app, shortcut(platform, "Cmd+Shift+R"))?;
+    let record = MenuAction::Record.item(app, shortcut(platform, MenuAction::Record))?;
     let in_person = MenuAction::RecordInPerson.item(app, None)?;
     // A login item the system manages shows checked and cannot be
     // switched (`autostart`).
@@ -111,23 +142,16 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         login_item.is_on(),
         None::<&str>,
     )?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &record,
-            &in_person,
-            &PredefinedMenuItem::separator(app)?,
-            &MenuAction::OpenMain.item(app, None)?,
-            &MenuAction::OpenSettings.item(app, shortcut(platform, "Cmd+,"))?,
-            &PredefinedMenuItem::separator(app)?,
-            &launch_at_login,
-            &MenuAction::CheckForUpdates.item(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
-            // Not muda's predefined Quit: that one ends the process without
-            // `ExitRequested`, so the shell could not shut down cleanly.
-            &MenuAction::Quit.item(app, shortcut(platform, "Cmd+Q"))?,
-        ],
-    )?;
+    let menu = Menu::new(app)?;
+    for row in MENU {
+        match row {
+            Row::Separator => menu.append(&PredefinedMenuItem::separator(app)?)?,
+            Row::Item(MenuAction::Record) => menu.append(&record)?,
+            Row::Item(MenuAction::RecordInPerson) => menu.append(&in_person)?,
+            Row::Item(MenuAction::LaunchAtLogin) => menu.append(&launch_at_login)?,
+            Row::Item(action) => menu.append(&action.item(app, shortcut(platform, action))?)?,
+        }
+    }
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(true)
@@ -177,97 +201,20 @@ pub fn note_login_item(app: &AppHandle) {
     }
 }
 
-/// The name a status notifier host's watcher owns on the session bus:
-/// KDE's, the GNOME `AppIndicator` extension's and most desktop panels'.
-#[cfg(target_os = "linux")]
-const WATCHER: &str = "org.kde.StatusNotifierWatcher";
-
-/// Whether `WATCHER` has been seen on the bus in this run (`has_host`).
-#[cfg(target_os = "linux")]
-static WATCHER_SEEN: AtomicBool = AtomicBool::new(false);
-
 /// Whether something on the desktop shows the tray's icon. macOS and
-/// Windows always do. On Linux a status notifier host does, found through
-/// its watcher's name on the session bus; GNOME without the
-/// `AppIndicator` extension, a bare X server or no session bus has none,
-/// and the icon is built but never seen. An `XEmbed`-only tray is not
-/// asked for: the shell then counts no tray, the safe side (closing main
-/// ends the app instead of leaving it running unseen). Asked at each close
-/// until the watcher is seen, so a tray host that starts after the shell
-/// (a launch at login) counts; once seen it counts for the rest of the
-/// run, so one failed or slow bus call does not turn a close into a quit.
-/// The call itself waits half a second at most; the first connection to
-/// the bus has no timeout of its own.
-///
-/// Swift: none needed; an `NSStatusItem` always shows in the menu bar.
+/// Windows always do. On Linux a status notifier host does, as the
+/// follower in `tray_host` last read it; until it has, and with no session
+/// bus, none does, the safe side: closing main then ends the app instead
+/// of leaving it running unseen. Reading it asks nothing of the bus.
 pub fn has_host() -> bool {
     #[cfg(target_os = "linux")]
     {
-        remembered(&WATCHER_SEEN, || {
-            hosted(
-                std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
-                watcher_owned,
-            )
-        })
+        crate::tray_host::shown()
     }
     #[cfg(not(target_os = "linux"))]
     {
         true
     }
-}
-
-/// `true` once `ask` has said `true`: `seen` keeps it, and `ask` is not
-/// asked again.
-#[cfg(target_os = "linux")]
-fn remembered(seen: &AtomicBool, ask: impl FnOnce() -> bool) -> bool {
-    if seen.load(Ordering::Relaxed) {
-        return true;
-    }
-    let found = ask();
-    if found {
-        seen.store(true, Ordering::Relaxed);
-    }
-    found
-}
-
-/// `has_host` on Linux: with a session bus address, whether `owned` says
-/// the watcher's name has an owner. No address counts as no bus; `GLib`
-/// would otherwise look for one at `$XDG_RUNTIME_DIR/bus` and then try to
-/// launch one.
-#[cfg(target_os = "linux")]
-fn hosted(bus_address: Option<&std::ffi::OsStr>, owned: impl FnOnce() -> bool) -> bool {
-    bus_address.is_some_and(|address| !address.is_empty()) && owned()
-}
-
-/// One `NameHasOwner` call for `WATCHER` on the session bus.
-#[cfg(target_os = "linux")]
-fn watcher_owned() -> bool {
-    use gio::{
-        BusType, Cancellable, DBusCallFlags,
-        glib::{ToVariant, VariantTy},
-    };
-    let Ok(bus) = gio::bus_get_sync(BusType::Session, Cancellable::NONE) else {
-        return false;
-    };
-    bus.call_sync(
-        Some("org.freedesktop.DBus"),
-        "/org/freedesktop/DBus",
-        "org.freedesktop.DBus",
-        "NameHasOwner",
-        Some(&(WATCHER,).to_variant()),
-        VariantTy::new("(b)").ok(),
-        DBusCallFlags::NONE,
-        500,
-        Cancellable::NONE,
-    )
-    .is_ok_and(|reply| owner_in(&reply))
-}
-
-/// Whether a `NameHasOwner` reply says the name has an owner: a `(b)`
-/// that is `true`; anything else is no.
-#[cfg(target_os = "linux")]
-fn owner_in(reply: &gio::glib::Variant) -> bool {
-    reply.get::<(bool,)>().is_some_and(|(owned,)| owned)
 }
 
 #[cfg(test)]
@@ -276,9 +223,36 @@ mod tests {
 
     #[test]
     fn only_the_mac_menu_shows_shortcuts() {
-        assert_eq!(shortcut(Platform::Macos, "Cmd+Q"), Some("Cmd+Q"));
-        assert_eq!(shortcut(Platform::Windows, "Cmd+Q"), None);
-        assert_eq!(shortcut(Platform::Linux, "Cmd+Q"), None);
+        assert_eq!(shortcut(Platform::Macos, MenuAction::Quit), Some("Cmd+Q"));
+        assert_eq!(
+            shortcut(Platform::Macos, MenuAction::Record),
+            Some("Cmd+Shift+R")
+        );
+        assert_eq!(
+            shortcut(Platform::Macos, MenuAction::OpenSettings),
+            Some("Cmd+,")
+        );
+        assert_eq!(shortcut(Platform::Macos, MenuAction::OpenMain), None);
+        for &action in MenuAction::ALL {
+            assert_eq!(shortcut(Platform::Windows, action), None);
+            assert_eq!(shortcut(Platform::Linux, action), None);
+        }
+    }
+
+    /// Every action is in the tray's menu once, so a host that passes no
+    /// left click on still reaches each; separators only between items.
+    #[test]
+    fn the_menu_holds_every_action_once() {
+        for &action in MenuAction::ALL {
+            let rows = MENU.iter().filter(|&&row| row == Row::Item(action));
+            assert_eq!(rows.count(), 1, "{action}");
+        }
+        assert_ne!(MENU.first(), Some(&Row::Separator));
+        assert_ne!(MENU.last(), Some(&Row::Separator));
+        assert!(
+            MENU.windows(2)
+                .all(|pair| pair != [Row::Separator, Row::Separator])
+        );
     }
 
     #[test]
@@ -310,43 +284,6 @@ mod tests {
         assert_eq!(tooltip(RecordingState::Idle), "Steno");
         assert_eq!(tooltip(RecordingState::Starting), "Steno, recording");
         assert_eq!(tooltip(RecordingState::Recording), "Steno, recording");
-    }
-
-    /// No session bus address is no host, and the bus is not asked.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_tray_host_needs_a_session_bus_and_the_watcher() {
-        use std::ffi::OsStr;
-        let bus = Some(OsStr::new("unix:path=/run/user/1000/bus"));
-        assert!(hosted(bus, || true));
-        assert!(!hosted(bus, || false));
-        for none in [None, Some(OsStr::new(""))] {
-            assert!(!hosted(none, || panic!("asked without a bus")));
-        }
-    }
-
-    /// Once the watcher has been seen it counts without asking; a no is
-    /// asked again next time.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_watcher_once_seen_is_kept() {
-        let seen = AtomicBool::new(false);
-        assert!(!remembered(&seen, || false));
-        assert!(!seen.load(Ordering::Relaxed));
-        assert!(remembered(&seen, || true));
-        assert!(remembered(&seen, || panic!("asked again")));
-    }
-
-    /// Only a `(b)` that is `true` says the name has an owner.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn the_reply_names_an_owner_only_when_it_says_true() {
-        use gio::glib::ToVariant;
-        assert!(owner_in(&(true,).to_variant()));
-        assert!(!owner_in(&(false,).to_variant()));
-        assert!(!owner_in(&true.to_variant()));
-        assert!(!owner_in(&("true",).to_variant()));
-        assert!(!owner_in(&().to_variant()));
     }
 
     #[test]

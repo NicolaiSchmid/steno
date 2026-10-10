@@ -453,7 +453,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 |---|---|---|
 | X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` (#272: an app started inside another program's service of the user manager, as a key binding without `uwsm-app` leaves it in `wayland-wm@hyprland.desktop.service`, whose stop ended it unsaved 0.26 s in, moves at launch into `app-steno\x2ddesktop-<pid>.scope` in `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and `After=graphical-session.target`; at login the start waits for the target and is never called off, and a session that ends before then leaves the app in the compositor's unit; from an AppImage every mount server, found by its FUSE connection and keepalive pipe however the image was started, moves into a scope of its own in `app.slice` wherever it runs (a launcher's unit too, where GNOME leaves it), also when the app stays, and stays beside the app in a login's `session-<n>.scope`; each move is written to the journal and a failure logged at `warn`. In a systemd 255 container with uwsm 0.26.4's slice and shutdown target and a stand-in compositor's unit, every case saved `queued`; the README's Hyprland section has the table. logind's delay is #220's, tested against a fake logind) | Omarchy, NixOS with Hyprland; the AppImage on every systemd desktop |
 | X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) (#267: a list naming `x11` or `*`, or a lone `*`, counts as unset, any other value still wins; the titles on Linux only, macOS and Windows keep "Steno"; the rules are `apps/desktop/src-tauri/linux/hyprland-steno.lua`, one `hl.window_rule` on class `[Ss]teno-desktop` and title `Steno (bubble\|prompt)` that also turns off focus on hover, the border, shadow and blur, checked by Hyprland 0.56.2's `--verify-config`; the `.deb` installs it as `/usr/share/steno-desktop/hyprland-steno.lua` (`check-bundle.sh` checks it), and so does the AUR package that repackages it (#265) from the next release, loaded with `dofile`; the Linux smoke finds both panels by their titles) | Omarchy, NixOS with Hyprland |
-| X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves | all |
+| X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves (#275: the menu holds every action once, which a test checks, and a click does nothing the menu does not; a thread follows `org.kde.StatusNotifierWatcher` on the session bus, its owner and its `IsStatusNotifierHostRegistered`, at launch and at every change of either, so a watcher with no host counts as none and a host that goes turns the next close into a quit; with no host the close quits through Quit's path, which stops and saves a recording first and logs the quit and the shutdown's duration; a watcher that says it lacks the property counts as a host, one that serves no watcher object yet or a failed reading as none, read again 10 s later, three times at most before the next change; a recording's bubble covers a main window hidden when the host went, and starting Steno again brings it forward; `close-without-tray-linux.sh` proves it in CI on a bus with no watcher, requiring the follower's `no tray host shows the tray icon`, and beside a stand-in host, where the tray's menu holds every action, the close hides the window and the menu's Quit saves; macOS and Windows keep their tray and close as before) | all |
 | X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port | Omarchy, NixOS |
 | X5 | Packaged installs: `STENO_DISTRIBUTION=aur` or `=nix`, read at build time (Nix) or from the environment (the AUR wrapper), turns the in-app updater off and Settings says updates come from the package manager; the autostart entry names a stable path (`/usr/bin/steno-desktop`, or the Nix profile's), never `current_exe()` or a store path; with `STENO_LOGIN_ITEM=managed`, which the NixOS module sets, the app leaves launch at login to the system (#261: the environment wins over the build's value; the path is `$APPIMAGE`, else `STENO_EXEC_PATH` from a wrapper whose binary lies elsewhere, as X6's, else the first of `/usr/bin`, `/usr/local/bin` and the Nix profiles that resolves into the running binary's directory, else no entry, and turning Launch at login on fails with "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager." and is not saved; managed, the app touches no entry except one an earlier build wrote, whose `Exec` starts a program in `/nix/store` or names a profile path: it goes at launch, or, when the app runs as the autostart unit made from it, after the save at Steno's first exit, so a reload never leaves the recorder in a unit no logout stops) | Omarchy, NixOS |
 | X6 | The AUR package `steno-desktop-bin` | Omarchy |
@@ -1318,7 +1318,8 @@ an install needs a newer build installed by hand (Rollback).
     - the Linux known issues: the KDE Plasma logout until Plasma calls the
       portal monitor, the whole default sink as the system lane, the WebKitGTK
       descriptor leak on very long sessions, no tray on GNOME without the
-      AppIndicator extension, and a Steno started outside `uwsm` on Hyprland.
+      AppIndicator extension (closing the main window then quits Steno and
+      saves a recording), and a Steno started outside `uwsm` on Hyprland.
   - The Windows and OpenPGP paragraphs stay.
 
 ### Lanes and "latest"
@@ -1803,6 +1804,22 @@ interrupted" after one. On the GNOME machine,
      not stop", and no warning, and `systemctl --user list-units 'app-steno*'`
      lists that scope. Then log out with the system menu, log back in and
      check the meeting.
+  9. **GNOME, the tray (X3).** With the AppIndicator extension on (on by
+     default on Ubuntu; on Debian install
+     `gnome-shell-extension-appindicator`, log out and in, then
+     `gnome-extensions enable <id>`, the id from `gnome-extensions list |
+     grep -i appindicator`, or turn it on in the Extensions app): the icon
+     is in the top bar, a left click and a right click each open the menu,
+     and every entry works; closing the main window hides it, and Open
+     Steno brings it back. Then turn the extension off (`gnome-extensions
+     disable <id>`) while Steno runs: `journalctl --user -b 0 --since
+     '<disable time>' | grep -i steno` shows `no tray host shows the tray
+     icon`. Start a recording and close the main window: Steno quits
+     within 10 s, `q` shows the meeting with its full length and `quit`
+     as `endReason`, and `journalctl --user -b 0 --since '<close time>' |
+     grep -i steno` shows `the main window closed with no tray` before
+     `the shutdown ended`. Turn the extension on again and start Steno:
+     the journal shows `a tray host shows the tray icon`.
 - **Omarchy** (Omarchy 4, Arch with Hyprland on Wayland).
   1. Before step 0: import the release key from a checkout (`gpg --import
      packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`), so
@@ -1821,7 +1838,8 @@ interrupted" after one. On the GNOME machine,
   2. Start Steno from the Omarchy launcher. `cat /proc/$(pidof -s
      steno-desktop)/cgroup` names an `app-…scope` (not Hyprland's unit). The
      tray icon is in the bar's drawer; a right click opens the menu, and every
-     entry works (X3). While a meeting processes, the sidecar's cgroup is a
+     entry works; closing the main window hides it, and Open Steno brings it
+     back (X3). While a meeting processes, the sidecar's cgroup is a
      scope of its own (P6).
   3. Start a recording: `hyprctl clients -j | jq '.[]|select(.class |
      test("steno-desktop"; "i"))|{title,xwayland,floating,pinned}'` shows "Steno
@@ -1873,8 +1891,10 @@ interrupted" after one. On the GNOME machine,
      (`github:NicolaiSchmid/steno/v0.11.0-rc.<N-1>`), with
      `steno.nixosModules.default` in the system's modules and
      `programs.steno.enable = true`.
-  2. Steps 2 to 4 and 6 of the GNOME gate, with the phone through the firewall
-     the module opens (by hand until X4). Under the module, step 5's cgroup check, run
+  2. Steps 2 to 4, 6 and 9 of the GNOME gate, with the phone through the
+     firewall the module opens (by hand until X4), and step 9's extension
+     from `gnomeExtensions.appindicator` in `environment.systemPackages`,
+     turned on in GNOME's Extensions app. Under the module, step 5's cgroup check, run
      as `cg`, prints one line, ending in `steno.service`, and
      `systemctl --user show steno.service -p TimeoutStopUSec` is 20 s.
   3. Open Settings and choose a folder: the file chooser opens (the wrapper's

@@ -294,12 +294,12 @@ fn runs_in(cgroup: &str, unit: &str) -> bool {
 /// (`systemctl --user daemon-reload`), on a thread of its own so a slow
 /// bus holds nothing, then settles the owed reload at `owed` (`settle`).
 fn reload_user_manager(owed: Option<PathBuf>) {
-    crate::session_end::spawn_client(
+    crate::dbus::spawn_client(
         "steno-reload",
         "a stop timeout drop-in may wait for the next login",
         move || {
             let reloaded = Builder::session()
-                .and_then(crate::session_end::patient)
+                .and_then(crate::dbus::patient)
                 .and_then(|session| reload(&session));
             settle(owed.as_deref(), &reloaded);
             Ok(())
@@ -928,7 +928,7 @@ esac
     /// The reload is one `Reload` on systemd's manager.
     #[test]
     fn the_reload_calls_the_managers_reload() {
-        let Some(daemon) = crate::session_end::tests::Daemon::start() else {
+        let Some(daemon) = crate::dbus::tests::Daemon::start() else {
             return;
         };
         let client = daemon.connect();

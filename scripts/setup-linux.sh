@@ -31,6 +31,9 @@ packages=(
   xvfb
   imagemagick
   xdotool
+  # The close check's stand-in tray watcher
+  # (apps/desktop/scripts/tray-watcher-linux.py).
+  python3-gi
   # steno-audio's PipeWire backend: headers and bindgen's libclang.
   libclang-dev
   libpipewire-0.3-dev
