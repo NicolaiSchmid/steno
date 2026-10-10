@@ -1098,10 +1098,12 @@ The table above names each package and its owner. Their tests:
   which `vercmp` ranks below `0.11.0`).
   - As built (`packaging/aur/`, #265): pinned to `0.1.0rc3` as a build
     vehicle until a release contains #227 and #261; the first AUR push is a
-    release with both, so #265 merges after #227 (#261 is on main). Two
-    drop-ins (the autostart service's and GNOME's scope's), copied from #227
-    until the `.deb` installs them; `package()` keeps the `.deb`'s copy when
-    it has one.
+    release with both (#227 and #261 are on main). Two drop-ins (the
+    autostart service's and GNOME's scope's), byte for byte #227's
+    `apps/desktop/src-tauri/linux/` files; the copies stay until the pinned
+    `.deb` ships the drop-ins itself, and `package()` keeps the `.deb`'s
+    file when it has one. `check-aur.sh` requires both in the package
+    either way, identical to `linux/`'s and setting `TimeoutStopSec=20s`.
     No install script: Arch's `30-systemd-daemon-reload-user.hook` reloads
     the user managers. X4's `ufw` profile and X2's window rules are `TODO`
     lines in `package()`, so X6 lands before X2 and X4 and gains them in their
