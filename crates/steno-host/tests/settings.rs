@@ -236,20 +236,16 @@ fn a_login_item_removed_after_the_first_launch_is_not_added_back() {
 }
 
 /// With the setting off nothing registers and the launch is not counted.
-/// A login item already enabled or awaiting approval, and one the system
-/// cannot find, is left as it is and the launch counts, as Swift registers
-/// only a `notRegistered` one. Swift: `registerLoginItemOnFirstLaunch`.
+/// A login item already enabled or awaiting approval is left as it is and
+/// the launch counts, as Swift registers only a `notRegistered` one.
+/// Swift: `registerLoginItemOnFirstLaunch`.
 #[test]
 fn the_first_launch_registers_only_a_not_registered_login_item_with_the_setting_on() {
     assert_eq!(
         first_launch_on_mac(false, LoginItemStatus::NotRegistered, &[]),
         (vec![], false)
     );
-    for status in [
-        LoginItemStatus::Enabled,
-        LoginItemStatus::RequiresApproval,
-        LoginItemStatus::NotFound,
-    ] {
+    for status in [LoginItemStatus::Enabled, LoginItemStatus::RequiresApproval] {
         assert_eq!(
             first_launch_on_mac(true, status, &[]),
             (vec![], true),
@@ -258,8 +254,21 @@ fn the_first_launch_registers_only_a_not_registered_login_item_with_the_setting_
     }
 }
 
+/// A run outside an app bundle, such as `cargo run`, reads `NotFound` on
+/// the Mac and shares the installed app's preferences: it registers
+/// nothing and does not count the launch, so the installed app still
+/// registers its login item at its own first launch. Rust only.
+#[test]
+fn a_login_item_the_mac_cannot_find_leaves_the_first_launch_uncounted() {
+    assert_eq!(
+        first_launch_on_mac(true, LoginItemStatus::NotFound, &[]),
+        (vec![], false)
+    );
+}
+
 /// Off the Mac the first launch keeps the Swift app's flag, and the Mac's
-/// own flag means nothing there.
+/// own flag means nothing there. A login item the plugin could not read
+/// (`NotFound`) counts there, as in Swift.
 #[test]
 fn off_the_mac_the_first_launch_is_counted_under_the_swift_flag() {
     for platform in [Platform::Linux, Platform::Windows] {
@@ -273,6 +282,15 @@ fn off_the_mac_the_first_launch_is_counted_under_the_swift_flag() {
         assert_eq!(*harness.fakes.login_item.changes.lock().unwrap(), [true]);
         assert!(flag(&harness, LOGIN_ITEM_REGISTERED_KEY));
         assert_eq!(first_launch_key(platform), LOGIN_ITEM_REGISTERED_KEY);
+
+        let harness = Harness::builder()
+            .platform(platform)
+            .seed(seed_launch_at_login)
+            .seed(|_, fakes| fakes.login_item.set_status(LoginItemStatus::NotFound))
+            .build();
+        harness.host.register_login_item_on_first_launch();
+        assert!(harness.fakes.login_item.changes.lock().unwrap().is_empty());
+        assert!(flag(&harness, LOGIN_ITEM_REGISTERED_KEY));
     }
     assert_eq!(first_launch_key(Platform::Macos), MAIN_APP_REGISTERED_KEY);
 }
@@ -297,8 +315,8 @@ fn the_first_launch_registers_the_login_item_unless_the_system_manages_it() {
     assert!(!launch_counted(&harness));
     assert_eq!(harness.fakes.login_item.status(), LoginItemStatus::Managed);
 
-    // A registration that fails (on Linux, no launcher at a stable path)
-    // does not count the launch, so the next one tries again.
+    // A registration that fails does not count the launch, so the next
+    // one tries again.
     let harness = Harness::builder().seed(seed_launch_at_login).build();
     harness.fakes.login_item.fail_changes(Some(NO_STABLE_PATH));
     harness.host.register_login_item_on_first_launch();

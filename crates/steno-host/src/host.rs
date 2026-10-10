@@ -371,8 +371,8 @@ pub fn delete_recording_prompt() -> ConfirmDestructiveParams {
     }
 }
 
-/// The preferences flag `AppController` set on its first launch, which
-/// counts the first launch off the Mac.
+/// The preferences flag Swift's `AppController` set on its first launch on
+/// the Mac; here it counts the first launch on Linux and Windows.
 pub const LOGIN_ITEM_REGISTERED_KEY: &str = "steno.loginItemRegistered";
 
 /// The flag that counts the first launch on the Mac, where the login item
@@ -924,24 +924,28 @@ impl Host {
 
     /// The first launch with the setting on registers the login item, once:
     /// only while it reads `NotRegistered`, as in Swift, so one already
-    /// enabled or awaiting approval, or one the system cannot find, is left
-    /// as it is and the launch counts. The count is a preferences flag per
-    /// platform ([`first_launch_key`]); after it, only the switch in General
-    /// registers or removes the login item, so one the user removed in the
-    /// system's settings stays removed. A login item the system manages is
-    /// left alone, and the first launch is not counted, so a later install
-    /// that leaves launch at login to the app still registers it once. Nor
-    /// is a launch counted whose registration failed (on Linux, no
-    /// launcher at a path that outlives an upgrade), so a later launch
-    /// tries again; the failure is not shown. Swift:
+    /// enabled or awaiting approval is left as it is and the launch counts.
+    /// The count is a preferences flag per platform ([`first_launch_key`]);
+    /// after it, only the switch in General registers or removes the login
+    /// item, so one the user removed in the system's settings stays
+    /// removed. A login item the system manages is left alone, and the
+    /// first launch is not counted, so a later install that leaves launch
+    /// at login to the app still registers it once. Nor is a launch counted
+    /// whose registration failed (on Linux, no launcher at a path that
+    /// outlives an upgrade): a warning is logged, General shows the switch
+    /// off, and a later launch tries again. On the Mac a login item the
+    /// system cannot find (`NotFound`) is not counted either: a run outside
+    /// an app bundle, such as `cargo run`, reads it, shares the installed
+    /// app's preferences, and would otherwise stop the installed app's
+    /// first registration for good. Swift:
     /// `AppController.registerLoginItemOnFirstLaunch`, which counts the
     /// launch before it registers.
     pub fn register_login_item_on_first_launch(&self) {
+        use crate::services::LoginItemStatus;
         let preferences = &self.shared.services.preferences;
+        let login_item = &self.shared.services.login_item;
         let key = first_launch_key(self.shared.config.platform);
-        if preferences.flag(key)
-            || self.shared.services.login_item.status() == crate::services::LoginItemStatus::Managed
-        {
+        if preferences.flag(key) || login_item.status() == LoginItemStatus::Managed {
             return;
         }
         let Ok(settings) = self.shared.store.settings() else {
@@ -950,14 +954,23 @@ impl Host {
         if !settings.launch_at_login {
             return;
         }
-        let registered = self.shared.services.login_item.status()
-            != crate::services::LoginItemStatus::NotRegistered
-            || self.shared.services.login_item.set_enabled(true).is_ok();
-        if registered {
+        let counted = match login_item.status() {
+            LoginItemStatus::NotRegistered => match login_item.set_enabled(true) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "the first launch could not register the login item");
+                    false
+                }
+            },
+            LoginItemStatus::NotFound => self.shared.config.platform != Platform::Macos,
+            LoginItemStatus::Enabled | LoginItemStatus::RequiresApproval => true,
+            LoginItemStatus::Managed => false,
+        };
+        if counted {
             preferences.set_flag(key, true);
         }
         let mut inner = self.lock();
-        inner.general.login_item = self.shared.services.login_item.status();
+        inner.general.login_item = login_item.status();
     }
 
     /// The onboarding window closed, by its own close button or after the
