@@ -272,8 +272,8 @@ Every start logs one `display:` line naming the backend. A `GDK_BACKEND`
 list that names `x11` or `*`, or a lone `*`, counts as not set: it is a
 session's default for every app (Omarchy exports `wayland,x11,*`), and
 GDK skips the entries it is not allowed. A list that names neither, such
-as `wayland,broadway`, stays the user's choice. A single `GDK_BACKEND`
-set before launch always wins: `GDK_BACKEND=wayland steno-desktop` runs
+as `wayland,broadway`, stays the user's choice. Any other `GDK_BACKEND`
+set before launch wins: `GDK_BACKEND=wayland steno-desktop` runs
 natively on Wayland, with panels that neither stay on top nor keep their
 place. A Wayland session without XWayland (no `DISPLAY`) runs on Wayland
 too, since X11 would not open there.
@@ -499,15 +499,36 @@ the main window ("Steno").
 
 Load them with one line at the end of `~/.config/hypr/hyprland.lua` (on
 Omarchy, below "Add any other personal Hyprland configuration below").
-The `.deb` installs the file as
-`/usr/share/steno-desktop/hyprland-steno.lua`, and so does the AUR
-package from the next release on. From either:
+From the release after 0.1.0-rc.3 on, the `.deb` and the AUR package,
+which repackages it, install the file as
+`/usr/share/steno-desktop/hyprland-steno.lua`. From either:
 
 ```lua
 dofile("/usr/share/steno-desktop/hyprland-steno.lua")
 ```
 
-From a copy of the file at `~/.config/hypr/steno.lua`:
+From the same release on, the Nix package holds the file as
+`share/steno-desktop/hyprland-steno.lua`, which NixOS links into no
+profile by default. Add this to the system's configuration:
+
+```nix
+environment.pathsToLink = ["/share/steno-desktop"];
+```
+
+With the package in `environment.systemPackages` (where `programs.steno`
+puts it), the file is then at
+`/run/current-system/sw/share/steno-desktop/`:
+
+```lua
+dofile("/run/current-system/sw/share/steno-desktop/hyprland-steno.lua")
+```
+
+With `programs.steno.users`, the same setting puts it under
+`/etc/profiles/per-user/<user>/share/steno-desktop/`.
+
+From the AppImage, an older release or a build from source, copy
+`src-tauri/linux/hyprland-steno.lua` to `~/.config/hypr/steno.lua` and
+load it with:
 
 ```lua
 require("steno")
@@ -629,9 +650,10 @@ the bundler fills for the `.deb` and the AppImage) still reads Steno,
 passes a `steno:` link to the binary (`%u`) and claims the scheme. The
 `.deb` also installs the Hyprland window rules as
 `/usr/share/steno-desktop/hyprland-steno.lua` (`bundle.linux.deb.files`;
-see Hyprland). The `.deb` depends on `libayatana-appindicator3-1` explicitly: the Tauri CLI
-adds the tray's library only when it sees the `tray-icon` feature on a
-crate-local `tauri` dependency, and ours is inherited from the workspace.
+see Hyprland). The `.deb` depends on `libayatana-appindicator3-1`
+explicitly: the Tauri CLI adds the tray's library only when it sees the
+`tray-icon` feature on a crate-local `tauri` dependency, and ours is
+inherited from the workspace.
 For the same reason the AppImage does not bundle that library; a host
 without it runs the shell without a tray, and closing the main window
 then quits (see above). The `.deb` also depends on PipeWire
@@ -1192,10 +1214,11 @@ raises a second prompt, hides the panels, closes main and reports:
 the Xvfb root and one crop per window and per panel into
 `apps/desktop/screens/` (ignored by git; CI uploads it as the
 `desktop-smoke-screens` artifact). At that moment, when `xdotool` is on
-the `PATH` (CI's setup has it), each panel must be a visible window titled
-"Steno bubble" or "Steno prompt", the titles the Hyprland rules match. With `STENO_SMOKE_DPI=120` it runs Xvfb
-at that resolution, where WebKitGTK's pixel ratio is 1.25 and the panels
-must still fit their pills. The windows carry what the host's database
+the `PATH` (CI's setup has it), each panel must be a visible window
+titled "Steno bubble" or "Steno prompt", the titles the Hyprland rules
+match. With `STENO_SMOKE_DPI=120` it runs Xvfb at that resolution,
+where WebKitGTK's pixel ratio is 1.25 and the panels must still fit
+their pills. The windows carry what the host's database
 holds: nothing on CI's fresh runner, synthetic data with `--features
 fixture-host`. Xvfb has no compositor, so the panels' transparent
 corners render black there; a desktop shows them rounded. Xvfb has no

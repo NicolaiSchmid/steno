@@ -2849,7 +2849,8 @@ touch and admission lines; each fix is ported to Swift before cutover.
   prompt", where the shell's panels on macOS and Windows say "Steno" (the Swift
   panels have no title), so Hyprland's window rules
   (`apps/desktop/src-tauri/linux/hyprland-steno.lua`, which the `.deb` installs in
-  `/usr/share/steno-desktop/`) can float, pin and leave unfocused the panels only.
+  `/usr/share/steno-desktop/`) can float and pin the panels and keep them out of
+  the focus without touching the main window.
 - Linux shows the tray only where a status notifier host runs (KDE, most desktop
   panels, GNOME with the AppIndicator extension); elsewhere closing the main window
   quits, where the Swift `NSStatusItem` is always in the menu bar.
