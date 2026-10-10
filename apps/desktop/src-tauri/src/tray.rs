@@ -8,11 +8,12 @@
 //! Only the Mac's menu shows shortcut hints (`shortcut`).
 //!
 //! Every action is in the menu (`MENU`), and a click on the icon does
-//! nothing the menu does not: macOS and Windows open the menu on a left click as on a
-//! right one, and on Linux the host decides what a left click does. KDE
-//! Plasma and GNOME's `AppIndicator` extension open the menu; a host that
-//! sends `Activate` instead, as Omarchy's bar may, gets no answer from
-//! libayatana-appindicator, and there only a right click opens the menu.
+//! nothing the menu does not: macOS and Windows open the menu on a left
+//! click as on a right one, and on Linux the host decides what a left
+//! click does. KDE Plasma and GNOME's `AppIndicator` extension open the
+//! menu; a host that sends `Activate` instead, as Omarchy's bar may, gets
+//! no answer from libayatana-appindicator, and there only a right click
+//! opens the menu.
 //!
 //! The tray also keeps the process alive: with it, closing the main window
 //! hides it and the process stays, as the Swift menu bar app stays; without

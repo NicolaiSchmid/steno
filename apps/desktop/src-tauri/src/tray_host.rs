@@ -241,8 +241,7 @@ fn follow_on(session: &Connection, hosted: &Hosted, retry: Duration) -> zbus::Re
                 retried += 1;
                 nudged.recv_timeout(retry)
             } else {
-                retried = 0;
-                nudged.recv().map_err(|_| RecvTimeoutError::Disconnected)
+                nudged.recv().map_err(RecvTimeoutError::from)
             };
             match next {
                 Ok(()) => {
@@ -304,34 +303,32 @@ mod tests {
     }
 
     /// The watcher as the follower asks it: the property, and the signals
-    /// sent by hand (`Connection::emit_signal`).
+    /// sent by hand (`Connection::emit_signal`). Its first `hangs` answers
+    /// come only after `HANG`, longer than `follow_slowly`'s calls wait;
+    /// `asked` counts the questions.
+    #[derive(Default)]
     struct FakeWatcher {
         registered: bool,
-    }
-
-    #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
-    impl FakeWatcher {
-        #[zbus(property)]
-        fn is_status_notifier_host_registered(&self) -> bool {
-            self.registered
-        }
-    }
-
-    /// A watcher whose first `hangs` answers to the property come only
-    /// after `HANG`, longer than `follow_slowly`'s calls wait; `asked`
-    /// counts the questions.
-    struct SlowWatcher {
         hangs: std::sync::Mutex<usize>,
         asked: Arc<AtomicUsize>,
     }
 
-    /// How long `SlowWatcher` takes to answer while it hangs, and how long
+    impl FakeWatcher {
+        fn new(registered: bool) -> Self {
+            Self {
+                registered,
+                ..Self::default()
+            }
+        }
+    }
+
+    /// How long `FakeWatcher` takes to answer while it hangs, and how long
     /// `follow_slowly`'s calls wait.
     const HANG: Duration = Duration::from_millis(600);
     const SHORT_PATIENCE: Duration = Duration::from_millis(200);
 
     #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
-    impl SlowWatcher {
+    impl FakeWatcher {
         #[zbus(property)]
         fn is_status_notifier_host_registered(&self) -> bool {
             self.asked.fetch_add(1, Ordering::SeqCst);
@@ -341,7 +338,7 @@ mod tests {
                 drop(hangs);
                 std::thread::sleep(HANG);
             }
-            true
+            self.registered
         }
     }
 
@@ -414,7 +411,7 @@ mod tests {
         };
         let hosted = follow_daemon(&daemon);
         reads(&hosted, false);
-        let watcher = serve(&daemon, FakeWatcher { registered: true });
+        let watcher = serve(&daemon, FakeWatcher::new(true));
         reads(&hosted, true);
         drop(watcher);
         reads(&hosted, false);
@@ -427,7 +424,7 @@ mod tests {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let watcher = serve(&daemon, FakeWatcher { registered: false });
+        let watcher = serve(&daemon, FakeWatcher::new(false));
         let hosted = follow_daemon(&daemon);
         reads(&hosted, false);
         let host = |registered: bool, signal: &str| {
@@ -446,7 +443,7 @@ mod tests {
         reads(&hosted, false);
     }
 
-    /// A watcher that does not answer the property counts as a host.
+    /// A watcher without the property counts as a host.
     #[test]
     fn a_watcher_without_the_property_counts_as_a_host() {
         let Some(daemon) = Daemon::start() else {
@@ -467,7 +464,8 @@ mod tests {
         let asked = Arc::default();
         let _watcher = serve(
             &daemon,
-            SlowWatcher {
+            FakeWatcher {
+                registered: true,
                 hangs: usize::MAX.into(),
                 asked: Arc::clone(&asked),
             },
@@ -495,7 +493,8 @@ mod tests {
         let asked = Arc::default();
         let _watcher = serve(
             &daemon,
-            SlowWatcher {
+            FakeWatcher {
+                registered: true,
                 hangs: 1.into(),
                 asked: Arc::clone(&asked),
             },
@@ -511,7 +510,7 @@ mod tests {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let _watcher = serve(&daemon, FakeWatcher { registered: true });
+        let _watcher = serve(&daemon, FakeWatcher::new(true));
         let hosted = Arc::new(Hosted::new());
         let (session, kept) = (daemon.connect(), hosted.clone());
         let (done, ended) = mpsc::channel();

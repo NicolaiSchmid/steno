@@ -796,7 +796,7 @@ fn hold_logout_inhibitor(session: &Connection, busy: &mpsc::Receiver<bool>) {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use crate::dbus::tests::Daemon;
     use std::io::Read as _;
