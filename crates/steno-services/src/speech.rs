@@ -1010,7 +1010,7 @@ pub(crate) mod testing {
     /// Mac), so a test writing placeholder models never overwrites real
     /// ones, wherever its models directory was resolved from: `named` is
     /// the models directory the environment names, which may itself lie
-    /// inside the temp directory. A path that climbs out with `..` is not
+    /// inside the temp directory. A path with a `..` component is not
     /// scratch, and neither is any path while `named` cannot be resolved.
     pub fn is_scratch_in(path: &Path, temp: &Path, named: Option<&Path>) -> bool {
         if path.components().any(|part| part == Component::ParentDir) {
