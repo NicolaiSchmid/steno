@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# The release workflow's first step: fail with the names of the missing
-# repository secrets before anything is built, instead of a cryptic codesign
-# or notarytool error twenty minutes in. A dry run (`DRY_RUN=true`) needs
-# only the signing certificate; a real release needs all six.
+# The Swift release workflow's first step, until S7 of
+# .plans/2026-10-07-stable-promotion.md removed release.yml: fail with the
+# names of the missing repository secrets before anything is built, instead
+# of a cryptic codesign or notarytool error twenty minutes in. A dry run
+# (`DRY_RUN=true`) needs only the signing certificate; a real release needs
+# all six.
 #
-# Reads from the environment (release.yml maps the secrets onto these):
+# Reads from the environment (release.yml mapped the secrets onto these):
 #   P12, P12_PASSWORD              MACOS_CERTIFICATE_P12_BASE64, MACOS_CERTIFICATE_PASSWORD
 #   ASC_KEY_ID, ASC_ISSUER_ID, ASC_PRIVATE_KEY
 #   SPARKLE_PRIVATE_KEY

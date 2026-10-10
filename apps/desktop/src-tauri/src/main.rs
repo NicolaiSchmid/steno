@@ -83,10 +83,12 @@ mod display_lost;
 #[cfg(feature = "fixture-host")]
 mod fixtures;
 mod host;
+mod identifier;
 #[cfg(target_os = "macos")]
 mod menu;
 mod navigation;
 mod packaged;
+mod panel_anchor;
 mod panel_geometry;
 mod panels;
 mod permissions;
@@ -146,8 +148,12 @@ fn main() {
             }
         }));
     }
+    // macOS registers the login item with `SMAppService` (`autostart`).
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.plugin(autostart::plugin());
+    }
     builder = builder
-        .plugin(autostart::plugin())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -238,6 +244,8 @@ fn setup(
     }
     #[cfg(target_os = "linux")]
     autostart::remove_earlier_entry(handle);
+    #[cfg(target_os = "macos")]
+    autostart::remove_earlier_agent();
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle);
@@ -569,14 +577,16 @@ fn onboarding_closed(app: &tauri::AppHandle) {
 /// and an autostart entry an earlier build wrote that waited for the exit
 /// goes, unless the exit is an update's relaunch (`autostart::at_exit`):
 /// only once the save is over, since until then the unit the app runs as
-/// needs the entry.
+/// needs the entry. Last, the panels' anchor a drag queued reaches the
+/// disk (`panels::flush_anchor`); it waits for a slow disk, so it goes
+/// after the login item, which matters more than the panels' place.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
     let shutdown = host::host(app).shutdown_action();
-    #[cfg(target_os = "linux")]
     let app = app.clone();
     timed_then(shutdown, move || {
         #[cfg(target_os = "linux")]
         autostart::at_exit(&app, autostart::relaunching_now());
+        panels::flush_anchor(&app);
     })
 }
 
@@ -883,6 +893,25 @@ fn single_instance_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exit, after the save, turns the Linux login item off first and
+    /// then waits for the panels' anchor, so a slow disk cannot hold the
+    /// login item's change past the time the system gives the app.
+    #[test]
+    fn the_exit_flushes_the_anchor_after_the_login_item() {
+        // Without the carriage returns a Windows checkout may add.
+        let main = include_str!("main.rs").replace("\r\n", "\n");
+        let start = main.find("\nfn exit_action(").unwrap();
+        let end = start + main[start..].find("\n}\n").unwrap();
+        let exit = &main[start..end];
+        let login_item = exit
+            .find("autostart::at_exit(&app, autostart::relaunching_now());")
+            .expect("the exit turns the Linux login item off");
+        let flush = exit
+            .find("panels::flush_anchor(&app);")
+            .expect("the exit flushes the anchor");
+        assert!(login_item < flush);
+    }
 
     /// A running Swift app refuses the start before the host is built; with
     /// none running the start goes on. Only the Swift app's bundle id is

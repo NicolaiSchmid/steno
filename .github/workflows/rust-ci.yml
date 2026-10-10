@@ -85,6 +85,10 @@ on:
       - 'apps/macos/web/pnpm-lock.yaml'
       - 'scripts/setup-linux.sh'
       - 'scripts/pipewire-headless.sh'
+      - 'apps/macos/scripts/merge-appcast.py'
+      - 'packaging/aur/PKGBUILD'
+      - 'packaging/aur/.SRCINFO'
+      - '.github/workflows/desktop-release.yml'
       - '.github/workflows/rust-ci.yml'
   push:
     branches: ['main']
@@ -102,6 +106,10 @@ on:
       - 'apps/macos/web/pnpm-lock.yaml'
       - 'scripts/setup-linux.sh'
       - 'scripts/pipewire-headless.sh'
+      - 'apps/macos/scripts/merge-appcast.py'
+      - 'packaging/aur/PKGBUILD'
+      - 'packaging/aur/.SRCINFO'
+      - '.github/workflows/desktop-release.yml'
       - '.github/workflows/rust-ci.yml'
 
 concurrency:
@@ -365,19 +373,26 @@ jobs:
           grep -qF "test result: ok. 1 passed" "$log" \
             || { echo "::error::the sidecar's scope test did not pass"; exit 1; }
 
-      # The desktop release workflow's platform filter, MSI version, updater
-      # manifest and lanes, asset gathering, checksums and signatures, and
-      # release notes.
+      # Every apps/desktop/scripts/*.test.sh: the desktop release
+      # workflow's platform filter, MSI version, updater manifest and lanes,
+      # asset gathering, checksums and signatures, release notes, the bundle
+      # check's `app` and `--handoff` checks over stub bundles, the handoff
+      # item and appcast, the AUR bump, the cask bump's token check, and
+      # the workflow itself. Each runs, and the step fails naming every one
+      # that failed.
       - name: Desktop release scripts
         if: matrix.name == 'linux'
         run: |
-          apps/desktop/scripts/release-matrix.test.sh
-          apps/desktop/scripts/wix-version.test.sh
-          apps/desktop/scripts/updater-manifest.test.sh
-          apps/desktop/scripts/updater-lanes.test.sh
-          apps/desktop/scripts/release-assets.test.sh
-          apps/desktop/scripts/release-signatures.test.sh
-          apps/desktop/scripts/release-notes.test.sh
+          failed=()
+          for test in apps/desktop/scripts/*.test.sh; do
+            echo "::group::$test"
+            "$test" || failed+=("$test")
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::failed: ${failed[*]}"
+            exit 1
+          fi
 
       # The WASAPI smoke tests again with their output, so the log shows what
       # COM answered on the runner (endpoints, sessions, why a capture

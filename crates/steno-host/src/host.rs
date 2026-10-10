@@ -130,6 +130,16 @@ pub struct HostConfig {
     /// section offers no check and says where updates come from, and
     /// `updates.check` checks nothing. Rust only.
     pub updates_managed: bool,
+    /// The shell runs from an installed app bundle: inside a `.app` (one
+    /// built under `target/` too), and neither on a mounted disk image nor
+    /// translocated by Gatekeeper. On the Mac only such a launch registers
+    /// the login item at its first launch and counts it
+    /// ([`Host::register_login_item_on_first_launch`]), so a run that
+    /// would register a path about to disappear leaves the first launch to
+    /// the installed copy. The shell decides from its own path; off the Mac
+    /// it is not read. False by default, as for the CLI and the tests. Rust
+    /// only.
+    pub installed_bundle: bool,
 }
 
 impl Default for HostConfig {
@@ -139,6 +149,7 @@ impl Default for HostConfig {
             zone: crate::labels::utc(),
             platform: Platform::CURRENT,
             updates_managed: false,
+            installed_bundle: false,
         }
     }
 }
@@ -371,8 +382,26 @@ pub fn delete_recording_prompt() -> ConfirmDestructiveParams {
     }
 }
 
-/// The preferences flag `AppController` set on its first launch.
+/// The preferences flag Swift's `AppController` set on its first launch on
+/// the Mac; here it counts the first launch on Linux and Windows.
 pub const LOGIN_ITEM_REGISTERED_KEY: &str = "steno.loginItemRegistered";
+
+/// The flag that counts the first launch on the Mac, where the login item
+/// is `SMAppService.mainApp` (D4 of `.plans/2026-10-07-stable-promotion.md`).
+/// A key of its own: a desktop build under the earlier identifier set
+/// [`LOGIN_ITEM_REGISTERED_KEY`] for the Launch Agent that the shell now
+/// removes, so that flag must not stop the first registration. Rust only.
+pub const MAIN_APP_REGISTERED_KEY: &str = "steno.mainAppRegistered";
+
+/// The flag that counts the first launch on `platform`
+/// ([`Host::register_login_item_on_first_launch`]).
+#[must_use]
+pub fn first_launch_key(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Macos => MAIN_APP_REGISTERED_KEY,
+        Platform::Windows | Platform::Linux => LOGIN_ITEM_REGISTERED_KEY,
+    }
+}
 
 fn no_such_meeting() -> BridgeError {
     BridgeError::not_found("No meeting with that id is listed.")
@@ -904,19 +933,36 @@ impl Host {
         )
     }
 
-    /// The first launch registers the login item when the setting says so;
-    /// a login item the system manages is left alone, and the first launch
-    /// is not counted, so a later install that leaves launch at login to the
-    /// app still registers it once. Nor is a launch counted whose
-    /// registration failed (on Linux, no launcher at a path that outlives
-    /// an upgrade), so a later launch tries again; the failure is not
-    /// shown. Swift: `AppController.registerLoginItemOnFirstLaunch`, which
-    /// counts the launch before it registers.
+    /// The first launch with the setting on registers the login item, once:
+    /// only while it reads `NotRegistered`, as in Swift, so one already
+    /// enabled or awaiting approval is left as it is and the launch counts.
+    /// The count is a preferences flag per platform ([`first_launch_key`]);
+    /// after it, only the switch in General registers or removes the login
+    /// item, so one the user removed in the system's settings stays
+    /// removed. A login item the system manages is left alone, and the
+    /// first launch is not counted, so a later install that leaves launch
+    /// at login to the app still registers it once. Nor is a launch counted
+    /// whose registration failed (on Linux, no launcher at a path that
+    /// outlives an upgrade): a warning is logged, General shows the switch
+    /// off, and a later launch tries again. On the Mac a login item the
+    /// system cannot find (`NotFound`) is not counted either: a run outside
+    /// an app bundle, such as `cargo run`, reads it, shares the installed
+    /// app's preferences, and would otherwise stop the installed app's
+    /// first registration for good. Nor, on the Mac, does a launch from
+    /// outside an installed bundle register or count anything
+    /// ([`HostConfig::installed_bundle`]). Swift:
+    /// `AppController.registerLoginItemOnFirstLaunch`, which counts the
+    /// launch before it registers.
     pub fn register_login_item_on_first_launch(&self) {
+        use crate::services::LoginItemStatus;
+        let config = &self.shared.config;
+        if config.platform == Platform::Macos && !config.installed_bundle {
+            return;
+        }
         let preferences = &self.shared.services.preferences;
-        if preferences.flag(LOGIN_ITEM_REGISTERED_KEY)
-            || self.shared.services.login_item.status() == crate::services::LoginItemStatus::Managed
-        {
+        let login_item = &self.shared.services.login_item;
+        let key = first_launch_key(config.platform);
+        if preferences.flag(key) || login_item.status() == LoginItemStatus::Managed {
             return;
         }
         let Ok(settings) = self.shared.store.settings() else {
@@ -925,14 +971,23 @@ impl Host {
         if !settings.launch_at_login {
             return;
         }
-        let registered = self.shared.services.login_item.status()
-            != crate::services::LoginItemStatus::NotRegistered
-            || self.shared.services.login_item.set_enabled(true).is_ok();
-        if registered {
-            preferences.set_flag(LOGIN_ITEM_REGISTERED_KEY, true);
+        let counted = match login_item.status() {
+            LoginItemStatus::NotRegistered => match login_item.set_enabled(true) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "the first launch could not register the login item");
+                    false
+                }
+            },
+            LoginItemStatus::NotFound => config.platform != Platform::Macos,
+            LoginItemStatus::Enabled | LoginItemStatus::RequiresApproval => true,
+            LoginItemStatus::Managed => false,
+        };
+        if counted {
+            preferences.set_flag(key, true);
         }
         let mut inner = self.lock();
-        inner.general.login_item = self.shared.services.login_item.status();
+        inner.general.login_item = login_item.status();
     }
 
     /// The onboarding window closed, by its own close button or after the
