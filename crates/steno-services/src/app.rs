@@ -422,23 +422,27 @@ fn lock_or_run_without(
     }
 }
 
-/// The listener's configuration: [`crate::handover::configuration`] over
-/// the environment, and in this crate's tests loopback only, unadvertised,
-/// on a port the system chooses, with the inbox under the test's support
-/// directory.
+/// The listener's configuration, with the inbox under the support
+/// directory: [`crate::handover::configuration`] over the environment, and
+/// in this crate's tests loopback only, unadvertised, on a port the system
+/// chooses.
 fn listener_configuration(
     paths: &StenoPaths,
     store: &Store,
 ) -> steno_handover::HandoverConfiguration {
+    let inbox_directory = paths.support_directory.join("handover-inbox");
     if cfg!(test) {
         return steno_handover::HandoverConfiguration {
             advertise: false,
-            inbox_directory: paths.support_directory.join("handover-inbox"),
+            inbox_directory,
             ..steno_handover::HandoverConfiguration::default()
         };
     }
     let environment = std::env::var(crate::handover::PORT_VARIABLE).ok();
-    crate::handover::configuration(store, environment.as_deref())
+    steno_handover::HandoverConfiguration {
+        inbox_directory,
+        ..crate::handover::configuration(store, environment.as_deref())
+    }
 }
 
 /// Why the identity is not available, for the Phones settings: the

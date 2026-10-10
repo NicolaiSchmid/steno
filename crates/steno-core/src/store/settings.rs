@@ -97,6 +97,7 @@ impl Store {
         for (key, value) in rows {
             if key == HANDOVER_PORT_KEY && json::from_column_str::<Option<u16>>(&value).is_err() {
                 tracing::warn!(
+                    target: "steno::store",
                     "the stored {HANDOVER_PORT_KEY} is not a port from 0 to 65535, so it is ignored"
                 );
                 continue;

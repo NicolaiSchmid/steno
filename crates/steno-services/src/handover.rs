@@ -1,6 +1,6 @@
 //! The host's `Handover` over the phone handover listener, the file the
 //! identity's fingerprint is recorded in ([`FingerprintFile`]), and the
-//! port it listens on ([`listener_port`], Rust only). Swift:
+//! listener's port ([`listener_port`], [`PORT_VARIABLE`]; Rust only). Swift:
 //! the handover block of `AppEnvironment.live` in
 //! `apps/macos/Steno/AppEnvironment.swift`.
 
@@ -113,9 +113,8 @@ pub(crate) fn stored_port(store: &Store) -> Option<u16> {
         .and_then(|settings| settings.handover_port)
 }
 
-/// The app's listener configuration: the default on the port
-/// [`listener_port`] picks from `environment`, the value of
-/// [`PORT_VARIABLE`], and [`stored_port`].
+/// The default listener configuration on the port [`listener_port`] picks
+/// from `environment` (the value of [`PORT_VARIABLE`]) and [`stored_port`].
 pub(crate) fn configuration(store: &Store, environment: Option<&str>) -> HandoverConfiguration {
     HandoverConfiguration {
         port: listener_port(environment, stored_port(store)),
