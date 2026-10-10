@@ -668,7 +668,7 @@ mod tests {
 
     use super::*;
     use crate::appimage::tests::warnings;
-    use crate::session_end::tests::Daemon;
+    use crate::dbus::tests::Daemon;
 
     const USER: &str = "0::/user.slice/user-1000.slice/user@1000.service";
     const HYPRLAND: &str = "wayland-wm@hyprland.desktop.service";
