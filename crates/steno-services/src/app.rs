@@ -2359,7 +2359,11 @@ mod tests {
             async fn ask(&self, _question: crate::updates::Question<'_>) -> bool {
                 false
             }
+            fn installer(&self) -> crate::updates::Installer {
+                crate::updates::Installer::InPlace
+            }
             fn tell_install_failed(&self, _message: &str) {}
+            fn tell_relaunch_waits(&self, _version: &str, _busy: crate::updates::Busy) {}
             fn announce(&self, _version: &str) {}
         }
         let dir = tempfile::tempdir().unwrap();

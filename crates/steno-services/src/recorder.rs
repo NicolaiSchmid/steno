@@ -2437,7 +2437,8 @@ mod tests {
     }
 
     /// An update whose install waits on a password prompt until the test
-    /// cancels it, as the updater's prompt for a `.deb` does.
+    /// cancels it, as the updater's prompt for a `.deb` does; one the test
+    /// never cancels never returns.
     #[derive(Default)]
     struct PasswordPromptSource {
         prompt_up: tokio::sync::Notify,
@@ -2462,6 +2463,10 @@ mod tests {
             Err("User canceled.".into())
         }
 
+        fn installer(&self) -> crate::updates::Installer {
+            crate::updates::Installer::AsksForAPassword
+        }
+
         async fn relaunch(&self) {
             self.relaunches.fetch_add(1, Ordering::SeqCst);
         }
@@ -2472,6 +2477,10 @@ mod tests {
 
         fn tell_install_failed(&self, message: &str) {
             self.told.lock().unwrap().push(message.to_owned());
+        }
+
+        fn tell_relaunch_waits(&self, version: &str, _busy: crate::updates::Busy) {
+            panic!("{version} was installed");
         }
 
         fn announce(&self, _version: &str) {}
@@ -2507,11 +2516,12 @@ mod tests {
         harness.recorder.status()
     }
 
-    /// A start under a hold the install keeps through a password prompt is
-    /// refused; cancelling the prompt fails the install, and the next start
-    /// records.
+    /// A Record while the install waits on a password prompt records at
+    /// once, over the app's gate: recording always wins over an install.
+    /// Cancelling the prompt fails the install, which relaunches nothing,
+    /// and the recording goes on and is saved.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_cancelled_password_prompt_lets_recording_start_again() {
+    async fn a_record_during_a_password_prompt_records() {
         let harness = harness(&[]);
         let source = Arc::new(PasswordPromptSource::default());
         let schedule = schedule_over(&harness, source.clone());
@@ -2522,29 +2532,52 @@ mod tests {
         };
         source.prompt_up.notified().await;
         let status = status_after_a_start(&harness);
-        assert_eq!(status.state, RecordingState::Idle);
-        assert_eq!(status.error.as_deref(), Some(INSTALLING_UPDATE));
-        assert_eq!(harness.store.all_meetings().unwrap(), []);
+        assert_eq!(status.state, RecordingState::Recording);
+        assert_eq!(status.error, None);
 
         source.cancel.notify_one();
         offer.await.unwrap();
         assert_eq!(*source.told.lock().unwrap(), ["User canceled."]);
         assert_eq!(source.relaunches.load(Ordering::SeqCst), 0);
-        assert_eq!(harness.recorder.status().error, None);
+        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+        stop(&harness.recorder).await;
+        quit(&harness.recorder);
+        assert_eq!(harness.store.all_meetings().unwrap().len(), 1);
+    }
+
+    /// A password prompt nobody answers, so the install never returns: a
+    /// Record records, and stopping saves the meeting.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_password_prompt_nobody_answers_never_keeps_recording_off() {
+        let harness = harness(&[]);
+        let source = Arc::new(PasswordPromptSource::default());
+        let schedule = schedule_over(&harness, source.clone());
+        schedule.check_on_request().await.unwrap();
+        let offer = {
+            let schedule = schedule.clone();
+            tokio::spawn(async move { schedule.offer("0.12.0").await })
+        };
+        source.prompt_up.notified().await;
         assert_eq!(
             status_after_a_start(&harness).state,
             RecordingState::Recording
         );
+        stop(&harness.recorder).await;
+        assert_eq!(harness.recorder.status().error, None);
+        let meetings = harness.store.all_meetings().unwrap();
+        assert_eq!(meetings.len(), 1);
+        assert_ne!(meetings[0].state, steno_core::MeetingState::Recording);
+        assert_eq!(source.relaunches.load(Ordering::SeqCst), 0);
+        offer.abort();
         quit(&harness.recorder);
-        assert_eq!(harness.store.all_meetings().unwrap().len(), 1);
     }
 
     /// An update the user installs while a recording runs, over the app's
     /// gate (stable plan P25): it asks whether to install once the
     /// recording ends and, told yes, waits. Nothing downloads while the
     /// recording runs or while its meeting is processed; once the meeting
-    /// is ready the update downloads, installs with recording starts held
-    /// off, and relaunches.
+    /// is ready the update downloads, installs, and relaunches with
+    /// recording starts held off.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_users_install_waits_for_the_recording_and_its_processing() {
         let harness = harness(&[]);
@@ -2577,15 +2610,15 @@ mod tests {
             *source.steps.lock().unwrap(),
             [
                 "download after: ready",
-                "install: a Record was refused",
-                "relaunch"
+                "install",
+                "relaunch: a Record was refused"
             ]
         );
         assert_eq!(harness.recorder.status().error, None, "the hold is gone");
     }
 
     /// Answers yes, and records each step with what it found: the
-    /// meetings' states at the download, whether a Record at the install
+    /// meetings' states at the download, whether a Record at the relaunch
     /// was refused.
     #[derive(Default)]
     struct WaitingSource {
@@ -2619,6 +2652,15 @@ mod tests {
         }
 
         async fn install(&self, _version: &str, _package: Vec<u8>) -> Result<(), String> {
+            self.steps.lock().unwrap().push("install".to_owned());
+            Ok(())
+        }
+
+        fn installer(&self) -> crate::updates::Installer {
+            crate::updates::Installer::AsksForAPassword
+        }
+
+        async fn relaunch(&self) {
             let recorder = self.recorder.clone().unwrap();
             let refused = tokio::task::spawn_blocking(move || {
                 recorder.start(CaptureMode::InPerson, None);
@@ -2631,12 +2673,7 @@ mod tests {
             self.steps
                 .lock()
                 .unwrap()
-                .push("install: a Record was refused".to_owned());
-            Ok(())
-        }
-
-        async fn relaunch(&self) {
-            self.steps.lock().unwrap().push("relaunch".to_owned());
+                .push("relaunch: a Record was refused".to_owned());
         }
 
         async fn ask(&self, question: crate::updates::Question<'_>) -> bool {
@@ -2651,6 +2688,10 @@ mod tests {
 
         fn tell_install_failed(&self, message: &str) {
             panic!("the install failed: {message}");
+        }
+
+        fn tell_relaunch_waits(&self, version: &str, _busy: crate::updates::Busy) {
+            panic!("{version} waited to relaunch");
         }
 
         fn announce(&self, _version: &str) {}

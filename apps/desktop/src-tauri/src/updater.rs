@@ -27,7 +27,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use steno_services::updates::{
-    Busy, CHECK_TIMED_OUT, CHECK_TIMEOUT, MANAGED_CHECK, Question, UpdateSchedule, UpdateSource,
+    Busy, CHECK_TIMED_OUT, CHECK_TIMEOUT, Installer, MANAGED_CHECK, Question, UpdateSchedule,
+    UpdateSource,
 };
 use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_dialog::{
@@ -147,6 +148,22 @@ impl UpdateSource for ShellUpdates {
             .map_err(|error| error.to_string())
     }
 
+    /// The updater's choice by the bundle the binary came in: on Windows
+    /// it starts the installer and ends the process; a `.deb` or an `.rpm`
+    /// is installed through pkexec, then a zenity or kdialog password
+    /// dialog, then `sudo`, each of which waits for an answer; anything
+    /// else (an `AppImage`, the macOS bundle) is replaced in place.
+    fn installer(&self) -> Installer {
+        use tauri::utils::config::BundleType;
+        if cfg!(windows) {
+            return Installer::EndsTheApp;
+        }
+        match tauri::utils::platform::bundle_type() {
+            Some(BundleType::Deb | BundleType::Rpm) => Installer::AsksForAPassword,
+            _ => Installer::InPlace,
+        }
+    }
+
     /// Runs the shutdown first (`shut_down_for_relaunch`), as Sparkle's
     /// relaunch went through `applicationShouldTerminate`. The restart's
     /// own exit request (`tauri::RESTART_EXIT_CODE`) then finds the exit
@@ -190,6 +207,15 @@ impl UpdateSource for ShellUpdates {
                 handle.exit(0);
             }
         });
+    }
+
+    fn tell_relaunch_waits(&self, version: &str, busy: Busy) {
+        app_dialog(
+            &self.app,
+            MessageDialogKind::Info,
+            relaunch_waits_message(version, busy),
+        )
+        .show(|_| {});
     }
 
     fn announce(&self, version: &str) {
@@ -237,6 +263,19 @@ impl Dialog {
                 install: INSTALL_AFTER,
             },
         }
+    }
+}
+
+/// What the user is told when an update installed while a recording or a
+/// processing job began: Steno relaunches into it once that is done.
+fn relaunch_waits_message(version: &str, busy: Busy) -> String {
+    match busy {
+        Busy::Recording => format!(
+            "Steno {version} is installed. Steno relaunches into it once the recording is saved and processed."
+        ),
+        Busy::Processing => format!(
+            "Steno {version} is installed. Steno relaunches into it once the meeting is processed."
+        ),
     }
 }
 
@@ -377,6 +416,19 @@ mod tests {
             assert!(installs(&MessageDialogResult::Custom(default), install));
             assert!(!installs(&MessageDialogResult::Custom(other), install));
         }
+    }
+
+    /// The relaunch that waits names the version and what it waits for.
+    #[test]
+    fn the_relaunch_that_waits_says_what_for() {
+        let recording = relaunch_waits_message("0.12.0", Busy::Recording);
+        assert!(
+            recording.starts_with("Steno 0.12.0 is installed."),
+            "{recording}"
+        );
+        assert!(recording.contains("recording is saved"), "{recording}");
+        let processing = relaunch_waits_message("0.12.0", Busy::Processing);
+        assert!(processing.contains("processed"), "{processing}");
     }
 
     /// Only the install button installs: Escape, closing the dialog and
