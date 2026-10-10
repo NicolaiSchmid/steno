@@ -906,21 +906,24 @@ impl App {
     /// `failed`; a start or a stop in progress settles; a recording in
     /// progress is stopped with the `quit` end reason and saved (its asset
     /// written, the meeting enqueued, where it stays `queued` until the
-    /// next launch processes it); and the handover listener stops. Every
+    /// next launch processes it); the handover listener stops; and
+    /// meeting detection stops ([`DetectionController::stop`]). Every
     /// write is a committed transaction by then, so the store has nothing
     /// left to flush. A handover still waiting for its listener gets none
     /// after this ([`ListenerHandover::close`]). Swift:
     /// `AppController.shutdown`, whose pipeline died with the app, so the
     /// next launch resumed its job.
     pub fn shutdown(&self) {
-        // First, so no prompt comes up while the app goes.
-        if let Some(detection) = &self.detection {
-            detection.stop();
-        }
         self.pipeline.quit();
         self.recorder.stop_for_quit();
         if let Some(handover) = self.handover.as_deref().and_then(ListenerHandover::close) {
             block_on(&self.runtime, handover.stop());
+        }
+        // Last: the quit save must not wait for a detector start or a
+        // snapshot under way, and a prompt's Record meanwhile is refused,
+        // as the quit refuses every start.
+        if let Some(detection) = &self.detection {
+            detection.stop();
         }
     }
 

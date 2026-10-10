@@ -271,12 +271,18 @@ impl DetectionController {
         }
     }
 
-    /// Detection off for good: the setting is no longer followed, the
-    /// detector stops and the prompt goes. For the app's shutdown.
+    /// Detection off for good: the setting is no longer followed and the
+    /// prompt goes at once, so no event raises another; then the detector
+    /// stops, which waits for a start or a snapshot under way (seconds,
+    /// while `PipeWire` reconnects or coreaudiod restarts). For the app's
+    /// shutdown, which runs it after the recording's quit save for that
+    /// reason.
     pub fn stop(&self) {
         {
             let mut state = self.state();
             state.stopped = true;
+            state.enabled = false;
+            self.close(&mut state);
             if let Some(running) = state.running.take() {
                 running.cancel();
             }

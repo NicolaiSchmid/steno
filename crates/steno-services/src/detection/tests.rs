@@ -628,3 +628,159 @@ fn an_app_without_a_bundle_id_is_another_app() {
     assert_eq!(fallback_app_name(None), "Another app");
     assert_eq!(fallback_app_name(Some("firefox")), "firefox");
 }
+
+/// A process list whose snapshots wait while its gate is closed, as a
+/// detector's start waits while `PipeWire` reconnects at logout.
+struct GatedActivity {
+    /// Whether the gate is closed, and how many snapshots wait at it.
+    gate: Mutex<(bool, usize)>,
+    changed: std::sync::Condvar,
+    listeners: Mutex<Vec<std::sync::mpsc::Sender<()>>>,
+}
+
+impl GatedActivity {
+    fn closed() -> Arc<Self> {
+        Arc::new(Self {
+            gate: Mutex::new((true, 0)),
+            changed: std::sync::Condvar::new(),
+            listeners: Mutex::default(),
+        })
+    }
+
+    /// Waits until a snapshot waits at the gate.
+    fn until_held(&self) {
+        let (gate, timeout) = self
+            .changed
+            .wait_timeout_while(self.gate.lock().unwrap(), PATIENCE, |(_, held)| *held == 0)
+            .unwrap();
+        drop(gate);
+        assert!(!timeout.timed_out(), "a snapshot waits at the gate");
+    }
+
+    fn open(&self) {
+        self.gate.lock().unwrap().0 = false;
+        self.changed.notify_all();
+    }
+}
+
+impl steno_audio::ProcessAudioActivitySource for GatedActivity {
+    fn snapshot(&self) -> Result<Vec<ProcessAudioActivity>, steno_audio::detection::ActivityError> {
+        let mut gate = self.gate.lock().unwrap();
+        gate.1 += 1;
+        self.changed.notify_all();
+        let mut gate = self
+            .changed
+            .wait_while(gate, |(closed, _)| *closed)
+            .unwrap();
+        gate.1 -= 1;
+        Ok(Vec::new())
+    }
+
+    fn changes(&self) -> std::sync::mpsc::Receiver<()> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.listeners.lock().unwrap().push(sender);
+        receiver
+    }
+}
+
+/// A controller over `recorder` whose detector reads `activity`.
+fn gated_controller(
+    recorder: Arc<dyn CallRecorder>,
+    store: Arc<Store>,
+    activity: Arc<GatedActivity>,
+) -> (Arc<DetectionController>, Arc<FakePanel>) {
+    let clock = Arc::new(ManualClock::new());
+    let panel = Arc::new(FakePanel::default());
+    let controller = DetectionController::new(DetectionParts {
+        detector: MeetingDetector::new(
+            activity,
+            clock.clone(),
+            Some(std::collections::BTreeSet::new()),
+            MeetingDetector::DEFAULT_DEBOUNCE,
+            MeetingDetector::DEFAULT_POLL_INTERVAL,
+        ),
+        recorder,
+        panel: panel.clone(),
+        store,
+        clock,
+        app_names: test_names(),
+    });
+    (controller, panel)
+}
+
+/// The stop turns detection off and takes the prompt down at once, though
+/// a detector start still waits on its first snapshot; only the
+/// detector's own stop waits for that.
+#[test]
+fn a_stop_takes_the_prompt_down_while_a_detector_start_still_waits() {
+    let (_dir, store) = temp_store();
+    let activity = GatedActivity::closed();
+    let (controller, panel) =
+        gated_controller(Arc::new(FakeRecorder::default()), store, activity.clone());
+    let starting = {
+        let controller = controller.clone();
+        std::thread::spawn(move || controller.set_enabled(true))
+    };
+    activity.until_held();
+    controller.handle(opened(Some("us.zoom.xos")));
+    assert!(controller.has_prompt(), "on while the start waits");
+    let stopping = {
+        let controller = controller.clone();
+        std::thread::spawn(move || controller.stop())
+    };
+    panel.wait_until("the stop took the prompt down", |shown| {
+        shown.last() == Some(&None)
+    });
+    assert!(!controller.is_enabled(), "off before the start returned");
+    controller.handle(opened(Some("com.example.meet")));
+    assert!(!controller.has_prompt(), "and no event raises another");
+    activity.open();
+    starting.join().unwrap();
+    stopping.join().unwrap();
+    assert!(!controller.is_detecting(), "the detector stopped after all");
+}
+
+/// Swift's quit saved the recording first. A detector start held in its
+/// snapshot (`PipeWire` reconnecting at logout) does not hold up the quit
+/// save of a call recording: `App::shutdown` stops detection last.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_quit_save_does_not_wait_for_a_held_detector_start() {
+    use steno_core::RecordingEndReason;
+    let (dir, store) = temp_store();
+    let mut app =
+        crate::testing::app_over_fakes(dir.path(), &store, crate::testing::synthetic_capture());
+    let activity = GatedActivity::closed();
+    let (controller, _panel) =
+        gated_controller(app.recorder.clone(), store.clone(), activity.clone());
+    app.detection = Some(controller.clone());
+    let app = Arc::new(app);
+    let recorder = app.recorder.clone();
+    on_own_thread(PATIENCE, "the start returned", move || {
+        recorder.start(CaptureMode::Call, None);
+    });
+    let meeting_id = app.recorder.status().meeting_id.expect("recording");
+    let starting = {
+        let controller = controller.clone();
+        std::thread::spawn(move || controller.set_enabled(true))
+    };
+    activity.until_held();
+    let quitting = {
+        let app = app.clone();
+        std::thread::spawn(move || app.shutdown())
+    };
+    crate::testing::eventually("the quit saved the call while the start is held", || {
+        store
+            .meeting(meeting_id)
+            .unwrap()
+            .is_some_and(|meeting| meeting.end_reason == Some(RecordingEndReason::Quit))
+    })
+    .await;
+    assert_eq!(app.recorder.status().state, RecordingState::Idle);
+    activity.open();
+    tokio::task::block_in_place(|| {
+        starting.join().unwrap();
+        quitting.join().unwrap();
+    });
+    assert!(!controller.is_detecting(), "the shutdown stopped detection");
+    app.pipeline.current().wait_until_idle().await;
+}
