@@ -585,6 +585,34 @@ impl steno_host::services::LoginItem for ShellLoginItem {
 mod tests {
     use super::*;
 
+    /// macOS registers with `SMAppService` only: `tauri-plugin-autostart`
+    /// is a dependency only off macOS, so its Launch Agent cannot come
+    /// back there, and `main.rs` registers its plugin only off macOS.
+    #[test]
+    fn the_autostart_plugin_is_neither_built_nor_registered_on_macos() {
+        let manifest = include_str!("../Cargo.toml");
+        let mut table = "";
+        let mut tables = Vec::new();
+        for line in manifest.lines() {
+            if line.starts_with('[') {
+                table = line;
+            } else if line.starts_with("tauri-plugin-autostart") {
+                tables.push(table);
+            }
+        }
+        assert_eq!(
+            tables,
+            ["[target.'cfg(not(target_os = \"macos\"))'.dependencies]"]
+        );
+
+        // Without the carriage returns a Windows checkout may add.
+        let main = include_str!("main.rs").replace("\r\n", "\n");
+        assert_eq!(main.matches("autostart::plugin()").count(), 1);
+        assert!(main.contains(
+            "    #[cfg(not(target_os = \"macos\"))]\n    {\n        builder = builder.plugin(autostart::plugin());\n    }\n"
+        ));
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_status_reads_the_plugins_answer() {

@@ -3,8 +3,9 @@
 //! `.plans/2026-10-07-stable-promotion.md`), and the one the desktop
 //! builds before it carried, [`EARLIER`].
 //!
-//! Nothing that matters is named after either: the database, its lock,
-//! the preferences, the audio, the models and the panels' anchor
+//! No data is named after either, so changing the identifier moves no
+//! data; what it resets is listed below. The database, its lock, the
+//! preferences, the audio, the models and the panels' anchor
 //! (`panel_anchor`) live in the support directory
 //! (`steno_core::StenoPaths`), and every secret under the keyring
 //! service `uno.schmid.steno.mac`. What is named after the identifier,
@@ -31,13 +32,10 @@ mod tests {
     use super::*;
 
     /// The identifier in `tauri.conf.json`, which every platform's build
-    /// takes (no platform file overrides it).
+    /// takes.
     fn configured() -> String {
         let config: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
-        let platform: serde_json::Value =
-            serde_json::from_str(include_str!("../tauri.linux.conf.json")).unwrap();
-        assert!(platform.get("identifier").is_none(), "{platform}");
         config["identifier"].as_str().unwrap().to_owned()
     }
 
@@ -45,6 +43,35 @@ mod tests {
     fn the_identifier_is_the_desktop_one_on_every_platform() {
         assert_eq!(configured(), "com.nicolaischmid.steno.desktop");
         assert_ne!(configured(), EARLIER);
+    }
+
+    /// No file merged over `tauri.conf.json` (the platform files, the
+    /// release files a `--config` names) sets another identifier: every
+    /// `tauri*.conf.json` beside it is checked, so a new one is too.
+    #[test]
+    fn no_other_config_file_sets_an_identifier() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut checked = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            if !(name.starts_with("tauri") && name.ends_with(".conf.json"))
+                || name == "tauri.conf.json"
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(dir.join(&name)).unwrap();
+            let config: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(
+                config.get("identifier").is_none(),
+                "{name} sets one: {config}"
+            );
+            checked.push(name);
+        }
+        checked.sort();
+        assert!(
+            checked.len() >= 3 && checked.contains(&"tauri.linux.conf.json".to_owned()),
+            "{checked:?}"
+        );
     }
 
     /// The bundle keeps the Swift app's Sparkle key (stable plan S6):
