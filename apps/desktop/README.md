@@ -499,9 +499,10 @@ the main window ("Steno").
 
 Load them with one line at the end of `~/.config/hypr/hyprland.lua` (on
 Omarchy, below "Add any other personal Hyprland configuration below").
-From the release after 0.1.0-rc.3 on, the `.deb` and the AUR package,
-which repackages it, install the file as
-`/usr/share/steno-desktop/hyprland-steno.lua`. From either:
+From the release after 0.1.0-rc.3 on, the `.deb` installs the file as
+`/usr/share/steno-desktop/hyprland-steno.lua`; the AUR package
+(`packaging/aur/`) installs it there for every release, with its own copy
+while the `.deb` it repackages lacks the file. From either:
 
 ```lua
 dofile("/usr/share/steno-desktop/hyprland-steno.lua")
