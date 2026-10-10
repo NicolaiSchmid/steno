@@ -72,10 +72,10 @@
 //! the allocation and the failure apply to the next diarization too, one
 //! abort to a diarization only, one abort and one hang to the next
 //! diarizer load only, and one fault refuses every diarizer load.
-//! `--fault-once
-//! <path>` limits that to the first child that creates `<path>`, which
-//! holds that child's pid. The isolation tests, the diarization tests and
-//! the `DirectML` test binaries drive the real client against these.
+//! `--fault-once <path>` limits that to the first child that creates
+//! `<path>`, which holds that child's pid. The isolation tests, the
+//! diarization tests and the `DirectML` test binaries drive the real client
+//! against these.
 
 use std::fs::File;
 use std::io::{self, BufReader, Write};
@@ -526,13 +526,8 @@ impl Engine for FakeEngine {
             Some(Fault::RefuseDiarizer) => {
                 Err("simulated refusal of the diarizer's models".to_owned())
             }
-            Some(Fault::AbortOnDiarizerLoad | Fault::HangOnDiarizerLoad) => {
-                match self.fault_now() {
-                    Some(Fault::AbortOnDiarizerLoad) => std::process::abort(),
-                    Some(_) => hang(),
-                    None => Ok(()),
-                }
-            }
+            Some(Fault::AbortOnDiarizerLoad) if self.fault_now().is_some() => std::process::abort(),
+            Some(Fault::HangOnDiarizerLoad) if self.fault_now().is_some() => hang(),
             _ => Ok(()),
         }
     }
