@@ -52,7 +52,8 @@ conflicts=("$_pkgname")
 # also needs the same port in Steno (STENO_HANDOVER_PORT or handoverPort)
 # and `sudo ufw app update Steno` for the rule already added.
 backup=('etc/ufw/applications.d/steno-desktop')
-# Only prints `sudo ufw allow Steno`.
+# Only prints `sudo ufw allow Steno`, and after a removal
+# `sudo ufw delete allow Steno`.
 install=steno-desktop.install
 # The binaries stay byte for byte as the signed release built them.
 options=('!strip' '!debug')

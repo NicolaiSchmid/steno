@@ -33,7 +33,8 @@
 #   (backup=), or `ufw app info Steno` does not read it; or ufw's own rules
 #   stop admitting mDNS, which the profile leaves to them;
 # - the install script does more than print `sudo ufw allow Steno` after an
-#   install and an upgrade, or the install did not print it;
+#   install and an upgrade and `sudo ufw delete allow Steno` after a removal,
+#   or the install or the removal did not print its hint;
 # - a binary needs a library that is not installed, or the sidecar does
 #   not start.
 #
@@ -185,16 +186,18 @@ grep -qE -- '-d 224\.0\.0\.251 --dport 5353 -j ACCEPT' /etc/ufw/before.rules \
   || die "ufw's before.rules no longer admit mDNS: the profile must open 5353/udp"
 echo "ok: the package installs the ufw profile Steno as a backup file, ufw reads it, and ufw admits mDNS"
 
-# The install script only prints the hint, and pacman ran it.
+# The install script only prints the hints, and pacman ran it.
 hint='Steno receives recordings from the paired phone. If ufw is on, let them through once with: sudo ufw allow Steno'
+remove_hint='Steno is removed. If you let the paired phone through ufw, close its port with: sudo ufw delete allow Steno'
 grep -qxF $'\tinstall = steno-desktop.install' "$work/.SRCINFO" \
   || die "the PKGBUILD has no install=steno-desktop.install"
 grep -vE '^[[:space:]]*(#|$)' "$work/steno-desktop.install" \
-  | diff -u <(printf '%s\n' 'post_install() {' "  echo '$hint'" '}' 'post_upgrade() {' '  post_install' '}') - \
-  || die "the install script does more than print sudo ufw allow Steno"
+  | diff -u <(printf '%s\n' 'post_install() {' "  echo '$hint'" '}' 'post_upgrade() {' '  post_install' '}' \
+      'post_remove() {' "  echo '$remove_hint'" '}') - \
+  || die "the install script does more than print the ufw hints"
 grep -qxF "$hint" /tmp/makepkg.log \
   || die "the install did not print sudo ufw allow Steno"
-echo "ok: the install script only prints sudo ufw allow Steno, and the install printed it"
+echo "ok: the install script only prints the ufw hints, and the install printed sudo ufw allow Steno"
 
 for binary in /usr/lib/steno-desktop/steno-desktop /usr/lib/steno-desktop/steno-speech-sidecar; do
   ! ldd "$binary" | grep 'not found' || die "$binary needs a library that is not installed"
@@ -206,3 +209,9 @@ status=0
 /usr/lib/steno-desktop/steno-speech-sidecar --check-aur 2>/dev/null || status=$?
 [[ "$status" == 2 ]] || die "the sidecar did not start (exit $status)"
 echo "ok: the sidecar starts"
+
+# Last, as it removes the package: the removal prints how to close the port.
+pacman -R --noconfirm steno-desktop-bin 2>&1 | tee /tmp/pacman-remove.log
+grep -qxF "$remove_hint" /tmp/pacman-remove.log \
+  || die "the removal did not print sudo ufw delete allow Steno"
+echo "ok: the removal printed sudo ufw delete allow Steno"
