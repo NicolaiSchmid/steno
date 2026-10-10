@@ -241,8 +241,8 @@ anchor (top centre of the frame, 8 pt under the main screen's top edge by
 default, saved to `panel-anchor.json` in the support directory by
 `panel_anchor.rs` when the user drags one, see The identifier; the
 geometry is `panel_geometry.rs`). One rule decides what shows: a busy
-recorder wins, else a pending detection prompt, else nothing. Each window is created once and then hidden and shown; the
-prompt's is navigated to each new request, which the shell numbers when
+recorder wins, else a pending detection prompt, else nothing. Each window
+is created once and then hidden and shown; the prompt's is navigated to each new request, which the shell numbers when
 the host raises it, so the page remounts and the countdown restarts; the X
 and Record send that number back and answer only their own prompt. The page
 measures its pill and reports the size in device pixels through the
@@ -827,7 +827,10 @@ once the database is open:
    `…/Contents/MacOS/steno-desktop`) goes: `launchctl bootout` unloads it,
    unless it is the job this very process was started as at login, which
    it would end; then the file is deleted. The log says what happened. A
-   `Steno.plist` that starts another program stays.
+   `Steno.plist` that starts another program stays. Only the app run from
+   its bundle removes it: a `fixture-host` build, or a binary run from
+   `target/` that shares the home folder with an installed Steno, leaves
+   it to the installed app.
 2. Then the host's first-launch registration
    (`Host::register_login_item_on_first_launch`, as the Swift app's
    `registerLoginItemOnFirstLaunch`) registers the login item once, at the
@@ -835,8 +838,11 @@ once the database is open:
    not registered. It counts that launch under `steno.mainAppRegistered` in
    `preferences.json`, also when the item was already enabled or awaiting
    approval; `steno.loginItemRegistered`, which an earlier build set for
-   its Launch Agent, counts only off the Mac. A failed registration is
-   logged, General shows the switch off, and the next launch tries again.
+   its Launch Agent, counts only off the Mac. A launch whose login item
+   macOS cannot find is not counted: a binary run outside a bundle reads
+   that, and counting it would keep the installed app from ever
+   registering. A failed registration is logged as a warning, General
+   shows the switch off, and the next launch tries again.
    After that only the switch in General registers or removes the login
    item, so one the user removed in System Settings stays removed.
 

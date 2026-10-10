@@ -168,7 +168,9 @@ release_signature() {
 }
 
 # plist_value <file> <key>: the value under the top-level <key> of a plist
-# or a JSON file.
+# or a JSON file. plutil rather than PlistBuddy, since it also reads
+# tauri.conf.json; its `raw` form has been there since macOS 12, and
+# check-bundle.test.sh stubs it off macOS.
 plist_value() {
   plutil -extract "$2" raw -o - "$1"
 }

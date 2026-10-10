@@ -1544,7 +1544,7 @@ except case e.
     the update, as expected: the agent's file goes, the first launch registers
     the main app, and turning the setting off in General removes it;
   - on the Mac, the main app removed under Login Items after that first launch
-    is not added back at the next launch while General shows the switch off;
+    is not added back at the next launch, and General shows the switch off;
   - the panel opens where it was moved (the anchor read from the old
     directory);
   - on the Mac, no import step appears; onboarding opens on its permissions page

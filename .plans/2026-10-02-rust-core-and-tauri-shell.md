@@ -2799,13 +2799,15 @@ touch and admission lines; each fix is ported to Swift before cutover.
   approval copy is reachable; Linux and Windows keep `tauri-plugin-autostart`. Under
   the new identifier, `com.nicolaischmid.steno.desktop`, each launch first removes the
   Launch Agent a build under `uno.schmid.steno.desktop` left behind
-  (`~/Library/LaunchAgents/Steno.plist`). Then the host's first-launch registration
+  (`~/Library/LaunchAgents/Steno.plist`), but only when it runs from its app bundle
+  and is not a `fixture-host` build. Then the host's first-launch registration
   (`Host::register_login_item_on_first_launch`, one path on every platform) registers
   the main app once, at the first launch with the stored `launch_at_login` setting on,
   counted under `steno.mainAppRegistered` on the Mac (`steno.loginItemRegistered`,
-  which the earlier build set for its agent, counts only off the Mac); a failed
-  registration tries again next launch, and after that only General's switch
-  registers or removes it. The Swift entry is left to macOS, and R3 of
+  which the earlier build set for its agent, counts only off the Mac). On the Mac a
+  `NotFound` status, which a binary run outside a bundle reads, is not counted; a
+  failed registration logs a warning and tries again next launch; after that only
+  General's switch registers or removes it. The Swift entry is left to macOS, and R3 of
   `.plans/2026-10-07-stable-promotion.md` finds out what it does (D4, S6).
 - Packaged installs (stable plan X5, Rust only): `STENO_DISTRIBUTION=aur` or `=nix`
   (the environment first, then the value the build was given;
