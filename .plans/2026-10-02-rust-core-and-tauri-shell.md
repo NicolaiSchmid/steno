@@ -3251,6 +3251,15 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   still to be decided. Where: `crates/steno-pipeline/src/pipeline.rs`,
   `crates/steno-services/src/pipeline.rs`, `crates/steno-core/src/store/mod.rs`.
   Found: #237.
+- **Unowned.** A Pair that lands during the quit starts a listener after it:
+  `App::shutdown` stops the listener, but `ListenerHandover::close` only keeps a
+  waiting handover from receiving one, so a `start` waiting on the stop's lock binds
+  once the stop returns and runs until the process exits. It loses nothing. With the
+  fixed port, an update's relaunch that binds before the old process exits falls back
+  to a port the system chooses, which the firewall blocks until the next launch. The
+  likely remedy: `ListenerHandover::start` refuses once `close` ran. Where:
+  `crates/steno-services/src/handover.rs`, `crates/steno-services/src/app.rs`
+  (`shutdown`). Found: #276.
 
 ## Progress
 
@@ -3337,7 +3346,7 @@ PR off `main`.
 | No update stops a recording or a processing run: the app's install gate over the recorder and the pipelines' in-flight set, whose job hold keeps jobs claimed during the install waiting for a minute at most; Record always works while an installer that returns (a `.deb`'s password prompt) runs, and the relaunch waits for what started; the user's yes while busy installs after it ends; automatic downloads on, not for an installer that asks an administrator, which runs only right after a yes given while idle; on Windows a hidden `cmd.exe` starts the old version again when the installer does not install (P25 of `.plans/2026-10-07-stable-promotion.md`; `steno-pipeline`, `steno-services`, desktop shell) | `fix/desktop-updates-wait-for-idle` | #270 | open |
 | An app started inside another program's service (a Hyprland key binding without `uwsm-app`) moves at launch into a scope of its own with 20 s to save, an AppImage's mount servers into scopes of their own wherever the app runs, and the desktop README says what saves at each session end under Hyprland (X1 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-session-end` | #272 | open |
 | Stable plan X3: every tray action is in the tray's menu, a click doing nothing the menu does not, and on Linux a follower of the status notifier watcher on the session bus (its owner and `IsStatusNotifierHostRegistered`, at launch and at every change) decides the close: with no host, as on GNOME without the AppIndicator extension, closing the main window quits through Quit's path and saves a recording first, which `close-without-tray-linux.sh` checks in CI (`apps/desktop`) | `fix/desktop-linux-tray` | #275 | open |
-| The handover behind a firewall: TCP 23820 on Linux (`HandoverConfiguration::LINUX_PORT`), set otherwise by `STENO_HANDOVER_PORT` or the setting `handoverPort` (a stored port that is not one ignored with a warning), a taken port giving way to one the system chooses with a warning; the AUR package's `ufw` profile `Steno`; the NixOS module's `programs.steno.openFirewall` and `handoverPort` (X4 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-core`, `steno-services`, `packaging/aur/`, `nix/`) | `fix/desktop-handover-firewall` | #276 | open |
+| The handover behind a firewall: TCP 23820 on Linux (`HandoverConfiguration::LINUX_PORT`), set otherwise by `STENO_HANDOVER_PORT` or the setting `handoverPort` (a stored port that is not one ignored with a warning), a taken port giving way to one the system chooses with a warning, a start during a stop waiting for it, so a restart keeps the port; the AUR package's `ufw` profile `Steno`; the NixOS module's `programs.steno.openFirewall` and `handoverPort` (X4 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-core`, `steno-services`, `packaging/aur/`, `nix/`) | `fix/desktop-handover-firewall` | #276 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
