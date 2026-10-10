@@ -48,9 +48,12 @@ libc.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 gdk.workspace = true
 gio.workspace = true
+# The `AppImage`'s mount: `statfs` for whether `$APPDIR` is a FUSE mount,
+# and close-on-exec for the keepalive pipe (`appimage`). Already in the lock.
+rustix.workspace = true
 # The logout and shutdown clients (`session_end`), the user manager's
 # reload after a stop timeout drop-in changes (`stop_timeout`) and the
-# scopes of its own (`own_scope`).
+# app's own scopes (`own_scope`).
 zbus.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -66,8 +69,11 @@ block2.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
-# The temporary Nix layout and autostart entries of `packaged`'s tests.
+# The temporary Nix layout and autostart entries of `packaged`'s tests, and
+# the fake `/proc` of `appimage`'s.
 tempfile.workspace = true
+# The warnings the scope and mount server tests read.
+tracing-subscriber.workspace = true
 
 # The work packages named here are in .plans/2026-10-02-rust-core-and-tauri-shell.md.
 [features]
