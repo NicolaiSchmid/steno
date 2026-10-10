@@ -20,9 +20,9 @@
 //! The models are installed in this process ([`crate::models::paths`] under
 //! the diarizer's [`Install`]); the child only loads the files it is
 //! handed, and opens no connection. A load that fails, whether the child
-//! refuses the files or dies or hangs while it loads them, is checked
-//! against the manifest here ([`crate::models`]'s failed-load check), as
-//! for [`ModelDiarizer`](crate::ModelDiarizer).
+//! refuses the files or dies, hangs or overruns the ceiling while it loads
+//! them, is checked against the manifest here ([`crate::models`]'s
+//! failed-load check), as for [`ModelDiarizer`](crate::ModelDiarizer).
 
 use std::sync::Arc;
 
@@ -45,12 +45,12 @@ use crate::pipeline::DiarizerConfig;
 /// stopped after the call. A child that dies, hangs or overruns the
 /// ceiling while it diarizes fails the call with the sidecar's error, and
 /// the next call starts a new child. When the load of the models fails
-/// instead, refused or crashed or hung alike, the files are hashed: one
-/// that fails its checksum is deleted and the call is
+/// instead, refused, crashed, hung or over the ceiling alike, the files
+/// are hashed: one that fails its checksum is deleted and the call is
 /// [`DiarizeError::NotInstalled`], so a gate parks the meeting until a
-/// download replaces it; intact files leave the sidecar's error. Audio under
-/// [`DiarizerConfig::MINIMUM_AUDIO_SECONDS`] has no speakers and starts no
-/// child, as in [`Pipeline::diarize`](crate::Pipeline::diarize).
+/// download replaces it; intact files leave the sidecar's error. Audio
+/// under [`DiarizerConfig::MINIMUM_AUDIO_SECONDS`] has no speakers and
+/// starts no child, as in [`Pipeline::diarize`](crate::Pipeline::diarize).
 ///
 /// ```no_run
 /// use std::sync::Arc;
