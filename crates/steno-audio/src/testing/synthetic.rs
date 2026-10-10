@@ -12,9 +12,9 @@
 //! session's wait for a restarted stream's first frame finds it at once.
 //!
 //! Device changes, so the session's rebuild runs on CI exactly as in
-//! production: `change_device_after` reports `DefaultInputChanged` after
-//! exactly that many seconds of one `start` and ends the producer thread,
-//! like a microphone that moved; it fires `changes` times per backend
+//! production: `change_device_after` reports `DefaultInputChanged` (or
+//! `change_reason`) after exactly that many seconds of one `start` and
+//! ends the producer thread, like a microphone that moved; it fires `changes` times per backend
 //! instance (one by default), not once per `start`, or the rebuilt backend
 //! would report again and loop. `restarts_that_fail` makes that many
 //! `start` calls after the first fail with `InputDeviceUnavailable`, the
@@ -126,6 +126,8 @@ pub struct SyntheticOptions {
     pub change_device_after: Option<f64>,
     /// How many starts report one.
     pub changes: usize,
+    /// What a change reports: `DefaultInputChanged` unless set. Rust only.
+    pub change_reason: DeviceChangeReason,
     /// How many restarts after a change fail before one succeeds.
     pub restarts_that_fail: usize,
     /// The stream the first start reports, when it should differ.
@@ -178,6 +180,7 @@ impl SyntheticOptions {
             real_time: false,
             change_device_after: None,
             changes: 1,
+            change_reason: DeviceChangeReason::DefaultInputChanged,
             restarts_that_fail: 0,
             stream: None,
             restart_panics: false,
@@ -208,6 +211,14 @@ impl SyntheticOptions {
     #[must_use]
     pub fn changes(mut self, count: usize) -> Self {
         self.changes = count;
+        self
+    }
+
+    /// What a change reports, `DefaultInputChanged` by default: an
+    /// `AudioServiceRestarted`, say. Rust only.
+    #[must_use]
+    pub fn change_reason(mut self, reason: DeviceChangeReason) -> Self {
+        self.change_reason = reason;
         self
     }
 
@@ -446,6 +457,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
         .map(|s| (s * rate) as usize);
         let resumed = Arc::clone(&self.resumed);
         let changes_remaining = Arc::clone(&self.changes_remaining);
+        let change_reason = self.options.change_reason;
         let real_time = self.options.real_time;
         let callback_frames = self.options.callback_frames;
         let stop = Arc::clone(&self.stop_requested);
@@ -471,7 +483,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         // Before the report: its handler takes the lock
                         // the session's `start` holds.
                         first_offered.finish();
-                        sink.report_device_change(DeviceChangeReason::DefaultInputChanged);
+                        sink.report_device_change(change_reason);
                         break;
                     }
                     if stall_frame == Some(delivered) {

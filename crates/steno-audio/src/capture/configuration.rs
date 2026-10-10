@@ -272,7 +272,8 @@ pub struct LaneLevels {
 }
 
 /// What the backend's listener found different after a notification burst
-/// settled. The synthetic backend reports `DefaultInputChanged`.
+/// settled. The synthetic backend reports `DefaultInputChanged` unless told
+/// otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceChangeReason {
     /// The default output device moved; the system lane follows it once
