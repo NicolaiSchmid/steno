@@ -818,15 +818,15 @@ mod tests {
         }
     }
 
-    /// The fake on `daemon`'s bus under the manager's name, with the job
-    /// `queued` or ended and the service's `main_pid`, and a connection of
-    /// the app's to the bus.
-    fn serve(
-        daemon: &Daemon,
-        asked: &'static Asked,
+    /// The fake on a bus of its own under the manager's name, with the job
+    /// `queued` or ended and the service's `main_pid`: the bus, what the
+    /// fake was asked, the fake's connection and the app's.
+    fn fake(
         queued: bool,
         main_pid: Option<u32>,
-    ) -> (Connection, Connection) {
+    ) -> Option<(Daemon, &'static Asked, Connection, Connection)> {
+        let daemon = Daemon::start()?;
+        let asked: &'static Asked = Box::leak(Box::default());
         let mut manager = daemon
             .builder()
             .name(SYSTEMD)
@@ -839,11 +839,8 @@ mod tests {
         if let Some(pid) = main_pid {
             manager = manager.serve_at(UNIT, FakeService(pid)).unwrap();
         }
-        (manager.build().unwrap(), daemon.connect())
-    }
-
-    fn leak() -> &'static Asked {
-        Box::leak(Box::default())
+        let (manager, app) = (manager.build().unwrap(), daemon.connect());
+        Some((daemon, asked, manager, app))
     }
 
     /// Nothing was called off or stopped.
@@ -911,11 +908,9 @@ mod tests {
 
     #[test]
     fn the_app_asks_for_a_scope_of_its_own_in_the_app_slice() {
-        let Some(daemon) = Daemon::start() else {
+        let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
             return;
         };
-        let asked = leak();
-        let (_manager, app) = serve(&daemon, asked, true, Some(7));
 
         let moved = move_app(&app, None, MOVED).unwrap();
         assert_eq!(moved.as_deref(), Some("app-steno\\x2ddesktop-4242.scope"));
@@ -958,11 +953,9 @@ mod tests {
 
     #[test]
     fn the_mount_server_gets_a_scope_of_its_own_that_no_session_end_stops() {
-        let Some(daemon) = Daemon::start() else {
+        let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
             return;
         };
-        let asked = leak();
-        let (_manager, app) = serve(&daemon, asked, true, Some(7));
 
         let moved = move_app(&app, Some(77), MOVED).unwrap();
         assert_eq!(moved, Some(scope_name(4242)));
@@ -994,19 +987,6 @@ mod tests {
         );
         assert_eq!(properties.len(), 5);
         nothing_undone(asked);
-    }
-
-    /// The fake on a bus of its own, with the job `queued` or ended and
-    /// the service's `main_pid`: the bus, what the fake was asked, the
-    /// fake's connection and the app's.
-    fn fake(
-        queued: bool,
-        main_pid: Option<u32>,
-    ) -> Option<(Daemon, &'static Asked, Connection, Connection)> {
-        let daemon = Daemon::start()?;
-        let asked = leak();
-        let (manager, app) = serve(&daemon, asked, queued, main_pid);
-        Some((daemon, asked, manager, app))
     }
 
     #[test]
@@ -1088,11 +1068,9 @@ mod tests {
 
     #[test]
     fn a_service_whose_main_process_is_unknown_starts_nothing() {
-        let Some(daemon) = Daemon::start() else {
+        let Some((_daemon, asked, _manager, app)) = fake(true, None) else {
             return;
         };
-        let asked = leak();
-        let (_manager, app) = serve(&daemon, asked, true, None);
 
         let error = move_app(&app, None, MOVED).unwrap_err();
         assert!(matches!(error, MoveError::Bus(_)), "{error}");
@@ -1102,11 +1080,9 @@ mod tests {
     #[test]
     fn an_app_seen_in_its_scope_after_a_few_reads_is_moved() {
         static READS: AtomicUsize = AtomicUsize::new(0);
-        let Some(daemon) = Daemon::start() else {
+        let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
             return;
         };
-        let asked = leak();
-        let (_manager, app) = serve(&daemon, asked, true, Some(7));
         let after_three_reads: CgroupOf = |pid| {
             if READS.fetch_add(1, Ordering::SeqCst) < 3 {
                 LEFT_BEHIND(pid)
@@ -1125,11 +1101,9 @@ mod tests {
     /// the deadline it stays queued, never called off.
     #[test]
     fn a_start_still_queued_at_the_deadline_stays_queued() {
-        let Some(daemon) = Daemon::start() else {
+        let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
             return;
         };
-        let asked = leak();
-        let (_manager, app) = serve(&daemon, asked, true, Some(7));
 
         let started = Instant::now();
         let error = move_app(&app, None, LEFT_BEHIND).unwrap_err();
@@ -1141,11 +1115,9 @@ mod tests {
     #[test]
     fn a_job_that_ended_without_the_app_stops_nothing() {
         static JOINED: AtomicBool = AtomicBool::new(false);
-        let Some(daemon) = Daemon::start() else {
+        let Some((_daemon, asked, _manager, app)) = fake(false, Some(7)) else {
             return;
         };
-        let asked = leak();
-        let (_manager, app) = serve(&daemon, asked, false, Some(7));
 
         let error = move_app(&app, None, LEFT_BEHIND).unwrap_err();
         assert!(matches!(error, MoveError::NotMoved), "{error}");
