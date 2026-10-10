@@ -321,11 +321,13 @@ pub enum Installer {
     AsksForAPassword,
     /// Starts the installer, which ends the app and installs for the user
     /// alone: Windows' NSIS setup. Nothing outside Steno is waited on
-    /// before the shutdown.
+    /// before the shutdown, and a setup that fails starts the version that
+    /// ran again.
     EndsTheApp,
     /// Starts the installer, which ends the app, then asks for an
     /// administrator's consent and installs for every user: Windows' MSI.
-    /// Steno is down until someone answers the prompt.
+    /// Steno is down until the prompt is answered; a no or a failure
+    /// starts the version that ran again.
     EndsTheAppThenAsks,
 }
 
@@ -364,9 +366,10 @@ pub trait UpdateSource: Send + Sync {
     /// another version, or none.
     async fn download(&self, version: &str) -> Result<Vec<u8>, String>;
     /// Writes `package`, the download of `version`, over the app. Fails
-    /// when the last check found another version, or none. On Windows the
-    /// installer ends the process once it runs (its exit runs the
-    /// shutdown), so it returns there only when it failed.
+    /// when the last check found another version, or none. On Windows it
+    /// runs the shutdown and ends the process once the installer runs,
+    /// under a watcher that starts this version again when the installer
+    /// does not install, so it returns there only when it failed.
     async fn install(&self, version: &str, package: Vec<u8>) -> Result<(), String>;
     /// How [`Self::install`] installs on this build.
     fn installer(&self) -> Installer;
@@ -375,7 +378,8 @@ pub trait UpdateSource: Send + Sync {
     async fn relaunch(&self);
     /// Asks the user `question`; true for the answer that installs.
     async fn ask(&self, question: Question<'_>) -> bool;
-    /// Tells the user an install failed, with the updater's `message`.
+    /// Tells the user an install failed, with the updater's `message`; one
+    /// that failed after the shutdown ran restarts the app instead.
     fn tell_install_failed(&self, message: &str);
     /// Tells the user `version` is installed and Steno relaunches once
     /// `busy` has ended: a recording started, or a processing job began,

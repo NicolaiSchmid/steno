@@ -21,6 +21,11 @@
 //! endpoint. The matching private key is the `TAURI_SIGNING_PRIVATE_KEY`
 //! secret and lives nowhere in the repository.
 //!
+//! On Windows the app runs the installer under a watcher that starts the
+//! running version again when the installer does not install
+//! (`windows_setup`), in place of the plugin's install, which left Steno
+//! down after a declined consent prompt or a failed setup.
+//!
 //! Swift: `apps/macos/Steno/Services/UpdaterController.swift`,
 //! `apps/macos/Steno/Services/UpdateChannels.swift`.
 
@@ -36,6 +41,9 @@ use tauri_plugin_dialog::{
     DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
 use tauri_plugin_updater::{Update, UpdaterExt};
+
+#[cfg(any(windows, test))]
+mod windows_setup;
 
 /// The stable lane: the rolling `desktop-stable` release, which carries the
 /// newest release's manifest.
@@ -113,14 +121,11 @@ impl UpdateSource for ShellUpdates {
     /// the download and the install.
     async fn check(&self) -> Result<Option<String>, String> {
         let version = self.app.package_info().version.to_string();
-        let handle = self.app.clone();
         let update = self
             .app
             .updater_builder()
             .endpoints(endpoints(&version))
             .map_err(|error| error.to_string())?
-            // Windows: the installer ends the process itself.
-            .on_before_exit(move || crate::shut_down_before_exit(&handle))
             .build()
             .map_err(|error| error.to_string())?
             .check()
@@ -138,24 +143,17 @@ impl UpdateSource for ShellUpdates {
             .map_err(|error| error.to_string())
     }
 
-    /// Writes the package on a blocking thread, since the updater may wait
-    /// on a password prompt; on Windows the installer's own exit runs the
-    /// shutdown (`UpdateSource::check`).
+    /// Writes the package on a blocking thread ([`write_update`]), since
+    /// the updater may wait on a password prompt.
     async fn install(&self, version: &str, package: Vec<u8>) -> Result<(), String> {
-        let update = self.found(version)?;
-        tauri::async_runtime::spawn_blocking(move || update.install(package))
+        let (app, update) = (self.app.clone(), self.found(version)?);
+        tauri::async_runtime::spawn_blocking(move || write_update(&app, &update, &package))
             .await
             .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
     }
 
-    /// [`installer_for`] this build's platform and bundle.
     fn installer(&self) -> Installer {
-        installer_for(
-            cfg!(windows),
-            tauri::utils::platform::bundle_type().as_ref(),
-            bundle_is_writable,
-        )
+        this_installer()
     }
 
     /// Runs the shutdown first (`shut_down_for_relaunch`), as Sparkle's
@@ -184,23 +182,24 @@ impl UpdateSource for ShellUpdates {
             .is_ok_and(|result| installs(&result, dialog.install))
     }
 
-    /// An install that fails after the shutdown ran (Windows: the
-    /// installer did not launch) ends the app once its message is closed:
-    /// the recorder and the pipeline start nothing after a shutdown, and
-    /// the next Quit would run none.
+    /// An install that fails after the shutdown ran (Windows: the watcher
+    /// did not start) restarts the app at once, into the version that
+    /// runs, with the failure in the log: the recorder and the pipeline
+    /// start nothing after a shutdown, and on a scheduled install nobody
+    /// may be there to close a message. The next check offers the update
+    /// again.
     fn tell_install_failed(&self, message: &str) {
-        let shut_down = self.app.state::<steno_services::app::ExitGate>().released();
-        let handle = self.app.clone();
+        if self.app.state::<steno_services::app::ExitGate>().released() {
+            tracing::warn!(%message, "the update failed after the shutdown; Steno restarts");
+            steno_services::flush_logs();
+            self.app.restart();
+        }
         app_dialog(
             &self.app,
             MessageDialogKind::Error,
             format!("The update could not be installed: {message}"),
         )
-        .show(move |_| {
-            if shut_down {
-                handle.exit(0);
-            }
-        });
+        .show(|_| {});
     }
 
     fn tell_relaunch_waits(&self, version: &str, busy: Busy) {
@@ -222,17 +221,83 @@ impl UpdateSource for ShellUpdates {
     }
 }
 
-/// How the updater installs for the bundle the binary came in (`bundle`,
-/// on Windows when `windows`). On Windows it starts the installer and ends
-/// the process: the NSIS setup installs for the user alone
-/// (`bundle.windows.nsis.installMode` in `tauri.conf.json`), and the MSI
-/// for every user, after Windows' consent prompt. A `.deb` or an `.rpm` is
-/// installed through pkexec, then a zenity or kdialog password dialog,
-/// then `sudo`, each of which waits for an answer. The macOS bundle is
-/// replaced in place, after an administrator's password when the user
-/// cannot write it or its folder (`writable`, asked only then; the prompt
-/// holds the app's windows until it is answered). Anything else (an
-/// `AppImage`) is replaced in place.
+/// Writes `package`, the verified download of `update`: through the
+/// plugin, except on Windows.
+#[cfg(not(windows))]
+fn write_update(_app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
+    update.install(package).map_err(|error| error.to_string())
+}
+
+/// Windows: writes the installer under the app's local data folder
+/// (`%LOCALAPPDATA%\uno.schmid.steno.desktop\update\`, which holds only
+/// the last update's), runs the shutdown, starts the watcher
+/// (`windows_setup`) and ends the process; returns only when it failed.
+/// The watcher has no window and leaves the app's job, if it runs in one,
+/// so it outlives the app; a job that refuses that refuses the start, and
+/// the app restarts (`UpdateSource::tell_install_failed`).
+#[cfg(windows)]
+fn write_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use windows_setup::{RELAUNCH_VARIABLE, SETUP_VARIABLE, Setup};
+    /// `CREATE_NO_WINDOW` and `CREATE_BREAKAWAY_FROM_JOB`.
+    const HIDDEN_AND_OUT_OF_THE_JOB: u32 = 0x0800_0000 | 0x0100_0000;
+
+    let text = |error: std::io::Error| error.to_string();
+    let setup = Setup::of(package).ok_or("The update is not a Windows installer.")?;
+    let folder = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("update");
+    let installer = folder.join(setup.file_name(&update.version));
+    // An earlier update's installer goes.
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).map_err(text)?;
+    std::fs::write(&installer, package).map_err(text)?;
+    let relaunch = std::env::current_exe().map_err(text)?;
+    let system32 = std::path::PathBuf::from(
+        std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()),
+    )
+    .join("System32");
+    let mut watcher = Command::new(system32.join("cmd.exe"));
+    watcher
+        .raw_arg(windows_setup::watcher_arguments(setup))
+        .env(
+            SETUP_VARIABLE,
+            windows_setup::setup_command(setup, &installer, &system32.join("msiexec.exe")),
+        )
+        .env(RELAUNCH_VARIABLE, &relaunch)
+        .current_dir(&folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(HIDDEN_AND_OUT_OF_THE_JOB);
+    crate::shut_down_before_exit(app);
+    watcher.spawn().map_err(text)?;
+    std::process::exit(0)
+}
+
+/// [`installer_for`] this build's platform and bundle.
+fn this_installer() -> Installer {
+    installer_for(
+        cfg!(windows),
+        tauri::utils::platform::bundle_type().as_ref(),
+        bundle_is_writable,
+    )
+}
+
+/// How the updater installs on this platform (`windows` on Windows) for
+/// the bundle the binary came in (`bundle`). On Windows the installer ends
+/// the process (`write_update`): the NSIS setup installs for the user
+/// alone (`bundle.windows.nsis.installMode` in `tauri.conf.json`), and the
+/// MSI for every user, after Windows' consent prompt. A `.deb` or an
+/// `.rpm` is installed through pkexec, then a zenity or kdialog password
+/// dialog, then `sudo`, each of which waits for an answer. The macOS
+/// bundle is replaced in place, after an administrator's password when the
+/// user cannot write it or its folder (`writable`, asked only then; the
+/// prompt holds the app's windows until it is answered). Anything else (an
+/// `AppImage`, or no bundle) is replaced in place.
 fn installer_for(
     windows: bool,
     bundle: Option<&BundleType>,
