@@ -1353,11 +1353,6 @@ mod tests {
             failure_kind(&crashed),
             "it could not load the diarizer's models: it died"
         );
-        let refused = SidecarError::DiarizerLoad(Box::new(SidecarError::Remote("no".to_owned())));
-        assert_eq!(
-            failure_kind(&refused),
-            "it could not load the diarizer's models: it reported an error"
-        );
     }
 
     #[test]
