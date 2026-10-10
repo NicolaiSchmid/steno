@@ -23,7 +23,9 @@
 //! microphone as newly opened. A detector that cannot start (`PipeWire`
 //! not up yet at login) is started again by the next
 //! [`DetectionController::follow_settings`], which [`DetectionController::run`]
-//! calls every two seconds along with the setting.
+//! calls every two seconds along with the setting. So the switch in
+//! Settings takes effect within two seconds, and a prompt can still come
+//! up in that time; Swift observed the setting and followed it at once.
 //!
 //! Lives here rather than in `steno-host`: it drives the detector of
 //! `steno-audio` and the capture recorder, which this crate assembles, as
@@ -56,11 +58,12 @@ pub const PROMPT_SECONDS: u64 = 60;
 pub const SETTINGS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// What the prompt asks: which app opened the microphone, and for how
-/// many seconds the prompt stays.
+/// many seconds the prompt stays. Swift: `DetectionPromptViewModel`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectionPrompt {
     /// The app's name; "Another app" when it could not be named.
     pub app_name: String,
+    /// How long the prompt stays up unanswered: [`PROMPT_SECONDS`].
     pub seconds: u64,
     /// The controller's number for this prompt, one more for each raised.
     /// The panel shows it (the shell's `raised`) and hands it back with
@@ -71,7 +74,8 @@ pub struct DetectionPrompt {
 }
 
 /// Where the prompt shows: the shell's floating panel (`panels::set_prompt`
-/// in `apps/desktop`).
+/// in `apps/desktop`). Swift: the `FloatingPanelModel` that observed
+/// `DetectionController.prompt` (`apps/macos/Steno/Panels/`).
 pub trait PromptPanel: Send + Sync {
     /// Raises `prompt`, or takes the prompt down for `None`. Called with
     /// the controller's lock held, so the panel sees raises and clears in
@@ -107,7 +111,7 @@ impl CallRecorder for CaptureRecorder {
 }
 
 /// Names the app with a bundle id (`None` when the detector knows none).
-/// The shell's resolves Mac bundle ids through `NSRunningApplication`;
+/// The shell resolves Mac bundle ids through `NSRunningApplication`;
 /// [`fallback_app_name`] elsewhere.
 pub type AppNames = Arc<dyn Fn(Option<&str>) -> String + Send + Sync>;
 
@@ -212,7 +216,8 @@ struct State {
     stopped: bool,
 }
 
-/// The meeting detection controller; see the module doc.
+/// The meeting detection controller; see the module doc. Swift:
+/// `DetectionController`.
 pub struct DetectionController {
     detector: MeetingDetector,
     recorder: Arc<dyn CallRecorder>,

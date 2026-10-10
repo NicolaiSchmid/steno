@@ -543,7 +543,12 @@ Every package is written in parallel except where a dependency is named:
     stops through the recorder's Stop path with `callEnded`, which the Swift app
     decodes. A Record the update's start hold refuses closes the prompt and shows
     the refusal in the main window; after the relaunch the detector reports the
-    microphone the call still holds, and the prompt comes up again.
+    microphone the call still holds, and the prompt comes up again. While the
+    capture recovers from a lost device (coreaudiod restarting empties the
+    process list too), the countdown neither arms nor ends the recording; once
+    audio is delivered again, `CaptureRecorder::resume_auto_stop` arms a fresh
+    one if the call app let go and still holds no microphone. The capture's
+    recovery (#244) gates the countdown and calls it.
 - **S3 Calendar and permissions** (`feat/rust-calendar-permissions`).
   - Look up the overlapping EventKit event at recording start, behind a trait
     whose Mac implementation is in `steno-macos` (D10).

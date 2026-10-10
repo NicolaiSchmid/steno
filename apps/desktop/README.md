@@ -267,8 +267,9 @@ its prompt panel (`host::ShellPromptPanel` over `panels::set_prompt`)
 and the platform's process list: Core Audio's processes on the Mac,
 PipeWire's streams on Linux, the audio sessions on Windows. When another
 app holds the microphone for two seconds, the prompt says "<App> opened
-the microphone" for 60 seconds, unless Steno records or Meeting detection
-is off in Settings; one prompt shows at a time, and it goes when the app
+the microphone" for 60 seconds, unless Steno records or "Offer to record
+when a call starts" is off in Settings > General; one prompt shows at a
+time, and it goes when the app
 lets go, a recording starts, the setting goes off or the minute runs out.
 On the Mac the app is named by its running application's name
 (`host::app_name`); on Linux by its binary (`firefox`), on Windows by its

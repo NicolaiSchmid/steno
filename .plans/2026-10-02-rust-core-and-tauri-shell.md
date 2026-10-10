@@ -616,8 +616,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   incomplete and "Not now" was not pressed), the deep-link requests consumed by the
   publish that carried them. Difference: `phone` is filled from the handover service
   (the Swift main window left it nil).
-- [x] `recording`: from the `Recorder` trait, at most 20 Hz; the levels and the
-  auto-stop countdown arrive with WP5's recorder.
+- [x] `recording`: from the `Recorder` trait, at most 20 Hz; the levels arrived with
+  WP5's recorder, the auto-stop countdown with S2 of
+  `.plans/2026-10-07-stable-promotion.md`.
 - [x] `progress`: one entry per queued or processing meeting, fed by
   `Host::apply_meeting_event` and the meeting list.
 - [x] `meetings.list`: filters, tag filter, FTS query, counts before the tag filter and
@@ -2916,8 +2917,8 @@ touch and admission lines; each fix is ported to Swift before cutover.
   (`Recorder::hold_starts`) from just before the updater writes the package through
   the relaunch: a Record meanwhile, from the sidebar or the tray, is refused and says
   "Steno is installing an update. You can record again once it relaunches, or if you
-  cancel the install."; a meeting prompt's Record, once detection raises one, goes
-  through the same `recording.start` and is refused the same way. The hold also spans
+  cancel the install."; a meeting prompt's Record (`recordFromPrompt`) reaches the
+  same start and is refused the same way. The hold also spans
   the updater's password prompt: a `.deb` install always asks (pkexec, then a zenity
   or kdialog password dialog, then a terminal `sudo`), and on macOS an app folder the
   user cannot write asks for an administrator. Cancelling every prompt fails the
