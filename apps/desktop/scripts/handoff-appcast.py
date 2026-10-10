@@ -87,10 +87,20 @@ def number(value, what):
     return int(value)
 
 
+def published(path):
+    return [number(value, "sparkle:version") for item in items(path) for value in builds(item)]
+
+
+def the_item(path):
+    found = items(path)
+    if len(found) != 1:
+        fail("%s holds %d items, expected the one handoff item" % (path, len(found)))
+    return found[0]
+
+
 def check_build(path, build):
     build = number(build, "the build")
-    published = [number(value, "sparkle:version") for item in items(path) for value in builds(item)]
-    highest = max(published, default=0)
+    highest = max(published(path), default=0)
     if build <= highest:
         fail(
             "build %d is not above build %d, the highest on the appcast branch; Sparkle would "
@@ -104,16 +114,11 @@ def has_handoff_item(path):
 
 
 def has_build(path, build):
-    build = number(build, "the build")
-    published = [number(value, "sparkle:version") for item in items(path) for value in builds(item)]
-    print("true" if build in published else "false")
+    print("true" if number(build, "the build") in published(path) else "false")
 
 
 def check_item(path, version, build, expected_url):
-    found = items(path)
-    if len(found) != 1:
-        fail("%s holds %d items, expected the one handoff item" % (path, len(found)))
-    item = found[0]
+    item = the_item(path)
     expected = {
         "version": build,
         "shortVersionString": version,
@@ -124,8 +129,9 @@ def check_item(path, version, build, expected_url):
     for name, value in expected.items():
         if text(item, name) != value:
             fail("the handoff item has sparkle:%s %r, expected %r" % (name, text(item, name), value))
-    if text(item, "channel") is not None:
-        fail("the handoff item has the channel %r; Swift builds on no channel would never see it" % text(item, "channel"))
+    channel = text(item, "channel")
+    if channel is not None:
+        fail("the handoff item has the channel %r; Swift builds on no channel would never see it" % channel)
     enclosure = item.find("enclosure")
     if enclosure is None:
         fail("the handoff item has no enclosure")
@@ -148,8 +154,7 @@ PUB_DATE = re.compile(r"<pubDate>[^<]*</pubDate>")
 def stamp_pubdate(path, when):
     when = datetime.datetime.fromtimestamp(number(when, "the time"), datetime.timezone.utc)
     stamp = email.utils.format_datetime(when)
-    if len(items(path)) != 1:
-        fail("%s holds %d items, expected the one handoff item" % (path, len(items(path))))
+    the_item(path)
     with open(path, encoding="utf-8") as handle:
         feed = handle.read()
     stamped, count = PUB_DATE.subn("<pubDate>%s</pubDate>" % stamp, feed)
