@@ -344,6 +344,40 @@ mod tests {
         assert_eq!(dirs.set_aside(), Vec::<PathBuf>::new());
     }
 
+    /// A new file this user may not read (mode 000) is neither set aside
+    /// nor replaced by a save in this run, though the folder would take a
+    /// write. Skipped as root, who reads it anyway.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_file_without_read_permission_is_never_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dirs = Dirs::new();
+        dirs.write_earlier(anchor(100.0));
+        let bytes = serde_json::to_vec(&anchor(300.0)).unwrap();
+        Dirs::write(&dirs.new_path(), &bytes);
+        let mode = |mode| {
+            std::fs::set_permissions(dirs.new_path(), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+        };
+        mode(0o000);
+        if std::fs::read(dirs.new_path()).is_ok() {
+            mode(0o600);
+            return;
+        }
+        let file = dirs.file();
+        assert_eq!(file.load(), None);
+        file.save(anchor(200.0));
+        let unchanged = std::fs::metadata(dirs.new_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        mode(0o600);
+        assert_eq!(unchanged, 0o000);
+        assert_eq!(std::fs::read(dirs.new_path()).unwrap(), bytes);
+        assert_eq!(dirs.set_aside(), Vec::<PathBuf>::new());
+    }
+
     #[test]
     fn a_write_takes_the_latest_anchor_queued() {
         let (queue, queued) = channel();

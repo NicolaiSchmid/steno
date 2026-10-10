@@ -944,6 +944,19 @@ mod macos {
 mod tests {
     use super::*;
 
+    /// The anchor's file is the support directory's (`Steno/`, beside the
+    /// database), and the earlier build's anchor is read from the config
+    /// directory the earlier identifier's folder sits in
+    /// (`panel_anchor::AnchorFile::new`), not from this identifier's.
+    #[test]
+    fn the_anchor_lives_in_the_support_directory() {
+        // Without the carriage returns a Windows checkout may add.
+        let source = include_str!("panels.rs").replace("\r\n", "\n");
+        assert!(source.contains(
+            "        AnchorFile::new(\n            &steno_core::StenoPaths::default_support_directory(),\n            app.path().config_dir().ok().as_deref(),\n        )\n"
+        ));
+    }
+
     fn request(app_name: &str) -> PromptRequest {
         PromptRequest {
             app_name: app_name.into(),

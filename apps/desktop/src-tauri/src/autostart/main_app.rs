@@ -401,6 +401,7 @@ mod tests {
         job: Cell<Option<Job>>,
         unreadable: bool,
         bootout_fails: bool,
+        remove_fails: bool,
         calls: RefCell<Vec<String>>,
     }
 
@@ -434,6 +435,9 @@ mod tests {
 
         fn remove(&self, label: &str) -> std::io::Result<()> {
             self.note("remove", label);
+            if self.remove_fails {
+                return Err(std::io::Error::other("operation not permitted"));
+            }
             self.file.borrow_mut().take();
             Ok(())
         }
@@ -666,6 +670,22 @@ mod tests {
             ))
         );
         assert!(agents.file.borrow().is_none());
+    }
+
+    /// A file that cannot be deleted is a failure, not a removal, even
+    /// when its job was booted out.
+    #[test]
+    fn a_file_that_cannot_be_deleted_is_a_failure() {
+        let agents = FakeAgents {
+            remove_fails: true,
+            ..FakeAgents::with(EARLIER_AGENT, Job::Loaded { pid: Some(7) })
+        };
+        assert_eq!(
+            remove_earlier_agent(&agents, OWN_PID),
+            EarlierAgent::Failed("operation not permitted".to_owned())
+        );
+        assert_eq!(agents.calls(), ["read", "job", "bootout", "remove"]);
+        assert!(agents.file.borrow().is_some());
     }
 
     #[test]
