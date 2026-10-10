@@ -2477,6 +2477,27 @@ mod tests {
         fn announce(&self, _version: &str) {}
     }
 
+    /// The update schedule over `source` and the app's gate on the
+    /// harness's recorder and pipeline.
+    fn schedule_over(
+        harness: &Harness,
+        source: Arc<dyn crate::updates::UpdateSource>,
+    ) -> Arc<crate::updates::UpdateSchedule> {
+        crate::updates::UpdateSchedule::new(crate::updates::ScheduleParts {
+            source,
+            preferences: Arc::new(steno_host::fakes::FakePreferences::default()),
+            clock: Arc::new(steno_host::fakes::FakeClock::new(chrono::Utc::now())),
+            gate: Arc::new(crate::updates::IdleGate::new(
+                harness.recorder.clone(),
+                harness.recorder.pipeline.clone(),
+            )),
+            recorder: harness.recorder.clone(),
+            support_directory: harness.dir.path().to_owned(),
+            managed: false,
+            runtime: tokio::runtime::Handle::current(),
+        })
+    }
+
     /// The harness's recorder after a start on a thread of its own.
     fn status_after_a_start(harness: &Harness) -> RecorderStatus {
         let starter = harness.recorder.clone();
@@ -2493,19 +2514,7 @@ mod tests {
     async fn a_cancelled_password_prompt_lets_recording_start_again() {
         let harness = harness(&[]);
         let source = Arc::new(PasswordPromptSource::default());
-        let schedule = crate::updates::UpdateSchedule::new(crate::updates::ScheduleParts {
-            source: source.clone(),
-            preferences: Arc::new(steno_host::fakes::FakePreferences::default()),
-            clock: Arc::new(steno_host::fakes::FakeClock::new(chrono::Utc::now())),
-            gate: Arc::new(crate::updates::IdleGate::new(
-                harness.recorder.clone(),
-                harness.recorder.pipeline.clone(),
-            )),
-            recorder: harness.recorder.clone(),
-            support_directory: harness.dir.path().to_owned(),
-            managed: false,
-            runtime: tokio::runtime::Handle::current(),
-        });
+        let schedule = schedule_over(&harness, source.clone());
         schedule.check_on_request().await.unwrap();
         let offer = {
             let schedule = schedule.clone();
@@ -2544,19 +2553,7 @@ mod tests {
             recorder: Some(harness.recorder.clone()),
             ..WaitingSource::default()
         });
-        let schedule = crate::updates::UpdateSchedule::new(crate::updates::ScheduleParts {
-            source: source.clone(),
-            preferences: Arc::new(steno_host::fakes::FakePreferences::default()),
-            clock: Arc::new(steno_host::fakes::FakeClock::new(chrono::Utc::now())),
-            gate: Arc::new(crate::updates::IdleGate::new(
-                harness.recorder.clone(),
-                harness.recorder.pipeline.clone(),
-            )),
-            recorder: harness.recorder.clone(),
-            support_directory: harness.dir.path().to_owned(),
-            managed: false,
-            runtime: tokio::runtime::Handle::current(),
-        });
+        let schedule = schedule_over(&harness, source.clone());
         schedule.check_on_request().await.unwrap();
         start(&harness.recorder).await;
         let offer = {
