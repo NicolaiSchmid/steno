@@ -124,8 +124,9 @@ exits reach the shutdown these ways:
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).
 - An update's relaunch bypasses the request, so it waits for the shutdown
-  first too; on Windows the installer's own exit runs it, and an install
-  that fails after that ends the app once its message is closed.
+  first too; on Windows the install runs it before it hands the installer
+  to a watcher (below), and an install that fails after that restarts
+  the app at once.
 - A logoff or a shutdown on Windows also arrives as `RunEvent::Exit`
   (tao answers `WM_ENDSESSION` with it), and the shutdown runs until
   Windows' end-session timeout ends the process: about five seconds,
@@ -757,14 +758,28 @@ can record again in a moment."; a summary re-run or an export asked for
 in those seconds is not kept and has to be asked for again after the
 relaunch.
 
-An install that asks for a password or for consent (the MSI, whose
-Windows prompt comes after it has ended Steno) runs only right after a
-yes given while Steno is idle, so someone is there to answer and Steno is
-not left down behind the prompt. A yes given while Steno was busy, or one it
-turned busy after, asks once more when it is idle: "Steno 0.12.0 is
+An install that asks for a password or for consent (a `.deb` or `.rpm`,
+a macOS app in a folder the user cannot write, and the MSI, whose Windows
+prompt comes after it has ended Steno) runs only right after a yes given
+while Steno is idle, so someone is there to answer. A yes given while
+Steno was busy, one it turned busy after, and one whose download took
+more than 30 seconds ask once more when it is idle: "Steno 0.12.0 is
 ready to install. Install it and relaunch now?", with Later leaving the
-update for the next tick. The NSIS setup installs for the user alone and
-asks nothing.
+update for the next tick (a package the schedule had downloaded stays
+downloaded). The NSIS setup installs for the user alone and asks nothing.
+
+On Windows Steno does not start the installer itself. It writes the
+verified installer to
+`%LOCALAPPDATA%\uno.schmid.steno.desktop\update\`, saves and shuts down,
+and leaves a hidden `cmd.exe` running that starts the installer and
+waits for it. A successful install starts the new version. When the
+consent prompt is declined, the MSI fails or another install is under
+way (any `msiexec` exit code but 0, 1641 or 3010), or the NSIS setup
+fails or is aborted (any exit code but 0), the `cmd.exe` starts the
+version that was running, so Steno is back within seconds. Steno is down
+only while the installer runs, its consent prompt included. If the
+`cmd.exe` cannot be started, Steno restarts at once and the error goes to
+the log.
 
 With automatic downloads on, the schedule downloads a found update at the
 first tick that finds the app idle and no install under way, and installs

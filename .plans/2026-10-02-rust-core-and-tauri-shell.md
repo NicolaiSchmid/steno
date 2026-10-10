@@ -1457,8 +1457,9 @@ still has to draw the window side. `[ ]` is not ported yet.
     Windows' end-session timeout ends the process: about five seconds, less than
     `SHUTDOWN_PATIENCE` (WP10).
   - The updater's relaunch bypasses the exit request and runs the shutdown before it
-    relaunches; on Windows the installer's own exit runs it (`on_before_exit`), and an
-    install that fails after it ends the app once its message is closed.
+    relaunches; on Windows the install runs it before it starts the installer's watcher
+    (P25 of `.plans/2026-10-07-stable-promotion.md`), and an install that fails after it
+    restarts the app at once.
   - On Linux an exit that went through ends the process two seconds later at the latest
     (`end_within` in the shell's `main.rs`), with its code; an update's relaunch is left to
     the teardown. `tauri-plugin-single-instance` 2.5 releases its bus name in its
@@ -2941,11 +2942,18 @@ touch and admission lines; each fix is ported to Swift before cutover.
   app, and the hold is kept through the install: the NSIS setup
   (`Installer::EndsTheApp`) installs for the user alone and waits on nothing outside
   Steno before the shutdown; the MSI (`Installer::EndsTheAppThenAsks`) installs for
-  every user, so Windows asks for consent after the app has ended, and Steno stays
-  down until someone answers. An installer that asks an administrator (a `.deb`, an
+  every user, so Windows asks for consent after the app has ended, and Steno is
+  down until the prompt is answered. The app runs neither installer itself: it
+  writes the verified download to its local data folder, runs the shutdown and
+  leaves a hidden `cmd.exe` (`updater/windows_setup.rs` in the desktop shell) that
+  starts the installer as the plugin's passive install did, waits, and starts the
+  version that ran again unless the installer installed (`msiexec` 0, 1641 or 3010;
+  the setup 0), so a no at the prompt, a failed MSI or an aborted setup brings Steno
+  back within seconds; when that `cmd.exe` cannot start, the app restarts at once.
+  An installer that asks an administrator (a `.deb`, an
   `.rpm`, an unwritable macOS bundle, the MSI) therefore runs only right after a yes
-  given while the app is idle: a yes given while it was busy, or one it turned busy
-  after, asks once more when it is idle ("Steno 0.12.0 is ready to install. Install it
+  given while the app is idle: a yes given while it was busy, one it turned busy
+  after, or one whose download took over 30 s, asks once more when it is idle ("Steno 0.12.0 is ready to install. Install it
   and relaunch now?"), holding nothing while that dialog is up, and "Later" leaves the
   version to be raised again. The hold is kept through the
   shutdown and the relaunch: a Record then, from the sidebar, the tray or a meeting
