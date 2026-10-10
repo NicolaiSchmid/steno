@@ -243,7 +243,9 @@ fn install_update(_app: &AppHandle, update: &Update, package: &[u8]) -> Result<(
 /// [`WATCHER_START_LIMIT`]: windows_setup::WATCHER_START_LIMIT
 #[cfg(windows)]
 fn install_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
-    use windows_setup::{STARTED_FILE, Setup, WATCHER_START_LIMIT};
+    use windows_setup::{
+        STARTED_FILE, Setup, WATCHER_START_LIMIT, system32, wait_for_start, watcher_command,
+    };
 
     let text = |error: std::io::Error| error.to_string();
     let setup = Setup::of(package).ok_or("The update is not a Windows installer.")?;
@@ -259,17 +261,17 @@ fn install_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<()
     std::fs::write(&installer, package).map_err(text)?;
     let relaunch = std::env::current_exe().map_err(text)?;
     let started = folder.join(STARTED_FILE);
-    let mut watcher = windows_setup::watcher_command(
+    let mut watcher = watcher_command(
         setup,
         &installer,
-        &windows_setup::system32().join("msiexec.exe"),
+        &system32().join("msiexec.exe"),
         &relaunch,
         &started,
         &data,
     );
     crate::shut_down_before_exit(app);
     let mut watcher = watcher.spawn().map_err(text)?;
-    windows_setup::wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT)?;
+    wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT)?;
     std::process::exit(0)
 }
 

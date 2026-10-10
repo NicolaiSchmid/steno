@@ -43,6 +43,13 @@ pub const WATCHER_START_LIMIT: Duration = Duration::from_secs(10);
 /// The first bytes of a compound file, which an MSI is.
 const COMPOUND_FILE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
+/// Starts a console program without a window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Starts a process outside the app's job, so it outlives the app.
+#[cfg(windows)]
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
 /// The installer a Windows update holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setup {
@@ -164,8 +171,6 @@ pub fn watcher_command(
 ) -> Command {
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
-    /// `CREATE_NO_WINDOW` and `CREATE_BREAKAWAY_FROM_JOB`.
-    const HIDDEN_AND_OUT_OF_THE_JOB: u32 = 0x0800_0000 | 0x0100_0000;
 
     let mut watcher = Command::new(system32().join("cmd.exe"));
     watcher
@@ -177,7 +182,7 @@ pub fn watcher_command(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(HIDDEN_AND_OUT_OF_THE_JOB);
+        .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
     watcher
 }
 
@@ -185,39 +190,38 @@ pub fn watcher_command(
 /// it runs. A watcher that exits first, or is still silent at the limit,
 /// is ended and the error says so: it has started no installer, since it
 /// creates the file before anything else, so the app can start again.
-#[cfg(any(windows, test))]
 pub fn wait_for_start(
     watcher: &mut std::process::Child,
     started: &Path,
     limit: Duration,
 ) -> Result<(), String> {
     let deadline = std::time::Instant::now() + limit;
-    loop {
+    let error = loop {
         if started.exists() {
             return Ok(());
         }
         match watcher.try_wait() {
-            Ok(None) if std::time::Instant::now() < deadline => {}
             Ok(Some(_)) if started.exists() => return Ok(()),
             Ok(Some(status)) => {
                 return Err(format!(
                     "The installer's watcher ended before it ran ({status})."
                 ));
             }
-            outcome => {
-                let _ = watcher.kill();
-                let _ = watcher.wait();
-                return Err(match outcome {
-                    Err(error) => error.to_string(),
-                    Ok(_) => format!(
-                        "The installer's watcher did not run within {} seconds, and was ended.",
-                        limit.as_secs()
-                    ),
-                });
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
             }
+            Ok(None) => {
+                break format!(
+                    "The installer's watcher did not run within {} seconds, and was ended.",
+                    limit.as_secs()
+                );
+            }
+            Err(error) => break error.to_string(),
         }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    };
+    let _ = watcher.kill();
+    let _ = watcher.wait();
+    Err(error)
 }
 
 #[cfg(test)]
@@ -328,23 +332,25 @@ mod tests {
         assert_eq!(WATCHER_START_LIMIT, Duration::from_secs(10));
     }
 
-    /// A child under `sh` that runs `script` with the start file as `$1`.
+    /// A watcher under `sh` that runs `script` with its start file, in a
+    /// new folder, as `$1`.
     #[cfg(unix)]
-    fn sh(script: &str, started: &Path) -> std::process::Child {
-        std::process::Command::new("sh")
+    fn sh(script: &str) -> (tempfile::TempDir, std::path::PathBuf, std::process::Child) {
+        let folder = tempfile::tempdir().unwrap();
+        let started = folder.path().join(STARTED_FILE);
+        let watcher = std::process::Command::new("sh")
             .args(["-c", script, "sh"])
-            .arg(started)
+            .arg(&started)
             .spawn()
-            .expect("sh starts")
+            .expect("sh starts");
+        (folder, started, watcher)
     }
 
     /// A watcher that creates the file is running: the wait ends at once.
     #[cfg(unix)]
     #[test]
     fn a_watcher_that_says_it_runs_ends_the_wait() {
-        let folder = tempfile::tempdir().unwrap();
-        let started = folder.path().join(STARTED_FILE);
-        let mut watcher = sh(r#"touch "$1"; sleep 5"#, &started);
+        let (_folder, started, mut watcher) = sh(r#"touch "$1"; sleep 5"#);
         let begun = std::time::Instant::now();
         assert_eq!(
             wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT),
@@ -365,9 +371,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_watcher_that_ends_without_saying_so_fails_the_wait() {
-        let folder = tempfile::tempdir().unwrap();
-        let started = folder.path().join(STARTED_FILE);
-        let mut watcher = sh("exit 3", &started);
+        let (_folder, started, mut watcher) = sh("exit 3");
         let begun = std::time::Instant::now();
         let error = wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT).unwrap_err();
         assert!(error.contains("ended before it ran"), "{error}");
@@ -382,9 +386,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_silent_watcher_is_ended_at_the_limit() {
-        let folder = tempfile::tempdir().unwrap();
-        let started = folder.path().join(STARTED_FILE);
-        let mut watcher = sh("sleep 30", &started);
+        let (_folder, started, mut watcher) = sh("sleep 30");
         let limit = Duration::from_millis(300);
         let begun = std::time::Instant::now();
         let error = wait_for_start(&mut watcher, &started, limit).unwrap_err();
@@ -457,7 +459,6 @@ fn main() {
     #[cfg(windows)]
     fn spawn(mut watcher: Command) -> std::process::Child {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         match watcher.spawn() {
             Ok(child) => child,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -472,6 +473,7 @@ fn main() {
     #[cfg(windows)]
     #[test]
     fn the_watcher_command_puts_each_path_in_its_variable() {
+        use std::ffi::OsStr;
         let at = |path: &str| Path::new(path).to_owned();
         let (installer, msiexec, relaunch, started, folder) = (
             at(r"C:\Data\update\Steno-0.12.0.msi"),
@@ -490,10 +492,7 @@ fn main() {
         );
         assert_eq!(watcher.get_program(), system32().join("cmd.exe"));
         let arguments: Vec<_> = watcher.get_args().collect();
-        assert_eq!(
-            arguments,
-            [std::ffi::OsStr::new(&watcher_arguments(Setup::Msi))]
-        );
+        assert_eq!(arguments, [OsStr::new(&watcher_arguments(Setup::Msi))]);
         assert_eq!(watcher.get_current_dir(), Some(folder.as_path()));
         let mut variables: Vec<_> = watcher.get_envs().collect();
         variables.sort();
@@ -501,18 +500,9 @@ fn main() {
         assert_eq!(
             variables,
             [
-                (
-                    std::ffi::OsStr::new(RELAUNCH_VARIABLE),
-                    Some(relaunch.as_os_str())
-                ),
-                (
-                    std::ffi::OsStr::new(SETUP_VARIABLE),
-                    Some(setup.as_os_str())
-                ),
-                (
-                    std::ffi::OsStr::new(STARTED_VARIABLE),
-                    Some(started.as_os_str())
-                ),
+                (OsStr::new(RELAUNCH_VARIABLE), Some(relaunch.as_os_str())),
+                (OsStr::new(SETUP_VARIABLE), Some(setup.as_os_str())),
+                (OsStr::new(STARTED_VARIABLE), Some(started.as_os_str())),
             ]
         );
     }
