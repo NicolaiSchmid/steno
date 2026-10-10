@@ -5,8 +5,9 @@
 //!
 //! A test that writes models gives the app an explicit models directory in
 //! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
-//! `speech::testing`'s writers panic outside the temp directory, so no
-//! test overwrites the models a developer keeps for the real-model tests.
+//! `speech::testing`'s writers panic outside the temp directory or inside
+//! the directory `STENO_MODELS_DIR` names, so no test overwrites the
+//! models a developer keeps for the real-model tests.
 
 use std::sync::Arc;
 use std::time::Duration;

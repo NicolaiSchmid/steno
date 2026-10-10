@@ -903,15 +903,16 @@ impl ProgressThrottle {
 }
 
 /// Model files on disk for the tests, so no test downloads one. Every
-/// writer here panics outside the temp directory ([`testing::is_scratch`]),
-/// so none writes into a models directory a developer keeps
-/// (`STENO_MODELS_DIR` names one for the real-model tests).
+/// writer here panics outside the temp directory or inside the directory
+/// `STENO_MODELS_DIR` names ([`testing::is_scratch`]), so none writes into
+/// a models directory a developer keeps for the real-model tests, even one
+/// that lies inside the temp directory.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::collections::BTreeSet;
     use std::path::{Component, Path, PathBuf};
 
-    use steno_speech::{SidecarConfig, SpeechSettings};
+    use steno_speech::{ModelStore, SidecarConfig, SpeechSettings};
 
     use super::{ModelStoreSpeechModels, SpeechSetup};
 
@@ -975,8 +976,14 @@ pub(crate) mod testing {
         let directory = store.directory(asset);
         assert!(
             is_scratch(&directory),
-            "a test may write models only inside the temp directory, not into {}",
-            directory.display()
+            "a test writes models only into a temp directory it owns \
+             (`models_in(tempdir)`, or the settings' `models_directory`), \
+             not into {} (the temp directory is {}, {} names {})",
+            directory.display(),
+            std::env::temp_dir().display(),
+            ModelStore::ENVIRONMENT_VARIABLE,
+            ModelStore::environment_models_directory()
+                .map_or_else(|| "nothing".to_owned(), |named| named.display().to_string()),
         );
         for file in &asset.files {
             let path = directory.join(&file.name);
@@ -988,19 +995,35 @@ pub(crate) mod testing {
         }
     }
 
-    /// Whether `path` lies inside the temp directory, compared as the file
-    /// system resolves both (the temp directory is a link on the Mac), so
-    /// a test writing placeholder models never overwrites real ones,
-    /// wherever its models directory was resolved from. A path that climbs
-    /// out with `..` is not scratch.
+    /// [`is_scratch_in`] the process's temp directory and the models
+    /// directory `STENO_MODELS_DIR` names.
     pub fn is_scratch(path: &Path) -> bool {
+        is_scratch_in(
+            path,
+            &std::env::temp_dir(),
+            ModelStore::environment_models_directory().as_deref(),
+        )
+    }
+
+    /// Whether `path` lies inside `temp` and outside `named`, compared as
+    /// the file system resolves them (the temp directory is a link on the
+    /// Mac), so a test writing placeholder models never overwrites real
+    /// ones, wherever its models directory was resolved from: `named` is
+    /// the models directory the environment names, which may itself lie
+    /// inside the temp directory. A path that climbs out with `..` is not
+    /// scratch, and neither is any path while `named` cannot be resolved.
+    pub fn is_scratch_in(path: &Path, temp: &Path, named: Option<&Path>) -> bool {
         if path.components().any(|part| part == Component::ParentDir) {
             return false;
         }
-        let (Some(path), Ok(temp)) = (resolved(path), std::env::temp_dir().canonicalize()) else {
+        let (Some(path), Ok(temp)) = (resolved(path), temp.canonicalize()) else {
             return false;
         };
-        path.starts_with(temp)
+        let named = match named.map(resolved) {
+            Some(None) => return false,
+            named => named.flatten(),
+        };
+        path.starts_with(temp) && !named.is_some_and(|named| path.starts_with(named))
     }
 
     /// `path` with its deepest existing ancestor canonicalised and the
@@ -1059,6 +1082,52 @@ mod tests {
             &temp.with_file_name(sibling).join("models")
         ));
         assert!(!testing::is_scratch(&dir.path().join("../../steno-models")));
+    }
+
+    /// The guard refuses the models directory `STENO_MODELS_DIR` names,
+    /// and anything inside it, even where that directory lies inside the
+    /// temp directory (a developer's `TMPDIR` may hold their real models),
+    /// existing or not; a sibling whose name only starts like it is still
+    /// scratch, and a named directory that cannot be resolved refuses
+    /// every path.
+    #[test]
+    fn the_model_writers_never_write_inside_the_models_directory_the_environment_names() {
+        let root = tempfile::tempdir().unwrap();
+        let temp = root.path().join("tmp");
+        let named = temp.join("real-models");
+        let model = named.join("onnx/diarization/pyannote-segmentation-3.0.onnx");
+        let scratch = temp.join("test-models/onnx/diarization");
+        std::fs::create_dir_all(&scratch).unwrap();
+        for named in [Some(named.as_path()), None] {
+            assert!(testing::is_scratch_in(&scratch, &temp, named));
+        }
+        for path in [&named, &model] {
+            assert!(testing::is_scratch_in(path, &temp, None));
+            assert!(!testing::is_scratch_in(path, &temp, Some(&named)));
+        }
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"a developer's downloaded model").unwrap();
+        assert!(!testing::is_scratch_in(&model, &temp, Some(&named)));
+        assert!(testing::is_scratch_in(
+            &temp.join("real-models-other"),
+            &temp,
+            Some(&named)
+        ));
+        assert!(!testing::is_scratch_in(
+            &scratch,
+            &temp,
+            Some(&temp.join("no/such/..")),
+        ));
+    }
+
+    /// The model writers ask the guard: an install into a models directory
+    /// that climbs with `..` panics (without the guard it would land in
+    /// the test's own directory, so the check is harmless).
+    #[test]
+    #[should_panic(expected = "a test writes models only into a temp directory it owns")]
+    fn the_model_writers_panic_where_the_guard_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        testing::install_onnx_diarizer(&testing::models_in(&dir.path().join("x/..")));
     }
 
     /// The same runtime gets the same engine and claims; another runtime a
