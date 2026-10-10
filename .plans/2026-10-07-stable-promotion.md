@@ -449,7 +449,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | ID | What | Targets |
 |---|---|---|
 | X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` | Omarchy, NixOS with Hyprland |
-| X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) (#267: a list naming `x11` or `*`, or a lone `*`, counts as unset, any other value still wins; the titles on Linux only, macOS and Windows keep "Steno"; the rules are `apps/desktop/src-tauri/linux/hyprland-steno.lua`, one `hl.window_rule` on class `[Ss]teno-desktop` and title `Steno (bubble\|prompt)` that also turns off focus on hover, the border, shadow and blur, checked by Hyprland 0.56.2's `--verify-config`; the `.deb` installs it as `/usr/share/steno-desktop/hyprland-steno.lua` (`check-bundle.sh` checks it), and so does the AUR package that repackages it (#265), with its own copy while the pinned `.deb` lacks the file, loaded with `dofile`; the Linux smoke finds both panels by their titles) | Omarchy, NixOS with Hyprland |
+| X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) (#267: a list naming `x11` or `*`, or a lone `*`, counts as unset, any other value still wins; the titles on Linux only, macOS and Windows keep "Steno"; the rules are `apps/desktop/src-tauri/linux/hyprland-steno.lua`, one `hl.window_rule` on class `[Ss]teno-desktop` and title `Steno (bubble\|prompt)` that also turns off focus on hover, the border, shadow and blur, checked by Hyprland 0.56.2's `--verify-config`; the `.deb` installs it as `/usr/share/steno-desktop/hyprland-steno.lua` (`check-bundle.sh` checks it), and so does the AUR package that repackages it (#265) from the next release, loaded with `dofile`; the Linux smoke finds both panels by their titles) | Omarchy, NixOS with Hyprland |
 | X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves | all |
 | X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port | Omarchy, NixOS |
 | X5 | Packaged installs: `STENO_DISTRIBUTION=aur` or `=nix`, read at build time (Nix) or from the environment (the AUR wrapper), turns the in-app updater off and Settings says updates come from the package manager; the autostart entry names a stable path (`/usr/bin/steno-desktop`, or the Nix profile's), never `current_exe()` or a store path; with `STENO_LOGIN_ITEM=managed`, which the NixOS module sets, the app leaves launch at login to the system (#261: the environment wins over the build's value; the path is `$APPIMAGE`, else `STENO_EXEC_PATH` from a wrapper whose binary lies elsewhere, as X6's, else the first of `/usr/bin`, `/usr/local/bin` and the Nix profiles that resolves into the running binary's directory, else no entry, and turning Launch at login on fails with "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager." and is not saved; managed, the app touches no entry except one an earlier build wrote, whose `Exec` starts a program in `/nix/store` or names a profile path: it goes at launch, or, when the app runs as the autostart unit made from it, after the save at Steno's first exit, so a reload never leaves the recorder in a unit no logout stops) | Omarchy, NixOS |
@@ -491,9 +491,9 @@ A for the audio path, P for the other data-loss fixes, X for the Linux targets.
 Every package is written in parallel except where a dependency is named:
 
 - S3 on S6's `steno-macos` (D10); S4's packaged-install message on X5; A8 on S2's
-  controller; X6 on X5 and P5 (X2's rules joined it in #265, X4's file joins it in X4's PR); X7
-  on X4, X5 and P5; P5's save logging on P3's recoverable save; S1's queued
-  refusal on P9's queue.
+  controller; X6 on X5 and P5 (X2's rules come in the `.deb` it repackages;
+  X4's `ufw` profile joins X6 in X4's PR); X7 on X4, X5 and P5; P5's save
+  logging on P3's recoverable save; S1's queued refusal on P9's queue.
 
 ### S: the Mac and the release
 
@@ -1100,21 +1100,18 @@ The table above names each package and its owner. Their tests:
     vehicle until a release contains #227 and #261; the first AUR push is a
     release with both (#227, #261 and #267 are on main). Two drop-ins (the
     autostart service's and GNOME's scope's), byte for byte #227's
-    `apps/desktop/src-tauri/linux/` files, and X2's Hyprland rules as
-    `/usr/share/steno-desktop/hyprland-steno.lua`, byte for byte #267's
-    `linux/hyprland-steno.lua`, which Omarchy users load with `dofile` (the
-    package README's "Hyprland"). The copies of the drop-ins and of the rules
-    file stay until the pinned `.deb` ships them itself, and `package()`
-    keeps the `.deb`'s file when it has one. `check-aur.sh` compares each
-    copy with `linux/`'s before the build and requires each file in the
-    package either way, identical to `linux/`'s, the drop-ins also setting
-    `TimeoutStopSec=20s`. No install script: Arch's
+    `apps/desktop/src-tauri/linux/` files. The drop-in copies stay until the
+    pinned `.deb` ships them, and the build then fails until Bump step 3
+    deletes them. `check-aur.sh` compares each copy with `linux/`'s and
+    requires both drop-ins with `TimeoutStopSec=20s`. X2's Hyprland rules
+    come in the `.deb` from the first release that contains #267; rc.3's
+    lacks them. No install script: Arch's
     `30-systemd-daemon-reload-user.hook` reloads the user managers. X4's
     `ufw` profile is a `TODO` line in `package()`, so X6 lands before X4 and
-    gains it in X4's PR. An autostart entry a candidate without X5 wrote survives the upgrade
-    and bypasses the wrapper; Omarchy step 1 rewrites it. `depends` adds
-    what namcap finds linked (`cairo`, `gdk-pixbuf2`, `glibc`,
-    `hicolor-icon-theme`, `libgcc`, `libpipewire`, `libstdc++`).
+    gains it in X4's PR. An autostart entry a candidate without X5 wrote
+    survives the upgrade and bypasses the wrapper; Omarchy step 1 rewrites
+    it. `depends` adds what namcap finds linked (`cairo`, `gdk-pixbuf2`,
+    `glibc`, `hicolor-icon-theme`, `libgcc`, `libpipewire`, `libstdc++`).
     The release key is also committed as
     `packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`;
     publishing it to keyserver.ubuntu.com, which yay and paru query for a
