@@ -777,9 +777,13 @@ prompt is declined, the MSI fails or another install is under way (any
 aborted (any exit code but 0), the `cmd.exe` starts the version that was
 running, so Steno is back within seconds. Steno is down only while the
 installer runs, its consent prompt included. If the `cmd.exe` cannot
-start, or does not say within 10 seconds that it runs (a policy that
-turns off the command prompt does this), Steno ends it and restarts at
-once, and the error goes to the log.
+start, ends before it runs (a policy that turns off the command prompt
+ends it at once) or says nothing for 10 seconds, Steno restarts at once
+and the error goes to the log. Steno lets go of its single-instance lock
+just before it ends, so an old version started again at once (`msiexec`
+exits at once while another install runs) comes up rather than handing
+over to the ending Steno. An install that fails while Steno quits
+restarts nothing.
 
 With automatic downloads on, the schedule downloads a found update at the
 first tick that finds the app idle and no install under way, and installs

@@ -2949,29 +2949,32 @@ touch and admission lines; each fix is ported to Swift before cutover.
   plugin's passive install did, waits, and starts the version that ran again unless
   the installer installed (`msiexec` 0, 1641 or 3010; the setup 0), so a no at the
   prompt, a failed MSI or an aborted setup brings Steno back within seconds. If the
-  `cmd.exe` cannot start, or does not say within 10 seconds that it runs (a policy
-  that turns off the command prompt does this), Steno ends it and restarts at once,
-  and the error goes to the log. An installer that asks an administrator (a `.deb`, an
-  `.rpm`, an unwritable macOS bundle, the MSI) therefore runs only right after a yes
-  given while the app is idle: a yes given while it was busy, one it turned busy
-  after, or one whose download took over 30 s, asks once more when it is idle ("Steno
-  0.12.0 is ready to install. Install it and relaunch now?"), holding nothing while
-  that dialog is up, and "Later" leaves the version to be raised again. The hold is
-  kept through the shutdown and the relaunch: a Record then, from the sidebar, the
-  tray or a meeting prompt, is refused and says "Steno is relaunching to finish
-  installing an update. You can record again in a moment."; a background run claimed
-  then stays `queued` for the relaunched app, and a summary re-run or a re-export
-  claimed then is not kept (the user asks again). Cancelling every prompt fails the
-  install, which drops the hold. A yes given while the schedule's own install runs
-  installs nothing. With automatic downloads on, the schedule downloads by itself only
-  while `InstallGate::is_idle_now` says idle and no install runs (a recording or a
-  processing job has the disk and the network to itself), keeps the package until an
-  install takes it, and installs only with the gate's hold from `try_hold`, taken
-  after the one-install guard; it does not run an installer that asks an
-  administrator, whose package it announces instead. The flag is read again when the
-  download ends, and turning it off frees the kept package, so a switch turned off
-  during the transfer keeps and installs nothing. Sparkle installed a download at
-  quit. Settings' footer now says only "Updates are checked once a day."
+  `cmd.exe` cannot start, ends before it runs (a policy that turns off the command
+  prompt ends it at once) or says nothing for 10 seconds, Steno restarts at once and
+  the error goes to the log. Steno lets go of its single-instance lock just before it
+  ends, so an old version started again at once (`msiexec` exits at once while another
+  install runs) comes up rather than handing over to the ending Steno. An install that
+  fails while Steno quits restarts nothing. An installer that asks an administrator (a
+  `.deb`, an `.rpm`, an unwritable macOS bundle, the MSI) therefore runs only right
+  after a yes given while the app is idle: a yes given while it was busy, one it
+  turned busy after, or one whose download took over 30 s, asks once more when it is
+  idle ("Steno 0.12.0 is ready to install. Install it and relaunch now?"), holding
+  nothing while that dialog is up, and "Later" leaves the version to be raised again.
+  The hold is kept through the shutdown and the relaunch: a Record then, from the
+  sidebar, the tray or a meeting prompt, is refused and says "Steno is relaunching to
+  finish installing an update. You can record again in a moment."; a background run
+  claimed then stays `queued` for the relaunched app, and a summary re-run or a
+  re-export claimed then is not kept (the user asks again). Cancelling every prompt
+  fails the install, which drops the hold. A yes given while the schedule's own
+  install runs installs nothing. With automatic downloads on, the schedule downloads
+  by itself only while `InstallGate::is_idle_now` says idle and no install runs (a
+  recording or a processing job has the disk and the network to itself), keeps the
+  package until an install takes it, and installs only with the gate's hold from
+  `try_hold`, taken after the one-install guard; it does not run an installer that
+  asks an administrator, whose package it announces instead. The flag is read again
+  when the download ends, and turning it off frees the kept package, so a switch
+  turned off during the transfer keeps and installs nothing. Sparkle installed a
+  download at quit. Settings' footer now says only "Updates are checked once a day."
   (`general-section.tsx`, the settings redesign's footnote), which holds for both
   apps. One install runs at a time, and the install is of the version the last check
   found: a yes carries over to a newer version a check finds while the install waits.
