@@ -27,6 +27,11 @@
 #   and run the binary;
 # - an installed drop-in is not the copy here while one exists, or its
 #   settings are not exactly its section and TimeoutStopSec=20s;
+# - the ufw profile does not open the handover's Linux port
+#   (HandoverConfiguration::LINUX_PORT in crates/steno-handover), is not
+#   installed as /etc/ufw/applications.d/steno-desktop and kept on upgrade
+#   (backup=), or `ufw app info Steno` does not read it; or ufw's own rules
+#   stop admitting mDNS, which the profile leaves to them;
 # - a binary needs a library that is not installed, or the sidecar does
 #   not start.
 #
@@ -82,6 +87,14 @@ for entry in "${drop_ins[@]}"; do
     || die "packaging/aur/$conf is not apps/desktop/src-tauri/linux/$conf"
 done
 echo "ok: the copies of the drop-ins are apps/desktop/src-tauri/linux's"
+
+# The ufw profile opens the port the app binds on Linux.
+port="$(sed -n 's/^ *pub const LINUX_PORT: u16 = \([0-9]*\);$/\1/p' \
+  "$root/crates/steno-handover/src/configuration.rs")"
+[[ -n "$port" ]] || die "crates/steno-handover/src/configuration.rs has no LINUX_PORT"
+[[ "$(grep -E '^ports=' "$work/ufw-steno-desktop")" == "ports=$port/tcp" ]] \
+  || die "packaging/aur/ufw-steno-desktop does not open exactly $port/tcp, the handover's LINUX_PORT"
+echo "ok: the ufw profile opens $port/tcp, the handover's LINUX_PORT"
 
 # The pinned .deb lacks the drop-ins, so the build never trips _copy's
 # guard. While the PKGBUILD has _copy, call it on a stand-in for the
@@ -152,6 +165,21 @@ for entry in "${drop_ins[@]}"; do
     || die "$installed does not set exactly [$section] TimeoutStopSec=20s"
   echo "ok: the package installs $installed, which sets exactly [$section] TimeoutStopSec=20s"
 done
+
+profile=/etc/ufw/applications.d/steno-desktop
+grep -qxF "$profile" <<<"$files" || die "the package does not install $profile"
+cmp -s "$profile" "$work/ufw-steno-desktop" || die "$profile is not packaging/aur/ufw-steno-desktop"
+pacman -Qii "$pkgname" | grep -qE "^(Backup Files[[:space:]]*:[[:space:]]*)?$profile[[:space:]]" \
+  || die "$profile is not a backup file, so an upgrade would overwrite a user's edit"
+pacman -S --noconfirm --needed ufw >/dev/null
+ufw app info Steno | tee /tmp/ufw-app
+grep -qxF 'Profile: Steno' /tmp/ufw-app && grep -qxF "  $port/tcp" /tmp/ufw-app \
+  || die "ufw app info Steno does not read the profile with $port/tcp"
+# mDNS to 224.0.0.251:5353, which ufw's before.rules accept for every
+# profile and policy.
+grep -qE -- '-d 224\.0\.0\.251 --dport 5353 -j ACCEPT' /etc/ufw/before.rules \
+  || die "ufw's before.rules no longer admit mDNS: the profile must open 5353/udp"
+echo "ok: the package installs the ufw profile Steno as a backup file, ufw reads it, and ufw admits mDNS"
 
 for binary in /usr/lib/steno-desktop/steno-desktop /usr/lib/steno-desktop/steno-speech-sidecar; do
   ! ldd "$binary" | grep 'not found' || die "$binary needs a library that is not installed"
