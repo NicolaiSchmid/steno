@@ -401,7 +401,6 @@ mod tests {
     struct FakeMainApp {
         status: Cell<LoginItemStatus>,
         registers_as: Result<LoginItemStatus, String>,
-        registered: Cell<u32>,
     }
 
     impl FakeMainApp {
@@ -409,7 +408,6 @@ mod tests {
             FakeMainApp {
                 status: Cell::new(status),
                 registers_as,
-                registered: Cell::new(0),
             }
         }
     }
@@ -420,7 +418,6 @@ mod tests {
         }
 
         fn register(&self) -> Result<(), String> {
-            self.registered.set(self.registered.get() + 1);
             let status = self.registers_as.clone()?;
             self.status.set(status);
             Ok(())
@@ -430,10 +427,6 @@ mod tests {
             self.status.set(LoginItemStatus::NotRegistered);
             Ok(())
         }
-    }
-
-    fn not_registered() -> FakeMainApp {
-        FakeMainApp::new(LoginItemStatus::NotRegistered, Ok(LoginItemStatus::Enabled))
     }
 
     /// A build under the earlier identifier with launch at login on left
@@ -540,7 +533,8 @@ mod tests {
 
     #[test]
     fn the_switch_registers_and_unregisters() {
-        let main_app = not_registered();
+        let main_app =
+            FakeMainApp::new(LoginItemStatus::NotRegistered, Ok(LoginItemStatus::Enabled));
         set_enabled(&main_app, true).unwrap();
         assert_eq!(main_app.status(), LoginItemStatus::Enabled);
         set_enabled(&main_app, false).unwrap();
