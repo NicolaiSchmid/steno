@@ -352,7 +352,7 @@ jobs:
       # submit profile fields ascApiKeyPath / ascApiKeyId / ascApiKeyIssuerId
       # (https://docs.expo.dev/submit/ios/ — the EXPO_ASC_* env vars only
       # authenticate the Developer Portal, not the submission). So hand it the
-      # repository's key — the one release.yml uses for notarytool: the .p8
+      # repository's key, the one the desktop release notarises with: the .p8
       # goes to $RUNNER_TEMP (mode 600, outside the checkout) and the three
       # fields are written into the checkout's eas.json for this job only.
       # Nothing is committed, and the cleanup step below undoes both even

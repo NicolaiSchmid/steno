@@ -1018,7 +1018,15 @@ finding.
    `gh workflow run desktop-release.yml --ref <branch> -f platforms=linux,windows,macos`.
    Its `desktop-release-checksums` artifact proves the checksums and
    signatures (see Checksums and OpenPGP signatures), and the run's
-   summary holds the notes.
+   summary holds the notes. Before the first stable tag, also:
+   - Create the GitHub environment `appcast` (Settings > Environments)
+     with a required reviewer, "Prevent self-review" off and the
+     deployment tag rule `v*`. The `handoff` job stops without the
+     reviewer. Check it:
+     `gh api repos/NicolaiSchmid/steno/environments/appcast --jq '[.protection_rules[].type]'`
+     must list `required_reviewers` and `branch_policy`.
+   - Under Settings > Actions > General, allow GitHub Actions to create
+     and approve pull requests, which the AUR bump's pull request needs.
 1. On `main`, set `[workspace.package] version` in `Cargo.toml`, run
    `cargo check` so `Cargo.lock` follows (CI builds with `--locked`), and
    merge both. A hyphen (`0.11.0-rc.1`) means the beta lane only. Wait
@@ -1033,14 +1041,15 @@ finding.
    platforms bundled.
 4. Check what the lanes serve:
    `curl -fsSL https://github.com/NicolaiSchmid/steno/releases/download/desktop-beta/latest.json | jq .version`
-   (and `desktop-stable` for a release).
+   (and `desktop-stable` for a stable release).
 5. A stable release only: the `handoff` job waits for the `appcast`
    environment's reviewer, the first time and when
    `HANDOFF_ITEM_REPLACE` names the version (see The handoff item). Approve
    it only after the stable build's rehearsal (R7 in the stable plan) has
-   passed; reject it to leave the Swift app's users where they are. Then
-   open the flake bump pull request with the two lines in the run's
-   summary (Nix flake bump).
+   passed; reject it to leave the Swift app's users where they are.
+6. A stable release only, without waiting for the approval: open the
+   flake bump pull request with the two lines in the run's summary (Nix
+   flake bump).
 
 ### When a run fails
 
@@ -1067,8 +1076,9 @@ new assets until **Update lanes** finishes.
   the step output. A notarisation failure in **Bundle** is the bundler's
   error in that step's output.
 - **Check the bundles**: the `::error::` names the file or the check that
-  failed. On macOS that includes `--handoff`: a bundle id, `SUPublicEDKey`
-  or build number other than the pinned ones, or a designated requirement
+  failed. On macOS that includes `--handoff`: a bundle id or
+  `SUPublicEDKey` other than the pinned ones, a `CFBundleVersion` other
+  than `plan`'s build, or a designated requirement
   without team `KQB68F43PW`. Fix the configuration on `main`, delete the
   tag and tag again.
 - **Handoff item** (macOS, tag runs only): the Sparkle tarball's checksum,
@@ -1117,7 +1127,13 @@ new assets until **Update lanes** finishes.
   stands): the tap or the AUR refused the push, or the AUR bump found the
   PKGBUILD in another form than it rewrites (`scripts/aur-bump.sh` names
   it). Bump by hand as `packaging/aur/README.md` and the tap say.
-- **handoff**: `publish-appcast.sh` could not push to the `appcast` branch,
+- **handoff**: "the appcast environment has no required reviewer" means
+  GitHub ran the job unapproved and nothing was written; set the
+  environment up (Cutting a release, step 0) and re-run it. "has a handoff
+  item since publish looked", or a build not above the branch's, means
+  another release's item reached the branch while this one waited; reject
+  the job, or set `HANDOFF_ITEM_REPLACE` to this version and re-run it.
+  Otherwise `publish-appcast.sh` could not push to the `appcast` branch,
   or the upload of `appcast.xml` failed. Re-run the job (it asks for the
   approval again). It reads the same `sparkle-item` artifact; if the push
   had failed, it dates the item at the new approval, and if the branch
@@ -1383,7 +1399,10 @@ installs it from a local feed.
 
 For a stable release, the `handoff` job runs once the `appcast`
 environment's reviewer approves it, and only if the branch has no handoff
-item yet or `HANDOFF_ITEM_REPLACE` names the version. It sets the item's
+item yet or `HANDOFF_ITEM_REPLACE` names the version. It first stops
+unless the environment has a required reviewer, and at the approval checks
+the branch again, since another release's item may have reached it while
+this one waited. It sets the item's
 `pubDate` to the approval's time in `generate_appcast`'s form
 (`Tue, 13 Oct 2026 09:00:00 +0000`, `handoff-appcast.py stamp-pubdate`;
 Sparkle counts the rollout's groups from it and reads any other form as no
@@ -1557,15 +1576,15 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
 | `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh`, `release-workflow.test.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `v*` tag, and the Sparkle handoff (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh`; `release-workflow.test.sh` checks the workflow against the stable plan and runs `plan`'s version step |
 | `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check, and runs the `.app` check's bundle id and Sparkle key, and the `--handoff` checks, over stub bundles (`check-bundle.test.sh`) |
-| `apps/desktop/scripts/handoff-item.sh`, `handoff-appcast.py`, `aur-bump.sh` | The Sparkle handoff item, the appcast reads and the `pubDate` stamp around it, and the AUR bump of a stable release (see Publishing, on a tag) |
+| `apps/desktop/scripts/handoff-item.sh`, `handoff-appcast.py`, `aur-bump.sh` | The Sparkle handoff item, the appcast reads and the `pubDate` stamp around it, and the AUR bump of a stable release (see Publishing, on a tag); `bump-homebrew-cask.test.sh` checks the token check of `apps/macos/scripts/bump-homebrew-cask.sh` |
 | `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh`, `release-assets.sh`, `release-signatures.sh`, `release-notes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json`, the lanes a release moves, the assets gathered from each platform's artifact, `SHA256SUMS` and the OpenPGP signatures, and the release notes (Rust CI runs every `*.test.sh` here) |
 | `apps/desktop/release-signing-key.asc` | The public half of the release signing key that signs `SHA256SUMS` and the Linux bundles (see Checksums and OpenPGP signatures) |
 
 ## Not here yet
 
-The Mac cutover (the bundle id, the Sparkle handoff, the Swift app's
-removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it
-lands the desktop app installs beside the Swift app on the Mac. WP6b
+The Swift app's removal is planned in `.plans/2026-10-04-mac-cutover.md`
+(S9 of `.plans/2026-10-07-stable-promotion.md`); until a Swift install
+takes the handoff item, the desktop app installs beside it on the Mac. WP6b
 filled the host's half of the WP8 seams except four; S4 and S2 of
 `.plans/2026-10-07-stable-promotion.md` later filled the updater, the
 QR half of the fourth and the detection controller, which leaves the

@@ -135,7 +135,7 @@ summaries choice, Steno reads and refreshes the Codex CLI's own sign-in in `~/.c
 user confirms it in onboarding or Settings > Summaries
 ([`.plans/2026-09-29-codex-chatgpt-provider.md`](../../.plans/2026-09-29-codex-chatgpt-provider.md)).
 
-## Cutting a release
+## Releases (retired)
 
 The Swift app ships no further release: S7 of
 [`.plans/2026-10-07-stable-promotion.md`](../../.plans/2026-10-07-stable-promotion.md) removed
@@ -147,12 +147,12 @@ release is ever needed, a dedicated pull request restores the workflow with a `s
 trigger (the plan's "`release.yml`" section). The removed workflow ran these steps:
 
 1. `Check secrets` (`scripts/check-release-secrets.sh`, unit-tested in `ReleaseScriptsTests`)
-   fails early with the missing names; a dry run needs only the certificate pair.
-2. The Developer ID certificate is imported into a throwaway keychain. Start a Swift release
-   only while no Desktop release run with macOS is in progress, since both import the same
+   failed early with the missing names; a dry run needed only the certificate pair.
+2. The Developer ID certificate was imported into a throwaway keychain. A Swift release ran
+   only while no Desktop release run with macOS was in progress, since both imported the same
    Developer ID identity (see `apps/desktop/README.md`, Signing).
-3. `scripts/build-release.sh <version> <build>` archives and exports with Developer ID and the
-   hardened runtime, then verifies: `codesign --verify --deep --strict`, the Developer ID
+3. `scripts/build-release.sh <version> <build>` archived and exported with Developer ID and the
+   hardened runtime, then verified: `codesign --verify --deep --strict`, the Developer ID
    authority, the runtime flag, a secure timestamp, exactly the two entitlements
    (audio-input, calendars, read with `codesign -d --entitlements - --xml`), and that every
    nested code item (Sparkle.framework with its `Autoupdate`, `Updater.app` and XPC services,
@@ -162,20 +162,20 @@ trigger (the plan's "`release.yml`" section). The removed workflow ran these ste
    runs only these checks against an app exported earlier; `ReleaseScriptsTests` does so
    against a `codesign` shim. `<version>` is the tag without `v`; `<build>` is
    `git rev-list --count HEAD`.
-4. `scripts/make-dmg.sh <version>` builds `Steno-<version>.dmg` with `hdiutil` (UDZO, an
-   `Applications` symlink), signs it, submits it to `notarytool --wait`, staples the ticket
-   and runs `spctl -a -t open --context context:primary-signature`.
-5. `scripts/make-appcast.sh <tag>` runs Sparkle's `generate_appcast --ed-key-file -` with
-   `SPARKLE_PRIVATE_KEY` on stdin and writes `appcast.xml` for this release alone.
-6. A draft GitHub release is created, the DMG and appcast uploaded, and the release
-   published (`--prerelease` when the tag contains a hyphen).
-   The build number is the commit count, so a tag is refused when another `v*` tag already
-   points at the same commit: promoting `v0.9.0-rc.1` to `v0.9.0` needs a new commit (the
+4. `scripts/make-dmg.sh <version>` built `Steno-<version>.dmg` with `hdiutil` (UDZO, an
+   `Applications` symlink), signed it, submitted it to `notarytool --wait`, stapled the ticket
+   and ran `spctl -a -t open --context context:primary-signature`.
+5. `scripts/make-appcast.sh <tag>` ran Sparkle's `generate_appcast --ed-key-file -` with
+   `SPARKLE_PRIVATE_KEY` on stdin and wrote `appcast.xml` for this release alone.
+6. A draft GitHub release was created, the DMG and appcast uploaded, and the release
+   published (`--prerelease` when the tag contained a hyphen).
+   The build number was the commit count, so a tag was refused when another `v*` tag already
+   pointed at the same commit: promoting `v0.9.0-rc.1` to `v0.9.0` needs a new commit (the
    version bump), otherwise Sparkle, which orders by build number alone, would never offer
    the stable build to candidate installs.
-7. `scripts/publish-appcast.sh <tag> <prerelease>` folds the release's item into the rolling
+7. `scripts/publish-appcast.sh <tag> <prerelease>` folded the release's item into the rolling
    `appcast.xml` on the `appcast` branch (`scripts/merge-appcast.py`: newest first, one item
-   per build number, at most twenty) and pushes. That branch is what `SUFeedURL` reads
+   per build number, at most twenty) and pushed. That branch is what `SUFeedURL` reads
    (`https://raw.githubusercontent.com/NicolaiSchmid/steno/appcast/appcast.xml`), so the feed
    never depends on `releases/latest`, which GitHub never points at a pre-release. A
    pre-release item carries `<sparkle:channel>beta</sparkle:channel>`; the app allows that
@@ -183,14 +183,15 @@ trigger (the plan's "`release.yml`" section). The removed workflow ran these ste
    so release candidates are offered candidates and stable builds never are. The
    per-release appcast stays on the release too, so `v0.9.0-rc.1` installs (which read
    `releases/latest`) hop to the first stable release and pick up the new feed URL from it.
-8. `scripts/bump-homebrew-cask.sh <version> <dmg>` rewrites `version` and `sha256` in
+8. `scripts/bump-homebrew-cask.sh <version> <dmg>` rewrote `version` and `sha256` in
    `Casks/steno.rb` of [NicolaiSchmid/homebrew-tap](https://github.com/NicolaiSchmid/homebrew-tap)
-   and pushes `steno <version>` to its `main`. Pre-releases bump too. Without
-   `HOMEBREW_TAP_TOKEN` the step prints a notice and the release stands; with it, a failed
-   push is a warning (`continue-on-error`), never a failed release.
-9. `always()`: the keychain is deleted and the App Store Connect key removed.
+   and pushed `steno <version>` to its `main`; pre-releases bumped too (the desktop release
+   bumps stable releases only). Without `HOMEBREW_TAP_TOKEN` the step printed a notice and
+   the release stood; with it, a failed push was a warning (`continue-on-error`), never a
+   failed release.
+9. `always()`: the keychain was deleted and the App Store Connect key removed.
 
-`workflow_dispatch` with `dry_run` builds, signs and verifies without notarising or
+`workflow_dispatch` with `dry_run` built, signed and verified without notarising or
 publishing.
 
 ### One-time setup (a human, once)

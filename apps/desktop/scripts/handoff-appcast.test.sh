@@ -136,8 +136,8 @@ cp "$good" "$scratch/stamped.xml"
 passes 'the stamp' stamp-pubdate "$scratch/stamped.xml" 1791882000
 stamp="$(sed -n 's|.*<pubDate>\(.*\)</pubDate>.*|\1|p' "$scratch/stamped.xml")"
 [[ "$stamp" == 'Tue, 13 Oct 2026 09:00:00 +0000' ]] || fail "the stamp is '$stamp'"
-# Parsed back with Sparkle's format (SUAppcastItem's `EEE, dd MMM yyyy
-# HH:mm:ss ZZ`, en_US_POSIX), it is the approval's time.
+# Parsed back as Sparkle reads it (SUAppcastItem's `E, dd MMM yyyy
+# HH:mm:ss Z`, en_US), it is the approval's time.
 parsed="$(python3 -c '
 import datetime, sys
 when = datetime.datetime.strptime(sys.argv[1], "%a, %d %b %Y %H:%M:%S %z")

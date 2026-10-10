@@ -32,11 +32,13 @@ an appcast file:
 
   stamp-pubdate <appcast.xml> <unix time>
       Set the one item's `<pubDate>` to <unix time> in the form
-      `generate_appcast` writes (Sparkle's `EEE, dd MMM yyyy HH:mm:ss ZZ`,
-      in UTC: `Tue, 13 Oct 2026 09:00:00 +0000`), in place and leaving
-      every other byte. Sparkle counts the phased rollout's groups from it,
-      and reads any other form as no date, which offers the item to every
-      group at once. The `handoff` job runs it at the approval.
+      `generate_appcast` writes (`EEE, dd MMM yyyy HH:mm:ss ZZ`,
+      en_US_POSIX, here in UTC: `Tue, 13 Oct 2026 09:00:00 +0000`), in
+      place and leaving every other byte. Sparkle counts the phased
+      rollout's groups from it, parsed with SUAppcastItem's
+      `E, dd MMM yyyy HH:mm:ss Z` (en_US), and reads any other form as no
+      date, which offers the item to every group at once. The `handoff` job
+      runs it at the approval.
 
 apps/desktop/scripts/handoff-appcast.test.sh checks it; rust-ci.yml runs
 that. Standard library only.
