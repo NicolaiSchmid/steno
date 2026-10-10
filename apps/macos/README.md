@@ -137,7 +137,14 @@ user confirms it in onboarding or Settings > Summaries
 
 ## Cutting a release
 
-`.github/workflows/release.yml` runs on every `v*` tag:
+The Swift app ships no further release: S7 of
+[`.plans/2026-10-07-stable-promotion.md`](../../.plans/2026-10-07-stable-promotion.md) removed
+`.github/workflows/release.yml`, and a `v*` tag now releases the Tauri app through
+`.github/workflows/desktop-release.yml` (`apps/desktop/README.md`, Release). That workflow
+still calls `scripts/publish-appcast.sh`, `scripts/merge-appcast.py` and
+`scripts/bump-homebrew-cask.sh`, which stay here until the Swift app's removal. If a bridge
+release is ever needed, a dedicated pull request restores the workflow with a `swift-v*`
+trigger (the plan's "`release.yml`" section). The removed workflow ran these steps:
 
 1. `Check secrets` (`scripts/check-release-secrets.sh`, unit-tested in `ReleaseScriptsTests`)
    fails early with the missing names; a dry run needs only the certificate pair.
