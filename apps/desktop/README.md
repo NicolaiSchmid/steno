@@ -586,9 +586,8 @@ The paired phone finds Steno through mDNS (the `_steno._tcp` record on UDP
 certificate it pinned at pairing. Steno answers on the computer's own
 addresses, except VPN point-to-point, link-local and carrier-grade NAT
 ones, and on loopback; a client that has not paired gets no further than
-the hello. A firewall
-that blocks either the port or mDNS keeps the phone's recordings on the
-phone, where they wait for the next try.
+the hello. A firewall that blocks either the port or mDNS keeps the phone's
+recordings on the phone, where they wait for the next try.
 
 On Linux, Steno listens on TCP port 23820
 (`HandoverConfiguration::LINUX_PORT` in `crates/steno-handover`), so a

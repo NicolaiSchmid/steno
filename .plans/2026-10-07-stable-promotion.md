@@ -1135,18 +1135,17 @@ The table above names each package and its owner. Their tests:
     deletes them. `check-aur.sh` compares each copy with `linux/`'s and
     requires both drop-ins with `TimeoutStopSec=20s`. X2's Hyprland rules
     come in the `.deb` from the first release that contains #267; rc.3's
-    lacks them. The install script only prints `sudo ufw allow Steno`
-    after an install or an upgrade, and its removal
-    `sudo ufw delete allow Steno`; Arch's
-    `30-systemd-daemon-reload-user.hook` reloads the user managers. X4's
-    `ufw` profile came in X4's PR (#276): `ufw-steno-desktop`, installed as
-    `/etc/ufw/applications.d/steno-desktop` and kept on upgrade
-    (`backup=`); `check-aur.sh` checks its port against `LINUX_PORT` and
-    that `ufw app info Steno` reads it. An autostart entry a candidate without X5 wrote
-    survives the upgrade and bypasses the wrapper; Omarchy step 1 rewrites
-    it. `depends` adds what namcap finds linked (`cairo`, `gdk-pixbuf2`,
-    `glibc`, `hicolor-icon-theme`, `libgcc`, `libpipewire`, `libstdc++`).
-    The release key is also committed as
+    lacks them. The install script only prints `sudo ufw allow Steno` after an
+    install or an upgrade, and its removal `sudo ufw delete allow Steno`;
+    Arch's `30-systemd-daemon-reload-user.hook` reloads the user managers.
+    X4's `ufw` profile came in X4's PR (#276): `ufw-steno-desktop`, installed
+    as `/etc/ufw/applications.d/steno-desktop` and kept on upgrade
+    (`backup=`); `check-aur.sh` checks its port against `LINUX_PORT` and that
+    `ufw app info Steno` reads it. An autostart entry a candidate without X5
+    wrote survives the upgrade and bypasses the wrapper; Omarchy step 1
+    rewrites it. `depends` adds what namcap finds linked (`cairo`,
+    `gdk-pixbuf2`, `glibc`, `hicolor-icon-theme`, `libgcc`, `libpipewire`,
+    `libstdc++`). The release key is also committed as
     `packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`;
     publishing it to keyserver.ubuntu.com, which yay and paru query for a
     missing `validpgpkeys` key, is **Nicolai**'s. The repository gains a root
@@ -1207,10 +1206,10 @@ The table above names each package and its owner. Their tests:
     X4 (#276) added the firewall: `programs.steno.openFirewall`, on by
     default, opens `programs.steno.handoverPort` (23820) and UDP 5353, and
     the module sets `STENO_HANDOVER_PORT` to that port and refuses a
-    `handoverPort` from 1 to 1023. P5's drop-ins arrive
-    through the `.deb`'s `files` map (#227). Without the module, the
-    autostart entry names the profile's path by X5's rule (#261), so the
-    wrapper sets no `STENO_EXEC_PATH`. ONNX Runtime is nixpkgs' 1.27.1 against the
+    `handoverPort` from 1 to 1023. P5's drop-ins arrive through the `.deb`'s
+    `files` map (#227). Without the module, the autostart entry names the
+    profile's path by X5's rule (#261), so the wrapper sets no
+    `STENO_EXEC_PATH`. ONNX Runtime is nixpkgs' 1.27.1 against the
     1.28.0 build `ort` downloads, at FLEURS 4.9 % with both. Nix CI
     (`nix-ci.yml`) runs on a pull request that touches the flake, the web UI's
     dependencies, a Cargo manifest, the lockfile, a build script, the Tauri
@@ -1908,12 +1907,16 @@ interrupted" after one. On the GNOME machine,
      (`github:NicolaiSchmid/steno/v0.11.0-rc.<N-1>`), with
      `steno.nixosModules.default` in the system's modules and
      `programs.steno.enable = true`.
-  2. Steps 2 to 4, 6 and 9 of the GNOME gate, with the phone through the firewall
-     the module opens (X4; when step 0's candidate predates X4, step 0 opens
-     `networking.firewall.allowedTCPPortRanges = [{ from = 32768; to =
-     60999; }]` and `allowedUDPPorts = [5353]` by hand, keeps them through
-     the upgrade's switch, and removes them with a later switch once `ss
-     -ltn 'sport = :23820'` lists the new version), and step 9's extension from `gnomeExtensions.appindicator` in `environment.systemPackages`, turned on in GNOME's Extensions app. `systemctl --user show steno.service -p Environment` names `STENO_HANDOVER_PORT=23820`. Under the module, step 5's cgroup check, run
+  2. Steps 2 to 4, 6 and 9 of the GNOME gate, with the phone through the
+     firewall the module opens (X4; when step 0's candidate predates X4,
+     step 0 opens `networking.firewall.allowedTCPPortRanges = [{ from =
+     32768; to = 60999; }]` and `allowedUDPPorts = [5353]` by hand, keeps
+     them through the upgrade's switch, and removes them with a later
+     switch once `ss -ltn 'sport = :23820'` lists the new version), and
+     step 9's extension from `gnomeExtensions.appindicator` in
+     `environment.systemPackages`, turned on in GNOME's Extensions app.
+     `systemctl --user show steno.service -p Environment` names
+     `STENO_HANDOVER_PORT=23820`. Under the module, step 5's cgroup check, run
      as `cg`, prints one line, ending in `steno.service`, and
      `systemctl --user show steno.service -p TimeoutStopUSec` is 20 s.
   3. Open Settings and choose a folder: the file chooser opens (the wrapper's

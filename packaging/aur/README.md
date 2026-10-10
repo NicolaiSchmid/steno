@@ -25,14 +25,13 @@ below first.
 
 The install script, [`steno-desktop.install`](steno-desktop.install), only
 prints `sudo ufw allow Steno` after an install or an upgrade, and
-`sudo ufw delete allow Steno` after a removal. Arch's
-`systemd` package reloads every running user manager after any package
-changes a file under `usr/lib/systemd/user/`
-(`30-systemd-daemon-reload-user.hook`), so a running Steno picks the
-drop-ins up at the install without the script's help. From the first release that contains #227, the autostart
-entry the app keeps until it exits keeps a running, autostarted Steno safe
-through that reload (P5); step 8 of the Omarchy gate, which #227 adds, tests
-it.
+`sudo ufw delete allow Steno` after a removal. Arch's `systemd` package
+reloads every running user manager after any package changes a file under
+`usr/lib/systemd/user/` (`30-systemd-daemon-reload-user.hook`), so a running
+Steno picks the drop-ins up at the install without the script's help. From
+the first release that contains #227, the autostart entry the app keeps
+until it exits keeps a running, autostarted Steno safe through that reload
+(P5); step 8 of the Omarchy gate, which #227 adds, tests it.
 
 `package()` installs a copy only while the pinned `.deb` lacks the file,
 and the build fails once the `.deb` ships it; Bump step 3 then deletes the
