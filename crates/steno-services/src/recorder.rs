@@ -2486,13 +2486,14 @@ mod tests {
         fn announce(&self, _version: &str) {}
     }
 
-    /// The update schedule over `source` and the app's gate on the
-    /// harness's recorder and pipeline.
-    fn schedule_over(
+    /// The user's yes to 0.12.0 on the runtime, after a check that found
+    /// it, over `source` and the app's gate on the harness's recorder and
+    /// pipeline.
+    async fn offer_after_a_check(
         harness: &Harness,
         source: Arc<dyn crate::updates::UpdateSource>,
-    ) -> Arc<crate::updates::UpdateSchedule> {
-        crate::updates::UpdateSchedule::new(crate::updates::ScheduleParts {
+    ) -> tokio::task::JoinHandle<()> {
+        let schedule = crate::updates::UpdateSchedule::new(crate::updates::ScheduleParts {
             source,
             preferences: Arc::new(steno_host::fakes::FakePreferences::default()),
             clock: Arc::new(steno_host::fakes::FakeClock::new(chrono::Utc::now())),
@@ -2504,7 +2505,9 @@ mod tests {
             support_directory: harness.dir.path().to_owned(),
             managed: false,
             runtime: tokio::runtime::Handle::current(),
-        })
+        });
+        schedule.check_on_request().await.unwrap();
+        tokio::spawn(async move { schedule.offer("0.12.0").await })
     }
 
     /// The harness's recorder after a start on a thread of its own.
@@ -2524,12 +2527,7 @@ mod tests {
     async fn a_record_during_a_password_prompt_records() {
         let harness = harness(&[]);
         let source = Arc::new(PasswordPromptSource::default());
-        let schedule = schedule_over(&harness, source.clone());
-        schedule.check_on_request().await.unwrap();
-        let offer = {
-            let schedule = schedule.clone();
-            tokio::spawn(async move { schedule.offer("0.12.0").await })
-        };
+        let offer = offer_after_a_check(&harness, source.clone()).await;
         source.prompt_up.notified().await;
         let status = status_after_a_start(&harness);
         assert_eq!(status.state, RecordingState::Recording);
@@ -2551,12 +2549,7 @@ mod tests {
     async fn a_password_prompt_nobody_answers_never_keeps_recording_off() {
         let harness = harness(&[]);
         let source = Arc::new(PasswordPromptSource::default());
-        let schedule = schedule_over(&harness, source.clone());
-        schedule.check_on_request().await.unwrap();
-        let offer = {
-            let schedule = schedule.clone();
-            tokio::spawn(async move { schedule.offer("0.12.0").await })
-        };
+        let offer = offer_after_a_check(&harness, source.clone()).await;
         source.prompt_up.notified().await;
         assert_eq!(
             status_after_a_start(&harness).state,
@@ -2586,13 +2579,8 @@ mod tests {
             recorder: Some(harness.recorder.clone()),
             ..WaitingSource::default()
         });
-        let schedule = schedule_over(&harness, source.clone());
-        schedule.check_on_request().await.unwrap();
         start(&harness.recorder).await;
-        let offer = {
-            let schedule = schedule.clone();
-            tokio::spawn(async move { schedule.offer("0.12.0").await })
-        };
+        let offer = offer_after_a_check(&harness, source.clone()).await;
         tokio::time::sleep(crate::updates::IDLE_POLL * 2).await;
         assert_eq!(
             *source.asked.lock().unwrap(),
