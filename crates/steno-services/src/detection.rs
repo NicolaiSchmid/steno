@@ -499,10 +499,11 @@ impl DetectionController {
 
 impl Drop for DetectionController {
     fn drop(&mut self) {
-        if let Some(running) = self.state().running.take() {
+        let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+        if let Some(running) = state.running.take() {
             running.cancel();
         }
-        if let Some(prompt) = self.state().prompt.take() {
+        if let Some(prompt) = state.prompt.take() {
             prompt.countdown.cancel();
         }
     }

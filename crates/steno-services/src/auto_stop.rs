@@ -53,13 +53,13 @@ struct Armed {
     number: u64,
 }
 
-/// What [`CallWatch::released`] armed: the recorder sleeps `grace` on its
-/// clock unless `cancel` is raised, then calls back with `number`.
+/// What [`CallWatch::released`] armed: the recorder sleeps
+/// [`AUTO_STOP_GRACE`] on its clock unless `cancel` is raised, then calls
+/// back with `number`.
 #[derive(Debug)]
 pub(crate) struct Countdown {
     pub(crate) number: u64,
     pub(crate) cancel: Cancel,
-    pub(crate) grace: Duration,
 }
 
 /// The auto-stop policy of one recorder; see the module doc. The caller
@@ -128,7 +128,6 @@ impl CallWatch {
         Some(Countdown {
             number: self.arms,
             cancel,
-            grace: AUTO_STOP_GRACE,
         })
     }
 

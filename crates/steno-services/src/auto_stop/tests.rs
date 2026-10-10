@@ -191,7 +191,6 @@ fn only_the_armed_countdown_ends_the_call_with_its_app() {
     watch.begin(None);
     watch.opened(Some("Zen".to_owned()));
     let first = watch.released(Duration::ZERO).expect("armed");
-    assert_eq!(first.grace, AUTO_STOP_GRACE);
     watch.opened(Some("Zen".to_owned()));
     assert!(
         first.cancel.is_cancelled(),

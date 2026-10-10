@@ -51,7 +51,7 @@ use steno_pipeline::{LocalRecordingIntake, LocalRecordingIntakeError, RecordingR
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
 
-use crate::auto_stop::{CallWatch, MicrophoneActivity};
+use crate::auto_stop::{AUTO_STOP_GRACE, CallWatch, MicrophoneActivity};
 use crate::block_on;
 use crate::pipeline::CurrentPipeline;
 use crate::recovery::{RecoveryError, Unrecoverable};
@@ -760,7 +760,7 @@ impl CaptureRecorder {
                 let spawned = std::thread::Builder::new()
                     .name("steno-auto-stop".into())
                     .spawn(move || {
-                        if clock.sleep(countdown.grace, &countdown.cancel)
+                        if clock.sleep(AUTO_STOP_GRACE, &countdown.cancel)
                             && let Some(recorder) = this.upgrade()
                         {
                             recorder.call_ended(countdown.number);
