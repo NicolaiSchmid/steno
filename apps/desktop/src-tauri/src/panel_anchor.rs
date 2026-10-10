@@ -63,6 +63,10 @@ enum Write {
 /// time the system gives a quitting app.
 const FLUSH_PATIENCE: Duration = Duration::from_secs(2);
 
+// A patience under a second would let the exit go before a slow disk's
+// save, and a zero one would make the flush wait for nothing.
+const _: () = assert!(FLUSH_PATIENCE.as_millis() >= 1000);
+
 impl AnchorFile {
     /// The file in `support_directory`, and the earlier build's under
     /// `config_directory`, the platform's base config directory (Tauri's

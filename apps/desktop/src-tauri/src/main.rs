@@ -572,20 +572,21 @@ fn onboarding_closed(app: &tauri::AppHandle) {
 /// long a save takes against the waits it has to fit in: systemd's stop
 /// timeout, the session manager's, logind's delay. A shutdown cut off at
 /// `SHUTDOWN_PATIENCE` logs the gate's warning first, and this line only
-/// if the save ends before the process does. After it the panels' anchor
-/// a drag queued reaches the disk (`panels::flush_anchor`), and, on Linux,
-/// Launch at login turned off while the app ran as the autostart unit goes off,
+/// if the save ends before the process does. After it, on Linux, Launch
+/// at login turned off while the app ran as the autostart unit goes off,
 /// and an autostart entry an earlier build wrote that waited for the exit
 /// goes, unless the exit is an update's relaunch (`autostart::at_exit`):
 /// only once the save is over, since until then the unit the app runs as
-/// needs the entry.
+/// needs the entry. Last, the panels' anchor a drag queued reaches the
+/// disk (`panels::flush_anchor`); it waits for a slow disk, so it goes
+/// after the login item, which matters more than the panels' place.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
     let shutdown = host::host(app).shutdown_action();
     let app = app.clone();
     timed_then(shutdown, move || {
-        panels::flush_anchor(&app);
         #[cfg(target_os = "linux")]
         autostart::at_exit(&app, autostart::relaunching_now());
+        panels::flush_anchor(&app);
     })
 }
 
@@ -892,6 +893,25 @@ fn single_instance_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exit, after the save, turns the Linux login item off first and
+    /// then waits for the panels' anchor, so a slow disk cannot hold the
+    /// login item's change past the time the system gives the app.
+    #[test]
+    fn the_exit_flushes_the_anchor_after_the_login_item() {
+        // Without the carriage returns a Windows checkout may add.
+        let main = include_str!("main.rs").replace("\r\n", "\n");
+        let start = main.find("\nfn exit_action(").unwrap();
+        let end = start + main[start..].find("\n}\n").unwrap();
+        let exit = &main[start..end];
+        let login_item = exit
+            .find("autostart::at_exit(&app, autostart::relaunching_now());")
+            .expect("the exit turns the Linux login item off");
+        let flush = exit
+            .find("panels::flush_anchor(&app);")
+            .expect("the exit flushes the anchor");
+        assert!(login_item < flush);
+    }
 
     /// A running Swift app refuses the start before the host is built; with
     /// none running the start goes on. Only the Swift app's bundle id is
