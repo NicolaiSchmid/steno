@@ -227,6 +227,24 @@ fn own_cgroup() -> std::io::Result<String> {
     std::fs::read_to_string("/proc/self/cgroup")
 }
 
+/// [`move_out`] over the user bus's socket in `$XDG_RUNTIME_DIR`, with this
+/// process's cgroup file.
+fn move_over_user_bus(
+    unit: &str,
+    pid: u32,
+    deadline: Instant,
+) -> Result<Option<String>, MoveError> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .ok_or(MoveError::NoBus)?;
+    let address = format!("unix:path={}", runtime.join("bus").display());
+    let connection = Builder::address(address.as_str())?
+        .method_timeout(MOVE_TIMEOUT)
+        .build()?;
+    move_out(&connection, unit, pid, own_cgroup, deadline)
+}
+
 /// Moves the app into a scope of its own when it runs in another program's
 /// service (the module docs), waiting at most [`MOVE_TIMEOUT`] and the
 /// call-off. Called at launch, before the first window. Never fails: the app
@@ -247,18 +265,7 @@ pub fn leave_foreign_service() {
     let spawned = std::thread::Builder::new()
         .name("steno-own-scope".to_owned())
         .spawn(move || {
-            let moved = (|| {
-                let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-                    .map(PathBuf::from)
-                    .filter(|dir| dir.is_absolute())
-                    .ok_or(MoveError::NoBus)?;
-                let address = format!("unix:path={}", runtime.join("bus").display());
-                let connection = Builder::address(address.as_str())?
-                    .method_timeout(MOVE_TIMEOUT)
-                    .build()?;
-                move_out(&connection, &request, pid, own_cgroup, deadline)
-            })();
-            let _ = done.send(moved);
+            let _ = done.send(move_over_user_bus(&request, pid, deadline));
         });
     let moved = match spawned {
         Ok(_) => outcome
@@ -266,12 +273,6 @@ pub fn leave_foreign_service() {
             .unwrap_or(Err(MoveError::Silent)),
         Err(error) => Err(MoveError::Thread(error)),
     };
-    let now = own_cgroup()
-        .ok()
-        .as_deref()
-        .and_then(innermost)
-        .map(str::to_owned);
-    let now = now.as_deref().unwrap_or("unknown");
     match moved {
         Ok(Some(scope)) => tracing::info!(
             from = %unit,
@@ -279,12 +280,16 @@ pub fn leave_foreign_service() {
             "Steno started inside another program's service and moved into a scope of its own, which gives a save at the session's end 20 s"
         ),
         Ok(None) => tracing::debug!(%unit, "Steno is its service's main process and stays in it"),
-        Err(error) => tracing::warn!(
-            %unit,
-            %error,
-            now,
-            "Steno runs inside another program's service, whose stop may cut off the save of a recording; start Steno from the app launcher or with `uwsm-app -- steno-desktop`"
-        ),
+        Err(error) => {
+            let now = own_cgroup().ok();
+            let now = now.as_deref().and_then(innermost).unwrap_or("unknown");
+            tracing::warn!(
+                %unit,
+                %error,
+                now,
+                "Steno runs inside another program's service, whose stop may cut off the save of a recording; start Steno from the app launcher or with `uwsm-app -- steno-desktop`"
+            );
+        }
     }
 }
 
