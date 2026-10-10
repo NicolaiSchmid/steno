@@ -542,8 +542,10 @@ What a package sets:
 
 The paired phone finds Steno through mDNS (the `_steno._tcp` record on UDP
 5353) and uploads to the TCP port the record names, over TLS 1.3 with the
-certificate it pinned at pairing. Steno serves only connections that
-arrive on one of the computer's LAN addresses or on loopback. A firewall
+certificate it pinned at pairing. Steno answers on the computer's own
+addresses, except VPN point-to-point, link-local and carrier-grade NAT
+ones, and on loopback; a client that has not paired gets no further than
+the hello. A firewall
 that blocks either the port or mDNS keeps the phone's recordings on the
 phone, where they wait for the next try.
 
@@ -551,14 +553,14 @@ On Linux, Steno listens on TCP port 23820
 (`HandoverConfiguration::LINUX_PORT` in `crates/steno-handover`), so a
 firewall can open it by number (stable plan X4). The port is unassigned
 by IANA and below Linux's range for outgoing connections. On macOS and
-Windows the system chooses the port, as before.
+Windows the system chooses the port at each launch.
 
 | Desktop | What to open |
 |---|---|
 | Omarchy, or Arch with `ufw` | `sudo ufw allow Steno`. The AUR package installs the `ufw` profile `Steno` as `/etc/ufw/applications.d/steno-desktop`. `ufw` admits mDNS by default |
 | Ubuntu or Debian with `ufw` turned on | `sudo ufw allow 23820/tcp`; the `.deb` ships no profile. With `ufw` off, as Ubuntu installs it, nothing |
 | `firewalld` (Fedora and others) | `sudo firewall-cmd --permanent --add-port=23820/tcp`, `sudo firewall-cmd --permanent --add-service=mdns`, then `sudo firewall-cmd --reload`. Fedora Workstation's default zone already admits both |
-| NixOS with the module | Nothing: `programs.steno.openFirewall` (on by default) opens `programs.steno.handoverPort` and UDP 5353 |
+| NixOS with the module | Nothing: `programs.steno.openFirewall` (on by default) opens `programs.steno.handoverPort` and UDP 5353 on every interface. To open them on one network only, set `openFirewall = false` and list both under `networking.firewall.interfaces.<name>` |
 | NixOS without the module | `networking.firewall.allowedTCPPorts = [23820];` and `networking.firewall.allowedUDPPorts = [5353];` |
 
 To check from another computer on the same network:
@@ -566,11 +568,11 @@ To check from another computer on the same network:
 certificate when the port is open, and fails or times out when a firewall
 blocks it.
 
-Another port, in this order of precedence:
+To use another port, set one of these; the first wins:
 
 1. `STENO_HANDOVER_PORT` in Steno's environment. The NixOS module sets it
    to `programs.steno.handoverPort`, so the app and the firewall agree.
-2. The setting `handoverPort`, which has no row in Settings. With Steno
+2. The setting `handoverPort`, which Settings does not show. With Steno
    quit:
 
    ```sh
@@ -580,7 +582,7 @@ Another port, in this order of precedence:
    ```
 
    `delete from setting where key = 'handoverPort'` goes back to the
-   default.
+   default. A value that is not a port is ignored with a warning.
 
 `0` lets the system choose a port at each launch, which no firewall rule
 can name. The phone resolves the port before every connection, so a new
@@ -588,9 +590,17 @@ port needs nothing on the phone and keeps the pairing.
 
 When the port is taken, by another program or by a second user's Steno on
 the same computer, Steno listens on a port the system chooses and logs a
-warning: `journalctl --user -b | grep 'could not be bound'` shows it. The
+warning: `journalctl --user -b | grep 'is not available'` shows it. The
 phone still finds that port, but a firewall opened for 23820 blocks it, so
 free the port or choose another one for one of the two.
+
+Under the NixOS module `STENO_HANDOVER_PORT` is always set, so Steno never
+reads `handoverPort`. For a second user who runs Steno at the same time,
+give that user's service its own port in
+`~/.config/systemd/user/steno.service.d/port.conf` (`[Service]`,
+`Environment=STENO_HANDOVER_PORT=23821`) and open it with
+`networking.firewall.allowedTCPPorts = [23821];`. A Steno that user starts
+from the launcher still gets the session's port.
 
 ## Hyprland
 
@@ -1106,7 +1116,8 @@ opens the handover's port, `programs.steno.handoverPort` (23820), and UDP
 5353 for mDNS in the firewall, which `programs.steno.openFirewall = false`
 leaves closed, and sets `STENO_HANDOVER_PORT` to that port on the service
 and in `environment.sessionVariables` (see The phone handover behind a
-firewall).
+firewall). It refuses a `handoverPort` from 1 to 1023, which Steno, running
+as the user, cannot listen on.
 
 The package is built with the flake's own pinned nixpkgs, so the system
 carries a second GTK and WebKit closure. `inputs.steno.inputs.nixpkgs.follows
