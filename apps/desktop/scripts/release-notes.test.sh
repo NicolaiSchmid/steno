@@ -83,6 +83,7 @@ desktop_id=(
   'the app'"'"'s identifier is now `com.nicolaischmid.steno.desktop`, and such an install converts to it'
   'asks once more for its permissions (microphone, system audio, calendar) and once for each of its keychain items; choose *Always Allow*'
   'keeps two copies of one app once both have updated; the one outside `/Applications` can be deleted'
+  'An earlier desktop build that has not updated yet cannot open Steno'"'"'s data once this version has, and quits at launch: install the current build over it by hand.'
 )
 # shellcheck disable=SC2016 # the backticks are Markdown
 handoff=(

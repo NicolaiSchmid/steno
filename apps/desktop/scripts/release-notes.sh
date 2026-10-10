@@ -59,7 +59,7 @@ case "$version" in
   0.11.0 | 0.11.0-rc.*)
     cat <<'EOF'
 
-**From an earlier Steno desktop build** (0.1.0): the app's identifier is now `com.nicolaischmid.steno.desktop`, and such an install converts to it when it updates. On a Mac it then asks once more for its permissions (microphone, system audio, calendar) and once for each of its keychain items; choose *Always Allow*. A Mac that ran the Swift app and the desktop app from two paths keeps two copies of one app once both have updated; the one outside `/Applications` can be deleted.
+**From an earlier Steno desktop build** (0.1.0): the app's identifier is now `com.nicolaischmid.steno.desktop`, and such an install converts to it when it updates. On a Mac it then asks once more for its permissions (microphone, system audio, calendar) and once for each of its keychain items; choose *Always Allow*. A Mac that ran the Swift app and the desktop app from two paths keeps two copies of one app once both have updated; the one outside `/Applications` can be deleted. An earlier desktop build that has not updated yet cannot open Steno's data once this version has, and quits at launch: install the current build over it by hand.
 EOF
     ;;
 esac
@@ -71,7 +71,7 @@ if [[ "$version" == 0.11.0 ]]; then
 - Steno for Mac 0.10 and earlier receives this release as an update, and becomes this app at the same path.
 - macOS asks once more for microphone, system audio and calendar access, and for the login keychain password once for each secret Steno stored; choose *Always Allow*.
 - An old "Steno" entry in System Settings > General > Login Items may need removing.
-- Phones stay paired. If you deny macOS's prompt for the pairing key, Steno keeps the phones waiting and offers *Try again* in Settings > Phones. A phone pairs again only if it was paired with an earlier Steno desktop build on this Mac and never with the Swift app, or when you choose *Pair again*.
+- Phones stay paired. If you deny macOS's prompt for the pairing key, Steno keeps the phones waiting and offers *Try again* in Settings > Phones. A phone needs pairing again only if it was paired with an earlier Steno desktop build on this Mac and never with the Swift app, or when you choose *Pair again*.
 - The optional audio mixdown is now WAV.
 - Whisper, Parakeet Ultra and the German Parakeet are gone: Steno now transcribes with Parakeet v3.
 - Homebrew: if the app updated itself, run `brew upgrade --greedy --cask nicolaischmid/tap/steno` so Homebrew knows.
