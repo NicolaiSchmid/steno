@@ -170,6 +170,7 @@ pub fn app_over_fakes(
         updates: None,
         handover: None,
         recorder,
+        detection: None,
         models_directory: root.join("models"),
         zone,
         runtime: tokio::runtime::Handle::current(),

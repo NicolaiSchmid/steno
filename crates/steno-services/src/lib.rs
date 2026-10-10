@@ -12,6 +12,7 @@
 //! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) with the [`BuiltEngine`](pipeline::BuiltEngine) it was built with, and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
 //! | [`auto_stop`] | The auto-stop after a call ends: the 90-second grace, "Keep recording" and the `callEnded` end reason, the recorder's policy |
+//! | [`detection`] | [`DetectionController`](detection::DetectionController): the meeting detector's events into one prompt at a time through the shell's [`PromptPanel`](detection::PromptPanel), and into the recorder's auto-stop while recording |
 //! | [`audio_folders`] | Where recordings were written, beside the database: each recording's and phone upload's folder, for crash recovery and the adoption of a master with no meeting, and the known folders |
 //! | [`recovery`] | Recovery of an interrupted recording from its master on disk, at launch and after a failed stop, the launch's adoption of a master no meeting names, and [`LiveRecordingCheck`](recovery::LiveRecordingCheck), when a master counts as still written |
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels`, and [`SpeechEngines`](speech::SpeechEngines), the engines and the diarizer the pipelines share across reloads |
@@ -90,6 +91,7 @@
 pub mod app;
 pub mod audio_folders;
 pub mod auto_stop;
+pub mod detection;
 pub mod export;
 pub mod handover;
 #[cfg(test)]

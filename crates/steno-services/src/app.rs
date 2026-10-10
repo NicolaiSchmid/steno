@@ -24,6 +24,7 @@ use steno_pipeline::{
 };
 
 use crate::block_on;
+use crate::detection::{DetectionController, DetectionOptions};
 use crate::handover::{ListenerHandover, start_if_paired};
 use crate::llm::{ClientLlmService, codex_store};
 use crate::model_gate::ResumingSpeechModels;
@@ -81,6 +82,10 @@ pub struct AppOptions {
     pub version: String,
     /// Builds a capture session; `CaptureSession::new` in the product.
     pub make_capture_session: MakeCaptureSession,
+    /// Meeting detection with the shell's prompt panel
+    /// ([`crate::detection`]); `None` runs no detection (the CLI, the
+    /// tests).
+    pub detection: Option<DetectionOptions>,
     /// How long [`build`] waits for the database's lock while another
     /// process holds it ([`DatabaseLock::acquire_within`]):
     /// [`LOCK_PATIENCE`] in the product, whose update relaunch starts the
@@ -112,6 +117,7 @@ impl AppOptions {
             make_capture_session: Arc::new(|configuration| {
                 CaptureSession::new(configuration).map_err(|error| error.to_string())
             }),
+            detection: None,
             lock_patience: LOCK_PATIENCE,
         })
     }
@@ -135,6 +141,9 @@ pub struct App {
     pub updates: Option<Arc<UpdateSchedule>>,
     pub handover: Option<Arc<ListenerHandover>>,
     pub recorder: Arc<CaptureRecorder>,
+    /// Meeting detection, when the shell passed its prompt panel;
+    /// [`App::launch`] starts it.
+    pub detection: Option<Arc<DetectionController>>,
     /// Where the speech and diarization models live.
     pub models_directory: std::path::PathBuf,
     pub zone: FixedOffset,
@@ -570,6 +579,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     );
     // The save writes to the database's volume too.
     recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
+    let detection = options
+        .detection
+        .map(|detection| detection.controller(recorder.clone(), store.clone()));
 
     let handover = handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
         .inspect_err(|error| warnings.push(format!("Phone handover is unavailable: {error}")))
@@ -633,6 +645,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         updates,
         handover,
         recorder,
+        detection,
         models_directory: speech.models_directory.clone(),
         zone,
         runtime,
@@ -900,6 +913,10 @@ impl App {
     /// `AppController.shutdown`, whose pipeline died with the app, so the
     /// next launch resumed its job.
     pub fn shutdown(&self) {
+        // First, so no prompt comes up while the app goes.
+        if let Some(detection) = &self.detection {
+            detection.stop();
+        }
         self.pipeline.quit();
         self.recorder.stop_for_quit();
         if let Some(handover) = self.handover.as_deref().and_then(ListenerHandover::close) {
@@ -909,7 +926,10 @@ impl App {
 
     /// Everything that happens once at launch, in order:
     ///
-    /// 1. The pipeline's events are subscribed and routed into the host.
+    /// 1. The pipeline's events are subscribed and routed into the host,
+    ///    the recorder's changes into the host and the detection
+    ///    controller, and meeting detection starts following its setting
+    ///    ([`DetectionController::run`]).
     /// 2. The meetings left `recording`, the folder each was recorded into
     ///    and the known audio folders ([`crate::audio_folders`]) are
     ///    listed, before anything here can start a recording.
@@ -954,8 +974,16 @@ impl App {
     /// recording instead of recovering it.
     pub fn launch(&self, host: &Arc<Host>) {
         let recorder_host = host.clone();
-        self.recorder
-            .on_change(Arc::new(move || recorder_host.recorder_changed()));
+        let detection = self.detection.as_ref().map(Arc::downgrade);
+        self.recorder.on_change(Arc::new(move || {
+            recorder_host.recorder_changed();
+            if let Some(detection) = detection.as_ref().and_then(std::sync::Weak::upgrade) {
+                detection.recorder_changed();
+            }
+        }));
+        if let Some(detection) = &self.detection {
+            detection.run();
+        }
         self.report_update_checks(host);
 
         let mut receiver = self.events.subscribe();
@@ -2375,6 +2403,7 @@ mod tests {
             runtime: tokio::runtime::Handle::current(),
             version: "0.0.0".to_owned(),
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+            detection: None,
             lock_patience: std::time::Duration::ZERO,
         }
     }
