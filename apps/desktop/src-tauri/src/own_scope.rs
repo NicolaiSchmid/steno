@@ -54,7 +54,7 @@
 //!   `setup`.
 //! - [`move_within`]: the request on a thread of its own, waited for at
 //!   most [`MOVE_TIMEOUT`].
-//! - [`move_over_user_bus`]: the request over the user bus's socket.
+//! - [`user_bus`]: the connection to the user bus's socket.
 //! - [`move_out`]: the main-process check, the scopes' starts and the wait.
 //! - [`foreign_service`]: the unit to leave, from the cgroup.
 //! - [`image_server`]: the `AppImage` runtime's process, from the cgroup,
@@ -307,14 +307,13 @@ fn image_stays(server: u32, error: &dyn std::fmt::Display) {
 
 /// Whether the manager's `job` has ended: the manager no longer knows it.
 fn job_ended(connection: &Connection, job: &OwnedObjectPath) -> zbus::Result<bool> {
-    let state: zbus::Result<OwnedValue> = call(
+    match call::<_, OwnedValue>(
         connection,
         job.as_str(),
         PROPERTIES,
         "Get",
         &(SYSTEMD_JOB, "State"),
-    );
-    match state {
+    ) {
         Ok(_) => Ok(false),
         Err(zbus::Error::MethodError(..)) => Ok(true),
         Err(error) => Err(error),
@@ -377,12 +376,6 @@ fn own_cgroup() -> std::io::Result<String> {
 /// [`CALL_TIMEOUT`] or failed.
 fn connected(builder: Builder<'_>) -> zbus::Result<Connection> {
     builder.method_timeout(CALL_TIMEOUT).build()
-}
-
-/// [`move_out`] over the user bus's socket in `$XDG_RUNTIME_DIR`, with this
-/// process's cgroup file.
-fn move_over_user_bus(unit: &str, pid: u32, image: Option<u32>, deadline: Instant) -> Outcome {
-    move_out(&user_bus()?, unit, pid, image, own_cgroup, deadline)
 }
 
 /// A connection to the user bus's socket in `$XDG_RUNTIME_DIR`.
@@ -453,15 +446,6 @@ fn report(unit: &str, outcome: &Outcome, late: bool) {
     }
 }
 
-/// [`move_image`] over the user bus's socket, for an app that stays in its
-/// own unit `app`.
-fn move_image_over_user_bus(server: u32, app: &str) {
-    match user_bus() {
-        Ok(connection) => move_image(&connection, server, app),
-        Err(error) => image_stays(server, &error),
-    }
-}
-
 /// Moves the app into a scope of its own when it runs in another program's
 /// service, waiting at most [`MOVE_TIMEOUT`], and the `AppImage` runtime's
 /// process out of the app's unit (the module docs). Called at launch,
@@ -479,7 +463,10 @@ pub fn leave_foreign_service() {
         if let (Some(server), Some(app)) = (image, own_unit(&cgroup).map(str::to_owned)) {
             let spawned = std::thread::Builder::new()
                 .name("steno-image-scope".to_owned())
-                .spawn(move || move_image_over_user_bus(server, &app));
+                .spawn(move || match user_bus() {
+                    Ok(connection) => move_image(&connection, server, &app),
+                    Err(error) => image_stays(server, &error),
+                });
             if let Err(error) = spawned {
                 image_stays(server, &error);
             }
@@ -489,7 +476,7 @@ pub fn leave_foreign_service() {
     let deadline = Instant::now() + QUEUE_LIMIT;
     let request = unit.clone();
     let outcome = move_within(MOVE_TIMEOUT, &unit, move || {
-        move_over_user_bus(&request, pid, image, deadline)
+        move_out(&user_bus()?, &request, pid, image, own_cgroup, deadline)
     });
     report(&unit, &outcome, false);
 }
