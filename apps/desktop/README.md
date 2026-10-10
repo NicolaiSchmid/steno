@@ -226,7 +226,7 @@ the menu is the only way in there:
 | GNOME with the AppIndicator extension (on by default on Ubuntu) | the top bar | a left or a right click |
 | GNOME without the extension | nowhere: closing the main window quits Steno (below) | |
 | KDE Plasma | the system tray | a left or a right click |
-| Omarchy (Hyprland) | the bar's tray drawer, shown on hover | a right click; a left click may do nothing (the bar sends `Activate`, which libayatana-appindicator does not answer) |
+| Omarchy (Hyprland) | the bar's tray drawer, shown on hover | a right click; a left click may do nothing (the bar sends `Activate`, which libayatana-appindicator does not implement) |
 | NixOS | as on the desktop it runs (GNOME, Plasma or Hyprland) | as there |
 
 Closing the main window hides it while the tray stands, as the Swift
@@ -239,28 +239,31 @@ once the save is done, `the shutdown ended` with its duration. The window
 is not just hidden, which would leave a recording running in an app
 nothing on screen reaches.
 
-On Linux "shows it" means a status notifier
-host (`tray_host.rs`). A thread follows the session bus for the whole run:
-whether `org.kde.StatusNotifierWatcher` has an owner and, if it does,
-whether that watcher's `IsStatusNotifierHostRegistered` says a host
-registered (a watcher can run with no host, for example KDE's `kded`
-started for a KDE app on another desktop). It reads both at launch and
-again whenever the name changes owner or the watcher says a host came or
-went, so a close reads the last answer without asking the bus. With no
-session bus, before the first reading and after the bus closed, the shell
-counts no host, the safe side; a watcher without the property still
-counts as one; a reading that fails (no answer within five seconds, for
-one) counts as none and is read again ten seconds later. The log says `no tray host shows the tray
-icon` at launch on stock GNOME, and again whenever the host goes. On
-stock GNOME the AppIndicator extension brings the tray back. When the
-host goes while the main window is hidden (the bar restarts, the
-extension is turned off), nothing on the desktop shows the window: during
-a recording the bubble stays on screen, with Stop, and a click on it
-opens the main window; otherwise starting Steno again from the launcher
-brings it back. An `XEmbed`-only tray is not asked for, so there closing main also
-quits. On macOS
-the menu bar carries the shell's own menu (`menu.rs`): Quit goes through
-the run loop, the Edit menu gives the pages their copy and paste shortcuts.
+On Linux "shows it" means a status notifier host (`tray_host.rs`). A
+thread follows the session bus for the whole run: whether
+`org.kde.StatusNotifierWatcher` has an owner and, if it does, whether
+that watcher's `IsStatusNotifierHostRegistered` says a host registered (a
+watcher can run with no host, for example KDE's `kded` started for a KDE
+app on another desktop). It reads both at launch and again whenever the
+name changes owner or the watcher says a host came or went, so a close
+reads the last answer without asking the bus. With no session bus,
+before the first reading and after the bus closed, the shell counts no
+host, the safe side; a watcher that says it lacks the property still
+counts as one; one that serves no watcher object yet, or a reading that
+fails (no answer within five seconds, for one), counts as none and is
+read again ten seconds later, three times at most before the next
+change. The log says `no tray host shows the tray icon` at launch on
+stock GNOME, and again whenever the host goes. On stock GNOME the
+AppIndicator extension brings the tray back. When the host goes while
+the main window is hidden (the bar restarts, the extension is turned
+off), nothing on the desktop shows the window: during a recording the
+bubble stays on screen, with Stop, and a click on it opens the main
+window; otherwise starting Steno again from the launcher brings it back.
+An `XEmbed`-only tray is not asked for, so there closing main also quits.
+
+On macOS the menu bar carries the shell's own menu (`menu.rs`): Quit goes
+through the run loop, the Edit menu gives the pages their copy and paste
+shortcuts.
 
 Every webview gets the platform before its page runs: `platform.rs` adds
 `window.__STENO_PLATFORM__ = "linux"` (or `"macos"`, `"windows"`) as an
@@ -1419,35 +1422,38 @@ app's.
 
 ## Test
 
-`cargo test -p steno-desktop` covers the window specs and routes, the typed `window.open`
-and `window.close` params and who may close what, the URL and navigation
-policies, the deep-link snapshots and the smoke's switches and verdicts,
-and every WP8 module's rules: the tray's ids, labels and tooltip per
-recorder state, every action in the tray's menu once, whether a tray
-host shows the icon (a watcher with a host, without one, without the
-property, none, a failed reading), the panels' geometry (the anchor's default, drag, screen
-loss and JSON, the probe before measuring, which size reports are
-accepted and how they are clamped), the one content rule, the prompt
-query and its numbering, the window requests a page is owed before it
-mounts, when the main window hides on close and when the process ends,
-the login item states, the update lanes, the permission panes per OS,
-the `steno:` link grammar and its case rules, the Linux desktop entry,
-the folder choosers' replies and the host's chosen folder, the alert's
-buttons, and the exit rules: an exit request runs the shutdown once and
-exits after it, a second Quit meanwhile is held, a close behind a tray
-runs nothing, which repeated signal forces the exit, an ignored signal
-reads as ignored; the window sink delivers on the main thread, in emit
-order, without the emit waiting. On Linux the tray host's follower runs
-against a fake watcher on a private `dbus-daemon`: no watcher, a watcher
-that comes and goes, one whose host registers and goes, one without the
-property, one that does not answer in time and one that answers only
-the second time it is asked, and the bus closing (`STENO_REQUIRE_DBUS_TEST=1` fails the
-tests when `dbus-daemon` is missing, as in CI). `cargo test -p steno-desktop
---features fixture-host` runs the same with the fixture host, plus the
-fixture table against `index.json` and the mock transport; Rust CI runs
-both. In the web
-app, `tauri-transport.test.ts` covers the page's half of the wire and
-`src/windows/panels/*.test.tsx` the two panels.
+`cargo test -p steno-desktop` covers the window specs and routes, the
+typed `window.open` and `window.close` params and who may close what, the
+URL and navigation policies, the deep-link snapshots and the smoke's
+switches and verdicts, and every WP8 module's rules: the tray's ids,
+labels and tooltip per recorder state, every action in the tray's menu
+once, whether a tray host shows the icon (a watcher with a host, without
+one, without the property, none, a failed reading), the panels' geometry
+(the anchor's default, drag, screen loss and JSON, the probe before
+measuring, which size reports are accepted and how they are clamped), the
+one content rule, the prompt query and its numbering, the window requests
+a page is owed before it mounts, when the main window hides on close and
+when the process ends, the login item states, the update lanes, the
+permission panes per OS, the `steno:` link grammar and its case rules, the
+Linux desktop entry, the folder choosers' replies and the host's chosen
+folder, the alert's buttons, and the exit rules: an exit request runs the
+shutdown once and exits after it, a second Quit meanwhile is held, a close
+behind a tray runs nothing, which repeated signal forces the exit, an
+ignored signal reads as ignored; the window sink delivers on the main
+thread, in emit order, without the emit waiting. On Linux the tray host's
+follower decides by a table of the watcher's answers (which mean it lacks
+the property, which fail the reading) and runs against a fake watcher on a
+private `dbus-daemon`: no watcher, a watcher that comes and goes, one
+whose host registers and goes, one without the property, one that serves
+no object at its path, one that does not answer in time and one that
+answers only the second time it is asked, and the bus closing; a call that
+gets no answer gives up after five seconds (`STENO_REQUIRE_DBUS_TEST=1`
+fails the tests when `dbus-daemon` is missing, as in CI). `cargo test -p
+steno-desktop --features fixture-host` runs the same with the fixture
+host, plus the fixture table against `index.json` and the mock transport;
+Rust CI runs both. In the web app, `tauri-transport.test.ts` covers the
+page's half of the wire and `src/windows/panels/*.test.tsx` the two
+panels.
 
 ## Smoke
 
