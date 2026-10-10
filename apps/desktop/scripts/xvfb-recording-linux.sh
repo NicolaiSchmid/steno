@@ -1,5 +1,6 @@
 # shellcheck shell=bash disable=SC2154 # `name` is the sourcing script's
-# What lost-display-linux.sh and close-without-tray-linux.sh share; each
+# Sourced, not run: what lost-display-linux.sh and
+# close-without-tray-linux.sh share; each
 # sets `name`, its log prefix, and sources this file with its arguments
 # ([path/to/steno-desktop] [seconds]). Sourcing it checks them and the
 # tools (Xvfb, xdotool, python3; exit 2 on a usage error or a missing
@@ -116,8 +117,8 @@ start_recording() {
   [[ -n "$recording" ]] || fail "no recording started"
 }
 
-# Waits 30 s at most for the app to end after $1, and keeps its exit
-# status in `code`.
+# Waits 30 s at most for the app to end, and keeps its exit status in
+# `code`; $1 names what ended it, for the failure message.
 await_exit() {
   for _ in $(seq 300); do
     kill -0 "$app" 2>/dev/null || break

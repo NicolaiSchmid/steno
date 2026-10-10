@@ -25,7 +25,7 @@ name=lost-display
 source "$(dirname "${BASH_SOURCE[0]}")/xvfb-recording-linux.sh" "$@"
 
 start_recording
-echo "lost-display: recording; ending the display server in $seconds s"
+echo "$name: recording; ending the display server in $seconds s"
 sleep "$seconds"
 
 kill -TERM "$server"
@@ -34,4 +34,4 @@ await_exit "the display server ended"
 grep -qF "the display closed; saving" "$work/app.log" \
   || fail "the app did not save for the lost display"
 require_saved
-echo "lost-display: ok, the recording was saved before the app ended"
+echo "$name: ok, the recording was saved before the app ended"

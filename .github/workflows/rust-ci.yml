@@ -28,8 +28,9 @@ name: Rust CI
 # requires the recording saved
 # (apps/desktop/scripts/lost-display-linux.sh), closes the main window
 # under a recording on a session bus with no tray host and requires the
-# app to quit and save it (apps/desktop/scripts/close-without-tray-linux.sh),
-# and bundles a `.deb` with
+# app to quit and save it, and beside a stand-in host requires the close
+# to hide the window and the tray menu's Quit to save it
+# (apps/desktop/scripts/close-without-tray-linux.sh), and bundles a `.deb` with
 # the speech sidecar
 # (apps/desktop/scripts/check-bundle.sh finds it beside the app) so a
 # packaging regression (the bundle config, the icons, the plists, the
@@ -445,6 +446,17 @@ jobs:
         run: |
           scripts/pipewire-headless.sh \
             apps/desktop/scripts/close-without-tray-linux.sh target/debug/steno-desktop
+      # Beside a stand-in watcher with a host
+      # (apps/desktop/scripts/tray-watcher-linux.py): the tray's menu must
+      # hold every action in order, the close must hide the main window
+      # while the recording goes on, and Quit Steno in the menu must save
+      # it.
+      - name: Desktop close beside a tray host
+        if: matrix.name == 'linux'
+        timeout-minutes: 5
+        run: |
+          scripts/pipewire-headless.sh \
+            apps/desktop/scripts/close-without-tray-linux.sh --with-host target/debug/steno-desktop
       # The same smoke on macOS, after the tests so they build as before.
       # It shows the windows on the runner's screen for 15 s and runs with a
       # fresh HOME; the script waits for another runner's smoke to end.
