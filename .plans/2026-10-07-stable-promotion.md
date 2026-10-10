@@ -742,10 +742,10 @@ Each lands before `0.11.0-rc.1`.
   diarizer failure) and the next call starts a new one. A load of the models
   that fails, whether the child refuses the files or dies or hangs in it, has
   the files hashed against the manifest: one that fails its checksum is
-  deleted and the meeting waits for the models, rather than falling back.
-  Parity: the sidecar's
-  clusters equal the in-process pipeline's bit for bit on the two-voice
-  fixture, once and tiled to 75 s, so refinement runs too.
+  deleted and the meeting waits for the models, rather than falling back;
+  intact files fall back as before. Parity: the sidecar's clusters equal the
+  in-process pipeline's bit for bit on the two-voice fixture, once and tiled
+  to 75 s, so refinement runs too.
 - **A4 PipeWire** (#214), plus `start`'s first cycle and the latencies measured
   on Nicolai's GNOME and Omarchy machines.
 - **A5 One speech engine per reload** (#218, merged).
