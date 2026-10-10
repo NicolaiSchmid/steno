@@ -172,8 +172,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
-      # macOS only (signing-keychain.sh). Outside the workspace and named
-      # apart from the Swift release's, which may share the runner.
+      # macOS only (signing-keychain.sh). Outside the workspace, so no
+      # checkout or cache step can pick it up.
       KEYCHAIN_PATH: ${{ github.workspace }}/../steno-desktop-release.keychain-db
     steps:
       # The whole history on macOS, whose build number is the commit count.
@@ -731,13 +731,30 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # actions: read is what the environments API asks of the token (GET
+    # .../environments/<name>, the "Actions" repository permission);
+    # contents for the branch and the release.
     permissions:
+      actions: read
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
       BUILD: ${{ needs.plan.outputs.build }}
     steps:
+      # GitHub creates an environment the first time a job names it, with no
+      # protection rules, and then runs the job without asking. So before
+      # anything else the job stops unless `appcast` has a required
+      # reviewer: no item reaches the branch without the approval after R7.
+      - name: The appcast environment has a required reviewer
+        run: |
+          set -euo pipefail
+          reviewed="$(gh api "repos/$GITHUB_REPOSITORY/environments/appcast" --jq '[.protection_rules[].type] | index("required_reviewers") != null')"
+          if [ "$reviewed" != true ]; then
+            echo "::error::the appcast environment has no required reviewer, so this job ran unapproved and wrote nothing. Set the environment up (apps/desktop/README.md, Cutting a release, step 0), then re-run handoff"
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
@@ -748,20 +765,32 @@ jobs:
       # The approval's time: Sparkle counts the rollout's groups from the
       # item's pubDate, and the job starts when the reviewer approves. A
       # re-run after the item reached the branch keeps the branch's item,
-      # and so its date, and only uploads the feed again.
+      # and so its date, and only uploads the feed again. Otherwise the
+      # branch is checked again as it is now, since an approval can come
+      # days after `publish` looked: another release's approval may have
+      # put a higher build or a handoff item there meanwhile (D8: one item).
       - name: Date the item
         id: date
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          HANDOFF_ITEM_REPLACE: ${{ vars.HANDOFF_ITEM_REPLACE }}
         run: |
           set -euo pipefail
           git fetch --quiet origin refs/heads/appcast
           git show FETCH_HEAD:appcast.xml > "$RUNNER_TEMP/branch.xml"
           on_branch="$(python3 apps/desktop/scripts/handoff-appcast.py has-build "$RUNNER_TEMP/branch.xml" "$BUILD")"
-          echo "on_branch=$on_branch" >> "$GITHUB_OUTPUT"
           if [ "$on_branch" = true ]; then
             echo "::notice::build $BUILD is on the appcast branch already; its item and date stay"
           else
+            python3 apps/desktop/scripts/handoff-appcast.py check-build "$RUNNER_TEMP/branch.xml" "$BUILD"
+            handoff_item="$(python3 apps/desktop/scripts/handoff-appcast.py has-handoff-item "$RUNNER_TEMP/branch.xml")"
+            if [ "$handoff_item" != false ] && [ "$HANDOFF_ITEM_REPLACE" != "$VERSION" ]; then
+              echo "::error::the appcast branch has a handoff item since publish looked; reject this job, or set HANDOFF_ITEM_REPLACE to $VERSION and re-run it"
+              exit 1
+            fi
             python3 apps/desktop/scripts/handoff-appcast.py stamp-pubdate sparkle-item/appcast.xml "$(date +%s)"
           fi
+          echo "on_branch=$on_branch" >> "$GITHUB_OUTPUT"
 
       - name: Put the item on the appcast branch
         if: steps.date.outputs.on_branch == 'false'
@@ -776,4 +805,4 @@ jobs:
           mkdir -p "$RUNNER_TEMP/feed"
           git show FETCH_HEAD:appcast.xml > "$RUNNER_TEMP/feed/appcast.xml"
           gh release upload "$TAG" "$RUNNER_TEMP/feed/appcast.xml" --clobber
-          grep -c '<item>' "$RUNNER_TEMP/feed/appcast.xml"
+          echo "the release's appcast.xml is the branch's feed, $(grep -c '<item>' "$RUNNER_TEMP/feed/appcast.xml") items"
