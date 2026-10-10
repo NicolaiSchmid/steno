@@ -389,51 +389,78 @@ mod tests {
         );
     }
 
+    /// What this test binary logs at debug and above, from the first call
+    /// on: the process-wide subscriber, since a thread's own default can
+    /// miss a callsite another test's thread registered first. Every test
+    /// logs into it, so a test picks its lines out by its temporary folder.
+    #[derive(Clone, Default)]
+    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn installed() -> &'static CapturedLog {
+            use tracing_subscriber::util::SubscriberInitExt as _;
+            static LOG: std::sync::OnceLock<CapturedLog> = std::sync::OnceLock::new();
+            LOG.get_or_init(|| {
+                let log = CapturedLog::default();
+                tracing_subscriber::fmt()
+                    .with_writer({
+                        let log = log.clone();
+                        move || log.clone()
+                    })
+                    .with_max_level(tracing::Level::DEBUG)
+                    .finish()
+                    .init();
+                log
+            })
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// The checksum warning names the file and its digests, never the
     /// load's error, whose crash report can hold the child's stderr: that
     /// is logged once, at debug.
     #[test]
     fn the_load_error_is_logged_at_debug_only() {
-        #[derive(Clone, Default)]
-        struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Log {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
+        let log = CapturedLog::installed();
         let dir = tempfile::tempdir().unwrap();
-        let (store, _folder) = install_synthetic(dir.path(), b"embeddinG");
-        let log = Log::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer({
-                let log = log.clone();
-                move || log.clone()
-            })
-            .with_max_level(tracing::Level::DEBUG)
-            .finish();
-        let error = tracing::subscriber::with_default(subscriber, || {
-            after_failed_load_of(
-                &store,
-                &synthetic_asset(),
-                DiarizeError::metadata("the child died: /home/someone/stderr-line"),
-            )
-        });
+        let (store, folder) = install_synthetic(dir.path(), b"embeddinG");
+        let stderr = format!("{}/stderr-line", dir.path().display());
+        let error = after_failed_load_of(
+            &store,
+            &synthetic_asset(),
+            DiarizeError::metadata(format!("the child died: {stderr}")),
+        );
         assert!(
             matches!(error, DiarizeError::NotInstalled { .. }),
             "{error:?}"
         );
-        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        let warning: Vec<_> = lines.iter().filter(|l| l.contains("WARN")).collect();
-        assert_eq!(warning.len(), 1, "{text}");
-        assert!(warning[0].contains("failed its checksum"), "{text}");
-        assert!(warning[0].contains("b.onnx"), "{text}");
-        let leaks: Vec<_> = lines.iter().filter(|l| l.contains("stderr-line")).collect();
+        let text = log.text();
+        let ours: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains(&*dir.path().to_string_lossy()))
+            .collect();
+        let warnings: Vec<&&str> = ours.iter().filter(|line| line.contains("WARN")).collect();
+        assert_eq!(warnings.len(), 1, "{text}");
+        assert!(warnings[0].contains("failed its checksum"), "{text}");
+        assert!(
+            warnings[0].contains(&*folder.join("b.onnx").to_string_lossy()),
+            "{text}"
+        );
+        let leaks: Vec<&&str> = ours.iter().filter(|line| line.contains(&stderr)).collect();
         assert_eq!(leaks.len(), 1, "{text}");
         assert!(leaks[0].contains("DEBUG"), "{text}");
     }
