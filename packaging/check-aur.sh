@@ -10,21 +10,23 @@
 # - keys/pgp/ holds another key than apps/desktop/release-signing-key.asc,
 #   validpgpkeys names another fingerprint, or source= lacks the .deb's .asc;
 # - LICENSE differs from the repository's, speexdsp-COPYING from
-#   crates/steno-audio/vendor/speexdsp/COPYING, or a drop-in copy here from
-#   its file in apps/desktop/src-tauri/linux/;
+#   crates/steno-audio/vendor/speexdsp/COPYING, or a copy here of a drop-in
+#   or of the Hyprland rules from its file in apps/desktop/src-tauri/linux/;
 # - the .deb's checksum or its signature from the release key does not
 #   verify, makepkg skipped either check, or the package does not build
 #   and install;
 # - namcap reports an error;
 # - a file is missing: the binary and the sidecar side by side in
 #   /usr/lib/steno-desktop, the /usr/bin wrapper, the drop-ins, the
-#   desktop entry, the licenses;
+#   Hyprland rules, the desktop entry, the licenses;
 # - the wrapper is not executable, or its commands are not exactly the three
 #   that set STENO_DISTRIBUTION=aur and STENO_EXEC_PATH=/usr/bin/steno-desktop
 #   and run the binary;
 # - an installed drop-in, the .deb's or the copy here, differs from its
 #   file in apps/desktop/src-tauri/linux/, or its settings are not exactly
 #   its section and TimeoutStopSec=20s;
+# - the installed Hyprland rules, the .deb's or the copy here, differ from
+#   apps/desktop/src-tauri/linux/hyprland-steno.lua;
 # - a binary needs a library that is not installed, or the sidecar does
 #   not start.
 #
@@ -67,18 +69,25 @@ echo "ok: LICENSE is the repository's, speexdsp-COPYING the vendored SpeexDSP's"
 
 # The stop timeout drop-ins (P5): the path under /usr/lib/systemd/user, the
 # file in apps/desktop/src-tauri/linux (and its copy here while the pinned
-# .deb lacks it) and the section it sets.
+# .deb lacks it) and the section it sets. The Hyprland rules (X2) have a
+# copy here on the same terms.
 linux="$root/apps/desktop/src-tauri/linux"
 drop_ins=(
   'app-steno\x2ddesktop@autostart.service.d/10-steno.conf autostart-service-stop-timeout.conf Service'
   'app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf gnome-scope-stop-timeout.conf Scope'
 )
+rules=/usr/share/steno-desktop/hyprland-steno.lua
+# A copy that Bump step 3 has deleted is not checked.
+check_copy() {
+  [[ ! -e "$work/$1" ]] || cmp -s "$linux/$1" "$work/$1" \
+    || die "packaging/aur/$1 is not apps/desktop/src-tauri/linux/$1"
+}
 for entry in "${drop_ins[@]}"; do
   read -r _ conf _ <<<"$entry"
-  [[ ! -e "$work/$conf" ]] || cmp -s "$linux/$conf" "$work/$conf" \
-    || die "packaging/aur/$conf is not apps/desktop/src-tauri/linux/$conf"
+  check_copy "$conf"
 done
-echo "ok: the drop-in copies are apps/desktop/src-tauri/linux's"
+check_copy hyprland-steno.lua
+echo "ok: the copies of the drop-ins and the Hyprland rules are apps/desktop/src-tauri/linux's"
 
 as_builder "gpg --batch --import keys/pgp/$fpr.asc"
 as_builder 'makepkg -si --noconfirm' 2>&1 | tee /tmp/makepkg.log
@@ -133,6 +142,11 @@ for entry in "${drop_ins[@]}"; do
     || die "$installed does not set exactly [$section] TimeoutStopSec=20s"
   echo "ok: $installed is apps/desktop/src-tauri/linux/$conf and sets [$section] TimeoutStopSec=20s"
 done
+
+grep -qxF "$rules" <<<"$files" || die "the package does not install $rules"
+cmp -s "$rules" "$linux/hyprland-steno.lua" \
+  || die "$rules differs from apps/desktop/src-tauri/linux/hyprland-steno.lua"
+echo "ok: $rules is apps/desktop/src-tauri/linux/hyprland-steno.lua"
 
 for binary in /usr/lib/steno-desktop/steno-desktop /usr/lib/steno-desktop/steno-speech-sidecar; do
   ! ldd "$binary" | grep 'not found' || die "$binary needs a library that is not installed"

@@ -19,6 +19,7 @@ below first.
 | `/usr/bin/steno-desktop` | [`steno-desktop.sh`](steno-desktop.sh): sets `STENO_DISTRIBUTION=aur` (the in-app updater stays off; pacman updates) and `STENO_EXEC_PATH=/usr/bin/steno-desktop` (the path the autostart entry names), then runs the binary. Both take effect from the first release that contains #261; rc.3 ignores them |
 | `/usr/share/applications/steno-desktop.desktop`, `/usr/share/icons/hicolor/*/apps/steno-desktop.png` | The `.deb`, unchanged. The entry's `Exec=steno-desktop` finds the wrapper on `PATH` |
 | `/usr/lib/systemd/user/app-steno\x2ddesktop@autostart.service.d/10-steno.conf`, `/usr/lib/systemd/user/app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf` | The stop timeout drop-ins (P5), `[Service]` and `[Scope]` `TimeoutStopSec=20s`: the `.deb`'s from the first release that contains #227. The pinned `.deb` lacks them, so the copies here, [`autostart-service-stop-timeout.conf`](autostart-service-stop-timeout.conf) and [`gnome-scope-stop-timeout.conf`](gnome-scope-stop-timeout.conf), byte for byte `apps/desktop/src-tauri/linux/`'s, stay until `pkgver` pins a `.deb` that ships the drop-ins itself |
+| `/usr/share/steno-desktop/hyprland-steno.lua` | The Hyprland window rules for the bubble and the prompt (X2, [below](#hyprland)): the `.deb`'s from the first release that contains #267. The pinned `.deb` lacks it, so the copy here, [`hyprland-steno.lua`](hyprland-steno.lua), byte for byte `apps/desktop/src-tauri/linux/`'s, stays until `pkgver` pins a `.deb` that ships the file itself |
 | `/usr/share/licenses/steno-desktop-bin/LICENSE` | [`LICENSE`](LICENSE), a copy of the repository's |
 | `/usr/share/licenses/steno-desktop-bin/speexdsp-COPYING` | [`speexdsp-COPYING`](speexdsp-COPYING), a copy of `crates/steno-audio/vendor/speexdsp/COPYING`: the binary compiles in SpeexDSP's echo canceller, and its BSD licence asks for the notice with the binary |
 
@@ -30,8 +31,31 @@ entry the app keeps until it exits keeps a running, autostarted Steno safe
 through that reload (P5); step 8 of the Omarchy gate, which #227 adds, tests
 it.
 
-Still to come: X4's `ufw` profile and X2's Hyprland window rules. The
-`TODO` lines in `package()` say where each goes.
+The copies of the drop-ins and of the rules file stay until the pinned
+`.deb` ships them itself; `package()` keeps the `.deb`'s file when it has
+one, and `check-aur.sh` requires each file in the package, identical to its
+file in `apps/desktop/src-tauri/linux/`, whichever supplied it.
+
+Still to come: X4's `ufw` profile. The `TODO` line in `package()` says
+where it goes.
+
+## Hyprland
+
+Hyprland, and so Omarchy, needs window rules so that the recording bubble
+and the meeting prompt float, stay on every workspace and take no keyboard
+focus. The package installs them as
+`/usr/share/steno-desktop/hyprland-steno.lua` (Hyprland 0.55 or later, whose
+config is Lua). Load them with one line at the end of
+`~/.config/hypr/hyprland.lua` (on Omarchy, below "Add any other personal
+Hyprland configuration below"):
+
+```lua
+dofile("/usr/share/steno-desktop/hyprland-steno.lua")
+```
+
+The "Hyprland" section of [`apps/desktop/README.md`](../../apps/desktop/README.md#hyprland)
+says what the rules do, gives the line for older Hyprland configs and shows
+how to check that they apply.
 
 ## The pinned release
 
@@ -108,12 +132,13 @@ timeout until it exits. The removal leaves `~/.local/share/Steno` and
    `.deb` and its `.asc` and rewrites `sha256sums`. The `.deb`'s line must
    match its line in the release's `SHA256SUMS`.
 3. Once the release's `.deb` installs the drop-ins (the first release that
-   contains #227), delete `autostart-service-stop-timeout.conf`,
-   `gnome-scope-stop-timeout.conf`, their `source` and `sha256sums` entries
-   and the two `install` lines; `package()` then keeps the `.deb`'s files.
-   Until then the copies stay. `check-aur.sh` requires both drop-ins in the
-   package either way, each identical to its file in
-   `apps/desktop/src-tauri/linux/`.
+   contains #227) and the Hyprland rules (the first that contains #267),
+   delete the copies, `autostart-service-stop-timeout.conf`,
+   `gnome-scope-stop-timeout.conf` and `hyprland-steno.lua`, their `source`
+   and `sha256sums` entries and the three `install` lines; `package()` then
+   keeps the `.deb`'s files. Until then the copies stay. `check-aur.sh`
+   requires the drop-ins and the rules in the package either way, each
+   identical to its file in `apps/desktop/src-tauri/linux/`.
 4. Regenerate the metadata the AUR reads: `makepkg --printsrcinfo > .SRCINFO`.
 5. Install it (`makepkg -si`) and check that `/usr/lib/steno-desktop/` holds
    both binaries and that Steno starts from the launcher.
@@ -127,7 +152,7 @@ OpenPGP signatures"), copy the new public key over `keys/pgp/` too.
 `packaging/check-aur.sh` checks the checksums, the signature, `.SRCINFO`
 and the installed files in a throwaway Arch container (the AUR package job
 in `.github/workflows/aur-ci.yml` runs it on every pull request that touches
-this directory, the drop-ins in `apps/desktop/src-tauri/linux/`, the release
+this directory, the drop-ins and the rules in `apps/desktop/src-tauri/linux/`, the release
 key, `LICENSE` or SpeexDSP's `COPYING`). From the checkout's root:
 
 ```sh
@@ -139,8 +164,8 @@ docker run --rm --cpus=2 --memory=4g -v "$PWD":/src:ro \
 
 The AUR repository holds the files `makepkg` needs, flat at its root:
 `PKGBUILD`, `.SRCINFO`, `.gitignore`, every local file in `source=` (today
-`steno-desktop.sh`, the two `.conf` files, `LICENSE` and
-`speexdsp-COPYING`) and `keys/pgp/`,
+`steno-desktop.sh`, the two `.conf` files, `hyprland-steno.lua`, `LICENSE`
+and `speexdsp-COPYING`) and `keys/pgp/`,
 the release key. Not this README.
 
 **The first push is by hand** (Nicolai, at gate G3, with a release that
@@ -151,7 +176,7 @@ contains #227 and #261), from an AUR account with an SSH key added under
 git clone ssh://aur@aur.archlinux.org/steno-desktop-bin.git /tmp/aur-steno
 cd /tmp/aur-steno
 cp -r <checkout>/packaging/aur/{PKGBUILD,.SRCINFO,.gitignore,steno-desktop.sh,LICENSE,speexdsp-COPYING,keys} .
-cp <checkout>/packaging/aur/*.conf .  # until Bump step 3 deletes them
+cp <checkout>/packaging/aur/{*.conf,hyprland-steno.lua} .  # until Bump step 3 deletes them
 git add -A
 git commit -m "steno-desktop-bin 0.11.0-1"
 git push origin master
