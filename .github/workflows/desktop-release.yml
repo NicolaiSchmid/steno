@@ -338,6 +338,7 @@ jobs:
           while IFS= read -r config; do configs+=("$config"); done < "$RUNNER_TEMP/tauri-configs"
           pnpm dlx @tauri-apps/cli@2.12.1 bundle --ci --bundles "${{ matrix.bundles }}" "${configs[@]}"
 
+      # The image's path stays in STENO_DMG for the Handoff item step.
       - name: Notarise the disk image
         if: matrix.name == 'macos'
         env:
@@ -348,6 +349,7 @@ jobs:
           dmgs=("${STENO_TARGET_DIR:-target}"/release/bundle/dmg/*.dmg)
           [[ ${#dmgs[@]} -eq 1 && -f "${dmgs[0]}" ]] || { echo "::error::expected one .dmg, found ${dmgs[*]}"; exit 1; }
           apps/desktop/scripts/notarize-dmg.sh "${dmgs[0]}"
+          echo "STENO_DMG=${dmgs[0]}" >> "$GITHUB_ENV"
 
       # Also fails when either binary still holds a remapped prefix. On
       # macOS also what the Swift app's last update needs (--handoff).
@@ -378,9 +380,7 @@ jobs:
           BUILD: ${{ needs.plan.outputs.build }}
         run: |
           set -euo pipefail
-          dmgs=("${STENO_TARGET_DIR:-target}"/release/bundle/dmg/*.dmg)
-          [[ ${#dmgs[@]} -eq 1 && -f "${dmgs[0]}" ]] || { echo "::error::expected one .dmg, found ${dmgs[*]}"; exit 1; }
-          apps/desktop/scripts/handoff-item.sh "$VERSION" "$BUILD" "${dmgs[0]}" sparkle-item
+          apps/desktop/scripts/handoff-item.sh "$VERSION" "$BUILD" "$STENO_DMG" sparkle-item
           cat sparkle-item/appcast.xml
 
       # Its own artifact, outside the steno-desktop-* pattern `assets`

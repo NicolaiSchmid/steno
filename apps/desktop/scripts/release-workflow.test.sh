@@ -98,7 +98,11 @@ check(item.get("if") == tag_only, "the Handoff item runs on %r" % item.get("if")
 check(index("bundle", "Notarise the disk image") < index("bundle", "Handoff item"), "the item is signed before notarisation")
 check(index("bundle", "Check the bundles") < index("bundle", "Handoff item"), "the item is signed before the bundle check")
 check(item.get("env", {}).get("SPARKLE_PRIVATE_KEY") == "${{ secrets.SPARKLE_PRIVATE_KEY }}", "the Handoff item does not get the key")
-check("handoff-item.sh" in item.get("run", ""), "the Handoff item does not run handoff-item.sh")
+check('handoff-item.sh "$VERSION" "$BUILD" "$STENO_DMG"' in item.get("run", ""), "the Handoff item does not run handoff-item.sh on the image")
+check(
+    'echo "STENO_DMG=${dmgs[0]}" >> "$GITHUB_ENV"' in step("bundle", "Notarise the disk image").get("run", ""),
+    "Notarise the disk image does not leave the image's path in STENO_DMG",
+)
 uses = re.findall(r"secrets\.SPARKLE_PRIVATE_KEY[^}]*", text)
 check(
     sorted(uses) == sorted(["secrets.SPARKLE_PRIVATE_KEY ", "secrets.SPARKLE_PRIVATE_KEY != '' && 'set' || '' "]),
@@ -143,9 +147,9 @@ for name in ("Bump the Homebrew cask", "Push the AUR bump", "Nix flake lines in 
     check(step("publish", name).get("if") == stable, "%r runs for a pre-release: %r" % (name, step("publish", name).get("if")))
 check("bump-homebrew-cask.sh" in step("publish", "Bump the Homebrew cask").get("run", ""), "the cask step does not bump the cask")
 check("aur-bump.sh" in step("publish", "Push the AUR bump").get("run", ""), "the AUR step does not run aur-bump.sh")
-for name, steps_ in jobs.items():
+for name, job in jobs.items():
     if name != "publish":
-        for s in steps_.get("steps", []):
+        for s in job.get("steps", []):
             check("bump-homebrew-cask.sh" not in s.get("run", ""), "%s bumps the cask" % name)
 
 # handoff: after publish, stable only, once, behind the environment.
