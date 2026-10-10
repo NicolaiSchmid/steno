@@ -2,7 +2,9 @@
 //! one-line `StenoJSON` fragment. A property missing from the table loads
 //! as its default. A row this build does not know (a newer build's or the
 //! Swift app's, which share the file until the Mac cutover) is ignored on
-//! load and kept on save.
+//! load and kept on save. A `handoverPort` row that is not a port (users
+//! type it by hand) loads as unset with a warning, and the next save
+//! removes it. Rust only.
 //! Swift: `Sources/StenoCore/Storage/SettingsStore.swift`, which still
 //! deletes and rewrites every row.
 //!
@@ -28,6 +30,10 @@ pub const PARAKEET_V3_ENGINE_ID: &str = "parakeet-v3";
 
 /// The key [`Settings::speech_engine_id`] is stored under.
 const SPEECH_ENGINE_KEY: &str = "speechEngineID";
+
+/// The key [`Settings::handover_port`] is stored under, the one users type
+/// by hand (`apps/desktop/README.md`).
+const HANDOVER_PORT_KEY: &str = "handoverPort";
 
 /// `settings` as a JSON object. Through text, not `to_value`, so an `f32`
 /// keeps its shortest form (`0.6`) as in [`json::to_column_string`].
@@ -89,6 +95,12 @@ impl Store {
         })?;
         let mut merged = object(defaults)?;
         for (key, value) in rows {
+            if key == HANDOVER_PORT_KEY && json::from_column_str::<Option<u16>>(&value).is_err() {
+                tracing::warn!(
+                    "the stored {HANDOVER_PORT_KEY} is not a port from 0 to 65535, so it is ignored"
+                );
+                continue;
+            }
             merged.insert(key, json::from_column_str(&value)?);
         }
         Ok(serde_json::from_value(Value::Object(merged))?)
@@ -191,5 +203,14 @@ mod tests {
         let mut known = known_keys().to_vec();
         known.sort_unstable();
         assert_eq!(known, serialized);
+    }
+
+    #[test]
+    fn the_handover_port_is_stored_under_the_key_the_readme_names() {
+        let settings = Settings {
+            handover_port: Some(23900),
+            ..Settings::default()
+        };
+        assert_eq!(object(&settings).unwrap()[HANDOVER_PORT_KEY], 23900);
     }
 }
