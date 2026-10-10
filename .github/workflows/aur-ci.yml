@@ -10,7 +10,8 @@ on:
   pull_request:
     paths:
       - 'packaging/**'
-      - 'apps/desktop/src-tauri/linux/**'
+      - 'apps/desktop/src-tauri/linux/autostart-service-stop-timeout.conf'
+      - 'apps/desktop/src-tauri/linux/gnome-scope-stop-timeout.conf'
       - 'apps/desktop/release-signing-key.asc'
       - 'LICENSE'
       - 'crates/steno-audio/vendor/speexdsp/COPYING'
@@ -19,7 +20,8 @@ on:
     branches: ['main']
     paths:
       - 'packaging/**'
-      - 'apps/desktop/src-tauri/linux/**'
+      - 'apps/desktop/src-tauri/linux/autostart-service-stop-timeout.conf'
+      - 'apps/desktop/src-tauri/linux/gnome-scope-stop-timeout.conf'
       - 'apps/desktop/release-signing-key.asc'
       - 'LICENSE'
       - 'crates/steno-audio/vendor/speexdsp/COPYING'

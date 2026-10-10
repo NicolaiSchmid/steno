@@ -12,6 +12,8 @@
 # - LICENSE differs from the repository's, speexdsp-COPYING from
 #   crates/steno-audio/vendor/speexdsp/COPYING, or a copy here of a drop-in
 #   from its file in apps/desktop/src-tauri/linux/;
+# - the PKGBUILD's _copy, while it has one, installs a copy over a file the
+#   .deb ships or not where the .deb lacks it;
 # - the .deb's checksum or its signature from the release key does not
 #   verify, makepkg skipped either check, or the package does not build
 #   and install (which includes a copy still here when the .deb ships its
@@ -80,6 +82,21 @@ for entry in "${drop_ins[@]}"; do
     || die "packaging/aur/$conf is not apps/desktop/src-tauri/linux/$conf"
 done
 echo "ok: the copies of the drop-ins are apps/desktop/src-tauri/linux's"
+
+# The pinned .deb lacks the drop-ins, so the build never trips _copy's
+# guard. While the PKGBUILD has _copy, call it on a stand-in for the
+# unpacked .deb: a file there stops it, a missing one is installed.
+if grep -q '^_copy()' "$work/PKGBUILD"; then
+  fake="$(mktemp -d)"
+  # error and pkgdir are makepkg's, for _copy.
+  # shellcheck source=/dev/null disable=SC2034,SC2329
+  (cd "$work" && source ./PKGBUILD && error() { :; } && pkgdir="$fake" \
+    && mkdir "$fake/deb" && touch "$fake/deb/f" && ! _copy LICENSE "$fake/deb/f" \
+    && _copy LICENSE "$fake/new/f" && cmp -s LICENSE "$fake/new/f") \
+    || die "_copy installs a copy over a file the .deb ships, or not where it lacks one"
+  rm -rf "$fake"
+  echo "ok: _copy fails on a file the .deb ships and installs one it lacks"
+fi
 
 as_builder "gpg --batch --import keys/pgp/$fpr.asc"
 as_builder 'makepkg -si --noconfirm' 2>&1 | tee /tmp/makepkg.log
