@@ -13,15 +13,22 @@
 //!
 //! Every write replaces the whole file (`files::write_json`, atomic and
 //! durable), off the main thread, the latest anchor of a drag winning
-//! ([`AnchorFile::save_in_background`]). A new file that does not parse is
-//! set aside (`files::set_aside`, `panel-anchor.json.corrupt-<time>`)
-//! before anything is written, and the panels open at the default place;
-//! one that cannot be read, or set aside, is never written in this run.
+//! ([`AnchorFile::save_in_background`]); the exit waits for the last one
+//! ([`AnchorFile::flush`]). A new file that does not parse is set aside
+//! (`files::set_aside`, `panel-anchor.json.corrupt-<time>`) before
+//! anything is written, and the panels open at the default place in that
+//! run; until a drag saves a new file, the next launch reads the earlier
+//! build's file again, as when the new one was missing. One that cannot
+//! be read, or set aside, is never written in this run.
+//!
+//! Swift: `FloatingPanelModel.anchorKey` (`steno.floatingPanel.anchor` in
+//! the Swift app's defaults, which nothing imports).
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Duration;
 
 use steno_services::files;
 
@@ -41,8 +48,20 @@ pub struct AnchorFile {
     writable: AtomicBool,
     /// The background writer ([`Self::save_in_background`]), started with
     /// the first save.
-    writer: OnceLock<Sender<PanelAnchor>>,
+    writer: OnceLock<Sender<Write>>,
 }
+
+/// What the background writer is asked.
+enum Write {
+    Save(PanelAnchor),
+    /// Answer once every anchor queued before is on disk.
+    Flush(Sender<()>),
+}
+
+/// How long the exit waits for the writer ([`AnchorFile::flush`]): far
+/// above one save (about 150 ms on a slow disk), and short beside the
+/// time the system gives a quitting app.
+const FLUSH_PATIENCE: Duration = Duration::from_secs(2);
 
 impl AnchorFile {
     /// The file in `support_directory`, and the earlier build's under
@@ -107,21 +126,55 @@ impl AnchorFile {
     /// the thread cannot start, the save runs here.
     pub fn save_in_background(&'static self, anchor: PanelAnchor) {
         let writer = self.writer.get_or_init(|| {
-            let (writer, anchors) = channel();
+            let (writer, requests) = channel();
             let started = std::thread::Builder::new()
                 .name("panel-anchor".to_owned())
-                .spawn(move || {
-                    while let Ok(anchor) = anchors.recv() {
-                        self.save(latest(anchor, &anchors));
-                    }
-                });
+                .spawn(move || self.write_all(&requests));
             if let Err(error) = started {
                 tracing::debug!(%error, "the panels' anchor is saved on the calling thread");
             }
             writer
         });
-        if let Err(unsent) = writer.send(anchor) {
-            self.save(unsent.0);
+        if writer.send(Write::Save(anchor)).is_err() {
+            self.save(anchor);
+        }
+    }
+
+    /// Waits until every anchor queued so far is on disk, at most
+    /// [`FLUSH_PATIENCE`]; at once when nothing was ever queued. The exit
+    /// calls it after the shutdown, so a drag just before a quit or a
+    /// logout is not lost.
+    pub fn flush(&self) {
+        self.flush_within(FLUSH_PATIENCE);
+    }
+
+    fn flush_within(&self, patience: Duration) {
+        let Some(writer) = self.writer.get() else {
+            return;
+        };
+        let (done, written) = channel();
+        if writer.send(Write::Flush(done)).is_ok() && written.recv_timeout(patience).is_err() {
+            tracing::debug!("the panels' anchor was not saved before the exit");
+        }
+    }
+
+    /// The writer thread: each save takes the latest anchor queued by then
+    /// ([`latest`]), and a flush is answered once the anchors before it are
+    /// written.
+    fn write_all(&self, requests: &Receiver<Write>) {
+        while let Ok(request) = requests.recv() {
+            match request {
+                Write::Save(anchor) => {
+                    let (anchor, flushes) = latest(anchor, requests);
+                    self.save(anchor);
+                    for done in flushes {
+                        let _ = done.send(());
+                    }
+                }
+                Write::Flush(done) => {
+                    let _ = done.send(());
+                }
+            }
         }
     }
 }
@@ -132,9 +185,18 @@ fn read_earlier(path: &Path) -> Option<PanelAnchor> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// `first`, or the last anchor queued after it.
-fn latest(first: PanelAnchor, queued: &Receiver<PanelAnchor>) -> PanelAnchor {
-    queued.try_iter().last().unwrap_or(first)
+/// `first`, or the last anchor queued after it, and the flushes queued
+/// meanwhile, which wait for that anchor's write.
+fn latest(first: PanelAnchor, queued: &Receiver<Write>) -> (PanelAnchor, Vec<Sender<()>>) {
+    let mut anchor = first;
+    let mut flushes = Vec::new();
+    for request in queued.try_iter() {
+        match request {
+            Write::Save(later) => anchor = later,
+            Write::Flush(done) => flushes.push(done),
+        }
+    }
+    (anchor, flushes)
 }
 
 #[cfg(test)]
@@ -284,11 +346,37 @@ mod tests {
     #[test]
     fn a_write_takes_the_latest_anchor_queued() {
         let (queue, queued) = channel();
-        assert_eq!(latest(anchor(1.0), &queued), anchor(1.0));
-        for x in [2.0, 3.0, 4.0] {
-            queue.send(anchor(x)).unwrap();
+        assert_eq!(latest(anchor(1.0), &queued).0, anchor(1.0));
+        for x in [2.0, 3.0] {
+            queue.send(Write::Save(anchor(x))).unwrap();
         }
-        assert_eq!(latest(anchor(1.0), &queued), anchor(4.0));
+        let (done, _written) = channel();
+        queue.send(Write::Flush(done)).unwrap();
+        queue.send(Write::Save(anchor(4.0))).unwrap();
+        let (latest_anchor, flushes) = latest(anchor(1.0), &queued);
+        assert_eq!(latest_anchor, anchor(4.0));
+        assert_eq!(flushes.len(), 1);
         assert!(queued.try_recv().is_err());
+    }
+
+    /// A drag of 60 moves saved in the background, then the exit's flush:
+    /// once it returns the file holds the last move, never an earlier one.
+    /// The patience is a minute here, so a slow runner's disk cannot fail
+    /// the test.
+    #[test]
+    fn the_flush_returns_once_the_last_anchor_of_a_drag_is_on_disk() {
+        let patience = Duration::from_secs(60);
+        let dirs = Dirs::new();
+        let file: &'static AnchorFile = Box::leak(Box::new(dirs.file()));
+        file.flush();
+        assert!(!dirs.new_path().exists());
+        for x in 1..=60 {
+            file.save_in_background(anchor(f64::from(x)));
+        }
+        file.flush_within(patience);
+        assert_eq!(dirs.file().load(), Some(anchor(60.0)));
+        file.save_in_background(anchor(61.0));
+        file.flush_within(patience);
+        assert_eq!(dirs.file().load(), Some(anchor(61.0)));
     }
 }

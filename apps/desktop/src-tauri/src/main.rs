@@ -572,17 +572,18 @@ fn onboarding_closed(app: &tauri::AppHandle) {
 /// long a save takes against the waits it has to fit in: systemd's stop
 /// timeout, the session manager's, logind's delay. A shutdown cut off at
 /// `SHUTDOWN_PATIENCE` logs the gate's warning first, and this line only
-/// if the save ends before the process does. After it, on Linux, Launch
-/// at login turned off while the app ran as the autostart unit goes off,
+/// if the save ends before the process does. After it the panels' anchor
+/// a drag queued reaches the disk (`panels::flush_anchor`), and, on Linux,
+/// Launch at login turned off while the app ran as the autostart unit goes off,
 /// and an autostart entry an earlier build wrote that waited for the exit
 /// goes, unless the exit is an update's relaunch (`autostart::at_exit`):
 /// only once the save is over, since until then the unit the app runs as
 /// needs the entry.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
     let shutdown = host::host(app).shutdown_action();
-    #[cfg(target_os = "linux")]
     let app = app.clone();
     timed_then(shutdown, move || {
+        panels::flush_anchor(&app);
         #[cfg(target_os = "linux")]
         autostart::at_exit(&app, autostart::relaunching_now());
     })

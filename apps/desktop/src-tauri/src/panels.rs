@@ -513,6 +513,11 @@ fn save_anchor(app: &AppHandle, anchor: PanelAnchor) {
     anchor_file(app).save_in_background(anchor);
 }
 
+/// The exit's wait for the anchor a drag queued (`AnchorFile::flush`).
+pub fn flush_anchor(app: &AppHandle) {
+    anchor_file(app).flush();
+}
+
 /// The window's inner size in logical points.
 pub fn logical_size(window: &WebviewWindow) -> tauri::Result<(f64, f64)> {
     let scale = window.scale_factor()?;
