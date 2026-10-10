@@ -411,17 +411,11 @@ fn a_known_property_set_to_none_loses_its_row() {
 fn a_stored_handover_port_loads_and_one_that_is_not_a_port_is_ignored() {
     let store = Store::in_memory().unwrap();
     let defaults = Settings::defaults(&StenoPaths::new("/support"));
-    put_setting_row(&store, "handoverPort", "23900");
-    let settings = store.settings_with_defaults(&defaults).unwrap();
-    assert_eq!(settings.handover_port, Some(23900));
-    put_setting_row(&store, "handoverPort", "0");
-    assert_eq!(
-        store
-            .settings_with_defaults(&defaults)
-            .unwrap()
-            .handover_port,
-        Some(0)
-    );
+    for (stored, port) in [("23900", 23900), ("0", 0)] {
+        put_setting_row(&store, "handoverPort", stored);
+        let settings = store.settings_with_defaults(&defaults).unwrap();
+        assert_eq!(settings.handover_port, Some(port), "{stored:?}");
+    }
 
     for invalid in ["abc", r#""23900""#, "70000", "-1", "23900.5", ""] {
         put_setting_row(&store, "handoverPort", invalid);

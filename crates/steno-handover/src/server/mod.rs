@@ -664,16 +664,19 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    /// A port that was free a moment ago.
-    async fn free_port() -> u16 {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        listener.local_addr().unwrap().port()
+    /// A listener that holds a port the system chose on `address`, and
+    /// that port.
+    async fn hold_port(address: Ipv4Addr) -> (TcpListener, u16) {
+        let held = TcpListener::bind((address, 0)).await.unwrap();
+        let port = held.local_addr().unwrap().port();
+        (held, port)
     }
 
     #[tokio::test]
     async fn a_fixed_port_that_is_free_is_the_one_bound() {
         let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
-        let port = free_port().await;
+        // Free again: the listener drops here.
+        let (_, port) = hold_port(Ipv4Addr::LOCALHOST).await;
         let warnings = Warnings::default();
         let _installed = tracing::subscriber::set_default(warnings.clone());
         let server = on_loopback(port, &identity).await;
@@ -686,8 +689,7 @@ mod tests {
     async fn a_fixed_port_another_program_holds_gives_way_to_one_the_system_chooses_with_a_warning()
     {
         let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
-        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let taken = held.local_addr().unwrap().port();
+        let (held, taken) = hold_port(Ipv4Addr::LOCALHOST).await;
         let warnings = Warnings::default();
         let _installed = tracing::subscriber::set_default(warnings.clone());
         let server = on_loopback(taken, &identity).await;
@@ -723,8 +725,7 @@ mod tests {
     /// The fallback binds the address asked for: loopback stays loopback.
     #[tokio::test]
     async fn the_fallback_keeps_the_address() {
-        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let taken = held.local_addr().unwrap().port();
+        let (_held, taken) = hold_port(Ipv4Addr::LOCALHOST).await;
         let listener = bind(IpAddr::V4(Ipv4Addr::LOCALHOST), taken).await.unwrap();
         let bound = listener.local_addr().unwrap();
         assert_eq!(bound.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
@@ -736,8 +737,7 @@ mod tests {
     #[tokio::test]
     async fn after_a_fallback_the_record_carries_the_port_bound() {
         let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
-        let held = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
-        let taken = held.local_addr().unwrap().port();
+        let (held, taken) = hold_port(Ipv4Addr::UNSPECIFIED).await;
         let directory = tempfile::tempdir().unwrap();
         let configuration = HandoverConfiguration {
             service_name: "Steno port test".to_owned(),
