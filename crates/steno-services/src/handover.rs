@@ -386,7 +386,6 @@ mod tests {
         assert_eq!(stored_port(&store), Some(40000));
         assert_eq!(configuration(&store, None).port, 40000);
         assert_eq!(configuration(&store, Some("")).port, 40000);
-        assert_eq!(configuration(&store, Some("23900")).port, 23900);
         assert_eq!(
             configuration(&store, Some("23900")),
             HandoverConfiguration {
