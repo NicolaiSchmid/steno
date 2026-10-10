@@ -1092,7 +1092,7 @@ mod tests {
     use super::*;
     use crate::pipeline::CurrentPipeline;
     use crate::testing::{
-        an_hour_later, current_pipeline, fake_dependencies, temp_store, write_frames,
+        an_hour_later, current_pipeline, fake_dependencies, temp_store, warnings, write_frames,
     };
 
     struct Harness {
@@ -2640,37 +2640,6 @@ mod tests {
             [unmounted]
         );
         harness.pipeline.current().wait_until_idle().await;
-    }
-
-    /// A `Write` into a shared buffer, for a test's log subscriber.
-    #[derive(Clone, Default)]
-    struct Logged(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Logged {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// What `run` returns, and the warnings it logged on this thread.
-    fn warnings<T>(run: impl FnOnce() -> T) -> (T, String) {
-        let logged = Logged::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer({
-                let logged = logged.clone();
-                move || logged.clone()
-            })
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let value = tracing::subscriber::with_default(subscriber, run);
-        let logged = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
-        (value, logged)
     }
 
     /// The masters the record does not name are logged in one line with

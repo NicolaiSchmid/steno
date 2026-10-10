@@ -314,6 +314,7 @@ impl Handover for ListenerHandover {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::warnings;
 
     #[test]
     fn the_port_is_the_environment_s_else_the_stored_one_else_the_platform_s() {
@@ -329,43 +330,17 @@ mod tests {
         assert_eq!(listener_port(Some("steno"), None), platform);
     }
 
-    /// The warnings `run` logs on this thread.
-    fn warnings(run: impl FnOnce()) -> String {
-        #[derive(Clone, Default)]
-        struct Logged(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Logged {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let logged = Logged::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer({
-                let logged = logged.clone();
-                move || logged.clone()
-            })
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        tracing::subscriber::with_default(subscriber, run);
-        String::from_utf8(logged.0.lock().unwrap().clone()).unwrap()
-    }
-
     /// An empty variable is unset, not a value that is not a port.
     #[test]
     fn only_a_variable_that_is_not_a_port_logs_a_warning() {
         let platform = HandoverConfiguration::platform_port();
-        let logged = warnings(|| {
+        let ((), logged) = warnings(|| {
             assert_eq!(listener_port(Some(""), None), platform);
             assert_eq!(listener_port(Some(" \n"), None), platform);
             assert_eq!(listener_port(Some("23900"), None), 23900);
         });
         assert_eq!(logged, "");
-        let logged = warnings(|| assert_eq!(listener_port(Some("steno"), None), platform));
+        let ((), logged) = warnings(|| assert_eq!(listener_port(Some("steno"), None), platform));
         assert!(
             logged.contains("STENO_HANDOVER_PORT is not a port from 0 to 65535, so it is ignored"),
             "{logged}"
