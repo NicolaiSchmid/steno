@@ -211,7 +211,7 @@ status=0
 echo "ok: the sidecar starts"
 
 # Last, as it removes the package: the removal prints how to close the port.
-pacman -R --noconfirm steno-desktop-bin 2>&1 | tee /tmp/pacman-remove.log
+pacman -R --noconfirm "$pkgname" 2>&1 | tee /tmp/pacman-remove.log
 grep -qxF "$remove_hint" /tmp/pacman-remove.log \
   || die "the removal did not print sudo ufw delete allow Steno"
 echo "ok: the removal printed sudo ufw delete allow Steno"
