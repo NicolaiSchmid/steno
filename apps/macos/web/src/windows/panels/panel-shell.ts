@@ -7,8 +7,9 @@ import { hasTauriBridge } from "@/bridge/tauri-transport";
  * `panel_call` command (`apps/desktop/src-tauri/src/bridge.rs`). The
  * bridge carries the recorder; this carries what only a floating webview
  * needs, the measured size the shell sizes the window from and the
- * prompt's two answers, its X and its Record. Outside the shell (the dev server, the stories, the
- * tests) every call is a no-op, so the routes render anywhere.
+ * prompt's two answers, its X and its Record. Outside the shell (the dev
+ * server, the stories, the tests) every call is a no-op, so the routes
+ * render anywhere.
  */
 
 export const PANEL_CALL_COMMAND = "panel_call";

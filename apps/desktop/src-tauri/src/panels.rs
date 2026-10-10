@@ -716,33 +716,35 @@ pub fn note_recording(app: &AppHandle, state: RecordingState) {
     refresh(app);
 }
 
+/// [`refresh`] posted from the async runtime, to run on a later turn of
+/// the main loop: on the main thread `refresh` would run `apply` in place,
+/// and `apply` may build a window, which deadlocks a synchronous command
+/// on Windows.
+fn post_refresh(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move { refresh(&handle) });
+}
+
 /// The host's detection controller raised (`Some`) or cleared (`None`)
 /// the detection prompt; a raised one is numbered here
 /// (`Panels::set_prompt`). The slot changes at once, in the controller's
-/// order; the refresh is posted from the async runtime, as
-/// `dismiss_prompt`'s is, so a caller on the main thread (a Record from
-/// the tray, whose start takes the prompt down) never builds a window in
-/// place.
+/// order; the refresh is posted, so a caller on the main thread (a Record
+/// from the tray, whose start takes the prompt down) never builds a
+/// window in place.
 #[cfg_attr(feature = "fixture-host", allow(dead_code))]
 pub fn set_prompt(app: &AppHandle, request: Option<PromptRequest>) {
     app.state::<Panels>().set_prompt(request);
-    let handle = app.clone();
-    tauri::async_runtime::spawn(async move { refresh(&handle) });
+    post_refresh(app);
 }
 
 /// The prompt's X: the prompt goes away, unless the X was another
 /// prompt's (`Panels::dismiss_prompt`), and the host's detection
 /// controller hears of it; the fixture host has no detection to tell.
-///
 /// The caller is `bridge::panel_call`, a synchronous command on the main
-/// thread, where `refresh` would run `apply` in place, and `apply` may
-/// build a window, which deadlocks a synchronous command on Windows. So
-/// the refresh is posted from the async runtime and runs on a later turn
-/// of the main loop.
+/// thread, so the refresh is posted.
 pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
     if app.state::<Panels>().dismiss_prompt(raised) {
-        let handle = app.clone();
-        tauri::async_runtime::spawn(async move { refresh(&handle) });
+        post_refresh(app);
         if crate::host::is_running(app) {
             crate::host::host(app).prompt_dismissed();
         }
@@ -756,8 +758,7 @@ pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
 /// earlier prompt does nothing. Swift: `DetectionPromptViewModel.start`.
 pub fn record_from_prompt(app: &AppHandle, raised: Option<u64>) {
     if app.state::<Panels>().dismiss_prompt(raised) {
-        let handle = app.clone();
-        tauri::async_runtime::spawn(async move { refresh(&handle) });
+        post_refresh(app);
         if crate::host::is_running(app) {
             let handle = app.clone();
             tauri::async_runtime::spawn_blocking(move || {

@@ -297,9 +297,8 @@ pub async fn bridge_call(
 /// (`dismissPrompt`) and its Record records the call it announced
 /// (`recordFromPrompt`, which the detection controller attributes to the
 /// prompt's app, as no bridge method could). Only a panel window may call
-/// it; the three bridge
-/// windows get `unknownMethod`, as they would for a method they do not
-/// answer.
+/// it; the three bridge windows get `unknownMethod`, as they would for a
+/// method they do not answer.
 ///
 /// A synchronous command: Tauri runs it on the main thread, in the order
 /// the page sent its calls, so a burst of size reports applies in order
