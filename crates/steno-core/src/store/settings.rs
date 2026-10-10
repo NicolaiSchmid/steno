@@ -177,6 +177,7 @@ mod tests {
             llm_model: Some("model".to_owned()),
             codex_model: Some("codex".to_owned()),
             codex_confirmed_at: Some(chrono::DateTime::UNIX_EPOCH),
+            handover_port: Some(23820),
             obsidian: Some(ObsidianSettings {
                 vault_path: "/vault".to_owned(),
                 people_folder: None,

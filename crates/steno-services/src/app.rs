@@ -395,7 +395,7 @@ fn listener_over_identity(
     ));
     let mac_id = identity.mac_id();
     let service = Arc::new(crate::handover::service(
-        listener_configuration(paths),
+        listener_configuration(paths, store),
         store.clone(),
         intake,
         identity,
@@ -422,17 +422,34 @@ fn lock_or_run_without(
     }
 }
 
-/// The listener's configuration: the default, and in this crate's tests
-/// loopback only, unadvertised, with the inbox under the test's support
-/// directory.
-fn listener_configuration(paths: &StenoPaths) -> steno_handover::HandoverConfiguration {
-    let configuration = steno_handover::HandoverConfiguration::default();
+/// The listener's configuration: the default on the port
+/// [`listener_port`](crate::handover::listener_port) picks, and in this
+/// crate's tests loopback only, unadvertised, on a port the system
+/// chooses, with the inbox under the test's support directory. Settings
+/// that cannot be read leave the stored port out, with a warning.
+fn listener_configuration(
+    paths: &StenoPaths,
+    store: &Store,
+) -> steno_handover::HandoverConfiguration {
+    let stored = store
+        .settings()
+        .inspect_err(|error| {
+            tracing::warn!(%error, "the settings could not be read for the handover's port");
+        })
+        .ok()
+        .and_then(|settings| settings.handover_port);
+    let environment = std::env::var(crate::handover::PORT_VARIABLE).ok();
+    let configuration = steno_handover::HandoverConfiguration {
+        port: crate::handover::listener_port(environment.as_deref(), stored),
+        ..steno_handover::HandoverConfiguration::default()
+    };
     if !cfg!(test) {
         return configuration;
     }
     steno_handover::HandoverConfiguration {
         advertise: false,
         inbox_directory: paths.support_directory.join("handover-inbox"),
+        port: 0,
         ..configuration
     }
 }
