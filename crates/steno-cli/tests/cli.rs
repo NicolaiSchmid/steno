@@ -13,14 +13,23 @@ struct Run {
     stderr: String,
 }
 
-fn steno(args: &[&str], home: &Path) -> Run {
+/// The `steno` binary on `home`: its support directory and models are
+/// `home`'s, never the developer's key or the models directory their
+/// environment names for the real-model tests.
+fn steno_on(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_steno"));
     command
-        .args(args)
         .env("HOME", home)
         .env("XDG_DATA_HOME", home.join("share"))
         .env("APPDATA", home.join("appdata"))
-        .env_remove("STENO_LLM_API_KEY");
+        .env_remove("STENO_LLM_API_KEY")
+        .env_remove("STENO_MODELS_DIR");
+    command
+}
+
+fn steno(args: &[&str], home: &Path) -> Run {
+    let mut command = steno_on(home);
+    command.args(args);
     // Every run on Unix carries a variable that is not Unicode, as a
     // user's environment may: the secret overrides, which read every
     // variable, must read past it (`std::env::vars()` would panic).
@@ -46,6 +55,23 @@ fn fixtures_root() -> PathBuf {
 
 fn export(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// The `steno` every test runs has its home set and the developer's key
+/// and models directory removed from its environment, so no run writes
+/// into the models the developer keeps for the real-model tests.
+#[test]
+fn the_steno_the_tests_run_inherits_no_models_directory_or_key() {
+    let home = tempfile::tempdir().unwrap();
+    let command = steno_on(home.path());
+    let envs: Vec<_> = command.get_envs().collect();
+    for removed in ["STENO_MODELS_DIR", "STENO_LLM_API_KEY"] {
+        assert!(
+            envs.contains(&(std::ffi::OsStr::new(removed), None)),
+            "{removed} is removed: {envs:?}"
+        );
+    }
+    assert!(envs.contains(&(std::ffi::OsStr::new("HOME"), Some(home.path().as_os_str()))));
 }
 
 // The Swift test is one flow too: each step reads the one before.
@@ -566,13 +592,9 @@ fn relative_paths_are_taken_from_the_working_directory() {
     )
     .unwrap();
     let run = |args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_steno"))
+        let output = steno_on(home)
             .args(args)
             .current_dir(&work)
-            .env("HOME", home)
-            .env("XDG_DATA_HOME", home.join("share"))
-            .env("APPDATA", home.join("appdata"))
-            .env_remove("STENO_LLM_API_KEY")
             .output()
             .unwrap();
         assert!(
@@ -650,13 +672,10 @@ fn the_models_variable_names_the_models_directory() {
     let relative = Path::new("relative").join("models");
     let expected = work.join(&relative);
     std::fs::create_dir_all(&expected).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_steno"))
+    let output = steno_on(home)
         .args(["dev", "models", "list", "--db"])
         .arg(home.join("steno.sqlite"))
         .current_dir(&work)
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", home.join("share"))
-        .env("APPDATA", home.join("appdata"))
         .env("STENO_MODELS_DIR", &relative)
         .output()
         .unwrap();

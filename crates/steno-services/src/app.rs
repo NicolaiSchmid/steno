@@ -1559,7 +1559,10 @@ mod tests {
     /// The app's resumes ask the app's gates: a meeting a run left waiting
     /// for models stays waiting through a reload while they are missing,
     /// no run started, and the first reload once every model the gates
-    /// check is on disk (the `steno` command's install) starts it.
+    /// check is on disk (the `steno` command's install) starts it. The
+    /// models directory is the settings' one in the test's directory, which
+    /// wins over `STENO_MODELS_DIR`: the placeholder models never land in
+    /// a directory the environment names.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_resumes_the_waiting_meetings_once_the_apps_gates_pass() {
         let dir = tempfile::tempdir().unwrap();
@@ -1572,7 +1575,14 @@ mod tests {
             r#"{"onnxSidecarOnMac":true,"modelsMirror":"http://127.0.0.1:9"}"#,
         )
         .unwrap();
+        let models = dir.path().join("models");
+        let store = open_store(&StenoPaths::new(&support).database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        settings.models_directory = Some(file_url(&models, true));
+        store.save_settings(&settings).unwrap();
+        drop(store);
         let app = build(options_under(&support)).unwrap();
+        assert_eq!(app.models_directory, models);
         let mut meeting = steno_core::testing::sample_data::meeting();
         meeting.id = uuid::Uuid::new_v4();
         let asset = steno_pipeline::fixtures::two_lane_call(
@@ -1608,6 +1618,55 @@ mod tests {
         assert!(decodes(&mut events) > 0, "the meeting started");
         app.pipeline.quit();
         app.pipeline.current().wait_until_idle().await;
+    }
+
+    /// The reload test above, run as a child of this test binary with
+    /// `STENO_MODELS_DIR` naming a directory that holds a model file of
+    /// known bytes, and a home of its own: the child passes, and the
+    /// directory holds that file alone, its bytes unchanged. A child,
+    /// because the environment is the process's: setting the variable here
+    /// is `unsafe` and would reach every test running beside this one.
+    #[test]
+    fn the_reload_test_leaves_the_models_directory_the_environment_names_alone() {
+        const RELOAD_TEST: &str =
+            "app::tests::a_reload_resumes_the_waiting_meetings_once_the_apps_gates_pass";
+        let home = tempfile::tempdir().unwrap();
+        let named = tempfile::tempdir().unwrap();
+        let asset = steno_diarize::models::asset();
+        let sentinel = crate::speech::testing::models_in(named.path())
+            .speech
+            .directory(&asset)
+            .join(&asset.files[0].name);
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        let bytes = b"a developer's downloaded model";
+        std::fs::write(&sentinel, bytes).unwrap();
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", RELOAD_TEST, "--test-threads=1"])
+            .env("HOME", home.path())
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("APPDATA", home.path().join("appdata"))
+            .env("CODEX_HOME", home.path().join("codex"))
+            .env(steno_speech::ModelStore::ENVIRONMENT_VARIABLE, named.path())
+            .env_remove(steno_speech::ModelStore::MIRROR_ENVIRONMENT_VARIABLE)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            stdout.contains("1 passed"),
+            "the child ran the test: {stdout}"
+        );
+        let after = std::fs::read(&sentinel).unwrap();
+        assert!(
+            after == bytes,
+            "the model file was overwritten: {} bytes now",
+            after.len()
+        );
+        assert_eq!(
+            crate::speech::testing::files_under(named.path()),
+            std::collections::BTreeSet::from([sentinel])
+        );
     }
 
     /// A stored engine the Rust app does not run (the Swift app's Whisper)
