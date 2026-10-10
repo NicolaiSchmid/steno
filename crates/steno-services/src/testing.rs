@@ -146,6 +146,12 @@ pub struct SyntheticRecorder {
 
 /// A [`SyntheticRecorder`] on the current runtime.
 pub fn synthetic_recorder() -> SyntheticRecorder {
+    synthetic_recorder_over(synthetic_capture())
+}
+
+/// A [`SyntheticRecorder`] whose sessions `make_session` builds: one whose
+/// device changes, say.
+pub fn synthetic_recorder_over(make_session: MakeCaptureSession) -> SyntheticRecorder {
     let (dir, store) = temp_store();
     let mut settings = store.settings().unwrap();
     settings.audio_folder = steno_core::paths::file_url(&dir.path().join("audio"), true);
@@ -155,7 +161,7 @@ pub fn synthetic_recorder() -> SyntheticRecorder {
     let recorder = crate::recorder::CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
-        synthetic_capture(),
+        make_session,
         fakes.permissions.clone(),
         fakes.speech_models.clone(),
         chrono::FixedOffset::east_opt(0).unwrap(),

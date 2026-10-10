@@ -51,7 +51,7 @@ use steno_pipeline::{LocalRecordingIntake, LocalRecordingIntakeError, RecordingR
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
 
-use crate::auto_stop::{AUTO_STOP_GRACE, CallWatch, MicrophoneActivity};
+use crate::auto_stop::{AUTO_STOP_GRACE, CallWatch, Countdown, MicrophoneActivity};
 use crate::block_on;
 use crate::pipeline::CurrentPipeline;
 use crate::recovery::{RecoveryError, Unrecoverable};
@@ -731,8 +731,9 @@ impl CaptureRecorder {
     /// Another app's microphone activity while Steno records ([`crate::auto_stop`]):
     /// an `Opened` while the recording starts or runs is a call, and stops
     /// a countdown; a `Released` while a call records arms the countdown,
-    /// once such a call was seen. Ignored while idle or stopping, and not
-    /// remembered. Swift: `RecordingController.microphoneActivity`.
+    /// once such a call was seen, and is remembered for
+    /// [`Self::resume_auto_stop`]. Ignored, and not remembered, while idle
+    /// or stopping. Swift: `RecordingController.microphoneActivity`.
     pub fn microphone_activity(&self, activity: MicrophoneActivity) {
         let mut inner = self.inner();
         let state = inner.status.state;
@@ -744,37 +745,66 @@ impl CaptureRecorder {
                 inner.calls.opened(app_name);
             }
             MicrophoneActivity::Released => {
-                let call = state == RecordingState::Recording
-                    && inner
-                        .active
-                        .as_ref()
-                        .is_some_and(|active| active.mode == CaptureMode::Call);
-                if !call {
+                if !self.arm_auto_stop(&mut inner, CallWatch::released) {
                     return;
-                }
-                let clock = self.clock();
-                let Some(countdown) = inner.calls.released(clock.now()) else {
-                    return;
-                };
-                let this = self.this.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("steno-auto-stop".into())
-                    .spawn(move || {
-                        if clock.sleep(AUTO_STOP_GRACE, &countdown.cancel)
-                            && let Some(recorder) = this.upgrade()
-                        {
-                            recorder.call_ended(countdown.number);
-                        }
-                    });
-                if let Err(error) = spawned {
-                    // Without its countdown the recording runs until a stop.
-                    tracing::error!(%error, "the auto-stop could not be armed");
-                    inner.calls.keep_recording();
                 }
             }
         }
         drop(inner);
         self.notify();
+    }
+
+    /// Audio is delivered again after the capture recovered from a lost
+    /// device: while a call records whose app let go of the microphone and
+    /// has not opened it since, a fresh countdown is armed
+    /// ([`crate::auto_stop`]), since the detector does not report that
+    /// release again. Takes the recorder's lock only to arm, spawns the
+    /// countdown's thread and waits for nothing, so the capture's notice
+    /// thread may call it: a stop joins that thread without the lock. An
+    /// armed countdown is reported through the change hook
+    /// ([`Self::on_change`]) on the calling thread.
+    pub fn resume_auto_stop(&self) {
+        let armed = self.arm_auto_stop(&mut self.inner(), CallWatch::resume);
+        if armed {
+            self.notify();
+        }
+    }
+
+    /// While a call records, arms the auto-stop with `arm` at the clock's
+    /// now and spawns its countdown; `true` when it armed.
+    fn arm_auto_stop(
+        &self,
+        inner: &mut Inner,
+        arm: impl FnOnce(&mut CallWatch, Duration) -> Option<Countdown>,
+    ) -> bool {
+        let call = inner.status.state == RecordingState::Recording
+            && inner
+                .active
+                .as_ref()
+                .is_some_and(|active| active.mode == CaptureMode::Call);
+        if !call {
+            return false;
+        }
+        let clock = self.clock();
+        let Some(countdown) = arm(&mut inner.calls, clock.now()) else {
+            return false;
+        };
+        let this = self.this.clone();
+        let spawned = std::thread::Builder::new()
+            .name("steno-auto-stop".into())
+            .spawn(move || {
+                if clock.sleep(AUTO_STOP_GRACE, &countdown.cancel)
+                    && let Some(recorder) = this.upgrade()
+                {
+                    recorder.call_ended(countdown.number);
+                }
+            });
+        if let Err(error) = spawned {
+            // Without its countdown the recording runs until a stop.
+            tracing::error!(%error, "the auto-stop could not be armed");
+            inner.calls.keep_recording();
+        }
+        true
     }
 
     /// The auto-stop's countdown `number` ran out: the recording stops and
