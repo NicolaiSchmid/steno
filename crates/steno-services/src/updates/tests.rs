@@ -610,8 +610,9 @@ async fn a_check_that_finds_no_update_forgets_the_download() {
     assert_eq!(world.installs(), 0);
 }
 
-/// A check that finds another version forgets the package kept for the old one and downloads the new one; one that finds
-/// the kept version again downloads nothing.
+/// A check that finds another version forgets the package kept for the
+/// old one and downloads the new one; one that finds the kept version
+/// again downloads nothing.
 #[tokio::test]
 async fn a_check_that_finds_another_update_replaces_the_download() {
     let world = World::new();
@@ -642,9 +643,8 @@ async fn a_check_that_finds_another_update_replaces_the_download() {
     assert_eq!(schedule.state().to_download.as_deref(), Some("0.13.0"));
 }
 
-/// Busy at the check: a later check that finds no
-/// update forgets the version still to download, so the first idle tick
-/// downloads nothing.
+/// Busy at the check: a later check that finds no update forgets the
+/// version still to download, so the first idle tick downloads nothing.
 #[tokio::test]
 async fn a_check_that_finds_no_update_forgets_the_version_to_download() {
     let world = World::new();
@@ -1164,8 +1164,8 @@ async fn a_tick_behind_the_users_check_does_not_check_again() {
     assert_eq!(world.checks(), 1);
 }
 
-/// Idle: a failed install is shown and not retried; a
-/// failed download leaves the update to the announcement.
+/// Idle: a failed install is shown and not retried; a failed download
+/// leaves the update to the announcement.
 #[tokio::test]
 async fn failed_downloads_and_installs_fall_back_to_the_announcement() {
     let world = World::new();
