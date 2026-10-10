@@ -1622,13 +1622,15 @@ mod tests {
 
     /// The reload test above, run as a child of this test binary with
     /// `STENO_MODELS_DIR` naming a directory that holds a model file of
-    /// known bytes (the environment is the process's, so only the child
-    /// sees the variable): the child passes, and the directory holds that
-    /// file alone, its bytes unchanged.
+    /// known bytes, and a home of its own: the child passes, and the
+    /// directory holds that file alone, its bytes unchanged. A child,
+    /// because the environment is the process's: setting the variable here
+    /// is `unsafe` and would reach every test running beside this one.
     #[test]
     fn the_reload_test_leaves_the_models_directory_the_environment_names_alone() {
         const RELOAD_TEST: &str =
             "app::tests::a_reload_resumes_the_waiting_meetings_once_the_apps_gates_pass";
+        let home = tempfile::tempdir().unwrap();
         let named = tempfile::tempdir().unwrap();
         let asset = steno_diarize::models::asset();
         let sentinel = crate::speech::testing::models_in(named.path())
@@ -1641,6 +1643,10 @@ mod tests {
 
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", RELOAD_TEST, "--test-threads=1"])
+            .env("HOME", home.path())
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("APPDATA", home.path().join("appdata"))
+            .env("CODEX_HOME", home.path().join("codex"))
             .env(steno_speech::ModelStore::ENVIRONMENT_VARIABLE, named.path())
             .env_remove(steno_speech::ModelStore::MIRROR_ENVIRONMENT_VARIABLE)
             .output()
