@@ -23,6 +23,9 @@ pub const SETUP_VARIABLE: &str = "STENO_UPDATE_SETUP";
 /// which the watcher starts when the installer did not install.
 pub const RELAUNCH_VARIABLE: &str = "STENO_UPDATE_RELAUNCH";
 
+/// The first bytes of a compound file, which an MSI is.
+const COMPOUND_FILE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+
 /// The installer a Windows update holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setup {
@@ -38,7 +41,6 @@ impl Setup {
     /// compound file, the setup an executable. `None` for anything else,
     /// such as a zip, which this app's releases do not publish.
     pub fn of(package: &[u8]) -> Option<Setup> {
-        const COMPOUND_FILE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
         if package.starts_with(&COMPOUND_FILE) {
             Some(Setup::Msi)
         } else if package.starts_with(b"MZ") {
@@ -75,24 +77,22 @@ impl Setup {
 /// it: `msiexec` (at `msiexec`) with `/passive /promptrestart
 /// AUTOLAUNCHAPP=True`, or the setup with `/P /UPDATE /R`.
 pub fn setup_command(setup: Setup, installer: &Path, msiexec: &Path) -> OsString {
-    let mut command = OsString::new();
-    let quoted = |command: &mut OsString, path: &Path| {
-        command.push("\"");
-        command.push(path);
-        command.push("\"");
+    let quoted = |path: &Path| {
+        let mut quoted = OsString::from("\"");
+        quoted.push(path);
+        quoted.push("\"");
+        quoted
     };
-    match setup {
-        Setup::Msi => {
-            quoted(&mut command, msiexec);
-            command.push(" /i ");
-            quoted(&mut command, installer);
-            command.push(" /passive /promptrestart AUTOLAUNCHAPP=True");
-        }
-        Setup::Nsis => {
-            quoted(&mut command, installer);
-            command.push(" /P /UPDATE /R");
-        }
+    let mut command = OsString::new();
+    if setup == Setup::Msi {
+        command.push(quoted(msiexec));
+        command.push(" /i ");
     }
+    command.push(quoted(installer));
+    command.push(match setup {
+        Setup::Msi => " /passive /promptrestart AUTOLAUNCHAPP=True",
+        Setup::Nsis => " /P /UPDATE /R",
+    });
     command
 }
 
@@ -118,8 +118,6 @@ pub fn watcher_arguments(setup: Setup) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const COMPOUND_FILE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
     #[test]
     fn the_package_says_which_installer_it_is() {
