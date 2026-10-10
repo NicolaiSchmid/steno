@@ -377,8 +377,9 @@ jobs:
       # workflow's platform filter, MSI version, updater manifest and lanes,
       # asset gathering, checksums and signatures, release notes, the bundle
       # check's `app` and `--handoff` checks over stub bundles, the handoff
-      # item and appcast, the AUR bump, and the workflow itself. Each runs,
-      # and the step fails naming every one that failed.
+      # item and appcast, the AUR bump, the cask bump's token check, and
+      # the workflow itself. Each runs, and the step fails naming every one
+      # that failed.
       - name: Desktop release scripts
         if: matrix.name == 'linux'
         run: |
