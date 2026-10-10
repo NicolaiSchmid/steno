@@ -278,9 +278,10 @@ pub(crate) type BuildEngine = Box<dyn Fn(SpeechRuntime) -> Arc<dyn SpeechEngine>
 /// The speech engines and the diarizer the app's pipelines share, so a
 /// pipeline reload (a Settings save of the engine or of the summaries)
 /// keeps the current engine with its claims ([`SharedSpeechEngine`]) and
-/// the diarizer: the `CoreML` model and the diarizer's models a
-/// recording's warm-up loaded stay loaded, and a job the reload retired
-/// and a job on the new pipeline share one speech sidecar child. Swift:
+/// the diarizer: the `CoreML` model a recording's warm-up loaded stays
+/// loaded (the diarizer's warm-up only checks its files), and a job the
+/// reload retired and a job on the new pipeline share one speech sidecar
+/// child. Swift:
 /// none; `reloadPipeline` built a new engine and diarizer every time.
 ///
 /// The setup (the models directory, the speech settings, how the sidecar
@@ -319,6 +320,9 @@ pub struct SpeechEngines {
     kept: std::sync::Mutex<KeptEngines>,
     /// The gates' checks, together ([`Self::models_installed`]).
     installed: ModelsInstalled,
+    /// The sidecar engine [`Self::with_checks`] built, for the tests.
+    #[cfg(test)]
+    sidecar: Option<Arc<SidecarSpeechEngine>>,
 }
 
 /// The engines [`SpeechEngines`] hands out again.
@@ -357,6 +361,8 @@ impl SpeechEngines {
         // CLI's) never reaches the app's engines or `setup()`.
         setup.sidecar.install = Install::Never;
         let sidecar = Arc::new(sidecar_engine(&setup));
+        #[cfg(test)]
+        let for_tests = sidecar.clone();
         let diarizer = Arc::new(GatedDiarizer::new(
             Self::app_diarizer(sidecar.clone()),
             diarizer_installed.clone(),
@@ -373,7 +379,11 @@ impl SpeechEngines {
             }
         });
         let installed = Arc::new(move |runtime| speech_installed(runtime) && diarizer_installed());
-        Self::with_parts(setup, build, diarizer, installed)
+        Self {
+            #[cfg(test)]
+            sidecar: Some(for_tests),
+            ..Self::with_parts(setup, build, diarizer, installed)
+        }
     }
 
     /// Engines from `build` instead, with no gates, for the tests; the
@@ -404,6 +414,8 @@ impl SpeechEngines {
             build,
             kept: std::sync::Mutex::default(),
             installed,
+            #[cfg(test)]
+            sidecar: None,
         }
     }
 
@@ -1253,6 +1265,59 @@ mod tests {
             "{error}"
         );
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// The app's speech engine and diarizer share one sidecar engine, so
+    /// one child: over the real `steno-speech-sidecar` binary's fake
+    /// engine (in the target directory, which `cargo test --workspace`
+    /// builds) and sparse model files, speech's prepare starts the child,
+    /// the diarization runs in it, and once speech released it the
+    /// diarizer's own child is the same engine's second.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_apps_speech_engine_and_diarizer_share_one_sidecar_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut setup = testing::setup(dir.path(), SpeechSettings::default());
+        // The test binary sits in the target directory's `deps/`, the
+        // binaries one folder up.
+        let exe = std::env::current_exe().unwrap();
+        setup.sidecar.program = exe
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join(steno_speech::sidecar::SIDECAR_BINARY);
+        assert!(
+            setup.sidecar.program.is_file(),
+            "{} is missing: build it with `cargo build -p steno-speech-sidecar`",
+            setup.sidecar.program.display()
+        );
+        setup.sidecar.args = vec!["--fake-engine".into()];
+        let models = ModelStoreSpeechModels::new(&setup);
+        for asset in steno_speech::ModelAsset::onnx() {
+            testing::install_speech_asset(&models, &asset);
+        }
+        testing::install_onnx_diarizer(&models);
+        let engines = SpeechEngines::with_checks(setup, Arc::new(|_| true), Arc::new(|| true));
+        let sidecar = engines.sidecar.clone().unwrap();
+        let speech = engines.engine(SpeechRuntime::OnnxSidecar);
+        let diarizer = engines.diarizer();
+        let audio = AudioBuffer16k::new(vec![0.25; 32_000]);
+
+        speech.prepare().await.unwrap();
+        let pid = sidecar.pid().expect("speech's child runs");
+        let result = diarizer.diarize(&audio).await.unwrap();
+        assert_eq!(result.clusters.len(), 1, "{result:?}");
+        assert_eq!(sidecar.spawns(), 1, "the diarizer ran in speech's child");
+        assert_eq!(sidecar.pid(), Some(pid));
+
+        speech.release().await.unwrap();
+        assert_eq!(sidecar.pid(), None);
+        diarizer.diarize(&audio).await.unwrap();
+        assert_eq!(
+            sidecar.spawns(),
+            2,
+            "the diarizer's own child is this engine's"
+        );
+        assert_eq!(sidecar.pid(), None, "and stopped after the call");
     }
 
     /// `models_installed` holds only while both gates would let a run

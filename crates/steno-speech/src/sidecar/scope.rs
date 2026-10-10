@@ -16,10 +16,11 @@
 //! app's cgroup; a child that joined its scope just before the call-off
 //! stays in it. `systemd-oomd` then weighs the two cgroups apart and takes
 //! the child's first; the client sees a dead child as after any crash,
-//! and the next call starts another, in a scope of its own. The app's own
-//! cgroup is still a candidate: speaker diarization runs in the app's
-//! process (`crates/steno-diarize/src/onnx.rs`), and pressure that lasts
-//! after the child is gone can take the app too.
+//! and the next call starts another, in a scope of its own. Speaker
+//! diarization runs in the child too (`steno_diarize::SidecarDiarizer`),
+//! and a child started only to diarize gets its scope the same way, so
+//! the app's own cgroup is a candidate only under pressure that lasts
+//! after the child is gone.
 //!
 //! The scope is `PartOf` the app's unit, so stopping that unit stops the
 //! child too; the child also ends at the app's exit, as everywhere (the

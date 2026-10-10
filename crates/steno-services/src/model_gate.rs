@@ -335,7 +335,7 @@ mod tests {
     }
 
     /// The diarizer's `NotInstalled` (it never downloads, or its load
-    /// deleted a file that failed its checksum), boxed as `ModelDiarizer`
+    /// deleted a file that failed its checksum), boxed as `SidecarDiarizer`
     /// returns it, is the refusal for the diarize stage while the gate's
     /// check still holds, so the pipeline's diarizer fallback passes it
     /// on and the meeting waits.

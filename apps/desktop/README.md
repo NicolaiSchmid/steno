@@ -176,11 +176,10 @@ scope of its own right after its start,
 `systemd-oomd`, which some distributions turn on for the user's session,
 kills a whole cgroup under memory pressure. With the sidecar in a cgroup
 of its own, oomd takes the sidecar first and the recording goes on: the
-job that was transcribing fails as after any crash of the sidecar, and
-the next job starts a new one. The app's own cgroup stays a
-candidate: speaker diarization runs in the app's process, so while it
-runs, or under pressure that lasts after the sidecar is gone, oomd can
-take the app.
+job that was transcribing or diarizing fails that stage as after any
+crash of the sidecar, and the next job starts a new one. Speaker
+diarization runs in the sidecar too, so the app's own cgroup stays a
+candidate only under pressure that lasts after the sidecar is gone.
 
 The app asks the user manager for the scope over the user bus's Unix
 socket in `$XDG_RUNTIME_DIR`, sending the sidecar's pid, the unit names

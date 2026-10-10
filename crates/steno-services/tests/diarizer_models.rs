@@ -19,8 +19,8 @@
 //!   behind the models-missing gate of `steno_services::model_gate`)
 //!   leaves the job `queued`, waiting for the models with its recording,
 //!   instead: when the models are missing, and when the child refuses
-//!   files of the right size that then fail their checksum. The mirror
-//!   sees no request either way.
+//!   files of the right size that then fail their checksum, or aborts
+//!   while it loads them. The mirror sees no request either way.
 //!
 //! The test's recordings are kept forever (`KeepForever`). Under
 //! `DeleteAfterProcessing`, a meeting that ends `ready` without its
@@ -217,7 +217,7 @@ struct World {
 /// [`world_with`] over the diarizer `diarizer_in` builds under `install`
 /// in a sidecar engine of its own, with no gate in front.
 fn world(mirror: &Mirror, install: Install) -> World {
-    world_with(mirror, |setup| {
+    world_with(mirror, &[], |setup| {
         steno_services::speech::diarizer_in(
             Arc::new(steno_services::speech::sidecar_engine(setup)),
             install,
@@ -226,14 +226,22 @@ fn world(mirror: &Mirror, install: Install) -> World {
 }
 
 /// [`world_with`] over the diarizer the app's pipelines run
-/// (`SpeechEngines::new(..).diarizer()`).
-fn app_world(mirror: &Mirror) -> World {
-    world_with(mirror, |setup| SpeechEngines::new(setup.clone()).diarizer())
+/// (`SpeechEngines::new(..).diarizer()`), its child started with
+/// `sidecar_args`.
+fn app_world(mirror: &Mirror, sidecar_args: &[&str]) -> World {
+    world_with(mirror, sidecar_args, |setup| {
+        SpeechEngines::new(setup.clone()).diarizer()
+    })
 }
 
 /// A six-second call, kept forever (see the module doc), processed with
-/// the diarizer `diarizer` builds over the world's setup.
-fn world_with(mirror: &Mirror, diarizer: impl FnOnce(&SpeechSetup) -> Arc<dyn Diarizer>) -> World {
+/// the diarizer `diarizer` builds over the world's setup, whose sidecar
+/// child starts with `sidecar_args`.
+fn world_with(
+    mirror: &Mirror,
+    sidecar_args: &[&str],
+    diarizer: impl FnOnce(&SpeechSetup) -> Arc<dyn Diarizer>,
+) -> World {
     let dir = tempfile::tempdir().unwrap();
     let models_directory = dir.path().join("models");
     let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
@@ -243,6 +251,7 @@ fn world_with(mirror: &Mirror, diarizer: impl FnOnce(&SpeechSetup) -> Arc<dyn Di
     setup.speech_settings.models_mirror = Some(mirror.url.clone());
     // The real child, which loads (and refuses) the files it is handed.
     setup.sidecar.program = common::sidecar_binary();
+    setup.sidecar.args = sidecar_args.iter().map(Into::into).collect();
     let models = setup.model_store();
     assert_eq!(
         models.directory(&models::asset()),
@@ -533,7 +542,7 @@ async fn junk_where_settings_installs_is_deleted_so_settings_offers_download() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_apps_diarizer_without_its_models_parks_the_job_and_fetches_nothing() {
     let mirror = Mirror::start(None);
-    let world = app_world(&mirror);
+    let world = app_world(&mirror, &[]);
     let before = world.run_the_job().await;
     world.assert_waiting_for_the_models();
     world.assert_recording_kept(&before);
@@ -548,8 +557,30 @@ async fn the_apps_diarizer_without_its_models_parks_the_job_and_fetches_nothing(
 /// its recording, and no request is made.
 #[tokio::test(flavor = "multi_thread")]
 async fn files_the_apps_diarizer_cannot_load_in_its_child_park_the_job() {
+    park_the_job_over_files_that_do_not_load(&[]).await;
+}
+
+/// The same files, in a child that aborts while it loads them, as ONNX
+/// Runtime may on a corrupt file (the fake engine's
+/// `abort-on-diarizer-load`): the crash in the load is checked like a
+/// refusal, so the files are deleted and the job waits for the models,
+/// rather than ending with the room speaker.
+#[tokio::test(flavor = "multi_thread")]
+async fn files_whose_load_aborts_the_apps_diarizer_child_park_the_job() {
+    park_the_job_over_files_that_do_not_load(&[
+        "--fake-engine",
+        "--fault",
+        "abort-on-diarizer-load",
+    ])
+    .await;
+}
+
+/// The app's diarizer, its child started with `sidecar_args`, over files
+/// of the right size that fail their checksum: the job waits with its
+/// recording, the files are deleted, and no request is made.
+async fn park_the_job_over_files_that_do_not_load(sidecar_args: &[&str]) {
     let mirror = Mirror::start(None);
-    let world = app_world(&mirror);
+    let world = app_world(&mirror, sidecar_args);
     let asset = models::asset();
     let folder = world.models.directory(&asset);
     std::fs::create_dir_all(&folder).unwrap();

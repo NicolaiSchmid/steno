@@ -19,9 +19,10 @@
 //!
 //! The models are installed in this process ([`crate::models::paths`] under
 //! the diarizer's [`Install`]); the child only loads the files it is
-//! handed, and opens no connection. A load the child refuses is checked
-//! against the manifest here ([`crate::models`]'s failed-load check), as
-//! for [`ModelDiarizer`](crate::ModelDiarizer).
+//! handed, and opens no connection. A load that fails, whether the child
+//! refuses the files or dies, hangs or overruns the ceiling while it loads
+//! them, is checked against the manifest here ([`crate::models`]'s
+//! failed-load check), as for [`ModelDiarizer`](crate::ModelDiarizer).
 
 use std::sync::Arc;
 
@@ -43,9 +44,13 @@ use crate::pipeline::DiarizerConfig;
 /// `diarize` hands the lane to the running child, or to a new one that is
 /// stopped after the call. A child that dies, hangs or overruns the
 /// ceiling while it diarizes fails the call with the sidecar's error, and
-/// the next call starts a new child. Audio under
-/// [`DiarizerConfig::MINIMUM_AUDIO_SECONDS`] has no speakers and starts no
-/// child, as in [`Pipeline::diarize`](crate::Pipeline::diarize).
+/// the next call starts a new child. When the load of the models fails
+/// instead, refused, crashed, hung or over the ceiling alike, the files
+/// are hashed: one that fails its checksum is deleted and the call is
+/// [`DiarizeError::NotInstalled`], so a gate parks the meeting until a
+/// download replaces it; intact files leave the sidecar's error. Audio
+/// under [`DiarizerConfig::MINIMUM_AUDIO_SECONDS`] has no speakers and
+/// starts no child, as in [`Pipeline::diarize`](crate::Pipeline::diarize).
 ///
 /// ```no_run
 /// use std::sync::Arc;
@@ -123,8 +128,9 @@ impl Diarizer for SidecarDiarizer {
         match self.engine.diarize(models, audio).await {
             Ok(clusters) => Ok(DiarizationResult { clusters }),
             Err(error @ SpeechError::Sidecar(SidecarError::DiarizerLoad(_))) => {
-                // A file that fails its checksum is deleted and reported
-                // as not installed, so a download can replace it.
+                // Whatever ended the load, even an abort a corrupt file
+                // set off: a file that fails its checksum is deleted and
+                // reported as not installed, so a download can replace it.
                 let store = self.engine.store().clone();
                 let error = DiarizeError::Sidecar(error);
                 let checked =

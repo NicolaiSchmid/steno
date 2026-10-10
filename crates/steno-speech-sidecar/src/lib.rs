@@ -70,11 +70,12 @@
 //! or on a load that asks for `DirectML`, or stay silent, greet late or
 //! announce another protocol version from the start; the crashes, the hang,
 //! the allocation and the failure apply to the next diarization too, one
-//! abort to a diarization only, and one fault refuses every diarizer load.
-//! `--fault-once
-//! <path>` limits that to the first child that creates `<path>`, which
-//! holds that child's pid. The isolation tests, the diarization tests and
-//! the `DirectML` test binaries drive the real client against these.
+//! abort to a diarization only, one abort and one hang to the next
+//! diarizer load only, and one fault refuses every diarizer load.
+//! `--fault-once <path>` limits that to the first child that creates
+//! `<path>`, which holds that child's pid. The isolation tests, the
+//! diarization tests and the `DirectML` test binaries drive the real client
+//! against these.
 
 use std::fs::File;
 use std::io::{self, BufReader, Write};
@@ -100,8 +101,10 @@ steno_core::string_enum! {
     /// answering; [`Fault::Abort`], [`Fault::Panic`], [`Fault::Exit`],
     /// [`Fault::Hang`], [`Fault::Allocate`] and [`Fault::Error`] apply to
     /// the next diarization as well, whichever comes first,
-    /// [`Fault::AbortDiarizing`] to the next diarization only, and
-    /// [`Fault::RefuseDiarizer`] to every diarizer load.
+    /// [`Fault::AbortDiarizing`] to the next diarization only,
+    /// [`Fault::AbortOnDiarizerLoad`] and [`Fault::HangOnDiarizerLoad`] to
+    /// the next diarizer load only, and [`Fault::RefuseDiarizer`] to every
+    /// diarizer load.
     pub enum Fault {
         /// `std::process::abort`, the way an uncaught C++ exception in ONNX
         /// Runtime ends the process.
@@ -162,6 +165,12 @@ steno_core::string_enum! {
         /// the real engine does with a file ONNX Runtime cannot load;
         /// transcriptions answer.
         RefuseDiarizer = "refuse-diarizer",
+        /// `std::process::abort` inside the next diarizer load, the way a
+        /// model file that makes ONNX Runtime abort ends it there;
+        /// transcriptions answer.
+        AbortOnDiarizerLoad = "abort-on-diarizer-load",
+        /// Never answers the next diarizer load; transcriptions answer.
+        HangOnDiarizerLoad = "hang-on-diarizer-load",
     }
 }
 
@@ -430,8 +439,11 @@ impl Engine for FakeEngine {
         samples: &[f32],
         hint: Option<&LanguageTag>,
     ) -> Result<Vec<RawSegment>, String> {
-        // Left for the diarization it is meant for.
-        let fault = if self.fault == Some(Fault::AbortDiarizing) {
+        // Left for the diarization or diarizer load it is meant for.
+        let fault = if matches!(
+            self.fault,
+            Some(Fault::AbortDiarizing | Fault::AbortOnDiarizerLoad | Fault::HangOnDiarizerLoad)
+        ) {
             None
         } else {
             self.fault_now()
@@ -498,18 +510,26 @@ impl Engine for FakeEngine {
                 | Fault::AbortOnLoad
                 | Fault::AbortOnDirectmlLoad
                 | Fault::AbortDiarizing
-                | Fault::RefuseDiarizer,
+                | Fault::RefuseDiarizer
+                | Fault::AbortOnDiarizerLoad
+                | Fault::HangOnDiarizerLoad,
             )
             | None => Ok(describe(samples, hint)),
         }
     }
 
-    /// Needs no files; fails with [`Fault::RefuseDiarizer`].
+    /// Needs no files; fails with [`Fault::RefuseDiarizer`], aborts with
+    /// [`Fault::AbortOnDiarizerLoad`] and hangs with
+    /// [`Fault::HangOnDiarizerLoad`].
     fn load_diarizer(&mut self, _: &ModelPaths, _: usize) -> Result<(), String> {
-        if self.fault == Some(Fault::RefuseDiarizer) {
-            return Err("simulated refusal of the diarizer's models".to_owned());
+        match self.fault {
+            Some(Fault::RefuseDiarizer) => {
+                Err("simulated refusal of the diarizer's models".to_owned())
+            }
+            Some(Fault::AbortOnDiarizerLoad) if self.fault_now().is_some() => std::process::abort(),
+            Some(Fault::HangOnDiarizerLoad) if self.fault_now().is_some() => hang(),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     fn diarize(&mut self, audio: AudioBuffer16k) -> Result<Vec<SpeakerCluster>, String> {
