@@ -252,8 +252,8 @@ impl Dialog {
             Question::AfterItEnds(busy) => Dialog {
                 kind: MessageDialogKind::Info,
                 message: match busy {
-                    Busy::Recording => "Steno is recording. It can install the update and relaunch once the recording ends and is saved.",
-                    Busy::Processing => "Steno is still processing a meeting. It can install the update and relaunch once that is done.",
+                    Busy::Recording => "Steno is recording. Install the update and relaunch once the recording is saved and processed?",
+                    Busy::Processing => "Steno is still processing a meeting. Install the update and relaunch once it is done?",
                 }
                 .to_owned(),
                 buttons: MessageDialogButtons::OkCancelCustom(
