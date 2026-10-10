@@ -750,15 +750,20 @@ still has to draw the window side. `[ ]` is not ported yet.
 
 - [ ] Menu bar item: the processing queue, the five recent meetings, record and stop,
   the login item toggle, check for updates (`MenuBarViewModel`); the shell's tray, WP8.
-- [ ] Floating panels: the recording bubble and the detection prompt with its
-  60-second countdown; the shell, WP8.
+- [x] Floating panels: the recording bubble and the detection prompt with its
+  60-second countdown: the shell's panels (WP8), the prompt raised and cleared by the
+  services' `DetectionController` (S2 of `.plans/2026-10-07-stable-promotion.md`).
 - [x] Deep links: a requested meeting or Settings section rides on the next `app`
   snapshot and is consumed by that publish (`Host::request_meeting`,
   `Host::open_settings`).
-- [ ] Auto-stop after a call ends (the 90-second grace, "Keep recording", the end
-  reasons): the recorder's policy, WP5; the snapshot side is covered.
-- [ ] Meeting detection (`DetectionController`: one prompt at a time, suppressed while
-  recording or when the setting is off): WP5.
+- [x] Auto-stop after a call ends (the 90-second grace, "Keep recording", the end
+  reasons): `steno_services::auto_stop`, the capture recorder's policy, whose stop is
+  the Stop button's with the end reason `callEnded` (S2).
+- [x] Meeting detection (`DetectionController`: one prompt at a time, suppressed while
+  recording or when the setting is off): `steno_services::detection` over the detector
+  of every platform, its Record attributed to the prompt's app through the panels'
+  `recordFromPrompt` (S2). Difference: the setting is read every two seconds, where
+  Swift observed it, which also retries a detector that could not start.
 - [x] Retention sweep at launch and after `retentionApplied`, interrupted recordings
   recovered from their master at launch or, with none on disk, marked failed
   (`steno_services::recovery`), unfinished processing resumed at launch
@@ -820,9 +825,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   interval. Observation inside the Rust store, or a change hook on `Store::write`,
   removes the poll.
 - The recorder starts without the calendar lookup (title and attendees stay the
-  defaults), without the auto-stop grace after a call ends and without the meeting
-  detection prompt; the detector and the capture session exist, the policy is WP5's
-  and the panel WP8's.
+  defaults). The auto-stop grace after a call ends and the meeting detection prompt
+  came with S2 of `.plans/2026-10-07-stable-promotion.md` (`steno_services::auto_stop`,
+  `steno_services::detection`).
 - The recorder watches each recording on its own thread (the stable plan's P18 and
   P20): a session that fails on its own (a device that stayed lost, a write that
   failed, a rebuild that panicked, which ends as a lost device) is saved and queued at
@@ -1478,9 +1483,10 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The host calls the recorder's commands with its lock released: the recorder reports
   each change through `Host::recorder_changed`, which takes that lock, so a failed
   start, whose permission re-read ran under it, froze the caller.
-- The shell's seams WP6b leaves open, each with the package that closes it: (1) the
-  detection prompt: no `DetectionController` is ported (WP5), so nothing calls
-  `panels::set_prompt` and `panels::dismiss_prompt` tells no one; (2) the host's
+- The shell's seams WP6b leaves open, each with the package that closes it: (1) closed
+  by S2: the services' `DetectionController` raises and clears the prompt through
+  `panels::set_prompt` (`host::ShellPromptPanel`) and hears of its X and its Record
+  (`panels::dismiss_prompt`, `panels::record_from_prompt`); (2) the host's
   `Permissions` stay the services' fake (all granted): WP8's `permissions` answers
   `unknown` off the Mac and for the Mac's system audio, and the host's onboarding
   opener counts anything but `granted` as missing, so wiring it would open onboarding
@@ -3040,7 +3046,7 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   release, and which follow it, is the blocking list of
   `.plans/2026-10-07-stable-promotion.md` (D3), which replaces the rule that all must
   be ticked before the cutover opens. The lines: the menu bar's queue and recent
-  meetings, the detection prompt, the auto-stop after a call, the calendar lookup, the permissions probe, the macOS menu
+  meetings, the calendar lookup, the permissions probe, the macOS menu
   bar's Record and Find Meetings items. Several name WP5 or WP8, which merged without
   them. The other unticked "Speech" line, `SpeechSettings`, covers Rust-only settings
   with no Swift behaviour to match: it does not gate the cutover and has its own
@@ -3103,14 +3109,12 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   1.0 or 1.2 only the distribution's own package can carry the fix. Where: "A default move can go
   unreported" in the Linux list under "Audio". Found: #197, #201.
 - **First Linux release.** Meeting detection on PipeWire names a holder by its binary
-  (`application.process.binary`, else `application.name`), so WP9b's prompt needs a
-  display name for it, from the app's `.desktop` entry or `application.name`. A
+  (`application.process.binary`, else `application.name`), so the prompt says
+  "firefox opened the microphone" (`steno_services::detection::fallback_app_name`);
+  it needs a display name, from the app's `.desktop` entry or `application.name`. A
   Flatpak app's pid is its pid inside the sandbox, so two sandboxed apps can merge
   into one holder; check with a Flatpak browser on a real desktop, where
-  `pipewire.access.portal.app_id` may name the app better. `MeetingDetector::start`
-  fails while PipeWire is unreachable (its first snapshot answers the error), so the
-  services (the controller of S2 in `.plans/2026-10-07-stable-promotion.md`) must
-  retry it when PipeWire comes up after Steno (autostart at login). Where: "Meeting
+  `pipewire.access.portal.app_id` may name the app better. Where: "Meeting
   detection" in the Linux list under "Audio". Found: #222.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
   measured DirectML's speed (at least three times the CPU's on an integrated GPU), so

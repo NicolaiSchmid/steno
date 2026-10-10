@@ -244,7 +244,7 @@ what shows: a busy recorder wins, else a pending detection prompt, else
 nothing. Each window is created once and then hidden and shown; the
 prompt's is navigated to each new request, which the shell numbers when
 the host raises it, so the page remounts and the countdown restarts; the X
-sends that number back and dismisses only its own prompt. The page
+and Record send that number back and answer only their own prompt. The page
 measures its pill and reports the size in device pixels through the
 `panel_call` command; the shell divides it by the window's scale factor
 (WebKitGTK's pixel ratio follows the X resolution, the window's scale does
@@ -252,13 +252,34 @@ not), rounds it up to whole points, clamps it to the screen's work area
 and sizes the window from it. `panel_call` is a synchronous command, so it
 runs on the main thread in the order the page sent its reports, and the
 last one sent is the size the window keeps (a report that is not a size is
-`invalidParams`). The prompt's X
-and that size report are the only two things `panel_call` carries;
-everything else the panels do goes through the bridge (`recording.stop`,
-`recording.keepGoing`, `recording.start`, `window.open`). The host raises
-and clears the prompt through `panels::set_prompt` and hears of its X
-through `panels::dismiss_prompt`; no detection controller calls either
-yet (see Not here yet).
+`invalidParams`). The prompt's X (`dismissPrompt`), its Record
+(`recordFromPrompt`) and that size report are the only things
+`panel_call` carries; everything else the panels do goes through the
+bridge (`recording.stop`, `recording.keepGoing`, `window.open`). Record
+goes to the shell rather than to `recording.start`, because the recording
+it starts is attributed to the app the prompt named, which arms the
+auto-stop when that app lets go of the microphone; the start runs on a
+blocking thread, since it opens the audio devices.
+
+Meeting detection is the services' `DetectionController`
+(`crates/steno-services/src/detection.rs`), which the shell builds with
+its prompt panel (`host::ShellPromptPanel` over `panels::set_prompt`)
+and the platform's process list: Core Audio's processes on the Mac,
+PipeWire's streams on Linux, the audio sessions on Windows. When another
+app holds the microphone for two seconds, the prompt says "<App> opened
+the microphone" for 60 seconds, unless Steno records or Meeting detection
+is off in Settings; one prompt shows at a time, and it goes when the app
+lets go, a recording starts, the setting goes off or the minute runs out.
+On the Mac the app is named by its running application's name
+(`host::app_name`); on Linux by its binary (`firefox`), on Windows by its
+executable (`Teams.exe`). The setting is read every two seconds, which
+also starts a detector that could not start before (PipeWire not up yet
+at login). While a call recording runs, the app letting go starts a
+90-second countdown in the bubble and the sidebar ("Keep recording"
+cancels it, the app taking the microphone again too), after which the
+recording stops and is saved as Stop saves it, with the end reason
+`callEnded` (`crates/steno-services/src/auto_stop.rs`). A smoke run
+detects nothing.
 
 On a Wayland session the shell runs under XWayland. GTK 3 on Wayland can
 neither place a window nor keep it above the others, and it reports no
@@ -1339,14 +1360,12 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 The Mac cutover (the bundle id, the Sparkle handoff, the Swift app's
 removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it
 lands the desktop app installs beside the Swift app on the Mac. WP6b
-filled the host's half of the WP8 seams except four; S4 of
-`.plans/2026-10-07-stable-promotion.md` later filled the updater and the
-QR half of the fourth, which leaves the detection controller, the
+filled the host's half of the WP8 seams except four; S4 and S2 of
+`.plans/2026-10-07-stable-promotion.md` later filled the updater, the
+QR half of the fourth and the detection controller, which leaves the
 permissions and the clip player (the plan's "Pipeline and services
-(WP6b)" list gives each one's reason and what closes it): the detection
-controller (WP5) is not ported, so nothing raises the prompt
-(`panels::set_prompt`) and its X (`panels::dismiss_prompt`) tells no
-one; the host's `Permissions` stay the services' fake (all granted),
+(WP6b)" list gives each one's reason and what closes it): the host's
+`Permissions` stay the services' fake (all granted),
 because `permissions` answers `unknown` off the Mac and for the Mac's
 system audio, which the host's onboarding opener counts as missing, so
 onboarding would open at every launch until the audio probe (WP5) and a

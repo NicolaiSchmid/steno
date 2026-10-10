@@ -535,6 +535,15 @@ Every package is written in parallel except where a dependency is named:
     fake clock and a fake process list. **Nicolai**, on his Mac: a FaceTime or
     Teams call raises the prompt, and hanging up stops the recording after the
     grace.
+  - As built (`steno_services::detection`, `steno_services::auto_stop`): the
+    controller reads `meetingDetectionEnabled` every two seconds, which also
+    starts a detector that failed to start (PipeWire not up yet at login). The
+    prompt's Record goes to the shell's `panel_call` (`recordFromPrompt`), like
+    its X, so the recording is attributed to the prompt's app. The auto-stop
+    stops through the recorder's Stop path with `callEnded`, which the Swift app
+    decodes. A Record the update's start hold refuses closes the prompt and shows
+    the refusal in the main window; after the relaunch the detector reports the
+    microphone the call still holds, and the prompt comes up again.
 - **S3 Calendar and permissions** (`feat/rust-calendar-permissions`).
   - Look up the overlapping EventKit event at recording start, behind a trait
     whose Mac implementation is in `steno-macos` (D10).
