@@ -903,9 +903,9 @@ impl ProgressThrottle {
 }
 
 /// Model files on disk for the tests, so no test downloads one. Every
-/// writer here goes through [`testing::assert_scratch`]: it writes only
-/// inside the temp directory, never into a models directory a developer
-/// keeps (`STENO_MODELS_DIR` names one for the real-model tests).
+/// writer here panics outside the temp directory ([`testing::is_scratch`]),
+/// so none writes into a models directory a developer keeps
+/// (`STENO_MODELS_DIR` names one for the real-model tests).
 #[cfg(test)]
 pub(crate) mod testing {
     use std::collections::BTreeSet;
@@ -973,7 +973,11 @@ pub(crate) mod testing {
     /// `asset`'s files in `store`, each a sparse file of its manifest size.
     fn install_in(store: &steno_speech::ModelStore, asset: &steno_speech::ModelAsset) {
         let directory = store.directory(asset);
-        assert_scratch(&directory);
+        assert!(
+            is_scratch(&directory),
+            "a test may write models only inside the temp directory, not into {}",
+            directory.display()
+        );
         for file in &asset.files {
             let path = directory.join(&file.name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -984,37 +988,19 @@ pub(crate) mod testing {
         }
     }
 
-    /// Panics unless `path` lies inside the temp directory (or, in an
-    /// integration test, the target's tmp), so a test writing placeholder
-    /// models can never overwrite real ones, wherever its models directory
-    /// was resolved from.
-    pub fn assert_scratch(path: &Path) {
-        assert!(
-            is_scratch(path),
-            "a test may write models only inside the temp directory, not into {}",
-            path.display()
-        );
-    }
-
-    /// Whether `path` lies inside one of the scratch roots
-    /// [`assert_scratch`] allows, compared as the file system resolves
-    /// them (the temp directory is a link on the Mac). A path that climbs
+    /// Whether `path` lies inside the temp directory, compared as the file
+    /// system resolves both (the temp directory is a link on the Mac), so
+    /// a test writing placeholder models never overwrites real ones,
+    /// wherever its models directory was resolved from. A path that climbs
     /// out with `..` is not scratch.
     pub fn is_scratch(path: &Path) -> bool {
         if path.components().any(|part| part == Component::ParentDir) {
             return false;
         }
-        let Some(path) = resolved(path) else {
+        let (Some(path), Ok(temp)) = (resolved(path), std::env::temp_dir().canonicalize()) else {
             return false;
         };
-        [
-            Some(std::env::temp_dir()),
-            option_env!("CARGO_TARGET_TMPDIR").map(PathBuf::from),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(|root| root.canonicalize().ok())
-        .any(|root| path.starts_with(root))
+        path.starts_with(temp)
     }
 
     /// `path` with its deepest existing ancestor canonicalised and the
