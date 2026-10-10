@@ -62,11 +62,14 @@
 //!   ([`Installer::asks_an_administrator`]: a `.deb`'s or an `.rpm`'s
 //!   password, a macOS bundle the user cannot write, the MSI's consent
 //!   prompt) runs only right after a yes given while the app is idle, so
-//!   someone is at the screen to answer. The MSI ends the app before its
-//!   prompt, and Steno stays down until the prompt is answered. A yes given
-//!   while the app was busy, or one the app turned busy after, is asked
-//!   again once it is idle ([`Question::InstallNow`]), before the install
-//!   takes the hold.
+//!   someone is at the screen to answer. A download that took longer than
+//!   [`LONG_DOWNLOAD`] counts as such a wait. The MSI ends the app before
+//!   its prompt, so Steno is down until the prompt is answered; a no or a
+//!   failure starts the version that ran again, as a failed NSIS setup
+//!   does (the shell's Windows watcher). A yes given while the app was
+//!   busy, or one the app turned busy after, is asked again once it is
+//!   idle ([`Question::InstallNow`]), before the install takes the hold.
+//!   "Later" there keeps a package the schedule had kept.
 //! - **Between an install that returned and the relaunch** the running
 //!   version works beside the new files. A recording reads none of them; a
 //!   processing job starts the new speech sidecar, which fails cleanly
@@ -143,6 +146,10 @@ pub const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 /// meanwhile, or a phone's that arrives, is processed while the prompt
 /// waits.
 pub const JOB_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long the user's download may take before an installer that asks an
+/// administrator asks again ([`Question::InstallNow`]): the user may have
+/// left the screen since the yes.
+pub const LONG_DOWNLOAD: std::time::Duration = std::time::Duration::from_secs(30);
 /// The outcome of a check that ran into [`CHECK_TIMEOUT`].
 pub const CHECK_TIMED_OUT: &str = "The update check timed out.";
 /// The outcome of a check asked for on a packaged install: the line the
@@ -709,11 +716,14 @@ impl UpdateSchedule {
     /// from the kept package when it is that version, else downloaded
     /// then; then, once the app is idle again and the gate's hold is taken
     /// ([`Self::hold_for_install`]), installed as [`Self::install_now`]
-    /// does. A recording started during the download is waited for, never
-    /// stopped. Nothing installs while another install runs (a second yes
-    /// meanwhile does nothing). A newer version a check found during a
-    /// wait keeps the yes: the install downloads and installs that one
-    /// instead. A version no longer found fails with a message.
+    /// does. A download that took longer than [`LONG_DOWNLOAD`] counts as
+    /// put off, and a "Later" when asked again keeps the schedule's kept
+    /// package ([`Self::keep`]). A recording started during the download
+    /// is waited for, never stopped. Nothing installs while another
+    /// install runs (a second yes meanwhile does nothing). A newer version
+    /// a check found during a wait keeps the yes: the install downloads
+    /// and installs that one instead. A version no longer found fails with
+    /// a message.
     async fn install_on_request(&self, version: &str, mut put_off: bool) -> Installed {
         let Some(_one) = OneInstall::start(&self.installing) else {
             return Installed::Skipped;
@@ -730,17 +740,25 @@ impl UpdateSchedule {
                 .staged
                 .take_if(|staged| staged.version == version)
                 .map(|staged| staged.package);
-            let package = match kept {
-                Some(package) => package,
-                None => match self.source.download(&version).await {
+            let was_kept = kept.is_some();
+            let package = if let Some(package) = kept {
+                package
+            } else {
+                let started = tokio::time::Instant::now();
+                let downloaded = self.source.download(&version).await;
+                put_off |= started.elapsed() > LONG_DOWNLOAD;
+                match downloaded {
                     Ok(package) => package,
                     Err(message) => {
                         self.install_failed(message);
                         return Installed::Failed;
                     }
-                },
+                }
             };
             let Some(hold) = self.hold_for_install(&version, put_off).await else {
+                if was_kept {
+                    self.keep(&version, package);
+                }
                 self.announce_again(&version);
                 return Installed::PutOff;
             };
@@ -754,6 +772,20 @@ impl UpdateSchedule {
                 Some(_) => put_off = true,
                 None => return Installed::Failed,
             }
+        }
+    }
+
+    /// Keeps `package` of `version` again, the schedule's kept package that
+    /// a "Later" handed back, unless a check found another version or
+    /// automatic downloads were turned off meanwhile.
+    fn keep(&self, version: &str, package: Vec<u8>) {
+        let downloads = self.automatically_downloads();
+        let mut state = self.state();
+        if downloads && state.found.as_deref() == Some(version) {
+            state.staged = Some(Staged {
+                version: version.to_owned(),
+                package,
+            });
         }
     }
 
