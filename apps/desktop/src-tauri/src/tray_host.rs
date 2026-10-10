@@ -229,9 +229,7 @@ fn follow_on(session: &Connection, hosted: &Hosted, retry: Duration) -> zbus::Re
         std::thread::Builder::new()
             .name("steno-tray-hosts".to_owned())
             .spawn_scoped(scope, forward(hosts, is_host_signal))
-            .inspect_err(|error| {
-                tracing::warn!(%error, "{UNFOLLOWED}");
-            })?;
+            .inspect_err(|error| tracing::warn!(%error, "{UNFOLLOWED}"))?;
         drop(nudge);
         let mut retried = 0;
         loop {
@@ -303,12 +301,12 @@ mod tests {
     #[test]
     fn only_an_answer_without_the_property_counts_as_a_host() {
         use zbus::fdo::Error;
-        let lacks: [fn(String) -> Error; 3] = [
+        let lacks: &[fn(String) -> Error] = &[
             Error::UnknownProperty,
             Error::InvalidArgs,
             Error::UnknownInterface,
         ];
-        let fails: [fn(String) -> Error; 11] = [
+        let fails: &[fn(String) -> Error] = &[
             Error::UnknownMethod,
             Error::UnknownObject,
             Error::NoReply,
@@ -321,11 +319,11 @@ mod tests {
             Error::Disconnected,
             Error::NotSupported,
         ];
-        for error in lacks.map(|error| error(String::new())) {
-            assert!(lacks_the_property(&error), "{error:?}");
-        }
-        for error in fails.map(|error| error(String::new())) {
-            assert!(!lacks_the_property(&error), "{error:?}");
+        for (answers, lacking) in [(lacks, true), (fails, false)] {
+            for answer in answers {
+                let error = answer(String::new());
+                assert_eq!(lacks_the_property(&error), lacking, "{error:?}");
+            }
         }
     }
 
@@ -399,11 +397,20 @@ mod tests {
     }
 
     fn serve(daemon: &Daemon, watcher: impl zbus::object_server::Interface) -> Connection {
+        serve_at(daemon, WATCHER_PATH, watcher)
+    }
+
+    /// A peer on `daemon` that owns `WATCHER` and serves `watcher` at `path`.
+    fn serve_at(
+        daemon: &Daemon,
+        path: &str,
+        watcher: impl zbus::object_server::Interface,
+    ) -> Connection {
         daemon
             .builder()
             .name(WATCHER)
             .unwrap()
-            .serve_at(WATCHER_PATH, watcher)
+            .serve_at(path, watcher)
             .unwrap()
             .build()
             .unwrap()
@@ -505,14 +512,7 @@ mod tests {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let _watcher = daemon
-            .builder()
-            .name(WATCHER)
-            .unwrap()
-            .serve_at("/Elsewhere", BareWatcher { version: 0 })
-            .unwrap()
-            .build()
-            .unwrap();
+        let _watcher = serve_at(&daemon, "/Elsewhere", BareWatcher { version: 0 });
         let hosted = follow_daemon(&daemon);
         reads(&hosted, false);
     }
