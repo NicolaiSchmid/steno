@@ -431,6 +431,14 @@ fn listener_configuration(
     paths: &StenoPaths,
     store: &Store,
 ) -> steno_handover::HandoverConfiguration {
+    let configuration = steno_handover::HandoverConfiguration::default();
+    if cfg!(test) {
+        return steno_handover::HandoverConfiguration {
+            advertise: false,
+            inbox_directory: paths.support_directory.join("handover-inbox"),
+            ..configuration
+        };
+    }
     let stored = store
         .settings()
         .inspect_err(|error| {
@@ -439,17 +447,8 @@ fn listener_configuration(
         .ok()
         .and_then(|settings| settings.handover_port);
     let environment = std::env::var(crate::handover::PORT_VARIABLE).ok();
-    let configuration = steno_handover::HandoverConfiguration {
-        port: crate::handover::listener_port(environment.as_deref(), stored),
-        ..steno_handover::HandoverConfiguration::default()
-    };
-    if !cfg!(test) {
-        return configuration;
-    }
     steno_handover::HandoverConfiguration {
-        advertise: false,
-        inbox_directory: paths.support_directory.join("handover-inbox"),
-        port: 0,
+        port: crate::handover::listener_port(environment.as_deref(), stored),
         ..configuration
     }
 }
