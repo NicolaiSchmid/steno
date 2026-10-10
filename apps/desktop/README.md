@@ -272,9 +272,10 @@ is off in Settings; one prompt shows at a time, and it goes when the app
 lets go, a recording starts, the setting goes off or the minute runs out.
 On the Mac the app is named by its running application's name
 (`host::app_name`); on Linux by its binary (`firefox`), on Windows by its
-executable (`Teams.exe`). The setting is read every two seconds, which
-also starts a detector that could not start before (PipeWire not up yet
-at login). While a call recording runs, the app letting go starts a
+executable without `.exe` (`Teams`). The setting is read every two
+seconds, so switching it takes up to two seconds, and the read also
+starts a detector that could not start before (PipeWire not up yet at
+login). While a call recording runs, the app letting go starts a
 90-second countdown in the bubble and the sidebar ("Keep recording"
 cancels it, the app taking the microphone again too), after which the
 recording stops and is saved as Stop saves it, with the end reason

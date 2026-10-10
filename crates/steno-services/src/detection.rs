@@ -113,10 +113,17 @@ pub type AppNames = Arc<dyn Fn(Option<&str>) -> String + Send + Sync>;
 
 /// "Another app" without a bundle id, else the id itself, as Swift's
 /// `liveAppName` falls back: on Linux the holder's binary name, on Windows
-/// its executable's file name.
+/// its executable's file name without `.exe` ("Teams"), which the prompt
+/// and the stored end reason show.
 #[must_use]
 pub fn fallback_app_name(bundle_id: Option<&str>) -> String {
-    bundle_id.unwrap_or("Another app").to_owned()
+    let Some(id) = bundle_id else {
+        return "Another app".to_owned();
+    };
+    let stem = id
+        .get(..id.len().saturating_sub(4))
+        .filter(|stem| !stem.is_empty() && id[stem.len()..].eq_ignore_ascii_case(".exe"));
+    stem.unwrap_or(id).to_owned()
 }
 
 /// What meeting detection needs from the shell

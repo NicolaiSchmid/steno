@@ -677,6 +677,24 @@ fn an_app_without_a_bundle_id_is_another_app() {
     assert_eq!(fallback_app_name(Some("firefox")), "firefox");
 }
 
+/// A Windows holder is named by its executable without `.exe`, in any
+/// case; a name that is only the extension, or holds it elsewhere, stays.
+#[test]
+fn a_windows_executable_is_named_without_its_extension() {
+    for (id, name) in [
+        ("Teams.exe", "Teams"),
+        ("ms-teams.EXE", "ms-teams"),
+        ("Zoom.Exe", "Zoom"),
+        (".exe", ".exe"),
+        ("exe", "exe"),
+        ("app.exe.config", "app.exe.config"),
+        ("Zoöm.exe", "Zoöm"),
+        ("ö.exe", "ö"),
+    ] {
+        assert_eq!(fallback_app_name(Some(id)), name, "{id}");
+    }
+}
+
 /// A process list whose snapshots wait while its gate is closed, as a
 /// detector's start waits while `PipeWire` reconnects at logout.
 struct GatedActivity {

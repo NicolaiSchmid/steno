@@ -3116,6 +3116,12 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   into one holder; check with a Flatpak browser on a real desktop, where
   `pipewire.access.portal.app_id` may name the app better. Where: "Meeting
   detection" in the Linux list under "Audio". Found: #222.
+- **First Windows release.** Meeting detection names a Windows holder by its
+  executable without `.exe` (`steno_services::detection::fallback_app_name`), so the
+  prompt says "Teams opened the microphone" and an auto-stop stores "Teams" as the
+  call's app; a display name (the executable's `FileDescription`) would read better.
+  Check the names on a real call with the Teams and Zoom desktop apps. Where: S2 of
+  `.plans/2026-10-07-stable-promotion.md`. Found: #271.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
   measured DirectML's speed (at least three times the CPU's on an integrated GPU), so
   `directmlOnWindows` stays off by default (`SpeechSettings` in
