@@ -387,8 +387,9 @@ pub trait UpdateSource: Send + Sync {
     async fn relaunch(&self);
     /// Asks the user `question`; true for the answer that installs.
     async fn ask(&self, question: Question<'_>) -> bool;
-    /// Tells the user an install failed, with the updater's `message`; one
-    /// that failed after the shutdown ran restarts the app instead.
+    /// Tells the user an install failed, with the updater's `message`. One
+    /// that failed after the install's own shutdown (Windows) restarts the
+    /// app instead, and one that failed while the app quits is only logged.
     fn tell_install_failed(&self, message: &str);
     /// Tells the user `version` is installed and Steno relaunches once
     /// `busy` has ended: a recording started, or a processing job began,

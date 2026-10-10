@@ -182,17 +182,19 @@ impl UpdateSource for ShellUpdates {
             .is_ok_and(|result| installs(&result, dialog.install))
     }
 
-    /// An install that fails after the shutdown ran (Windows: the watcher
-    /// did not start, or did not say in time that it runs) restarts the
-    /// app at once, into the version that runs, with the failure in the
-    /// log: the recorder and the pipeline start nothing after a shutdown,
-    /// and on a scheduled install nobody may be there to close a message.
-    /// The next check offers the update again.
+    /// An install that failed after its own shutdown ran (Windows,
+    /// [`install_update`]: the watcher could not start, ended before it
+    /// ran, or said nothing in time) restarts the app at once, into the
+    /// version that runs, with the failure in the log. The recorder and the
+    /// pipelines start nothing after a shutdown, and on a scheduled install
+    /// nobody may be there to close a message. One that fails while the app
+    /// quits (a `.deb`'s pkexec ended with the session) is only logged,
+    /// since the app is ending. The next check offers the update again.
     fn tell_install_failed(&self, message: &str) {
         if self.app.state::<steno_services::app::ExitGate>().released() {
-            tracing::warn!(%message, "the update failed after the shutdown; Steno restarts");
+            tracing::warn!(%message, "the update failed while Steno quits");
             steno_services::flush_logs();
-            self.app.restart();
+            return;
         }
         app_dialog(
             &self.app,
@@ -232,11 +234,13 @@ fn install_update(_app: &AppHandle, update: &Update, package: &[u8]) -> Result<(
 /// (`%LOCALAPPDATA%\uno.schmid.steno.desktop\update\`, which holds only
 /// the last update's), runs the shutdown, starts the watcher
 /// (`windows_setup`), waits up to [`WATCHER_START_LIMIT`] for it to say
-/// that it runs, and ends the process; returns only when it failed. A
-/// watcher that does not say so in time (a policy that turns off the
-/// command prompt) is ended, and the app restarts
-/// (`UpdateSource::tell_install_failed`); so does a job that forbids
-/// breakaway, which makes the start fail. The watcher's current directory
+/// that it runs, lets go of the single-instance lock and ends the process;
+/// returns only when it failed before the shutdown. A start file the
+/// folder's removal left behind fails the install before the shutdown, so
+/// the user is told. After the shutdown, a watcher that cannot start (a
+/// job that forbids breakaway), ends before it ran (a policy that turns off
+/// the command prompt) or says nothing in time (which is ended) restarts
+/// the app, with the failure in the log. The watcher's current directory
 /// is the local data folder, not the install folder the installer
 /// replaces.
 ///
@@ -244,7 +248,8 @@ fn install_update(_app: &AppHandle, update: &Update, package: &[u8]) -> Result<(
 #[cfg(windows)]
 fn install_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
     use windows_setup::{
-        STARTED_FILE, Setup, WATCHER_START_LIMIT, system32, wait_for_start, watcher_command,
+        STARTED_FILE, Setup, WATCHER_START_LIMIT, empty_update_folder, system32, wait_for_start,
+        watcher_command,
     };
 
     let text = |error: std::io::Error| error.to_string();
@@ -255,12 +260,10 @@ fn install_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<()
         .map_err(|error| error.to_string())?;
     let folder = data.join("update");
     let installer = folder.join(setup.file_name(&update.version));
-    // An earlier update's installer goes, and its start file with it.
-    let _ = std::fs::remove_dir_all(&folder);
-    std::fs::create_dir_all(&folder).map_err(text)?;
+    let started = folder.join(STARTED_FILE);
+    empty_update_folder(&folder)?;
     std::fs::write(&installer, package).map_err(text)?;
     let relaunch = std::env::current_exe().map_err(text)?;
-    let started = folder.join(STARTED_FILE);
     let mut watcher = watcher_command(
         setup,
         &installer,
@@ -270,9 +273,26 @@ fn install_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<()
         &data,
     );
     crate::shut_down_before_exit(app);
-    let mut watcher = watcher.spawn().map_err(text)?;
-    wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT)?;
-    std::process::exit(0)
+    let ran = watcher
+        .spawn()
+        .map_err(text)
+        .and_then(|mut watcher| wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT));
+    match ran {
+        Ok(()) => {
+            // The single-instance mutex goes first: an installer that fails
+            // at once (msiexec 1618) has the watcher start this version
+            // within milliseconds, and that copy would hand itself to this
+            // ending process. `RunEvent::Exit` frees it on every other exit;
+            // `exit` skips that.
+            tauri_plugin_single_instance::destroy(app);
+            std::process::exit(0)
+        }
+        Err(message) => {
+            tracing::warn!(%message, "the update failed after the shutdown; Steno restarts");
+            steno_services::flush_logs();
+            app.restart()
+        }
+    }
 }
 
 /// [`installer_for`] this build's platform and bundle.

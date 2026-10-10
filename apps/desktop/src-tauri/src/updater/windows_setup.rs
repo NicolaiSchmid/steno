@@ -186,9 +186,25 @@ pub fn watcher_command(
     watcher
 }
 
+/// Empties `folder`, the update's, before a new installer is written
+/// there: an earlier update's installer goes, and its start file with it.
+/// A start file left behind would pass [`wait_for_start`] at once, so one
+/// the removal could not take fails the install.
+pub fn empty_update_folder(folder: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(folder);
+    if folder.join(STARTED_FILE).exists() {
+        return Err(format!(
+            "Steno could not empty its update folder ({}).",
+            folder.display()
+        ));
+    }
+    std::fs::create_dir_all(folder).map_err(|error| error.to_string())
+}
+
 /// Waits up to `limit` for `watcher` to create `started`, which says that
-/// it runs. A watcher that exits first, or is still silent at the limit,
-/// is ended and the error says so: it has started no installer, since it
+/// it runs; `started` must not exist yet ([`empty_update_folder`] makes
+/// sure). A watcher that exits first fails the wait, and one still silent
+/// at the limit is ended. Either way it has started no installer, since it
 /// creates the file before anything else, so the app can start again.
 pub fn wait_for_start(
     watcher: &mut std::process::Child,
@@ -398,6 +414,50 @@ mod tests {
         );
         assert!(watcher.try_wait().unwrap().is_some(), "ended");
         assert!(!started.exists());
+    }
+
+    /// An earlier update's installer and start file go.
+    #[test]
+    fn an_earlier_update_is_emptied_out() {
+        let data = tempfile::tempdir().unwrap();
+        let folder = data.path().join("update");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Steno-0.11.0.msi"), b"old").unwrap();
+        std::fs::write(folder.join(STARTED_FILE), b"").unwrap();
+        assert_eq!(empty_update_folder(&folder), Ok(()));
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+        let fresh = data.path().join("fresh");
+        assert_eq!(empty_update_folder(&fresh), Ok(()));
+        assert!(fresh.is_dir());
+    }
+
+    /// A start file the removal cannot take fails the install, before the
+    /// shutdown, in words the user's dialog can show.
+    #[cfg(unix)]
+    #[test]
+    fn a_start_file_left_behind_fails_the_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let data = tempfile::tempdir().unwrap();
+        let folder = data.path().join("update");
+        std::fs::create_dir_all(&folder).unwrap();
+        let started = folder.join(STARTED_FILE);
+        std::fs::write(&started, b"").unwrap();
+        let mode = |mode| std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(&folder, mode(0o555)).unwrap();
+        let result = empty_update_folder(&folder);
+        std::fs::set_permissions(&folder, mode(0o755)).unwrap();
+        if started.exists() {
+            assert_eq!(
+                result,
+                Err(format!(
+                    "Steno could not empty its update folder ({}).",
+                    folder.display()
+                ))
+            );
+        } else {
+            // Root removes the file whatever the folder's mode says.
+            assert_eq!(result, Ok(()));
+        }
     }
 
     /// A stub for an installer or the app, built by the test: it writes
