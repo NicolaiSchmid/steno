@@ -6,18 +6,20 @@
 //! the memory ceiling while it diarizes fails that call, leaves `DirectML`
 //! alone and is replaced by the next, one that failed while idle is
 //! replaced before the diarization, and a refused load keeps a child that
-//! holds speech. A child that aborts or hangs in the diarizer's load is
-//! killed and fails the call as a failed load, which `SidecarDiarizer`
-//! checks against the manifest: files of the right size that fail their
-//! checksum are deleted and the call is not installed, while an abort in
-//! the diarization itself stays the sidecar's crash. The real engine
-//! refuses model files it cannot load without dying.
+//! holds speech. A child that aborts, hangs or overruns the ceiling in the
+//! diarizer's load is killed and fails the call as a failed load, which
+//! `SidecarDiarizer` checks against the manifest: files of the right size
+//! that fail their checksum are deleted and the call is not installed,
+//! while an abort in the diarization itself stays the sidecar's crash. The
+//! real engine refuses model files it cannot load without dying.
 //!
 //! The ignored tests run the real models: set `STENO_MODELS_DIR` to a
 //! models directory holding `onnx/diarization/`. They compare the sidecar's
 //! result with the in-process pipeline's on the repository's two-voice
-//! fixture (exactly: the same code on the same ops), and kill a child
-//! mid-diarization of ten minutes of it.
+//! fixture (exactly: the same code on the same ops), kill a child
+//! mid-diarization of ten minutes of it, and fail loads over a copy of the
+//! models: intact files are kept, and only one that fails its checksum is
+//! deleted.
 
 mod common;
 
@@ -307,7 +309,8 @@ async fn a_refused_load_keeps_a_child_that_holds_speech() {
 /// `DirectML` where that is asked for: the call fails as a failed load
 /// over the crash, so the caller checks the files; the child is killed,
 /// `DirectML` stays on, and the next calls load speech and the diarizer
-/// in a new child.
+/// in a new child. The `DirectML` assertion has power only on Windows,
+/// the one place the fake engine's speech runs on `DirectML`.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_abort_in_the_diarizer_load_is_a_failed_load_that_ends_the_child() {
     let (engine, _dir) = engine_with_fault("abort-on-diarizer-load", |config| {
@@ -350,6 +353,28 @@ async fn a_hung_diarizer_load_is_killed_at_the_load_timeout() {
     assert_eq!(engine.pid(), None);
     assert_diarizes(&engine, &tone(1.0)).await;
     assert_eq!(engine.spawns(), 2);
+}
+
+/// A child over the memory ceiling while it loads the diarizer's models
+/// (a ceiling under its idle resident set, and a load that never answers,
+/// so the first heartbeat ends it there): killed, and the call fails as a
+/// failed load over the overrun, so the caller checks the files.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diarizer_load_over_the_memory_ceiling_is_a_failed_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(&["--fault", "hang-on-diarizer-load"]);
+    config.memory_ceiling_bytes = 1 << 20;
+    let engine = engine_in(&dir, config);
+    let error = engine.diarize(fake_models(), &tone(1.0)).await.unwrap_err();
+    let SidecarError::DiarizerLoad(load) = sidecar_error(&error) else {
+        panic!("{error}");
+    };
+    assert!(
+        matches!(**load, SidecarError::MemoryCeiling { ceiling_bytes, .. } if ceiling_bytes == 1 << 20),
+        "{error}"
+    );
+    assert_eq!(engine.pid(), None);
+    assert_eq!(engine.spawns(), 1);
 }
 
 /// The diarizer the app runs over an engine with `fault` (in its first
@@ -591,4 +616,148 @@ async fn a_child_killed_mid_diarization_of_real_audio_fails_the_call_and_the_nex
         .unwrap();
     assert_eq!(diarizer.diarize(&audio).await.unwrap(), here);
     assert_eq!(engine.spawns(), 2);
+}
+
+/// A writable store in `dir` holding a copy of the models in
+/// `STENO_MODELS_DIR`, verified; the copy's folder. The tests below delete
+/// files, so they never run over the originals.
+fn copy_of_real_models(dir: &Path) -> PathBuf {
+    let asset = steno_diarize::models::asset();
+    let from = real_store().directory(&asset);
+    let store = ModelStore::new(dir);
+    let to = store.directory(&asset);
+    std::fs::create_dir_all(&to).unwrap();
+    for file in &asset.files {
+        std::fs::copy(from.join(&file.name), to.join(&file.name)).unwrap();
+    }
+    store.verify(&asset).unwrap();
+    to
+}
+
+/// The inner error of a failed diarizer load, as `SidecarDiarizer`
+/// returns it, if `error` is one.
+fn failed_load<'a>(
+    error: &'a (dyn std::error::Error + Send + Sync + 'static),
+) -> Option<&'a SidecarError> {
+    match error.downcast_ref::<DiarizeError>() {
+        Some(DiarizeError::Sidecar(SpeechError::Sidecar(SidecarError::DiarizerLoad(load)))) => {
+            Some(load)
+        }
+        _ => None,
+    }
+}
+
+/// The fake engine aborting or hanging in its load over a copy of the
+/// real, intact models: the files are hashed and kept byte for byte, the
+/// call keeps the load's error (so the job falls back), and the next call
+/// diarizes over the same files.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the ONNX diarizer models (STENO_MODELS_DIR)"]
+async fn a_crash_or_hang_in_the_load_keeps_the_real_models() {
+    for fault in ["abort-on-diarizer-load", "hang-on-diarizer-load"] {
+        let (engine, dir) = engine_with_fault(fault, |config| {
+            config.load_timeout = Duration::from_secs(2);
+        });
+        copy_of_real_models(dir.path());
+        let engine = Arc::new(engine);
+        let diarizer = SidecarDiarizer::new(Arc::clone(&engine), Install::Never, 4);
+        let error = diarizer.diarize(&tone(2.0)).await.unwrap_err();
+        let load = failed_load(error.as_ref()).unwrap_or_else(|| panic!("{fault}: {error}"));
+        if fault.starts_with("abort") {
+            assert!(matches!(load, SidecarError::Crashed { .. }), "{load}");
+        } else {
+            assert!(matches!(load, SidecarError::Timeout { .. }), "{load}");
+        }
+        assert_eq!(engine.pid(), None);
+        engine
+            .store()
+            .verify(&steno_diarize::models::asset())
+            .unwrap();
+        let result = diarizer.diarize(&tone(2.0)).await.unwrap();
+        assert_eq!(result.clusters.len(), 1);
+    }
+}
+
+/// One byte flipped in the copied embedding model, and a load that
+/// aborts: only that file is deleted and named, and the segmentation model
+/// keeps its checksum.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the ONNX diarizer models (STENO_MODELS_DIR)"]
+async fn only_the_real_model_that_fails_its_checksum_is_deleted() {
+    let (engine, dir) = engine_with_fault("abort-on-diarizer-load", |_| {});
+    let folder = copy_of_real_models(dir.path());
+    let embedding = folder.join(steno_diarize::models::EMBEDDING_FILE);
+    let mut bytes = std::fs::read(&embedding).unwrap();
+    bytes[1_000_000] ^= 0x01;
+    std::fs::write(&embedding, bytes).unwrap();
+    let diarizer = SidecarDiarizer::new(Arc::new(engine), Install::Never, 4);
+    let error = diarizer.diarize(&tone(2.0)).await.unwrap_err();
+    let Some(DiarizeError::NotInstalled { missing, .. }) = error.downcast_ref::<DiarizeError>()
+    else {
+        panic!("{error}");
+    };
+    assert_eq!(missing, &[steno_diarize::models::EMBEDDING_FILE.to_owned()]);
+    assert!(!embedding.exists());
+    let segmentation = &steno_diarize::models::asset().files[0];
+    assert_eq!(
+        steno_speech::model_store::sha256_of(&folder.join(&segmentation.name)).unwrap(),
+        segmentation.sha256
+    );
+}
+
+/// The real engine over a copy of the real models, failing its load the
+/// way a starved machine does (a load timeout of 1 ms) and over memory
+/// ceilings its load overruns: the child is gone and the files are kept
+/// every time, and at least one ceiling ends the load itself.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the ONNX diarizer models (STENO_MODELS_DIR)"]
+async fn the_real_engine_failing_its_load_keeps_the_real_models() {
+    let real_engine = |dir: &Path, adjust: &dyn Fn(&mut SidecarConfig)| {
+        let mut config = SidecarConfig::new(binary());
+        config.heartbeat = Duration::from_millis(5);
+        adjust(&mut config);
+        Arc::new(SidecarSpeechEngine::with_assets(
+            ModelStore::new(dir),
+            config,
+            Vec::new(),
+        ))
+    };
+    let asset = steno_diarize::models::asset();
+
+    let dir = tempfile::tempdir().unwrap();
+    copy_of_real_models(dir.path());
+    let engine = real_engine(dir.path(), &|config| {
+        config.load_timeout = Duration::from_millis(1);
+    });
+    let diarizer = SidecarDiarizer::new(Arc::clone(&engine), Install::Never, 4);
+    let error = diarizer.diarize(&tone(2.0)).await.unwrap_err();
+    let load = failed_load(error.as_ref()).unwrap_or_else(|| panic!("{error}"));
+    assert!(matches!(load, SidecarError::Timeout { .. }), "{load}");
+    assert_eq!(engine.pid(), None);
+    engine.store().verify(&asset).unwrap();
+
+    let mut ended_in_the_load = 0;
+    for mib in [16u64, 32, 64] {
+        let dir = tempfile::tempdir().unwrap();
+        copy_of_real_models(dir.path());
+        let engine = real_engine(dir.path(), &|config| {
+            config.memory_ceiling_bytes = mib << 20;
+        });
+        let diarizer = SidecarDiarizer::new(Arc::clone(&engine), Install::Never, 4);
+        match diarizer.diarize(&tone(2.0)).await {
+            Ok(result) => eprintln!("{mib} MiB: {} clusters", result.clusters.len()),
+            Err(error) => {
+                eprintln!("{mib} MiB: {error}");
+                if matches!(
+                    failed_load(error.as_ref()),
+                    Some(SidecarError::MemoryCeiling { .. })
+                ) {
+                    ended_in_the_load += 1;
+                }
+            }
+        }
+        assert_eq!(engine.pid(), None, "{mib} MiB");
+        engine.store().verify(&asset).unwrap();
+    }
+    assert!(ended_in_the_load > 0, "no ceiling ended the load");
 }
