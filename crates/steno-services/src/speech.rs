@@ -1019,11 +1019,9 @@ pub(crate) mod testing {
         let (Some(path), Ok(temp)) = (resolved(path), temp.canonicalize()) else {
             return false;
         };
-        let named = match named.map(resolved) {
-            Some(None) => return false,
-            named => named.flatten(),
-        };
-        path.starts_with(temp) && !named.is_some_and(|named| path.starts_with(named))
+        path.starts_with(temp)
+            && named
+                .is_none_or(|named| resolved(named).is_some_and(|named| !path.starts_with(named)))
     }
 
     /// `path` with its deepest existing ancestor canonicalised and the
