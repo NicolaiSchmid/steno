@@ -48,6 +48,12 @@ optdepends=(
 )
 provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname")
+# A user's edit to the ufw profile survives an upgrade. Another port there
+# also needs the same port in Steno (STENO_HANDOVER_PORT or handoverPort)
+# and `sudo ufw app update Steno` for the rule already added.
+backup=('etc/ufw/applications.d/steno-desktop')
+# Only prints `sudo ufw allow Steno`.
+install=steno-desktop.install
 # The binaries stay byte for byte as the signed release built them.
 options=('!strip' '!debug')
 source=(
@@ -56,6 +62,7 @@ source=(
   'steno-desktop.sh'
   'autostart-service-stop-timeout.conf'
   'gnome-scope-stop-timeout.conf'
+  'ufw-steno-desktop'
   'LICENSE'
   'speexdsp-COPYING'
 )
@@ -67,6 +74,7 @@ sha256sums=('2f2dfb3b3452a5473e7de6ab44a3733cf143871cf7da14d708a78ffc532e60e5'
             '82b4fab9295ef6e73cb593de396ec807c9d6de623df5331705cf3b2281f0c478'
             '8be20b6744998a6ba94422ba008e9d927f77eb525ea1c1c165e73c6e5954c8e8'
             '9c1f94b44d7b0e260e4a8ebcad2fee81b6dcb948ea37e4aecfb1e3953e8a4028'
+            'd328e4b6d255451214e0498a79e2e5b0923986fdf7b0d2db16f1f7a4746ae8e5'
             '4adbf25a93d2acbdb0e1feb850b1a4e88b64ebfdf2063ae917a3827732fe7a86'
             '2654a4264b2bfe298dedc508748d140111840c315cc8eb646a3a68c13fa75b01')
 
@@ -93,7 +101,7 @@ package() {
   # The stop timeout drop-ins (stable plan P5), which the .deb ships from
   # the first release that contains #227.
   # Arch's systemd reloads the user managers after the install
-  # (30-systemd-daemon-reload-user.hook), so no install script does. Unlike
+  # (30-systemd-daemon-reload-user.hook), so the install script does not. Unlike
   # the .deb's postinst, the hook does not skip a user whose autostart entry
   # is gone; #227's kept entry covers that case.
   local units="$pkgdir/usr/lib/systemd/user"
@@ -102,8 +110,9 @@ package() {
   _copy autostart-service-stop-timeout.conf "$units/$autostart"
   _copy gnome-scope-stop-timeout.conf "$units/$gnome"
 
-  # TODO(X4): the ufw profile for the handover's fixed port, as
-  # /etc/ufw/applications.d/steno (in backup=), once X4 fixes the port.
+  # The ufw application profile `Steno` for the handover's port (stable
+  # plan X4): `sudo ufw allow Steno` opens it.
+  install -Dm644 ufw-steno-desktop "$pkgdir/etc/ufw/applications.d/steno-desktop"
 
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   # The binary compiles in SpeexDSP (BSD-3-Clause), whose notice goes with it.

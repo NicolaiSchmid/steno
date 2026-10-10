@@ -403,6 +403,30 @@ fn a_known_property_set_to_none_loses_its_row() {
     assert_eq!(store.settings_with_defaults(&defaults).unwrap(), settings);
 }
 
+/// The README's command stores `'23900'` under `handoverPort`, and the
+/// port loads. A value that is not a port (not JSON, a JSON string, out
+/// of range, negative) loads as unset rather than failing every settings
+/// read, and the next save removes its row.
+#[test]
+fn a_stored_handover_port_loads_and_one_that_is_not_a_port_is_ignored() {
+    let store = Store::in_memory().unwrap();
+    let defaults = Settings::defaults(&StenoPaths::new("/support"));
+    for (stored, port) in [("23900", 23900), ("0", 0)] {
+        put_setting_row(&store, "handoverPort", stored);
+        let settings = store.settings_with_defaults(&defaults).unwrap();
+        assert_eq!(settings.handover_port, Some(port), "{stored:?}");
+    }
+
+    for invalid in ["abc", r#""23900""#, "70000", "-1", "23900.5", ""] {
+        put_setting_row(&store, "handoverPort", invalid);
+        let settings = store.settings_with_defaults(&defaults).unwrap();
+        assert_eq!(settings.handover_port, None, "{invalid:?}");
+        assert_eq!(settings, defaults, "{invalid:?}: the rest still loads");
+        store.save_settings(&settings).unwrap();
+        assert_eq!(setting_row(&store, "handoverPort"), None, "{invalid:?}");
+    }
+}
+
 /// A field inside the Obsidian value that this build does not know comes
 /// back on save, next to the edit.
 #[test]

@@ -10,7 +10,10 @@
 //! after start on the same port. The check runs once per connection, at
 //! accept, so the listener closes no connection when the network changes;
 //! one on an address that leaves breaks with it, and the phone resumes
-//! from the partial. Swift: `Network/HandoverServer.swift`,
+//! from the partial. The port is the configuration's; a fixed one that
+//! is taken gives way to one the system chooses, with a warning, and the
+//! record carries the port bound (Rust only: the Swift app always let the
+//! system choose). Swift: `Network/HandoverServer.swift`,
 //! `Network/ServerMetrics.swift`.
 
 pub mod advertise;
@@ -144,6 +147,12 @@ impl std::fmt::Debug for HandoverServer {
 }
 
 impl HandoverServer {
+    /// The port the Bonjour record carries, `None` when unpublished.
+    #[cfg(test)]
+    pub(crate) fn advertised_port(&self) -> Option<u16> {
+        self.advertiser.as_ref().map(advertise::Advertiser::port)
+    }
+
     /// Binds and starts accepting. Advertising binds every IPv4 interface
     /// (the phone resolves IPv4 only) and publishes the LAN addresses;
     /// otherwise 127.0.0.1.
@@ -178,7 +187,7 @@ impl HandoverServer {
             Reach::Loopback => (IpAddr::V4(Ipv4Addr::LOCALHOST), None, false),
             Reach::Lan { lan, publish } => (IpAddr::V4(Ipv4Addr::UNSPECIFIED), Some(lan), publish),
         };
-        let listener = TcpListener::bind(SocketAddr::new(address, configuration.port)).await?;
+        let listener = bind(address, configuration.port).await?;
         let port = listener.local_addr()?.port();
         if port == 0 {
             return Err(ServerError::NoPort);
@@ -239,6 +248,24 @@ impl HandoverServer {
             advertiser.withdraw();
         }
     }
+}
+
+/// A listener on `port` at `address`. A fixed port that cannot be bound
+/// gives way to one the system chooses, with a warning: the phone still
+/// finds it through Bonjour, but a firewall opened for the fixed port
+/// blocks it.
+async fn bind(address: IpAddr, port: u16) -> std::io::Result<TcpListener> {
+    let error = match TcpListener::bind(SocketAddr::new(address, port)).await {
+        Err(error) if port != 0 => error,
+        bound => return bound,
+    };
+    let listener = TcpListener::bind(SocketAddr::new(address, 0)).await?;
+    let chosen = listener.local_addr()?.port();
+    tracing::warn!(
+        target: "steno::handover",
+        "port {port} is not available ({error}), so the phone handover listens on port {chosen} instead, which a firewall opened only for port {port} blocks"
+    );
+    Ok(listener)
 }
 
 /// Resolves once the server is stopping, also when the server was dropped.
@@ -483,6 +510,21 @@ mod tests {
         assert_eq!(may_skip(false, "no LAN address"), Ok(()));
     }
 
+    /// An engine over an empty in-memory store.
+    fn engine(
+        configuration: &HandoverConfiguration,
+        identity: &Arc<HandoverIdentity>,
+    ) -> Arc<Engine> {
+        Arc::new(Engine::new(
+            configuration.clone(),
+            identity.clone(),
+            Arc::new(Store::in_memory().unwrap()),
+            Arc::new(FakeHandoverIntake::default()),
+            watch::channel(Vec::new()).0,
+            Arc::new(Utc::now),
+        ))
+    }
+
     /// A listener on every IPv4 address that serves loopback and `lan`,
     /// read again after `every`.
     async fn serve(
@@ -491,14 +533,7 @@ mod tests {
         lan: fn() -> Vec<Ipv4Addr>,
         every: Duration,
     ) -> (HandoverServer, Arc<ServerMetrics>) {
-        let engine = Arc::new(Engine::new(
-            configuration.clone(),
-            identity.clone(),
-            Arc::new(Store::in_memory().unwrap()),
-            Arc::new(FakeHandoverIntake::default()),
-            watch::channel(Vec::new()).0,
-            Arc::new(Utc::now),
-        ));
+        let engine = engine(configuration, identity);
         let metrics = Arc::new(ServerMetrics::default());
         let reach = Reach::Lan {
             lan: LanAddresses::new(lan, every),
@@ -576,6 +611,157 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         assert_eq!(metrics.snapshot().refused_interface, 0);
         lan.stop().await;
+    }
+
+    /// A loopback listener on `port`.
+    async fn on_loopback(port: u16, identity: &Arc<HandoverIdentity>) -> HandoverServer {
+        let directory = tempfile::tempdir().unwrap();
+        let configuration = HandoverConfiguration {
+            advertise: false,
+            inbox_directory: directory.path().join("inbox"),
+            port,
+            ..HandoverConfiguration::default()
+        };
+        HandoverServer::start(
+            &configuration,
+            identity,
+            engine(&configuration, identity),
+            Arc::new(ServerMetrics::default()),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The warnings logged on this thread while it is installed.
+    #[derive(Clone, Default)]
+    struct Warnings(Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct Message<'a>(&'a mut String);
+
+    impl tracing::field::Visit for Message<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                *self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl tracing::Subscriber for Warnings {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut message = String::new();
+            event.record(&mut Message(&mut message));
+            self.0.lock().unwrap().push(message);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// A listener that holds a port the system chose on `address`, and
+    /// that port.
+    async fn hold_port(address: Ipv4Addr) -> (TcpListener, u16) {
+        let held = TcpListener::bind((address, 0)).await.unwrap();
+        let port = held.local_addr().unwrap().port();
+        (held, port)
+    }
+
+    #[tokio::test]
+    async fn a_fixed_port_that_is_free_is_the_one_bound() {
+        let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
+        // Free again: the listener drops here.
+        let (_, port) = hold_port(Ipv4Addr::LOCALHOST).await;
+        let warnings = Warnings::default();
+        let _installed = tracing::subscriber::set_default(warnings.clone());
+        let server = on_loopback(port, &identity).await;
+        assert_eq!(server.port, port);
+        assert!(warnings.0.lock().unwrap().is_empty(), "no warning");
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_fixed_port_another_program_holds_gives_way_to_one_the_system_chooses_with_a_warning()
+    {
+        let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
+        let (held, taken) = hold_port(Ipv4Addr::LOCALHOST).await;
+        let warnings = Warnings::default();
+        let _installed = tracing::subscriber::set_default(warnings.clone());
+        let server = on_loopback(taken, &identity).await;
+        assert_ne!(server.port, taken);
+        assert_ne!(server.port, 0);
+        let warnings = warnings.0.lock().unwrap().clone();
+        let [warning] = warnings.as_slice() else {
+            panic!("one warning: {warnings:?}");
+        };
+        assert!(
+            warning.starts_with(&format!("port {taken} is not available (")),
+            "{warning}"
+        );
+        assert!(
+            warning.ends_with(&format!(
+                "listens on port {} instead, which a firewall opened only for port {taken} blocks",
+                server.port
+            )),
+            "{warning}"
+        );
+
+        // The port reported, which Bonjour publishes, is the one that answers.
+        let mut tls = within(connect(&identity, Ipv4Addr::LOCALHOST, server.port))
+            .await
+            .unwrap();
+        let status = within(hello(&mut tls)).await.unwrap();
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        drop(tls);
+        server.stop().await;
+        drop(held);
+    }
+
+    /// The fallback binds the address asked for: loopback stays loopback.
+    #[tokio::test]
+    async fn the_fallback_keeps_the_address() {
+        let (_held, taken) = hold_port(Ipv4Addr::LOCALHOST).await;
+        let listener = bind(IpAddr::V4(Ipv4Addr::LOCALHOST), taken).await.unwrap();
+        let bound = listener.local_addr().unwrap();
+        assert_eq!(bound.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_ne!(bound.port(), taken);
+    }
+
+    /// After a fallback the Bonjour record carries the port bound, not the
+    /// one configured, so the phone never resolves the other program.
+    #[tokio::test]
+    async fn after_a_fallback_the_record_carries_the_port_bound() {
+        let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
+        let (held, taken) = hold_port(Ipv4Addr::UNSPECIFIED).await;
+        let directory = tempfile::tempdir().unwrap();
+        let configuration = HandoverConfiguration {
+            service_name: "Steno port test".to_owned(),
+            inbox_directory: directory.path().join("inbox"),
+            port: taken,
+            ..HandoverConfiguration::default()
+        };
+        let reach = Reach::Lan {
+            lan: LanAddresses::new(Vec::new, Duration::from_secs(60)),
+            publish: true,
+        };
+        let server = HandoverServer::start_with(
+            &configuration,
+            &identity,
+            engine(&configuration, &identity),
+            Arc::new(ServerMetrics::default()),
+            reach,
+        )
+        .await
+        .unwrap();
+        assert_ne!(server.port, taken);
+        assert_eq!(server.advertised_port(), Some(server.port));
+        server.stop().await;
+        drop(held);
     }
 
     /// The host address of the network test below, and whether the

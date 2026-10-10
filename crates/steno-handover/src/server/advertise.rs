@@ -370,6 +370,9 @@ pub struct Advertiser {
     daemon: ServiceDaemon,
     fullname: String,
     published: Arc<Mutex<Published>>,
+    /// The port the record carries.
+    #[cfg(test)]
+    port: u16,
 }
 
 impl Advertiser {
@@ -450,7 +453,15 @@ impl Advertiser {
             daemon,
             fullname,
             published,
+            #[cfg(test)]
+            port,
         })
+    }
+
+    /// The port the record carries.
+    #[cfg(test)]
+    pub(crate) fn port(&self) -> u16 {
+        self.port
     }
 
     fn start(

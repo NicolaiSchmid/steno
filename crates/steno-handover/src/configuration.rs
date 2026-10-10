@@ -33,7 +33,13 @@ pub struct HandoverConfiguration {
     pub inbox_directory: PathBuf,
     /// How long a pairing QR code stays valid on the injected clock.
     pub pairing_window: Duration,
-    /// `0` lets the system choose; the port is published through Bonjour.
+    /// The port the listener binds; `0` lets the system choose. When a
+    /// fixed port cannot be bound (another program, or another user's
+    /// Steno, holds it), the listener binds one the system chooses and logs
+    /// a warning. Either way the port bound is the one published through
+    /// Bonjour, which the phone resolves before every connection. The app
+    /// passes [`HandoverConfiguration::platform_port`] unless the user chose
+    /// another.
     pub port: u16,
     /// How long a connection may stay silent while the computer waits for
     /// the client (a request line, the rest of a body, the next request)
@@ -48,6 +54,26 @@ impl HandoverConfiguration {
     pub const BODY_HEADROOM: i64 = 64 * 1024;
     /// Upper bound for the JSON bodies of the small routes.
     pub const JSON_BODY_LIMIT: i64 = 64 * 1024;
+    /// The port the app listens on under Linux, where the desktops' firewalls
+    /// (`ufw` on Omarchy, the NixOS firewall) block every incoming port not
+    /// opened by name: the AUR package's `ufw` profile and the NixOS module
+    /// open this one (stable plan X4). Unassigned by IANA, below Linux's
+    /// ephemeral range (32768 to 60999) so no outgoing connection takes it,
+    /// and in no list of ports common LAN software uses.
+    pub const LINUX_PORT: u16 = 23820;
+
+    /// The port the app listens on unless the user chose one:
+    /// [`HandoverConfiguration::LINUX_PORT`] on Linux; on macOS and Windows
+    /// `0`, a port the system chooses. Rust only: Swift's
+    /// `HandoverConfiguration.port` is always 0.
+    #[must_use]
+    pub const fn platform_port() -> u16 {
+        if cfg!(target_os = "linux") {
+            Self::LINUX_PORT
+        } else {
+            0
+        }
+    }
 
     /// Body limit for chunk uploads: the chunk size plus 64 KiB.
     #[must_use]
@@ -176,6 +202,21 @@ mod tests {
         assert!(
             NameSource::SystemHostname.read().is_some(),
             "every platform has a host name"
+        );
+    }
+
+    #[test]
+    fn linux_listens_on_the_fixed_port_and_the_mac_and_windows_on_one_the_system_chooses() {
+        let expected = if cfg!(target_os = "linux") { 23820 } else { 0 };
+        assert_eq!(HandoverConfiguration::platform_port(), expected);
+        assert!(
+            (1024..32768).contains(&HandoverConfiguration::LINUX_PORT),
+            "registered, and below Linux's ephemeral range"
+        );
+        assert_eq!(
+            HandoverConfiguration::default().port,
+            0,
+            "tests and the CLI"
         );
     }
 

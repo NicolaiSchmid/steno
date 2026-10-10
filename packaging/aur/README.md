@@ -19,13 +19,16 @@ below first.
 | `/usr/bin/steno-desktop` | [`steno-desktop.sh`](steno-desktop.sh): sets `STENO_DISTRIBUTION=aur` (the in-app updater stays off; pacman updates) and `STENO_EXEC_PATH=/usr/bin/steno-desktop` (the path the autostart entry names), then runs the binary. Both take effect from the first release that contains #261; rc.3 ignores them |
 | `/usr/share/applications/steno-desktop.desktop`, `/usr/share/icons/hicolor/*/apps/steno-desktop.png` | The `.deb`, unchanged. The entry's `Exec=steno-desktop` finds the wrapper on `PATH` |
 | `/usr/lib/systemd/user/app-steno\x2ddesktop@autostart.service.d/10-steno.conf`, `/usr/lib/systemd/user/app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf` | The stop timeout drop-ins (P5), `[Service]` and `[Scope]` `TimeoutStopSec=20s`: the `.deb`'s from the first release that contains #227; for the pinned `.deb`, the copies here, [`autostart-service-stop-timeout.conf`](autostart-service-stop-timeout.conf) and [`gnome-scope-stop-timeout.conf`](gnome-scope-stop-timeout.conf) |
+| `/etc/ufw/applications.d/steno-desktop` | [`ufw-steno-desktop`](ufw-steno-desktop): the `ufw` profile `Steno`, TCP 23820, the phone handover's port on Linux (X4). `sudo ufw allow Steno` opens it; `ufw` admits mDNS by default, so the profile leaves UDP 5353 out. In `backup=`: an edited profile survives an upgrade. Another port there also needs the same port in Steno (`STENO_HANDOVER_PORT` or `handoverPort`) and `sudo ufw app update Steno` for the rule already added |
 | `/usr/share/licenses/steno-desktop-bin/LICENSE` | [`LICENSE`](LICENSE), a copy of the repository's |
 | `/usr/share/licenses/steno-desktop-bin/speexdsp-COPYING` | [`speexdsp-COPYING`](speexdsp-COPYING), a copy of `crates/steno-audio/vendor/speexdsp/COPYING`: the binary compiles in SpeexDSP's echo canceller, and its BSD licence asks for the notice with the binary |
 
-There is no install script. Arch's `systemd` package reloads every running
-user manager after any package changes a file under `usr/lib/systemd/user/`
-(`30-systemd-daemon-reload-user.hook`), so a running Steno picks the drop-ins
-up at the install. From the first release that contains #227, the autostart
+The install script, [`steno-desktop.install`](steno-desktop.install), only
+prints `sudo ufw allow Steno` after an install or an upgrade. Arch's
+`systemd` package reloads every running user manager after any package
+changes a file under `usr/lib/systemd/user/`
+(`30-systemd-daemon-reload-user.hook`), so a running Steno picks the
+drop-ins up at the install without the script's help. From the first release that contains #227, the autostart
 entry the app keeps until it exits keeps a running, autostarted Steno safe
 through that reload (P5); step 8 of the Omarchy gate, which #227 adds, tests
 it.
@@ -36,8 +39,11 @@ copy. `check-aur.sh` requires each copy to be its file in
 `apps/desktop/src-tauri/linux/`, and both drop-ins in the package with
 `TimeoutStopSec=20s`, whichever supplied them.
 
-Still to come: X4's `ufw` profile. The `TODO` line in `package()` says
-where it goes.
+`check-aur.sh` requires the profile's port to be `LINUX_PORT` in
+`crates/steno-handover/src/configuration.rs` (the AUR job also runs when
+that file changes), the profile in `backup=`, `ufw app info Steno` to read
+it, `ufw`'s own rules to still admit mDNS, and the install script to do
+nothing but print `sudo ufw allow Steno`.
 
 ## Hyprland
 
@@ -62,7 +68,7 @@ check that they apply.
 ## The pinned release
 
 `pkgver=0.1.0rc3` pins `desktop-v0.1.0-rc.3`, which contains none of #227,
-#261 and #267. It builds and checks this directory; it is not a release to
+#261, #267 and #276. It builds and checks this directory; it is not a release to
 publish:
 
 - rc.3 ignores `STENO_DISTRIBUTION` and `STENO_EXEC_PATH` (X5, #261): its
@@ -82,6 +88,8 @@ publish:
   Steno a login started, turning it on fails with "Steno can't open at
   login from where it's installed now", and launch at login stays off
   until it is turned on from the launcher.
+- rc.3 listens for the phone on a port the system chooses, not on
+  23820 (X4, #276), so the `ufw` profile does not open it.
 - rc.3's `.deb` lacks the Hyprland rules (X2, #267), and its panels are
   titled "Steno", so the rules would not match them.
 
@@ -106,10 +114,12 @@ differ. The key is on no keyserver yet, so `gpg --recv-keys` and the import
 that AUR helpers such as yay and paru run for a missing `validpgpkeys` key
 both fail; with the key imported as above, they verify with it.
 
-Then, for a new candidate after Bump steps 1 to 5, build and install:
+Then, for a new candidate after Bump steps 1 to 5, build and install, and
+open the handover's port once:
 
 ```sh
 makepkg -si
+sudo ufw allow Steno
 ```
 
 `makepkg` fails with "One or more PGP signatures could not be verified" when

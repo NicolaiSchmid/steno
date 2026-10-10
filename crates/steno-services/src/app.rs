@@ -395,7 +395,7 @@ fn listener_over_identity(
     ));
     let mac_id = identity.mac_id();
     let service = Arc::new(crate::handover::service(
-        listener_configuration(paths),
+        listener_configuration(paths, store),
         store.clone(),
         intake,
         identity,
@@ -422,19 +422,23 @@ fn lock_or_run_without(
     }
 }
 
-/// The listener's configuration: the default, and in this crate's tests
-/// loopback only, unadvertised, with the inbox under the test's support
+/// The listener's configuration: [`crate::handover::configuration`] over
+/// the environment, and in this crate's tests loopback only, unadvertised,
+/// on a port the system chooses, with the inbox under the test's support
 /// directory.
-fn listener_configuration(paths: &StenoPaths) -> steno_handover::HandoverConfiguration {
-    let configuration = steno_handover::HandoverConfiguration::default();
-    if !cfg!(test) {
-        return configuration;
+fn listener_configuration(
+    paths: &StenoPaths,
+    store: &Store,
+) -> steno_handover::HandoverConfiguration {
+    if cfg!(test) {
+        return steno_handover::HandoverConfiguration {
+            advertise: false,
+            inbox_directory: paths.support_directory.join("handover-inbox"),
+            ..steno_handover::HandoverConfiguration::default()
+        };
     }
-    steno_handover::HandoverConfiguration {
-        advertise: false,
-        inbox_directory: paths.support_directory.join("handover-inbox"),
-        ..configuration
-    }
+    let environment = std::env::var(crate::handover::PORT_VARIABLE).ok();
+    crate::handover::configuration(store, environment.as_deref())
 }
 
 /// Why the identity is not available, for the Phones settings: the

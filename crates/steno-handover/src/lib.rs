@@ -16,7 +16,8 @@
 //!   run [`HandoverService::checkpoint_store`] before they build it
 //!   ([`StoreNotSynced`] when it fails).
 //! - [`HandoverConfiguration`]: the name the phone shows, how the listener
-//!   binds, where partial uploads live, the pairing window and the read
+//!   binds (a fixed port on Linux, [`HandoverConfiguration::LINUX_PORT`]),
+//!   where partial uploads live, the pairing window and the read
 //!   timeout; [`Clock`] is the one time source.
 //! - [`HandoverIdentity`]: the TLS identity, minted once and kept in the
 //!   [`SecretStore`](steno_core::SecretStore), with its fingerprint
