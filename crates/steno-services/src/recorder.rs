@@ -1,9 +1,10 @@
 //! The host's `Recorder` over the capture session and the Mac recording
 //! intake. Swift: `apps/macos/Steno/Recording/RecordingController.swift`.
-//! The calendar lookup, the auto-stop after a call ends and the detection
-//! prompt are not here yet (the recorder's item in the parity list of
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`); the status carries
-//! what the capture session reports.
+//! The calendar lookup is not here yet (the recorder's item in the parity
+//! list of `.plans/2026-10-02-rust-core-and-tauri-shell.md`); the status
+//! carries what the capture session reports. The auto-stop after a call
+//! ends is [`crate::auto_stop`]'s policy, fed by
+//! [`CaptureRecorder::microphone_activity`]; its stop is the Stop button's.
 //!
 //! A stop that cannot store its meeting (the database still busy after the
 //! intake's tries, a full disk) keeps the recording on disk and the meeting
@@ -50,6 +51,7 @@ use steno_pipeline::{LocalRecordingIntake, LocalRecordingIntakeError, RecordingR
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
 
+use crate::auto_stop::{CallWatch, MicrophoneActivity};
 use crate::block_on;
 use crate::pipeline::CurrentPipeline;
 use crate::recovery::{RecoveryError, Unrecoverable};
@@ -479,6 +481,8 @@ struct Inner {
     /// shown after the status's own warning whenever the recorder is idle,
     /// until the user dismisses the messages. Rust only.
     launch_note: Option<String>,
+    /// The auto-stop after a call ends, for the recording in progress.
+    calls: CallWatch,
 }
 
 /// [`CaptureRecorder`]'s [`StartHold`]: the last one dropped clears the
@@ -638,6 +642,9 @@ pub struct CaptureRecorder {
     /// database folder until the app names it, or a test's own
     /// ([`Self::watch_disk_with`]).
     disk: Mutex<DiskWatch>,
+    /// The clock the auto-stop's grace runs on; the system's, or a
+    /// test's ([`Self::count_down_on`]).
+    clock: Mutex<Arc<dyn steno_audio::Clock>>,
     /// This recorder, for the watcher threads.
     this: Weak<CaptureRecorder>,
 }
@@ -675,10 +682,12 @@ impl CaptureRecorder {
                 quitting: false,
                 start_holds: 0,
                 launch_note: None,
+                calls: CallWatch::default(),
             }),
             changes: Condvar::new(),
             changed: Mutex::new(None),
             disk: Mutex::new(DiskWatch::system(None)),
+            clock: Mutex::new(Arc::new(steno_audio::SystemClock::new())),
             this: this.clone(),
         })
     }
@@ -696,6 +705,96 @@ impl CaptureRecorder {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Runs the auto-stop's grace on `clock` from the next countdown on.
+    #[cfg(test)]
+    pub(crate) fn count_down_on(&self, clock: Arc<dyn steno_audio::Clock>) {
+        *self
+            .clock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = clock;
+    }
+
+    fn clock(&self) -> Arc<dyn steno_audio::Clock> {
+        self.clock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether a recording is starting, running or stopping.
+    pub(crate) fn is_busy(&self) -> bool {
+        self.inner().status.state != RecordingState::Idle
+    }
+
+    /// Another app's microphone activity while Steno records ([`crate::auto_stop`]):
+    /// an `Opened` while the recording starts or runs is a call, and stops
+    /// a countdown; a `Released` while a call records arms the countdown,
+    /// once such a call was seen. Ignored while idle or stopping, and not
+    /// remembered. Swift: `RecordingController.microphoneActivity`.
+    pub fn microphone_activity(&self, activity: MicrophoneActivity) {
+        let mut inner = self.inner();
+        let state = inner.status.state;
+        match activity {
+            MicrophoneActivity::Opened { app_name } => {
+                if !matches!(state, RecordingState::Starting | RecordingState::Recording) {
+                    return;
+                }
+                inner.calls.opened(app_name);
+            }
+            MicrophoneActivity::Released => {
+                let call = state == RecordingState::Recording
+                    && inner
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.mode == CaptureMode::Call);
+                if !call {
+                    return;
+                }
+                let clock = self.clock();
+                let Some(countdown) = inner.calls.released(clock.now()) else {
+                    return;
+                };
+                let this = self.this.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("steno-auto-stop".into())
+                    .spawn(move || {
+                        if clock.sleep(countdown.grace, &countdown.cancel)
+                            && let Some(recorder) = this.upgrade()
+                        {
+                            recorder.call_ended(countdown.number);
+                        }
+                    });
+                if let Err(error) = spawned {
+                    // Without its countdown the recording runs until a stop.
+                    tracing::error!(%error, "the auto-stop could not be armed");
+                    inner.calls.keep_recording();
+                }
+            }
+        }
+        drop(inner);
+        self.notify();
+    }
+
+    /// The auto-stop's countdown `number` ran out: the recording stops and
+    /// is saved as Stop does, with the call's end reason, unless the
+    /// countdown was disarmed meanwhile or the recording is already
+    /// stopping.
+    fn call_ended(&self, number: u64) {
+        let (active, reason) = {
+            let mut inner = self.inner();
+            if inner.status.state != RecordingState::Recording {
+                return;
+            }
+            let Some(reason) = inner.calls.elapsed(number) else {
+                return;
+            };
+            (Self::begin_stop(&mut inner), reason)
+        };
+        if let Some(active) = active {
+            self.finish_stop(active, reason, None);
+        }
     }
 
     /// Tells the user under the Record control that the launch adopted
@@ -848,7 +947,7 @@ impl CaptureRecorder {
 
     /// Starts the session and the meeting; the error says why not in plain
     /// words, for after [`COULD_NOT_START`].
-    fn start_inner(&self, mode: CaptureMode, call_app: Option<&str>) -> Result<(), String> {
+    fn start_inner(&self, mode: CaptureMode) -> Result<(), String> {
         let (configuration, audio_folder) = self.configuration(mode)?;
         let disk = self.disk();
         let rate = bytes_per_second(&configuration);
@@ -913,7 +1012,6 @@ impl CaptureRecorder {
             inner.status.state = RecordingState::Recording;
             inner.status.started_at = Some(started_at);
             inner.status.mode = Some(mode);
-            inner.status.call_app = call_app.map(str::to_owned);
             inner.status.meeting_id = Some(meeting_id);
             inner.status.levels = None;
             inner.status.error = None;
@@ -1084,9 +1182,11 @@ impl CaptureRecorder {
     }
 
     /// Takes the session of the recording in progress and marks the
-    /// recorder `Stopping`; none when nothing records.
+    /// recorder `Stopping`, the auto-stop disarmed; none when nothing
+    /// records.
     fn begin_stop(inner: &mut Inner) -> Option<Active> {
         let active = inner.active.take()?;
+        inner.calls.reset();
         inner.status.state = RecordingState::Stopping;
         Some(active)
     }
@@ -1246,10 +1346,9 @@ impl CaptureRecorder {
         inner.status.state = RecordingState::Idle;
         inner.status.started_at = None;
         inner.status.mode = None;
-        inner.status.call_app = None;
         inner.status.meeting_id = None;
         inner.status.levels = None;
-        inner.status.auto_stop = None;
+        inner.calls.reset();
     }
 }
 
@@ -1336,6 +1435,10 @@ impl Recorder for CaptureRecorder {
     fn status(&self) -> RecorderStatus {
         let inner = self.inner();
         let mut status = inner.status.clone();
+        if status.state != RecordingState::Idle {
+            status.call_app = inner.calls.call_app().map(str::to_owned);
+            status.auto_stop = inner.calls.status(self.clock().now());
+        }
         if status.state == RecordingState::Recording
             && let Some(active) = &inner.active
         {
@@ -1384,12 +1487,13 @@ impl Recorder for CaptureRecorder {
             inner.status.state = RecordingState::Starting;
             inner.status.error = None;
             inner.status.warning = None;
+            inner.calls.begin(call_app);
         }
         // A meeting a panicking start had begun is failed on the way
         // ([`BegunMeeting`]).
         let unwinding = Unwinding::of(self, RecordingState::Starting, START_PANICKED);
         self.notify();
-        match self.start_inner(mode, call_app) {
+        match self.start_inner(mode) {
             Ok(()) => self.warm_up_if_installed(),
             Err(error) => {
                 let mut inner = self.inner();
@@ -1425,7 +1529,7 @@ impl Recorder for CaptureRecorder {
     }
 
     fn keep_recording(&self) {
-        self.inner().status.auto_stop = None;
+        self.inner().calls.keep_recording();
         self.notify();
     }
 
