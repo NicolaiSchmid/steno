@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::future::Future as _;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
+use std::time::Duration;
 
 use chrono::TimeZone as _;
 use steno_bridge::CaptureMode;
@@ -58,6 +59,10 @@ struct FakeSource {
     download_fails: AtomicBool,
     /// A Record clicked while the next "install now" dialog is up.
     record_while_asked: AtomicBool,
+    /// The recording ends while the next "after it ends" dialog is up.
+    idle_while_asked_after: AtomicBool,
+    /// What the user does while the next "install now" dialog is up.
+    while_asked_now: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     installs: AtomicUsize,
     install_stalls: AtomicBool,
     install_release: tokio::sync::Notify,
@@ -205,6 +210,16 @@ impl UpdateSource for FakeSource {
                 state: RecordingState::Recording,
                 ..RecorderStatus::idle()
             });
+        }
+        if matches!(question, Question::InstallNow(_))
+            && let Some(meanwhile) = lock(&self.while_asked_now).take()
+        {
+            meanwhile();
+        }
+        if matches!(question, Question::AfterItEnds(_))
+            && self.idle_while_asked_after.swap(false, Ordering::SeqCst)
+        {
+            self.recorder().set_status(RecorderStatus::idle());
         }
         lock(&self.replies).pop_front().unwrap_or(false)
     }
@@ -2117,4 +2132,242 @@ async fn a_switch_turned_off_during_a_download_while_busy_keeps_nothing() {
     world.source.download_release.notify_one();
     at_once(tick).await.unwrap();
     assert!(schedule.state().staged.is_none(), "not kept");
+}
+
+/// A yes given while a recording ran, whose recording ended while the
+/// "after it ends" dialog was up, is still asked again before an installer
+/// that asks an administrator.
+#[tokio::test(start_paused = true)]
+async fn a_busy_yes_whose_recording_ended_during_the_dialog_asks_again() {
+    let world = World::new();
+    *lock(&world.source.installer) = Some(Installer::EndsTheAppThenAsks);
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    world.recording(RecordingState::Recording);
+    world
+        .source
+        .idle_while_asked_after
+        .store(true, Ordering::SeqCst);
+    world.source.reply(&[true, true, true]);
+    at_once(schedule.offer("0.12.0")).await;
+    assert_eq!(
+        world.source.asked(),
+        [
+            "install 0.12.0",
+            "after the recording",
+            "install now 0.12.0"
+        ]
+    );
+}
+
+/// A newer version a tick found during the download of an idle yes is
+/// asked about again before an installer that asks an administrator.
+#[tokio::test(start_paused = true)]
+async fn a_newer_version_found_during_the_download_asks_again() {
+    let world = World::new();
+    *lock(&world.source.installer) = Some(Installer::EndsTheAppThenAsks);
+    world.source.answer(Ok(Some("0.12.0")));
+    world.source.answer(Ok(Some("0.13.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    world.source.download_stalls.store(true, Ordering::SeqCst);
+    world.source.reply(&[true, true]);
+    let offer = offer_in_background(&schedule, "0.12.0");
+    while world.downloads() == 0 {
+        tokio::task::yield_now().await;
+    }
+    world.advance(TimeDelta::days(1));
+    schedule.tick().await;
+    world.source.download_stalls.store(false, Ordering::SeqCst);
+    world.source.download_release.notify_one();
+    at_once(offer).await.unwrap();
+    assert_eq!(
+        world.source.asked(),
+        ["install 0.12.0", "install now 0.13.0"]
+    );
+    assert_eq!(*lock(&world.source.installed), ["0.13.0"]);
+}
+
+/// A download that took longer than [`LONG_DOWNLOAD`] asks again before an
+/// installer that asks an administrator, since the user may have left; a
+/// shorter one installs on the yes.
+#[tokio::test(start_paused = true)]
+async fn a_long_download_asks_again_before_an_installer_that_asks() {
+    for (took, asked) in [
+        (LONG_DOWNLOAD + Duration::from_secs(1), true),
+        (
+            LONG_DOWNLOAD.checked_sub(Duration::from_secs(1)).unwrap(),
+            false,
+        ),
+    ] {
+        let world = World::new();
+        *lock(&world.source.installer) = Some(Installer::EndsTheAppThenAsks);
+        world.source.answer(Ok(Some("0.12.0")));
+        let schedule = world.schedule();
+        schedule.tick().await;
+        world.source.download_stalls.store(true, Ordering::SeqCst);
+        world.source.reply(&[true, true]);
+        let offer = offer_in_background(&schedule, "0.12.0");
+        while world.downloads() == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(took).await;
+        world.source.download_release.notify_one();
+        at_once(offer).await.unwrap();
+        let expected: &[&str] = if asked {
+            &["install 0.12.0", "install now 0.12.0"]
+        } else {
+            &["install 0.12.0"]
+        };
+        assert_eq!(world.source.asked(), expected, "{took:?}");
+        assert_eq!(world.installs(), 1, "{took:?}");
+    }
+}
+
+/// "Later" when asked again keeps the package the schedule had kept, so
+/// the next yes installs it without downloading it again.
+#[tokio::test(start_paused = true)]
+async fn later_when_asked_again_keeps_the_kept_package() {
+    let world = World::new();
+    *lock(&world.source.installer) = Some(Installer::AsksForAPassword);
+    world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    assert_eq!(world.downloads(), 1);
+    world.processing(true);
+    world.source.reply(&[true, true, false]);
+    let offer = offer_in_background(&schedule, "0.12.0");
+    tokio::time::sleep(IDLE_POLL * 3).await;
+    world.processing(false);
+    at_once(offer).await.unwrap();
+    assert!(schedule.state().staged.is_some(), "kept");
+    world.source.reply(&[true]);
+    at_once(schedule.offer("0.12.0")).await;
+    assert_eq!(world.installs(), 1);
+    assert_eq!(world.downloads(), 1, "downloaded once");
+}
+
+/// "Later" when asked again keeps nothing once automatic downloads are
+/// off: the package was the user's download, not the schedule's.
+#[tokio::test(start_paused = true)]
+async fn later_when_asked_again_keeps_no_download_of_its_own() {
+    let world = World::new();
+    *lock(&world.source.installer) = Some(Installer::AsksForAPassword);
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    world.processing(true);
+    world.source.reply(&[true, true, false]);
+    let offer = offer_in_background(&schedule, "0.12.0");
+    tokio::time::sleep(IDLE_POLL * 3).await;
+    world.processing(false);
+    at_once(offer).await.unwrap();
+    assert_eq!(world.downloads(), 1);
+    assert!(schedule.state().staged.is_none(), "not kept");
+}
+
+/// "Later" when asked again keeps nothing once automatic downloads were
+/// turned off while that dialog was up.
+#[tokio::test(start_paused = true)]
+async fn later_after_the_switch_went_off_during_the_dialog_keeps_nothing() {
+    let world = World::new();
+    *lock(&world.source.installer) = Some(Installer::AsksForAPassword);
+    world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    assert!(schedule.state().staged.is_some(), "kept by the tick");
+    *lock(&world.source.while_asked_now) = Some(Box::new({
+        let schedule = schedule.clone();
+        move || schedule.set_automatically_downloads(false)
+    }));
+    world.processing(true);
+    world.source.reply(&[true, true, false]);
+    let offer = offer_in_background(&schedule, "0.12.0");
+    tokio::time::sleep(IDLE_POLL * 3).await;
+    world.processing(false);
+    at_once(offer).await.unwrap();
+    assert_eq!(world.source.asked().len(), 3);
+    assert!(schedule.state().staged.is_none(), "not kept");
+}
+
+/// "Later" when asked again tells the user nothing failed, and the General
+/// section still shows the update.
+#[tokio::test(start_paused = true)]
+async fn later_when_asked_again_tells_no_failure() {
+    let world = World::new();
+    *lock(&world.source.installer) = Some(Installer::AsksForAPassword);
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    world.processing(true);
+    world.source.reply(&[true, true, false]);
+    let offer = offer_in_background(&schedule, "0.12.0");
+    tokio::time::sleep(IDLE_POLL * 3).await;
+    world.processing(false);
+    at_once(offer).await.unwrap();
+    assert_eq!(world.source.asked().len(), 3);
+    assert_eq!(*lock(&world.source.told), Vec::<String>::new());
+    assert_eq!(
+        schedule.last_outcome(),
+        UpdateOutcome::Available("0.12.0".into())
+    );
+}
+
+/// The app's gate says it shuts down once the pipeline quits.
+#[tokio::test]
+async fn the_apps_gate_says_when_it_shuts_down() {
+    let app = AppGate::new();
+    assert!(!app.gate.is_shutting_down());
+    app.pipeline.quit();
+    assert!(app.gate.is_shutting_down());
+}
+
+/// A yes during a Quit, while the relaunch waited for a recording, asks
+/// and says nothing more.
+#[tokio::test(start_paused = true)]
+async fn a_yes_during_a_quit_while_the_relaunch_waits_says_nothing() {
+    let world = World::new();
+    let (schedule, offer) = an_install_under_way(&world).await;
+    assert!(!world.source.try_record());
+    world.source.install_release.notify_one();
+    tokio::time::sleep(IDLE_POLL * 3).await;
+    assert_eq!(lock(&world.source.relaunch_waits).len(), 1);
+    world.gate.quitting.store(true, Ordering::SeqCst);
+    world.source.reply(&[true]);
+    at_once(schedule.offer("0.12.0")).await;
+    assert_eq!(lock(&world.source.relaunch_waits).len(), 1, "nothing told");
+    offer.abort();
+}
+
+/// A yes while the install still runs is not told the update is
+/// installed: it is asked as any yes is.
+#[tokio::test(start_paused = true)]
+async fn a_yes_during_the_install_is_not_told_it_is_installed() {
+    let world = World::new();
+    let (schedule, offer) = an_install_under_way(&world).await;
+    assert!(!world.source.try_record());
+    world.source.reply(&[true]);
+    at_once(schedule.offer("0.12.0")).await;
+    assert_eq!(*lock(&world.source.relaunch_waits), Vec::<String>::new());
+    assert_eq!(
+        world.source.asked(),
+        ["install 0.12.0", "install 0.12.0", "after the recording"]
+    );
+    offer.abort();
+}
+
+/// The job hold ends at [`JOB_HOLD_LIMIT`], within a tenth of a second.
+#[tokio::test(start_paused = true)]
+async fn the_job_hold_ends_at_the_limit() {
+    let world = World::new();
+    let (_schedule, offer) = an_install_under_way(&world).await;
+    let tenth = Duration::from_millis(100);
+    tokio::time::sleep(JOB_HOLD_LIMIT.checked_sub(tenth).unwrap()).await;
+    assert_eq!(world.gate.alive.load(Ordering::SeqCst), 1, "jobs wait");
+    tokio::time::sleep(tenth * 2).await;
+    assert_eq!(world.gate.alive.load(Ordering::SeqCst), 0, "jobs go");
+    offer.abort();
 }
