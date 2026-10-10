@@ -240,8 +240,8 @@ The panels are the web app's `#/panel/bubble` and `#/panel/prompt` routes
 anchor (top centre of the frame, 8 pt under the main screen's top edge by
 default, saved to `panel-anchor.json` in the support directory by
 `panel_anchor.rs` when the user drags one, see The identifier; the
-geometry is `panel_geometry.rs`). One rule decides what shows: a busy recorder wins, else a pending detection prompt, else
-nothing. Each window is created once and then hidden and shown; the
+geometry is `panel_geometry.rs`). One rule decides what shows: a busy
+recorder wins, else a pending detection prompt, else nothing. Each window is created once and then hidden and shown; the
 prompt's is navigated to each new request, which the shell numbers when
 the host raises it, so the page remounts and the countdown restarts; the X
 and Record send that number back and answer only their own prompt. The page
@@ -696,7 +696,8 @@ Swift app, so install it elsewhere (`~/Applications`) to keep both.
 (`SUPublicEDKey`, from `apps/macos/project.yml`), inert here: Sparkle
 installs no bundle without a public key, and the Swift app's last update
 installs this one (`.plans/2026-10-07-stable-promotion.md`, S6).
-`check-bundle.sh` checks both it and the bundle id in the built `.app`.
+`check-bundle.sh` checks both it and the bundle id in the built `.app`,
+and Rust CI runs that check over stub bundles (`check-bundle.test.sh`).
 
 Every release bundle carries `steno-speech-sidecar` beside the app (see
 "The speech sidecar" under Release), so a `.deb`, AppImage, `.msi` or NSIS
@@ -774,8 +775,9 @@ The identifier is `com.nicolaischmid.steno.desktop` on every platform
 (`tauri.conf.json`; D5 of `.plans/2026-10-07-stable-promotion.md`). The
 desktop builds before it, up to `desktop-v0.1.0-rc.2` and the
 `desktop-beta` lane, carried `uno.schmid.steno.desktop`, and the Swift
-app keeps `uno.schmid.steno.mac`. Nothing that matters is
-named after the identifier, so a later change costs nothing (`identifier.rs`):
+app keeps `uno.schmid.steno.mac`. No data is named after the identifier,
+so changing it moves no data; what it resets is listed below
+(`identifier.rs`):
 
 - **The support directory** holds the database, its lock, the preferences,
   the audio, the models and the panels' anchor, and is `Steno` on every
@@ -787,7 +789,9 @@ named after the identifier, so a later change costs nothing (`identifier.rs`):
   `%APPDATA%\uno.schmid.steno.desktop`) is read once and written to the new
   place; the old file stays. A new file that does not parse is set aside as
   `panel-anchor.json.corrupt-<time>`, and the panels open at the default
-  place.
+  place in that run; until a drag saves a new file, the next launch reads
+  the earlier build's anchor again. Saves run on a thread of their own,
+  and the exit waits for the last one.
 - **What starts afresh** under the new identifier: Tauri's per-identifier
   directories (the app config and data directories, the webview's data,
   which the web app does not use), on macOS the permissions and the login
@@ -811,11 +815,12 @@ named after the identifier, so a later change costs nothing (`identifier.rs`):
 ### Launch at login on macOS
 
 The login item is `SMAppService.mainApp` (`autostart/main_app.rs`, over
-`smappservice-rs`), the one the Swift app registers, so Settings shows
-"requires approval" when macOS waits for the user to allow it in System
-Settings > General > Login Items. It is filed under the bundle id, so this
-app registers itself; the Swift app's entry is the system's (S6). At each
-launch, once the database is open:
+`smappservice-rs`), the one the Swift app registers. While macOS waits for
+the user to allow it, General shows "Waiting for your approval in System
+Settings › Login Items." with an Open Login Items button. It is filed
+under the bundle id, so this app registers itself; macOS keeps or drops
+the Swift app's entry, and this app never touches it (S6). At each launch,
+once the database is open:
 
 1. The Launch Agent an earlier build wrote through `tauri-plugin-autostart`
    (`~/Library/LaunchAgents/Steno.plist`, labelled `Steno`, starting
@@ -823,11 +828,23 @@ launch, once the database is open:
    unless it is the job this very process was started as at login, which
    it would end; then the file is deleted. The log says what happened. A
    `Steno.plist` that starts another program stays.
-2. While the stored Launch at login setting is on and the login item is
-   neither enabled nor awaiting approval, the app registers it. The
-   setting is what the switch in General writes; `steno.loginItemRegistered`
-   in `preferences.json` decides nothing here. A failed registration is
-   logged, and General shows the switch off.
+2. Then the host's first-launch registration
+   (`Host::register_login_item_on_first_launch`, as the Swift app's
+   `registerLoginItemOnFirstLaunch`) registers the login item once, at the
+   first launch with the stored Launch at login setting on, if it reads
+   not registered. It counts that launch under `steno.mainAppRegistered` in
+   `preferences.json`, also when the item was already enabled or awaiting
+   approval; `steno.loginItemRegistered`, which an earlier build set for
+   its Launch Agent, counts only off the Mac. A failed registration is
+   logged, General shows the switch off, and the next launch tries again.
+   After that only the switch in General registers or removes the login
+   item, so one the user removed in System Settings stays removed.
+
+A user of an earlier build who switched its agent off under "Allow in the
+Background" in System Settings, with the setting still on, gets Steno
+back at login after the update: the agent's file goes, the first launch
+registers the main app, and macOS offers no cheap way to read that
+switch. Turning the setting off in General removes it again.
 
 A smoke run registers and removes nothing. Linux and Windows keep the
 plugin.
@@ -1420,7 +1437,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/scripts/lost-display-linux.sh` | Ends the display server under a recording and fails unless the app saved it first; CI's Linux job runs it |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
 | `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
-| `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check |
+| `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check, and runs the `.app` check's bundle id and Sparkle key over stub bundles (`check-bundle.test.sh`) |
 | `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh`, `release-assets.sh`, `release-signatures.sh`, `release-notes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json`, the lanes a release moves, the assets gathered from each platform's artifact, `SHA256SUMS` and the OpenPGP signatures, and the release notes (each `.sh` with a `.test.sh` is tested in Rust CI) |
 | `apps/desktop/release-signing-key.asc` | The public half of the release signing key that signs `SHA256SUMS` and the Linux bundles (see Checksums and OpenPGP signatures) |
 

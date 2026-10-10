@@ -2797,11 +2797,15 @@ touch and admission lines; each fix is ported to Swift before cutover.
 - Launch at login on macOS is `SMAppService.mainApp`, as in the Swift app, through
   `smappservice-rs` (`autostart/main_app.rs`), so `requiresApproval` occurs and the
   approval copy is reachable; Linux and Windows keep `tauri-plugin-autostart`. Under
-  the new identifier, `com.nicolaischmid.steno.desktop`, the app registers itself at
-  launch while the stored `launch_at_login` setting is on and the item is neither
-  enabled nor awaiting approval, whatever `steno.loginItemRegistered` says, after it
-  removed the Launch Agent a build under `uno.schmid.steno.desktop` left behind
-  (`~/Library/LaunchAgents/Steno.plist`). The Swift entry is left to macOS, and R3 of
+  the new identifier, `com.nicolaischmid.steno.desktop`, each launch first removes the
+  Launch Agent a build under `uno.schmid.steno.desktop` left behind
+  (`~/Library/LaunchAgents/Steno.plist`). Then the host's first-launch registration
+  (`Host::register_login_item_on_first_launch`, one path on every platform) registers
+  the main app once, at the first launch with the stored `launch_at_login` setting on,
+  counted under `steno.mainAppRegistered` on the Mac (`steno.loginItemRegistered`,
+  which the earlier build set for its agent, counts only off the Mac); a failed
+  registration tries again next launch, and after that only General's switch
+  registers or removes it. The Swift entry is left to macOS, and R3 of
   `.plans/2026-10-07-stable-promotion.md` finds out what it does (D4, S6).
 - Packaged installs (stable plan X5, Rust only): `STENO_DISTRIBUTION=aur` or `=nix`
   (the environment first, then the value the build was given;
@@ -3273,7 +3277,7 @@ PR off `main`.
 | Stable plan X6: the AUR package `steno-desktop-bin` (`packaging/aur/`), repackaging the release `.deb` verified against the release key, the binary and the sidecar in `/usr/lib/steno-desktop/` behind a `/usr/bin` wrapper that sets `STENO_DISTRIBUTION=aur` and `STENO_EXEC_PATH`, P5's drop-ins (copies until the pinned `.deb` ships them), no install script, pinned to rc.3 until a release contains #227 and #261; checked in an Arch container by `packaging/check-aur.sh` (`aur-ci.yml`) | `feat/aur-steno-desktop-bin` | #265 | merged |
 | Tests never write placeholder models into a models directory `STENO_MODELS_DIR` names: the reload test that installed them into the app's resolved directory (and so over a developer's real models) pins its own in the settings, the CLI tests clear the variable, `steno-services`' model writers panic outside the temp directory or inside the named one, and a child-process test proves the named directory is left alone | `fix/test-models-dir-guard` | #273 | open |
 | S2: meeting detection on every platform (`steno_services::detection`: one prompt at a time for 60 s through the shell's panel, none while recording or with detection off, its Record attributed to the prompt's app through `recordFromPrompt`, the setting read every two seconds, which retries a detector that could not start) and the auto-stop after a call (`steno_services::auto_stop`: the 90-second grace, Keep recording, the call resuming, the Stop path with `callEnded`) (`steno-services`, desktop shell, web prompt) | `feat/rust-recorder-policy` | #271 | open |
-| S6, the identifier half: `com.nicolaischmid.steno.desktop` on every platform, the Swift `SUPublicEDKey` in `Info.plist` (checked in the built bundle), `panel-anchor.json` in the support directory and read once from the earlier identifier's config directory, and the macOS login item on `SMAppService.mainApp`, which removes the earlier build's Launch Agent and registers itself while `launch_at_login` is on (S6 of `.plans/2026-10-07-stable-promotion.md`; desktop shell) | `feat/desktop-identifier` | #268 | open |
+| S6, the identifier half: `com.nicolaischmid.steno.desktop` on every platform, the Swift `SUPublicEDKey` in `Info.plist` (checked in the built bundle), `panel-anchor.json` in the support directory and read once from the earlier identifier's config directory, and the macOS login item on `SMAppService.mainApp`, which removes the earlier build's Launch Agent at each launch and registers itself once, at the first launch with `launch_at_login` on (`steno.mainAppRegistered`; S6 of `.plans/2026-10-07-stable-promotion.md`; desktop shell) | `feat/desktop-identifier` | #268 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

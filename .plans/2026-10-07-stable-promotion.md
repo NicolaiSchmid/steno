@@ -1539,6 +1539,12 @@ except case e.
   - the app relaunches as `com.nicolaischmid.steno.desktop`, and launch at login starts
     it once; `~/Library/LaunchAgents` holds no Steno plist, and with launch at
     login off a login starts nothing;
+  - on the Mac, an earlier build's agent switched off under "Allow in the
+    Background" while the setting stayed on opens Steno at login again after
+    the update, as expected: the agent's file goes, the first launch registers
+    the main app, and turning the setting off in General removes it;
+  - on the Mac, the main app removed under Login Items after that first launch
+    is not added back at the next launch while General shows the switch off;
   - the panel opens where it was moved (the anchor read from the old
     directory);
   - on the Mac, no import step appears; onboarding opens on its permissions page
