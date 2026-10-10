@@ -48,8 +48,8 @@ fn listening_port(home: &Path, stored: u16, variable: Option<u16>) -> u16 {
 
 #[test]
 fn the_app_listens_on_the_stored_handover_port() {
-    if let Some(stored) = std::env::var_os(CHILD) {
-        listen_as_the_shell_does(stored.to_str().unwrap().parse().unwrap());
+    if let Ok(stored) = std::env::var(CHILD) {
+        listen_as_the_shell_does(stored.parse().unwrap());
         return;
     }
     let home = tempfile::tempdir().unwrap();

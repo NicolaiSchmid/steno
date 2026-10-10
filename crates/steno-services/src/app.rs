@@ -440,8 +440,8 @@ fn listener_configuration(
             ..steno_handover::HandoverConfiguration::default()
         };
     }
-    let environment = std::env::var_os(crate::handover::PORT_VARIABLE);
-    let environment = environment.as_deref().map(std::ffi::OsStr::to_string_lossy);
+    let environment = std::env::var_os(crate::handover::PORT_VARIABLE)
+        .map(|value| value.to_string_lossy().into_owned());
     steno_handover::HandoverConfiguration {
         inbox_directory,
         ..crate::handover::configuration(store, environment.as_deref())
