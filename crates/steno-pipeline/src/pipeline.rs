@@ -363,6 +363,12 @@ struct InFlightSet {
     held: bool,
 }
 
+impl InFlightSet {
+    fn is_idle(&self) -> bool {
+        self.meetings.is_empty() && self.assets.is_empty()
+    }
+}
+
 impl InFlight {
     fn lock(&self) -> MutexGuard<'_, InFlightSet> {
         self.0
@@ -378,8 +384,7 @@ impl InFlight {
     /// job.
     #[must_use]
     pub fn is_idle(&self) -> bool {
-        let set = self.lock();
-        set.meetings.is_empty() && set.assets.is_empty()
+        self.lock().is_idle()
     }
 
     /// While idle ([`is_idle`](Self::is_idle)) and no other hold lives, a
@@ -403,7 +408,7 @@ impl InFlight {
     #[must_use]
     pub fn try_hold(&self) -> Option<JobHold> {
         let mut set = self.lock();
-        if set.held || !set.meetings.is_empty() || !set.assets.is_empty() {
+        if set.held || !set.is_idle() {
             return None;
         }
         set.held = true;
