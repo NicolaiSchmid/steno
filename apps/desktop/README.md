@@ -467,13 +467,14 @@ that scope's stop ends both.
 ## Packaged installs
 
 A package manager that installs Steno also updates it, and may start it at
-login itself. Two environment variables tell the app (stable plan X5,
-`.plans/2026-10-07-stable-promotion.md`):
+login itself. Environment variables tell the app (stable plan X5,
+`.plans/2026-10-07-stable-promotion.md`, and X4 for the port):
 
 | Variable | Set by | What the app does |
 |---|---|---|
 | `STENO_DISTRIBUTION=aur` or `=nix` | the Nix package at build time (`env`) and in its wrapper; the AUR package's `/usr/bin` wrapper | Never checks for updates: the tray's Check for Updates says "Updates come from your package manager.", and Settings > General shows that line in place of the check and the two switches. A value in the environment wins over the one the build was given (`steno_services::updates::updates_are_managed`) |
 | `STENO_LOGIN_ITEM=managed` | the NixOS module, for its user service and the session (`environment.sessionVariables`) | Leaves Launch at login to the system: it never writes, rewrites or removes the autostart entry, the first launch registers nothing, the autostart unit's drop-in is written only for the unit made from an entry that stands and goes with that entry, Settings shows the switch on and locked with "Your system opens Steno when you log in and manages this setting.", and the tray's item is checked and disabled. It removes one entry, below |
+| `STENO_HANDOVER_PORT=<port>` | the NixOS module, for its user service and the session | Listens for the phone on that port (see The phone handover behind a firewall) |
 
 With `STENO_LOGIN_ITEM=managed`, the one entry the app removes is one an
 earlier build wrote: its `Exec` starts a program in `/nix/store`, or
@@ -536,6 +537,60 @@ What a package sets:
   no `STENO_EXEC_PATH`; it still needs `STENO_DISTRIBUTION=aur`, from a
   wrapper or from the build's environment, and both drop-ins under
   `/usr/lib/systemd/user/`.
+
+## The phone handover behind a firewall
+
+The paired phone finds Steno through mDNS (the `_steno._tcp` record on UDP
+5353) and uploads to the TCP port the record names, over TLS 1.3 with the
+certificate it pinned at pairing. Steno serves only connections that
+arrive on one of the computer's LAN addresses or on loopback. A firewall
+that blocks either the port or mDNS keeps the phone's recordings on the
+phone, where they wait for the next try.
+
+On Linux, Steno listens on TCP port 23820
+(`HandoverConfiguration::LINUX_PORT` in `crates/steno-handover`), so a
+firewall can open it by number (stable plan X4). The port is unassigned
+by IANA and below Linux's range for outgoing connections. On macOS and
+Windows the system chooses the port, as before.
+
+| Desktop | What to open |
+|---|---|
+| Omarchy, or Arch with `ufw` | `sudo ufw allow Steno`. The AUR package installs the `ufw` profile `Steno` as `/etc/ufw/applications.d/steno-desktop`. `ufw` admits mDNS by default |
+| Ubuntu or Debian with `ufw` turned on | `sudo ufw allow 23820/tcp`; the `.deb` ships no profile. With `ufw` off, as Ubuntu installs it, nothing |
+| `firewalld` (Fedora and others) | `sudo firewall-cmd --permanent --add-port=23820/tcp`, `sudo firewall-cmd --permanent --add-service=mdns`, then `sudo firewall-cmd --reload`. Fedora Workstation's default zone already admits both |
+| NixOS with the module | Nothing: `programs.steno.openFirewall` (on by default) opens `programs.steno.handoverPort` and UDP 5353 |
+| NixOS without the module | `networking.firewall.allowedTCPPorts = [23820];` and `networking.firewall.allowedUDPPorts = [5353];` |
+
+To check from another computer on the same network:
+`openssl s_client -connect <address>:23820 </dev/null` prints the
+certificate when the port is open, and fails or times out when a firewall
+blocks it.
+
+Another port, in this order of precedence:
+
+1. `STENO_HANDOVER_PORT` in Steno's environment. The NixOS module sets it
+   to `programs.steno.handoverPort`, so the app and the firewall agree.
+2. The setting `handoverPort`, which has no row in Settings. With Steno
+   quit:
+
+   ```sh
+   sqlite3 ~/.local/share/Steno/steno.sqlite \
+     "insert into setting (key, value) values ('handoverPort', '23900')
+      on conflict (key) do update set value = excluded.value"
+   ```
+
+   `delete from setting where key = 'handoverPort'` goes back to the
+   default.
+
+`0` lets the system choose a port at each launch, which no firewall rule
+can name. The phone resolves the port before every connection, so a new
+port needs nothing on the phone and keeps the pairing.
+
+When the port is taken, by another program or by a second user's Steno on
+the same computer, Steno listens on a port the system chooses and logs a
+warning: `journalctl --user -b | grep 'could not be bound'` shows it. The
+phone still finds that port, but a firewall opened for 23820 blocks it, so
+free the port or choose another one for one of the two.
 
 ## Hyprland
 
@@ -1047,7 +1102,11 @@ API key or this computer's phone pairing; they stay in
 `services.gnome.gcr-ssh-agent.enable = false` keeps the keyring. The
 module links the package's systemd user files, and raises logind's
 `InhibitDelayMaxSec` when `programs.steno.inhibitDelayMaxSec` is set. It
-does not open the handover's port in the firewall yet.
+opens the handover's port, `programs.steno.handoverPort` (23820), and UDP
+5353 for mDNS in the firewall, which `programs.steno.openFirewall = false`
+leaves closed, and sets `STENO_HANDOVER_PORT` to that port on the service
+and in `environment.sessionVariables` (see The phone handover behind a
+firewall).
 
 The package is built with the flake's own pinned nixpkgs, so the system
 carries a second GTK and WebKit closure. `inputs.steno.inputs.nixpkgs.follows
@@ -1060,9 +1119,10 @@ real binary, no missing library, the tray's library, the `.deb`'s systemd
 user files), that the build itself sets
 `STENO_DISTRIBUTION=nix`, and that the release pins the same Tauri CLI. It
 evaluates the module in a system-wide and a per-user system down to the
-user units and the session variable, in one with `launchAtLogin = false`,
-and in one each with `programs.ssh.startAgent` and with GnuPG's SSH
-support.
+user units, the session variables and the firewall's ports, in one with
+`launchAtLogin = false` and `openFirewall = false`, and in one each with
+`programs.ssh.startAgent` and with GnuPG's SSH support, and checks that
+`handoverPort`'s default is the app's `LINUX_PORT`.
 
 ## Release
 

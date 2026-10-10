@@ -147,7 +147,8 @@ Forge and atlas.
   minted its own that way.
 - **The handover listens on a port the system picks** (`port: 0`) and advertises
   through its own mDNS responder (`mdns-sd`). A firewall that blocks incoming TCP
-  hides it from the phone; `ufw` admits mDNS by default.
+  hides it from the phone; `ufw` admits mDNS by default. From X4 (#276) the
+  port is TCP 23820 on Linux.
 - **"Process again" is new, and only in the Rust app.** "Try again" re-runs only
   the summary and is off without a transcript; P9's "Process again" runs a
   failed meeting from the start with its recording, from the button and from
@@ -454,7 +455,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` (#272: an app started inside another program's service of the user manager, as a key binding without `uwsm-app` leaves it in `wayland-wm@hyprland.desktop.service`, whose stop ended it unsaved 0.26 s in, moves at launch into `app-steno\x2ddesktop-<pid>.scope` in `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and `After=graphical-session.target`; at login the start waits for the target and is never called off, and a session that ends before then leaves the app in the compositor's unit; from an AppImage every mount server, found by its FUSE connection and keepalive pipe however the image was started, moves into a scope of its own in `app.slice` wherever it runs (a launcher's unit too, where GNOME leaves it), also when the app stays, and stays beside the app in a login's `session-<n>.scope`; each move is written to the journal and a failure logged at `warn`. In a systemd 255 container with uwsm 0.26.4's slice and shutdown target and a stand-in compositor's unit, every case saved `queued`; the README's Hyprland section has the table. logind's delay is #220's, tested against a fake logind) | Omarchy, NixOS with Hyprland; the AppImage on every systemd desktop |
 | X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) (#267: a list naming `x11` or `*`, or a lone `*`, counts as unset, any other value still wins; the titles on Linux only, macOS and Windows keep "Steno"; the rules are `apps/desktop/src-tauri/linux/hyprland-steno.lua`, one `hl.window_rule` on class `[Ss]teno-desktop` and title `Steno (bubble\|prompt)` that also turns off focus on hover, the border, shadow and blur, checked by Hyprland 0.56.2's `--verify-config`; the `.deb` installs it as `/usr/share/steno-desktop/hyprland-steno.lua` (`check-bundle.sh` checks it), and so does the AUR package that repackages it (#265) from the next release, loaded with `dofile`; the Linux smoke finds both panels by their titles) | Omarchy, NixOS with Hyprland |
 | X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves | all |
-| X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port | Omarchy, NixOS |
+| X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port (#276: TCP 23820 on Linux, `HandoverConfiguration::LINUX_PORT`, unassigned by IANA, below Linux's ephemeral range of 32768 to 60999 so no outgoing connection takes it, and in neither nmap's port list nor Wikipedia's list of TCP and UDP port numbers (LocalSend's 53317, Syncthing's 22000 and 21027, Synergy's 24800 and the game servers lie elsewhere); macOS and Windows keep a port the system chooses, as Swift did. `STENO_HANDOVER_PORT` wins over the setting `handoverPort`, which has no Settings row and no bridge field, and either wins over the default; `0` lets the system choose. A port that cannot be bound gives way to one the system chooses with a `warn` line, "port 23820 could not be bound (...)", and the Bonjour record carries the port bound. The phone resolves the record before every connection and the QR code carries no port, so the phone needs no change. The AUR package installs the `ufw` profile `Steno` (TCP 23820 only, as `ufw`'s `before.rules` admit mDNS) as `/etc/ufw/applications.d/steno-desktop`, in `backup=`; `check-aur.sh` compares its port with `LINUX_PORT` and reads it with `ufw app info Steno`. The NixOS module's `programs.steno.openFirewall`, on by default, opens `programs.steno.handoverPort` (23820) and UDP 5353 for Steno's own mDNS responder, and the module sets `STENO_HANDOVER_PORT` on `steno.service` and in the session; `nix/checks.nix` holds the default to `LINUX_PORT`) | Omarchy, NixOS |
 | X5 | Packaged installs: `STENO_DISTRIBUTION=aur` or `=nix`, read at build time (Nix) or from the environment (the AUR wrapper), turns the in-app updater off and Settings says updates come from the package manager; the autostart entry names a stable path (`/usr/bin/steno-desktop`, or the Nix profile's), never `current_exe()` or a store path; with `STENO_LOGIN_ITEM=managed`, which the NixOS module sets, the app leaves launch at login to the system (#261: the environment wins over the build's value; the path is `$APPIMAGE`, else `STENO_EXEC_PATH` from a wrapper whose binary lies elsewhere, as X6's, else the first of `/usr/bin`, `/usr/local/bin` and the Nix profiles that resolves into the running binary's directory, else no entry, and turning Launch at login on fails with "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager." and is not saved; managed, the app touches no entry except one an earlier build wrote, whose `Exec` starts a program in `/nix/store` or names a profile path: it goes at launch, or, when the app runs as the autostart unit made from it, after the save at Steno's first exit, so a reload never leaves the recorder in a unit no logout stops) | Omarchy, NixOS |
 | X6 | The AUR package `steno-desktop-bin` | Omarchy |
 | X7 | The flake's Linux package and NixOS module | NixOS |
@@ -1136,8 +1137,10 @@ The table above names each package and its owner. Their tests:
     come in the `.deb` from the first release that contains #267; rc.3's
     lacks them. No install script: Arch's
     `30-systemd-daemon-reload-user.hook` reloads the user managers. X4's
-    `ufw` profile is a `TODO` line in `package()`, so X6 lands before X4 and
-    gains it in X4's PR. An autostart entry a candidate without X5 wrote
+    `ufw` profile came in X4's PR (#276): `ufw-steno-desktop`, installed as
+    `/etc/ufw/applications.d/steno-desktop` and kept on upgrade
+    (`backup=`); `check-aur.sh` checks its port against `LINUX_PORT` and
+    that `ufw app info Steno` reads it. An autostart entry a candidate without X5 wrote
     survives the upgrade and bypasses the wrapper; Omarchy step 1 rewrites
     it. `depends` adds what namcap finds linked (`cairo`, `gdk-pixbuf2`,
     `glibc`, `hicolor-icon-theme`, `libgcc`, `libpipewire`, `libstdc++`).
@@ -1199,7 +1202,9 @@ The table above names each package and its owner. Their tests:
     none of Plasma 6, `services.passSecretService`, `programs.ssh.startAgent`
     and `programs.gnupg.agent.enableSSHSupport` is on: its gcr SSH agent
     conflicts with `startAgent`, and takes `SSH_AUTH_SOCK` from gpg-agent's.
-    X4's firewall port is not in the module; X4 adds it. P5's drop-ins arrive
+    X4 (#276) added the firewall: `programs.steno.openFirewall`, on by
+    default, opens `programs.steno.handoverPort` (23820) and UDP 5353, and
+    the module sets `STENO_HANDOVER_PORT` to that port. P5's drop-ins arrive
     through the `.deb`'s `files` map (#227). Without the module, the
     autostart entry names the profile's path by X5's rule (#261), so the
     wrapper sets no `STENO_EXEC_PATH`. ONNX Runtime is nixpkgs' 1.27.1 against the
@@ -1774,7 +1779,8 @@ interrupted" after one. On the GNOME machine,
      `sha256sum --check`.
   2. Onboarding shows no permission as missing; Settings downloads the speech
      model with progress; Settings > Recording lists the input devices (A7).
-  3. The phone, paired in step 0, uploads a recording.
+  3. The phone, paired in step 0, uploads a recording; `ss -ltn 'sport =
+     :23820'` lists Steno's listener (X4).
   4. Join a Google Meet call in Firefox: the detection prompt appears (A8);
      record it, with the floating panel on top; stop; the meeting has a
      microphone lane and a system lane, and is transcribed, diarized and
@@ -1808,7 +1814,11 @@ interrupted" after one. On the GNOME machine,
      packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`), so
      the PKGBUILD verifies each `.deb`'s signature; add the README's Lua window
      rules to `~/.config/hypr/` and reload Hyprland. In step 0, `sudo ufw allow
-     Steno` runs right after the install and before the pairing, and the
+     Steno` runs right after the install and before the pairing (when the
+     previous candidate predates X4, its package has no profile and it listens
+     on a port from Linux's ephemeral range: run `sudo ufw allow
+     32768:60999/tcp` instead, and after the upgrade `sudo ufw allow Steno`
+     and `sudo ufw delete allow 32768:60999/tcp`), and the
      upgrade runs while the previous candidate, started at login, records;
      then stop the recording: the meeting processes. When the previous
      candidate predates X5, the autostart entry its first launch wrote names
@@ -1836,7 +1846,10 @@ interrupted" after one. On the GNOME machine,
      `llm-api-key` and `handover-identity`; `~/.local/share/Steno/secrets.json`
      holds only `"movedToSecretService": true`; Chromium's saved passwords still
      open (P8).
-  5. The phone uploads a recording through the firewall (X4).
+  5. The phone uploads a recording through the firewall (X4): `sudo ufw
+     status` lists `Steno` as `ALLOW` and no wider rule, `ss -ltn 'sport =
+     :23820'` lists Steno's listener, and `journalctl --user -b | grep
+     'could not be bound'` prints nothing.
   6. Steps 4 to 6 of the GNOME gate, with the call in Chromium and the logout
      through the system menu, which is `uwsm stop`. Also `hyprctl dispatch exit`
      while recording: after logging back in, the meeting is saved with `quit` as
@@ -1874,7 +1887,11 @@ interrupted" after one. On the GNOME machine,
      `steno.nixosModules.default` in the system's modules and
      `programs.steno.enable = true`.
   2. Steps 2 to 4 and 6 of the GNOME gate, with the phone through the firewall
-     the module opens (by hand until X4). Under the module, step 5's cgroup check, run
+     the module opens (X4; when step 0's candidate predates X4, step 0 opens
+     `networking.firewall.allowedTCPPortRanges = [{ from = 32768; to =
+     60999; }]` and `allowedUDPPorts = [5353]` by hand and the upgrade
+     removes them), and `systemctl --user show steno.service -p Environment`
+     names `STENO_HANDOVER_PORT=23820`. Under the module, step 5's cgroup check, run
      as `cg`, prints one line, ending in `steno.service`, and
      `systemctl --user show steno.service -p TimeoutStopUSec` is 20 s.
   3. Open Settings and choose a folder: the file chooser opens (the wrapper's
