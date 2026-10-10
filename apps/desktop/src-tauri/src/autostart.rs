@@ -314,24 +314,20 @@ fn with_off_at_exit(status: LoginItemStatus, mark: Option<&std::path::Path>) -> 
     }
 }
 
-/// At launch, on macOS, once the database is open: the Launch Agent a
-/// build under the earlier identifier left behind goes, and the app
-/// registers itself while `launch_at_login` (the stored setting) is on
-/// (`main_app::at_launch`). Nothing while the system manages the login
-/// item but the agent's removal, and nothing at all in a smoke run.
+/// At launch, on macOS, once the database is open and before the host's
+/// first-launch registration: the Launch Agent a build under the earlier
+/// identifier left behind goes (`main_app::remove_earlier_agent`), also
+/// while the system manages the login item; nothing in a smoke run. The
+/// counterpart of Linux's `remove_earlier_entry`.
 #[cfg(target_os = "macos")]
-pub fn at_launch_on_mac(launch_at_login: Option<bool>) {
+pub fn remove_earlier_agent() {
     if main_app::smoke_run() {
         return;
     }
-    let launch_at_login = launch_at_login.filter(|_| !packaged::login_item_is_managed());
-    let launch = main_app::at_launch(
+    main_app::log(&main_app::remove_earlier_agent(
         &main_app::UserLaunchAgents::of_home(),
-        &main_app::SystemMainApp,
-        launch_at_login,
         std::process::id(),
-    );
-    main_app::log(&launch);
+    ));
 }
 
 /// An update's relaunch is about to exit (`updater`): the next process

@@ -371,8 +371,26 @@ pub fn delete_recording_prompt() -> ConfirmDestructiveParams {
     }
 }
 
-/// The preferences flag `AppController` set on its first launch.
+/// The preferences flag `AppController` set on its first launch, which
+/// counts the first launch off the Mac.
 pub const LOGIN_ITEM_REGISTERED_KEY: &str = "steno.loginItemRegistered";
+
+/// The flag that counts the first launch on the Mac, where the login item
+/// is `SMAppService.mainApp` (D4 of `.plans/2026-10-07-stable-promotion.md`).
+/// A key of its own: a desktop build under the earlier identifier set
+/// [`LOGIN_ITEM_REGISTERED_KEY`] for the Launch Agent that the shell now
+/// removes, so that flag must not stop the first registration. Rust only.
+pub const MAIN_APP_REGISTERED_KEY: &str = "steno.mainAppRegistered";
+
+/// The flag that counts the first launch on `platform`
+/// ([`Host::register_login_item_on_first_launch`]).
+#[must_use]
+pub fn first_launch_key(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Macos => MAIN_APP_REGISTERED_KEY,
+        Platform::Windows | Platform::Linux => LOGIN_ITEM_REGISTERED_KEY,
+    }
+}
 
 fn no_such_meeting() -> BridgeError {
     BridgeError::not_found("No meeting with that id is listed.")
@@ -904,17 +922,24 @@ impl Host {
         )
     }
 
-    /// The first launch registers the login item when the setting says so;
-    /// a login item the system manages is left alone, and the first launch
-    /// is not counted, so a later install that leaves launch at login to the
-    /// app still registers it once. Nor is a launch counted whose
-    /// registration failed (on Linux, no launcher at a path that outlives
-    /// an upgrade), so a later launch tries again; the failure is not
-    /// shown. Swift: `AppController.registerLoginItemOnFirstLaunch`, which
-    /// counts the launch before it registers.
+    /// The first launch with the setting on registers the login item, once:
+    /// only while it reads `NotRegistered`, as in Swift, so one already
+    /// enabled or awaiting approval, or one the system cannot find, is left
+    /// as it is and the launch counts. The count is a preferences flag per
+    /// platform ([`first_launch_key`]); after it, only the switch in General
+    /// registers or removes the login item, so one the user removed in the
+    /// system's settings stays removed. A login item the system manages is
+    /// left alone, and the first launch is not counted, so a later install
+    /// that leaves launch at login to the app still registers it once. Nor
+    /// is a launch counted whose registration failed (on Linux, no
+    /// launcher at a path that outlives an upgrade), so a later launch
+    /// tries again; the failure is not shown. Swift:
+    /// `AppController.registerLoginItemOnFirstLaunch`, which counts the
+    /// launch before it registers.
     pub fn register_login_item_on_first_launch(&self) {
         let preferences = &self.shared.services.preferences;
-        if preferences.flag(LOGIN_ITEM_REGISTERED_KEY)
+        let key = first_launch_key(self.shared.config.platform);
+        if preferences.flag(key)
             || self.shared.services.login_item.status() == crate::services::LoginItemStatus::Managed
         {
             return;
@@ -929,7 +954,7 @@ impl Host {
             != crate::services::LoginItemStatus::NotRegistered
             || self.shared.services.login_item.set_enabled(true).is_ok();
         if registered {
-            preferences.set_flag(LOGIN_ITEM_REGISTERED_KEY, true);
+            preferences.set_flag(key, true);
         }
         let mut inner = self.lock();
         inner.general.login_item = self.shared.services.login_item.status();

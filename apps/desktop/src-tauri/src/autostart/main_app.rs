@@ -5,22 +5,20 @@
 //! `com.nicolaischmid.steno.desktop`, registers itself; the Swift app's
 //! entry is the system's to keep or drop, and nothing here touches it.
 //!
-//! At each launch ([`at_launch`]), first the Launch Agent a build under
-//! the earlier identifier wrote through `tauri-plugin-autostart`
-//! (`~/Library/LaunchAgents/Steno.plist`, [`EARLIER_AGENT_LABEL`]) goes,
-//! whatever the preferences say: unloaded unless it is the job this
-//! process runs as, then deleted ([`remove_earlier_agent`]). Then, while
-//! the stored `launch_at_login` setting is on and the login item is
-//! neither enabled nor awaiting the user's approval, the app registers
-//! itself ([`register_when_on`]). The setting is the user's word, kept
-//! in the shared database by the switch in General, so the preferences'
-//! `steno.loginItemRegistered`, which a build under the earlier
-//! identifier set for its Launch Agent, decides nothing here. A login
-//! item the user turned off in System Settings reads `requiresApproval`
-//! and stays off.
+//! At each launch, before the host's first-launch registration, the Launch
+//! Agent a build under the earlier identifier wrote through
+//! `tauri-plugin-autostart` (`~/Library/LaunchAgents/Steno.plist`,
+//! [`EARLIER_AGENT_LABEL`]) goes, whatever the preferences say: unloaded
+//! unless it is the job this process runs as, then deleted
+//! ([`remove_earlier_agent`]). The registration is the host's
+//! (`Host::register_login_item_on_first_launch` in `steno-host`): once, at
+//! the first launch with the stored `launch_at_login` setting on, under the
+//! preferences flag `steno.mainAppRegistered`; a failed registration tries
+//! again at the next launch, and after that only the switch in General
+//! registers or removes the login item ([`set_enabled`]).
 //!
-//! The decisions run over two traits, [`MainApp`] and [`LaunchAgents`],
-//! which the tests fake; the system's are [`SystemMainApp`] and
+//! The rules run over two traits, [`MainApp`] and [`LaunchAgents`], which
+//! the tests fake; the system's are [`SystemMainApp`] and
 //! [`UserLaunchAgents`], macOS only. A smoke run (`STENO_SMOKE_SECONDS`)
 //! registers and removes nothing.
 //!
@@ -116,64 +114,11 @@ pub fn remove_earlier_agent(agents: &dyn LaunchAgents, own_pid: u32) -> EarlierA
     }
 }
 
-/// What the launch did about the login item.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Registration {
-    /// Launch at login is off, or the setting could not be read.
-    Off,
-    /// Already enabled, or awaiting the user's approval.
-    Kept(LoginItemStatus),
-    /// Registered; the status after it (`RequiresApproval` until the user
-    /// allows it in System Settings).
-    Registered(LoginItemStatus),
-    Failed(String),
-}
-
-/// Registers the login item while `launch_at_login` is on and it is
-/// neither enabled nor awaiting approval.
-pub fn register_when_on(main_app: &dyn MainApp, launch_at_login: bool) -> Registration {
-    if !launch_at_login {
-        return Registration::Off;
-    }
-    match main_app.status() {
-        status @ (LoginItemStatus::Enabled | LoginItemStatus::RequiresApproval) => {
-            Registration::Kept(status)
-        }
-        _ => match main_app.register() {
-            Ok(()) => Registration::Registered(main_app.status()),
-            Err(error) => Registration::Failed(error),
-        },
-    }
-}
-
-/// What [`at_launch`] did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Launch {
-    pub earlier_agent: EarlierAgent,
-    pub registration: Registration,
-}
-
-/// The launch's login item step: the earlier agent removed first, then
-/// the registration while `launch_at_login` (the stored setting, none
-/// when it could not be read) is on.
-pub fn at_launch(
-    agents: &dyn LaunchAgents,
-    main_app: &dyn MainApp,
-    launch_at_login: Option<bool>,
-    own_pid: u32,
-) -> Launch {
-    let earlier_agent = remove_earlier_agent(agents, own_pid);
-    let registration = register_when_on(main_app, launch_at_login.unwrap_or(false));
-    Launch {
-        earlier_agent,
-        registration,
-    }
-}
-
-/// Logs what [`at_launch`] did: each change and failure as a warning,
-/// which the default filter shows; nothing when nothing changed.
-pub fn log(launch: &Launch) {
-    match &launch.earlier_agent {
+/// Logs what [`remove_earlier_agent`] did: each change and failure as a
+/// warning, which the default filter shows; nothing when there was no
+/// agent.
+pub fn log(earlier_agent: &EarlierAgent) {
+    match earlier_agent {
         EarlierAgent::None => {}
         EarlierAgent::NotSteno => tracing::warn!(
             "~/Library/LaunchAgents/{EARLIER_AGENT_LABEL}.plist starts another program; left alone"
@@ -186,15 +131,6 @@ pub fn log(launch: &Launch) {
             %error,
             "the Launch Agent an earlier Steno left behind could not be removed"
         ),
-    }
-    match &launch.registration {
-        Registration::Off | Registration::Kept(_) => {}
-        Registration::Registered(status) => {
-            tracing::warn!(?status, "registered Steno as a login item");
-        }
-        Registration::Failed(error) => {
-            tracing::warn!(%error, "Steno could not register as a login item");
-        }
     }
 }
 
@@ -290,16 +226,11 @@ mod system {
 
     /// `gui/<uid>/<label>`, launchd's name for the job in this user's GUI
     /// domain.
-    fn service_target(label: &str) -> Result<String, String> {
-        let output = Command::new("/usr/bin/id")
-            .arg("-u")
-            .output()
-            .map_err(|error| error.to_string())?;
-        let uid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !output.status.success() || uid.parse::<u32>().is_err() {
-            return Err(format!("id -u answered {uid:?}"));
-        }
-        Ok(format!("gui/{uid}/{label}"))
+    fn service_target(label: &str) -> String {
+        // SAFETY: `getuid` takes no arguments, touches no memory and
+        // cannot fail (POSIX).
+        let uid = unsafe { libc::getuid() };
+        format!("gui/{uid}/{label}")
     }
 
     impl LaunchAgents for UserLaunchAgents {
@@ -322,11 +253,8 @@ mod system {
         }
 
         fn job(&self, label: &str) -> Job {
-            let Ok(target) = service_target(label) else {
-                return Job::NotLoaded;
-            };
             match Command::new("/bin/launchctl")
-                .args(["print", &target])
+                .args(["print", &service_target(label)])
                 .output()
             {
                 Ok(output) if output.status.success() => Job::Loaded {
@@ -337,9 +265,8 @@ mod system {
         }
 
         fn bootout(&self, label: &str) -> Result<(), String> {
-            let target = service_target(label)?;
             let output = Command::new("/bin/launchctl")
-                .args(["bootout", &target])
+                .args(["bootout", &service_target(label)])
                 .output()
                 .map_err(|error| error.to_string())?;
             if output.status.success() {
@@ -374,7 +301,12 @@ mod system {
             assert_eq!(agents.job(&label), Job::NotLoaded);
             agents.remove(&label).unwrap();
             assert_eq!(agents.read(&label).unwrap(), None);
-            assert!(service_target(&label).unwrap().starts_with("gui/"));
+            let id = Command::new("/usr/bin/id").arg("-u").output().unwrap();
+            let uid = String::from_utf8(id.stdout).unwrap();
+            assert_eq!(
+                service_target(&label),
+                format!("gui/{}/{label}", uid.trim())
+            );
         }
     }
 }
@@ -506,22 +438,16 @@ mod tests {
 
     /// A build under the earlier identifier with launch at login on left
     /// its agent loaded (the app was opened from the Finder, or quit): the
-    /// job is booted out, its file deleted, and then the app registers.
+    /// job is booted out and its file deleted.
     #[test]
-    fn a_leftover_agent_is_removed_then_the_app_registers() {
+    fn a_leftover_agent_is_booted_out_and_deleted() {
         let agents = FakeAgents::with(EARLIER_AGENT, Job::Loaded { pid: None });
-        let main_app = not_registered();
-        let launch = at_launch(&agents, &main_app, Some(true), OWN_PID);
         assert_eq!(
-            launch,
-            Launch {
-                earlier_agent: EarlierAgent::Removed(Unloaded::BootedOut),
-                registration: Registration::Registered(LoginItemStatus::Enabled),
-            }
+            remove_earlier_agent(&agents, OWN_PID),
+            EarlierAgent::Removed(Unloaded::BootedOut)
         );
         assert_eq!(agents.calls(), ["read", "job", "bootout", "remove"]);
         assert!(agents.file.borrow().is_none());
-        assert_eq!(main_app.registered.get(), 1);
     }
 
     /// The first login after the update: launchd started this process from
@@ -531,102 +457,41 @@ mod tests {
     #[test]
     fn the_agent_this_process_runs_as_loses_its_file_only() {
         let agents = FakeAgents::with(EARLIER_AGENT, Job::Loaded { pid: Some(OWN_PID) });
-        let launch = at_launch(&agents, &not_registered(), Some(true), OWN_PID);
         assert_eq!(
-            launch.earlier_agent,
+            remove_earlier_agent(&agents, OWN_PID),
             EarlierAgent::Removed(Unloaded::RunsThisProcess)
         );
         assert_eq!(agents.calls(), ["read", "job", "remove"]);
         assert!(agents.file.borrow().is_none());
     }
 
-    /// Launch at login off: the leftover agent goes all the same, and
-    /// nothing registers; with the setting unreadable, nothing registers
-    /// either.
+    /// An agent that is not loaded loses its file; no agent at all is
+    /// only read for.
     #[test]
-    fn off_removes_the_leftover_agent_and_registers_nothing() {
-        for setting in [Some(false), None] {
-            let agents = FakeAgents::with(EARLIER_AGENT, Job::NotLoaded);
-            let main_app = not_registered();
-            let launch = at_launch(&agents, &main_app, setting, OWN_PID);
-            assert_eq!(
-                launch,
-                Launch {
-                    earlier_agent: EarlierAgent::Removed(Unloaded::NotLoaded),
-                    registration: Registration::Off,
-                }
-            );
-            assert!(agents.file.borrow().is_none());
-            assert_eq!(main_app.registered.get(), 0);
-            assert_eq!(main_app.status(), LoginItemStatus::NotRegistered);
-        }
-    }
-
-    /// Nothing to remove, an item already enabled, and one the user has
-    /// yet to allow (or turned off) in System Settings: nothing registers
-    /// again, and the status the General section shows is the system's.
-    #[test]
-    fn an_enabled_or_awaiting_login_item_is_kept() {
-        for status in [LoginItemStatus::Enabled, LoginItemStatus::RequiresApproval] {
-            let agents = FakeAgents::default();
-            let main_app = FakeMainApp::new(status, Err("not called".to_owned()));
-            let launch = at_launch(&agents, &main_app, Some(true), OWN_PID);
-            assert_eq!(launch.earlier_agent, EarlierAgent::None);
-            assert_eq!(launch.registration, Registration::Kept(status));
-            assert_eq!(main_app.registered.get(), 0);
-            assert_eq!(agents.calls(), ["read"]);
-        }
-    }
-
-    /// A registration the system leaves awaiting approval says so: the
-    /// General section shows "requires approval" with the button to System
-    /// Settings. A status the system cannot find registers too.
-    #[test]
-    fn a_registration_awaiting_approval_is_shown_as_such() {
-        let main_app = FakeMainApp::new(
-            LoginItemStatus::NotFound,
-            Ok(LoginItemStatus::RequiresApproval),
-        );
+    fn an_unloaded_agent_loses_its_file_and_none_is_nothing() {
+        let agents = FakeAgents::with(EARLIER_AGENT, Job::NotLoaded);
         assert_eq!(
-            register_when_on(&main_app, true),
-            Registration::Registered(LoginItemStatus::RequiresApproval)
+            remove_earlier_agent(&agents, OWN_PID),
+            EarlierAgent::Removed(Unloaded::NotLoaded)
         );
-        assert!(main_app.status().is_on());
-    }
-
-    /// A refused registration is reported with the system's reason, and
-    /// the status stays what it was, so General shows the switch off.
-    #[test]
-    fn a_failed_registration_is_surfaced() {
-        let main_app = FakeMainApp::new(
-            LoginItemStatus::NotRegistered,
-            Err("Operation not permitted".to_owned()),
-        );
-        let launch = at_launch(&FakeAgents::default(), &main_app, Some(true), OWN_PID);
-        assert_eq!(
-            launch.registration,
-            Registration::Failed("Operation not permitted".to_owned())
-        );
-        assert_eq!(main_app.status(), LoginItemStatus::NotRegistered);
-        assert!(set_enabled(&main_app, true).is_err());
+        assert!(agents.file.borrow().is_none());
+        let none = FakeAgents::default();
+        assert_eq!(remove_earlier_agent(&none, OWN_PID), EarlierAgent::None);
+        assert_eq!(none.calls(), ["read"]);
     }
 
     /// A file under the label that starts another program is not Steno's
-    /// and stays; one that cannot be read is reported. Neither stops the
-    /// registration.
+    /// and stays; one that cannot be read is reported.
     #[test]
     fn an_agent_that_is_not_stenos_stays() {
         let other = EARLIER_AGENT.replace("/Contents/MacOS/steno-desktop", "/Contents/MacOS/Steno");
         let agents = FakeAgents::with(&other, Job::Loaded { pid: None });
-        let main_app = not_registered();
-        let launch = at_launch(&agents, &main_app, Some(true), OWN_PID);
-        assert_eq!(launch.earlier_agent, EarlierAgent::NotSteno);
+        assert_eq!(
+            remove_earlier_agent(&agents, OWN_PID),
+            EarlierAgent::NotSteno
+        );
         assert_eq!(agents.calls(), ["read"]);
         assert!(agents.file.borrow().is_some());
-        assert_eq!(
-            launch.registration,
-            Registration::Registered(LoginItemStatus::Enabled)
-        );
 
         let unreadable = FakeAgents {
             unreadable: true,
@@ -636,6 +501,24 @@ mod tests {
             remove_earlier_agent(&unreadable, OWN_PID),
             EarlierAgent::Failed(_)
         ));
+    }
+
+    /// The leftover agent goes in `setup` before the host's launch, whose
+    /// first-launch registration (`Host::register_login_item_on_first_launch`)
+    /// would otherwise register the main app beside a Launch Agent that
+    /// still starts the same binary.
+    #[test]
+    fn the_leftover_agent_goes_before_the_hosts_launch() {
+        // Without the carriage returns a Windows checkout may add.
+        let main = include_str!("../main.rs").replace("\r\n", "\n");
+        let setup = &main[main.find("\nfn setup(").unwrap()..];
+        let removal = setup
+            .find("#[cfg(target_os = \"macos\")]\n    autostart::remove_earlier_agent();")
+            .expect("setup removes the leftover agent on macOS");
+        let launch = setup
+            .find("host::host(handle).launch(runtime);")
+            .expect("setup launches the host");
+        assert!(removal < launch);
     }
 
     /// A boot-out that fails still deletes the file, so the next login
@@ -662,6 +545,16 @@ mod tests {
         assert_eq!(main_app.status(), LoginItemStatus::Enabled);
         set_enabled(&main_app, false).unwrap();
         assert_eq!(main_app.status(), LoginItemStatus::NotRegistered);
+
+        let refused = FakeMainApp::new(
+            LoginItemStatus::NotRegistered,
+            Err("Operation not permitted".to_owned()),
+        );
+        assert_eq!(
+            set_enabled(&refused, true),
+            Err("Operation not permitted".to_owned())
+        );
+        assert_eq!(refused.status(), LoginItemStatus::NotRegistered);
     }
 
     #[test]

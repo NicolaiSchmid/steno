@@ -14,13 +14,14 @@ use common::*;
 use serde_json::{Value, json};
 use steno_bridge::{
     AssetIdParams, BridgeErrorCode, BridgeHost, BridgeTopic, DeviceIdParams, ExportUpdateParams,
-    PermissionKind, PermissionKindParams, PermissionState, RecordingRetention, RetentionMode,
-    SetAutomaticUpdatesParams, SetBoolParams, SetRetentionParams, SetStringParams,
+    PermissionKind, PermissionKindParams, PermissionState, Platform, RecordingRetention,
+    RetentionMode, SetAutomaticUpdatesParams, SetBoolParams, SetRetentionParams, SetStringParams,
     SetTemplateParams, SummariesUpdateParams,
 };
 use steno_core::paths::file_url;
 use steno_core::protocols::{BoundaryResult, SecretKey, SecretStore};
 use steno_core::{AudioRetention, LlmProvider};
+use steno_host::host::{LOGIN_ITEM_REGISTERED_KEY, MAIN_APP_REGISTERED_KEY, first_launch_key};
 use steno_host::services::{CodexModel, LoginItemStatus, UpdateOutcome};
 use steno_host::settings::{KeyRead, LlmSettingsViewModel};
 use steno_host::speech::ModelAsset;
@@ -162,12 +163,115 @@ fn a_check_outside_a_command_republishes_the_general_section() {
 /// path that outlives an upgrade (`packaged::NO_STABLE_PATH` on Linux).
 const NO_STABLE_PATH: &str = "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager.";
 
-/// Whether the first launch has been counted (`LOGIN_ITEM_REGISTERED_KEY`).
+/// Whether the first launch on the Mac has been counted
+/// (`MAIN_APP_REGISTERED_KEY`).
 fn launch_counted(harness: &Harness) -> bool {
-    harness
-        .fakes
-        .preferences
-        .flag(steno_host::host::LOGIN_ITEM_REGISTERED_KEY)
+    flag(harness, MAIN_APP_REGISTERED_KEY)
+}
+
+fn flag(harness: &Harness, key: &str) -> bool {
+    harness.fakes.preferences.flag(key)
+}
+
+/// The stored `launch_at_login` setting on.
+fn seed_launch_at_login(store: &steno_core::Store, _: &steno_host::fakes::FakeServices) {
+    let mut settings = store.settings().unwrap();
+    settings.launch_at_login = true;
+    store.save_settings(&settings).unwrap();
+}
+
+/// What the first-launch registration did on the Mac with the setting
+/// `on`, the login item reading `status` and the flags in `flags` set:
+/// the registrations it made, and whether it counted the launch.
+fn first_launch_on_mac(on: bool, status: LoginItemStatus, flags: &[&str]) -> (Vec<bool>, bool) {
+    let flags: Vec<String> = flags.iter().map(|&key| key.to_owned()).collect();
+    let harness = Harness::builder()
+        .platform(Platform::Macos)
+        .seed(move |store, fakes| {
+            if on {
+                seed_launch_at_login(store, fakes);
+            }
+            fakes.login_item.set_status(status);
+            for key in &flags {
+                fakes.preferences.set_flag(key, true);
+            }
+        })
+        .build();
+    harness.host.register_login_item_on_first_launch();
+    harness.host.register_login_item_on_first_launch();
+    let changes = harness.fakes.login_item.changes.lock().unwrap().clone();
+    (changes, launch_counted(&harness))
+}
+
+/// A desktop build under the earlier identifier set
+/// `steno.loginItemRegistered` for its Launch Agent; the main app was never
+/// registered, so the first launch on the new identifier registers it, once,
+/// under its own flag (stable plan S6). Rust only.
+#[test]
+fn the_earlier_builds_flag_does_not_stop_the_main_apps_first_registration() {
+    let (changes, counted) = first_launch_on_mac(
+        true,
+        LoginItemStatus::NotRegistered,
+        &[LOGIN_ITEM_REGISTERED_KEY],
+    );
+    assert_eq!(changes, [true]);
+    assert!(counted);
+}
+
+/// After the first launch, a login item the user removed in System
+/// Settings (it reads `NotRegistered`, the setting still on) stays
+/// removed: only the switch in General registers it again. Rust only.
+#[test]
+fn a_login_item_removed_after_the_first_launch_is_not_added_back() {
+    let (changes, counted) = first_launch_on_mac(
+        true,
+        LoginItemStatus::NotRegistered,
+        &[MAIN_APP_REGISTERED_KEY],
+    );
+    assert!(changes.is_empty(), "{changes:?}");
+    assert!(counted);
+}
+
+/// With the setting off nothing registers and the launch is not counted.
+/// A login item already enabled or awaiting approval, and one the system
+/// cannot find, is left as it is and the launch counts, as Swift registers
+/// only a `notRegistered` one. Swift: `registerLoginItemOnFirstLaunch`.
+#[test]
+fn the_first_launch_registers_only_a_not_registered_login_item_with_the_setting_on() {
+    assert_eq!(
+        first_launch_on_mac(false, LoginItemStatus::NotRegistered, &[]),
+        (vec![], false)
+    );
+    for status in [
+        LoginItemStatus::Enabled,
+        LoginItemStatus::RequiresApproval,
+        LoginItemStatus::NotFound,
+    ] {
+        assert_eq!(
+            first_launch_on_mac(true, status, &[]),
+            (vec![], true),
+            "{status:?}"
+        );
+    }
+}
+
+/// Off the Mac the first launch keeps the Swift app's flag, and the Mac's
+/// own flag means nothing there.
+#[test]
+fn off_the_mac_the_first_launch_is_counted_under_the_swift_flag() {
+    for platform in [Platform::Linux, Platform::Windows] {
+        let harness = Harness::builder()
+            .platform(platform)
+            .seed(seed_launch_at_login)
+            .seed(|_, fakes| fakes.preferences.set_flag(MAIN_APP_REGISTERED_KEY, true))
+            .build();
+        harness.host.register_login_item_on_first_launch();
+        harness.host.register_login_item_on_first_launch();
+        assert_eq!(*harness.fakes.login_item.changes.lock().unwrap(), [true]);
+        assert!(flag(&harness, LOGIN_ITEM_REGISTERED_KEY));
+        assert_eq!(first_launch_key(platform), LOGIN_ITEM_REGISTERED_KEY);
+    }
+    assert_eq!(first_launch_key(Platform::Macos), MAIN_APP_REGISTERED_KEY);
 }
 
 /// The first launch registers the login item once when the setting says
@@ -175,11 +279,6 @@ fn launch_counted(harness: &Harness) -> bool {
 /// and that launch is not counted. Rust only.
 #[test]
 fn the_first_launch_registers_the_login_item_unless_the_system_manages_it() {
-    let seed_launch_at_login = |store: &steno_core::Store, _: &steno_host::fakes::FakeServices| {
-        let mut settings = store.settings().unwrap();
-        settings.launch_at_login = true;
-        store.save_settings(&settings).unwrap();
-    };
     let harness = Harness::builder().seed(seed_launch_at_login).build();
     harness.host.register_login_item_on_first_launch();
     harness.host.register_login_item_on_first_launch();
