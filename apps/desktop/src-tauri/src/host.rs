@@ -260,16 +260,21 @@ mod real {
         steno_services::detection::fallback_app_name(bundle_id)
     }
 
+    /// In a pool of its own: the caller is the detector's long-lived
+    /// events thread, which has none, so what `AppKit` autoreleases here
+    /// would otherwise stay until the thread ends.
     #[cfg(target_os = "macos")]
     fn running_app_name(bundle_id: &str) -> Option<String> {
         use objc2_app_kit::NSRunningApplication;
         use objc2_foundation::NSString;
 
-        let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(
-            &NSString::from_str(bundle_id),
-        );
-        let name = running.firstObject()?.localizedName()?.to_string();
-        (!name.trim().is_empty()).then_some(name)
+        objc2::rc::autoreleasepool(|_| {
+            let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+                &NSString::from_str(bundle_id),
+            );
+            let name = running.firstObject()?.localizedName()?.to_string();
+            (!name.trim().is_empty()).then_some(name)
+        })
     }
 
     /// The window a command came from, for `Host::for_window`: the
