@@ -1802,7 +1802,7 @@ async fn a_carried_over_version_is_not_announced_during_its_install() {
     assert_eq!(*lock(&world.source.installed), ["0.13.0"]);
 }
 
-/// Where the installer ends the app (Windows, the NSIS setup and the
+/// Where the install ends the app (Windows, the NSIS setup and the
 /// MSI), the hold is kept through the install as well: a Record at the
 /// install and at the relaunch is refused.
 #[tokio::test]
@@ -1824,7 +1824,7 @@ async fn an_installer_that_ends_the_app_keeps_recording_off_through_the_install(
 }
 
 /// With automatic downloads on, an installer that asks an administrator
-/// (a `.deb`'s password, the MSI's prompt after it ended the app) is not
+/// (a `.deb`'s password, the MSI's prompt after the app ended) is not
 /// run by the schedule, since nobody may be there to answer: the kept
 /// package is announced, and the user's yes installs it without a second
 /// download.
@@ -2200,6 +2200,7 @@ async fn a_newer_version_found_during_the_download_asks_again() {
 /// shorter one installs on the yes.
 #[tokio::test(start_paused = true)]
 async fn a_long_download_asks_again_before_an_installer_that_asks() {
+    assert_eq!(LONG_DOWNLOAD, Duration::from_secs(30), "the plan's 30 s");
     for (took, asked) in [
         (LONG_DOWNLOAD + Duration::from_secs(1), true),
         (
@@ -2348,6 +2349,7 @@ async fn a_yes_during_the_install_is_not_told_it_is_installed() {
 /// The job hold ends at [`JOB_HOLD_LIMIT`], within a tenth of a second.
 #[tokio::test(start_paused = true)]
 async fn the_job_hold_ends_at_the_limit() {
+    assert_eq!(JOB_HOLD_LIMIT, Duration::from_secs(60), "the plan's minute");
     let world = World::new();
     let (_schedule, offer) = an_install_under_way(&world).await;
     let tenth = Duration::from_millis(100);

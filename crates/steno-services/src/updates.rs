@@ -53,7 +53,7 @@
 //!   ([`UpdateSource::tell_relaunch_waits`]), as is a yes given meanwhile.
 //!   A password typed after the limit still installs, and the relaunch
 //!   follows as it would have. The hold is kept through the shutdown and
-//!   the relaunch, and, where the installer ends the app (Windows), through
+//!   the relaunch, and, where the install ends the app (Windows), through
 //!   the install: meanwhile a Record is refused and says
 //!   [`INSTALLING_UPDATE`](steno_host::services::INSTALLING_UPDATE), and a
 //!   processing job, such as one for a phone recording that arrives, waits
@@ -63,10 +63,10 @@
 //!   password, a macOS bundle the user cannot write, the MSI's consent
 //!   prompt) runs only right after a yes given while the app is idle, so
 //!   someone is at the screen to answer. A download that took longer than
-//!   [`LONG_DOWNLOAD`] counts as such a wait. The MSI ends the app before
-//!   its prompt, so Steno is down until the prompt is answered; a no or a
-//!   failure starts the version that ran again, as a failed NSIS setup
-//!   does (the shell's Windows watcher). A yes given while the app was
+//!   [`LONG_DOWNLOAD`] counts as such a wait. On Windows the app ends
+//!   before the MSI's prompt, so Steno is down until the prompt is
+//!   answered; a no or a failure starts the version that ran again, as a
+//!   failed NSIS setup does (the shell's Windows watcher). A yes given while the app was
 //!   busy, or one the app turned busy after, is asked again once it is
 //!   idle ([`Question::InstallNow`]), before the install takes the hold.
 //!   "Later" there keeps a package the schedule had kept.
@@ -284,9 +284,11 @@ pub enum Question<'a> {
     /// answer that installs then is the default; neither answer stops the
     /// recording or the processing.
     AfterItEnds(Busy),
-    /// A yes put off while the app was busy, now that it is idle, for an
-    /// installer that asks an administrator: install this version now and
-    /// relaunch? Asked so someone is at the screen to answer the prompt.
+    /// A yes for an installer that asks an administrator, put off while
+    /// the app was busy or by a download that took longer than
+    /// [`LONG_DOWNLOAD`], now that the app is idle: install this version
+    /// now and relaunch? Asked so someone is at the screen to answer the
+    /// prompt.
     InstallNow(&'a str),
 }
 
@@ -326,13 +328,13 @@ pub enum Installer {
     /// Asks for an administrator's password, then installs and returns: a
     /// `.deb` or an `.rpm`, or a macOS bundle the user cannot write.
     AsksForAPassword,
-    /// Starts the installer, which ends the app and installs for the user
-    /// alone: Windows' NSIS setup. Nothing outside Steno is waited on
+    /// Ends the app and leaves the installer to a watcher: Windows' NSIS
+    /// setup, which installs for the user alone. Nothing outside Steno is waited on
     /// before the shutdown, and a setup that fails starts the version that
     /// ran again.
     EndsTheApp,
-    /// Starts the installer, which ends the app, then asks for an
-    /// administrator's consent and installs for every user: Windows' MSI.
+    /// Ends the app; the installer then asks for an administrator's consent
+    /// and installs for every user: Windows' MSI.
     /// Steno is down until the prompt is answered; a no or a failure
     /// starts the version that ran again.
     EndsTheAppThenAsks,
@@ -374,9 +376,9 @@ pub trait UpdateSource: Send + Sync {
     async fn download(&self, version: &str) -> Result<Vec<u8>, String>;
     /// Writes `package`, the download of `version`, over the app. Fails
     /// when the last check found another version, or none. On Windows it
-    /// runs the shutdown and ends the process once the installer runs,
-    /// under a watcher that starts this version again when the installer
-    /// does not install, so it returns there only when it failed.
+    /// runs the shutdown and ends the process once the watcher runs, which
+    /// starts this version again when the installer does not install, so
+    /// it returns there only when it failed.
     async fn install(&self, version: &str, package: Vec<u8>) -> Result<(), String>;
     /// How [`Self::install`] installs on this build.
     fn installer(&self) -> Installer;
@@ -859,7 +861,7 @@ impl UpdateSchedule {
     }
 
     /// Installs the downloaded `package` of `version` and relaunches, with
-    /// `hold`, the gate's, taken before the install. Where the installer
+    /// `hold`, the gate's, taken before the install. Where the install
     /// ends the app the hold is kept through the install, since the process
     /// ends inside it. An installer that returns may wait on a password
     /// prompt (a `.deb` install always asks), so recording starts are let
