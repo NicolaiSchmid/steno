@@ -29,14 +29,20 @@
 //! compositor's unit. Nothing here stops a scope.
 //!
 //! Started from an `AppImage`, the app reads its files from the image's
-//! mount, which the `AppImage` runtime's own process serves from the same
-//! cgroup: the compositor's final SIGTERM, or the stop of the app's own
-//! unit (a `uwsm-app` scope, GNOME's scope, the autostart unit), would end
-//! it while the app saves, and the app with it. Wherever the app runs in
-//! the user manager, that process gets a scope of its own,
+//! mount, which the `AppImage` runtime's own process, the mount server,
+//! serves (`appimage`). It runs in the unit the app was started in, or in
+//! the launcher's when the launcher moves only the app into a scope after
+//! the spawn (GNOME): the stop of that unit (the compositor's, a `uwsm-app`
+//! scope, GNOME's scope, the autostart unit, a user's own service) would
+//! end it while the app saves, and the app with it. Wherever the app runs
+//! in the user manager, the mount server gets a scope of its own,
 //! `app-steno\x2ddesktop\x2dimage-<pid>.scope` in `app.slice`, which no
-//! session's end stops; it ends itself when the app exits, and an exit of
-//! the user manager stops it after the app's unit.
+//! session's end stops; it ends by itself when the app exits, and an exit
+//! of the user manager stops it after the app's unit. Its move is checked
+//! as the app's is, and a failure is logged. In a login's
+//! `session-<n>.scope` (Hyprland without uwsm), outside the user manager,
+//! the mount server stays beside the app, with a warning: that scope's
+//! stop ends both.
 //!
 //! A scope (including another program's, which the app stays in), Steno's
 //! own service, and an app outside the user manager (a system service, an
@@ -52,19 +58,18 @@
 //!
 //! - [`leave_foreign_service`]: the one entry point, called first in
 //!   `setup`.
+//! - [`plan`]: what moves, from the cgroup and the mount server.
 //! - [`move_within`]: the request on a thread of its own, waited for at
 //!   most [`MOVE_TIMEOUT`].
 //! - [`user_bus`]: the connection to the user bus's socket.
 //! - [`move_out`]: the main-process check, the scopes' starts and the wait.
+//! - [`move_image`]: the mount server's scope, started and checked.
 //! - [`foreign_service`]: the unit to leave, from the cgroup.
-//! - [`image_server`]: the `AppImage` runtime's process, from the cgroup,
-//!   and [`move_image`], its scope's start.
 //!
 //! Swift: none; the Mac app is never in another program's unit.
 
-use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -106,7 +111,7 @@ enum MoveError {
     NoBus(std::io::Error),
     #[error(transparent)]
     Bus(#[from] zbus::Error),
-    #[error("the user manager's job ended without moving the app")]
+    #[error("the user manager's job ended without the move")]
     NotMoved,
     #[error("the user manager had not started the scope after {}s; its start stays queued", QUEUE_LIMIT.as_secs())]
     StillQueued,
@@ -155,41 +160,49 @@ fn user_unit<'a>(cgroup: &'a str, suffix: &str) -> Option<&'a str> {
 }
 
 /// The app's own unit in the user manager, a scope or a service: what the
-/// image's scope is ordered against when the app stays.
+/// mount server's scope is ordered against when the app stays.
 fn own_unit(cgroup: &str) -> Option<&str> {
     user_unit(cgroup, ".scope").or_else(|| user_unit(cgroup, ".service"))
 }
 
-/// The `AppImage` runtime's process that serves the image's mount, when the
-/// app runs from an `AppImage` (its executable is inside the mount,
-/// `$APPDIR`, and `$APPIMAGE` names the image, not only inherited from a
-/// launcher that is one): another process in the app's cgroup (`cgroup`,
-/// the app's cgroup file) whose executable is the image. The runtime
-/// daemonizes it before it starts the app, so it is no child of the app's.
-fn image_server(cgroup: &str, pid: u32) -> Option<u32> {
-    let mount = PathBuf::from(std::env::var_os("APPDIR")?);
-    if !std::env::current_exe().ok()?.starts_with(&mount) {
-        return None;
-    }
-    let image = PathBuf::from(std::env::var_os("APPIMAGE")?);
-    let procs = Path::new("/sys/fs/cgroup")
-        .join(unified(cgroup)?.trim_start_matches('/'))
-        .join("cgroup.procs");
-    running(&image, &std::fs::read_to_string(procs).ok()?, pid)
+/// Whether a cgroup file puts its process in a login's
+/// `session-<n>.scope`, outside the user manager.
+fn in_login_session(cgroup: &str) -> bool {
+    unified(cgroup).is_some_and(|path| {
+        path.starts_with("/user.slice/")
+            && innermost(cgroup)
+                .and_then(|unit| unit.strip_prefix("session-")?.strip_suffix(".scope"))
+                .is_some_and(|n| !n.is_empty())
+    })
 }
 
-/// The first pid of `procs` (a `cgroup.procs` file) other than `pid` whose
-/// executable is the file `image`.
-fn running(image: &Path, procs: &str, pid: u32) -> Option<u32> {
-    let image = std::fs::metadata(image).ok()?;
-    procs
-        .lines()
-        .filter_map(|line| line.parse::<u32>().ok())
-        .filter(|&other| other != pid)
-        .find(|other| {
-            std::fs::metadata(format!("/proc/{other}/exe"))
-                .is_ok_and(|exe| (exe.dev(), exe.ino()) == (image.dev(), image.ino()))
-        })
+/// What the launch moves.
+#[derive(Debug, PartialEq, Eq)]
+enum Plan<'a> {
+    /// The app leaves another program's service, and the mount server, when
+    /// there is one, leaves with it.
+    Leave(&'a str),
+    /// The app stays in its own unit, and the mount server (the pid) leaves
+    /// whatever unit it runs in, ordered before the app's.
+    MoveServer(u32, &'a str),
+    /// The app runs in a login's session scope, outside the user manager,
+    /// and the mount server (the pid) stays beside it.
+    ServerStays(u32),
+    /// Nothing moves.
+    Stay,
+}
+
+/// What the launch moves, from the app's cgroup file and the `AppImage`'s
+/// mount server, when the app runs from one.
+fn plan(cgroup: &str, server: Option<u32>) -> Plan<'_> {
+    if let Some(unit) = foreign_service(cgroup) {
+        return Plan::Leave(unit);
+    }
+    match (server, own_unit(cgroup)) {
+        (Some(server), Some(unit)) => Plan::MoveServer(server, unit),
+        (Some(server), None) if in_login_session(cgroup) => Plan::ServerStays(server),
+        _ => Plan::Stay,
+    }
 }
 
 /// The app's scope, named as the XDG convention for applications' units has
@@ -198,8 +211,8 @@ fn scope_name(pid: u32) -> String {
     format!("app-steno\\x2ddesktop-{pid}.scope")
 }
 
-/// The scope of the `AppImage` runtime's process `server`, named as
-/// [`scope_name`] names the app's.
+/// The scope of the mount server `server`, named as [`scope_name`] names
+/// the app's.
 fn image_scope_name(server: u32) -> String {
     format!("app-steno\\x2ddesktop\\x2dimage-{server}.scope")
 }
@@ -221,8 +234,8 @@ fn properties(pid: u32) -> Vec<(&'static str, Value<'static>)> {
     ]
 }
 
-/// What the image's scope is started with: outside the graphical slices,
-/// stopped after the app's scope `app`.
+/// What the mount server's scope is started with: outside the graphical
+/// slices, stopped after the app's unit `app`.
 fn image_properties(server: u32, app: &str) -> Vec<(&'static str, Value<'static>)> {
     vec![
         ("Description", Value::from("Steno's AppImage mount")),
@@ -286,22 +299,45 @@ fn start_scope(
     )
 }
 
-/// Moves the `AppImage` runtime's process `server` into a scope of its own,
-/// stopped after the app's unit `app`; a failure is logged.
-fn move_image(connection: &Connection, server: u32, app: &str) {
+/// Moves the mount server `server` into a scope of its own, stopped after
+/// the app's unit `app`, once `cgroup_of` names that scope for it, the
+/// job has ended, or `deadline` passes.
+fn move_image(
+    connection: &Connection,
+    server: u32,
+    app: &str,
+    cgroup_of: impl Fn(u32) -> std::io::Result<String>,
+    deadline: Instant,
+) -> Result<(), MoveError> {
     let scope = image_scope_name(server);
-    if let Err(error) = start_scope(connection, &scope, image_properties(server, app)) {
+    let job = start_scope(connection, &scope, image_properties(server, app))?;
+    joined(
+        connection,
+        &job,
+        || in_unit(&cgroup_of, server, &scope),
+        deadline,
+    )
+}
+
+/// [`move_image`], a failure logged.
+fn take_image(
+    connection: &Connection,
+    server: u32,
+    app: &str,
+    cgroup_of: impl Fn(u32) -> std::io::Result<String>,
+    deadline: Instant,
+) {
+    if let Err(error) = move_image(connection, server, app, cgroup_of, deadline) {
         image_stays(server, &error);
     }
 }
 
-/// Logs why the `AppImage` runtime's process `server` stays in the app's
-/// cgroup.
+/// Logs why the mount server `server` stays where it runs.
 fn image_stays(server: u32, error: &dyn std::fmt::Display) {
     tracing::warn!(
         server,
         %error,
-        "the AppImage's mount stays in Steno's cgroup, whose stop may end it while Steno saves a recording"
+        "the AppImage's mount server stays where it runs, and the stop of that unit at the session's end may end it while Steno saves a recording"
     );
 }
 
@@ -320,10 +356,48 @@ fn job_ended(connection: &Connection, job: &OwnedObjectPath) -> zbus::Result<boo
     }
 }
 
+/// Whether `cgroup_of` puts the process `pid` in the unit `name`.
+fn in_unit(cgroup_of: impl Fn(u32) -> std::io::Result<String>, pid: u32, name: &str) -> bool {
+    cgroup_of(pid).is_ok_and(|cgroup| innermost(&cgroup) == Some(name))
+}
+
+/// Waits for the start `job` to move a process: `Ok` once `moved` says so,
+/// `NotMoved` once the job has ended without it (`moved` read once more
+/// then), and `StillQueued` when `deadline` passes first. Nothing is called
+/// off.
+fn joined(
+    connection: &Connection,
+    job: &OwnedObjectPath,
+    moved: impl Fn() -> bool,
+    deadline: Instant,
+) -> Result<(), MoveError> {
+    loop {
+        if moved() {
+            return Ok(());
+        }
+        if job_ended(connection, job)? {
+            return if moved() {
+                Ok(())
+            } else {
+                Err(MoveError::NotMoved)
+            };
+        }
+        if Instant::now() >= deadline {
+            return Err(MoveError::StillQueued);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
 /// Moves the app `pid`, which runs in another program's service `unit`, into a
-/// scope of its own over `connection`, and the `AppImage` runtime's process
-/// `image` into one beside it; the app's scope once `read_cgroup` names it,
-/// or `None` when the app is `unit`'s main process and stays.
+/// scope of its own over `connection`, and the mount server `server` into one
+/// beside it; the app's scope once `cgroup_of` names it, or `None` when the
+/// app is `unit`'s main process and stays.
+///
+/// The app's scope is started first, so the mount server's can be ordered
+/// before it; when the app stays (its service's main process, or a failed
+/// call), the mount server's scope is ordered before `unit`. The mount
+/// server's move is checked before the app's.
 ///
 /// `StartTransientUnit` answers once the manager queued the job, and the job
 /// moves the app later: at once, or at login once `graphical-session.target`
@@ -336,74 +410,78 @@ fn move_out(
     connection: &Connection,
     unit: &str,
     pid: u32,
-    image: Option<u32>,
-    read_cgroup: impl Fn() -> std::io::Result<String>,
+    server: Option<u32>,
+    cgroup_of: impl Fn(u32) -> std::io::Result<String>,
     deadline: Instant,
 ) -> Outcome {
-    if main_pid(connection, unit)? == pid {
-        return Ok(None);
-    }
     let name = scope_name(pid);
-    let job = start_scope(connection, &name, properties(pid))?;
-    if let Some(server) = image {
-        move_image(connection, server, &name);
+    let started = match main_pid(connection, unit) {
+        Ok(main) if main == pid => Ok(None),
+        Ok(_) => start_scope(connection, &name, properties(pid)).map(Some),
+        Err(error) => Err(error),
+    };
+    if let Some(server) = server {
+        let before = if matches!(started, Ok(Some(_))) {
+            name.as_str()
+        } else {
+            unit
+        };
+        take_image(connection, server, before, &cgroup_of, deadline);
     }
-    let in_scope = || read_cgroup().is_ok_and(|cgroup| innermost(&cgroup) == Some(name.as_str()));
-    loop {
-        if in_scope() {
-            return Ok(Some(name));
-        }
-        if job_ended(connection, &job)? {
-            return if in_scope() {
-                Ok(Some(name))
-            } else {
-                Err(MoveError::NotMoved)
-            };
-        }
-        if Instant::now() >= deadline {
-            return Err(MoveError::StillQueued);
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
+    let Some(job) = started? else {
+        return Ok(None);
+    };
+    joined(
+        connection,
+        &job,
+        || in_unit(&cgroup_of, pid, &name),
+        deadline,
+    )?;
+    Ok(Some(name))
 }
 
-/// This process's cgroup file.
-fn own_cgroup() -> std::io::Result<String> {
-    std::fs::read_to_string("/proc/self/cgroup")
-}
-
-/// The connection `builder` sets up, each call answered within
-/// [`CALL_TIMEOUT`] or failed.
-fn connected(builder: Builder<'_>) -> zbus::Result<Connection> {
-    builder.method_timeout(CALL_TIMEOUT).build()
+/// The cgroup file of the process `pid`.
+fn cgroup_of(pid: u32) -> std::io::Result<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
 }
 
 /// A connection to the user bus's socket in `$XDG_RUNTIME_DIR`.
 fn user_bus() -> Result<Connection, MoveError> {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
+    bus_in(
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .as_deref()
+            .map(Path::new),
+    )
+}
+
+/// A connection to the bus socket `bus` in the runtime directory `runtime`,
+/// which has to be an absolute path, each call answered within
+/// [`CALL_TIMEOUT`] or failed.
+fn bus_in(runtime: Option<&Path>) -> Result<Connection, MoveError> {
+    let runtime = runtime
         .filter(|dir| dir.is_absolute())
         .ok_or(MoveError::NoRuntimeDir)?;
     let stream = UnixStream::connect(runtime.join("bus")).map_err(MoveError::NoBus)?;
-    Ok(connected(Builder::async_io_unix_stream(stream))?)
+    Ok(Builder::async_io_unix_stream(stream)
+        .method_timeout(CALL_TIMEOUT)
+        .build()?)
 }
 
 /// Runs `request` on a thread of its own and waits at most `wait` for its
-/// outcome; `Waiting` after that. The thread then goes on and [`report`]s
-/// its outcome for `unit` itself: the outcome is handed over only to a
-/// receiver still waiting, so it is reported exactly once.
+/// outcome; `Waiting` after that. The thread then goes on and hands its
+/// outcome to `late` itself: the outcome is handed over only to a receiver
+/// still waiting, so it reaches exactly one of the two.
 fn move_within(
     wait: Duration,
-    unit: &str,
     request: impl FnOnce() -> Outcome + Send + 'static,
+    late: impl FnOnce(Outcome) + Send + 'static,
 ) -> Outcome {
     let (done, outcome) = mpsc::sync_channel(0);
-    let late = unit.to_owned();
     let spawned = std::thread::Builder::new()
         .name("steno-own-scope".to_owned())
         .spawn(move || {
             if let Err(mpsc::SendError(outcome)) = done.send(request()) {
-                report(&late, &outcome, true);
+                late(outcome);
             }
         });
     match spawned {
@@ -433,7 +511,7 @@ fn report(unit: &str, outcome: &Outcome, late: bool) {
             "the move into a scope of its own still waits for the user manager, at login until graphical-session.target is reached; its outcome follows"
         ),
         Err(error) => {
-            let now = own_cgroup().ok();
+            let now = cgroup_of(std::process::id()).ok();
             let now = now.as_deref().and_then(innermost).unwrap_or("unknown");
             tracing::warn!(
                 %unit,
@@ -447,38 +525,53 @@ fn report(unit: &str, outcome: &Outcome, late: bool) {
 }
 
 /// Moves the app into a scope of its own when it runs in another program's
-/// service, waiting at most [`MOVE_TIMEOUT`], and the `AppImage` runtime's
-/// process out of the app's unit (the module docs). Called at launch,
+/// service, waiting at most [`MOVE_TIMEOUT`], and the `AppImage`'s mount
+/// server out of the unit it runs in (the module docs). Called at launch,
 /// before the first window. Never fails: the app records where it is
 /// otherwise.
 pub fn leave_foreign_service() {
-    let Ok(cgroup) = own_cgroup() else {
+    let pid = std::process::id();
+    let Ok(cgroup) = cgroup_of(pid) else {
         return;
     };
-    let pid = std::process::id();
-    let image = image_server(&cgroup, pid);
-    let Some(unit) = foreign_service(&cgroup).map(str::to_owned) else {
-        // In a unit of its own, the app stays; the image's process leaves
-        // it on a thread nothing waits for.
-        if let (Some(server), Some(app)) = (image, own_unit(&cgroup).map(str::to_owned)) {
+    let server = crate::appimage::mount_server(pid);
+    let deadline = Instant::now() + QUEUE_LIMIT;
+    match plan(&cgroup, server) {
+        Plan::Leave(unit) => {
+            let (request, late) = (unit.to_owned(), unit.to_owned());
+            let outcome = move_within(
+                MOVE_TIMEOUT,
+                move || {
+                    let connection = user_bus().inspect_err(|error| {
+                        if let Some(server) = server {
+                            image_stays(server, error);
+                        }
+                    })?;
+                    move_out(&connection, &request, pid, server, cgroup_of, deadline)
+                },
+                move |outcome| report(&late, &outcome, true),
+            );
+            report(unit, &outcome, false);
+        }
+        Plan::MoveServer(server, unit) => {
+            // On a thread nothing waits for: the app stays either way.
+            let app = unit.to_owned();
             let spawned = std::thread::Builder::new()
                 .name("steno-image-scope".to_owned())
                 .spawn(move || match user_bus() {
-                    Ok(connection) => move_image(&connection, server, &app),
+                    Ok(connection) => take_image(&connection, server, &app, cgroup_of, deadline),
                     Err(error) => image_stays(server, &error),
                 });
             if let Err(error) = spawned {
                 image_stays(server, &error);
             }
         }
-        return;
-    };
-    let deadline = Instant::now() + QUEUE_LIMIT;
-    let request = unit.clone();
-    let outcome = move_within(MOVE_TIMEOUT, &unit, move || {
-        move_out(&user_bus()?, &request, pid, image, own_cgroup, deadline)
-    });
-    report(&unit, &outcome, false);
+        Plan::ServerStays(server) => image_stays(
+            server,
+            &"Steno runs in a login's session scope, outside the user manager",
+        ),
+        Plan::Stay => {}
+    }
 }
 
 #[cfg(test)]
@@ -603,25 +696,45 @@ mod tests {
         assert!(QUEUE_LIMIT > Duration::from_secs(30));
     }
 
-    /// The image's process is found by its executable, never the app itself.
+    /// The launch's choice, with GNOME's scope (where the launcher left the
+    /// mount server behind) and the autostart unit among the inputs.
     #[test]
-    fn the_image_server_is_the_other_process_running_the_image() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        let server = child.id();
-        let image = std::fs::read_link(format!("/proc/{server}/exe")).unwrap();
-        let own = std::process::id();
-        let procs = format!("{own}\n{server}\n");
-        assert_eq!(running(&image, &procs, own), Some(server));
-        assert_eq!(running(&image, &format!("{own}\n"), own), None);
-        assert_eq!(running(&image, &procs, server), None);
-        let test = std::env::current_exe().unwrap();
-        assert_eq!(running(&test, &procs, own), None);
-        assert_eq!(running(Path::new("/nonexistent"), &procs, own), None);
-        child.kill().unwrap();
-        child.wait().unwrap();
+    fn the_plan_moves_the_app_out_of_another_programs_service_and_the_server_out_of_any_unit() {
+        let hyprland = below_user_manager(&format!("session.slice/{HYPRLAND}"));
+        let gnome = below_user_manager("app.slice/app-gnome-steno\\x2ddesktop-4242.scope");
+        let autostart = below_user_manager("app.slice/app-steno\\x2ddesktop@autostart.service");
+        let uwsm = below_user_manager(
+            "app.slice/app-graphical.slice/app-Hyprland-steno\\x2ddesktop-1a2b3c4d.scope",
+        );
+        let session = "0::/user.slice/user-1000.slice/session-3.scope\n";
+        assert_eq!(plan(&hyprland, Some(77)), Plan::Leave(HYPRLAND));
+        assert_eq!(plan(&hyprland, None), Plan::Leave(HYPRLAND));
+        assert_eq!(
+            plan(&gnome, Some(77)),
+            Plan::MoveServer(77, "app-gnome-steno\\x2ddesktop-4242.scope")
+        );
+        assert_eq!(
+            plan(&autostart, Some(77)),
+            Plan::MoveServer(77, "app-steno\\x2ddesktop@autostart.service")
+        );
+        assert_eq!(
+            plan(&uwsm, Some(77)),
+            Plan::MoveServer(77, "app-Hyprland-steno\\x2ddesktop-1a2b3c4d.scope")
+        );
+        assert_eq!(plan(session, Some(77)), Plan::ServerStays(77));
+        for stays in [gnome.as_str(), autostart.as_str(), uwsm.as_str(), session] {
+            assert_eq!(plan(stays, None), Plan::Stay, "{stays}");
+        }
+        // A system service, a container's root, a sub-cgroup, no cgroup v2.
+        for stays in [
+            "0::/system.slice/display-manager.service\n",
+            "0::/\n",
+            "0::/user.slice/user-1000.slice/session-3.scope/sub\n",
+            "0::/user.slice/user-1000.slice/session-.scope\n",
+            "",
+        ] {
+            assert_eq!(plan(stays, Some(77)), Plan::Stay, "{stays}");
+        }
     }
 
     /// One `StartTransientUnit` call: the name, the mode, the properties
@@ -636,13 +749,15 @@ mod tests {
     const JOB: &str = "/org/freedesktop/systemd1/job/4711";
     const UNIT: &str = "/org/freedesktop/systemd1/unit/wayland_2dwm_40hyprland_2edesktop_2eservice";
 
-    /// What the fake manager was asked.
+    /// What the fake manager was asked, and whether it refuses the app's
+    /// scope.
     #[derive(Default)]
     struct Asked {
         units: Mutex<Vec<String>>,
         started: Mutex<Vec<Started>>,
         cancelled: AtomicUsize,
         stopped: Mutex<Vec<(String, String)>>,
+        refuse_app: AtomicBool,
     }
 
     /// The user manager as far as the move goes: every start queues
@@ -665,13 +780,16 @@ mod tests {
             mode: String,
             properties: Vec<(String, OwnedValue)>,
             auxiliary: Vec<(String, Vec<(String, OwnedValue)>)>,
-        ) -> OwnedObjectPath {
+        ) -> zbus::fdo::Result<OwnedObjectPath> {
+            if self.0.refuse_app.load(Ordering::SeqCst) && name == scope_name(4242) {
+                return Err(zbus::fdo::Error::Failed("refused".to_owned()));
+            }
             self.0
                 .started
                 .lock()
                 .unwrap()
                 .push((name, mode, properties, auxiliary));
-            OwnedObjectPath::try_from(JOB).unwrap()
+            Ok(OwnedObjectPath::try_from(JOB).unwrap())
         }
 
         fn stop_unit(&self, name: String, mode: String) -> OwnedObjectPath {
@@ -746,27 +864,27 @@ mod tests {
             .expect("returned within 10 s")
     }
 
+    /// The cgroup files the fake's processes read.
+    type CgroupOf = fn(u32) -> std::io::Result<String>;
+
     /// [`move_out`] for the app 4242 in Hyprland's unit, bounded.
-    fn move_app(
-        app: &Connection,
-        image: Option<u32>,
-        read_cgroup: impl Fn() -> std::io::Result<String> + Send + 'static,
-    ) -> Outcome {
+    fn move_app(app: &Connection, server: Option<u32>, cgroup_of: CgroupOf) -> Outcome {
         let app = app.clone();
-        bounded(move || move_out(&app, HYPRLAND, 4242, image, read_cgroup, soon()))
+        bounded(move || move_out(&app, HYPRLAND, 4242, server, cgroup_of, soon()))
     }
 
-    /// The app's cgroup once the manager moved it.
-    const IN_SCOPE: fn() -> std::io::Result<String> = || {
-        Ok(below_user_manager(&format!(
-            "app.slice/app-graphical.slice/{}",
-            scope_name(4242)
-        )))
+    /// Every process once the manager moved it: the app 4242 in its scope,
+    /// any other in the mount server's.
+    const MOVED: CgroupOf = |pid| {
+        Ok(below_user_manager(&if pid == 4242 {
+            format!("app.slice/app-graphical.slice/{}", scope_name(pid))
+        } else {
+            format!("app.slice/{}", image_scope_name(pid))
+        }))
     };
 
-    /// The app's cgroup when the manager never moved it.
-    const LEFT_BEHIND: fn() -> std::io::Result<String> =
-        || Ok(below_user_manager(&format!("session.slice/{HYPRLAND}")));
+    /// Every process when the manager never moved it.
+    const LEFT_BEHIND: CgroupOf = |_| Ok(below_user_manager(&format!("session.slice/{HYPRLAND}")));
 
     fn soon() -> Instant {
         Instant::now() + Duration::from_millis(300)
@@ -777,6 +895,20 @@ mod tests {
         value.try_clone().unwrap()
     }
 
+    /// The names of the scopes started, and the `Before=` of the mount
+    /// server's.
+    fn starts(asked: &Asked) -> (Vec<String>, Option<Vec<String>>) {
+        let started = asked.started.lock().unwrap();
+        let names = started.iter().map(|(name, ..)| name.clone()).collect();
+        let before = started
+            .iter()
+            .find(|(name, ..)| *name == image_scope_name(77))
+            .map(|(_, _, properties, _)| {
+                Vec::<String>::try_from(property(properties, "Before")).unwrap()
+            });
+        (names, before)
+    }
+
     #[test]
     fn the_app_asks_for_a_scope_of_its_own_in_the_app_slice() {
         let Some(daemon) = Daemon::start() else {
@@ -785,7 +917,7 @@ mod tests {
         let asked = leak();
         let (_manager, app) = serve(&daemon, asked, true, Some(7));
 
-        let moved = move_app(&app, None, IN_SCOPE).unwrap();
+        let moved = move_app(&app, None, MOVED).unwrap();
         assert_eq!(moved.as_deref(), Some("app-steno\\x2ddesktop-4242.scope"));
         assert_eq!(*asked.units.lock().unwrap(), [HYPRLAND]);
         let started = asked.started.lock().unwrap();
@@ -825,14 +957,14 @@ mod tests {
     }
 
     #[test]
-    fn the_image_server_gets_a_scope_of_its_own_that_no_session_end_stops() {
+    fn the_mount_server_gets_a_scope_of_its_own_that_no_session_end_stops() {
         let Some(daemon) = Daemon::start() else {
             return;
         };
         let asked = leak();
         let (_manager, app) = serve(&daemon, asked, true, Some(7));
 
-        let moved = move_app(&app, Some(77), IN_SCOPE).unwrap();
+        let moved = move_app(&app, Some(77), MOVED).unwrap();
         assert_eq!(moved, Some(scope_name(4242)));
         let started = asked.started.lock().unwrap();
         let [(app_scope, ..), (name, mode, properties, auxiliary)] = started.as_slice() else {
@@ -864,40 +996,94 @@ mod tests {
         nothing_undone(asked);
     }
 
-    /// An app that stays in its own unit moves only the image's process,
-    /// ordered before that unit's stop.
-    #[test]
-    fn the_image_server_of_an_app_in_its_own_unit_leaves_it() {
-        let Some(daemon) = Daemon::start() else {
-            return;
-        };
+    /// The fake on a bus of its own, with the job `queued` or ended and
+    /// the service's `main_pid`: the bus, what the fake was asked, the
+    /// fake's connection and the app's.
+    fn fake(
+        queued: bool,
+        main_pid: Option<u32>,
+    ) -> Option<(Daemon, &'static Asked, Connection, Connection)> {
+        let daemon = Daemon::start()?;
         let asked = leak();
-        let (_manager, app) = serve(&daemon, asked, true, Some(7));
-        let unit = "app-steno\\x2ddesktop@autostart.service";
-
-        bounded(move || move_image(&app, 77, unit));
-        let started = asked.started.lock().unwrap();
-        let [(name, _, properties, _)] = started.as_slice() else {
-            panic!("one start: {}", started.len());
-        };
-        assert_eq!(*name, image_scope_name(77));
-        assert_eq!(
-            Vec::<String>::try_from(property(properties, "Before")).unwrap(),
-            [unit]
-        );
-        assert!(asked.units.lock().unwrap().is_empty());
+        let (manager, app) = serve(&daemon, asked, queued, main_pid);
+        Some((daemon, asked, manager, app))
     }
 
     #[test]
     fn the_services_main_process_stays() {
+        let Some((_daemon, asked, _manager, app)) = fake(true, Some(4242)) else {
+            return;
+        };
+        assert!(matches!(move_app(&app, None, MOVED), Ok(None)));
+        assert!(asked.started.lock().unwrap().is_empty());
+    }
+
+    /// An app that stays where it is still moves the mount server, ordered
+    /// before the unit it stays in: as its service's main process, when its
+    /// service's main process is unknown, and when its own scope is refused.
+    #[test]
+    fn the_mount_server_leaves_whenever_the_app_stays() {
+        let image = || (vec![image_scope_name(77)], Some(vec![HYPRLAND.to_owned()]));
+
+        let Some((_daemon, asked, _manager, app)) = fake(true, Some(4242)) else {
+            return;
+        };
+        assert!(matches!(move_app(&app, Some(77), MOVED), Ok(None)));
+        assert_eq!(starts(asked), image());
+
+        let Some((_daemon, asked, _manager, app)) = fake(true, None) else {
+            return;
+        };
+        let error = move_app(&app, Some(77), MOVED).unwrap_err();
+        assert!(matches!(error, MoveError::Bus(_)), "{error}");
+        assert_eq!(starts(asked), image());
+
+        let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
+            return;
+        };
+        asked.refuse_app.store(true, Ordering::SeqCst);
+        let error = move_app(&app, Some(77), MOVED).unwrap_err();
+        assert!(matches!(error, MoveError::Bus(_)), "{error}");
+        assert_eq!(starts(asked), image());
+        nothing_undone(asked);
+    }
+
+    /// The mount server's move counts once its cgroup names its scope; a
+    /// start still queued at the deadline, a job that ended without it and
+    /// no manager are errors, which `take_image` logs.
+    #[test]
+    fn the_mount_servers_move_is_checked() {
+        let unit = "app-steno\\x2ddesktop@autostart.service";
+        let image = |app: &Connection, cgroup_of: CgroupOf| {
+            let app = app.clone();
+            bounded(move || move_image(&app, 77, unit, cgroup_of, soon()))
+        };
+
+        let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
+            return;
+        };
+        image(&app, MOVED).unwrap();
+        assert_eq!(
+            starts(asked),
+            (vec![image_scope_name(77)], Some(vec![unit.to_owned()]))
+        );
+        assert!(asked.units.lock().unwrap().is_empty());
+        let error = image(&app, LEFT_BEHIND).unwrap_err();
+        assert!(matches!(error, MoveError::StillQueued), "{error}");
+        nothing_undone(asked);
+
+        let Some((_daemon, _asked, _manager, app)) = fake(false, Some(7)) else {
+            return;
+        };
+        let error = image(&app, LEFT_BEHIND).unwrap_err();
+        assert!(matches!(error, MoveError::NotMoved), "{error}");
+        image(&app, MOVED).unwrap();
+
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let asked = leak();
-        let (_manager, app) = serve(&daemon, asked, true, Some(4242));
-
-        assert!(matches!(move_app(&app, Some(77), IN_SCOPE), Ok(None)));
-        assert!(asked.started.lock().unwrap().is_empty());
+        let error = image(&daemon.connect(), MOVED).unwrap_err();
+        assert!(matches!(error, MoveError::Bus(_)), "{error}");
     }
 
     #[test]
@@ -908,7 +1094,7 @@ mod tests {
         let asked = leak();
         let (_manager, app) = serve(&daemon, asked, true, None);
 
-        let error = move_app(&app, None, IN_SCOPE).unwrap_err();
+        let error = move_app(&app, None, MOVED).unwrap_err();
         assert!(matches!(error, MoveError::Bus(_)), "{error}");
         assert!(asked.started.lock().unwrap().is_empty());
     }
@@ -921,11 +1107,11 @@ mod tests {
         };
         let asked = leak();
         let (_manager, app) = serve(&daemon, asked, true, Some(7));
-        let after_three_reads = || {
+        let after_three_reads: CgroupOf = |pid| {
             if READS.fetch_add(1, Ordering::SeqCst) < 3 {
-                LEFT_BEHIND()
+                LEFT_BEHIND(pid)
             } else {
-                IN_SCOPE()
+                MOVED(pid)
             }
         };
 
@@ -965,11 +1151,11 @@ mod tests {
         assert!(matches!(error, MoveError::NotMoved), "{error}");
 
         // The job moved the app just before it ended.
-        let joins_as_the_job_ends = || {
+        let joins_as_the_job_ends: CgroupOf = |pid| {
             if JOINED.swap(true, Ordering::SeqCst) {
-                IN_SCOPE()
+                MOVED(pid)
             } else {
-                LEFT_BEHIND()
+                LEFT_BEHIND(pid)
             }
         };
         let moved = move_app(&app, None, joins_as_the_job_ends).unwrap();
@@ -984,25 +1170,68 @@ mod tests {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let error = move_app(&daemon.connect(), None, IN_SCOPE).unwrap_err();
+        let error = move_app(&daemon.connect(), None, MOVED).unwrap_err();
         assert!(
             matches!(&error, MoveError::Bus(zbus::Error::MethodError(name, ..)) if name.starts_with("org.freedesktop.DBus.Error.")),
             "{error}"
         );
     }
 
+    /// A runtime directory of its own, removed with the value.
+    struct RuntimeDir(std::path::PathBuf);
+
+    impl RuntimeDir {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("steno-own-scope-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for RuntimeDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The user bus is the socket `bus` in the runtime directory, which has
+    /// to be an absolute path.
+    #[test]
+    fn the_user_bus_is_the_runtime_directorys_socket() {
+        let runtime = RuntimeDir::new("bus");
+        let Some(_daemon) =
+            Daemon::start_at(&format!("unix:path={}", runtime.0.join("bus").display()))
+        else {
+            return;
+        };
+        let connection = bus_in(Some(&runtime.0)).unwrap();
+        assert!(connection.unique_name().is_some());
+
+        assert!(matches!(bus_in(None), Err(MoveError::NoRuntimeDir)));
+        assert!(matches!(
+            bus_in(Some(Path::new("relative/run"))),
+            Err(MoveError::NoRuntimeDir)
+        ));
+        let empty = RuntimeDir::new("empty");
+        assert!(matches!(bus_in(Some(&empty.0)), Err(MoveError::NoBus(_))));
+    }
+
     /// A manager that owns its name and never answers ends the request
-    /// within the call timeout.
+    /// within the call timeout of the user bus's connection.
     #[test]
     fn a_silent_user_manager_ends_the_request_in_time() {
-        let Some(daemon) = Daemon::start() else {
+        let runtime = RuntimeDir::new("silent");
+        let Some(daemon) =
+            Daemon::start_at(&format!("unix:path={}", runtime.0.join("bus").display()))
+        else {
             return;
         };
         let _silent = daemon.builder().name(SYSTEMD).unwrap().build().unwrap();
-        let app = connected(daemon.builder()).unwrap();
+        let app = bus_in(Some(&runtime.0)).unwrap();
 
         let started = Instant::now();
-        let error = move_app(&app, None, IN_SCOPE).unwrap_err();
+        let error = move_app(&app, None, MOVED).unwrap_err();
         assert!(matches!(error, MoveError::Bus(_)), "{error}");
         assert!(started.elapsed() < CALL_TIMEOUT + Duration::from_secs(2));
     }
@@ -1011,20 +1240,57 @@ mod tests {
     /// request still runs.
     #[test]
     fn the_launch_goes_on_while_the_move_waits() {
-        let moved = move_within(Duration::from_secs(5), HYPRLAND, || {
-            Ok(Some(scope_name(4242)))
-        });
+        let moved = move_within(
+            Duration::from_secs(5),
+            || Ok(Some(scope_name(4242))),
+            |_| panic!("handed over in time"),
+        );
         assert_eq!(moved.unwrap(), Some(scope_name(4242)));
 
         let started = Instant::now();
         let waiting = bounded(|| {
-            move_within(Duration::from_millis(100), HYPRLAND, || {
-                loop {
-                    std::thread::park();
-                }
-            })
+            move_within(
+                Duration::from_millis(100),
+                || {
+                    loop {
+                        std::thread::park();
+                    }
+                },
+                |_| {},
+            )
         });
         assert!(matches!(waiting, Err(MoveError::Waiting)), "{waiting:?}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// An outcome that comes after the launch went on reaches the late
+    /// report, once; one that comes in time never does.
+    #[test]
+    fn a_late_outcome_is_reported_once() {
+        let (reported, late) = mpsc::channel();
+        let early = reported.clone();
+        let waiting = move_within(
+            Duration::from_millis(50),
+            || {
+                std::thread::sleep(Duration::from_millis(300));
+                Ok(Some(scope_name(4242)))
+            },
+            move |outcome| reported.send(outcome).unwrap(),
+        );
+        assert!(matches!(waiting, Err(MoveError::Waiting)), "{waiting:?}");
+        let outcome = late.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(outcome.unwrap(), Some(scope_name(4242)));
+
+        let moved = move_within(
+            Duration::from_secs(5),
+            || Ok(None),
+            move |outcome| early.send(outcome).unwrap(),
+        );
+        assert!(matches!(moved, Ok(None)));
+        // Both senders are gone once the threads end: nothing more came.
+        assert!(matches!(
+            late.recv_timeout(Duration::from_secs(5)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
     }
 }

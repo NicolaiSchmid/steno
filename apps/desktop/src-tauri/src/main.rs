@@ -17,8 +17,9 @@
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
 //! instance, on Linux the logout and shutdown clients (`session_end`) and
 //! the systemd drop-ins for the stop timeout (`stop_timeout`), a scope of
-//! its own when it starts inside another program's service (`own_scope`),
-//! and on a Wayland session the `XWayland` backend the panels need (`display`).
+//! its own when it starts inside another program's service, and one for
+//! the `AppImage`'s mount server (`own_scope`, `appimage`), and on a
+//! Wayland session the `XWayland` backend the panels need (`display`).
 //! Every one is a thin module over a Tauri plugin or an OS API with its
 //! rules in plain functions the tests cover. Everything that is on the
 //! wire (errors, topics, windows, sections, params) is the `steno-bridge`
@@ -73,6 +74,8 @@ fn write_stderr_line(line: std::fmt::Arguments<'_>) {
 }
 
 mod actions;
+#[cfg(target_os = "linux")]
+mod appimage;
 mod autostart;
 mod bridge;
 mod deep_links;
