@@ -158,22 +158,17 @@ impl AnchorFile {
         }
     }
 
-    /// The writer thread: each save takes the latest anchor queued by then
-    /// ([`latest`]), and a flush is answered once the anchors before it are
+    /// The writer thread: each write takes the latest anchor queued by then
+    /// ([`batch`]), and a flush is answered once the anchors before it are
     /// written.
     fn write_all(&self, requests: &Receiver<Write>) {
-        while let Ok(request) = requests.recv() {
-            match request {
-                Write::Save(anchor) => {
-                    let (anchor, flushes) = latest(anchor, requests);
-                    self.save(anchor);
-                    for done in flushes {
-                        let _ = done.send(());
-                    }
-                }
-                Write::Flush(done) => {
-                    let _ = done.send(());
-                }
+        while let Ok(first) = requests.recv() {
+            let (anchor, flushes) = batch(first, requests);
+            if let Some(anchor) = anchor {
+                self.save(anchor);
+            }
+            for done in flushes {
+                let _ = done.send(());
             }
         }
     }
@@ -185,14 +180,15 @@ fn read_earlier(path: &Path) -> Option<PanelAnchor> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// `first`, or the last anchor queued after it, and the flushes queued
-/// meanwhile, which wait for that anchor's write.
-fn latest(first: PanelAnchor, queued: &Receiver<Write>) -> (PanelAnchor, Vec<Sender<()>>) {
-    let mut anchor = first;
+/// `first` and the requests queued after it: the last anchor among them,
+/// none when only flushes came, and the flushes, which wait for that
+/// anchor's write.
+fn batch(first: Write, queued: &Receiver<Write>) -> (Option<PanelAnchor>, Vec<Sender<()>>) {
+    let mut anchor = None;
     let mut flushes = Vec::new();
-    for request in queued.try_iter() {
+    for request in std::iter::once(first).chain(queued.try_iter()) {
         match request {
-            Write::Save(later) => anchor = later,
+            Write::Save(later) => anchor = Some(later),
             Write::Flush(done) => flushes.push(done),
         }
     }
@@ -346,17 +342,24 @@ mod tests {
     #[test]
     fn a_write_takes_the_latest_anchor_queued() {
         let (queue, queued) = channel();
-        assert_eq!(latest(anchor(1.0), &queued).0, anchor(1.0));
+        assert_eq!(
+            batch(Write::Save(anchor(1.0)), &queued).0,
+            Some(anchor(1.0))
+        );
         for x in [2.0, 3.0] {
             queue.send(Write::Save(anchor(x))).unwrap();
         }
         let (done, _written) = channel();
         queue.send(Write::Flush(done)).unwrap();
         queue.send(Write::Save(anchor(4.0))).unwrap();
-        let (latest_anchor, flushes) = latest(anchor(1.0), &queued);
-        assert_eq!(latest_anchor, anchor(4.0));
+        let (latest_anchor, flushes) = batch(Write::Save(anchor(1.0)), &queued);
+        assert_eq!(latest_anchor, Some(anchor(4.0)));
         assert_eq!(flushes.len(), 1);
         assert!(queued.try_recv().is_err());
+
+        let (done, _written) = channel();
+        let (no_anchor, flushes) = batch(Write::Flush(done), &queued);
+        assert_eq!((no_anchor, flushes.len()), (None, 1));
     }
 
     /// A drag of 60 moves saved in the background, then the exit's flush:
