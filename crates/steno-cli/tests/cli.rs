@@ -57,6 +57,23 @@ fn export(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
+/// The `steno` every test runs has its home set and the developer's key
+/// and models directory removed from its environment, so no run writes
+/// into the models the developer keeps for the real-model tests.
+#[test]
+fn the_steno_the_tests_run_inherits_no_models_directory_or_key() {
+    let home = tempfile::tempdir().unwrap();
+    let command = steno_on(home.path());
+    let envs: Vec<_> = command.get_envs().collect();
+    for removed in ["STENO_MODELS_DIR", "STENO_LLM_API_KEY"] {
+        assert!(
+            envs.contains(&(std::ffi::OsStr::new(removed), None)),
+            "{removed} is removed: {envs:?}"
+        );
+    }
+    assert!(envs.contains(&(std::ffi::OsStr::new("HOME"), Some(home.path().as_os_str()))));
+}
+
 // The Swift test is one flow too: each step reads the one before.
 #[allow(clippy::too_many_lines)]
 #[test]
