@@ -790,8 +790,9 @@ so changing it moves no data; what it resets is listed below
   place; the old file stays. A new file that does not parse is set aside as
   `panel-anchor.json.corrupt-<time>`, and the panels open at the default
   place in that run; until a drag saves a new file, the next launch reads
-  the earlier build's anchor again. Saves run on a thread of their own,
-  and the exit waits for the last one.
+  the earlier build's anchor again. A drag's saves run on a thread of
+  their own, and the exit waits for the last one; the one-time copy is
+  written when the anchor loads.
 - **What starts afresh** under the new identifier: Tauri's per-identifier
   directories (the app config and data directories, the webview's data,
   which the web app does not use), on macOS the permissions and the login

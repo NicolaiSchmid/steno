@@ -12,9 +12,10 @@
 //! rollback.
 //!
 //! Every write replaces the whole file (`files::write_json`, atomic and
-//! durable), off the main thread, the latest anchor of a drag winning
-//! ([`AnchorFile::save_in_background`]); the exit waits for the last one
-//! ([`AnchorFile::flush`]). A new file that does not parse is set aside
+//! durable). A drag's saves run off the main thread, the latest anchor of
+//! a drag winning ([`AnchorFile::save_in_background`]), and the exit waits
+//! for the last one ([`AnchorFile::flush`]); the one-time copy is written
+//! when the anchor loads ([`AnchorFile::load`]). A new file that does not parse is set aside
 //! (`files::set_aside`, `panel-anchor.json.corrupt-<time>`) before
 //! anything is written, and the panels open at the default place in that
 //! run; until a drag saves a new file, the next launch reads the earlier

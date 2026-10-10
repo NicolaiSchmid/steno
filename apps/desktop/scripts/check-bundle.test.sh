@@ -3,10 +3,11 @@
 # bundles: the merged Info.plist must carry the bundle id of
 # tauri.conf.json and the Swift app's SUPublicEDKey of
 # `src-tauri/Info.plist` (stable plan S6), which otherwise only a release
-# build would check. rust-ci.yml runs it on Linux. `plutil` is the system's on macOS and, elsewhere, a
-# stub over Python's plistlib and json for the one form the script uses;
-# `codesign` is a stub that records its calls, since the unsigned check
-# signs nothing. The expected values are the ones `identifier.rs` pins.
+# build would check. rust-ci.yml runs it on Linux. `plutil` is the
+# system's on macOS and, elsewhere, a stub over Python's plistlib and json
+# for the one form the script uses; `codesign` is a stub that records its
+# calls, since the unsigned check signs nothing. The expected values are
+# the ones `identifier.rs` pins.
 set -euo pipefail
 
 script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-bundle.sh"
