@@ -752,15 +752,14 @@ says "Steno 0.12.0 is installed. Steno relaunches once the recording is
 saved and processed." and relaunches once it is done, and says it again
 to a yes given meanwhile. Cancelling every password prompt ends the
 install with an error. Only while Steno shuts down to relaunch, and on
-Windows while it starts the installer, which ends the app, is Record
-refused, with "Steno is relaunching to finish installing an update. You
-can record again in a moment."; a summary re-run or an export asked for
-in those seconds is not kept and has to be asked for again after the
-relaunch.
+Windows from the install until Steno ends, is Record refused, with
+"Steno is relaunching to finish installing an update. You can record
+again in a moment."; a summary re-run or an export asked for in those
+seconds is not kept and has to be asked for again after the relaunch.
 
 An install that asks for a password or for consent (a `.deb` or `.rpm`,
 a macOS app in a folder the user cannot write, and the MSI, whose Windows
-prompt comes after it has ended Steno) runs only right after a yes given
+prompt comes after Steno has ended) runs only right after a yes given
 while Steno is idle, so someone is there to answer. A yes given while
 Steno was busy, one it turned busy after, and one whose download took
 more than 30 seconds ask once more when it is idle: "Steno 0.12.0 is
@@ -769,17 +768,18 @@ update for the next tick (a package the schedule had downloaded stays
 downloaded). The NSIS setup installs for the user alone and asks nothing.
 
 On Windows Steno does not start the installer itself. It writes the
-verified installer to
-`%LOCALAPPDATA%\uno.schmid.steno.desktop\update\`, saves and shuts down,
-and leaves a hidden `cmd.exe` running that starts the installer and
-waits for it. A successful install starts the new version. When the
-consent prompt is declined, the MSI fails or another install is under
-way (any `msiexec` exit code but 0, 1641 or 3010), or the NSIS setup
-fails or is aborted (any exit code but 0), the `cmd.exe` starts the
-version that was running, so Steno is back within seconds. Steno is down
-only while the installer runs, its consent prompt included. If the
-`cmd.exe` cannot be started, Steno restarts at once and the error goes to
-the log.
+verified installer to `%LOCALAPPDATA%\uno.schmid.steno.desktop\update\`,
+saves and shuts down, and leaves a hidden `cmd.exe` running that starts
+the installer and waits for it. Steno ends once that `cmd.exe` says it
+runs. A successful install starts the new version. When the consent
+prompt is declined, the MSI fails or another install is under way (any
+`msiexec` exit code but 0, 1641 or 3010), or the NSIS setup fails or is
+aborted (any exit code but 0), the `cmd.exe` starts the version that was
+running, so Steno is back within seconds. Steno is down only while the
+installer runs, its consent prompt included. If the `cmd.exe` cannot
+start, or does not say within 10 seconds that it runs (a policy that
+turns off the command prompt does this), Steno ends it and restarts at
+once, and the error goes to the log.
 
 With automatic downloads on, the schedule downloads a found update at the
 first tick that finds the app idle and no install under way, and installs
