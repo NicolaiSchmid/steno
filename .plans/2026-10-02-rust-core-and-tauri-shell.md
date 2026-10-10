@@ -2840,9 +2840,17 @@ touch and admission lines; each fix is ported to Swift before cutover.
   backend (inside the process, so nothing it starts inherits it) when
   `WAYLAND_DISPLAY` and `DISPLAY` are set and the user set no `GDK_BACKEND`, because
   GTK 3 on Wayland cannot place a window, keep it on top or report its moves, which
-  the panels need. A user's `GDK_BACKEND=wayland`, or a session without XWayland,
-  runs natively with panels that neither float nor keep their place; a native path
-  would need the layer-shell protocol and is not planned.
+  the panels need. A `GDK_BACKEND` list that names `x11` or `*` (Omarchy's
+  `wayland,x11,*`), or a lone `*`, counts as unset (#267); a list naming neither
+  stays the user's. A user's single `GDK_BACKEND=wayland`, or a session without
+  XWayland, runs natively with panels that neither float nor keep their place; a
+  native path would need the layer-shell protocol and is later work (the stable
+  plan's "What follows"). On Linux the panels are titled "Steno bubble" and "Steno
+  prompt", where the shell's panels on macOS and Windows say "Steno" (the Swift
+  panels have no title), so Hyprland's window rules
+  (`apps/desktop/src-tauri/linux/hyprland-steno.lua`, which the `.deb` installs in
+  `/usr/share/steno-desktop/`) can float and pin the panels and keep them out of
+  the focus without touching the main window.
 - Linux shows the tray only where a status notifier host runs (KDE, most desktop
   panels, GNOME with the AppIndicator extension); elsewhere closing the main window
   quits, where the Swift `NSStatusItem` is always in the menu bar.
@@ -3246,6 +3254,7 @@ PR off `main`.
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | open |
 | The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | open |
 | An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | open |
+| The panels under Hyprland: a `GDK_BACKEND` list keeps them on XWayland, they carry their own titles on Linux, and the Hyprland window rules ship in `apps/desktop/src-tauri/linux/hyprland-steno.lua` (X2 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-panels` | #267 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

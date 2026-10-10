@@ -449,7 +449,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | ID | What | Targets |
 |---|---|---|
 | X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` | Omarchy, NixOS with Hyprland |
-| X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) | Omarchy, NixOS with Hyprland |
+| X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) (#267: a list naming `x11` or `*`, or a lone `*`, counts as unset, any other value still wins; the titles on Linux only, macOS and Windows keep "Steno"; the rules are `apps/desktop/src-tauri/linux/hyprland-steno.lua`, one `hl.window_rule` on class `[Ss]teno-desktop` and title `Steno (bubble\|prompt)` that also turns off focus on hover, the border, shadow and blur, checked by Hyprland 0.56.2's `--verify-config`; the `.deb` installs it as `/usr/share/steno-desktop/hyprland-steno.lua` (`check-bundle.sh` checks it), and so does the AUR package that repackages it (#265) from the next release, loaded with `dofile`; the Linux smoke finds both panels by their titles) | Omarchy, NixOS with Hyprland |
 | X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves | all |
 | X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port | Omarchy, NixOS |
 | X5 | Packaged installs: `STENO_DISTRIBUTION=aur` or `=nix`, read at build time (Nix) or from the environment (the AUR wrapper), turns the in-app updater off and Settings says updates come from the package manager; the autostart entry names a stable path (`/usr/bin/steno-desktop`, or the Nix profile's), never `current_exe()` or a store path; with `STENO_LOGIN_ITEM=managed`, which the NixOS module sets, the app leaves launch at login to the system (#261: the environment wins over the build's value; the path is `$APPIMAGE`, else `STENO_EXEC_PATH` from a wrapper whose binary lies elsewhere, as X6's, else the first of `/usr/bin`, `/usr/local/bin` and the Nix profiles that resolves into the running binary's directory, else no entry, and turning Launch at login on fails with "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager." and is not saved; managed, the app touches no entry except one an earlier build wrote, whose `Exec` starts a program in `/nix/store` or names a profile path: it goes at launch, or, when the app runs as the autostart unit made from it, after the save at Steno's first exit, so a reload never leaves the recorder in a unit no logout stops) | Omarchy, NixOS |
@@ -1746,10 +1746,11 @@ interrupted" after one. On the GNOME machine,
      tray icon is in the bar's drawer; a right click opens the menu, and every
      entry works (X3). While a meeting processes, the sidecar's cgroup is a
      scope of its own (P6).
-  3. Start a recording: `hyprctl clients -j | jq
-     '.[]|select(.class=="steno-desktop")|{title,xwayland,floating,pinned}'`
-     shows the bubble as `xwayland: true`, floating and pinned; it did not take
-     focus (`hyprctl activewindow`); a drag moves it, and the place survives a
+  3. Start a recording: `hyprctl clients -j | jq '.[]|select(.class |
+     test("steno-desktop"; "i"))|{title,xwayland,floating,pinned}'` shows "Steno
+     bubble" as `xwayland: true`, floating and pinned (under XWayland the class
+     is `Steno-desktop`); it did not take focus (`hyprctl activewindow`); it
+     stays on a workspace switch; a drag moves it, and the place survives a
      restart (X2).
   4. Secrets: save a password in Chromium, set an API key, then reboot (the
      pairing from step 0 stands). Pass when no keyring

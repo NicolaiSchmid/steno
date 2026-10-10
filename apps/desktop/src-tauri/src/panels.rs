@@ -69,6 +69,23 @@ impl Panel {
         Self::ALL.into_iter().find(|panel| panel.label() == label)
     }
 
+    /// The window's title. On Linux "Steno bubble" and "Steno prompt", so
+    /// a window manager's rules can match the panels and not the main
+    /// window ("Steno"); `linux/hyprland-steno.lua` does under Hyprland.
+    /// macOS and Windows keep "Steno".
+    ///
+    /// Swift: none; `FloatingPanel` sets no title.
+    pub const fn title(self) -> &'static str {
+        if cfg!(target_os = "linux") {
+            match self {
+                Self::Bubble => "Steno bubble",
+                Self::Prompt => "Steno prompt",
+            }
+        } else {
+            "Steno"
+        }
+    }
+
     /// The hash route without its `#`.
     pub const fn route(self) -> &'static str {
         match self {
@@ -593,7 +610,7 @@ fn show_window(
         panel.label(),
         WebviewUrl::App(panel.start_path(query).into()),
     )
-    .title("Steno")
+    .title(panel.title())
     .inner_size(frame.width, frame.height)
     .position(frame.x, frame.y)
     .decorations(false)
@@ -892,6 +909,48 @@ mod tests {
             app_name: app_name.into(),
             seconds: 60,
         }
+    }
+
+    /// On Linux each panel has a title of its own, the one the Hyprland
+    /// rules match; elsewhere both are "Steno", as the main window is. The
+    /// rule itself is pinned whole, outside the file's comments: its
+    /// class, its titles and every effect, with no long comment (`--[[`)
+    /// around it.
+    #[test]
+    fn the_panels_carry_the_titles_the_hyprland_rules_match() {
+        let rules = include_str!("../linux/hyprland-steno.lua");
+        assert!(!rules.contains("--["), "{rules}");
+        let code = rules
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            code,
+            r#"hl.window_rule({
+  name = "steno-panels",
+  match = { class = "[Ss]teno-desktop", title = "Steno (bubble|prompt)" },
+  float = true,
+  pin = true,
+  no_initial_focus = true,
+  no_follow_mouse = true,
+  border_size = 0,
+  no_shadow = true,
+  no_blur = true,
+})"#,
+            "{rules}"
+        );
+        for panel in Panel::ALL {
+            if cfg!(target_os = "linux") {
+                assert_eq!(panel.title(), format!("Steno {}", panel.label()));
+            } else {
+                assert_eq!(panel.title(), "Steno");
+            }
+        }
+        assert_eq!(
+            windows::Spec::of(steno_bridge::BridgeWindow::Main).title,
+            "Steno"
+        );
     }
 
     #[test]

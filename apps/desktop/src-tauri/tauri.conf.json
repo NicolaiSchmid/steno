@@ -87,7 +87,8 @@
         "postInstallScript": "linux/deb-postinst.sh",
         "files": {
           "/usr/lib/systemd/user/app-steno\\x2ddesktop@autostart.service.d/10-steno.conf": "linux/autostart-service-stop-timeout.conf",
-          "/usr/lib/systemd/user/app-gnome-steno\\x2ddesktop-.scope.d/zz-steno.conf": "linux/gnome-scope-stop-timeout.conf"
+          "/usr/lib/systemd/user/app-gnome-steno\\x2ddesktop-.scope.d/zz-steno.conf": "linux/gnome-scope-stop-timeout.conf",
+          "/usr/share/steno-desktop/hyprland-steno.lua": "linux/hyprland-steno.lua"
         }
       },
       "appimage": {

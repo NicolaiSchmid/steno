@@ -26,7 +26,8 @@ packages=(
   pkg-config
   wget
   # The headless smoke: a virtual X server and `import` for the screenshots;
-  # the lost-display check: xdotool to start a recording.
+  # the smoke and the lost-display check: xdotool to find the panels by
+  # their titles and to start a recording.
   xvfb
   imagemagick
   xdotool
