@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The Developer ID certificate in a throwaway keychain for one release run,
-# as .github/workflows/release.yml does for the Swift app: `import` creates
+# as the Swift app's release workflow did: `import` creates
 # and unlocks the keychain, imports the .p12 with a partition list that lets
 # codesign use the key without a prompt, puts the keychain in front of the
 # user's keychain search list, then prints the SHA-1 of the Developer ID
