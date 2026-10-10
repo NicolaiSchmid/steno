@@ -316,16 +316,20 @@ fn installer_for(
     }
 }
 
-/// Whether the user can write the running macOS bundle and its folder,
-/// which the updater renames the bundle out of.
+/// Whether the user can write the running macOS bundle and its folder
+/// ([`bundle_is_writable_at`]).
 #[cfg(target_os = "macos")]
 fn bundle_is_writable() -> bool {
+    std::env::current_exe().is_ok_and(|executable| bundle_is_writable_at(&executable))
+}
+
+/// Whether the user can write the bundle of `executable`
+/// (`Steno.app/Contents/MacOS/steno-desktop`) and its folder, which the
+/// updater renames the bundle out of.
+#[cfg(target_os = "macos")]
+fn bundle_is_writable_at(executable: &std::path::Path) -> bool {
     let writable =
         |path: &std::path::Path| rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_ok();
-    let Ok(executable) = std::env::current_exe() else {
-        return false;
-    };
-    // `Steno.app/Contents/MacOS/steno-desktop`.
     let Some(bundle) = executable.ancestors().nth(3) else {
         return false;
     };
@@ -613,6 +617,50 @@ mod tests {
             &MessageDialogResult::Custom(INSTALL.into()),
             INSTALL_AFTER
         ));
+    }
+
+    /// This build's installer: a test binary comes in no bundle, so Windows
+    /// ends the app and every other platform replaces it in place.
+    #[test]
+    fn an_unbundled_build_installs_as_its_platform_does() {
+        let expected = if cfg!(windows) {
+            Installer::EndsTheApp
+        } else {
+            Installer::InPlace
+        };
+        assert_eq!(this_installer(), expected);
+    }
+
+    /// A bundle the user cannot write, or one in a folder the user cannot
+    /// write, asks for a password; one the user can write does not. Skipped
+    /// as root, who can write either.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unwritable_bundle_or_folder_asks_for_a_password() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &std::path::Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let folder = tempfile::tempdir().unwrap();
+        let bundle = folder.path().join("Steno.app");
+        let executable = bundle.join("Contents/MacOS/steno-desktop");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"").unwrap();
+        assert!(bundle_is_writable_at(&executable));
+        assert!(!bundle_is_writable_at(std::path::Path::new(
+            "steno-desktop"
+        )));
+        mode(&bundle, 0o555);
+        if std::fs::write(bundle.join("probe"), b"").is_ok() {
+            mode(&bundle, 0o755);
+            eprintln!("skipped: root writes a read-only folder");
+            return;
+        }
+        assert!(!bundle_is_writable_at(&executable), "bundle read-only");
+        mode(&bundle, 0o755);
+        mode(folder.path(), 0o555);
+        assert!(!bundle_is_writable_at(&executable), "folder read-only");
+        mode(folder.path(), 0o755);
     }
 
     /// The download and the install name the update the last check found,
