@@ -52,6 +52,7 @@ fn roots_in(cwd: &Path, home: &Path, variable: Option<&str>) -> (PathBuf, PathBu
 #[test]
 fn the_app_the_cli_and_the_example_read_one_models_directory() {
     if std::env::var_os(CHILD).is_some() {
+        common::assert_temporary_home();
         let paths = StenoPaths::new(StenoPaths::default_support_directory());
         let app = steno_speech::ModelStore::in_models_directory(
             &steno_services::speech::models_directory(&Settings::default(), &paths),
@@ -109,6 +110,7 @@ const MIRROR: &str = "the_mirror_variable_reaches_the_speech_setup";
 #[test]
 fn the_mirror_variable_reaches_the_speech_setup() {
     if std::env::var_os(CHILD).is_some() {
+        common::assert_temporary_home();
         let paths = StenoPaths::new(StenoPaths::default_support_directory());
         let setup = steno_services::speech::SpeechSetup::new(&Settings::default(), &paths);
         println!(

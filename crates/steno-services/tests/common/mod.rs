@@ -1,12 +1,17 @@
 //! What the test binaries share: the sidecar binary, and a child of the
-//! test binary under a temporary home ([`child_in`], [`printed`]).
+//! test binary under a temporary home ([`child_in`],
+//! [`assert_temporary_home`], [`printed`]).
 
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use steno_core::StenoPaths;
 use steno_speech::sidecar::SIDECAR_BINARY;
+
+/// Set by [`child_in`] to the temporary home; the child checks against it.
+pub const HOME_VARIABLE: &str = "STENO_TEST_HOME";
 
 /// The sidecar binary in the target directory: the test binary sits in
 /// its `deps/`, the binaries one folder up.
@@ -28,15 +33,32 @@ pub fn sidecar_binary() -> PathBuf {
 
 /// The test `name` run alone in a child of this test binary, with `home`
 /// as its home (`HOME`, `XDG_DATA_HOME`, `APPDATA`), so the child's
-/// default support directory is under it, never the developer's.
+/// default support directory is under it, never the developer's. A child
+/// that opens it calls [`assert_temporary_home`] first.
 pub fn child_in(home: &Path, name: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", name, "--nocapture", "--test-threads=1"])
+        .env(HOME_VARIABLE, home)
         .env("HOME", home)
         .env("XDG_DATA_HOME", home.join("data"))
         .env("APPDATA", home.join("appdata"));
     command
+}
+
+/// In the child, before anything opens the support directory: panics
+/// unless [`HOME_VARIABLE`] is set and
+/// `StenoPaths::default_support_directory()` is under it.
+pub fn assert_temporary_home() {
+    let home = std::env::var_os(HOME_VARIABLE)
+        .unwrap_or_else(|| panic!("{HOME_VARIABLE} is not set: run the child through child_in"));
+    let support = StenoPaths::default_support_directory();
+    assert!(
+        support.starts_with(&home),
+        "{} is not under the temporary home {}",
+        support.display(),
+        Path::new(&home).display()
+    );
 }
 
 /// What the child printed after `label`, to the end of its line. The
