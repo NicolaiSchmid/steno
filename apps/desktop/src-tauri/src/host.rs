@@ -227,6 +227,56 @@ mod real {
         }
     }
 
+    /// The detection prompt's panel (`panels::set_prompt`): what the
+    /// host's detection controller raises and clears.
+    pub struct ShellPromptPanel {
+        pub app: AppHandle,
+    }
+
+    impl steno_services::detection::PromptPanel for ShellPromptPanel {
+        fn show(&self, prompt: Option<&steno_services::detection::DetectionPrompt>) {
+            crate::panels::set_prompt(
+                &self.app,
+                prompt.map(|prompt| crate::panels::RaisedPrompt {
+                    request: crate::panels::PromptRequest {
+                        app_name: prompt.app_name.clone(),
+                        seconds: prompt.seconds,
+                    },
+                    raised: prompt.number,
+                }),
+            );
+        }
+    }
+
+    /// The name the prompt gives the app with `bundle_id`: on the Mac the
+    /// running app's localized name, as Swift's `liveAppName` read the
+    /// bundle's name; elsewhere, and for an app the Mac does not list,
+    /// `steno_services::detection::fallback_app_name`.
+    pub fn app_name(bundle_id: Option<&str>) -> String {
+        #[cfg(target_os = "macos")]
+        if let Some(name) = bundle_id.and_then(running_app_name) {
+            return name;
+        }
+        steno_services::detection::fallback_app_name(bundle_id)
+    }
+
+    /// In a pool of its own: the caller is the detector's long-lived
+    /// events thread, which has none, so what `AppKit` autoreleases here
+    /// would otherwise stay until the thread ends.
+    #[cfg(target_os = "macos")]
+    fn running_app_name(bundle_id: &str) -> Option<String> {
+        use objc2_app_kit::NSRunningApplication;
+        use objc2_foundation::NSString;
+
+        objc2::rc::autoreleasepool(|_| {
+            let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+                &NSString::from_str(bundle_id),
+            );
+            let name = running.firstObject()?.localizedName()?.to_string();
+            (!name.trim().is_empty()).then_some(name)
+        })
+    }
+
     /// The window a command came from, for `Host::for_window`: the
     /// Summaries form answers on the calling window's view model. A
     /// panel's label, or any other, answers on main.
@@ -514,7 +564,7 @@ mod real {
 }
 
 #[cfg(not(feature = "fixture-host"))]
-pub use real::{RealHost, ShellOpener, WindowSink};
+pub use real::{RealHost, ShellOpener, ShellPromptPanel, WindowSink, app_name};
 
 /// Why the real host could not be built.
 #[cfg(not(feature = "fixture-host"))]
@@ -570,13 +620,18 @@ impl Host {
             app: app.clone(),
         }));
         // A smoke run checks for no update, so it neither reaches the
-        // network nor raises the update alert over the windows it shows.
+        // network nor raises the update alert over the windows it shows,
+        // and detects no meeting, so no prompt comes up over them either.
         if std::env::var_os(crate::smoke::SECONDS_VARIABLE).is_none() {
             options.update_source = Some(
                 app.state::<Arc<crate::updater::ShellUpdates>>()
                     .inner()
                     .clone(),
             );
+            options.detection = Some(steno_services::detection::DetectionOptions::live(
+                Arc::new(ShellPromptPanel { app: app.clone() }),
+                Arc::new(app_name),
+            ));
         }
         let graph = runtime.block_on(async { steno_services::build(options) })?;
         for warning in &graph.startup_warnings {
@@ -627,6 +682,29 @@ impl Host {
         #[cfg(feature = "fixture-host")]
         {
             false
+        }
+    }
+
+    /// The X of prompt `raised` took it down: the detection controller hears
+    /// of it (`steno_services::detection::DetectionController::dismissed`);
+    /// a no-op for the fixtures and without detection.
+    #[cfg_attr(feature = "fixture-host", allow(unused_variables))]
+    pub fn prompt_dismissed(&self, raised: Option<u64>) {
+        #[cfg(not(feature = "fixture-host"))]
+        if let Some(detection) = &self.inner.app.detection {
+            detection.dismissed(raised);
+        }
+    }
+
+    /// The Record of prompt `raised`, the prompt taken down: the detection
+    /// controller starts a call recording for the app it named
+    /// (`DetectionController::record`). Blocks for the start; a no-op for
+    /// the fixtures and without detection.
+    #[cfg_attr(feature = "fixture-host", allow(unused_variables))]
+    pub fn record_from_prompt(&self, raised: Option<u64>) {
+        #[cfg(not(feature = "fixture-host"))]
+        if let Some(detection) = &self.inner.app.detection {
+            detection.record(raised);
         }
     }
 
