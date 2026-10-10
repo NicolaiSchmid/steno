@@ -90,10 +90,12 @@ fn pipes(process: &Path, mode: i32) -> HashSet<PathBuf> {
         .filter_map(Result::ok)
         .filter_map(|fd| {
             let link = std::fs::read_link(fd.path()).ok()?;
-            let fdinfo = std::fs::read_to_string(process.join("fdinfo").join(fd.file_name()));
-            (link.as_os_str().as_encoded_bytes().starts_with(b"pipe:")
-                && access(&fdinfo.ok()?) == Some(mode))
-            .then_some(link)
+            if !link.as_os_str().as_encoded_bytes().starts_with(b"pipe:") {
+                return None;
+            }
+            let fdinfo =
+                std::fs::read_to_string(process.join("fdinfo").join(fd.file_name())).ok()?;
+            (access(&fdinfo) == Some(mode)).then_some(link)
         })
         .collect()
 }
