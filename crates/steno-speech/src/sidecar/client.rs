@@ -34,6 +34,7 @@
 //!
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
@@ -620,9 +621,10 @@ fn ended_on_directml(
 }
 
 /// The kind of a failure, in fixed words for the log: no stderr, no
-/// protocol detail, no path.
-fn failure_kind(error: &SidecarError) -> &'static str {
-    match error {
+/// protocol detail, no path. A failed diarizer load names its inner kind
+/// too ("it could not load the diarizer's models: it died").
+fn failure_kind(error: &SidecarError) -> Cow<'static, str> {
+    Cow::Borrowed(match error {
         SidecarError::Spawn { .. } => "it could not start",
         SidecarError::Pipe(_) => "a pipe to it failed",
         SidecarError::Protocol(_) => "it broke the protocol",
@@ -630,9 +632,14 @@ fn failure_kind(error: &SidecarError) -> &'static str {
         SidecarError::Timeout { .. } => "it did not answer in time",
         SidecarError::MemoryCeiling { .. } => "it passed the memory ceiling",
         SidecarError::Remote(_) => "it reported an error",
-        SidecarError::DiarizerLoad(_) => "it could not load the diarizer's models",
+        SidecarError::DiarizerLoad(load) => {
+            return Cow::Owned(format!(
+                "it could not load the diarizer's models: {}",
+                failure_kind(load)
+            ));
+        }
         SidecarError::NotUtf8 { .. } => "a model path is not UTF-8",
-    }
+    })
 }
 
 impl Drop for SidecarProcess {
@@ -712,7 +719,7 @@ impl Shared {
     /// Kills a child that failed since its last request, so the next one
     /// starts fresh. A death between requests does not count against
     /// `DirectML`, an overrun does when `counts` (see the module docs); with
-    /// no provider, `kill_unless_remote_counting` does not count it.
+    /// no provider, `kill_unless_reported_counting` does not count it.
     fn drop_failed(&self, slot: &mut Option<SidecarProcess>, counts: bool) {
         if let Some(process) = slot.as_mut()
             && let Some(error) = process.failed_while_idle()
@@ -721,7 +728,7 @@ impl Shared {
                 process.provider = None;
                 process.load_asked_directml = false;
             }
-            self.kill_unless_remote_counting(slot, error, counts);
+            self.kill_unless_reported_counting(slot, error, counts);
         }
     }
 
@@ -782,7 +789,7 @@ impl Shared {
             }
             Err(error) => {
                 let probe_ended = ended_on_directml(&error, None, directml);
-                let error = self.kill_unless_remote(slot, error);
+                let error = self.kill_unless_reported(slot, error);
                 if probe_ended {
                     // `DirectML` is off now, so this load asks for the CPU
                     // and cannot come back here.
@@ -798,18 +805,18 @@ impl Shared {
     /// answers; returns the error. The warning names the kind of failure
     /// in fixed words; the error itself, whose crash report holds the
     /// child's stderr (which may hold a path), goes to debug only.
-    fn kill_unless_remote(
+    fn kill_unless_reported(
         &self,
         slot: &mut Option<SidecarProcess>,
         error: SidecarError,
     ) -> SidecarError {
-        self.kill_unless_remote_counting(slot, error, true)
+        self.kill_unless_reported_counting(slot, error, true)
     }
 
-    /// [`kill_unless_remote`](Self::kill_unless_remote), counting the end
+    /// [`kill_unless_reported`](Self::kill_unless_reported), counting the end
     /// against `DirectML` only when `counts` (never for the diarizer, which
     /// runs on the CPU).
-    fn kill_unless_remote_counting(
+    fn kill_unless_reported_counting(
         &self,
         slot: &mut Option<SidecarProcess>,
         error: SidecarError,
@@ -821,7 +828,7 @@ impl Shared {
                 tracing::warn!(
                     pid = process.pid,
                     ?status,
-                    reason = failure_kind(&error),
+                    reason = %failure_kind(&error),
                     "speech sidecar killed"
                 );
                 tracing::debug!(pid = process.pid, %error, "the speech sidecar's error");
@@ -855,7 +862,7 @@ impl Shared {
         self.drop_failed(slot, false);
         let result = self
             .load_and_diarize(slot, models, sample_count, payload, timeout)
-            .map_err(|error| self.kill_unless_remote_counting(slot, error, false));
+            .map_err(|error| self.kill_unless_reported_counting(slot, error, false));
         if let Some(process) = slot.take_if(|p| p.provider.is_none()) {
             self.pid.store(0, Ordering::SeqCst);
             process.shut_down(self.config.control_timeout);
@@ -1060,7 +1067,7 @@ impl SidecarSpeechEngine {
                     health.provider = process.provider;
                     Ok(Some(health))
                 }
-                Err(error) => Err(shared.kill_unless_remote(&mut slot, error)),
+                Err(error) => Err(shared.kill_unless_reported(&mut slot, error)),
             }
         })
         .await??)
@@ -1212,7 +1219,7 @@ impl SpeechEngine for SidecarSpeechEngine {
                     Ok(segments)
                 }
                 Err(error) => Err(SpeechError::from(
-                    shared.kill_unless_remote(&mut slot, error),
+                    shared.kill_unless_reported(&mut slot, error),
                 )),
             }
         })
@@ -1332,6 +1339,25 @@ mod tests {
         ] {
             assert!(!ended_on_directml(&error, Some(DirectMl), true));
         }
+    }
+
+    /// A failed diarizer load's warning says what ended it, and carries no
+    /// stderr.
+    #[test]
+    fn a_failed_diarizer_load_names_its_inner_kind() {
+        let crashed = SidecarError::DiarizerLoad(Box::new(SidecarError::Crashed {
+            status: "signal: 6".to_owned(),
+            stderr: "/home/someone/models/embedding.onnx".to_owned(),
+        }));
+        assert_eq!(
+            failure_kind(&crashed),
+            "it could not load the diarizer's models: it died"
+        );
+        let refused = SidecarError::DiarizerLoad(Box::new(SidecarError::Remote("no".to_owned())));
+        assert_eq!(
+            failure_kind(&refused),
+            "it could not load the diarizer's models: it reported an error"
+        );
     }
 
     #[test]

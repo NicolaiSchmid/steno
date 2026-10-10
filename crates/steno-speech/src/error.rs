@@ -88,16 +88,17 @@ pub enum SpeechError {
     #[error("{}: {detail}", path.display())]
     Wav { path: PathBuf, detail: String },
     /// The speech sidecar failed: unless the child reported the error
-    /// itself ([`SidecarError::reported_by_the_child`]), no child is left
-    /// running, and the next call starts a fresh one.
+    /// itself ([`SidecarError::reported_by_the_child`]) or nothing was sent
+    /// ([`SidecarError::NotUtf8`]), no child is left running, and the next
+    /// call starts a fresh one.
     #[error("speech sidecar: {0}")]
     Sidecar(#[from] SidecarError),
 }
 
 /// How the speech sidecar failed. Every error but one the child reported
-/// itself ([`SidecarError::reported_by_the_child`]) leaves the parent
-/// without a child: the next `prepare`, `transcribe` or `diarize` spawns
-/// and loads again.
+/// itself ([`SidecarError::reported_by_the_child`]) or
+/// [`SidecarError::NotUtf8`] leaves the parent without a child: the next
+/// `prepare`, `transcribe` or `diarize` spawns and loads again.
 #[derive(Debug, Error)]
 pub enum SidecarError {
     /// The binary could not be started.
