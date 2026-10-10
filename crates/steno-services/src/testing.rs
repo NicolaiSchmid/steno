@@ -2,6 +2,11 @@
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
 //! old, and the waits that fail a test instead of hanging it.
+//!
+//! A test that writes models gives the app an explicit models directory in
+//! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
+//! `speech::testing`'s writers panic outside the temp directory, so no
+//! test overwrites the models a developer keeps for the real-model tests.
 
 use std::sync::Arc;
 use std::time::Duration;

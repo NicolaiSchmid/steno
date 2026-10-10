@@ -902,11 +902,14 @@ impl ProgressThrottle {
     }
 }
 
-/// Model files on disk for the tests, so no test downloads one.
+/// Model files on disk for the tests, so no test downloads one. Every
+/// writer here goes through [`testing::assert_scratch`]: it writes only
+/// inside the temp directory, never into a models directory a developer
+/// keeps (`STENO_MODELS_DIR` names one for the real-model tests).
 #[cfg(test)]
 pub(crate) mod testing {
     use std::collections::BTreeSet;
-    use std::path::{Path, PathBuf};
+    use std::path::{Component, Path, PathBuf};
 
     use steno_speech::{SidecarConfig, SpeechSettings};
 
@@ -970,6 +973,7 @@ pub(crate) mod testing {
     /// `asset`'s files in `store`, each a sparse file of its manifest size.
     fn install_in(store: &steno_speech::ModelStore, asset: &steno_speech::ModelAsset) {
         let directory = store.directory(asset);
+        assert_scratch(&directory);
         for file in &asset.files {
             let path = directory.join(&file.name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -978,6 +982,53 @@ pub(crate) mod testing {
                 .set_len(file.size)
                 .unwrap();
         }
+    }
+
+    /// Panics unless `path` lies inside the temp directory (or, in an
+    /// integration test, the target's tmp), so a test writing placeholder
+    /// models can never overwrite real ones, wherever its models directory
+    /// was resolved from.
+    pub fn assert_scratch(path: &Path) {
+        assert!(
+            is_scratch(path),
+            "a test may write models only inside the temp directory, not into {}",
+            path.display()
+        );
+    }
+
+    /// Whether `path` lies inside one of the scratch roots
+    /// [`assert_scratch`] allows, compared as the file system resolves
+    /// them (the temp directory is a link on the Mac). A path that climbs
+    /// out with `..` is not scratch.
+    pub fn is_scratch(path: &Path) -> bool {
+        if path.components().any(|part| part == Component::ParentDir) {
+            return false;
+        }
+        let Some(path) = resolved(path) else {
+            return false;
+        };
+        [
+            Some(std::env::temp_dir()),
+            option_env!("CARGO_TARGET_TMPDIR").map(PathBuf::from),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| path.starts_with(root))
+    }
+
+    /// `path` with its deepest existing ancestor canonicalised and the
+    /// rest, which does not exist yet, appended.
+    fn resolved(path: &Path) -> Option<PathBuf> {
+        let mut existing = path;
+        let mut missing = Vec::new();
+        while !existing.exists() {
+            missing.push(existing.file_name()?);
+            existing = existing.parent()?;
+        }
+        let mut resolved = existing.canonicalize().ok()?;
+        resolved.extend(missing.into_iter().rev());
+        Some(resolved)
     }
 
     /// Every file under `directory`.
@@ -1003,6 +1054,26 @@ mod tests {
     use steno_core::testing::FakeSpeechEngine;
 
     use super::*;
+
+    /// The model writers' guard takes paths inside the temp directory,
+    /// existing or not, and refuses the file system's root, a sibling
+    /// whose name only starts like the temp directory's, and a path that
+    /// climbs out of it.
+    #[test]
+    fn the_model_writers_write_only_inside_the_temp_directory() {
+        let temp = std::env::temp_dir();
+        let dir = tempfile::tempdir().unwrap();
+        assert!(testing::is_scratch(dir.path()));
+        assert!(testing::is_scratch(&dir.path().join("not/yet/there")));
+        let root = temp.ancestors().last().unwrap();
+        assert!(!testing::is_scratch(&root.join("steno-models")));
+        let mut sibling = temp.file_name().unwrap().to_owned();
+        sibling.push("-steno-sibling");
+        assert!(!testing::is_scratch(
+            &temp.with_file_name(sibling).join("models")
+        ));
+        assert!(!testing::is_scratch(&dir.path().join("../../steno-models")));
+    }
 
     /// The same runtime gets the same engine and claims; another runtime a
     /// new one. The sidecar engine is kept for the app's run, the
