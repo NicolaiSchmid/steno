@@ -32,6 +32,8 @@
 #   installed as /etc/ufw/applications.d/steno-desktop and kept on upgrade
 #   (backup=), or `ufw app info Steno` does not read it; or ufw's own rules
 #   stop admitting mDNS, which the profile leaves to them;
+# - the install script does more than print `sudo ufw allow Steno` after an
+#   install and an upgrade, or the install did not print it;
 # - a binary needs a library that is not installed, or the sidecar does
 #   not start.
 #
@@ -169,7 +171,9 @@ done
 profile=/etc/ufw/applications.d/steno-desktop
 grep -qxF "$profile" <<<"$files" || die "the package does not install $profile"
 cmp -s "$profile" "$work/ufw-steno-desktop" || die "$profile is not packaging/aur/ufw-steno-desktop"
-pacman -Qii "$pkgname" | grep -qE "^(Backup Files[[:space:]]*:[[:space:]]*)?$profile[[:space:]]" \
+# pacman -Qii lists the first backup file after the label, the others
+# indented below it.
+pacman -Qii "$pkgname" | grep -qE "^(Backup Files[[:space:]]*:)?[[:space:]]*$profile[[:space:]]" \
   || die "$profile is not a backup file, so an upgrade would overwrite a user's edit"
 pacman -S --noconfirm --needed ufw >/dev/null
 ufw app info Steno | tee /tmp/ufw-app
@@ -180,6 +184,17 @@ grep -qxF 'Profile: Steno' /tmp/ufw-app && grep -qxF "  $port/tcp" /tmp/ufw-app 
 grep -qE -- '-d 224\.0\.0\.251 --dport 5353 -j ACCEPT' /etc/ufw/before.rules \
   || die "ufw's before.rules no longer admit mDNS: the profile must open 5353/udp"
 echo "ok: the package installs the ufw profile Steno as a backup file, ufw reads it, and ufw admits mDNS"
+
+# The install script only prints the hint, and pacman ran it.
+hint="echo 'Steno receives recordings from the paired phone. If ufw is on, let them through once with: sudo ufw allow Steno'"
+grep -qxF $'\tinstall = steno-desktop.install' "$work/.SRCINFO" \
+  || die "the PKGBUILD has no install=steno-desktop.install"
+grep -vE '^[[:space:]]*(#|$)' "$work/steno-desktop.install" \
+  | diff -u <(printf '%s\n' 'post_install() {' "  $hint" '}' 'post_upgrade() {' '  post_install' '}') - \
+  || die "the install script does more than print sudo ufw allow Steno"
+grep -qF 'let them through once with: sudo ufw allow Steno' /tmp/makepkg.log \
+  || die "the install did not print sudo ufw allow Steno"
+echo "ok: the install script only prints sudo ufw allow Steno, and the install printed it"
 
 for binary in /usr/lib/steno-desktop/steno-desktop /usr/lib/steno-desktop/steno-speech-sidecar; do
   ! ldd "$binary" | grep 'not found' || die "$binary needs a library that is not installed"

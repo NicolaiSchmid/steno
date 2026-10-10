@@ -1,0 +1,9 @@
+# Prints how to let the paired phone's recordings through ufw (stable plan
+# X4) and changes nothing. The port lives only in the ufw profile.
+post_install() {
+  echo 'Steno receives recordings from the paired phone. If ufw is on, let them through once with: sudo ufw allow Steno'
+}
+
+post_upgrade() {
+  post_install
+}
