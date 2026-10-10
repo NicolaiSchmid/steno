@@ -251,7 +251,7 @@ impl InstallGate for IdleGate {
             return None;
         }
         let starts = self.recorder.hold_starts();
-        if stops_a_recording(self.recorder.status().state) || self.pipeline.quitting() {
+        if under_way(self.recorder.status().state) || self.pipeline.quitting() {
             return None;
         }
         let jobs = self.pipeline.in_flight().try_hold()?;
@@ -259,7 +259,7 @@ impl InstallGate for IdleGate {
     }
 
     fn is_idle_now(&self) -> bool {
-        !stops_a_recording(self.recorder.status().state)
+        !under_way(self.recorder.status().state)
             && !self.pipeline.quitting()
             && self.pipeline.in_flight().is_idle()
     }
@@ -271,7 +271,7 @@ impl InstallGate for IdleGate {
 
 /// Whether a recording is under way: one is starting, running or
 /// stopping. The announcement waits while it does, and no install runs.
-fn stops_a_recording(state: RecordingState) -> bool {
+fn under_way(state: RecordingState) -> bool {
     state != RecordingState::Idle
 }
 
@@ -932,9 +932,9 @@ impl UpdateSchedule {
     }
 
     /// Whether a recording is starting, running or stopping now
-    /// ([`stops_a_recording`]).
+    /// ([`under_way`]).
     fn recording_under_way(&self) -> bool {
-        stops_a_recording(self.recorder.status().state)
+        under_way(self.recorder.status().state)
     }
 
     /// The user put the install of `version` off ("Not Now" while the app
@@ -949,8 +949,9 @@ impl UpdateSchedule {
     /// Installs the kept package while holding the gate; true when the
     /// relaunch is under way. It takes no hold with nothing kept, while
     /// another install runs, or for an installer that asks an
-    /// administrator, whose kept package is announced instead. Automatic downloads turned
-    /// off free the kept package, so nothing is left to install.
+    /// administrator, whose kept package is announced instead. Automatic
+    /// downloads turned off free the kept package, so nothing is left to
+    /// install.
     async fn install_when_idle(&self) -> bool {
         if self.state().staged.is_none() || self.source.installer().asks_an_administrator() {
             return false;
@@ -970,8 +971,9 @@ impl UpdateSchedule {
     }
 
     /// Announces the found update unless it was announced or shown in this
-    /// run, or a recording is under way: the dialog would offer to end the
-    /// recording, so a later tick announces it instead.
+    /// run, or a recording is under way: the alert would come up over the
+    /// meeting, so the first tick with no recording under way announces it
+    /// instead.
     fn announce_when_idle(&self) {
         if self.recording_under_way() {
             return;
