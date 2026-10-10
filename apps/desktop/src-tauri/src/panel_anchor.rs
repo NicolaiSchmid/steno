@@ -367,10 +367,11 @@ mod tests {
         assert_eq!((no_anchor, flushes.len()), (None, 1));
     }
 
-    /// A drag of 60 moves saved in the background, then the exit's flush:
-    /// once it returns the file holds the last move, never an earlier one.
-    /// The patience is a minute here, so a slow runner's disk cannot fail
-    /// the test.
+    /// A drag of 60 moves saved in the background, then a flush: once it
+    /// returns the file holds the last move, never an earlier one. The drag's
+    /// wait has a minute's patience, so a slow runner's disk cannot fail the
+    /// test; the last move's wait is the exit's own [`AnchorFile::flush`],
+    /// whose patience one write fits.
     #[test]
     fn the_flush_returns_once_the_last_anchor_of_a_drag_is_on_disk() {
         let patience = Duration::from_secs(60);
@@ -384,7 +385,7 @@ mod tests {
         file.flush_within(patience);
         assert_eq!(dirs.file().load(), Some(anchor(60.0)));
         file.save_in_background(anchor(61.0));
-        file.flush_within(patience);
+        file.flush();
         assert_eq!(dirs.file().load(), Some(anchor(61.0)));
     }
 }
