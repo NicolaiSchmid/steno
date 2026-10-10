@@ -44,7 +44,7 @@
 //!
 //! Swift: none; the Mac app ships no `AppImage`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
@@ -60,18 +60,18 @@ struct Found {
     read_ends: Vec<RawFd>,
 }
 
-/// The mount servers of the `AppImage` the app `pid` runs from: none when
-/// the app does not run from one, or when no process holds its FUSE
-/// connection and the other end of its keepalive pipe, which is logged.
-/// The app's read ends of their pipes are closed on exec from then on.
-pub fn mount_servers(pid: u32) -> Vec<u32> {
+/// The mount servers of the `AppImage` the app runs from: none when it
+/// does not run from one, or when no process holds its FUSE connection and
+/// the other end of its keepalive pipe, which is logged. The app's read
+/// ends of their pipes are closed on exec from then on.
+pub fn mount_servers() -> Vec<u32> {
     let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
     let Ok(exe) = std::env::current_exe() else {
         return Vec::new();
     };
     let found = servers_at(
         Path::new("/proc"),
-        pid,
+        std::process::id(),
         appdir.as_deref(),
         &exe,
         fuse_connection,
@@ -91,7 +91,9 @@ fn servers_at(
     exe: &Path,
     connection_of: impl Fn(&Path) -> Option<u32>,
 ) -> Found {
-    let Some(mount) = appdir.filter(|mount| runs_from_mount(mount, exe)) else {
+    // The executable inside the mount, not only `$APPDIR` inherited from a
+    // launcher that is an `AppImage`.
+    let Some(mount) = appdir.filter(|mount| exe.starts_with(mount)) else {
         return Found::default();
     };
     let Some(connection) = connection_of(mount) else {
@@ -106,12 +108,6 @@ fn servers_at(
         );
     }
     found
-}
-
-/// Whether the app's executable `exe` is inside the mount `appdir`: not
-/// only inherited from a launcher that is an `AppImage`.
-fn runs_from_mount(appdir: &Path, exe: &Path) -> bool {
-    exe.starts_with(appdir)
 }
 
 /// The FUSE connection of the mount at `mount`, as `/dev/fuse`'s `fdinfo`
@@ -150,7 +146,7 @@ fn servers_of(proc: &Path, pid: u32, connection: u32) -> Found {
     if read.is_empty() {
         return found;
     }
-    let mut kept = HashSet::new();
+    let mut read_ends = BTreeSet::new();
     let others = std::fs::read_dir(proc)
         .into_iter()
         .flatten()
@@ -165,23 +161,18 @@ fn servers_of(proc: &Path, pid: u32, connection: u32) -> Found {
             .into_iter()
             .map(|(_, pipe)| pipe)
             .collect();
-        let shared: Vec<&PathBuf> = read
+        let shared: Vec<RawFd> = read
             .iter()
-            .map(|(_, pipe)| pipe)
-            .filter(|pipe| written.contains(*pipe))
+            .filter(|(_, pipe)| written.contains(pipe))
+            .map(|&(fd, _)| fd)
             .collect();
         if !shared.is_empty() {
             found.servers.push(other);
-            kept.extend(shared);
+            read_ends.extend(shared);
         }
     }
     found.servers.sort_unstable();
-    found.read_ends = read
-        .iter()
-        .filter(|(_, pipe)| kept.contains(pipe))
-        .map(|&(fd, _)| fd)
-        .collect();
-    found.read_ends.sort_unstable();
+    found.read_ends = read_ends.into_iter().collect();
     found
 }
 
@@ -508,27 +499,23 @@ pub(crate) mod tests {
         );
         let mount = Path::new("/tmp/.mount_stenoAb12");
         let inside = mount.join("usr/bin/steno-desktop");
-        let fuse = |_: &Path| Some(CONNECTION);
+        let fuse: &dyn Fn(&Path) -> Option<u32> = &|_| Some(CONNECTION);
         let scan =
             |appdir: Option<&Path>, exe: &Path, connection_of: &dyn Fn(&Path) -> Option<u32>| {
                 warnings(|| servers_at(proc.0.path(), 4242, appdir, exe, connection_of))
             };
 
-        let (found, logged) = scan(Some(mount), &inside, &fuse);
+        let (found, logged) = scan(Some(mount), &inside, fuse);
         assert_eq!(found.servers, [77]);
         assert_eq!(logged, "");
         for (appdir, exe, connection_of) in [
-            (
-                Some(mount),
-                Path::new("/usr/bin/steno-desktop"),
-                &fuse as &dyn Fn(&Path) -> Option<u32>,
-            ),
+            (Some(mount), Path::new("/usr/bin/steno-desktop"), fuse),
             (
                 Some(mount),
                 Path::new("/tmp/.mount_stenoAb123/usr/bin/steno-desktop"),
-                &fuse,
+                fuse,
             ),
-            (None, inside.as_path(), &fuse),
+            (None, inside.as_path(), fuse),
             (Some(mount), inside.as_path(), &|_: &Path| None),
         ] {
             let (found, logged) = scan(appdir, exe, connection_of);

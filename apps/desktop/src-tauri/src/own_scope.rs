@@ -580,7 +580,7 @@ pub fn leave_foreign_service() {
     let Ok(cgroup) = cgroup_of(pid) else {
         return;
     };
-    let servers = unmoved(crate::appimage::mount_servers(pid), cgroup_of);
+    let servers = unmoved(crate::appimage::mount_servers(), cgroup_of);
     carry_out(
         plan(&cgroup, servers),
         pid,
