@@ -24,7 +24,8 @@
 #             --signed, also the Developer ID signature, hardened
 #             runtime, timestamp and team of the app, its executable and
 #             the sidecar, the two entitlements, the stapled ticket and
-#             Gatekeeper's verdict
+#             Gatekeeper's verdict. check-bundle.test.sh runs the unsigned
+#             check over stub bundles
 #   dmg       nothing of its own: the image holds the .app checked above
 #   msi       msi/*.msi, unpacked by an administrative install; the install
 #             directory also holds DirectML.dll and the Visual C++ runtime
@@ -166,11 +167,17 @@ release_signature() {
   sed -n 's/^TeamIdentifier=//p' <<< "$details"
 }
 
+# plist_value <file> <key>: the value under the top-level <key> of a plist
+# or a JSON file.
+plist_value() {
+  plutil -extract "$2" raw -o - "$1"
+}
+
 # info_is <Info.plist> <key> <expected>: the plist holds <expected>, not
 # empty, under <key>.
 info_is() {
   local got
-  got="$(/usr/libexec/PlistBuddy -c "Print :$2" "$1" 2>/dev/null || true)"
+  got="$(plist_value "$1" "$2" 2>/dev/null || true)"
   [[ -n "$3" && "$got" == "$3" ]] || die "$1 holds $2 '$got', expected '$3'"
   echo "ok: $1 holds $2 $got"
 }
@@ -178,15 +185,15 @@ info_is() {
 check_app() {
   local app executable team item item_team entitlements count src_tauri
   app="$(one "$bundle/macos/*.app")"
-  executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+  executable="$(plist_value "$app/Contents/Info.plist" CFBundleExecutable)"
   side_by_side "$app/Contents/MacOS" "$executable" "$sidecar_name"
   # The identifier, and the Swift app's Sparkle key, without which the
   # Swift app's last update cannot install this bundle (stable plan S6).
   src_tauri="$(cd "$(dirname "${BASH_SOURCE[0]}")/../src-tauri" && pwd)"
   info_is "$app/Contents/Info.plist" CFBundleIdentifier \
-    "$(plutil -extract identifier raw -o - "$src_tauri/tauri.conf.json")"
+    "$(plist_value "$src_tauri/tauri.conf.json" identifier)"
   info_is "$app/Contents/Info.plist" SUPublicEDKey \
-    "$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$src_tauri/Info.plist")"
+    "$(plist_value "$src_tauri/Info.plist" SUPublicEDKey)"
   [[ "$signed" == true ]] || return 0
 
   codesign --verify --deep --strict --verbose=2 "$app"

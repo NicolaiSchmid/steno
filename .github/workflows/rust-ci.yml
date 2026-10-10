@@ -366,11 +366,12 @@ jobs:
             || { echo "::error::the sidecar's scope test did not pass"; exit 1; }
 
       # The desktop release workflow's platform filter, MSI version, updater
-      # manifest and lanes, asset gathering, checksums and signatures, and
-      # release notes.
+      # manifest and lanes, asset gathering, checksums and signatures,
+      # release notes, and the bundle check's `app` type over stub bundles.
       - name: Desktop release scripts
         if: matrix.name == 'linux'
         run: |
+          apps/desktop/scripts/check-bundle.test.sh
           apps/desktop/scripts/release-matrix.test.sh
           apps/desktop/scripts/wix-version.test.sh
           apps/desktop/scripts/updater-manifest.test.sh
