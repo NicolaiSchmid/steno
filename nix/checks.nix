@@ -74,10 +74,8 @@
     "pub const LINUX_PORT: u16 = ([0-9]+);"
     (builtins.readFile ../crates/steno-handover/src/configuration.rs)));
   defaultPort = systemWide.config.programs.steno.handoverPort;
-  firewall = config: config.networking.firewall;
-  opens = port: config:
-    lib.elem port (firewall config).allowedTCPPorts
-    && lib.elem 5353 (firewall config).allowedUDPPorts;
+  opensTcp = port: config: lib.elem port config.networking.firewall.allowedTCPPorts;
+  opensMdns = config: lib.elem 5353 config.networking.firewall.allowedUDPPorts;
   portVariable = config: config.environment.sessionVariables.STENO_HANDOVER_PORT or null;
 
   # Every Tauri CLI the release installs is the one the package builds with.
@@ -164,11 +162,11 @@ in {
   "launchAtLogin = false still has steno.service";
   assert lib.assertMsg (linuxPorts == [(toString defaultPort)])
   "handoverPort defaults to ${toString defaultPort}, crates/steno-handover's LINUX_PORT is ${toString linuxPorts}";
-  assert lib.assertMsg (opens defaultPort systemWide.config && portVariable systemWide.config == toString defaultPort)
+  assert lib.assertMsg (opensTcp defaultPort systemWide.config && opensMdns systemWide.config && portVariable systemWide.config == toString defaultPort)
   "the firewall does not open ${toString defaultPort}/tcp and 5353/udp, or the session's STENO_HANDOVER_PORT is not ${toString defaultPort}";
-  assert lib.assertMsg (opens 23900 perUser.config && !(lib.elem defaultPort (firewall perUser.config).allowedTCPPorts) && portVariable perUser.config == "23900")
+  assert lib.assertMsg (opensTcp 23900 perUser.config && opensMdns perUser.config && !(opensTcp defaultPort perUser.config) && portVariable perUser.config == "23900")
   "handoverPort = 23900 does not move the firewall's port and STENO_HANDOVER_PORT";
-  assert lib.assertMsg (!(lib.elem defaultPort (firewall noLogin.config).allowedTCPPorts) && !(lib.elem 5353 (firewall noLogin.config).allowedUDPPorts) && portVariable noLogin.config == toString defaultPort)
+  assert lib.assertMsg (!(opensTcp defaultPort noLogin.config) && !(opensMdns noLogin.config) && portVariable noLogin.config == toString defaultPort)
   "openFirewall = false still opens a port, or drops STENO_HANDOVER_PORT";
     pkgs.runCommand "steno-module-check" {
       inherit userUnitFiles;
