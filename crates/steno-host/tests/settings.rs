@@ -183,8 +183,11 @@ fn seed_launch_at_login(store: &steno_core::Store, _: &steno_host::fakes::FakeSe
 /// What the first-launch registration did on the Mac with the setting
 /// `on`, the login item reading `status` and the flags in `flags` set:
 /// the registrations it made, and whether it counted the launch.
-fn first_launch_on_mac(on: bool, status: LoginItemStatus, flags: &[&str]) -> (Vec<bool>, bool) {
-    let flags: Vec<String> = flags.iter().map(|&key| key.to_owned()).collect();
+fn first_launch_on_mac(
+    on: bool,
+    status: LoginItemStatus,
+    flags: &'static [&'static str],
+) -> (Vec<bool>, bool) {
     let harness = Harness::builder()
         .platform(Platform::Macos)
         .seed(move |store, fakes| {
@@ -192,7 +195,7 @@ fn first_launch_on_mac(on: bool, status: LoginItemStatus, flags: &[&str]) -> (Ve
                 seed_launch_at_login(store, fakes);
             }
             fakes.login_item.set_status(status);
-            for key in &flags {
+            for key in flags {
                 fakes.preferences.set_flag(key, true);
             }
         })
