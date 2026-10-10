@@ -186,13 +186,13 @@ grep -qE -- '-d 224\.0\.0\.251 --dport 5353 -j ACCEPT' /etc/ufw/before.rules \
 echo "ok: the package installs the ufw profile Steno as a backup file, ufw reads it, and ufw admits mDNS"
 
 # The install script only prints the hint, and pacman ran it.
-hint="echo 'Steno receives recordings from the paired phone. If ufw is on, let them through once with: sudo ufw allow Steno'"
+hint='Steno receives recordings from the paired phone. If ufw is on, let them through once with: sudo ufw allow Steno'
 grep -qxF $'\tinstall = steno-desktop.install' "$work/.SRCINFO" \
   || die "the PKGBUILD has no install=steno-desktop.install"
 grep -vE '^[[:space:]]*(#|$)' "$work/steno-desktop.install" \
-  | diff -u <(printf '%s\n' 'post_install() {' "  $hint" '}' 'post_upgrade() {' '  post_install' '}') - \
+  | diff -u <(printf '%s\n' 'post_install() {' "  echo '$hint'" '}' 'post_upgrade() {' '  post_install' '}') - \
   || die "the install script does more than print sudo ufw allow Steno"
-grep -qF 'let them through once with: sudo ufw allow Steno' /tmp/makepkg.log \
+grep -qxF "$hint" /tmp/makepkg.log \
   || die "the install did not print sudo ufw allow Steno"
 echo "ok: the install script only prints sudo ufw allow Steno, and the install printed it"
 
