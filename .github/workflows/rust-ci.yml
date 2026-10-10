@@ -26,7 +26,10 @@ name: Rust CI
 # (apps/desktop/scripts/smoke-linux.sh; the screenshots are uploaded as
 # `desktop-smoke-screens`), ends the Xvfb server under a recording and
 # requires the recording saved
-# (apps/desktop/scripts/lost-display-linux.sh), and bundles a `.deb` with
+# (apps/desktop/scripts/lost-display-linux.sh), closes the main window
+# under a recording on a session bus with no tray host and requires the
+# app to quit and save it (apps/desktop/scripts/close-without-tray-linux.sh),
+# and bundles a `.deb` with
 # the speech sidecar
 # (apps/desktop/scripts/check-bundle.sh finds it beside the app) so a
 # packaging regression (the bundle config, the icons, the plists, the
@@ -431,6 +434,17 @@ jobs:
         run: |
           scripts/pipewire-headless.sh \
             apps/desktop/scripts/lost-display-linux.sh target/debug/steno-desktop
+      # Again, on the headless PipeWire's session bus, where no status
+      # notifier watcher runs, as on GNOME without the AppIndicator
+      # extension: closing the main window under a recording must quit
+      # through Quit's path and save it (the meeting `queued`, ended by
+      # `quit`), not hide the window behind a tray nothing shows.
+      - name: Desktop close without a tray
+        if: matrix.name == 'linux'
+        timeout-minutes: 5
+        run: |
+          scripts/pipewire-headless.sh \
+            apps/desktop/scripts/close-without-tray-linux.sh target/debug/steno-desktop
       # The same smoke on macOS, after the tests so they build as before.
       # It shows the windows on the runner's screen for 15 s and runs with a
       # fresh HOME; the script waits for another runner's smoke to end.

@@ -346,9 +346,10 @@ pub fn spawn_client(
     }
 }
 
-/// A proxy that caches no property: no client reads one, and the cache
-/// would ask the bus for them.
-fn proxy<'a>(
+/// A proxy that caches no property: the cache would ask the bus for all of
+/// them, and the one property read (the tray watcher's, `tray_host`) is
+/// asked of the bus each time.
+pub fn proxy<'a>(
     connection: &Connection,
     destination: &'a str,
     path: &'a str,
@@ -451,7 +452,7 @@ fn bus(connection: &Connection) -> zbus::Result<zbus::blocking::fdo::DBusProxy<'
 
 /// The unique name that owns `name` on `connection`, none when no peer
 /// does. Asked of the bus (`GetNameOwner`), so asking starts none.
-fn owner_of(connection: &Connection, name: &str) -> zbus::Result<Option<OwnedUniqueName>> {
+pub fn owner_of(connection: &Connection, name: &str) -> zbus::Result<Option<OwnedUniqueName>> {
     match bus(connection)?.get_name_owner(BusName::try_from(name)?) {
         Ok(owner) => Ok(Some(owner)),
         Err(zbus::fdo::Error::NameHasNoOwner(_)) => Ok(None),

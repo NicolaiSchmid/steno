@@ -7,7 +7,8 @@
 //! answered from the recorded fixtures instead, so the UI runs without a
 //! database.
 //!
-//! What the shell owns beside the windows (WP8): the tray (`tray`), the
+//! What the shell owns beside the windows (WP8): the tray (`tray`, and on
+//! Linux whether a status notifier host shows it, `tray_host`), the
 //! macOS menu bar (`menu`), the actions behind both menus (`actions`), the
 //! recorder state the shell follows (`recording`), the panels (`panels`)
 //! and their geometry (`panel_geometry`), window lifetime (`windows`; the
@@ -104,6 +105,8 @@ mod smoke;
 #[cfg(target_os = "linux")]
 mod stop_timeout;
 mod tray;
+#[cfg(target_os = "linux")]
+mod tray_host;
 mod updater;
 mod windows;
 
@@ -653,6 +656,12 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         } if label == BridgeWindow::Main.as_str() => {
             let tray = has_tray(app);
             app.state::<TrayAtClose>().note(tray);
+            if !tray {
+                tracing::warn!(
+                    "the main window closed with no tray to bring it back; \
+                     quitting, which saves a recording in progress first"
+                );
+            }
             if hides_on_close(&label, tray) {
                 api.prevent_close();
                 if let Some(main) = app.get_webview_window(&label)
@@ -732,19 +741,16 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
 /// closing main then ends the process (`exits_when_destroyed`). On Linux
 /// the tray crate panics (rather than errs) when libayatana-appindicator
 /// is not installed, so the panic is caught here; the .deb depends on the
-/// library, the `AppImage` does not bundle it (README, Bundles). A tray
-/// nothing shows (`tray::has_host`) is logged once here.
+/// library, the `AppImage` does not bundle it (README, Bundles). On
+/// Linux a built tray starts the follower that tells whether a host shows
+/// it (`tray_host::follow`), which logs what it finds.
 fn build_tray(app: &tauri::AppHandle) {
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tray::build(app)));
     match built {
         Ok(Ok(())) => {
             app.state::<smoke::Smoke>().note_tray();
-            if !tray::has_host() {
-                stderr_line!(
-                    "[steno-desktop] no tray host shows the tray icon; \
-                     closing the main window ends the app"
-                );
-            }
+            #[cfg(target_os = "linux")]
+            tray_host::follow();
         }
         Ok(Err(error)) => stderr_line!("[steno-desktop] the tray could not be built: {error}"),
         Err(_) => {
@@ -774,8 +780,8 @@ fn tray_stands(built: bool, smoke: bool, host: impl FnOnce() -> bool) -> bool {
 }
 
 /// What `has_tray` said when the main window last closed, so the
-/// `Destroyed` and the exit request that follow a close do not ask the
-/// session bus again.
+/// `Destroyed` and the exit request that follow a close decide as the
+/// close did, even when a tray host comes or goes between them.
 #[derive(Default)]
 struct TrayAtClose(std::sync::Mutex<Option<bool>>);
 
