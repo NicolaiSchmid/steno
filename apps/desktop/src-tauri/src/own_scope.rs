@@ -90,9 +90,9 @@ fn innermost(cgroup: &str) -> Option<&str> {
 /// The service of another program the app runs in, from its
 /// `/proc/self/cgroup`: a service of a systemd user manager (a path through
 /// `user@<uid>.service`) whose name does not say `steno`. `None` for a scope,
-/// Steno's own service (the autostart unit, uwsm's `app-…-steno\x2ddesktop@….service`,
-/// a user's `steno.service`), a sub-cgroup inside a unit, a path outside a
-/// user manager, and cgroup v1, which has no `0::` line.
+/// Steno's own service (the autostart unit, `uwsm-app -t service`'s, a user's
+/// `steno.service`), a sub-cgroup inside a unit, a path outside a user
+/// manager, and cgroup v1, which has no `0::` line.
 fn foreign_service(cgroup: &str) -> Option<&str> {
     let mut parts = unified(cgroup)?.rsplit('/');
     let unit = parts.next()?;
