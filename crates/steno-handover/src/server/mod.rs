@@ -504,6 +504,21 @@ mod tests {
         assert_eq!(may_skip(false, "no LAN address"), Ok(()));
     }
 
+    /// An engine over an empty in-memory store.
+    fn engine(
+        configuration: &HandoverConfiguration,
+        identity: &Arc<HandoverIdentity>,
+    ) -> Arc<Engine> {
+        Arc::new(Engine::new(
+            configuration.clone(),
+            identity.clone(),
+            Arc::new(Store::in_memory().unwrap()),
+            Arc::new(FakeHandoverIntake::default()),
+            watch::channel(Vec::new()).0,
+            Arc::new(Utc::now),
+        ))
+    }
+
     /// A listener on every IPv4 address that serves loopback and `lan`,
     /// read again after `every`.
     async fn serve(
@@ -512,14 +527,7 @@ mod tests {
         lan: fn() -> Vec<Ipv4Addr>,
         every: Duration,
     ) -> (HandoverServer, Arc<ServerMetrics>) {
-        let engine = Arc::new(Engine::new(
-            configuration.clone(),
-            identity.clone(),
-            Arc::new(Store::in_memory().unwrap()),
-            Arc::new(FakeHandoverIntake::default()),
-            watch::channel(Vec::new()).0,
-            Arc::new(Utc::now),
-        ));
+        let engine = engine(configuration, identity);
         let metrics = Arc::new(ServerMetrics::default());
         let reach = Reach::Lan {
             lan: LanAddresses::new(lan, every),
@@ -608,18 +616,10 @@ mod tests {
             port,
             ..HandoverConfiguration::default()
         };
-        let engine = Arc::new(Engine::new(
-            configuration.clone(),
-            identity.clone(),
-            Arc::new(Store::in_memory().unwrap()),
-            Arc::new(FakeHandoverIntake::default()),
-            watch::channel(Vec::new()).0,
-            Arc::new(Utc::now),
-        ));
         HandoverServer::start(
             &configuration,
             identity,
-            engine,
+            engine(&configuration, identity),
             Arc::new(ServerMetrics::default()),
         )
         .await
