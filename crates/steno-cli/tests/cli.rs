@@ -672,13 +672,10 @@ fn the_models_variable_names_the_models_directory() {
     let relative = Path::new("relative").join("models");
     let expected = work.join(&relative);
     std::fs::create_dir_all(&expected).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_steno"))
+    let output = steno_on(home)
         .args(["dev", "models", "list", "--db"])
         .arg(home.join("steno.sqlite"))
         .current_dir(&work)
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", home.join("share"))
-        .env("APPDATA", home.join("appdata"))
         .env("STENO_MODELS_DIR", &relative)
         .output()
         .unwrap();
