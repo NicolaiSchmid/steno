@@ -764,8 +764,7 @@ impl CaptureRecorder {
     /// armed countdown is reported through the change hook
     /// ([`Self::on_change`]) on the calling thread.
     pub fn resume_auto_stop(&self) {
-        let armed = self.arm_auto_stop(&mut self.inner(), CallWatch::resume);
-        if armed {
+        if self.arm_auto_stop(&mut self.inner(), CallWatch::resume) {
             self.notify();
         }
     }
