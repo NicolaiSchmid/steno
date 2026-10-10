@@ -27,7 +27,6 @@ steno-core = { path = "../../../crates/steno-core" }
 steno-host = { path = "../../../crates/steno-host" }
 steno-services = { path = "../../../crates/steno-services" }
 tauri.workspace = true
-tauri-plugin-autostart.workspace = true
 tauri-plugin-deep-link.workspace = true
 tauri-plugin-dialog.workspace = true
 tauri-plugin-opener.workspace = true
@@ -44,6 +43,11 @@ uuid.workspace = true
 # `main.rs`). Already in the lock through tokio.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# Launch at login on Linux and Windows (`autostart`); macOS registers with
+# `SMAppService` instead.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+tauri-plugin-autostart.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gdk.workspace = true
@@ -63,6 +67,8 @@ block2.workspace = true
 # Whether the user can write the bundle (`bundle_is_writable` in
 # `updater.rs`), with `access(2)` and no `unsafe`.
 rustix.workspace = true
+# The login item (`autostart`).
+smappservice-rs.workspace = true
 
 [dev-dependencies]
 # The temporary Nix layout and autostart entries of `packaged`'s tests.

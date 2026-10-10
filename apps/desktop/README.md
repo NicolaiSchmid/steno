@@ -20,7 +20,7 @@ Everything the Swift app does outside its three windows, per OS:
 |---|---|---|---|
 | Tray (`tray.rs`) | Menu bar extra with a template icon | Status notifier item (libayatana-appindicator) | Notification area icon |
 | Floating panels (`panels.rs`) | Non-activating `NSPanel`s on every space (`tauri-nspanel`) | Always-on-top undecorated windows, under XWayland on a Wayland session (see below) | Always-on-top undecorated windows |
-| Launch at login (`autostart.rs`, `packaged.rs`) | Launch Agent | `~/.config/autostart` entry naming a stable path (see Packaged installs), and systemd drop-ins for the stop timeout (`stop_timeout.rs`, see Launch at login under systemd) | Run registry key |
+| Launch at login (`autostart.rs`, `autostart/main_app.rs`, `packaged.rs`) | `SMAppService.mainApp`, as the Swift app (see Launch at login on macOS) | `~/.config/autostart` entry naming a stable path (see Packaged installs), and systemd drop-ins for the stop timeout (`stop_timeout.rs`, see Launch at login under systemd) | Run registry key |
 | Updates (`updater.rs`) | signed manifest per lane | same; off on a packaged install (see Packaged installs) | same |
 | Permissions (`permissions.rs`) | microphone TCC status and prompt; system audio and calendar deferred to the host's probes | unknown (nothing to query before capture; the portal asks when the stream opens) | unknown (the privacy switch decides at capture time) |
 | Deep links (`deep_links.rs`) | `steno:` through `CFBundleURLTypes`, written into the bundle by the deep-link plugin from `plugins.deep-link` | the `.deb`'s desktop entry from `linux/` (`Exec=… %u`, the `x-scheme-handler/steno` MIME type); an AppImage and a debug build register at start | registry (debug builds register at start) |
@@ -239,11 +239,12 @@ value (`HostConfig::platform`).
 The panels are the web app's `#/panel/bubble` and `#/panel/prompt` routes
 (`apps/macos/web/src/windows/panels/`), two webviews that hang from one
 anchor (top centre of the frame, 8 pt under the main screen's top edge by
-default, saved to `panel-anchor.json` in the app config directory when the
-user drags one; the geometry is `panel_geometry.rs`). One rule decides
-what shows: a busy recorder wins, else a pending detection prompt, else
-nothing. Each window is created once and then hidden and shown; the
-prompt's is navigated to each new request, which the shell numbers when
+default, saved to `panel-anchor.json` in the support directory by
+`panel_anchor.rs` when the user drags one, see The identifier; the
+geometry is `panel_geometry.rs`). One rule decides what shows: a busy
+recorder wins, else a pending detection prompt, else nothing. Each window
+is created once and then hidden and shown; the prompt's is navigated to
+each new request, which the shell numbers when
 the host raises it, so the page remounts and the countdown restarts; the X
 and Record send that number back and answer only their own prompt. The page
 measures its pill and reports the size in device pixels through the
@@ -690,12 +691,15 @@ instead of installing binaries that cannot start there.
 `cargo tauri icon` over the Swift app icon
 (`apps/macos/Steno/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512@2x.png`),
 the tray's template mark in `icons/tray/` is drawn by hand. The identifier
-stays `uno.schmid.steno.desktop`, so the shell keeps its own preferences
-and permissions beside the Swift app until the Mac cutover changes it to
-`uno.schmid.steno.mac` (`.plans/2026-10-04-mac-cutover.md`, whose step 1
-decides what becomes of these installs). Both apps are `Steno.app`,
-though: dragged into `/Applications`, the desktop `.dmg` replaces the
+differs from the Swift app's (see The identifier), but both apps are
+`Steno.app`: dragged into `/Applications`, the desktop `.dmg` replaces the
 Swift app, so install it elsewhere (`~/Applications`) to keep both.
+`Info.plist` also carries the Swift app's Sparkle key
+(`SUPublicEDKey`, from `apps/macos/project.yml`), inert here: Sparkle
+installs no bundle without a public key, and the Swift app's last update
+installs this one (`.plans/2026-10-07-stable-promotion.md`, S6).
+`check-bundle.sh` checks both it and the bundle id in the built `.app`,
+and Rust CI runs that check over stub bundles (`check-bundle.test.sh`).
 
 Every release bundle carries `steno-speech-sidecar` beside the app (see
 "The speech sidecar" under Release), so a `.deb`, AppImage, `.msi` or NSIS
@@ -819,6 +823,108 @@ paths until Cargo's `trim-paths` stabilises. The release workflow passes
 dependency sources in the cargo home read `cargo/…`. Cargo already gives
 the workspace's own sources relative paths; any absolute one reads
 `steno/…`.
+
+### The identifier
+
+The identifier is `com.nicolaischmid.steno.desktop` on every platform
+(`tauri.conf.json`; D5 of `.plans/2026-10-07-stable-promotion.md`). The
+desktop builds before it, up to `desktop-v0.1.0-rc.2` and the
+`desktop-beta` lane, carried `uno.schmid.steno.desktop`, and the Swift
+app keeps `uno.schmid.steno.mac`. No data is named after the identifier,
+so changing it moves no data; what it resets is listed below
+(`identifier.rs`):
+
+- **The support directory** holds the database, its lock, the preferences,
+  the audio, the models and the panels' anchor, and is `Steno` on every
+  platform. Secrets stay under the keyring service `uno.schmid.steno.mac`.
+- **The panels' anchor** moved there. While `Steno/panel-anchor.json` is
+  missing, the anchor an earlier build saved in its config directory
+  (`~/Library/Application Support/uno.schmid.steno.desktop`,
+  `$XDG_CONFIG_HOME` or `~/.config`, then `uno.schmid.steno.desktop`, or
+  `%APPDATA%\uno.schmid.steno.desktop`) is read once and written to the new
+  place; the old file stays. A new file that does not parse is set aside as
+  `panel-anchor.json.corrupt-<time>`, and the panels open at the default
+  place in that run; until a drag saves a new file, the next launch reads
+  the earlier build's anchor again. A drag's saves run on a thread of
+  their own, and the exit waits for the last one; the one-time copy is
+  written when the anchor loads.
+- **What starts afresh** under the new identifier: Tauri's per-identifier
+  directories (the app config and data directories, the webview's data,
+  which the web app does not use), on macOS the permissions and the login
+  item, and on Windows the `AppUserModelID`, so a taskbar pin of an earlier
+  build no longer groups with the running app; the MSI's upgrade code and
+  the NSIS keys come from the product name, so the installers still
+  upgrade in place, and the NSIS uninstaller's data cleanup removes only
+  the new identifier's folders.
+- **The single-instance guard** is named after the identifier (the socket
+  in `/tmp` on macOS, the session bus name on Linux, the mutex on Windows),
+  so a build under the earlier identifier and this one miss each other's.
+  If both start, the database's lock refuses the second ("Steno is already
+  running"), which then builds nothing.
+- **On Linux nothing user-visible moves.** The autostart entry
+  (`~/.config/autostart/steno-desktop.desktop`), its `Exec`, the unit
+  systemd makes from it (`app-steno\x2ddesktop@autostart.service`) and the
+  `.deb`'s desktop entry come from the Linux product name `steno-desktop`
+  (`tauri.linux.conf.json`) and the binary, not from the identifier, and
+  the `steno:` handler an AppImage registers is named after the binary.
+
+### Launch at login on macOS
+
+The login item is `SMAppService.mainApp` (`autostart/main_app.rs`, over
+`smappservice-rs`), the one the Swift app registers. While macOS waits for
+the user to allow it, General shows "Waiting for your approval in System
+Settings › Login Items." with an Open Login Items button. It is filed
+under the bundle id, so this app registers itself; macOS keeps or drops
+the Swift app's entry, and this app never touches it (S6). At each launch,
+once the database is open:
+
+1. The Launch Agent an earlier build wrote through `tauri-plugin-autostart`
+   (`~/Library/LaunchAgents/Steno.plist`, labelled `Steno`, starting
+   `…/Contents/MacOS/steno-desktop`) goes: `launchctl bootout` unloads it,
+   unless it is the job this very process was started as at login, which
+   it would end; then the file is deleted. The log says what happened. A
+   `Steno.plist` that starts another program stays. Only the app run from
+   its installed bundle removes it: a `fixture-host` build, a plain binary
+   run from `target/` that shares the home folder with an installed Steno,
+   or Steno opened from its mounted disk image (`/Volumes/…`) or
+   translocated by Gatekeeper (`…/AppTranslocation/…`), leaves it to the
+   installed app. A bundle built under `target/` counts as installed: it
+   registers that path and sets `steno.mainAppRegistered`, so open one only
+   in a test account.
+2. Then the host's first-launch registration
+   (`Host::register_login_item_on_first_launch`, as the Swift app's
+   `registerLoginItemOnFirstLaunch`) registers the login item once, at the
+   first launch with the stored Launch at login setting on, if it reads
+   not registered. It counts that launch under `steno.mainAppRegistered` in
+   `preferences.json`, also when the item was already enabled or awaiting
+   approval; `steno.loginItemRegistered`, which an earlier build set for
+   its Launch Agent, counts only off the Mac. A launch whose login item
+   macOS cannot find is not counted: a binary run outside a bundle reads
+   that, and counting it would keep the installed app from ever
+   registering. Nor does a run from outside an installed bundle, as in
+   step 1, register or count anything (`HostConfig::installed_bundle`,
+   which the shell sets from its own path): the copy in Applications
+   registers at its own first launch. A failed registration is logged as
+   a warning, General shows the switch off, and the next launch tries
+   again.
+   After that only the switch in General registers or removes the login
+   item, so one the user removed in System Settings stays removed.
+
+A user of an earlier build who switched its agent off under "Allow in the
+Background" in System Settings, with the setting still on, gets Steno
+back at login after the update: the agent's file goes, the first launch
+registers the main app, and macOS offers no cheap way to read that
+switch. Turning the setting off in General removes it again.
+
+An earlier build that its agent started at login may quit instead of
+relaunching when it installs this update. Its updater starts the new
+binary as a child and exits, and launchd ends the child with the agent's
+job, because the agent does not set `AbandonProcessGroup`. This build
+cannot change that. Opening Steno once removes the agent, and the next
+login starts Steno once, from Login Items.
+
+A smoke run registers and removes nothing. Linux and Windows keep the
+plugin.
 
 ### The Nix package and the NixOS module
 
@@ -1392,11 +1498,12 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop`, `linux/*-stop-timeout.conf` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles); the stop timeout drop-ins for the autostart unit and GNOME's scope (see Launch at login under systemd) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display. `stop_timeout.rs`, on Linux: the systemd drop-ins for the stop timeout |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart on Linux and Windows, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display. `stop_timeout.rs`, on Linux: the systemd drop-ins for the stop timeout |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items and their words per platform, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/platform.rs` | The initialization script that tells every page its platform |
-| `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
-| `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
+| `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs`, `panel_anchor.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values; the anchor's file (see The identifier) |
+| `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call; `autostart/main_app.rs` is the macOS login item (see Launch at login on macOS) |
+| `apps/desktop/src-tauri/src/identifier.rs` | The earlier identifier, and the tests that the configured one, the Sparkle key and the database lock are as The identifier says |
 | `apps/desktop/src-tauri/src/packaged.rs`, `packaged/linux.rs` | The Linux autostart entry's stable path, and the login item a package leaves to the system (see Packaged installs) |
 | `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. On Linux a closed Settings or onboarding window is kept, without its page, and loads afresh when opened again (`Kept`, against the fd leak of a destroyed webview). New windows from the page are denied. `Pages` holds the requests a window is owed until its page mounts |
 | `apps/desktop/src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window; a finished `onboarding` snapshot closes the onboarding window, a `recording` snapshot to main moves the tray and the panels. `window.open` (typed: one of the six sections, a UUID meeting id), `window.close` (the onboarding window, from itself), `system.openURL` (`https:` and `mailto:` only) and the shell's own methods listed above are the shell's; everything else goes to the host. `panel_call(action, params)` is the panels' own command |
@@ -1407,7 +1514,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/scripts/lost-display-linux.sh` | Ends the display server under a recording and fails unless the app saved it first; CI's Linux job runs it |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
 | `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
-| `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check |
+| `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check, and runs the `.app` check's bundle id and Sparkle key over stub bundles (`check-bundle.test.sh`) |
 | `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh`, `release-assets.sh`, `release-signatures.sh`, `release-notes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json`, the lanes a release moves, the assets gathered from each platform's artifact, `SHA256SUMS` and the OpenPGP signatures, and the release notes (each `.sh` with a `.test.sh` is tested in Rust CI) |
 | `apps/desktop/release-signing-key.asc` | The public half of the release signing key that signs `SHA256SUMS` and the Linux bundles (see Checksums and OpenPGP signatures) |
 
@@ -1429,10 +1536,9 @@ rule for `unknown` land; and the clip player is a fake, which needs an
 audio output and follows the stable release. The host may treat the main
 window as always present: a close hides it, or ends the process when no
 tray stands, so publishing to it never fails for want of a window.
-Launch at login is a Launch Agent, not `SMAppService`; the cutover has
-to retire the Swift registration so the user does not get two login
-items (the plan's parity list, `.plans/2026-10-04-mac-cutover.md`). The
-macOS menu bar has no Record menu yet (`⌘⇧R` and Record In Person are
+What the Swift app's login item does once this app replaced it is for
+the real handoff to show (R3 of `.plans/2026-10-07-stable-promotion.md`).
+The macOS menu bar has no Record menu yet (`⌘⇧R` and Record In Person are
 the tray's and the sidebar's), and no Find Meetings (`⌘F`). On macOS the
 system audio permission has no status API; the audio crate's probe (WP5)
 records it and until then it reads `unknown`. The panels are re-tuned on

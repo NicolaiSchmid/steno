@@ -23,5 +23,11 @@
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
+	<!-- The Swift app's Sparkle key, verbatim from apps/macos/project.yml.
+	     Inert here: this app updates through the Tauri updater. The Swift
+	     app's last Sparkle update installs this bundle, and Sparkle
+	     refuses a bundle without a public key (stable plan S6). -->
+	<key>SUPublicEDKey</key>
+	<string>RxaX7phoHvb7M0P4yaOC7zngDo+lqlOE6Iq89UtOuQI=</string>
 </dict>
 </plist>
