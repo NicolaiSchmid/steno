@@ -2172,7 +2172,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_handover_inbox_is_left_alone() {
         let harness = Harness::new();
-        let inbox = harness.support_directory().join("handover-inbox");
+        let inbox = harness
+            .support_directory()
+            .join(steno_handover::HandoverConfiguration::INBOX_DIRECTORY_NAME);
         std::fs::create_dir_all(&inbox).unwrap();
         let recording_id = Uuid::new_v4().hyphenated().to_string();
         let files = [

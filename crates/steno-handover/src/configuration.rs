@@ -54,6 +54,11 @@ impl HandoverConfiguration {
     pub const BODY_HEADROOM: i64 = 64 * 1024;
     /// Upper bound for the JSON bodies of the small routes.
     pub const JSON_BODY_LIMIT: i64 = 64 * 1024;
+    /// The inbox's directory under the support directory. The Swift app
+    /// and every Rust build use this name, so a phone resumes its partial
+    /// uploads after an upgrade. Swift:
+    /// `HandoverConfiguration.defaultInboxDirectory`.
+    pub const INBOX_DIRECTORY_NAME: &str = "handover-inbox";
     /// The port the app listens on under Linux, where the desktops' firewalls
     /// (`ufw` on Omarchy, the NixOS firewall) block every incoming port not
     /// opened by name: the AUR package's `ufw` profile and the NixOS module
@@ -92,11 +97,12 @@ impl HandoverConfiguration {
         first_name(NAME_SOURCES, NameSource::read)
     }
 
-    /// `<support>/handover-inbox`; [`StenoPaths`] decides the root so a
-    /// `HOME` override in tests applies here too.
+    /// `<support>/`[`INBOX_DIRECTORY_NAME`](Self::INBOX_DIRECTORY_NAME);
+    /// [`StenoPaths`] decides the root so a `HOME` override in tests
+    /// applies here too.
     #[must_use]
     pub fn default_inbox_directory() -> PathBuf {
-        StenoPaths::default_support_directory().join("handover-inbox")
+        StenoPaths::default_support_directory().join(Self::INBOX_DIRECTORY_NAME)
     }
 }
 

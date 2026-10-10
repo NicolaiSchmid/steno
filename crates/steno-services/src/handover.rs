@@ -104,9 +104,7 @@ pub(crate) fn stored_port(store: &Store) -> Option<u16> {
     store
         .settings()
         .inspect_err(|error| {
-            tracing::warn!(
-                "the settings could not be read; the phone handover uses its default port"
-            );
+            tracing::warn!("the settings could not be read, so a stored handoverPort is ignored");
             tracing::debug!(%error, "settings for the handover's port");
         })
         .ok()

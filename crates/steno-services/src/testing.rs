@@ -2,7 +2,7 @@
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
 //! old, the waits that fail a test instead of hanging it, and
-//! [`warnings`], what a call logs.
+//! [`warnings`], what a call logs at `warn` and above.
 //!
 //! A test that writes models gives the app an explicit models directory in
 //! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
