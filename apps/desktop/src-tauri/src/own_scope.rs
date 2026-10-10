@@ -37,27 +37,30 @@
 //! end the mount while the app saves, and the app with it. So wherever the
 //! app runs in the user manager, each mount server not in one yet gets a
 //! scope of its own, `app-steno\x2ddesktop\x2dimage-<pid>.scope` in
-//! `app.slice`, which no session's end stops; it ends by itself when the
-//! app exits, and an exit of the user manager stops it after the app's
-//! unit. Each move is checked as the app's is, and a failure is logged. In
-//! a login's `session-<n>.scope` (Hyprland without uwsm), outside the user
-//! manager, the mount servers stay beside the app, with a warning: that
-//! scope's stop ends both.
+//! `app.slice`, which no session's end stops; it ends by itself once the
+//! app, and every program the app started that still holds the keepalive
+//! pipe, have exited (`appimage`), and an exit of the user manager stops
+//! it after the app's unit. Each move is checked as the app's is, and a
+//! failure is logged. In a login's `session-<n>.scope` (Hyprland without
+//! uwsm), outside the user manager, the mount servers stay beside the app,
+//! with a warning: that scope's stop ends both.
 //!
 //! A scope (including another program's, which the app stays in), Steno's
 //! own service, and an app outside the user manager (a system service, an
 //! ssh login, a container, no systemd) stay where they are, silently. A
 //! user's own service whose shell does not `exec` Steno counts as another
-//! program's; the move does no harm there. The move is written to stderr;
-//! an app that does not move logs a warning with the unit it runs in
-//! afterwards, since the save at the session's end may be cut off there,
-//! and a move still waiting when the launch goes on is logged when it
-//! ends. The request goes over the user bus's socket in
-//! `$XDG_RUNTIME_DIR` and carries the pids, the scopes' names and their
-//! fixed settings, nothing else.
+//! program's; the move does no harm there. The app's move and each mount
+//! server's are written to stderr; an app that does not move logs a
+//! warning with the unit it runs in afterwards, since the save at the
+//! session's end may be cut off there, and a move still waiting when the
+//! launch goes on is logged when it ends. The request goes over the user
+//! bus's socket in `$XDG_RUNTIME_DIR` and carries the pids, the scopes'
+//! names and their fixed settings, nothing else.
 //!
 //! - [`leave_foreign_service`]: the one entry point, called first in
 //!   `setup`.
+//! - [`launch`]: the plan from the app's cgroup and its mount servers,
+//!   carried out.
 //! - [`plan`]: what moves, from the cgroup and the mount servers.
 //! - [`carry_out`]: the plan's moves and warnings.
 //! - [`move_within`]: the request on a thread of its own, waited for at
@@ -326,14 +329,14 @@ fn start_scope(
 
 /// Moves the mount server `server` into a scope of its own, stopped after
 /// the app's unit `app`, once `cgroup_of` names that scope for it, the
-/// job has ended, or `deadline` passes.
+/// job has ended, or `deadline` passes; the scope.
 fn move_server(
     connection: &Connection,
     server: u32,
     app: &str,
     cgroup_of: CgroupOf,
     deadline: Instant,
-) -> Result<(), MoveError> {
+) -> Result<String, MoveError> {
     let scope = server_scope_name(server);
     let job = start_scope(connection, &scope, server_properties(server, app))?;
     joined(
@@ -341,11 +344,13 @@ fn move_server(
         &job,
         || in_unit(cgroup_of, server, &scope),
         deadline,
-    )
+    )?;
+    Ok(scope)
 }
 
 /// [`move_server`] for each of the mount servers `servers`, one after the
-/// other against the one `deadline`, each failure logged.
+/// other against the one `deadline`, each move written to stderr and each
+/// failure logged.
 fn take_servers(
     connection: &Connection,
     servers: &[u32],
@@ -354,8 +359,11 @@ fn take_servers(
     deadline: Instant,
 ) {
     for &server in servers {
-        if let Err(error) = move_server(connection, server, app, cgroup_of, deadline) {
-            server_stays(server, &error);
+        match move_server(connection, server, app, cgroup_of, deadline) {
+            Ok(scope) => stderr_line!(
+                "[steno-desktop] moved the AppImage's mount server {server} into a scope of its own, {scope}, which the session's end does not stop"
+            ),
+            Err(error) => server_stays(server, &error),
         }
     }
 }
@@ -576,18 +584,29 @@ fn report(unit: &str, outcome: &Outcome, late: bool) {
 /// launch, before the first window. Never fails: the app records where it
 /// is otherwise.
 pub fn leave_foreign_service() {
-    let pid = std::process::id();
-    let Ok(cgroup) = cgroup_of(pid) else {
-        return;
-    };
-    let servers = unmoved(crate::appimage::mount_servers(), cgroup_of);
-    carry_out(
-        plan(&cgroup, servers),
-        pid,
+    launch(
+        std::process::id(),
+        crate::appimage::mount_servers,
         user_bus,
         cgroup_of,
         Instant::now() + QUEUE_LIMIT,
     );
+}
+
+/// [`carry_out`] for the app `pid`, its plan made from its cgroup and the
+/// mount servers `mount_servers` finds that are not in a scope of their
+/// own yet, both read through `cgroup_of`: nothing when its cgroup cannot
+/// be read. The thread [`carry_out`] may start.
+fn launch(
+    pid: u32,
+    mount_servers: impl FnOnce() -> Vec<u32>,
+    connect: impl FnOnce() -> Result<Connection, MoveError> + Send + 'static,
+    cgroup_of: CgroupOf,
+    deadline: Instant,
+) -> Option<std::thread::JoinHandle<()>> {
+    let cgroup = cgroup_of(pid).ok()?;
+    let servers = unmoved(mount_servers(), cgroup_of);
+    carry_out(plan(&cgroup, servers), pid, connect, cgroup_of, deadline)
 }
 
 /// Carries out `plan` for the app `pid` over the connection `connect`
@@ -1249,8 +1268,9 @@ mod tests {
     }
 
     /// Every mount server that stays where it runs is logged at warn: with
-    /// no user bus, whether the app leaves or stays; when its move fails;
-    /// and in a login's session scope.
+    /// no user bus, whether the app leaves or stays, beside the app's own
+    /// warning that names `uwsm-app`; when its move fails; and in a login's
+    /// session scope.
     #[test]
     fn every_mount_server_that_stays_is_logged() {
         let no_bus = || Err(MoveError::NoRuntimeDir);
@@ -1265,6 +1285,12 @@ mod tests {
             )
         });
         assert_eq!(stayed(&logged), ["60", "77"], "{logged}");
+        assert!(
+            logged
+                .lines()
+                .any(|line| line.contains("WARN") && line.contains("uwsm-app")),
+            "{logged}"
+        );
 
         let logged = servers_moved_from_gnome(no_bus, MOVED);
         assert_eq!(stayed(&logged), ["60", "77"], "{logged}");
@@ -1281,6 +1307,94 @@ mod tests {
         assert!(none.is_none());
         assert_eq!(stayed(&logged), ["60", "77"], "{logged}");
         assert!(logged.contains("session scope"), "{logged}");
+    }
+
+    /// An app that stays waits for each mount server's move until the
+    /// launch's deadline: a mount server seen in its scope only on a later
+    /// read is moved, and nothing is logged.
+    #[test]
+    fn a_mount_server_seen_in_its_scope_on_a_later_read_is_moved() {
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
+            return;
+        };
+        let after_a_read: CgroupOf = |pid| {
+            if READS.fetch_add(1, Ordering::SeqCst) == 0 {
+                LEFT_BEHIND(pid)
+            } else {
+                MOVED(pid)
+            }
+        };
+
+        let logged = servers_moved_from_gnome(move || Ok(app), after_a_read);
+        assert_eq!(logged, "");
+        assert_eq!(starts(asked), servers_before(&[60, 77], GNOME));
+        assert_eq!(READS.load(Ordering::SeqCst), 3);
+        nothing_undone(asked);
+    }
+
+    /// Set in the copy of this test binary whose stderr a test reads.
+    const STDERR_CHILD: &str = "STENO_TEST_OWN_SCOPE_STDERR_CHILD";
+
+    /// What the test `name` wrote to stderr, run again in a copy of this
+    /// test binary with [`STDERR_CHILD`] set, which has to pass; `None`
+    /// when the copy found no `dbus-daemon`. `--nocapture`, or the test
+    /// harness would catch its warnings.
+    fn stderr_of(name: &str) -> Option<String> {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(STDERR_CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{}: {stderr}", output.status);
+        (!stderr.contains("SKIPPED: dbus-daemon")).then_some(stderr)
+    }
+
+    /// The launch reads the app's cgroup, takes the mount servers found
+    /// that are not in a scope of their own yet, and moves them: for an app
+    /// that stays in GNOME's scope, the mount server 60, in its scope
+    /// already, stays, and 77 moves, which is written to stderr.
+    #[test]
+    fn the_launch_moves_the_mount_servers_found_and_writes_each_move_to_stderr() {
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        if std::env::var_os(STDERR_CHILD).is_none() {
+            let Some(stderr) = stderr_of(
+                "own_scope::tests::the_launch_moves_the_mount_servers_found_and_writes_each_move_to_stderr",
+            ) else {
+                return;
+            };
+            let moves: Vec<&str> = stderr
+                .lines()
+                .filter(|line| line.contains("mount server"))
+                .collect();
+            assert_eq!(
+                moves,
+                [
+                    "[steno-desktop] moved the AppImage's mount server 77 into a scope of its own, app-steno\\x2ddesktop\\x2dimage-77.scope, which the session's end does not stop"
+                ],
+                "{stderr}"
+            );
+            return;
+        }
+
+        let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
+            return;
+        };
+        // 77 is in the session's unit when the launch looks, and in its
+        // scope once asked.
+        let cgroup_of: CgroupOf = |pid| match pid {
+            4242 => Ok(below_user_manager(&format!("app.slice/{GNOME}"))),
+            77 if READS.fetch_add(1, Ordering::SeqCst) == 0 => LEFT_BEHIND(pid),
+            _ => MOVED(pid),
+        };
+        launch(4242, || vec![60, 77], move || Ok(app), cgroup_of, soon())
+            .expect("a thread moves the servers")
+            .join()
+            .unwrap();
+        assert_eq!(starts(asked), servers_before(&[77], GNOME));
+        nothing_undone(asked);
     }
 
     #[test]

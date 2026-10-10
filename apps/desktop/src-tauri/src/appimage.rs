@@ -26,95 +26,99 @@
 //! since it still ends once its last reader closes the pipe. Reading
 //! another process's `fd` and `fdinfo` needs the same user.
 //!
-//! Once found, the app's read ends of those pipes are closed on exec: a
-//! process the app starts inherits every descriptor that is not, so an
-//! update's relaunch would keep the old mount server alive for its whole
-//! session otherwise.
+//! The app leaves its read ends of those pipes open across exec, as the
+//! runtime left them. A program the app starts inherits them, and the mount
+//! lives as long as any of them is held. The runtime's `AppRun` puts the
+//! mount's libraries and modules on `LD_LIBRARY_PATH`, `GTK_PATH` and the
+//! like, which the app's children inherit. So a browser the app opens a
+//! link in, or an update's relaunch, may map files from the mount, and a
+//! mount that ended under it would crash it (`SIGBUS`). A mount server may
+//! therefore outlive the app until the last of those programs exits.
 //!
 //! `own_scope` moves each mount server into a scope of its own, so the stop
 //! of the unit it runs in cannot end the mount while the app saves.
 //!
 //! - [`mount_servers`]: the one entry point, from the environment.
-//! - [`servers_at`]: whether the app runs from a FUSE mount, the scan, and
-//!   a warning when the app runs from one whose server it cannot find.
-//! - [`fuse_connection`]: the FUSE connection of a mount, `None` for any
-//!   other file system (an image extracted and run from a folder).
+//! - [`servers_at`]: whether the app's executable is on a FUSE mount, the
+//!   scan, and a warning when the app runs from one whose server it cannot
+//!   find.
+//! - [`fuse_connection`]: the FUSE connection of the file system a path is
+//!   on, `None` for any other file system (an image extracted and run from
+//!   a folder), from [`file_system`].
 //! - [`servers_of`]: the scan of a `/proc` for the processes that hold the
 //!   connection and the write end of the app's pipe.
 //!
 //! Swift: none; the Mac app ships no `AppImage`.
 
-use std::collections::{BTreeSet, HashSet};
-use std::os::fd::{BorrowedFd, RawFd};
+use std::collections::HashSet;
+use std::os::fd::RawFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 /// `FUSE_SUPER_MAGIC`, the file system type `statfs` gives a FUSE mount.
 const FUSE_SUPER_MAGIC: u32 = 0x6573_5546;
 
-/// What the scan found: the mount servers, and the app's descriptors that
-/// hold the read ends of their pipes.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct Found {
-    servers: Vec<u32>,
-    read_ends: Vec<RawFd>,
-}
-
 /// The mount servers of the `AppImage` the app runs from: none when it
 /// does not run from one, or when no process holds its FUSE connection and
-/// the other end of its keepalive pipe, which is logged. The app's read
-/// ends of their pipes are closed on exec from then on.
+/// the other end of its keepalive pipe, which is logged.
 pub fn mount_servers() -> Vec<u32> {
     let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
     let Ok(exe) = std::env::current_exe() else {
         return Vec::new();
     };
-    let found = servers_at(
+    servers_at(
         Path::new("/proc"),
         std::process::id(),
         appdir.as_deref(),
         &exe,
         fuse_connection,
-    );
-    close_on_exec(&found.read_ends);
-    found.servers
+    )
 }
 
-/// The mount servers under `proc` of the app `pid`, whose executable is
-/// `exe`, when it runs from the mount `appdir` (`$APPDIR`) and
-/// `connection_of` gives that mount's FUSE connection; a warning when it
-/// does and no server is found.
+/// The mount servers under `proc` of the app `pid` when its executable
+/// `exe` is on the FUSE mount `appdir` (`$APPDIR`), `connection_of` giving
+/// the FUSE connection a path is on; a warning when it is and no server is
+/// found.
 fn servers_at(
     proc: &Path,
     pid: u32,
     appdir: Option<&Path>,
     exe: &Path,
     connection_of: impl Fn(&Path) -> Option<u32>,
-) -> Found {
-    // The executable inside the mount, not only `$APPDIR` inherited from a
-    // launcher that is an `AppImage`.
-    let Some(mount) = appdir.filter(|mount| exe.starts_with(mount)) else {
-        return Found::default();
+) -> Vec<u32> {
+    let Some(mount) = appdir else {
+        return Vec::new();
     };
-    let Some(connection) = connection_of(mount) else {
-        return Found::default();
+    // The executable on the mount's own FUSE connection, not only a
+    // `$APPDIR` inherited from a launcher that is an `AppImage`. The runtime
+    // does not resolve `$APPDIR` (`$TMPDIR` may name it through a symlink),
+    // so the paths do not compare.
+    let Some(connection) = connection_of(mount).filter(|&c| connection_of(exe) == Some(c)) else {
+        return Vec::new();
     };
-    let found = servers_of(proc, pid, connection);
-    if found.servers.is_empty() {
+    let servers = servers_of(proc, pid, connection);
+    if servers.is_empty() {
         tracing::warn!(
             appdir = %mount.display(),
             connection,
             "Steno runs from an AppImage whose mount server it cannot find, so the server stays where it runs, and the session's end may stop it while Steno saves a recording"
         );
     }
-    found
+    servers
 }
 
-/// The FUSE connection of the mount at `mount`, as `/dev/fuse`'s `fdinfo`
-/// names it; `None` when it is no FUSE mount, as when the runtime extracted
-/// the image into a folder and runs it from there.
-fn fuse_connection(mount: &Path) -> Option<u32> {
-    let stats = rustix::fs::statfs(mount).ok()?;
+/// The FUSE connection of the file system `path` is on, as `/dev/fuse`'s
+/// `fdinfo` names it; `None` when it is no FUSE mount, as when the runtime
+/// extracted the image into a folder and runs it from there.
+fn fuse_connection(path: &Path) -> Option<u32> {
+    let (magic, dev) = file_system(path)?;
+    (magic == FUSE_SUPER_MAGIC).then(|| kernel_dev(dev))
+}
+
+/// The type of the file system `path` is on (`statfs`'s magic number) and
+/// its device (`stat`'s `st_dev`).
+fn file_system(path: &Path) -> Option<(u32, u64)> {
+    let stats = rustix::fs::statfs(path).ok()?;
     // The magic numbers are 32 bits; where `f_type` is a signed 32-bit word
     // the cast keeps the bits of the ones above `i32::MAX`.
     #[allow(
@@ -124,10 +128,7 @@ fn fuse_connection(mount: &Path) -> Option<u32> {
         reason = "f_type's width and sign differ between targets"
     )]
     let magic = stats.f_type as u32;
-    if magic != FUSE_SUPER_MAGIC {
-        return None;
-    }
-    Some(kernel_dev(std::fs::metadata(mount).ok()?.dev()))
+    Some((magic, std::fs::metadata(path).ok()?.dev()))
 }
 
 /// A device number as the kernel encodes it inside, `major << 20 | minor`,
@@ -139,41 +140,30 @@ fn kernel_dev(dev: u64) -> u32 {
 
 /// The processes under `proc` other than `pid` that serve the FUSE
 /// `connection` and hold open for writing a pipe that `pid` holds open for
-/// reading, and `pid`'s descriptors of those pipes.
-fn servers_of(proc: &Path, pid: u32, connection: u32) -> Found {
+/// reading.
+fn servers_of(proc: &Path, pid: u32, connection: u32) -> Vec<u32> {
     let read = pipes(&proc.join(pid.to_string()), libc::O_RDONLY);
-    let mut found = Found::default();
     if read.is_empty() {
-        return found;
+        return Vec::new();
     }
-    let mut read_ends = BTreeSet::new();
     let others = std::fs::read_dir(proc)
         .into_iter()
         .flatten()
         .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
         .filter(|&other| other != pid);
+    let mut servers = Vec::new();
     for other in others {
         let process = proc.join(other.to_string());
         if !serves(&process, connection) {
             continue;
         }
-        let written: HashSet<PathBuf> = pipes(&process, libc::O_WRONLY)
-            .into_iter()
-            .map(|(_, pipe)| pipe)
-            .collect();
-        let shared: Vec<RawFd> = read
-            .iter()
-            .filter(|(_, pipe)| written.contains(pipe))
-            .map(|&(fd, _)| fd)
-            .collect();
-        if !shared.is_empty() {
-            found.servers.push(other);
-            read_ends.extend(shared);
+        let written: HashSet<PathBuf> = pipes(&process, libc::O_WRONLY).into_iter().collect();
+        if read.iter().any(|pipe| written.contains(pipe)) {
+            servers.push(other);
         }
     }
-    found.servers.sort_unstable();
-    found.read_ends = read_ends.into_iter().collect();
-    found
+    servers.sort_unstable();
+    servers
 }
 
 /// Whether the process at `process` (its `/proc` directory) holds
@@ -208,14 +198,15 @@ fn fdinfo(process: &Path, fd: RawFd) -> Option<String> {
 }
 
 /// The pipes the process at `process` holds open with the access mode
-/// `mode`, each with its descriptor and its `fd` link (`pipe:[<inode>]`).
-/// A pipe whose `fdinfo` cannot be read is left out.
-fn pipes(process: &Path, mode: i32) -> Vec<(RawFd, PathBuf)> {
+/// `mode`, each as its `fd` link names it (`pipe:[<inode>]`). A pipe whose
+/// `fdinfo` cannot be read is left out.
+fn pipes(process: &Path, mode: i32) -> Vec<PathBuf> {
     descriptors(process)
         .filter(|(fd, link)| {
             link.as_os_str().as_encoded_bytes().starts_with(b"pipe:")
                 && fdinfo(process, *fd).is_some_and(|info| access(&info) == Some(mode))
         })
+        .map(|(_, link)| link)
         .collect()
 }
 
@@ -233,31 +224,8 @@ fn access(fdinfo: &str) -> Option<i32> {
     Some(i32::from_str_radix(field(fdinfo, "flags")?, 8).ok()? & libc::O_ACCMODE)
 }
 
-/// Sets close-on-exec on each of this process's descriptors `fds`; a
-/// descriptor it cannot be set on is logged.
-fn close_on_exec(fds: &[RawFd]) {
-    for &fd in fds {
-        // SAFETY: `fd` was read from this process's own `fd` directory a
-        // moment ago, and it is a pipe end the runtime left open across
-        // its exec, which nothing in the app owns or closes, so it stays
-        // open while it is borrowed here. Only its descriptor flags change.
-        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-        let set = rustix::io::fcntl_getfd(borrowed).and_then(|flags| {
-            rustix::io::fcntl_setfd(borrowed, flags | rustix::io::FdFlags::CLOEXEC)
-        });
-        if let Err(error) = set {
-            tracing::warn!(
-                fd,
-                %error,
-                "the AppImage's keepalive pipe stays open across exec, so a process Steno starts may keep the mount server alive after Steno exits"
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::symlink;
     use std::sync::{Arc, Mutex};
 
@@ -268,6 +236,8 @@ pub(crate) mod tests {
     const KEEPALIVE: &str = "pipe:[100]";
     /// The FUSE connection of the fake app's mount.
     const CONNECTION: u32 = 79;
+    /// What a scan that finds no mount server returns.
+    const NO_SERVER: [u32; 0] = [];
 
     /// A fake `/proc` in a temporary directory, its processes made of
     /// `fd` links, `fdinfo` files and an `exe` link.
@@ -327,7 +297,7 @@ pub(crate) mod tests {
             self
         }
 
-        fn servers(&self, pid: u32) -> Found {
+        fn servers(&self, pid: u32) -> Vec<u32> {
             servers_of(self.0.path(), pid, CONNECTION)
         }
     }
@@ -365,14 +335,7 @@ pub(crate) mod tests {
                     &app(&[]),
                 )
                 .process(77, exe, &[Fd::Fuse(connection), Fd::Writes(KEEPALIVE)]);
-                assert_eq!(
-                    proc.servers(4242),
-                    Found {
-                        servers: vec![77],
-                        read_ends: vec![3]
-                    },
-                    "{connection:?} {exe}"
-                );
+                assert_eq!(proc.servers(4242), [77], "{connection:?} {exe}");
             }
         }
     }
@@ -407,20 +370,17 @@ pub(crate) mod tests {
                     Fd::Writes("pipe:[200]"),
                 ],
             );
-        assert_eq!(proc.servers(4242), Found::default());
+        assert_eq!(proc.servers(4242), NO_SERVER);
     }
 
     /// A stale mount server, left by a crashed run of the same image, whose
     /// pipe the app inherited from its launcher: from Linux 6.16 its other
     /// connection leaves it out; before, it is found beside the app's own.
-    /// Either way the app's own is found, and every read end it holds of a
-    /// found server's pipe is closed on exec later.
+    /// Either way the app's own is found.
     #[test]
     fn every_mount_server_is_found_and_a_stale_one_only_before_linux_6_16() {
         let stale = "pipe:[150]";
-        for (named, servers, read_ends) in
-            [(true, vec![77], vec![3]), (false, vec![60, 77], vec![3, 6])]
-        {
+        for (named, servers) in [(true, vec![77]), (false, vec![60, 77])] {
             let connection = |connection| named.then_some(connection);
             let proc = FakeProc::new();
             proc.process(4242, IMAGE, &app(&[Fd::Reads(stale)]))
@@ -430,11 +390,7 @@ pub(crate) mod tests {
                     IMAGE,
                     &[Fd::Fuse(connection(CONNECTION)), Fd::Writes(KEEPALIVE)],
                 );
-            assert_eq!(
-                proc.servers(4242),
-                Found { servers, read_ends },
-                "connection named: {named}"
-            );
+            assert_eq!(proc.servers(4242), servers, "connection named: {named}");
         }
     }
 
@@ -448,10 +404,10 @@ pub(crate) mod tests {
                 IMAGE,
                 &[Fd::Fuse(Some(CONNECTION)), Fd::Writes(KEEPALIVE)],
             );
-        assert_eq!(proc.servers(4242), Found::default());
-        assert_eq!(proc.servers(9), Found::default());
+        assert_eq!(proc.servers(4242), NO_SERVER);
+        assert_eq!(proc.servers(9), NO_SERVER);
         let empty = tempfile::tempdir().unwrap();
-        assert_eq!(servers_of(empty.path(), 4242, CONNECTION), Found::default());
+        assert_eq!(servers_of(empty.path(), 4242, CONNECTION), NO_SERVER);
     }
 
     /// What a test's code logged, captured on its thread.
@@ -485,12 +441,14 @@ pub(crate) mod tests {
         (value, text)
     }
 
-    /// The scan runs only for an app inside a FUSE mount, and warns when it
-    /// finds no server there: not for an executable outside the mount (a
-    /// launcher's `$APPDIR` inherited), a sibling mount, no `$APPDIR`, or a
-    /// mount that is no FUSE mount (the image extracted and run).
+    /// The scan runs only for an app whose executable is on the FUSE
+    /// mount `$APPDIR` names, that name through a symlink too, and warns
+    /// when it finds no server there: not for an executable outside the
+    /// mount (a launcher's `$APPDIR` inherited), an executable on another
+    /// connection, no `$APPDIR`, or a mount that is no FUSE mount (the
+    /// image extracted and run).
     #[test]
-    fn the_scan_runs_and_warns_only_for_an_app_inside_a_fuse_mount() {
+    fn the_scan_runs_and_warns_only_for_an_app_on_the_fuse_mount() {
         let proc = FakeProc::new();
         proc.process(4242, IMAGE, &app(&[])).process(
             77,
@@ -498,33 +456,43 @@ pub(crate) mod tests {
             &[Fd::Fuse(Some(CONNECTION)), Fd::Writes(KEEPALIVE)],
         );
         let mount = Path::new("/tmp/.mount_stenoAb12");
+        // `$TMPDIR` a symlink to `/tmp`.
+        let through_symlink = Path::new("/run/user/1000/tmp/.mount_stenoAb12");
+        let other = Path::new("/tmp/.mount_otherCd34");
         let inside = mount.join("usr/bin/steno-desktop");
-        let fuse: &dyn Fn(&Path) -> Option<u32> = &|_| Some(CONNECTION);
+        let on_other = other.join("usr/bin/steno-desktop");
+        let fuse: &dyn Fn(&Path) -> Option<u32> = &|path| {
+            if path.starts_with(mount) || path.starts_with(through_symlink) {
+                Some(CONNECTION)
+            } else if path.starts_with(other) {
+                Some(80)
+            } else {
+                None
+            }
+        };
         let scan =
             |appdir: Option<&Path>, exe: &Path, connection_of: &dyn Fn(&Path) -> Option<u32>| {
                 warnings(|| servers_at(proc.0.path(), 4242, appdir, exe, connection_of))
             };
 
-        let (found, logged) = scan(Some(mount), &inside, fuse);
-        assert_eq!(found.servers, [77]);
-        assert_eq!(logged, "");
+        for appdir in [mount, through_symlink] {
+            let (found, logged) = scan(Some(appdir), &inside, fuse);
+            assert_eq!(found, [77], "{}", appdir.display());
+            assert_eq!(logged, "", "{}", appdir.display());
+        }
         for (appdir, exe, connection_of) in [
             (Some(mount), Path::new("/usr/bin/steno-desktop"), fuse),
-            (
-                Some(mount),
-                Path::new("/tmp/.mount_stenoAb123/usr/bin/steno-desktop"),
-                fuse,
-            ),
+            (Some(mount), on_other.as_path(), fuse),
             (None, inside.as_path(), fuse),
             (Some(mount), inside.as_path(), &|_: &Path| None),
         ] {
             let (found, logged) = scan(appdir, exe, connection_of);
-            assert_eq!(found, Found::default(), "{appdir:?} {}", exe.display());
+            assert_eq!(found, NO_SERVER, "{appdir:?} {}", exe.display());
             assert_eq!(logged, "", "{appdir:?} {}", exe.display());
         }
 
         let (found, logged) = scan(Some(mount), &inside, &|_: &Path| Some(80));
-        assert_eq!(found, Found::default());
+        assert_eq!(found, NO_SERVER);
         assert!(
             logged.contains("WARN")
                 && logged.contains("cannot find")
@@ -533,12 +501,22 @@ pub(crate) mod tests {
         );
     }
 
-    /// A folder is no FUSE mount; the kernel's device numbers.
+    /// A folder is no FUSE mount; a path's own file system and device, the
+    /// kernel's device numbers.
     #[test]
     fn a_folder_has_no_fuse_connection() {
         let folder = tempfile::tempdir().unwrap();
         assert_eq!(fuse_connection(folder.path()), None);
         assert_eq!(fuse_connection(Path::new("/nonexistent")), None);
+        assert_eq!(file_system(Path::new("/nonexistent")), None);
+        // `/proc` is a file system of its own, `PROC_SUPER_MAGIC`.
+        let proc = Path::new("/proc");
+        assert_eq!(
+            file_system(proc),
+            Some((0x9fa0, std::fs::metadata(proc).unwrap().dev()))
+        );
+        let (_, dev) = file_system(folder.path()).unwrap();
+        assert_eq!(dev, std::fs::metadata(folder.path()).unwrap().dev());
         assert_eq!(kernel_dev(rustix::fs::makedev(0, 79)), 79);
         assert_eq!(kernel_dev(rustix::fs::makedev(8, 1)), 8 << 20 | 1);
         assert_eq!(kernel_dev(rustix::fs::makedev(0, 0x1_2345)), 0x1_2345);
@@ -558,16 +536,5 @@ pub(crate) mod tests {
         let fuse = "pos:\t0\nflags:\t02100002\nmnt_id:\t26\nino:\t5\nfuse_connection:\t79\n";
         assert_eq!(field(fuse, "fuse_connection"), Some("79"));
         assert_eq!(field(&fdinfo("02"), "fuse_connection"), None);
-    }
-
-    /// A read end left open across exec is closed on exec afterwards.
-    #[test]
-    fn the_read_ends_are_closed_on_exec() {
-        let (reader, _writer) = std::io::pipe().unwrap();
-        let flags = || rustix::io::fcntl_getfd(&reader).unwrap();
-        rustix::io::fcntl_setfd(&reader, rustix::io::FdFlags::empty()).unwrap();
-        assert!(!flags().contains(rustix::io::FdFlags::CLOEXEC));
-        close_on_exec(&[reader.as_raw_fd()]);
-        assert!(flags().contains(rustix::io::FdFlags::CLOEXEC));
     }
 }
