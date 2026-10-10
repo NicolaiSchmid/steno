@@ -3073,20 +3073,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   play). Where: the fake in `build` (`crates/steno-services/src/app.rs`), the tray
   (`apps/desktop/src-tauri/src/tray.rs`); the WP9 paragraph and seam (4) under
   "Pipeline and services (WP6b)". Found: #173, #185.
-- **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
-  Swift defects (each ported to Swift if it ships another release, otherwise closed by
-  the cutover), the fixtures the Swift side owes, and the audio choices to settle at
-  cutover (the WAV mixdown, the resampler, the sidecar's 2 ms lag).
-  Where: "Store", "Adapters", "Handover", "LLM",
-  "Audio" and "Bridge" in the parity list, and the CLI's `--title` under "Pipeline
-  and services (WP6b)". `.plans/2026-10-07-stable-promotion.md` (D9) settles all of
-  them, the parity notes' other "before cutover" ports to Swift included; its S7
-  deletes this item. Call mode without an output client is fixed by A10.
-  Found: #155, #165, #166, #167, #169, #190.
-- **WP9b.** No concurrency group spans the two release workflows, so two macOS signing
-  jobs can run at once; only both READMEs state the one-at-a-time rule, until
-  `release.yml` retires at the cutover. Where: `.github/workflows/release.yml`,
-  `.github/workflows/desktop-release.yml`. Found: #184.
 - **First Linux release.** No real GNOME or KDE Plasma session has logged out or shut
   down under the app: the session clients ran against fakes on a private bus, the lost
   display under Xvfb and headless sway, and real logouts only in xfce4-session 4.20.4
