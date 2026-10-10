@@ -1085,9 +1085,9 @@ mod tests {
     /// The guard refuses the models directory `STENO_MODELS_DIR` names,
     /// and anything inside it, even where that directory lies inside the
     /// temp directory (a developer's `TMPDIR` may hold their real models),
-    /// existing or not; a sibling whose name only starts like it is still
-    /// scratch, and a named directory that cannot be resolved refuses
-    /// every path.
+    /// existing or not, and on Unix where the variable names a link to it;
+    /// a sibling whose name only starts like it is still scratch, and a
+    /// named directory that cannot be resolved refuses every path.
     #[test]
     fn the_model_writers_never_write_inside_the_models_directory_the_environment_names() {
         let root = tempfile::tempdir().unwrap();
@@ -1106,6 +1106,18 @@ mod tests {
         std::fs::create_dir_all(model.parent().unwrap()).unwrap();
         std::fs::write(&model, b"a developer's downloaded model").unwrap();
         assert!(!testing::is_scratch_in(&model, &temp, Some(&named)));
+        #[cfg(unix)]
+        {
+            let link = temp.join("models-link");
+            std::os::unix::fs::symlink(&named, &link).unwrap();
+            let through_link = link.join("onnx/diarization/pyannote-segmentation-3.0.onnx");
+            for named in [&named, &link] {
+                for path in [&model, &through_link, &link.join("onnx/not-yet.onnx")] {
+                    assert!(!testing::is_scratch_in(path, &temp, Some(named)));
+                }
+                assert!(testing::is_scratch_in(&scratch, &temp, Some(named)));
+            }
+        }
         assert!(testing::is_scratch_in(
             &temp.join("real-models-other"),
             &temp,
