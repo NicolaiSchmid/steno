@@ -116,10 +116,10 @@ def menu_rows(connection, name, path):
 
 def main():
     command = sys.argv[1] if len(sys.argv) > 1 else ""
-    if command == "serve" and len(sys.argv) == 2:
-        serve()
-    if command not in ("menu", "click") or len(sys.argv) != (4 if command == "menu" else 5):
+    if {"serve": 2, "menu": 4, "click": 5}.get(command) != len(sys.argv):
         sys.exit(__doc__)
+    if command == "serve":
+        serve()
     connection = Gio.bus_get_sync(Gio.BusType.SESSION)
     menu, rows = menu_rows(connection, sys.argv[2], sys.argv[3])
     if command == "menu":

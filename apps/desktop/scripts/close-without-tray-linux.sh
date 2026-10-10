@@ -36,9 +36,11 @@ set -euo pipefail
 
 name=close-without-tray
 with_host=""
+proved="closing the main window quit and saved the recording"
 if [[ "${1:-}" == --with-host ]]; then
   name=close-beside-a-tray-host
   with_host=yes
+  proved="the close hid the main window and Quit saved the recording"
   shift
 fi
 scripts="$(dirname "${BASH_SOURCE[0]}")"
@@ -194,8 +196,4 @@ require_saved
 [[ "$reason" == quit ]] || fail "the meeting ended with $reason, not quit"
 echo "$name: the app's lines on the tray and the exit:"
 grep -E "tray host|main window closed|shutdown ended" "$work/app.log" | sed 's/^/  /'
-if [[ -z "$with_host" ]]; then
-  echo "$name: ok, closing the main window quit and saved the recording"
-else
-  echo "$name: ok, the close hid the main window and Quit saved the recording"
-fi
+echo "$name: ok, $proved"
