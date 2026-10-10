@@ -678,15 +678,14 @@ impl UpdateSchedule {
         if !self.source.ask(Question::Install(version)).await {
             return;
         }
-        let put_off = match self.busy() {
-            Some(busy) if !self.source.ask(Question::AfterItEnds(busy)).await => {
-                self.announce_again(version);
-                return;
-            }
-            Some(_) => true,
-            None => false,
-        };
-        self.install_on_request(version, put_off).await;
+        let busy = self.busy();
+        if let Some(busy) = busy
+            && !self.source.ask(Question::AfterItEnds(busy)).await
+        {
+            self.announce_again(version);
+            return;
+        }
+        self.install_on_request(version, busy.is_some()).await;
     }
 
     /// What keeps an install from running now; `None` while the app is
@@ -794,16 +793,17 @@ impl UpdateSchedule {
         if !self.source.installer().asks_an_administrator() {
             return Some(self.hold_once_idle().await);
         }
-        let mut just_said_yes = !put_off;
+        if !put_off && let Some(hold) = self.gate.try_hold() {
+            return Some(hold);
+        }
         loop {
-            if just_said_yes && let Some(hold) = self.gate.try_hold() {
-                return Some(hold);
-            }
             self.until_idle().await;
             if !self.source.ask(Question::InstallNow(version)).await {
                 return None;
             }
-            just_said_yes = true;
+            if let Some(hold) = self.gate.try_hold() {
+                return Some(hold);
+            }
         }
     }
 
