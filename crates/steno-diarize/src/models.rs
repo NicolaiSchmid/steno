@@ -179,8 +179,16 @@ pub fn ensure(store: &ModelStore) -> Result<ModelPaths, DiarizeError> {
 /// intact, or cannot be hashed, it is `error`. The hash runs only after a
 /// failure, never on a load that works.
 pub(crate) fn after_failed_load(store: &ModelStore, error: DiarizeError) -> DiarizeError {
-    let asset = asset();
-    let directory = match store.installed_directory(&asset) {
+    after_failed_load_of(store, &asset(), error)
+}
+
+/// [`after_failed_load`] over `asset`'s manifest.
+fn after_failed_load_of(
+    store: &ModelStore,
+    asset: &ModelAsset,
+    error: DiarizeError,
+) -> DiarizeError {
+    let directory = match store.installed_directory(asset) {
         Ok(directory) => directory,
         Err(gone) => return gone.into(),
     };
@@ -193,7 +201,10 @@ pub(crate) fn after_failed_load(store: &ModelStore, error: DiarizeError) -> Diar
         if actual == file.sha256 {
             continue;
         }
-        tracing::warn!(path = %path.display(), %actual, expected = %file.sha256, %error, "diarization model failed its checksum, deleting it");
+        // The load's error can be a crash report holding the child's
+        // stderr, which may hold a path: debug only.
+        tracing::warn!(path = %path.display(), %actual, expected = %file.sha256, "diarization model failed its checksum after a failed load, deleting it");
+        tracing::debug!(%error, "the load that failed");
         match std::fs::remove_file(&path) {
             Ok(()) => missing.push(file.name.clone()),
             Err(remove) => {
@@ -205,7 +216,7 @@ pub(crate) fn after_failed_load(store: &ModelStore, error: DiarizeError) -> Diar
         return error;
     }
     DiarizeError::NotInstalled {
-        asset: asset.id,
+        asset: asset.id.clone(),
         directory,
         missing,
     }
@@ -269,5 +280,118 @@ mod tests {
         };
         assert_eq!(missing, &[EMBEDDING_FILE.to_owned()]);
         assert!(folder.join(SEGMENTATION_FILE).exists(), "not hashed, kept");
+    }
+
+    /// Two files whose manifest holds the SHA-256 of their known contents.
+    fn synthetic_asset() -> ModelAsset {
+        let file = |name: &str, sha256: &str, size: u64| ModelFile {
+            name: name.to_owned(),
+            source: None,
+            sha256: sha256.to_owned(),
+            size,
+        };
+        ModelAsset {
+            id: "synthetic".to_owned(),
+            display_name: "Synthetic".to_owned(),
+            licence: "MIT".to_owned(),
+            attribution: String::new(),
+            files: vec![
+                // The SHA-256 of the 12 bytes `segmentation`.
+                file(
+                    "a.onnx",
+                    "fba586be3b6f140b30389654d548a660d3a746cf8344ab6f39248caf65e2da4d",
+                    12,
+                ),
+                // The SHA-256 of the 9 bytes `embedding`.
+                file(
+                    "b.onnx",
+                    "aa580156f36e357b5bfb0dcd869a026c7b0a244e7b01cba17d5da1dc1e7039cd",
+                    9,
+                ),
+            ],
+        }
+    }
+
+    /// The synthetic asset installed in a store in `dir`, with `b.onnx`
+    /// holding `embedding`; its folder.
+    fn install_synthetic(dir: &Path, embedding: &[u8]) -> (ModelStore, PathBuf) {
+        let store = ModelStore::in_models_directory(dir);
+        let folder = store.directory(&synthetic_asset());
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.onnx"), b"segmentation").unwrap();
+        std::fs::write(folder.join("b.onnx"), embedding).unwrap();
+        assert!(store.is_installed(&synthetic_asset()));
+        (store, folder)
+    }
+
+    /// Intact files survive a failed load, which keeps its own error: a
+    /// crash, a hang or a ceiling hit over good models deletes nothing.
+    #[test]
+    fn intact_files_are_kept_and_the_load_keeps_its_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, folder) = install_synthetic(dir.path(), b"embedding");
+        let error = after_failed_load_of(
+            &store,
+            &synthetic_asset(),
+            DiarizeError::metadata("the load failed"),
+        );
+        assert!(
+            matches!(&error, DiarizeError::Metadata(detail) if detail == "the load failed"),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read(folder.join("a.onnx")).unwrap(),
+            b"segmentation"
+        );
+        assert_eq!(std::fs::read(folder.join("b.onnx")).unwrap(), b"embedding");
+    }
+
+    /// A file of the right size that fails its checksum is deleted and is
+    /// the one file the result names; the intact one is kept.
+    #[test]
+    fn only_the_file_that_fails_its_checksum_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, folder) = install_synthetic(dir.path(), b"embeddinG");
+        let error = after_failed_load_of(
+            &store,
+            &synthetic_asset(),
+            DiarizeError::metadata("the load failed"),
+        );
+        let DiarizeError::NotInstalled { asset, missing, .. } = &error else {
+            panic!("not installed: {error:?}");
+        };
+        assert_eq!(asset, "synthetic");
+        assert_eq!(missing, &["b.onnx".to_owned()]);
+        assert!(!folder.join("b.onnx").exists());
+        assert_eq!(
+            std::fs::read(folder.join("a.onnx")).unwrap(),
+            b"segmentation"
+        );
+    }
+
+    /// A file that cannot be read is not hashed, so it is neither deleted
+    /// nor named, and the load keeps its error. Unix only, where a file
+    /// can be made unreadable; skipped where the test runs as root.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_cannot_be_read_is_skipped() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (store, folder) = install_synthetic(dir.path(), b"embeddinG");
+        let unreadable = folder.join("b.onnx");
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&unreadable).is_ok() {
+            eprintln!("skipped: the file is still readable (root?)");
+            return;
+        }
+        let error = after_failed_load_of(
+            &store,
+            &synthetic_asset(),
+            DiarizeError::metadata("the load failed"),
+        );
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(&error, DiarizeError::Metadata(_)), "{error:?}");
+        assert_eq!(std::fs::read(&unreadable).unwrap(), b"embeddinG");
     }
 }
