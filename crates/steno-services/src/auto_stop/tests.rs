@@ -397,6 +397,35 @@ impl Recording {
     fn meetings(&self) -> Vec<steno_core::Meeting> {
         self.store.meetings(10, 0).unwrap()
     }
+
+    /// Records, through the change hook, the countdown the status shows
+    /// at every change while the recording is Stopping: what the bubble
+    /// shows while a stop saves.
+    fn watch_stopping(&self) -> Arc<std::sync::Mutex<Vec<Option<AutoStopStatus>>>> {
+        let while_stopping = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (seen, watched) = (while_stopping.clone(), Arc::downgrade(&self.recorder));
+        self.recorder.on_change(Arc::new(move || {
+            if let Some(recorder) = watched.upgrade() {
+                let status = recorder.status();
+                if status.state == RecordingState::Stopping {
+                    seen.lock().unwrap().push(status.auto_stop);
+                }
+            }
+        }));
+        while_stopping
+    }
+}
+
+/// Asserts that a stop was seen and showed no countdown while it saved.
+fn assert_no_countdown_while_stopping(
+    while_stopping: &std::sync::Mutex<Vec<Option<AutoStopStatus>>>,
+) {
+    let while_stopping = while_stopping.lock().unwrap().clone();
+    assert!(!while_stopping.is_empty(), "the stop was seen");
+    assert!(
+        while_stopping.iter().all(Option::is_none),
+        "no countdown while the stop saves: {while_stopping:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -422,6 +451,9 @@ async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
         RecordingState::Recording,
         "still recording at 0:01"
     );
+    // The auto-stop goes through Stopping as Stop does, its countdown
+    // gone from the stop's start.
+    let while_stopping = recording.watch_stopping();
     recording.sleepers(1);
     recording.clock.advance(Duration::from_secs(1));
     eventually("the grace stopped the recording", || {
@@ -431,6 +463,7 @@ async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
     let status = recording.recorder.status();
     assert_eq!(status.auto_stop, None);
     assert_eq!(status.error, None);
+    assert_no_countdown_while_stopping(&while_stopping);
     let meetings = recording.meetings();
     assert_eq!(meetings.len(), 1);
     let meeting = &meetings[0];
@@ -559,18 +592,9 @@ async fn a_stop_while_armed_keeps_its_own_reason_and_withdraws_the_countdown() {
         recording.opened(Some("Zen"));
         recording.released();
         recording.sleepers(1);
-        // What the bubble shows while the stop saves: the countdown is
-        // gone from its start, as Swift's stop disarmed first.
-        let while_stopping = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (seen, watched) = (while_stopping.clone(), Arc::downgrade(&recording.recorder));
-        recording.recorder.on_change(Arc::new(move || {
-            if let Some(recorder) = watched.upgrade() {
-                let status = recorder.status();
-                if status.state == RecordingState::Stopping {
-                    seen.lock().unwrap().push(status.auto_stop);
-                }
-            }
-        }));
+        // The countdown is gone from the stop's start, as Swift's stop
+        // disarmed first.
+        let while_stopping = recording.watch_stopping();
         if quit {
             let recorder = recording.recorder.clone();
             on_own_thread(PATIENCE, "the quit returned", move || {
@@ -581,12 +605,7 @@ async fn a_stop_while_armed_keeps_its_own_reason_and_withdraws_the_countdown() {
         }
         assert_eq!(recording.recorder.status().state, RecordingState::Idle);
         assert_eq!(recording.armed(), None);
-        let while_stopping = while_stopping.lock().unwrap().clone();
-        assert!(!while_stopping.is_empty(), "the stop was seen");
-        assert!(
-            while_stopping.iter().all(Option::is_none),
-            "no countdown while the stop saves: {while_stopping:?}"
-        );
+        assert_no_countdown_while_stopping(&while_stopping);
         recording.sleepers(0);
         recording.clock.advance(AUTO_STOP_GRACE);
         let meetings = recording.meetings();
