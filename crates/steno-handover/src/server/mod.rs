@@ -223,9 +223,9 @@ impl HandoverServer {
     /// Stops accepting, closes every connection (an idle one, or one
     /// lingering after its last response, at once; one mid-request after
     /// its response; any still busy after [`STOP_GRACE`] by force) and
-    /// withdraws the Bonjour record. No task of the listener outlives it,
-    /// except store writes already in line, which finish unless the runtime
-    /// shuts down first.
+    /// withdraws the Bonjour record. Its port is free when it returns. No
+    /// task of the listener outlives it, except store writes already in
+    /// line, which finish unless the runtime shuts down first.
     /// Swift: `HandoverServer.stop` (`group.shutdownGracefully()` closes the
     /// child channels).
     pub async fn stop(self) {
@@ -237,12 +237,14 @@ impl HandoverServer {
         } = self;
         stop_signal.send_replace(true);
         // The accept task drains for STOP_GRACE; one second more before it
-        // is aborted outright.
+        // is aborted outright. The abort is awaited, so the listener is
+        // closed when this returns.
         if tokio::time::timeout(STOP_GRACE + Duration::from_secs(1), &mut accept_task)
             .await
             .is_err()
         {
             accept_task.abort();
+            let _ = accept_task.await;
         }
         if let Some(advertiser) = advertiser {
             advertiser.withdraw();

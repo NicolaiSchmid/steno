@@ -211,6 +211,15 @@ mod tests {
         );
     }
 
+    /// Another name orphans a phone's partial uploads after an upgrade.
+    #[test]
+    fn the_inbox_keeps_the_name_the_swift_app_and_earlier_builds_use() {
+        assert_eq!(
+            HandoverConfiguration::INBOX_DIRECTORY_NAME,
+            "handover-inbox"
+        );
+    }
+
     #[test]
     fn linux_listens_on_the_fixed_port_and_the_mac_and_windows_on_one_the_system_chooses() {
         let expected = if cfg!(target_os = "linux") { 23820 } else { 0 };

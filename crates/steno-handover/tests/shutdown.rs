@@ -1,8 +1,9 @@
 //! Stopping the service closes the connections it holds, not only the
 //! listener: a phone on a kept-alive connection is cut, a request sent
 //! after the stop is not handled, nothing new connects, an upload stalled
-//! mid-body is cut by the end of the grace, and the linger after a close
-//! ends with the stop.
+//! mid-body is cut by the end of the grace, the linger after a close
+//! ends with the stop, and a start made during a stop waits for it and
+//! keeps the fixed port.
 //! Swift: `group.shutdownGracefully()` closes the child channels.
 
 #![allow(
@@ -180,4 +181,26 @@ async fn stop_ends_the_linger_after_a_close() {
         !writes_land(20).await,
         "the lingering socket was closed by stop"
     );
+}
+
+/// A start that waits on a stop binds the port the stop let go, not one
+/// the system chooses.
+#[tokio::test]
+async fn a_start_during_a_stop_keeps_the_fixed_port() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let test = TestService::with(common::Options {
+        port,
+        ..common::Options::default()
+    })
+    .await;
+    assert_eq!(test.port(), port);
+    // Polled first, the stop takes the lock, and the start waits on it.
+    let ((), started) = tokio::join!(test.stop(), test.service.start());
+    started.unwrap();
+    assert_eq!(test.port(), port, "the start kept the fixed port");
+    test.stop().await;
 }

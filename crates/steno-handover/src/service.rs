@@ -239,8 +239,8 @@ impl HandoverService {
 
     /// Stops the listener ([`HandoverServer::stop`]) and reports
     /// [`ListenerState::Stopped`]. Idempotent. Holds the lock across the
-    /// stop, so a start that follows binds once this listener has let its
-    /// port go.
+    /// stop, so a start called meanwhile binds only once this listener has
+    /// let its port go ([`HandoverServer::stop`]).
     pub async fn stop(&self) {
         let mut guard = self.server.lock().await;
         if let Some(server) = guard.take() {

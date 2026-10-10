@@ -539,6 +539,8 @@ impl HandoverIntake for StoreIntake {
 pub struct Options {
     pub chunk_size: i64,
     pub intake: Option<Arc<dyn HandoverIntake>>,
+    /// The port to listen on; `0`, one the system chooses, by default.
+    pub port: u16,
     pub read_timeout: Duration,
     pub start: bool,
     /// The store in place of a fresh in-memory one: a second service over
@@ -551,6 +553,7 @@ impl Default for Options {
         Options {
             chunk_size: 1024 * 1024,
             intake: None,
+            port: 0,
             read_timeout: Duration::from_secs(30),
             start: true,
             store: None,
@@ -605,7 +608,7 @@ impl TestService {
             chunk_size: options.chunk_size,
             inbox_directory: directory.path().join("inbox"),
             pairing_window: Duration::from_secs(300),
-            port: 0,
+            port: options.port,
             read_timeout: options.read_timeout,
         };
         let identity =
