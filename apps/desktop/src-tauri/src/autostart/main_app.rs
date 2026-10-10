@@ -21,8 +21,9 @@
 //! the tests fake; the system's are [`SystemMainApp`] and
 //! [`UserLaunchAgents`], macOS only. A smoke run (`STENO_SMOKE_SECONDS`)
 //! registers and removes nothing. Only a run from an installed app bundle
-//! ([`installed_bundle`]: not from `target/`, a mounted disk image or a
-//! copy Gatekeeper translocated) removes the agent, outside a
+//! ([`installed_bundle`]: not a plain binary under `target/`, a mounted
+//! disk image or a copy Gatekeeper translocated; a bundle built under
+//! `target/` counts as installed) removes the agent, outside a
 //! `fixture-host` build ([`removes_earlier_agent`]), and only such a run
 //! lets the host count its first launch (`HostConfig::installed_bundle`).
 //!
@@ -94,6 +95,15 @@ pub enum Unloaded {
 
 /// Removes the earlier build's Launch Agent: its job unloaded, unless
 /// it is `own_pid`, then its file deleted.
+///
+/// The agent runs at load and is not kept alive, so a job loaded with no
+/// pid has exited and its boot-out ends nothing. When an earlier build
+/// that the agent started at login installs an update, the updater starts
+/// the new binary as its child and exits, and launchd ends the child with
+/// the job, because the agent sets no `AbandonProcessGroup` (probed on
+/// macOS 26). That is the earlier build's behaviour, which this one cannot
+/// change: Steno quits instead of relaunching, and opening it once
+/// removes the agent here.
 pub fn remove_earlier_agent(agents: &dyn LaunchAgents, own_pid: u32) -> EarlierAgent {
     let label = EARLIER_AGENT_LABEL;
     let text = match agents.read(label) {
@@ -164,10 +174,10 @@ pub fn smoke_run() -> bool {
 
 /// Whether the launch removes the earlier agent: not in a smoke run
 /// (`smoke`), nor in a `fixture-host` build, nor when the executable `exe`
-/// is not in an installed app bundle ([`installed_bundle`]). A `cargo run`
-/// binary under `target/`, or Steno opened from its disk image, shares the
-/// home folder with an installed Steno and must not remove the agent that
-/// Steno still starts at login.
+/// is not in an installed app bundle ([`installed_bundle`]). A plain
+/// `cargo run` binary under `target/`, or Steno opened from its disk
+/// image, shares the home folder with an installed Steno and must not
+/// remove the agent that Steno still starts at login.
 pub fn removes_earlier_agent(smoke: bool, exe: Option<&std::path::Path>) -> bool {
     !smoke && !cfg!(feature = "fixture-host") && exe.is_some_and(installed_bundle)
 }
@@ -178,7 +188,9 @@ pub fn removes_earlier_agent(smoke: bool, exe: Option<&std::path::Path>) -> bool
 /// opened where it was downloaded (`…/AppTranslocation/…`). Both paths go
 /// away, when the image is ejected or the app is moved, so such a run
 /// registers no login item and removes no agent; the copy in
-/// Applications does both at its own first launch.
+/// Applications does both at its own first launch. A bundle built under
+/// `target/` counts as installed: it registers that path and sets
+/// `steno.mainAppRegistered`, so open one only in a test account.
 pub fn installed_bundle(exe: &std::path::Path) -> bool {
     inside_app_bundle(exe)
         && !exe.starts_with("/Volumes")
@@ -612,8 +624,10 @@ mod tests {
 
     /// The launch's removal asks the gate before it touches the agent
     /// (`autostart::remove_earlier_agent`), and the shell tells the host
-    /// whether it runs from an installed bundle (`host::Host::real`), so
-    /// neither is left to a run from `target/` or a disk image.
+    /// whether it runs from an installed bundle (`host::Host::real`,
+    /// through `autostart::installed_bundle`, which asks
+    /// `main_app::installed_bundle`), so neither is left to a plain binary
+    /// under `target/` or a disk image.
     #[test]
     fn the_launch_asks_whether_it_runs_from_an_installed_bundle() {
         // Without the carriage returns a Windows checkout may add.
@@ -631,6 +645,10 @@ mod tests {
 
         let host = include_str!("../host.rs").replace("\r\n", "\n");
         assert!(host.contains("options.installed_bundle = crate::autostart::installed_bundle();"));
+        // The flag is this gate, not the looser `inside_app_bundle`.
+        assert!(autostart.contains(
+            "\npub fn installed_bundle() -> bool {\n    std::env::current_exe().is_ok_and(|exe| main_app::installed_bundle(&exe))\n}"
+        ));
     }
 
     /// A boot-out that fails still deletes the file, so the next login

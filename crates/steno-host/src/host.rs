@@ -130,14 +130,15 @@ pub struct HostConfig {
     /// section offers no check and says where updates come from, and
     /// `updates.check` checks nothing. Rust only.
     pub updates_managed: bool,
-    /// The shell runs from an installed app bundle: inside a `.app`, and
-    /// neither on a mounted disk image nor translocated by Gatekeeper. On
-    /// the Mac only such a launch registers the login item at its first
-    /// launch and counts it ([`Host::register_login_item_on_first_launch`]),
-    /// so a run that would register a path about to disappear leaves the
-    /// first launch to the installed copy. The shell decides from its own
-    /// path; off the Mac it is not read. False by default, as for the CLI
-    /// and the tests. Rust only.
+    /// The shell runs from an installed app bundle: inside a `.app` (one
+    /// built under `target/` too), and neither on a mounted disk image nor
+    /// translocated by Gatekeeper. On the Mac only such a launch registers
+    /// the login item at its first launch and counts it
+    /// ([`Host::register_login_item_on_first_launch`]), so a run that
+    /// would register a path about to disappear leaves the first launch to
+    /// the installed copy. The shell decides from its own path; off the Mac
+    /// it is not read. False by default, as for the CLI and the tests. Rust
+    /// only.
     pub installed_bundle: bool,
 }
 
