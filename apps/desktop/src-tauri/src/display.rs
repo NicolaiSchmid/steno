@@ -4,10 +4,10 @@
 //! their anchor; under `XWayland` all three work. On a Wayland session with
 //! `XWayland` the shell therefore allows GDK only its `x11` backend, before
 //! Tauri initialises GTK. That is a setting inside this process, so nothing
-//! the shell starts (the browser behind `xdg-open`) inherits it. A
-//! single `GDK_BACKEND` the user set always wins. A list that names `x11`
-//! or `*` (`wayland,x11,*`, which Omarchy sets for the whole session) is a
-//! session default, which the shell narrows to `x11` as if none were set.
+//! the shell starts (the browser behind `xdg-open`) inherits it. A list
+//! that names `x11` or `*` (`wayland,x11,*`, which Omarchy sets for the
+//! whole session) is a session default, which the shell narrows to `x11`
+//! as if none were set. Any other `GDK_BACKEND` the user set wins.
 //!
 //! Swift: none; `AppKit` has a single window server.
 
@@ -62,7 +62,8 @@ impl Backend {
 /// The GDK backend for a session with these `WAYLAND_DISPLAY`, `DISPLAY`
 /// and `GDK_BACKEND` values (an empty value counts as none, except the
 /// user's `GDK_BACKEND`, which wins even when it is `wayland` or empty;
-/// a list that names `x11` or `*` counts as none, `is_session_default`).
+/// a list that names `x11` or `*`, or a lone `*`, counts as none,
+/// `is_session_default`).
 pub fn backend(
     wayland_display: Option<&OsStr>,
     x11_display: Option<&OsStr>,
@@ -177,6 +178,7 @@ mod tests {
             "wayland,broadway",
             "wayland, x11",
             "wayland,x11x",
+            "wayland,X11",
         ] {
             assert!(!is_session_default(OsStr::new(value)), "{value}");
         }

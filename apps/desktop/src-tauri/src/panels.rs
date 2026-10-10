@@ -914,10 +914,12 @@ mod tests {
     /// On Linux each panel has a title of its own, the one the Hyprland
     /// rules match; elsewhere both are "Steno", as the main window is. The
     /// rule itself is pinned whole, outside the file's comments: its
-    /// class, its titles and every effect.
+    /// class, its titles and every effect, with no long comment (`--[[`)
+    /// around it.
     #[test]
     fn the_panels_carry_the_titles_the_hyprland_rules_match() {
         let rules = include_str!("../linux/hyprland-steno.lua");
+        assert!(!rules.contains("--["), "{rules}");
         let code = rules
             .lines()
             .filter(|line| !line.trim_start().starts_with("--"))
