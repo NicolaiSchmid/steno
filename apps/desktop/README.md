@@ -223,7 +223,7 @@ the menu is the only way in there:
 
 | Linux target | Where the icon is | What opens the menu |
 |---|---|---|
-| GNOME with the AppIndicator extension (Ubuntu ships it on) | the top bar | a left or a right click |
+| GNOME with the AppIndicator extension (on by default on Ubuntu) | the top bar | a left or a right click |
 | GNOME without the extension | nowhere: closing the main window quits Steno (below) | |
 | KDE Plasma | the system tray | a left or a right click |
 | Omarchy (Hyprland) | the bar's tray drawer, shown on hover | a right click; a left click may do nothing (the bar sends `Activate`, which libayatana-appindicator does not answer) |
@@ -237,7 +237,9 @@ stopped and saved first (its meeting ends with "Ended when Steno quit."),
 the log says `the main window closed with no tray to bring it back` and,
 once the save is done, `the shutdown ended` with its duration. The window
 is not just hidden, which would leave a recording running in an app
-nothing on screen reaches. On Linux "shows it" means a status notifier
+nothing on screen reaches.
+
+On Linux "shows it" means a status notifier
 host (`tray_host.rs`). A thread follows the session bus for the whole run:
 whether `org.kde.StatusNotifierWatcher` has an owner and, if it does,
 whether that watcher's `IsStatusNotifierHostRegistered` says a host
@@ -246,13 +248,16 @@ started for a KDE app on another desktop). It reads both at launch and
 again whenever the name changes owner or the watcher says a host came or
 went, so a close reads the last answer without asking the bus. With no
 session bus, before the first reading and after the bus closed, the shell
-counts no host, the safe side; a watcher that does not answer the
-property still counts as one. The log says `no tray host shows the tray
+counts no host, the safe side; a watcher without the property still
+counts as one; a reading that fails (no answer within five seconds, for
+one) counts as none and is read again ten seconds later. The log says `no tray host shows the tray
 icon` at launch on stock GNOME, and again whenever the host goes. On
-stock GNOME the AppIndicator extension brings the tray back. If the host
-goes while the main window is hidden (the bar restarts, the extension is
-turned off), starting Steno again from the launcher brings the window
-back. An `XEmbed`-only tray is not asked for, so there closing main also
+stock GNOME the AppIndicator extension brings the tray back. When the
+host goes while the main window is hidden (the bar restarts, the
+extension is turned off), nothing on the desktop shows the window: during
+a recording the bubble stays on screen, with Stop, and a click on it
+opens the main window; otherwise starting Steno again from the launcher
+brings it back. An `XEmbed`-only tray is not asked for, so there closing main also
 quits. On macOS
 the menu bar carries the shell's own menu (`menu.rs`): Quit goes through
 the run loop, the Edit menu gives the pages their copy and paste shortcuts.
@@ -1435,7 +1440,8 @@ reads as ignored; the window sink delivers on the main thread, in emit
 order, without the emit waiting. On Linux the tray host's follower runs
 against a fake watcher on a private `dbus-daemon`: no watcher, a watcher
 that comes and goes, one whose host registers and goes, one without the
-property, and the bus closing (`STENO_REQUIRE_DBUS_TEST=1` fails the
+property, one that does not answer in time and one that answers only
+the second time it is asked, and the bus closing (`STENO_REQUIRE_DBUS_TEST=1` fails the
 tests when `dbus-daemon` is missing, as in CI). `cargo test -p steno-desktop
 --features fixture-host` runs the same with the fixture host, plus the
 fixture table against `index.json` and the mock transport; Rust CI runs
@@ -1521,6 +1527,16 @@ within 30 s, and the store holds the meeting `queued` with a duration and
 `quit` as its end reason. CI's Linux job runs it after the lost display,
 with the same tools.
 
+With `--with-host` (`close-without-tray-linux.sh --with-host [binary]
+[seconds]`) the same script runs beside a stand-in watcher with a host
+(`tray-watcher-linux.py`, which needs Python's GObject bindings,
+`python3-gi`): the app must log that a tray host shows its icon, the
+tray's menu, read as a host reads it (dbusmenu), must hold every action
+in `tray::MENU`'s order, the close must hide the main window while the
+recording goes on, and Quit Steno in the tray's menu must then quit and
+save it, `quit` as its end reason. CI's Linux job runs it after the run
+without a tray.
+
 `apps/desktop/scripts/smoke-macos.sh [binary] [seconds]` runs the smoke on
 a Mac, in the logged-in session (the windows show on its screen for those
 seconds) and with a fresh `HOME`; CI's macOS job runs it. A panel there is
@@ -1575,7 +1591,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop`, `linux/*-stop-timeout.conf` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles); the stop timeout drop-ins for the autostart unit and GNOME's scope (see Launch at login under systemd) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display. `stop_timeout.rs`, on Linux: the systemd drop-ins for the stop timeout |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, quits through Quit's path otherwise, saving a recording first; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `dbus.rs`, on Linux: what the D-Bus clients share (a connection with a five-second call timeout, the client's thread, the name owner, the proxy) and the tests' private bus. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display. `stop_timeout.rs`, on Linux: the systemd drop-ins for the stop timeout |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items and their words per platform, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/tray_host.rs` | On Linux, whether a status notifier host shows the tray's icon: the follower on the session bus and the rule it decides by |
 | `apps/desktop/src-tauri/src/platform.rs` | The initialization script that tells every page its platform |
@@ -1589,7 +1605,8 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh`, `smoke-macos.sh` | The smoke CI runs under Xvfb on Linux and in the runner's session on macOS |
 | `apps/desktop/scripts/lost-display-linux.sh` | Ends the display server under a recording and fails unless the app saved it first; CI's Linux job runs it |
-| `apps/desktop/scripts/close-without-tray-linux.sh` | Closes the main window under a recording where no tray host runs and fails unless the app quit and saved it; CI's Linux job runs it |
+| `apps/desktop/scripts/close-without-tray-linux.sh` | Closes the main window under a recording where no tray host runs and fails unless the app quit and saved it; with `--with-host`, beside a stand-in host, fails unless the tray's menu holds every action, the close hid the window and the menu's Quit saved the recording; CI's Linux job runs both |
+| `apps/desktop/scripts/tray-watcher-linux.py` | The stand-in status notifier watcher with a host for that check, and its reads and clicks of the tray's menu |
 | `apps/desktop/scripts/xvfb-recording-linux.sh` | What those two share, sourced by both: the argument and tool checks, the app on an Xvfb server of its own with a recording started, the wait for its exit and the store's check |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
 | `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |

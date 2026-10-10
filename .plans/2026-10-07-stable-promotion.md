@@ -453,7 +453,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 |---|---|---|
 | X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` (#272: an app started inside another program's service of the user manager, as a key binding without `uwsm-app` leaves it in `wayland-wm@hyprland.desktop.service`, whose stop ended it unsaved 0.26 s in, moves at launch into `app-steno\x2ddesktop-<pid>.scope` in `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and `After=graphical-session.target`; at login the start waits for the target and is never called off, and a session that ends before then leaves the app in the compositor's unit; from an AppImage every mount server, found by its FUSE connection and keepalive pipe however the image was started, moves into a scope of its own in `app.slice` wherever it runs (a launcher's unit too, where GNOME leaves it), also when the app stays, and stays beside the app in a login's `session-<n>.scope`; each move is written to the journal and a failure logged at `warn`. In a systemd 255 container with uwsm 0.26.4's slice and shutdown target and a stand-in compositor's unit, every case saved `queued`; the README's Hyprland section has the table. logind's delay is #220's, tested against a fake logind) | Omarchy, NixOS with Hyprland; the AppImage on every systemd desktop |
 | X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) (#267: a list naming `x11` or `*`, or a lone `*`, counts as unset, any other value still wins; the titles on Linux only, macOS and Windows keep "Steno"; the rules are `apps/desktop/src-tauri/linux/hyprland-steno.lua`, one `hl.window_rule` on class `[Ss]teno-desktop` and title `Steno (bubble\|prompt)` that also turns off focus on hover, the border, shadow and blur, checked by Hyprland 0.56.2's `--verify-config`; the `.deb` installs it as `/usr/share/steno-desktop/hyprland-steno.lua` (`check-bundle.sh` checks it), and so does the AUR package that repackages it (#265) from the next release, loaded with `dofile`; the Linux smoke finds both panels by their titles) | Omarchy, NixOS with Hyprland |
-| X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves (#275: the menu holds every action once, which a test checks, and a click does nothing the menu does not; a thread follows `org.kde.StatusNotifierWatcher` on the session bus, its owner and its `IsStatusNotifierHostRegistered`, at launch and at every change of either, so a watcher with no host counts as none and a host that goes turns the next close into a quit; with no host the close quits through Quit's path, which stops and saves a recording first and logs the quit and the shutdown's duration; `close-without-tray-linux.sh` proves it in CI on a bus with no watcher; macOS and Windows keep their tray and close as before) | all |
+| X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves (#275: the menu holds every action once, which a test checks, and a click does nothing the menu does not; a thread follows `org.kde.StatusNotifierWatcher` on the session bus, its owner and its `IsStatusNotifierHostRegistered`, at launch and at every change of either, so a watcher with no host counts as none and a host that goes turns the next close into a quit; with no host the close quits through Quit's path, which stops and saves a recording first and logs the quit and the shutdown's duration; a watcher without the property counts as a host, a failed reading as none, read again 10 s later; a recording's bubble covers a main window hidden when the host went, and starting Steno again brings it forward; `close-without-tray-linux.sh` proves it in CI on a bus with no watcher, requiring the follower's `no tray host shows the tray icon`, and beside a stand-in host, where the tray's menu holds every action, the close hides the window and the menu's Quit saves; macOS and Windows keep their tray and close as before) | all |
 | X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port | Omarchy, NixOS |
 | X5 | Packaged installs: `STENO_DISTRIBUTION=aur` or `=nix`, read at build time (Nix) or from the environment (the AUR wrapper), turns the in-app updater off and Settings says updates come from the package manager; the autostart entry names a stable path (`/usr/bin/steno-desktop`, or the Nix profile's), never `current_exe()` or a store path; with `STENO_LOGIN_ITEM=managed`, which the NixOS module sets, the app leaves launch at login to the system (#261: the environment wins over the build's value; the path is `$APPIMAGE`, else `STENO_EXEC_PATH` from a wrapper whose binary lies elsewhere, as X6's, else the first of `/usr/bin`, `/usr/local/bin` and the Nix profiles that resolves into the running binary's directory, else no entry, and turning Launch at login on fails with "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager." and is not saved; managed, the app touches no entry except one an earlier build wrote, whose `Exec` starts a program in `/nix/store` or names a profile path: it goes at launch, or, when the app runs as the autostart unit made from it, after the save at Steno's first exit, so a reload never leaves the recorder in a unit no logout stops) | Omarchy, NixOS |
 | X6 | The AUR package `steno-desktop-bin` | Omarchy |
@@ -1804,18 +1804,21 @@ interrupted" after one. On the GNOME machine,
      not stop", and no warning, and `systemctl --user list-units 'app-steno*'`
      lists that scope. Then log out with the system menu, log back in and
      check the meeting.
-  9. **GNOME, the tray (X3).** With the AppIndicator extension on (Ubuntu
-     ships it on; on Debian install `gnome-shell-extension-appindicator`,
-     then log out and in): the icon is in the top bar, a left click and a right click
-     each open the menu, and every entry works; closing the main window
-     hides it, and Open Steno brings it back. Then turn the extension off
-     (`gnome-extensions disable <id>`, the id from `gnome-extensions list |
-     grep -i appindicator`) while Steno runs, start a recording and close
-     the main window: Steno quits within 10 s, `q` shows the meeting with
-     its full length and `quit` as `endReason`, and `journalctl --user -b 0
-     --since '<close time>' | grep -i steno` shows `the main window closed
-     with no tray` before `the shutdown ended`. Turn the extension on
-     again.
+  9. **GNOME, the tray (X3).** With the AppIndicator extension on (on by
+     default on Ubuntu; on Debian install
+     `gnome-shell-extension-appindicator`, then log out and in): the icon
+     is in the top bar, a left click and a right click each open the menu,
+     and every entry works; closing the main window hides it, and Open
+     Steno brings it back. Then turn the extension off (`gnome-extensions
+     disable <id>`, the id from `gnome-extensions list | grep -i
+     appindicator`) while Steno runs: `journalctl --user -b 0 --since
+     '<disable time>' | grep -i steno` shows `no tray host shows the tray
+     icon`. Start a recording and close the main window: Steno quits
+     within 10 s, `q` shows the meeting with its full length and `quit`
+     as `endReason`, and `journalctl --user -b 0 --since '<close time>' |
+     grep -i steno` shows `the main window closed with no tray` before
+     `the shutdown ended`. Turn the extension on again and start Steno:
+     the journal shows `a tray host shows the tray icon`.
 - **Omarchy** (Omarchy 4, Arch with Hyprland on Wayland).
   1. Before step 0: import the release key from a checkout (`gpg --import
      packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`), so

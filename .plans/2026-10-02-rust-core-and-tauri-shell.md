@@ -2885,7 +2885,8 @@ touch and admission lines; each fix is ported to Swift before cutover.
   always in the menu bar. The shell follows the watcher's owner and its
   `IsStatusNotifierHostRegistered` on the session bus for the whole run
   (`apps/desktop/src-tauri/src/tray_host.rs`), so a host that comes or goes decides
-  the next close.
+  the next close, and a reading that fails counts as none and is read again 10 s
+  later.
 - One process per database (Rust only; the stable plan's P15). The app takes an
   exclusive advisory lock on the database's own lock file, beside it with the extension
   `lock` (`<support>/steno.lock` for the default `steno.sqlite`), before it opens it,
