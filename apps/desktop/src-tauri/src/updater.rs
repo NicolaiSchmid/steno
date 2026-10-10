@@ -143,11 +143,11 @@ impl UpdateSource for ShellUpdates {
             .map_err(|error| error.to_string())
     }
 
-    /// Writes the package on a blocking thread ([`write_update`]), since
-    /// the updater may wait on a password prompt.
+    /// Installs the package on a blocking thread ([`install_update`]),
+    /// since the updater may wait on a password prompt.
     async fn install(&self, version: &str, package: Vec<u8>) -> Result<(), String> {
         let (app, update) = (self.app.clone(), self.found(version)?);
-        tauri::async_runtime::spawn_blocking(move || write_update(&app, &update, &package))
+        tauri::async_runtime::spawn_blocking(move || install_update(&app, &update, &package))
             .await
             .map_err(|error| error.to_string())?
     }
@@ -183,11 +183,11 @@ impl UpdateSource for ShellUpdates {
     }
 
     /// An install that fails after the shutdown ran (Windows: the watcher
-    /// did not start) restarts the app at once, into the version that
-    /// runs, with the failure in the log: the recorder and the pipeline
-    /// start nothing after a shutdown, and on a scheduled install nobody
-    /// may be there to close a message. The next check offers the update
-    /// again.
+    /// did not start, or did not say in time that it runs) restarts the
+    /// app at once, into the version that runs, with the failure in the
+    /// log: the recorder and the pipeline start nothing after a shutdown,
+    /// and on a scheduled install nobody may be there to close a message.
+    /// The next check offers the update again.
     fn tell_install_failed(&self, message: &str) {
         if self.app.state::<steno_services::app::ExitGate>().released() {
             tracing::warn!(%message, "the update failed after the shutdown; Steno restarts");
@@ -221,60 +221,55 @@ impl UpdateSource for ShellUpdates {
     }
 }
 
-/// Writes `package`, the verified download of `update`: through the
+/// Installs `package`, the verified download of `update`: through the
 /// plugin, except on Windows.
 #[cfg(not(windows))]
-fn write_update(_app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
+fn install_update(_app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
     update.install(package).map_err(|error| error.to_string())
 }
 
 /// Windows: writes the installer under the app's local data folder
 /// (`%LOCALAPPDATA%\uno.schmid.steno.desktop\update\`, which holds only
 /// the last update's), runs the shutdown, starts the watcher
-/// (`windows_setup`) and ends the process; returns only when it failed.
-/// The watcher has no window and leaves the app's job, if it runs in one,
-/// so it outlives the app; a job that refuses that refuses the start, and
-/// the app restarts (`UpdateSource::tell_install_failed`).
+/// (`windows_setup`), waits up to [`WATCHER_START_LIMIT`] for it to say
+/// that it runs, and ends the process; returns only when it failed. A
+/// watcher that does not say so in time (a policy that turns off the
+/// command prompt) is ended, and the app restarts
+/// (`UpdateSource::tell_install_failed`); so does a job that forbids
+/// breakaway, which makes the start fail. The watcher's current directory
+/// is the local data folder, not the install folder the installer
+/// replaces.
+///
+/// [`WATCHER_START_LIMIT`]: windows_setup::WATCHER_START_LIMIT
 #[cfg(windows)]
-fn write_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-    use windows_setup::{RELAUNCH_VARIABLE, SETUP_VARIABLE, Setup};
-    /// `CREATE_NO_WINDOW` and `CREATE_BREAKAWAY_FROM_JOB`.
-    const HIDDEN_AND_OUT_OF_THE_JOB: u32 = 0x0800_0000 | 0x0100_0000;
+fn install_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
+    use windows_setup::{STARTED_FILE, Setup, WATCHER_START_LIMIT};
 
     let text = |error: std::io::Error| error.to_string();
     let setup = Setup::of(package).ok_or("The update is not a Windows installer.")?;
-    let folder = app
+    let data = app
         .path()
         .app_local_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("update");
+        .map_err(|error| error.to_string())?;
+    let folder = data.join("update");
     let installer = folder.join(setup.file_name(&update.version));
-    // An earlier update's installer goes.
+    // An earlier update's installer goes, and its start file with it.
     let _ = std::fs::remove_dir_all(&folder);
     std::fs::create_dir_all(&folder).map_err(text)?;
     std::fs::write(&installer, package).map_err(text)?;
     let relaunch = std::env::current_exe().map_err(text)?;
-    let system32 = std::path::PathBuf::from(
-        std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()),
-    )
-    .join("System32");
-    let mut watcher = Command::new(system32.join("cmd.exe"));
-    watcher
-        .raw_arg(windows_setup::watcher_arguments(setup))
-        .env(
-            SETUP_VARIABLE,
-            windows_setup::setup_command(setup, &installer, &system32.join("msiexec.exe")),
-        )
-        .env(RELAUNCH_VARIABLE, &relaunch)
-        .current_dir(&folder)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(HIDDEN_AND_OUT_OF_THE_JOB);
+    let started = folder.join(STARTED_FILE);
+    let mut watcher = windows_setup::watcher_command(
+        setup,
+        &installer,
+        &windows_setup::system32().join("msiexec.exe"),
+        &relaunch,
+        &started,
+        &data,
+    );
     crate::shut_down_before_exit(app);
-    watcher.spawn().map_err(text)?;
+    let mut watcher = watcher.spawn().map_err(text)?;
+    windows_setup::wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT)?;
     std::process::exit(0)
 }
 
@@ -288,8 +283,8 @@ fn this_installer() -> Installer {
 }
 
 /// How the updater installs on this platform (`windows` on Windows) for
-/// the bundle the binary came in (`bundle`). On Windows the installer ends
-/// the process (`write_update`): the NSIS setup installs for the user
+/// the bundle the binary came in (`bundle`). On Windows the install ends
+/// the process (`install_update`): the NSIS setup installs for the user
 /// alone (`bundle.windows.nsis.installMode` in `tauri.conf.json`), and the
 /// MSI for every user, after Windows' consent prompt. A `.deb` or an
 /// `.rpm` is installed through pkexec, then a zenity or kdialog password
