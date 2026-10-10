@@ -185,11 +185,16 @@ git push origin master
 Cloning a name nobody owns yet gives an empty repository, and the first push
 creates the package. The AUR accepts only the `master` branch.
 
-**From the second stable release on, the release workflow is to push**
-(stable plan S7, "The workflow after S7"; not built yet). Nicolai creates an
-SSH key for the AUR account and stores its private half as the repository
-secret `AUR_SSH_PRIVATE_KEY`; the `publish` job will then bump and push for
-each stable release, and open a pull request with the same bump here, so
-this directory does not fall behind the AUR. Candidates are never pushed:
+**From the second stable release on, the release workflow pushes**
+(stable plan S7, "The workflow after S7"). Nicolai creates an SSH key for
+the AUR account and stores its private half as the repository secret
+`AUR_SSH_PRIVATE_KEY`; the `publish` job then runs
+`apps/desktop/scripts/aur-bump.sh` for each stable release (Bump steps 1,
+2 and 4 without `makepkg`, then the push above), and opens a pull request
+with the same bump here, so this directory does not fall behind the AUR.
+The script refuses a PKGBUILD that still installs drop-in copies (Bump
+step 3) or lists another remote source, so those bumps stay by hand. A pull
+request the workflow opens starts no checks; close and reopen it to run
+`aur-ci.yml`. Candidates are never pushed:
 they are installed with `makepkg -si` from this directory after Bump steps
 1 to 5.
