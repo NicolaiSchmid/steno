@@ -1448,8 +1448,9 @@ still has to draw the window side. `[ ]` is not ported yet.
     the sidecar's scope, a start still queued then (at login, behind
     `graphical-session.target`) is never called off: the request's thread waits
     up to 60 s more and logs the outcome. The AppImage runtime's mount server,
-    in the same cgroup, moves into a scope of its own in `app.slice`, which no
-    session's end stops. A scope, Steno's own services and an app outside the
+    in the app's cgroup, moves into a scope of its own in `app.slice` wherever
+    the app runs in the user manager, so no unit's stop at the session's end
+    ends it while the app saves. A scope, Steno's own services and an app outside the
     user manager stay, and a failed move logs a warning (`own_scope.rs`, X1 of
     `.plans/2026-10-07-stable-promotion.md`). Tested
     against a fake manager on a private `dbus-daemon`, and in a container under a

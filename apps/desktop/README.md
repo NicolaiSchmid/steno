@@ -434,7 +434,8 @@ by default and the user manager 120 s, so a save that outlasts logind's
 wait finishes under the drop-ins' 20 s. Started inside another program's
 service, as a Hyprland key binding without `uwsm-app` starts it in uwsm's
 `wayland-wm@.service`, Steno moves into a scope of its own at launch,
-with the same 20 s (see Hyprland).
+with the same 20 s, and from the AppImage the image's mount leaves
+Steno's unit (see Hyprland).
 
 ## Packaged installs
 
@@ -641,11 +642,15 @@ program's too, stay as they are. The speech sidecar's scope (above) then
 sits beside Steno's.
 
 Run from the AppImage, Steno reads its files from the image's mount,
-which the AppImage's own process serves from Hyprland's unit too; once
-Hyprland had exited, the unit's last SIGTERM would end it while Steno
-saves. That process moves with Steno, into
-`app-steno\x2ddesktop\x2dimage-<pid>.scope` in `app.slice`, which no
-session's end stops; it ends by itself when Steno exits.
+which the AppImage's own process serves from Steno's cgroup. The stop of
+Steno's unit (a `uwsm-app` scope, GNOME's scope, the autostart unit)
+ended that process 0.26 s in while Steno saved, and in one of two runs
+Steno with it, unsaved (below); in Hyprland's unit its last SIGTERM does
+the same. Up to 0.1.0-rc.3 that holds on every systemd desktop. From the
+release after it, that process moves at launch into
+`app-steno\x2ddesktop\x2dimage-<pid>.scope` in `app.slice`, wherever
+Steno runs in the user manager; no session's end stops it, and it ends
+by itself when Steno exits.
 
 To see where Steno runs: `cat /proc/$(pidof -s steno-desktop)/cgroup`
 ends in a `.scope`, or in `app-steno\x2ddesktop@autostart.service` when a
@@ -676,6 +681,8 @@ recording running and the display (Xvfb) up:
 | Started while graphical-session.target waited 8 s for the compositor (`exec-once`), moved once it was reached | 8 s in it | `queued`, `quit`; the move logged after the first window; gone 8.3 s after the stop |
 | The same, the compositor exiting instead (`hyprctl dispatch exit`) | 8 s in it | `queued`, `quit`; 8.3 s, with WebKit's processes left in the compositor's unit |
 | Moved from an AppImage (rc.3's runtime), the compositor exiting or its unit stopped | 8 s in it | `queued`, `quit`; 8.3 s; the mount's server in its own scope, gone with Steno and not before |
+| From an AppImage in a `uwsm-app`-style scope, the mount's server left in it (as up to 0.1.0-rc.3) | 8 s in it | the server gone 0.26 s after the stop; in one run the save still ended at 8.1 s (`queued`) and Steno was gone after 18.9 s, in the other Steno was gone after 6.8 s, unsaved (`recording`) |
+| From an AppImage in a `uwsm-app`-style scope, or as the autostart unit at a logout | 8 s in it | `queued`, `quit`; 8.3 s; the mount's server in its own scope, gone with Steno and not before |
 
 WebKit's processes started in Steno's scope too, except those of a window
 that opened before a late move.
