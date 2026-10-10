@@ -35,7 +35,7 @@ use zbus::blocking::connection::Builder;
 use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Type;
 
-use crate::session_end::{owner_of, patient, proxy, spawn_client};
+use crate::dbus::{owner_of, patient, proxy, spawn_client};
 
 /// The name a status notifier watcher owns on the session bus, and the
 /// interface it serves.
@@ -218,7 +218,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::session_end::tests::Daemon;
+    use crate::dbus::tests::Daemon;
 
     /// A watcher with a host, a watcher with none, one that does not say,
     /// no watcher, and a failed reading.

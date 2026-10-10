@@ -16,7 +16,8 @@
 //! and on a packaged install `packaged`),
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
-//! instance, on Linux the logout and shutdown clients (`session_end`) and
+//! instance, on Linux the logout and shutdown clients (`session_end`, over
+//! the D-Bus helpers in `dbus`) and
 //! the systemd drop-ins for the stop timeout (`stop_timeout`), a scope of
 //! its own when it starts inside another program's service, and one for
 //! each of the `AppImage`'s mount servers (`own_scope`, `appimage`), and on a
@@ -79,6 +80,8 @@ mod actions;
 mod appimage;
 mod autostart;
 mod bridge;
+#[cfg(target_os = "linux")]
+mod dbus;
 mod deep_links;
 mod dialogs;
 #[cfg(target_os = "linux")]
