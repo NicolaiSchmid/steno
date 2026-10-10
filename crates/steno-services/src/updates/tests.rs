@@ -1898,6 +1898,17 @@ async fn a_put_off_yes_asks_again_before_an_installer_that_asks_an_administrator
     }
 }
 
+/// A yes to 0.12.0 while a job runs, "Install After It Ends", then
+/// "Later" when it is asked again once the job ended.
+async fn later_when_asked_again(world: &World, schedule: &Arc<UpdateSchedule>) {
+    world.processing(true);
+    world.source.reply(&[true, true, false]);
+    let offer = offer_in_background(schedule, "0.12.0");
+    tokio::time::sleep(IDLE_POLL * 3).await;
+    world.processing(false);
+    at_once(offer).await.unwrap();
+}
+
 /// "Later" when asked again installs nothing, takes no hold, and leaves
 /// the version to announce again at the next idle tick.
 #[tokio::test(start_paused = true)]
@@ -1907,12 +1918,7 @@ async fn later_when_asked_again_installs_nothing() {
     world.source.answer(Ok(Some("0.12.0")));
     let schedule = world.schedule();
     schedule.tick().await;
-    world.processing(true);
-    world.source.reply(&[true, true, false]);
-    let offer = offer_in_background(&schedule, "0.12.0");
-    tokio::time::sleep(IDLE_POLL * 3).await;
-    world.processing(false);
-    at_once(offer).await.unwrap();
+    later_when_asked_again(&world, &schedule).await;
     assert_eq!(
         world.source.asked(),
         [
@@ -2236,12 +2242,7 @@ async fn later_when_asked_again_keeps_the_kept_package() {
     let schedule = world.schedule();
     schedule.tick().await;
     assert_eq!(world.downloads(), 1);
-    world.processing(true);
-    world.source.reply(&[true, true, false]);
-    let offer = offer_in_background(&schedule, "0.12.0");
-    tokio::time::sleep(IDLE_POLL * 3).await;
-    world.processing(false);
-    at_once(offer).await.unwrap();
+    later_when_asked_again(&world, &schedule).await;
     assert!(schedule.state().staged.is_some(), "kept");
     world.source.reply(&[true]);
     at_once(schedule.offer("0.12.0")).await;
@@ -2258,12 +2259,7 @@ async fn later_when_asked_again_keeps_no_download_of_its_own() {
     world.source.answer(Ok(Some("0.12.0")));
     let schedule = world.schedule();
     schedule.tick().await;
-    world.processing(true);
-    world.source.reply(&[true, true, false]);
-    let offer = offer_in_background(&schedule, "0.12.0");
-    tokio::time::sleep(IDLE_POLL * 3).await;
-    world.processing(false);
-    at_once(offer).await.unwrap();
+    later_when_asked_again(&world, &schedule).await;
     assert_eq!(world.downloads(), 1);
     assert!(schedule.state().staged.is_none(), "not kept");
 }
@@ -2283,12 +2279,7 @@ async fn later_after_the_switch_went_off_during_the_dialog_keeps_nothing() {
         let schedule = schedule.clone();
         move || schedule.set_automatically_downloads(false)
     }));
-    world.processing(true);
-    world.source.reply(&[true, true, false]);
-    let offer = offer_in_background(&schedule, "0.12.0");
-    tokio::time::sleep(IDLE_POLL * 3).await;
-    world.processing(false);
-    at_once(offer).await.unwrap();
+    later_when_asked_again(&world, &schedule).await;
     assert_eq!(world.source.asked().len(), 3);
     assert!(schedule.state().staged.is_none(), "not kept");
 }
@@ -2302,12 +2293,7 @@ async fn later_when_asked_again_tells_no_failure() {
     world.source.answer(Ok(Some("0.12.0")));
     let schedule = world.schedule();
     schedule.tick().await;
-    world.processing(true);
-    world.source.reply(&[true, true, false]);
-    let offer = offer_in_background(&schedule, "0.12.0");
-    tokio::time::sleep(IDLE_POLL * 3).await;
-    world.processing(false);
-    at_once(offer).await.unwrap();
+    later_when_asked_again(&world, &schedule).await;
     assert_eq!(world.source.asked().len(), 3);
     assert_eq!(*lock(&world.source.told), Vec::<String>::new());
     assert_eq!(
