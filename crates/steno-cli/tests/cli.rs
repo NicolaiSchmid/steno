@@ -13,17 +13,23 @@ struct Run {
     stderr: String,
 }
 
-fn steno(args: &[&str], home: &Path) -> Run {
+/// The `steno` binary on `home`: its support directory and models are
+/// `home`'s, never the developer's key or the models directory their
+/// environment names for the real-model tests.
+fn steno_on(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_steno"));
     command
-        .args(args)
         .env("HOME", home)
         .env("XDG_DATA_HOME", home.join("share"))
         .env("APPDATA", home.join("appdata"))
         .env_remove("STENO_LLM_API_KEY")
-        // The models directory is the support directory's, never one the
-        // developer's environment names for the real-model tests.
         .env_remove("STENO_MODELS_DIR");
+    command
+}
+
+fn steno(args: &[&str], home: &Path) -> Run {
+    let mut command = steno_on(home);
+    command.args(args);
     // Every run on Unix carries a variable that is not Unicode, as a
     // user's environment may: the secret overrides, which read every
     // variable, must read past it (`std::env::vars()` would panic).
@@ -569,14 +575,9 @@ fn relative_paths_are_taken_from_the_working_directory() {
     )
     .unwrap();
     let run = |args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_steno"))
+        let output = steno_on(home)
             .args(args)
             .current_dir(&work)
-            .env("HOME", home)
-            .env("XDG_DATA_HOME", home.join("share"))
-            .env("APPDATA", home.join("appdata"))
-            .env_remove("STENO_LLM_API_KEY")
-            .env_remove("STENO_MODELS_DIR")
             .output()
             .unwrap();
         assert!(
