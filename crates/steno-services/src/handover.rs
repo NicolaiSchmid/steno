@@ -1,5 +1,6 @@
-//! The host's `Handover` over the phone handover listener, and the file
-//! the identity's fingerprint is recorded in ([`FingerprintFile`]). Swift:
+//! The host's `Handover` over the phone handover listener, the file the
+//! identity's fingerprint is recorded in ([`FingerprintFile`]), and the
+//! port it listens on ([`listener_port`], Rust only). Swift:
 //! the handover block of `AppEnvironment.live` in
 //! `apps/macos/Steno/AppEnvironment.swift`.
 
@@ -75,7 +76,7 @@ pub const PORT_VARIABLE: &str = "STENO_HANDOVER_PORT";
 /// The port the app's listener binds (stable plan X4): [`PORT_VARIABLE`]
 /// from the environment, else the stored [`Settings::handover_port`], else
 /// [`HandoverConfiguration::platform_port`]. An empty variable counts as
-/// unset; one that is not a port is ignored with a warning.
+/// unset; one that is not a port is ignored with a warning. Rust only.
 ///
 /// [`Settings::handover_port`]: steno_core::Settings::handover_port
 #[must_use]
@@ -93,6 +94,33 @@ pub fn listener_port(environment: Option<&str>, stored: Option<u16>) -> u16 {
     from_environment
         .or(stored)
         .unwrap_or(HandoverConfiguration::platform_port())
+}
+
+/// The stored [`Settings::handover_port`]; `None` when there is none or
+/// the settings cannot be read, with a warning. Rust only.
+///
+/// [`Settings::handover_port`]: steno_core::Settings::handover_port
+pub(crate) fn stored_port(store: &Store) -> Option<u16> {
+    store
+        .settings()
+        .inspect_err(|error| {
+            tracing::warn!(
+                "the settings could not be read; the phone handover uses its default port"
+            );
+            tracing::debug!(%error, "settings for the handover's port");
+        })
+        .ok()
+        .and_then(|settings| settings.handover_port)
+}
+
+/// The app's listener configuration: the default on the port
+/// [`listener_port`] picks from `environment`, the value of
+/// [`PORT_VARIABLE`], and [`stored_port`].
+pub(crate) fn configuration(store: &Store, environment: Option<&str>) -> HandoverConfiguration {
+    HandoverConfiguration {
+        port: listener_port(environment, stored_port(store)),
+        ..HandoverConfiguration::default()
+    }
 }
 
 /// The listener over the store and the recording intake.
@@ -300,6 +328,94 @@ mod tests {
         assert_eq!(listener_port(Some(""), Some(40000)), 40000, "unset");
         assert_eq!(listener_port(Some("65536"), Some(40000)), 40000);
         assert_eq!(listener_port(Some("steno"), None), platform);
+    }
+
+    /// The warnings `run` logs on this thread.
+    fn warnings(run: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Logged(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Logged {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logged = Logged::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let logged = logged.clone();
+                move || logged.clone()
+            })
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        String::from_utf8(logged.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// An empty variable is unset, not a value that is not a port.
+    #[test]
+    fn only_a_variable_that_is_not_a_port_logs_a_warning() {
+        let platform = HandoverConfiguration::platform_port();
+        let logged = warnings(|| {
+            assert_eq!(listener_port(Some(""), None), platform);
+            assert_eq!(listener_port(Some(" \n"), None), platform);
+            assert_eq!(listener_port(Some("23900"), None), 23900);
+        });
+        assert_eq!(logged, "");
+        let logged = warnings(|| assert_eq!(listener_port(Some("steno"), None), platform));
+        assert!(
+            logged.contains("STENO_HANDOVER_PORT is not a port from 0 to 65535, so it is ignored"),
+            "{logged}"
+        );
+    }
+
+    #[test]
+    fn the_variable_and_the_stored_port_reach_the_configuration() {
+        let platform = HandoverConfiguration::platform_port();
+        let store = Store::in_memory().unwrap();
+        assert_eq!(stored_port(&store), None);
+        assert_eq!(configuration(&store, None).port, platform);
+
+        let mut settings = store.settings().unwrap();
+        settings.handover_port = Some(40000);
+        store.save_settings(&settings).unwrap();
+        assert_eq!(stored_port(&store), Some(40000));
+        assert_eq!(configuration(&store, None).port, 40000);
+        assert_eq!(configuration(&store, Some("")).port, 40000);
+        assert_eq!(configuration(&store, Some("23900")).port, 23900);
+        assert_eq!(
+            configuration(&store, Some("23900")),
+            HandoverConfiguration {
+                port: 23900,
+                ..HandoverConfiguration::default()
+            },
+            "the default otherwise"
+        );
+    }
+
+    /// Settings that cannot be read leave the stored port out.
+    #[test]
+    fn settings_that_cannot_be_read_leave_the_stored_port_out() {
+        let store = Store::in_memory().unwrap();
+        store
+            .write(|transaction| {
+                transaction.execute(
+                    "INSERT INTO setting (key, value) VALUES ('handoverPort', '40000'), ('launchAtLogin', 'yes')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store.settings().is_err());
+        assert_eq!(stored_port(&store), None);
+        assert_eq!(
+            configuration(&store, None).port,
+            HandoverConfiguration::platform_port()
+        );
     }
 
     #[test]

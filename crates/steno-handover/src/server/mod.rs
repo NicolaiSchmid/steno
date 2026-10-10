@@ -147,6 +147,12 @@ impl std::fmt::Debug for HandoverServer {
 }
 
 impl HandoverServer {
+    /// The port the Bonjour record carries, `None` when unpublished.
+    #[cfg(test)]
+    pub(crate) fn advertised_port(&self) -> Option<u16> {
+        self.advertiser.as_ref().map(advertise::Advertiser::port)
+    }
+
     /// Binds and starts accepting. Advertising binds every IPv4 interface
     /// (the phone resolves IPv4 only) and publishes the LAN addresses;
     /// otherwise 127.0.0.1.
@@ -257,7 +263,7 @@ async fn bind(address: IpAddr, port: u16) -> std::io::Result<TcpListener> {
     let chosen = listener.local_addr()?.port();
     tracing::warn!(
         target: "steno::handover",
-        "port {port} could not be bound ({error}), so the handover listens on port {chosen}, which a firewall opened for port {port} blocks"
+        "port {port} is not available ({error}), so the phone handover listens on port {chosen} instead, which a firewall opened only for port {port} blocks"
     );
     Ok(listener)
 }
@@ -692,12 +698,12 @@ mod tests {
             panic!("one warning: {warnings:?}");
         };
         assert!(
-            warning.starts_with(&format!("port {taken} could not be bound (")),
+            warning.starts_with(&format!("port {taken} is not available (")),
             "{warning}"
         );
         assert!(
             warning.ends_with(&format!(
-                "listens on port {}, which a firewall opened for port {taken} blocks",
+                "listens on port {} instead, which a firewall opened only for port {taken} blocks",
                 server.port
             )),
             "{warning}"
@@ -710,6 +716,50 @@ mod tests {
         let status = within(hello(&mut tls)).await.unwrap();
         assert!(status.starts_with("HTTP/1.1 200"), "{status}");
         drop(tls);
+        server.stop().await;
+        drop(held);
+    }
+
+    /// The fallback binds the address asked for: loopback stays loopback.
+    #[tokio::test]
+    async fn the_fallback_keeps_the_address() {
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let taken = held.local_addr().unwrap().port();
+        let listener = bind(IpAddr::V4(Ipv4Addr::LOCALHOST), taken).await.unwrap();
+        let bound = listener.local_addr().unwrap();
+        assert_eq!(bound.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_ne!(bound.port(), taken);
+    }
+
+    /// After a fallback the Bonjour record carries the port bound, not the
+    /// one configured, so the phone never resolves the other program.
+    #[tokio::test]
+    async fn after_a_fallback_the_record_carries_the_port_bound() {
+        let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
+        let held = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+        let taken = held.local_addr().unwrap().port();
+        let directory = tempfile::tempdir().unwrap();
+        let configuration = HandoverConfiguration {
+            service_name: "Steno port test".to_owned(),
+            inbox_directory: directory.path().join("inbox"),
+            port: taken,
+            ..HandoverConfiguration::default()
+        };
+        let reach = Reach::Lan {
+            lan: LanAddresses::new(Vec::new, Duration::from_secs(60)),
+            publish: true,
+        };
+        let server = HandoverServer::start_with(
+            &configuration,
+            &identity,
+            engine(&configuration, &identity),
+            Arc::new(ServerMetrics::default()),
+            reach,
+        )
+        .await
+        .unwrap();
+        assert_ne!(server.port, taken);
+        assert_eq!(server.advertised_port(), Some(server.port));
         server.stop().await;
         drop(held);
     }

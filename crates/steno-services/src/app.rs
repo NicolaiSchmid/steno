@@ -422,35 +422,23 @@ fn lock_or_run_without(
     }
 }
 
-/// The listener's configuration: the default on the port
-/// [`listener_port`](crate::handover::listener_port) picks, and in this
-/// crate's tests loopback only, unadvertised, on a port the system
-/// chooses, with the inbox under the test's support directory. Settings
-/// that cannot be read leave the stored port out, with a warning.
+/// The listener's configuration: [`crate::handover::configuration`] over
+/// the environment, and in this crate's tests loopback only, unadvertised,
+/// on a port the system chooses, with the inbox under the test's support
+/// directory.
 fn listener_configuration(
     paths: &StenoPaths,
     store: &Store,
 ) -> steno_handover::HandoverConfiguration {
-    let configuration = steno_handover::HandoverConfiguration::default();
     if cfg!(test) {
         return steno_handover::HandoverConfiguration {
             advertise: false,
             inbox_directory: paths.support_directory.join("handover-inbox"),
-            ..configuration
+            ..steno_handover::HandoverConfiguration::default()
         };
     }
-    let stored = store
-        .settings()
-        .inspect_err(|error| {
-            tracing::warn!(%error, "the settings could not be read for the handover's port");
-        })
-        .ok()
-        .and_then(|settings| settings.handover_port);
     let environment = std::env::var(crate::handover::PORT_VARIABLE).ok();
-    steno_handover::HandoverConfiguration {
-        port: crate::handover::listener_port(environment.as_deref(), stored),
-        ..configuration
-    }
+    crate::handover::configuration(store, environment.as_deref())
 }
 
 /// Why the identity is not available, for the Phones settings: the
