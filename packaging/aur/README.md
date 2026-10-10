@@ -18,7 +18,7 @@ below first.
 | `/usr/lib/steno-desktop/steno-desktop`, `/usr/lib/steno-desktop/steno-speech-sidecar` | The `.deb`'s `/usr/bin`. They move together because the app starts the sidecar from beside its own binary |
 | `/usr/bin/steno-desktop` | [`steno-desktop.sh`](steno-desktop.sh): sets `STENO_DISTRIBUTION=aur` (the in-app updater stays off; pacman updates) and `STENO_EXEC_PATH=/usr/bin/steno-desktop` (the path the autostart entry names), then runs the binary. Both take effect from the first release that contains #261; rc.3 ignores them |
 | `/usr/share/applications/steno-desktop.desktop`, `/usr/share/icons/hicolor/*/apps/steno-desktop.png` | The `.deb`, unchanged. The entry's `Exec=steno-desktop` finds the wrapper on `PATH` |
-| `/usr/lib/systemd/user/app-steno\x2ddesktop@autostart.service.d/10-steno.conf`, `/usr/lib/systemd/user/app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf` | The stop timeout drop-ins (P5), `[Service]` and `[Scope]` `TimeoutStopSec=20s`: the `.deb`'s from the first release that contains #227; for the pinned `.deb`, the copies here, [`autostart-service-stop-timeout.conf`](autostart-service-stop-timeout.conf) and [`gnome-scope-stop-timeout.conf`](gnome-scope-stop-timeout.conf) (Bump step 3) |
+| `/usr/lib/systemd/user/app-steno\x2ddesktop@autostart.service.d/10-steno.conf`, `/usr/lib/systemd/user/app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf` | The stop timeout drop-ins (P5), `[Service]` and `[Scope]` `TimeoutStopSec=20s`: the `.deb`'s from the first release that contains #227; for the pinned `.deb`, the copies here, [`autostart-service-stop-timeout.conf`](autostart-service-stop-timeout.conf) and [`gnome-scope-stop-timeout.conf`](gnome-scope-stop-timeout.conf) |
 | `/usr/share/licenses/steno-desktop-bin/LICENSE` | [`LICENSE`](LICENSE), a copy of the repository's |
 | `/usr/share/licenses/steno-desktop-bin/speexdsp-COPYING` | [`speexdsp-COPYING`](speexdsp-COPYING), a copy of `crates/steno-audio/vendor/speexdsp/COPYING`: the binary compiles in SpeexDSP's echo canceller, and its BSD licence asks for the notice with the binary |
 
@@ -139,8 +139,7 @@ timeout until it exits. The removal leaves `~/.local/share/Steno` and
 3. When the release's `.deb` ships a drop-in (from the first release that
    contains #227), `makepkg` fails with "the .deb ships ...: delete ..." and
    names the copy. Delete it, its `source` and `sha256sums` entries and its
-   `_copy` line; with the last copy, also the `_copy` helper and the
-   comment's words about the copies.
+   `_copy` line; with the last copy, also the `_copy` helper.
 4. Regenerate the metadata the AUR reads: `makepkg --printsrcinfo > .SRCINFO`.
 5. Install it (`makepkg -si`) and check that `/usr/lib/steno-desktop/` holds
    both binaries and that Steno starts from the launcher.

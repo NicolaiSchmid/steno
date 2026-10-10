@@ -90,9 +90,8 @@ package() {
     "$pkgdir/usr/lib/$_pkgname/"
   install -Dm755 steno-desktop.sh "$pkgdir/usr/bin/$_pkgname"
 
-  # The stop timeout drop-ins (stable plan P5): the .deb installs them from
-  # the first release that contains #227; the pinned one lacks them, so the
-  # copies here stand in.
+  # The stop timeout drop-ins (stable plan P5), which the .deb ships from
+  # the first release that contains #227.
   # Arch's systemd reloads the user managers after the install
   # (30-systemd-daemon-reload-user.hook), so no install script does. Unlike
   # the .deb's postinst, the hook does not skip a user whose autostart entry

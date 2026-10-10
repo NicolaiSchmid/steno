@@ -74,13 +74,10 @@ drop_ins=(
   'app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf gnome-scope-stop-timeout.conf Scope'
 )
 # A copy that Bump step 3 has deleted is not checked.
-check_copy() {
-  [[ ! -e "$work/$1" ]] || cmp -s "$linux/$1" "$work/$1" \
-    || die "packaging/aur/$1 is not apps/desktop/src-tauri/linux/$1"
-}
 for entry in "${drop_ins[@]}"; do
   read -r _ conf _ <<<"$entry"
-  check_copy "$conf"
+  [[ ! -e "$work/$conf" ]] || cmp -s "$linux/$conf" "$work/$conf" \
+    || die "packaging/aur/$conf is not apps/desktop/src-tauri/linux/$conf"
 done
 echo "ok: the copies of the drop-ins are apps/desktop/src-tauri/linux's"
 
