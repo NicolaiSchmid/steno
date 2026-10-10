@@ -364,10 +364,10 @@ impl Panels {
     /// The prompt's X or Record: one that names a prompt (`raised`)
     /// clears only the latest one raised, so a click that ran while the
     /// window loaded the next prompt cannot clear it; one that names none
-    /// (a prompt shown unnumbered) clears whatever is pending. Checked and cleared under
-    /// one lock, so a prompt raised in between is never the one cleared;
-    /// `true` when it cleared. Swift: each `DetectionPromptViewModel`
-    /// closes only itself (`onClose`).
+    /// (a prompt shown unnumbered) clears whatever is pending. Checked and
+    /// cleared under one lock, so a prompt raised in between is never the
+    /// one cleared; `true` when it cleared. Swift: each
+    /// `DetectionPromptViewModel` closes only itself (`onClose`).
     fn dismiss_prompt(&self, raised: Option<u64>) -> bool {
         self.prompt.lock().is_ok_and(|mut prompt| {
             let dismisses = raised.is_none_or(|raised| raised == prompt.last_raised);
