@@ -50,7 +50,6 @@
 //!
 //! Swift: none; the Mac app ships no `AppImage`.
 
-use std::collections::HashSet;
 use std::os::fd::RawFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
@@ -157,7 +156,7 @@ fn servers_of(proc: &Path, pid: u32, connection: u32) -> Vec<u32> {
         if !serves(&process, connection) {
             continue;
         }
-        let written: HashSet<PathBuf> = pipes(&process, libc::O_WRONLY).into_iter().collect();
+        let written = pipes(&process, libc::O_WRONLY);
         if read.iter().any(|pipe| written.contains(pipe)) {
             servers.push(other);
         }
