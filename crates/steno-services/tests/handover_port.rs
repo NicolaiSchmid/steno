@@ -9,8 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use steno_core::StenoPaths;
 use steno_handover::ListenerState;
+use steno_services::handover::PORT_VARIABLE;
+
+mod common;
 
 /// Set in the child to the port it stores.
 const CHILD: &str = "STENO_HANDOVER_PORT_TEST_STORED";
@@ -28,34 +30,17 @@ fn free_port() -> u16 {
 /// The port the child's app listens on, with `stored` stored and
 /// `variable` as `STENO_HANDOVER_PORT`.
 fn listening_port(home: &Path, stored: u16, variable: Option<u16>) -> u16 {
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    let mut command = common::child_in(home, NAME);
     command
-        .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
         .env(CHILD, stored.to_string())
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", home.join("data"))
-        .env("APPDATA", home.join("AppData"))
-        .env_remove(steno_services::handover::PORT_VARIABLE);
+        .env_remove(PORT_VARIABLE);
     if let Some(variable) = variable {
-        command.env(
-            steno_services::handover::PORT_VARIABLE,
-            variable.to_string(),
-        );
+        command.env(PORT_VARIABLE, variable.to_string());
     }
     let output = command.output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "the child failed: {stdout}{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // The harness prints the test's name on the same line, before it.
-    stdout
-        .split_once("listening=")
-        .and_then(|(_, rest)| rest.split_whitespace().next())
-        .unwrap_or_else(|| panic!("the child printed no port: {stdout}"))
-        .parse()
-        .unwrap()
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    common::printed(&stdout, "listening=").parse().unwrap()
 }
 
 #[test]
@@ -75,43 +60,36 @@ fn the_app_listens_on_the_stored_handover_port() {
     );
 }
 
-/// In the child: the default support directory, under the temporary home,
-/// with `stored` as `handoverPort`, and the app built on it; prints the
+/// In the child: the shell's options (`AppOptions::product`, without the
+/// keyring), whose default support directory is under the temporary home,
+/// with `stored` as `handoverPort`, and the app built on them; prints the
 /// port its listener bound.
 fn listen_as_the_shell_does(stored: u16) {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-    let paths = StenoPaths::create_default().unwrap();
-    assert!(
-        paths.support_directory.starts_with(&home),
-        "{} is not under the temporary home",
-        paths.support_directory.display()
-    );
-    {
-        let store = steno_services::open_store(&paths.database_path()).unwrap();
-        let mut settings = store.settings().unwrap();
-        settings.handover_port = Some(stored);
-        store.save_settings(&settings).unwrap();
-    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
+    let opener = Arc::new(steno_host::fakes::FakeOpener::default());
+    let options = steno_services::AppOptions {
+        keyring: false,
+        ..steno_services::AppOptions::product(runtime.handle().clone(), opener, "0.0.0").unwrap()
+    };
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let support = &options.paths.support_directory;
+    assert!(
+        support.starts_with(&home),
+        "{} is not under the temporary home",
+        support.display()
+    );
+    {
+        let store = steno_services::open_store(&options.paths.database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        settings.handover_port = Some(stored);
+        store.save_settings(&settings).unwrap();
+    }
     runtime.block_on(async {
-        let app = steno_services::build(steno_services::AppOptions {
-            paths,
-            database_path: None,
-            keyring: false,
-            opener: Arc::new(steno_host::fakes::FakeOpener::default()),
-            login_item: None,
-            update_source: None,
-            runtime: tokio::runtime::Handle::current(),
-            version: "0.0.0".to_owned(),
-            make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
-            detection: None,
-            lock_patience: std::time::Duration::ZERO,
-        })
-        .unwrap();
+        let app = steno_services::build(options).unwrap();
         let service = app.handover.as_ref().unwrap().listener().unwrap().clone();
         service.start().await.unwrap();
         let ListenerState::Listening { port } = service.state() else {
