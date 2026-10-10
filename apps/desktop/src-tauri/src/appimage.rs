@@ -146,15 +146,29 @@ mod tests {
         assert_eq!(access("flags:\tx\n"), None);
     }
 
-    /// `sleep` with `stdin`, `stdout` and `stderr`.
+    /// `sleep` with `stdin`, `stdout` and `stderr`, once its `exe` names
+    /// `sleep`. A spawn through `vfork` returns as soon as the child has let
+    /// go of this process's memory, and until the child's exec installs its
+    /// own, its `exe` still names this test binary.
     fn sleeping(stdin: Stdio, stdout: Stdio, stderr: Stdio) -> Child {
-        Command::new("sleep")
+        let child = Command::new("sleep")
             .arg("30")
             .stdin(stdin)
             .stdout(stdout)
             .stderr(stderr)
             .spawn()
-            .unwrap()
+            .unwrap();
+        let test = std::env::current_exe().unwrap();
+        let exe = format!("/proc/{}/exe", child.id());
+        let started = std::time::Instant::now();
+        while std::fs::read_link(&exe).is_ok_and(|exe| exe == test) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "sleep did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        child
     }
 
     /// What the process `pid` holds, for a failure's message: its
