@@ -324,17 +324,22 @@ mod tests {
         (store, folder)
     }
 
+    /// A load failed over the synthetic asset in `store`; the result.
+    fn fail_load(store: &ModelStore) -> DiarizeError {
+        after_failed_load_of(
+            store,
+            &synthetic_asset(),
+            DiarizeError::metadata("the load failed"),
+        )
+    }
+
     /// Intact files survive a failed load, which keeps its own error: a
     /// crash, a hang or a ceiling hit over good models deletes nothing.
     #[test]
     fn intact_files_are_kept_and_the_load_keeps_its_error() {
         let dir = tempfile::tempdir().unwrap();
         let (store, folder) = install_synthetic(dir.path(), b"embedding");
-        let error = after_failed_load_of(
-            &store,
-            &synthetic_asset(),
-            DiarizeError::metadata("the load failed"),
-        );
+        let error = fail_load(&store);
         assert!(
             matches!(&error, DiarizeError::Metadata(detail) if detail == "the load failed"),
             "{error:?}"
@@ -352,11 +357,7 @@ mod tests {
     fn only_the_file_that_fails_its_checksum_is_deleted() {
         let dir = tempfile::tempdir().unwrap();
         let (store, folder) = install_synthetic(dir.path(), b"embeddinG");
-        let error = after_failed_load_of(
-            &store,
-            &synthetic_asset(),
-            DiarizeError::metadata("the load failed"),
-        );
+        let error = fail_load(&store);
         let DiarizeError::NotInstalled { asset, missing, .. } = &error else {
             panic!("not installed: {error:?}");
         };
@@ -385,11 +386,7 @@ mod tests {
             eprintln!("skipped: the file is still readable (root?)");
             return;
         }
-        let error = after_failed_load_of(
-            &store,
-            &synthetic_asset(),
-            DiarizeError::metadata("the load failed"),
-        );
+        let error = fail_load(&store);
         std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(&error, DiarizeError::Metadata(_)), "{error:?}");
         assert_eq!(std::fs::read(&unreadable).unwrap(), b"embeddinG");
