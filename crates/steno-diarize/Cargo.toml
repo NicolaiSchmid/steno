@@ -42,6 +42,8 @@ hound.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+# The log-split test of `models` reads what it logs at debug.
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

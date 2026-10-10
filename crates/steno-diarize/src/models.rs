@@ -23,10 +23,11 @@
 //! This crate opens no connection of its own: the store fetches the
 //! published files and sends nothing but the request.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use steno_speech::model_store::sha256_of;
-use steno_speech::{DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore};
+use steno_speech::{DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore, SpeechError};
 
 use crate::error::DiarizeError;
 
@@ -175,9 +176,10 @@ pub fn ensure(store: &ModelStore) -> Result<ModelPaths, DiarizeError> {
 /// Settings and a gate report the asset not installed and a download
 /// replaces them; the result is then [`DiarizeError::NotInstalled`]
 /// naming them. A file that is gone by then (a Settings Remove during the
-/// load) is reported the same way, without a hash. When every file is
-/// intact, or cannot be hashed, it is `error`. The hash runs only after a
-/// failure, never on a load that works.
+/// load, or a concurrent check that deleted it first) is reported the same
+/// way. When every file is intact, or cannot be hashed or deleted for
+/// another reason, it is `error`. The hash runs only after a failure,
+/// never on a load that works.
 pub(crate) fn after_failed_load(store: &ModelStore, error: DiarizeError) -> DiarizeError {
     after_failed_load_of(store, &asset(), error)
 }
@@ -192,33 +194,50 @@ fn after_failed_load_of(
         Ok(directory) => directory,
         Err(gone) => return gone.into(),
     };
-    let mut missing = Vec::new();
-    for file in &asset.files {
-        let path = directory.join(&file.name);
-        let Ok(actual) = sha256_of(&path) else {
-            continue;
-        };
-        if actual == file.sha256 {
-            continue;
-        }
-        // The load's error can be a crash report holding the child's
-        // stderr, which may hold a path: debug only.
-        tracing::warn!(path = %path.display(), %actual, expected = %file.sha256, "diarization model failed its checksum after a failed load, deleting it");
-        tracing::debug!(%error, "the load that failed");
-        match std::fs::remove_file(&path) {
-            Ok(()) => missing.push(file.name.clone()),
-            Err(remove) => {
-                tracing::warn!(path = %path.display(), error = %remove, "corrupt diarization model left in place");
-            }
-        }
-    }
+    let missing: Vec<String> = asset
+        .files
+        .iter()
+        .filter(|file| {
+            let path = directory.join(&file.name);
+            is_gone_after_check(file, &path, sha256_of(&path))
+        })
+        .map(|file| file.name.clone())
+        .collect();
     if missing.is_empty() {
         return error;
     }
+    // The load's error can be a crash report holding the child's stderr,
+    // which may hold a path: debug only.
+    tracing::debug!(%error, "the load that failed");
     DiarizeError::NotInstalled {
         asset: asset.id.clone(),
         directory,
         missing,
+    }
+}
+
+/// Whether `file`, at `path`, is missing after the check, given `digest`,
+/// its hash: deleted because the digest is not the manifest's, or already
+/// gone (`NotFound`) when it was hashed or deleted. A file that cannot be
+/// hashed or deleted for another reason (permissions, I/O) is kept and is
+/// not missing.
+fn is_gone_after_check(file: &ModelFile, path: &Path, digest: Result<String, SpeechError>) -> bool {
+    let actual = match digest {
+        Ok(actual) if actual == file.sha256 => return false,
+        Ok(actual) => actual,
+        Err(SpeechError::Io { source, .. }) => {
+            return source.kind() == ErrorKind::NotFound;
+        }
+        Err(_) => return false,
+    };
+    tracing::warn!(path = %path.display(), %actual, expected = %file.sha256, "diarization model failed its checksum after a failed load, deleting it");
+    match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(remove) if remove.kind() == ErrorKind::NotFound => true,
+        Err(remove) => {
+            tracing::warn!(path = %path.display(), error = %remove, "corrupt diarization model left in place");
+            false
+        }
     }
 }
 
@@ -368,6 +387,83 @@ mod tests {
             std::fs::read(folder.join("a.onnx")).unwrap(),
             b"segmentation"
         );
+    }
+
+    /// The checksum warning names the file and its digests, never the
+    /// load's error, whose crash report can hold the child's stderr: that
+    /// is logged once, at debug.
+    #[test]
+    fn the_load_error_is_logged_at_debug_only() {
+        #[derive(Clone, Default)]
+        struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Log {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _folder) = install_synthetic(dir.path(), b"embeddinG");
+        let log = Log::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let log = log.clone();
+                move || log.clone()
+            })
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+        let error = tracing::subscriber::with_default(subscriber, || {
+            after_failed_load_of(
+                &store,
+                &synthetic_asset(),
+                DiarizeError::metadata("the child died: /home/someone/stderr-line"),
+            )
+        });
+        assert!(
+            matches!(error, DiarizeError::NotInstalled { .. }),
+            "{error:?}"
+        );
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let warning: Vec<_> = lines.iter().filter(|l| l.contains("WARN")).collect();
+        assert_eq!(warning.len(), 1, "{text}");
+        assert!(warning[0].contains("failed its checksum"), "{text}");
+        assert!(warning[0].contains("b.onnx"), "{text}");
+        let leaks: Vec<_> = lines.iter().filter(|l| l.contains("stderr-line")).collect();
+        assert_eq!(leaks.len(), 1, "{text}");
+        assert!(leaks[0].contains("DEBUG"), "{text}");
+    }
+
+    /// A file deleted since the folder was found, by a concurrent check or
+    /// a Settings Remove, is missing whether it is gone by its hash or by
+    /// its removal; any other error when hashing keeps it and does not
+    /// name it.
+    #[test]
+    fn a_file_that_vanishes_during_the_check_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = &synthetic_asset().files[1];
+        let gone = dir.path().join("gone.onnx");
+        // Absent when it is hashed.
+        assert!(is_gone_after_check(file, &gone, sha256_of(&gone)));
+        // Hashed as corrupt, then deleted by someone else before the remove.
+        assert!(is_gone_after_check(file, &gone, Ok("0".repeat(64))));
+        // Kept when the hash fails for another reason.
+        let kept = dir.path().join("kept.onnx");
+        std::fs::write(&kept, b"embeddinG").unwrap();
+        let denied = SpeechError::Io {
+            path: kept.clone(),
+            source: std::io::Error::from(ErrorKind::PermissionDenied),
+        };
+        assert!(!is_gone_after_check(file, &kept, Err(denied)));
+        assert!(kept.exists());
+        // Intact.
+        std::fs::write(&kept, b"embedding").unwrap();
+        assert!(!is_gone_after_check(file, &kept, sha256_of(&kept)));
+        assert!(kept.exists());
     }
 
     /// A file that cannot be read is not hashed, so it is neither deleted

@@ -10,8 +10,10 @@
 //! diarizer's load is killed and fails the call as a failed load, which
 //! `SidecarDiarizer` checks against the manifest: files of the right size
 //! that fail their checksum are deleted and the call is not installed,
-//! while an abort in the diarization itself stays the sidecar's crash. The
-//! real engine refuses model files it cannot load without dying.
+//! two such calls at once included, while an abort in the diarization
+//! itself stays the sidecar's crash. The kill warning names the failure in
+//! fixed words, its crash report at debug only. The real engine refuses
+//! model files it cannot load without dying.
 //!
 //! The ignored tests run the real models: set `STENO_MODELS_DIR` to a
 //! models directory holding `onnx/diarization/`. They compare the sidecar's
@@ -334,6 +336,81 @@ async fn an_abort_in_the_diarizer_load_is_a_failed_load_that_ends_the_child() {
     assert_eq!(engine.spawns(), 2);
 }
 
+/// What this test binary logs at debug and above, from the first call on:
+/// the process-wide subscriber, so a line is captured whichever thread
+/// writes it. Every test in the binary logs into it, so a test picks its
+/// own lines out by its child's pid.
+#[derive(Clone, Default)]
+struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLog {
+    fn installed() -> &'static CapturedLog {
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        static LOG: std::sync::OnceLock<CapturedLog> = std::sync::OnceLock::new();
+        LOG.get_or_init(|| {
+            let log = CapturedLog::default();
+            tracing_subscriber::fmt()
+                .with_writer({
+                    let log = log.clone();
+                    move || log.clone()
+                })
+                .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
+                .finish()
+                .init();
+            log
+        })
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The warning for a child killed in the diarizer's load names the kind of
+/// failure in fixed words; the crash report, which carries the child's
+/// stderr, is logged at debug only.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_kill_warning_names_the_failure_and_the_crash_report_stays_at_debug() {
+    let log = CapturedLog::installed();
+    let (engine, dir) = engine_with_fault("abort-on-diarizer-load", |_| {});
+    let error = engine.diarize(fake_models(), &tone(1.0)).await.unwrap_err();
+    let SidecarError::DiarizerLoad(load) = sidecar_error(&error) else {
+        panic!("{error}");
+    };
+    let report = load.to_string();
+    assert!(matches!(**load, SidecarError::Crashed { .. }), "{report}");
+    let pid = faulted(&dir).unwrap();
+    let text = log.text();
+    let ours: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains(&format!("pid={pid} ")))
+        .collect();
+    let killed: Vec<&&str> = ours
+        .iter()
+        .filter(|line| line.contains("speech sidecar killed"))
+        .collect();
+    assert_eq!(killed.len(), 1, "{text}");
+    assert!(killed[0].contains(" WARN "), "{text}");
+    assert!(
+        killed[0].contains("reason=it could not load the diarizer's models: it died"),
+        "{text}"
+    );
+    let reported: Vec<&&str> = ours.iter().filter(|line| line.contains(&report)).collect();
+    assert!(!reported.is_empty(), "{text}");
+    assert!(reported.iter().all(|line| line.contains("DEBUG")), "{text}");
+}
+
 /// A diarizer load that never answers is killed at the load timeout and
 /// fails the call as a failed load over the timeout; the next call
 /// diarizes in a new child.
@@ -422,6 +499,36 @@ async fn a_load_that_aborts_or_hangs_on_corrupt_files_deletes_them_and_is_not_in
         assert_eq!(missing, &names, "{fault}");
         for name in &names {
             assert!(!folder.join(name).exists(), "{fault}: {name}");
+        }
+    }
+}
+
+/// Two diarizations over the same corrupt files whose loads both fail (a
+/// reload's new job beside the job it retired): both are not installed,
+/// whichever check deletes a file first, so neither meeting falls back.
+/// The checks run outside the engine's lock and race each other.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_failed_loads_over_the_same_corrupt_files_are_both_not_installed() {
+    for round in 0..20 {
+        let (diarizer, folder, _dir) = diarizer_over_junk("refuse-diarizer", |_| {});
+        let audio = tone(2.0);
+        let (a, b) = tokio::join!(diarizer.diarize(&audio), diarizer.diarize(&audio));
+        for result in [a, b] {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<DiarizeError>(),
+                    Some(DiarizeError::NotInstalled { .. })
+                ),
+                "round {round}: {error}"
+            );
+        }
+        for file in &steno_diarize::models::asset().files {
+            assert!(
+                !folder.join(&file.name).exists(),
+                "round {round}: {}",
+                file.name
+            );
         }
     }
 }
