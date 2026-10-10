@@ -2908,36 +2908,41 @@ touch and admission lines; each fix is ported to Swift before cutover.
   not answered after 60 seconds fails, so a stalled request cannot hold the next one.
   Where Sparkle showed its alert for a found update, the schedule raises the shell's
   "Install and Relaunch" dialog once per version in a run, and not while a recording
-  starts, runs or stops: the first tick after it ends raises it. A yes given once a
-  recording has started since the dialog came up asks again ("Installing stops and
-  saves the recording in progress." with "Not Now", the default, or "Install and
-  Relaunch"; the confirm comes up where the alert's Install was, so a second Return
-  would otherwise pass it unread), and "Not Now" leaves the version to be raised again
-  after the recording. The install downloads first and then holds recording starts off
-  (`Recorder::hold_starts`) from just before the updater writes the package through
-  the relaunch: a Record meanwhile, from the sidebar or the tray, is refused and says
-  "Steno is installing an update. You can record again once it relaunches, or if you
-  cancel the install."; a meeting prompt's Record (`recordFromPrompt`) reaches the
-  same start and is refused the same way. The hold also spans
-  the updater's password prompt: a `.deb` install always asks (pkexec, then a zenity
-  or kdialog password dialog, then a terminal `sudo`), and on macOS an app folder the
-  user cannot write asks for an administrator. Cancelling every prompt fails the
-  install, which drops the hold and clears the message. A recording the user did not
-  agree to stop, such as one that started during the download, puts the install off:
-  the package is kept, the version is raised again at the first idle tick, and the
-  next yes installs without a second download. A confirm's yes may stop only the
-  recording it named; one still starting when the confirm came up is named by the
-  meeting id it has at the yes.
-  Automatic downloads wait for P25's `InstallGate` (stable plan): its stand-in
-  `NeverIdle` never gives a hold, so until P25 lands the flag downloads nothing and
-  every install waits for the user's yes; with the gate the schedule downloads by
+  starts, runs or stops: the first tick after it ends raises it. No update stops a
+  recording or a processing run (stable plan P25): every install holds the
+  `InstallGate`'s hold, and the app's gate (`IdleGate` over the recorder and the
+  pipelines' shared `InFlight` set) gives one only while no recording starts, runs or
+  stops (the save runs while it stops, and its processing job is claimed before the
+  recorder is idle), no processing job, summary re-run or re-export is in flight or
+  claimed, and the app is not shutting down. A yes given while the app is busy asks
+  again in plain words ("Steno is recording. It can install the update and relaunch
+  once the recording ends and is saved." or "Steno is still processing a meeting. It
+  can install the update and relaunch once that is done."), with "Install After It
+  Ends" as the default and "Not Now", which leaves the version to be raised again.
+  After a yes the install waits until the gate says idle (`UpdateSchedule::wait_until_idle`,
+  every two seconds), downloads, then waits for the gate's hold, so a recording started
+  during the download is waited for, never stopped. The hold is the recorder's start
+  hold (`Recorder::hold_starts`) and the pipelines' `JobHold`, from just before the
+  updater writes the package through the relaunch: a Record meanwhile, from the
+  sidebar or the tray, is refused and says "Steno is installing an update. You can
+  record again once it relaunches, or if you cancel the install."; a meeting prompt's
+  Record, once detection raises one, goes through the same `recording.start` and is
+  refused the same way; a processing job claimed meanwhile (a phone recording's)
+  keeps its claim and waits before its first stage, its meeting saved `queued` for the
+  relaunched app. The hold also spans the updater's password prompt: a `.deb` install
+  always asks (pkexec, then a zenity or kdialog password dialog, then a terminal
+  `sudo`), and on macOS an app folder the user cannot write asks for an administrator.
+  Cancelling every prompt fails the install, which drops the hold, clears the message
+  and lets the waiting jobs start. A yes given while the schedule's own install holds
+  the gate installs nothing. With automatic downloads on, the schedule downloads by
   itself only while `InstallGate::is_idle_now` says idle (a recording or a processing
   job has the disk and the network to itself), keeps the package until an install
-  takes it, and installs only with the gate's hold from `try_hold`, beside the
-  recorder's start hold. Sparkle installed a download at quit. Settings' footer
-  ("installed when you relaunch Steno", `general-section.tsx`) describes Sparkle; in
-  the Rust app the dialog's yes installs once downloaded, after a second confirm when
-  a recording has started since the dialog came up, and the shared copy follows when
+  takes it, and installs only with the gate's hold from `try_hold`; the flag is read
+  again when the download ends and once the hold is taken, so a switch turned off
+  during the transfer keeps and installs nothing. Sparkle installed a download at
+  quit. Settings' footer ("installed when you relaunch Steno", `general-section.tsx`)
+  describes Sparkle; in the Rust app the dialog's yes installs once downloaded, after
+  the recording or the processing under way has ended, and the shared copy follows when
   the Swift app retires (`.plans/2026-10-04-mac-cutover.md`). One install runs at a
   time, and the install is of the version the dialog named; a yes for a version a
   later check replaced installs nothing, since the newer one has its own dialog. The
@@ -3270,6 +3275,7 @@ PR off `main`.
 | Stable plan X6: the AUR package `steno-desktop-bin` (`packaging/aur/`), repackaging the release `.deb` verified against the release key, the binary and the sidecar in `/usr/lib/steno-desktop/` behind a `/usr/bin` wrapper that sets `STENO_DISTRIBUTION=aur` and `STENO_EXEC_PATH`, P5's drop-ins (copies until the pinned `.deb` ships them), no install script, pinned to rc.3 until a release contains #227 and #261; checked in an Arch container by `packaging/check-aur.sh` (`aur-ci.yml`) | `feat/aur-steno-desktop-bin` | #265 | open |
 | Tests never write placeholder models into a models directory `STENO_MODELS_DIR` names: the reload test that installed them into the app's resolved directory (and so over a developer's real models) pins its own in the settings, the CLI tests clear the variable, `steno-services`' model writers panic outside the temp directory or inside the named one, and a child-process test proves the named directory is left alone | `fix/test-models-dir-guard` | #273 | open |
 | S2: meeting detection on every platform (`steno_services::detection`: one prompt at a time for 60 s through the shell's panel, none while recording or with detection off, its Record attributed to the prompt's app through `recordFromPrompt`, the setting read every two seconds, which retries a detector that could not start) and the auto-stop after a call (`steno_services::auto_stop`: the 90-second grace, Keep recording, the call resuming, the Stop path with `callEnded`) (`steno-services`, desktop shell, web prompt) | `feat/rust-recorder-policy` | #271 | open |
+| No update stops a recording or a processing run: the app's install gate over the recorder and the pipelines' in-flight set, whose job hold keeps jobs claimed during the install waiting; the user's yes while busy installs after it ends; automatic downloads on (P25 of `.plans/2026-10-07-stable-promotion.md`; `steno-pipeline`, `steno-services`, desktop shell) | `fix/desktop-updates-wait-for-idle` | #270 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
