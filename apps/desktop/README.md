@@ -1046,7 +1046,11 @@ finding.
    environment's reviewer, the first time and when
    `HANDOFF_ITEM_REPLACE` names the version (see The handoff item). Approve
    it only after the stable build's rehearsal (R7 in the stable plan) has
-   passed; reject it to leave the Swift app's users where they are.
+   passed; reject it to leave the Swift app's users where they are. If a
+   newer stable release is published while an earlier handoff waits,
+   reject the earlier and approve only the newest: the handoff item is
+   written once, and an earlier release approved after a newer one wrote
+   fails (see When a run fails, handoff).
 6. A stable release only, without waiting for the approval: open the
    flake bump pull request with the two lines in the run's summary (Nix
    flake bump).
@@ -1126,13 +1130,26 @@ new assets until **Update lanes** finishes.
 - **Bump the Homebrew cask**, **Push the AUR bump** (warnings, the release
   stands): the tap or the AUR refused the push, or the AUR bump found the
   PKGBUILD in another form than it rewrites (`scripts/aur-bump.sh` names
-  it). Bump by hand as `packaging/aur/README.md` and the tap say.
+  it). Bump by hand as `packaging/aur/README.md` and the tap say. On a
+  re-run of `publish`, the AUR step finds `chore/aur-<version>` from the
+  first run, says so in a notice, and opens no second pull request; that
+  needs nothing.
 - **handoff**: "the appcast environment has no required reviewer" means
   GitHub ran the job unapproved and nothing was written; set the
-  environment up (Cutting a release, step 0) and re-run it. "has a handoff
-  item since publish looked", or a build not above the branch's, means
-  another release's item reached the branch while this one waited; reject
-  the job, or set `HANDOFF_ITEM_REPLACE` to this version and re-run it.
+  environment up (Cutting a release, step 0) and re-run it. Two releases'
+  handoffs that waited at once end in one of two ways:
+  - An earlier release approved after a newer one wrote: "build ... is not
+    above build ..." (`check-build`). Leave it failed, or reject it if it
+    waits again; the newer release's item is on the branch and in its
+    `appcast.xml`. Setting `HANDOFF_ITEM_REPLACE` does not help, since the
+    build check fails first.
+  - A newer release approved after an earlier one wrote: a warning, "has
+    another release's handoff item since publish looked". The job writes
+    no second item and uploads the branch's feed, with the earlier item,
+    as this release's `appcast.xml`, so `releases/latest` keeps carrying
+    it. Nothing to do. Only a release that fixes the handoff item itself
+    sets `HANDOFF_ITEM_REPLACE` to its version and re-runs the job.
+
   Otherwise `publish-appcast.sh` could not push to the `appcast` branch,
   or the upload of `appcast.xml` failed. Re-run the job (it asks for the
   approval again). It reads the same `sparkle-item` artifact; if the push
@@ -1402,7 +1419,8 @@ environment's reviewer approves it, and only if the branch has no handoff
 item yet or `HANDOFF_ITEM_REPLACE` names the version. It first stops
 unless the environment has a required reviewer, and at the approval checks
 the branch again, since another release's item may have reached it while
-this one waited. It sets the item's
+this one waited: a higher build stops the job, and another handoff item
+means it writes none and only uploads the branch's feed. It sets the item's
 `pubDate` to the approval's time in `generate_appcast`'s form
 (`Tue, 13 Oct 2026 09:00:00 +0000`, `handoff-appcast.py stamp-pubdate`;
 Sparkle counts the rollout's groups from it and reads any other form as no
