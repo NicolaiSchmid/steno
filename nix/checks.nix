@@ -1,8 +1,8 @@
 # The Linux checks behind `nix flake check`: the package's layout, libraries
 # and wrapper, and the NixOS module evaluated in minimal systems (a
-# system-wide and a per-user install down to the user units it generates and
-# the session variable, one without launch at login, and one each with
-# OpenSSH's and GnuPG's SSH agent).
+# system-wide and a per-user install down to the user units it generates,
+# the session variables and the firewall, one without launch at login or
+# the firewall, and one each with OpenSSH's and GnuPG's SSH agent).
 {
   nixpkgs,
   self,
@@ -45,9 +45,15 @@
       users.users.alice.isNormalUser = true;
       programs.steno.users = ["alice"];
       programs.steno.inhibitDelayMaxSec = 15;
+      programs.steno.handoverPort = 23900;
     }
   ];
-  noLogin = system [{programs.steno.launchAtLogin = false;}];
+  noLogin = system [
+    {
+      programs.steno.launchAtLogin = false;
+      programs.steno.openFirewall = false;
+    }
+  ];
   # Another SSH agent: the keyring default must stay off and evaluate.
   withAgent = system [{programs.ssh.startAgent = true;}];
   withGpgAgent = system [
@@ -62,6 +68,17 @@
   installs = config: lib.elem steno config.environment.systemPackages;
   # What `nixos-rebuild` would refuse with.
   evaluates = config: lib.all (a: a.assertion) config.assertions;
+
+  # The port the app binds on Linux, which the module's default must be.
+  linuxPorts = map lib.head (lib.filter lib.isList (builtins.split
+    "pub const LINUX_PORT: u16 = ([0-9]+);"
+    (builtins.readFile ../crates/steno-handover/src/configuration.rs)));
+  defaultPort = systemWide.config.programs.steno.handoverPort;
+  firewall = config: config.networking.firewall;
+  opens = port: config:
+    lib.elem port (firewall config).allowedTCPPorts
+    && lib.elem 5353 (firewall config).allowedUDPPorts;
+  portVariable = config: config.environment.sessionVariables.STENO_HANDOVER_PORT or null;
 
   # Every Tauri CLI the release installs is the one the package builds with.
   tauriVersion = steno.passthru.tauriCli.version;
@@ -145,6 +162,14 @@ in {
   "launchAtLogin = false still sets STENO_LOGIN_ITEM";
   assert lib.assertMsg (!(noLogin.config.systemd.user.services ? steno))
   "launchAtLogin = false still has steno.service";
+  assert lib.assertMsg (linuxPorts == [(toString defaultPort)])
+  "handoverPort defaults to ${toString defaultPort}, crates/steno-handover's LINUX_PORT is ${toString linuxPorts}";
+  assert lib.assertMsg (opens defaultPort systemWide.config && portVariable systemWide.config == toString defaultPort)
+  "the firewall does not open ${toString defaultPort}/tcp and 5353/udp, or the session's STENO_HANDOVER_PORT is not ${toString defaultPort}";
+  assert lib.assertMsg (opens 23900 perUser.config && !(lib.elem defaultPort (firewall perUser.config).allowedTCPPorts) && portVariable perUser.config == "23900")
+  "handoverPort = 23900 does not move the firewall's port and STENO_HANDOVER_PORT";
+  assert lib.assertMsg (!(lib.elem defaultPort (firewall noLogin.config).allowedTCPPorts) && !(lib.elem 5353 (firewall noLogin.config).allowedUDPPorts) && portVariable noLogin.config == toString defaultPort)
+  "openFirewall = false still opens a port, or drops STENO_HANDOVER_PORT";
     pkgs.runCommand "steno-module-check" {
       inherit userUnitFiles;
       systemWideUnits = userUnits systemWide.config;
@@ -174,9 +199,11 @@ in {
       done
       unit="$systemWideUnits/steno.service"
       has 'ExecStart=/run/current-system/sw/bin/steno-desktop'
+      has 'Environment="STENO_HANDOVER_PORT=${toString defaultPort}"'
       unit="$perUserUnits/steno.service"
       has 'ExecStart=/etc/profiles/per-user/%u/bin/steno-desktop'
       has 'ConditionPathExists=/etc/profiles/per-user/%u/bin/steno-desktop'
+      has 'Environment="STENO_HANDOVER_PORT=23900"'
       touch $out
     '';
 }

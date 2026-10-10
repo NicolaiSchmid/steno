@@ -1,8 +1,8 @@
 # `programs.steno`: Steno on NixOS. The package, launch at login as a
-# systemd user service, PipeWire, and GNOME Keyring as the Secret Service
-# where no other Secret Service or SSH agent runs. Item X7 of
-# .plans/2026-10-07-stable-promotion.md. The handover port in the firewall
-# is X4's and not here yet.
+# systemd user service, the phone handover's port and mDNS in the firewall,
+# PipeWire, and GNOME Keyring as the Secret Service where no other Secret
+# Service or SSH agent runs. Items X7 and X4 of
+# .plans/2026-10-07-stable-promotion.md.
 {packages}: {
   config,
   lib,
@@ -62,6 +62,33 @@ in {
       '';
     };
 
+    handoverPort = lib.mkOption {
+      type = lib.types.port;
+      # HandoverConfiguration::LINUX_PORT in crates/steno-handover, which
+      # nix/checks.nix compares it with.
+      default = 23820;
+      description = ''
+        The TCP port Steno listens on for recordings from the paired phone,
+        set for every session as `STENO_HANDOVER_PORT`. The phone finds the
+        port through mDNS, so changing it needs no change on the phone.
+        When another program holds the port, Steno listens on one the
+        system chooses and logs a warning; the firewall blocks that one.
+        `0` lets the system choose every time, and opens no TCP port.
+      '';
+    };
+
+    openFirewall = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Open `handoverPort` (TCP) and mDNS (UDP 5353) in the firewall, so the
+        paired phone finds Steno on the local network and uploads its
+        recordings. The handover serves only connections that arrive on a
+        LAN address or loopback, over TLS 1.3 with the certificate the phone
+        pinned at pairing.
+      '';
+    };
+
     inhibitDelayMaxSec = lib.mkOption {
       type = lib.types.nullOr lib.types.ints.positive;
       default = null;
@@ -93,7 +120,10 @@ in {
       # No PATH of the module's own: the app keeps the session's, which
       # names what it opens files and links with.
       enableDefaultPath = false;
-      environment.STENO_LOGIN_ITEM = "managed";
+      environment = {
+        STENO_LOGIN_ITEM = "managed";
+        STENO_HANDOVER_PORT = toString cfg.handoverPort;
+      };
       # A switch that changes or removes the unit (a nixpkgs bump changes
       # its LOCALE_ARCHIVE and TZDIR) leaves a running Steno alone instead
       # of stopping a recording; the new unit applies at the next login.
@@ -109,8 +139,19 @@ in {
       };
     };
     # A Steno started from the launcher in a session that began after the
-    # switch also agrees that the service owns launch at login.
-    environment.sessionVariables = lib.mkIf cfg.launchAtLogin {STENO_LOGIN_ITEM = "managed";};
+    # switch also agrees that the service owns launch at login, and listens
+    # on the port the firewall opens.
+    environment.sessionVariables = lib.mkMerge [
+      {STENO_HANDOVER_PORT = toString cfg.handoverPort;}
+      (lib.mkIf cfg.launchAtLogin {STENO_LOGIN_ITEM = "managed";})
+    ];
+
+    # The handover's port, and mDNS for Steno's own responder, which
+    # answers the phone's queries on UDP 5353 (Avahi need not run).
+    networking.firewall = lib.mkIf cfg.openFirewall {
+      allowedTCPPorts = lib.optional (cfg.handoverPort != 0) cfg.handoverPort;
+      allowedUDPPorts = [5353];
+    };
 
     # Capture is native PipeWire.
     services.pipewire.enable = lib.mkDefault true;
