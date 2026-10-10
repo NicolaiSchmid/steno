@@ -1007,6 +1007,37 @@ mod tests {
             .collect()
     }
 
+    /// The app's scope, then the mount servers `servers` each in one before it.
+    fn app_and_servers(servers: &[u32]) -> Vec<(String, Option<Vec<String>>)> {
+        let mut expected = vec![(scope_name(4242), None)];
+        expected.extend(servers_before(servers, &scope_name(4242)));
+        expected
+    }
+
+    /// GNOME's scope, which the app 4242 stays in.
+    const GNOME: &str = "app-gnome-steno\\x2ddesktop-4242.scope";
+
+    /// [`carry_out`] for the app 4242 that stays in [`GNOME`] with the mount
+    /// servers 60 and 77, its thread joined: what it logged.
+    fn servers_moved_from_gnome(
+        connect: impl FnOnce() -> Result<Connection, MoveError> + Send + 'static,
+        cgroup_of: CgroupOf,
+    ) -> String {
+        let ((), logged) = warnings(|| {
+            carry_out(
+                Plan::MoveServers(vec![60, 77], GNOME),
+                4242,
+                connect,
+                cgroup_of,
+                soon(),
+            )
+            .expect("a thread moves the servers")
+            .join()
+            .unwrap();
+        });
+        logged
+    }
+
     #[test]
     fn the_app_asks_for_a_scope_of_its_own_in_the_app_slice() {
         let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
@@ -1060,9 +1091,7 @@ mod tests {
 
         let moved = move_app(&app, &[60, 77], MOVED).unwrap();
         assert_eq!(moved, Some(scope_name(4242)));
-        let mut expected = vec![(scope_name(4242), None)];
-        expected.extend(servers_before(&[60, 77], &scope_name(4242)));
-        assert_eq!(starts(asked), expected);
+        assert_eq!(starts(asked), app_and_servers(&[60, 77]));
         let started = asked.started.lock().unwrap();
         let [_, _, (name, mode, properties, auxiliary)] = started.as_slice() else {
             panic!("three starts: {}", started.len());
@@ -1201,28 +1230,14 @@ mod tests {
             )
         });
         assert!(moved.is_none());
-        let mut expected = vec![(scope_name(4242), None)];
-        expected.extend(servers_before(&[60, 77], &scope_name(4242)));
-        assert_eq!(starts(asked), expected);
+        assert_eq!(starts(asked), app_and_servers(&[60, 77]));
         assert_eq!(logged, "");
 
         let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
             return;
         };
-        let unit = "app-gnome-steno\\x2ddesktop-4242.scope";
-        let ((), logged) = warnings(|| {
-            carry_out(
-                Plan::MoveServers(vec![60, 77], unit),
-                4242,
-                move || Ok(app),
-                MOVED,
-                soon(),
-            )
-            .expect("a thread moves the servers")
-            .join()
-            .unwrap();
-        });
-        assert_eq!(starts(asked), servers_before(&[60, 77], unit));
+        let logged = servers_moved_from_gnome(move || Ok(app), MOVED);
+        assert_eq!(starts(asked), servers_before(&[60, 77], GNOME));
         assert_eq!(logged, "");
         nothing_undone(asked);
 
@@ -1239,7 +1254,6 @@ mod tests {
     #[test]
     fn every_mount_server_that_stays_is_logged() {
         let no_bus = || Err(MoveError::NoRuntimeDir);
-        let unit = "app-gnome-steno\\x2ddesktop-4242.scope";
 
         let (_, logged) = warnings(|| {
             carry_out(
@@ -1252,35 +1266,13 @@ mod tests {
         });
         assert_eq!(stayed(&logged), ["60", "77"], "{logged}");
 
-        let ((), logged) = warnings(|| {
-            carry_out(
-                Plan::MoveServers(vec![60, 77], unit),
-                4242,
-                no_bus,
-                MOVED,
-                soon(),
-            )
-            .unwrap()
-            .join()
-            .unwrap();
-        });
+        let logged = servers_moved_from_gnome(no_bus, MOVED);
         assert_eq!(stayed(&logged), ["60", "77"], "{logged}");
 
         let Some((_daemon, _asked, _manager, app)) = fake(false, Some(7)) else {
             return;
         };
-        let ((), logged) = warnings(|| {
-            carry_out(
-                Plan::MoveServers(vec![60, 77], unit),
-                4242,
-                move || Ok(app),
-                LEFT_BEHIND,
-                soon(),
-            )
-            .unwrap()
-            .join()
-            .unwrap();
-        });
+        let logged = servers_moved_from_gnome(move || Ok(app), LEFT_BEHIND);
         assert_eq!(stayed(&logged), ["60", "77"], "{logged}");
         assert!(logged.contains("without the move"), "{logged}");
 
