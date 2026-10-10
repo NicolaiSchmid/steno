@@ -8,20 +8,19 @@
 //! database.
 //!
 //! What the shell owns beside the windows (WP8): the tray (`tray`, and on
-//! Linux whether a status notifier host shows it, `tray_host`), the
-//! macOS menu bar (`menu`), the actions behind both menus (`actions`), the
-//! recorder state the shell follows (`recording`), the panels (`panels`)
-//! and their geometry (`panel_geometry`), window lifetime (`windows`; the
-//! close and exit rules are in this file), launch at login (`autostart`,
-//! and on a packaged install `packaged`),
-//! updates (`updater`), the OS permissions (`permissions`), the `steno:`
-//! links (`deep_links`), the native dialogs (`dialogs`), the single
-//! instance, on Linux the logout and shutdown clients (`session_end`, over
-//! the D-Bus helpers in `dbus`) and
-//! the systemd drop-ins for the stop timeout (`stop_timeout`), a scope of
-//! its own when it starts inside another program's service, and one for
-//! each of the `AppImage`'s mount servers (`own_scope`, `appimage`), and on a
-//! Wayland session the `XWayland` backend the panels need (`display`).
+//! Linux whether a status notifier host shows it, `tray_host`), the macOS
+//! menu bar (`menu`), the actions behind both menus (`actions`), the recorder
+//! state the shell follows (`recording`), the panels (`panels`) and their
+//! geometry (`panel_geometry`), window lifetime (`windows`; the close and
+//! exit rules are in this file), launch at login (`autostart`, and on a
+//! packaged install `packaged`), updates (`updater`), the OS permissions
+//! (`permissions`), the `steno:` links (`deep_links`), the native dialogs
+//! (`dialogs`), the single instance, on Linux the D-Bus helpers its clients
+//! share (`dbus`), the logout and shutdown clients (`session_end`) and the
+//! systemd drop-ins for the stop timeout (`stop_timeout`), a scope of its own
+//! when it starts inside another program's service, and one for each of the
+//! `AppImage`'s mount servers (`own_scope`, `appimage`), and on a Wayland
+//! session the `XWayland` backend the panels need (`display`).
 //! Every one is a thin module over a Tauri plugin or an OS API with its
 //! rules in plain functions the tests cover. Everything that is on the
 //! wire (errors, topics, windows, sections, params) is the `steno-bridge`

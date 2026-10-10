@@ -1,14 +1,16 @@
 # shellcheck shell=bash disable=SC2154 # `name` is the sourcing script's
 # Sourced, not run: what lost-display-linux.sh and
-# close-without-tray-linux.sh share; each
-# sets `name`, its log prefix, and sources this file with its arguments
-# ([path/to/steno-desktop] [seconds]). Sourcing it checks them and the
-# tools (Xvfb, xdotool, python3; exit 2 on a usage error or a missing
-# tool), makes the work directory and ends the processes started from it
-# on exit. `start_recording` runs the built shell on an Xvfb server of
+# close-without-tray-linux.sh share. Each sets `name`, its log prefix, and
+# sources this file with its arguments ([path/to/steno-desktop]
+# [seconds]). Sourcing it checks them and the tools (Xvfb, xdotool,
+# python3; exit 2 on a usage error or a missing tool) and makes the work
+# directory. `start_recording` runs the built shell on an Xvfb server of
 # its own with a fresh HOME and starts a recording from the main window
 # (Ctrl+Shift+R, the record shortcut); `await_exit` waits for the app to
 # end; `require_saved` checks the store holds the recording, saved.
+# `fail` ends a failed check with the app's log, `meetings` lists the
+# store's rows, and `cleanup` (the EXIT trap) ends what it started; a
+# script that sets its own trap calls it.
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 binary="${1:-$root/target/debug/steno-desktop}"

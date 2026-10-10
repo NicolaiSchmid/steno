@@ -172,6 +172,8 @@ $expected"
   echo "$name: recording; closing the main window in $seconds s"
   sleep "$seconds"
   close_window "$main" || fail "the close could not be sent"
+  # A close that quit would have ended the app by now (well under a second
+  # without a host).
   sleep 3
   kill -0 "$app" 2>/dev/null || fail "the app ended although a tray host shows its icon"
   if xdotool search --onlyvisible --name '^Steno$' >/dev/null 2>&1; then

@@ -17,8 +17,10 @@ use zbus::blocking::{Connection, Proxy};
 use zbus::names::{BusName, OwnedUniqueName};
 use zbus::proxy::CacheProperties;
 
-/// How long a client waits for a method's answer: a frozen bus then holds
-/// it this long at most, so `EndSession` still quits.
+/// How long a client waits for a method's answer, so a frozen bus holds
+/// its thread this long at most per call: `EndSession` still quits in time
+/// (`session_end`), and a watcher that does not answer counts as no host
+/// (`tray_host`).
 const CALL_PATIENCE: Duration = Duration::from_secs(5);
 
 /// The connection `builder` makes, whose method calls wait `CALL_PATIENCE`
@@ -148,5 +150,32 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             self.end();
         }
+    }
+
+    /// A `patient` call to a peer that never answers gives up after
+    /// `CALL_PATIENCE`, not much later.
+    #[test]
+    fn a_patient_call_gives_up() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        // No object served, so this peer answers no call.
+        let silent = daemon.builder().build().unwrap();
+        let peer = silent.unique_name().unwrap().to_string();
+        let caller = daemon.connect();
+        let (done, answered) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let answer = proxy(&caller, &peer, "/", "org.steno.Silent")
+                .and_then(|proxy| proxy.call_method("Hush", &()));
+            let _ = done.send((answer.map(drop), started.elapsed()));
+        });
+        let margin = Duration::from_secs(3);
+        let (answer, waited) = answered
+            .recv_timeout(CALL_PATIENCE + margin)
+            .expect("the call gave up in time");
+        assert!(answer.is_err(), "{answer:?}");
+        assert!(waited >= CALL_PATIENCE, "{waited:?}");
+        drop(silent);
     }
 }
