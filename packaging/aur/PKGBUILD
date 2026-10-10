@@ -22,7 +22,8 @@ url='https://github.com/NicolaiSchmid/steno'
 license=('MIT' 'BSD-3-Clause')
 # What the binary links, plus two namcap cannot see: the tray library, which
 # the app loads at run time, and pipewire, whose client.conf every recording
-# needs (the .deb depends on it too).
+# needs. The .deb's Depends map to libayatana-appindicator, glibc (Arch's is
+# newer than its libc6 >= 2.39), libpipewire and pipewire.
 depends=(
   'cairo'
   'dbus'
@@ -82,8 +83,9 @@ package() {
   install -Dm755 steno-desktop.sh "$pkgdir/usr/bin/$_pkgname"
 
   # The stop timeout drop-ins (stable plan P5): the .deb installs them
-  # from the first release that contains #227; until then they come from
-  # here. Arch's systemd reloads the user managers after the install
+  # from the first release that contains #227; until pkgver pins one, the
+  # copies here, byte for byte apps/desktop/src-tauri/linux's, stand in.
+  # Arch's systemd reloads the user managers after the install
   # (30-systemd-daemon-reload-user.hook), so no install script does.
   local units="$pkgdir/usr/lib/systemd/user"
   local autostart='app-steno\x2ddesktop@autostart.service.d/10-steno.conf'

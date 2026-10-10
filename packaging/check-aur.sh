@@ -9,8 +9,9 @@
 # - .SRCINFO differs from `makepkg --printsrcinfo`;
 # - keys/pgp/ holds another key than apps/desktop/release-signing-key.asc,
 #   validpgpkeys names another fingerprint, or source= lacks the .deb's .asc;
-# - LICENSE differs from the repository's, or speexdsp-COPYING from
-#   crates/steno-audio/vendor/speexdsp/COPYING;
+# - LICENSE differs from the repository's, speexdsp-COPYING from
+#   crates/steno-audio/vendor/speexdsp/COPYING, or a drop-in copy here from
+#   its file in apps/desktop/src-tauri/linux/;
 # - the .deb's checksum or its signature from the release key does not
 #   verify, makepkg skipped either check, or the package does not build
 #   and install;
@@ -21,8 +22,9 @@
 # - the wrapper is not executable, or its commands are not exactly the three
 #   that set STENO_DISTRIBUTION=aur and STENO_EXEC_PATH=/usr/bin/steno-desktop
 #   and run the binary;
-# - an installed drop-in differs from apps/desktop/src-tauri/linux/
-#   (once that directory holds it);
+# - an installed drop-in, the .deb's or the copy here, differs from its
+#   file in apps/desktop/src-tauri/linux/, or its settings are not exactly
+#   its section and TimeoutStopSec=20s;
 # - a binary needs a library that is not installed, or the sidecar does
 #   not start.
 #
@@ -63,6 +65,21 @@ cmp -s "$root/crates/steno-audio/vendor/speexdsp/COPYING" "$work/speexdsp-COPYIN
   || die "packaging/aur/speexdsp-COPYING is not crates/steno-audio/vendor/speexdsp/COPYING"
 echo "ok: LICENSE is the repository's, speexdsp-COPYING the vendored SpeexDSP's"
 
+# The stop timeout drop-ins (P5): the path under /usr/lib/systemd/user, the
+# file in apps/desktop/src-tauri/linux (and its copy here while the pinned
+# .deb lacks it) and the section it sets.
+linux="$root/apps/desktop/src-tauri/linux"
+drop_ins=(
+  'app-steno\x2ddesktop@autostart.service.d/10-steno.conf autostart-service-stop-timeout.conf Service'
+  'app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf gnome-scope-stop-timeout.conf Scope'
+)
+for entry in "${drop_ins[@]}"; do
+  read -r _ conf _ <<<"$entry"
+  [[ ! -e "$work/$conf" ]] || cmp -s "$linux/$conf" "$work/$conf" \
+    || die "packaging/aur/$conf is not apps/desktop/src-tauri/linux/$conf"
+done
+echo "ok: the drop-in copies are apps/desktop/src-tauri/linux's"
+
 as_builder "gpg --batch --import keys/pgp/$fpr.asc"
 as_builder 'makepkg -si --noconfirm' 2>&1 | tee /tmp/makepkg.log
 # makepkg prints each header only when it runs that check, and the .deb's
@@ -85,8 +102,6 @@ for path in \
   /usr/bin/steno-desktop \
   /usr/lib/steno-desktop/steno-desktop \
   /usr/lib/steno-desktop/steno-speech-sidecar \
-  '/usr/lib/systemd/user/app-steno\x2ddesktop@autostart.service.d/10-steno.conf' \
-  '/usr/lib/systemd/user/app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf' \
   /usr/share/applications/steno-desktop.desktop \
   /usr/share/licenses/$pkgname/LICENSE \
   /usr/share/licenses/$pkgname/speexdsp-COPYING; do
@@ -108,16 +123,16 @@ grep -vE '^[[:space:]]*(#|$)' /usr/bin/steno-desktop \
   || die "the wrapper's commands differ from the three expected"
 echo "ok: the wrapper is an executable sh script that sets STENO_DISTRIBUTION and STENO_EXEC_PATH, then runs the binary"
 
-linux="$root/apps/desktop/src-tauri/linux"
-drop_in() {
-  local installed="/usr/lib/systemd/user/$1"
-  if [[ -e "$linux/$2" ]]; then
-    cmp -s "$installed" "$linux/$2" || die "$installed differs from apps/desktop/src-tauri/linux/$2"
-    echo "ok: $installed matches apps/desktop/src-tauri/linux/$2"
-  fi
-}
-drop_in 'app-steno\x2ddesktop@autostart.service.d/10-steno.conf' autostart-service-stop-timeout.conf
-drop_in 'app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf' gnome-scope-stop-timeout.conf
+for entry in "${drop_ins[@]}"; do
+  read -r unit conf section <<<"$entry"
+  installed="/usr/lib/systemd/user/$unit"
+  grep -qxF "$installed" <<<"$files" || die "the package does not install $installed"
+  cmp -s "$installed" "$linux/$conf" || die "$installed differs from apps/desktop/src-tauri/linux/$conf"
+  grep -vE '^[[:space:]]*(#|$)' "$installed" \
+    | diff -u <(printf '%s\n' "[$section]" 'TimeoutStopSec=20s') - \
+    || die "$installed does not set exactly [$section] TimeoutStopSec=20s"
+  echo "ok: $installed is apps/desktop/src-tauri/linux/$conf and sets [$section] TimeoutStopSec=20s"
+done
 
 for binary in /usr/lib/steno-desktop/steno-desktop /usr/lib/steno-desktop/steno-speech-sidecar; do
   ! ldd "$binary" | grep 'not found' || die "$binary needs a library that is not installed"
