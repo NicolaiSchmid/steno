@@ -679,6 +679,12 @@ jobs:
           fi
           apps/desktop/scripts/aur-bump.sh "$VERSION" assets
           branch="chore/aur-$VERSION"
+          # A re-run of publish: the AUR has the bump (aur-bump.sh says so)
+          # and the branch is pushed, so neither is pushed again.
+          if git ls-remote --quiet --exit-code --heads origin "$branch" >/dev/null; then
+            echo "::notice::$branch exists already, from an earlier run; no new branch or pull request"
+            exit 0
+          fi
           git switch --quiet -c "$branch"
           git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
           git -c user.name='github-actions[bot]' \
@@ -767,8 +773,11 @@ jobs:
       # re-run after the item reached the branch keeps the branch's item,
       # and so its date, and only uploads the feed again. Otherwise the
       # branch is checked again as it is now, since an approval can come
-      # days after `publish` looked: another release's approval may have
-      # put a higher build or a handoff item there meanwhile (D8: one item).
+      # days after `publish` looked. A higher build there (an older
+      # release approved after a newer one) stops the job. Another
+      # release's handoff item there (D8: one item) means this release
+      # writes none, but still uploads the branch's feed: this release may
+      # be `latest` now, and `releases/latest` must carry the item.
       - name: Date the item
         id: date
         env:
@@ -778,22 +787,23 @@ jobs:
           set -euo pipefail
           git fetch --quiet origin refs/heads/appcast
           git show FETCH_HEAD:appcast.xml > "$RUNNER_TEMP/branch.xml"
-          on_branch="$(python3 apps/desktop/scripts/handoff-appcast.py has-build "$RUNNER_TEMP/branch.xml" "$BUILD")"
-          if [ "$on_branch" = true ]; then
+          write=false
+          if [ "$(python3 apps/desktop/scripts/handoff-appcast.py has-build "$RUNNER_TEMP/branch.xml" "$BUILD")" = true ]; then
             echo "::notice::build $BUILD is on the appcast branch already; its item and date stay"
           else
             python3 apps/desktop/scripts/handoff-appcast.py check-build "$RUNNER_TEMP/branch.xml" "$BUILD"
             handoff_item="$(python3 apps/desktop/scripts/handoff-appcast.py has-handoff-item "$RUNNER_TEMP/branch.xml")"
             if [ "$handoff_item" != false ] && [ "$HANDOFF_ITEM_REPLACE" != "$VERSION" ]; then
-              echo "::error::the appcast branch has a handoff item since publish looked; reject this job, or set HANDOFF_ITEM_REPLACE to $VERSION and re-run it"
-              exit 1
+              echo "::warning::the appcast branch has another release's handoff item since publish looked; this release writes none and only uploads the branch's feed as its appcast.xml"
+            else
+              python3 apps/desktop/scripts/handoff-appcast.py stamp-pubdate sparkle-item/appcast.xml "$(date +%s)"
+              write=true
             fi
-            python3 apps/desktop/scripts/handoff-appcast.py stamp-pubdate sparkle-item/appcast.xml "$(date +%s)"
           fi
-          echo "on_branch=$on_branch" >> "$GITHUB_OUTPUT"
+          echo "write=$write" >> "$GITHUB_OUTPUT"
 
       - name: Put the item on the appcast branch
-        if: steps.date.outputs.on_branch == 'false'
+        if: steps.date.outputs.write == 'true'
         env:
           STENO_RELEASE_APPCAST: ${{ github.workspace }}/sparkle-item/appcast.xml
         run: apps/macos/scripts/publish-appcast.sh "$TAG" false

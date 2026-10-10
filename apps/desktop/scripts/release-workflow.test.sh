@@ -9,11 +9,12 @@
 # with appcast.xml before the cask bump, and a pre-release bumps nothing;
 # `handoff` needs `publish` behind the `appcast` environment, and stops
 # unless that environment has a required reviewer; `contents: write` where
-# a job writes. It also runs four steps as the workflow has them: `plan`'s
+# a job writes. It also runs six steps as the workflow has them: `plan`'s
 # version step over a scratch repository (the tag it accepts, the
 # pre-release flag the stable-only steps read, the build number);
 # "Publish the release" and the handoff job's environment check against a
-# stub `gh`; and "Date the item" over a scratch `appcast` origin.
+# stub `gh`; "Push the AUR bump" over a scratch origin; and "Date the item"
+# and the feed's upload over a scratch `appcast` origin.
 # rust-ci.yml runs it on Linux. Needs Python's PyYAML (the runner image
 # has it; on NixOS, nix-shell -p 'python3.withPackages (p: [p.pyyaml])').
 set -euo pipefail
@@ -151,6 +152,12 @@ check('release-notes.sh "$VERSION" "v$VERSION"' in step("assets", "Release notes
 publish = jobs["publish"]
 check(publish["if"] == "github.event_name == 'push' && github.ref_type == 'tag'", "publish runs on %r" % publish["if"])
 check(publish["outputs"].get("handoff_item") == "${{ steps.appcast.outputs.handoff_item }}", "publish does not output handoff_item")
+# One publish and one handoff at a time across all runs: the run's own
+# group is per ref, so two tags' jobs would write the lanes, or the
+# appcast branch, at once.
+for name, group in (("publish", "desktop-publish"), ("handoff", "desktop-handoff")):
+    wanted = {"group": group, "cancel-in-progress": False}
+    check(jobs[name].get("concurrency") == wanted, "%s's concurrency is %r, not %r" % (name, jobs[name].get("concurrency"), wanted))
 stable = "needs.plan.outputs.prerelease == 'false'"
 appcast = step("publish", "Appcast from the branch")
 check(appcast.get("id") == "appcast" and appcast.get("if") == stable, "Appcast from the branch is not the stable-only step 'appcast'")
@@ -194,10 +201,11 @@ check(
     "Date the item reads %r" % dating.get("env"),
 )
 push = step("handoff", "Put the item on the appcast branch")
-check(push.get("if") == "steps.date.outputs.on_branch == 'false'", "the item goes on the branch again on a re-run: %r" % push.get("if"))
+check(push.get("if") == "steps.date.outputs.write == 'true'", "the item goes on the branch on %r" % push.get("if"))
 check(push.get("run") == 'apps/macos/scripts/publish-appcast.sh "$TAG" false', "the item goes on with %r" % push.get("run"))
 check(push.get("env", {}).get("STENO_RELEASE_APPCAST", "").endswith("/sparkle-item/appcast.xml"), "publish-appcast.sh does not read sparkle-item")
-check("--clobber" in step("handoff", "The branch's feed as the release's appcast.xml").get("run", ""), "the release's appcast.xml is not replaced")
+feed_upload = step("handoff", "The branch's feed as the release's appcast.xml")
+check("if" not in feed_upload, "the feed is uploaded only on %r, so a release that writes no item leaves latest without it" % feed_upload.get("if"))
 
 # The steps the shell half runs, as written.
 for name, script in (
@@ -205,6 +213,8 @@ for name, script in (
     ("publish-step.sh", step("publish", "Publish the release")),
     ("reviewer-step.sh", steps("handoff")[0]),
     ("date-step.sh", dating),
+    ("feed-step.sh", feed_upload),
+    ("aur-step.sh", step("publish", "Push the AUR bump")),
 ):
     with open(scratch + "/" + name, "w", encoding="utf-8") as handle:
         handle.write(script.get("run", "exit 1"))
@@ -253,15 +263,28 @@ if output="$(version_step 0.11.0 tag v0.11.1)"; then
   fail "v0.11.1 on a 0.11.0 commit was accepted: $output"
 fi
 
-# A stub `gh` on PATH: it logs each call to gh.log, answers `gh api` with
-# GH_API_ANSWER, and finds no release, so "Publish the release" creates one.
+# A stub `gh` on PATH: it logs each call to gh.log, and finds no release,
+# so "Publish the release" creates one. `gh api` fails with GH_API_EXIT
+# when that is set (a 404 or 403), and otherwise answers with the JSON
+# GH_API_ANSWER, through jq as gh applies `--jq`.
 stubs="$scratch/stubs"
 mkdir -p "$stubs" "$scratch/runner"
 cat > "$stubs/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_LOG"
 case "$1 $2" in
-  "api "*) printf '%s\n' "$GH_API_ANSWER" ;;
+  "api "*)
+    if [ -n "${GH_API_EXIT:-}" ]; then
+      echo "gh: Not Found (HTTP 404)" >&2
+      exit "$GH_API_EXIT"
+    fi
+    filter=.
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = --jq ] && filter="$2"
+      shift
+    done
+    jq -r "$filter" <<< "${GH_API_ANSWER:-null}"
+    ;;
   "release view") [[ "$*" == *--json* ]] && echo "https://github.com/x/y/releases/tag/$3" || exit 1 ;;
 esac
 SH
@@ -303,23 +326,64 @@ calls="$(publish_step 0.11.0 false)" || fail "a stable publish failed: $calls"
 $calls"
 
 # The handoff job's first step passes only for an environment with a
-# required reviewer, as the API's jq answers it.
+# required reviewer: reviewer_step <environment JSON> [<gh api exit>].
 reviewer_step() {
   : > "$scratch/gh.log"
-  (PATH="$stubs:$PATH" STUB_LOG="$scratch/gh.log" GH_API_ANSWER="$1" GITHUB_REPOSITORY=NicolaiSchmid/steno \
-    bash -e "$scratch/reviewer-step.sh" >"$scratch/error" 2>&1)
+  (PATH="$stubs:$PATH" STUB_LOG="$scratch/gh.log" GH_API_ANSWER="$1" GH_API_EXIT="${2:-}" \
+    GITHUB_REPOSITORY=NicolaiSchmid/steno bash -e "$scratch/reviewer-step.sh" >"$scratch/error" 2>&1)
 }
-reviewer_step true || fail "an environment with a required reviewer was refused: $(cat "$scratch/error")"
+reviewed='{"name":"appcast","protection_rules":[{"type":"branch_policy"},{"type":"required_reviewers"}]}'
+reviewer_step "$reviewed" || fail "an environment with a required reviewer was refused: $(cat "$scratch/error")"
 # shellcheck disable=SC2016 # the jq filter is literal
 [[ "$(cat "$scratch/gh.log")" == 'api repos/NicolaiSchmid/steno/environments/appcast --jq [.protection_rules[].type] | index("required_reviewers") != null' ]] \
   || fail "the environment check asks: $(cat "$scratch/gh.log")"
-for answer in false ''; do
+for answer in '{"protection_rules":[]}' '{"protection_rules":[{"type":"wait_timer"},{"type":"branch_policy"}]}'; do
   if reviewer_step "$answer"; then
-    fail "an environment without a required reviewer (gh answered '$answer') was accepted"
+    fail "an environment without a required reviewer ($answer) was accepted"
   elif ! grep -q '::error::the appcast environment has no required reviewer' "$scratch/error"; then
     fail "the environment check failed without saying so: $(cat "$scratch/error")"
   fi
 done
+# No answer to read: a missing key, or the API refusing (404, 403).
+reviewer_step '{"name":"appcast"}' && fail "an answer without protection_rules was accepted"
+reviewer_step "$reviewed" 1 && fail "a failed environment read was accepted"
+
+# "Push the AUR bump" over a fresh checkout of a scratch origin, with a
+# stub aur-bump.sh: the first run pushes chore/aur-0.11.0 and opens its
+# pull request; a re-run of publish finds the branch and does neither.
+aur_origin="$scratch/aur-origin"
+git init --quiet --bare --initial-branch=main "$aur_origin"
+aur_seed="$scratch/aur-seed"
+git init --quiet --initial-branch=main "$aur_seed"
+mkdir -p "$aur_seed/apps/desktop/scripts" "$aur_seed/packaging/aur"
+# shellcheck disable=SC2016 # the stub's text is literal
+printf '#!/usr/bin/env bash\necho "pkgver=$1" > packaging/aur/PKGBUILD\necho "pkgver = $1" > packaging/aur/.SRCINFO\n' \
+  > "$aur_seed/apps/desktop/scripts/aur-bump.sh"
+chmod +x "$aur_seed/apps/desktop/scripts/aur-bump.sh"
+: > "$aur_seed/packaging/aur/PKGBUILD"
+: > "$aur_seed/packaging/aur/.SRCINFO"
+git -C "$aur_seed" add .
+git -C "$aur_seed" -c user.name=test -c user.email=test@example.com commit --quiet -m seed
+git -C "$aur_seed" push --quiet "$aur_origin" main
+aur_step() {
+  local clone="$scratch/aur-clone"
+  command rm -rf "$clone"
+  git clone --quiet "$aur_origin" "$clone"
+  : > "$scratch/gh.log"
+  (cd "$clone" && PATH="$stubs:$PATH" STUB_LOG="$scratch/gh.log" GH_API_ANSWER='{"html_url":"https://example.com/pull/1"}' \
+    AUR_SSH_PRIVATE_KEY=key VERSION=0.11.0 TAG=v0.11.0 GITHUB_REPOSITORY=NicolaiSchmid/steno \
+    bash -e "$scratch/aur-step.sh" >"$scratch/error" 2>&1) || { cat "$scratch/error"; return 1; }
+  cat "$scratch/gh.log"
+}
+calls="$(aur_step)" || fail "the AUR step failed: $calls"
+[[ "$calls" == "api repos/NicolaiSchmid/steno/pulls -f title=chore(desktop): steno-desktop-bin 0.11.0-1 "* ]] \
+  || fail "the AUR step did not open the pull request: $calls"
+pushed="$(git -C "$aur_origin" rev-parse --verify --quiet refs/heads/chore/aur-0.11.0)" \
+  || fail "the AUR step did not push chore/aur-0.11.0"
+calls="$(aur_step)" || fail "a re-run of the AUR step failed: $calls"
+[[ -z "$calls" ]] || fail "a re-run of the AUR step opened another pull request: $calls"
+grep -q '::notice::chore/aur-0.11.0 exists already' "$scratch/error" || fail "a re-run of the AUR step skipped without a notice: $(cat "$scratch/error")"
+[[ "$(git -C "$aur_origin" rev-parse refs/heads/chore/aur-0.11.0)" == "${pushed:-}" ]] || fail "a re-run of the AUR step moved the branch"
 
 # "Date the item" over a checkout whose origin's `appcast` branch holds the
 # items given; the item it dates is build 3500 for 0.11.1.
@@ -341,13 +405,17 @@ feed() {
   printf '%s' "$@"
   printf '</channel></rss>\n'
 }
+# branch_feed <items...>: the origin's `appcast` branch holds these items.
+branch_feed() {
+  feed "$@" > "$origin/appcast.xml"
+  git -C "$origin" add appcast.xml
+  git -C "$origin" -c user.name=test -c user.email=test@example.com commit --quiet --allow-empty -m feed
+}
 # date_step <replace> <branch items...>: the step's outputs, or its error.
 date_step() {
   local replace="$1"
   shift
-  feed "$@" > "$origin/appcast.xml"
-  git -C "$origin" add appcast.xml
-  git -C "$origin" -c user.name=test -c user.email=test@example.com commit --quiet --allow-empty -m feed
+  branch_feed "$@"
   feed "$(feed_item 3500)" > "$checkout/sparkle-item/appcast.xml"
   : > "$scratch/output"
   (cd "$checkout" && GITHUB_OUTPUT="$scratch/output" RUNNER_TEMP="$scratch/runner" BUILD=3500 VERSION=0.11.1 \
@@ -358,33 +426,47 @@ dated() { ! grep -q "<pubDate>$undated</pubDate>" "$checkout/sparkle-item/appcas
 betas="$(feed_item 3423 beta)$(feed_item 3424 beta)"
 
 outputs="$(date_step '' "$betas")" || fail "the first approval was refused: $outputs"
-[[ "$outputs" == 'on_branch=false' ]] || fail "the first approval outputs '$outputs'"
+[[ "$outputs" == 'write=true' ]] || fail "the first approval outputs '$outputs'"
 { dated && grep -q '<pubDate>[A-Z][a-z][a-z], [0-9][0-9] [A-Z][a-z][a-z] 20[0-9][0-9] [0-9:]* +0000</pubDate>' "$checkout/sparkle-item/appcast.xml"; } \
   || fail "the first approval did not date the item: $(cat "$checkout/sparkle-item/appcast.xml")"
 
 # A re-run after the item reached the branch keeps its date, so the
 # phased rollout does not start again.
 outputs="$(date_step '' "$betas" "$(feed_item 3500)")" || fail "a re-run was refused: $outputs"
-[[ "$outputs" == 'on_branch=true' ]] || fail "a re-run outputs '$outputs', so the item would go on the branch again"
+[[ "$outputs" == 'write=false' ]] || fail "a re-run outputs '$outputs', so the item would go on the branch again"
 dated && fail "a re-run dated the item again"
 
-# Another release's approval since publish looked: its handoff item, or a
-# higher build.
+# An older release's handoff item reached the branch since publish looked:
+# a warning and no second item (D8), unless HANDOFF_ITEM_REPLACE names this
+# version. The feed is still uploaded, below.
 for replace in '' 0.11.0; do
-  if output="$(date_step "$replace" "$betas" "$(feed_item 3450)")"; then
-    fail "a second handoff item was accepted with HANDOFF_ITEM_REPLACE='$replace': $output"
-  elif [[ "$output" != *'::error::the appcast branch has a handoff item since publish looked'* ]]; then
-    fail "a second handoff item failed without saying so: $output"
-  fi
+  outputs="$(date_step "$replace" "$betas" "$(feed_item 3450)")" \
+    || fail "a newer release's approval over an older handoff item failed with HANDOFF_ITEM_REPLACE='$replace': $outputs"
+  [[ "$outputs" == 'write=false' ]] || fail "a second handoff item would be written with HANDOFF_ITEM_REPLACE='$replace': $outputs"
+  grep -q "::warning::the appcast branch has another release's handoff item since publish looked" "$scratch/error" \
+    || fail "a newer release's approval over an older handoff item says nothing: $(cat "$scratch/error")"
   dated && fail "the item was dated over another handoff item"
 done
 outputs="$(date_step 0.11.1 "$betas" "$(feed_item 3450)")" || fail "HANDOFF_ITEM_REPLACE=0.11.1 was refused: $outputs"
-{ [[ "$outputs" == 'on_branch=false' ]] && dated; } || fail "HANDOFF_ITEM_REPLACE=0.11.1 did not date the item: $outputs"
+{ [[ "$outputs" == 'write=true' ]] && dated; } || fail "HANDOFF_ITEM_REPLACE=0.11.1 did not date the item: $outputs"
+# An older release approved after a newer one wrote: a higher build.
 if output="$(date_step 0.11.1 "$betas" "$(feed_item 3600 beta)")"; then
   fail "an item below the branch's highest build was accepted: $output"
 elif [[ "$output" != *'build 3500 is not above build 3600'* ]]; then
   fail "an item below the branch's highest build failed without saying so: $output"
 fi
+
+# The release's appcast.xml is the branch's feed as it is after the item
+# went on (publish-appcast.sh pushes after "Date the item" fetched), not
+# as it was before.
+branch_feed "$betas" "$(feed_item 3500)"
+: > "$scratch/gh.log"
+(cd "$checkout" && PATH="$stubs:$PATH" STUB_LOG="$scratch/gh.log" RUNNER_TEMP="$scratch/runner" TAG=v0.11.1 \
+  bash -e "$scratch/feed-step.sh" >"$scratch/error" 2>&1) || fail "the feed's upload failed: $(cat "$scratch/error")"
+[[ "$(cat "$scratch/gh.log")" == "release upload v0.11.1 $scratch/runner/feed/appcast.xml --clobber" ]] \
+  || fail "the feed's upload calls: $(cat "$scratch/gh.log")"
+cmp -s "$origin/appcast.xml" "$scratch/runner/feed/appcast.xml" \
+  || fail "the release's appcast.xml is not the branch's feed as it is now: $(cat "$scratch/runner/feed/appcast.xml")"
 
 if ((failures > 0)); then
   echo "release-workflow: $failures failed"
