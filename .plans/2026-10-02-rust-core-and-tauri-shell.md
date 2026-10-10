@@ -1436,9 +1436,21 @@ still has to draw the window side. `[ ]` is not ported yet.
     login under systemd). A reboot saves inside logind's delay; on
     Omarchy the delay is 15 s and the user manager then gets 5 s (`user@.service`),
     which no drop-in for this unit can raise, so that path depends on the delay
-    lock. A save still needs to fit in the compositor's own stop when the app runs
-    in the compositor's unit rather than its own (uwsm's `wayland-wm@.service`,
-    `TimeoutStopSec=10`).
+    lock. An app started inside another program's service, as a Hyprland key
+    binding without `uwsm-app` starts it in uwsm's `wayland-wm@.service`, got
+    SIGTERM with the compositor and a second one from systemd once the compositor
+    had exited, which ends it unsaved (`forced_exit`), and `SIGKILL` 10 s in. So at
+    launch, before the first window, an app whose cgroup names a service of the
+    user manager that is not Steno's own (its name does not say `steno`) and whose
+    main process is another asks for `app-steno\x2ddesktop-<pid>.scope` in
+    `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and
+    `After=graphical-session.target`, waits up to 2 s for the move and calls the
+    start off otherwise, as the sidecar's scope does; a scope, Steno's own
+    services and an app outside the user manager stay, and a failed move logs a
+    warning (`own_scope.rs`, X1 of `.plans/2026-10-07-stable-promotion.md`). Tested
+    against a fake manager on a private `dbus-daemon`, and in a container under a
+    real systemd 255 user manager with a stand-in for uwsm's units (desktop README,
+    Hyprland).
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -3308,6 +3320,7 @@ PR off `main`.
 | Tests never write placeholder models into a models directory `STENO_MODELS_DIR` names: the reload test that installed them into the app's resolved directory (and so over a developer's real models) pins its own in the settings, the CLI tests clear the variable, `steno-services`' model writers panic outside the temp directory or inside the named one, and a child-process test proves the named directory is left alone | `fix/test-models-dir-guard` | #273 | open |
 | S2: meeting detection on every platform (`steno_services::detection`: one prompt at a time for 60 s through the shell's panel, none while recording or with detection off, its Record attributed to the prompt's app through `recordFromPrompt`, the setting read every two seconds, which retries a detector that could not start) and the auto-stop after a call (`steno_services::auto_stop`: the 90-second grace, Keep recording, the call resuming, the Stop path with `callEnded`) (`steno-services`, desktop shell, web prompt) | `feat/rust-recorder-policy` | #271 | open |
 | No update stops a recording or a processing run: the app's install gate over the recorder and the pipelines' in-flight set, whose job hold keeps jobs claimed during the install waiting for a minute at most; Record always works while an installer that returns (a `.deb`'s password prompt) runs, and the relaunch waits for what started; the user's yes while busy installs after it ends; automatic downloads on, not for an installer that asks an administrator, which runs only right after a yes given while idle; on Windows a hidden `cmd.exe` starts the old version again when the installer does not install (P25 of `.plans/2026-10-07-stable-promotion.md`; `steno-pipeline`, `steno-services`, desktop shell) | `fix/desktop-updates-wait-for-idle` | #270 | open |
+| An app started inside another program's service (a Hyprland key binding without `uwsm-app`) moves at launch into a scope of its own with 20 s to save, and the desktop README says what saves at each session end under Hyprland (X1 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-session-end` | #272 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

@@ -167,8 +167,11 @@ Forge and atlas.
     holds on every systemd desktop that runs XDG autostart through it;
   - `app.slice` is under systemd-oomd with `kill`, and the app and its speech
     sidecar share one cgroup, so a memory-pressure kill takes the recording;
-  - an app started outside a `uwsm` scope sits in Hyprland's own unit, stopped
-    with it after at most 10 s;
+  - an app started outside a `uwsm` scope sits in Hyprland's own unit, whose stop
+    sends SIGTERM to the app with Hyprland and a second one once Hyprland has
+    exited, which ends the app unsaved, and `SIGKILL` 10 s in (measured with a
+    stand-in for the unit, #272); from #272 the app moves into a scope of its own
+    at launch;
   - Hyprland's portal serves no Inhibit and no session monitor;
   - the bar is a Quickshell shell, whose tray is an SNI host behind a hover
     drawer; with `libayatana-appindicator` a left click on Steno's icon probably
@@ -448,7 +451,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 
 | ID | What | Targets |
 |---|---|---|
-| X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` | Omarchy, NixOS with Hyprland |
+| X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` (#272: an app whose cgroup names a service of the user manager that is not Steno's own and whose main process is another, as a key binding without `uwsm-app` leaves it in `wayland-wm@hyprland.desktop.service`, moves at launch into `app-steno\x2ddesktop-<pid>.scope` in `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and `After=graphical-session.target`, waiting up to 2 s and calling the start off otherwise, a failure logged at `warn`; there the compositor's stop had sent a second SIGTERM once the compositor exited, which ended the app unsaved in 0.26 s; measured in a systemd 255 container with uwsm 0.26.4's slice and shutdown target and a stand-in compositor's unit: the uwsm stop, the compositor's crash and a `uwsm-app`-style scope all saved `queued`, also with a save ending 12 s after SIGTERM; the README's Hyprland section says what saves at each end; logind's delay is #220's, tested against a fake logind) | Omarchy, NixOS with Hyprland |
 | X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) (#267: a list naming `x11` or `*`, or a lone `*`, counts as unset, any other value still wins; the titles on Linux only, macOS and Windows keep "Steno"; the rules are `apps/desktop/src-tauri/linux/hyprland-steno.lua`, one `hl.window_rule` on class `[Ss]teno-desktop` and title `Steno (bubble\|prompt)` that also turns off focus on hover, the border, shadow and blur, checked by Hyprland 0.56.2's `--verify-config`; the `.deb` installs it as `/usr/share/steno-desktop/hyprland-steno.lua` (`check-bundle.sh` checks it), and so does the AUR package that repackages it (#265) from the next release, loaded with `dofile`; the Linux smoke finds both panels by their titles) | Omarchy, NixOS with Hyprland |
 | X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves | all |
 | X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port | Omarchy, NixOS |
@@ -1827,7 +1830,12 @@ interrupted" after one. On the GNOME machine,
   6. Steps 4 to 6 of the GNOME gate, with the call in Chromium and the logout
      through the system menu, which is `uwsm stop`. Also `hyprctl dispatch exit`
      while recording: after logging back in, the meeting is saved with `quit` as
-     `endReason` (X1).
+     `endReason` (X1). Then the same logout with Steno started by a key binding
+     without `uwsm-app` (`bind = SUPER SHIFT, S, exec, steno-desktop`): `cat
+     /proc/$(pidof -s steno-desktop)/cgroup` ends in
+     `app-steno\x2ddesktop-<pid>.scope`, `journalctl --user -b | grep 'moved into
+     a scope of its own'` names `wayland-wm@hyprland.desktop.service`, and the
+     meeting is saved the same way (#272).
   7. In the Steno that a login started, Settings says updates come from the
      package manager (X5), and `~/.config/autostart/steno-desktop.desktop`'s
      `Exec` names `/usr/bin/steno-desktop`.
