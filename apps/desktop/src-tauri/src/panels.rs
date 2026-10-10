@@ -158,10 +158,11 @@ impl PromptRequest {
     }
 }
 
-/// A prompt the host raised, with the shell's number for it: the `raised`
-/// in its query and in its X's dismissal. Each `set_prompt` with a request
-/// is a new number, so a request raised again, even an identical one, is a
-/// new prompt; one shown again after the bubble keeps its number.
+/// A prompt the host raised, with the detection controller's number for
+/// it (`DetectionPrompt::number`): the `raised` in its query and in its X
+/// and Record. Each prompt raised is a new number, so a request raised
+/// again, even an identical one, is a new prompt; one shown again after
+/// the bubble keeps its number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RaisedPrompt {
     pub request: PromptRequest,
@@ -176,7 +177,7 @@ impl RaisedPrompt {
 }
 
 /// The prompt slot: the one pending, and the number of the latest one
-/// raised (how many have been).
+/// raised.
 #[derive(Debug, Default)]
 struct PromptSlot {
     pending: Option<RaisedPrompt>,
@@ -350,23 +351,20 @@ impl Panels {
     }
 
     /// The host raised (`Some`) or cleared (`None`) the prompt; a raised
-    /// one takes the next number.
-    fn set_prompt(&self, request: Option<PromptRequest>) {
+    /// one's number becomes the latest.
+    fn set_prompt(&self, raised: Option<RaisedPrompt>) {
         if let Ok(mut prompt) = self.prompt.lock() {
-            prompt.pending = request.map(|request| {
-                prompt.last_raised += 1;
-                RaisedPrompt {
-                    request,
-                    raised: prompt.last_raised,
-                }
-            });
+            if let Some(raised) = &raised {
+                prompt.last_raised = raised.raised;
+            }
+            prompt.pending = raised;
         }
     }
 
-    /// The prompt's X: one that names a prompt (`raised`) clears only the
-    /// latest one raised, so a click that ran while the window loaded the
-    /// next prompt cannot clear it; one that names none (a prompt shown
-    /// unnumbered) clears whatever is pending. Checked and cleared under
+    /// The prompt's X or Record: one that names a prompt (`raised`)
+    /// clears only the latest one raised, so a click that ran while the
+    /// window loaded the next prompt cannot clear it; one that names none
+    /// (a prompt shown unnumbered) clears whatever is pending. Checked and cleared under
     /// one lock, so a prompt raised in between is never the one cleared;
     /// `true` when it cleared. Swift: each `DetectionPromptViewModel`
     /// closes only itself (`onClose`).
@@ -726,28 +724,40 @@ fn post_refresh(app: &AppHandle) {
 }
 
 /// The host's detection controller raised (`Some`) or cleared (`None`)
-/// the detection prompt; a raised one is numbered here
-/// (`Panels::set_prompt`). The slot changes at once, in the controller's
-/// order; the refresh is posted, so a caller on the main thread (a Record
-/// from the tray, whose start takes the prompt down) never builds a
-/// window in place.
+/// the detection prompt, a raised one with the controller's number. The
+/// slot changes at once, in the controller's order; the refresh is
+/// posted, so a caller on the main thread (a Record from the tray, whose
+/// start takes the prompt down) never builds a window in place.
 #[cfg_attr(feature = "fixture-host", allow(dead_code))]
-pub fn set_prompt(app: &AppHandle, request: Option<PromptRequest>) {
-    app.state::<Panels>().set_prompt(request);
+pub fn set_prompt(app: &AppHandle, raised: Option<RaisedPrompt>) {
+    app.state::<Panels>().set_prompt(raised);
     post_refresh(app);
 }
 
+/// The prompt's X or Record (`raised`, its number) reaches `answer`
+/// exactly when it takes the prompt down (`Panels::dismiss_prompt`): a
+/// click aimed at an earlier prompt answers nothing. `true` when it
+/// answered.
+fn answer_prompt(panels: &Panels, raised: Option<u64>, answer: impl FnOnce()) -> bool {
+    let answers = panels.dismiss_prompt(raised);
+    if answers {
+        answer();
+    }
+    answers
+}
+
 /// The prompt's X: the prompt goes away, unless the X was another
-/// prompt's (`Panels::dismiss_prompt`), and the host's detection
-/// controller hears of it; the fixture host has no detection to tell.
-/// The caller is `bridge::panel_call`, a synchronous command on the main
+/// prompt's, and the host's detection controller hears of it with the
+/// prompt's number; the fixture host has no detection to tell. The
+/// caller is `bridge::panel_call`, a synchronous command on the main
 /// thread, so the refresh is posted.
 pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
-    if app.state::<Panels>().dismiss_prompt(raised) {
-        post_refresh(app);
+    if answer_prompt(&app.state::<Panels>(), raised, || {
         if crate::host::is_running(app) {
-            crate::host::host(app).prompt_dismissed();
+            crate::host::host(app).prompt_dismissed(raised);
         }
+    }) {
+        post_refresh(app);
     }
 }
 
@@ -757,14 +767,15 @@ pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
 /// caller is the synchronous `bridge::panel_call`. A click aimed at an
 /// earlier prompt does nothing. Swift: `DetectionPromptViewModel.start`.
 pub fn record_from_prompt(app: &AppHandle, raised: Option<u64>) {
-    if app.state::<Panels>().dismiss_prompt(raised) {
-        post_refresh(app);
+    if answer_prompt(&app.state::<Panels>(), raised, || {
         if crate::host::is_running(app) {
             let handle = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                crate::host::host(&handle).record_from_prompt();
+                crate::host::host(&handle).record_from_prompt(raised);
             });
         }
+    }) {
+        post_refresh(app);
     }
 }
 
@@ -938,6 +949,14 @@ mod tests {
         }
     }
 
+    /// The controller's prompt `number` for `app_name`.
+    fn raised(app_name: &str, number: u64) -> RaisedPrompt {
+        RaisedPrompt {
+            request: request(app_name),
+            raised: number,
+        }
+    }
+
     /// On Linux each panel has a title of its own, the one the Hyprland
     /// rules match; elsewhere both are "Steno", as the main window is. The
     /// rule itself is pinned whole, outside the file's comments: its
@@ -1020,9 +1039,9 @@ mod tests {
         assert!(Panel::Prompt.navigates_per_request());
         assert!(!Panel::Bubble.navigates_per_request());
         let panels = Panels::default();
-        panels.set_prompt(Some(request("Zoom")));
+        panels.set_prompt(Some(raised("Zoom", 1)));
         let first = pending_query(&panels);
-        panels.set_prompt(Some(request("Zoom")));
+        panels.set_prompt(Some(raised("Zoom", 2)));
         let second = pending_query(&panels);
         assert_eq!(first, "app=Zoom&seconds=60&raised=1");
         assert_eq!(second, "app=Zoom&seconds=60&raised=2");
@@ -1091,7 +1110,7 @@ mod tests {
         assert_eq!(panels.size_of(Panel::Bubble), Panel::Bubble.initial_size());
         assert_eq!(Panel::Bubble.initial_size(), (480.0, 40.0));
         assert_eq!(Panel::Prompt.initial_size(), (480.0, 56.0));
-        panels.set_prompt(Some(request("Zoom")));
+        panels.set_prompt(Some(raised("Zoom", 1)));
         assert!(matches!(panels.content(), Some(FloatingContent::Prompt(_))));
         *panels.recording.lock().unwrap() = RecordingState::Recording;
         assert_eq!(panels.content(), Some(FloatingContent::Bubble));
@@ -1273,16 +1292,38 @@ mod tests {
     fn the_x_dismisses_only_its_own_prompt() {
         let panels = Panels::default();
         assert!(panels.dismiss_prompt(None));
-        panels.set_prompt(Some(request("Charlie")));
-        panels.set_prompt(Some(request("Delta")));
+        panels.set_prompt(Some(raised("Charlie", 1)));
+        panels.set_prompt(Some(raised("Delta", 2)));
         assert!(!panels.dismiss_prompt(Some(1)), "Charlie's X");
         assert!(!panels.dismiss_prompt(Some(3)), "a prompt not raised yet");
         assert_eq!(pending_query(&panels), "app=Delta&seconds=60&raised=2");
         assert!(panels.dismiss_prompt(Some(2)), "Delta's X");
         assert_eq!(panels.content(), None);
-        panels.set_prompt(Some(request("Echo")));
+        panels.set_prompt(Some(raised("Echo", 3)));
         assert!(panels.dismiss_prompt(None), "an unnumbered X");
         assert_eq!(panels.content(), None);
+    }
+
+    /// The X and Record reach the detection controller exactly when they
+    /// take the prompt down: a click aimed at an earlier prompt answers
+    /// nothing, one on the prompt up answers once, as does an unnumbered
+    /// one.
+    #[test]
+    fn only_a_click_that_takes_the_prompt_down_reaches_the_controller() {
+        let panels = Panels::default();
+        let answers = std::cell::Cell::new(0);
+        let answer = || answers.set(answers.get() + 1);
+        panels.set_prompt(Some(raised("Charlie", 1)));
+        panels.set_prompt(Some(raised("Delta", 2)));
+        assert!(!answer_prompt(&panels, Some(1), answer), "Charlie's click");
+        assert_eq!(answers.get(), 0, "reaches nothing");
+        assert_eq!(pending_query(&panels), "app=Delta&seconds=60&raised=2");
+        assert!(answer_prompt(&panels, Some(2), answer), "Delta's click");
+        assert_eq!(answers.get(), 1);
+        assert_eq!(panels.content(), None);
+        panels.set_prompt(Some(raised("Echo", 3)));
+        assert!(answer_prompt(&panels, None, answer), "an unnumbered click");
+        assert_eq!(answers.get(), 2);
     }
 
     /// The number is taken when the host raises the prompt, not when it
@@ -1291,24 +1332,24 @@ mod tests {
     #[test]
     fn an_old_x_between_raising_and_showing_leaves_the_new_prompt() {
         let panels = Panels::default();
-        panels.set_prompt(Some(request("Charlie")));
+        panels.set_prompt(Some(raised("Charlie", 1)));
         let shown = pending_query(&panels);
         assert!(shown.ends_with("raised=1"));
-        panels.set_prompt(Some(request("Delta")));
+        panels.set_prompt(Some(raised("Delta", 2)));
         // Charlie's X, before Delta's `apply` ran.
         assert!(!panels.dismiss_prompt(Some(1)));
         assert_eq!(pending_query(&panels), "app=Delta&seconds=60&raised=2");
     }
 
-    /// Clearing the prompt keeps the count: the prompt raised after it is
-    /// a new number, so the first one's X cannot dismiss it.
+    /// A prompt raised after a clear has the controller's next number, so
+    /// the first one's X cannot dismiss it.
     #[test]
     fn a_prompt_raised_after_a_clear_takes_the_next_number() {
         let panels = Panels::default();
-        panels.set_prompt(Some(request("Charlie")));
+        panels.set_prompt(Some(raised("Charlie", 1)));
         panels.set_prompt(None);
         assert_eq!(panels.content(), None);
-        panels.set_prompt(Some(request("Charlie")));
+        panels.set_prompt(Some(raised("Charlie", 2)));
         assert!(!panels.dismiss_prompt(Some(1)), "the first one's X");
         assert_eq!(pending_query(&panels), "app=Charlie&seconds=60&raised=2");
     }
@@ -1318,13 +1359,13 @@ mod tests {
     #[test]
     fn a_request_raised_again_is_a_new_prompt() {
         let panels = Panels::default();
-        panels.set_prompt(Some(request("Zoom")));
+        panels.set_prompt(Some(raised("Zoom", 1)));
         let first = panels.content();
         assert!(panels.note_showing(first.as_ref()));
         assert!(panels.note_showing(Some(&FloatingContent::Bubble)));
         assert!(panels.note_showing(first.as_ref()));
         assert_eq!(panels.content(), first, "the same prompt after the bubble");
-        panels.set_prompt(Some(request("Zoom")));
+        panels.set_prompt(Some(raised("Zoom", 2)));
         assert!(panels.note_showing(panels.content().as_ref()));
     }
 

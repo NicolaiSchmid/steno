@@ -237,9 +237,12 @@ mod real {
         fn show(&self, prompt: Option<&steno_services::detection::DetectionPrompt>) {
             crate::panels::set_prompt(
                 &self.app,
-                prompt.map(|prompt| crate::panels::PromptRequest {
-                    app_name: prompt.app_name.clone(),
-                    seconds: prompt.seconds,
+                prompt.map(|prompt| crate::panels::RaisedPrompt {
+                    request: crate::panels::PromptRequest {
+                        app_name: prompt.app_name.clone(),
+                        seconds: prompt.seconds,
+                    },
+                    raised: prompt.number,
                 }),
             );
         }
@@ -677,24 +680,27 @@ impl Host {
         }
     }
 
-    /// The prompt's X took it down: the detection controller hears of it
+    /// The X of prompt `raised` took it down: the detection controller
+    /// hears of it
     /// (`steno_services::detection::DetectionController::dismissed`); a
     /// no-op for the fixtures and without detection.
-    pub fn prompt_dismissed(&self) {
+    #[cfg_attr(feature = "fixture-host", allow(unused_variables))]
+    pub fn prompt_dismissed(&self, raised: Option<u64>) {
         #[cfg(not(feature = "fixture-host"))]
         if let Some(detection) = &self.inner.app.detection {
-            detection.dismissed();
+            detection.dismissed(raised);
         }
     }
 
-    /// The prompt's Record, the prompt taken down: the detection
+    /// The Record of prompt `raised`, the prompt taken down: the detection
     /// controller starts a call recording for the app it named
     /// (`DetectionController::record`). Blocks for the start; a no-op for
     /// the fixtures and without detection.
-    pub fn record_from_prompt(&self) {
+    #[cfg_attr(feature = "fixture-host", allow(unused_variables))]
+    pub fn record_from_prompt(&self, raised: Option<u64>) {
         #[cfg(not(feature = "fixture-host"))]
         if let Some(detection) = &self.inner.app.detection {
-            detection.record();
+            detection.record(raised);
         }
     }
 

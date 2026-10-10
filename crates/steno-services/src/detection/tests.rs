@@ -159,10 +159,12 @@ fn opened(bundle_id: Option<&str>) -> MeetingEvent {
     }
 }
 
-fn prompt(app_name: &str) -> DetectionPrompt {
+/// The prompt for `app_name`, the controller's `number`th.
+fn prompt(app_name: &str, number: u64) -> DetectionPrompt {
     DetectionPrompt {
         app_name: app_name.to_owned(),
         seconds: PROMPT_SECONDS,
+        number,
     }
 }
 
@@ -239,7 +241,10 @@ fn an_opened_microphone_prompts_only_when_on_idle_and_no_prompt_is_up() {
         harness.recorder.busy.store(row.busy, Ordering::SeqCst);
         let before = harness.panel.shown().len();
         harness.controller.handle(opened(Some("com.example.meet")));
-        let raised = harness.panel.shown()[before..].contains(&Some(prompt("com.example.meet")));
+        let raised = harness.panel.shown()[before..]
+            .iter()
+            .flatten()
+            .any(|prompt| prompt.app_name == "com.example.meet");
         assert_eq!(raised, row.prompts, "{}: prompted", row.what);
         assert_eq!(
             !harness.recorder.activity().is_empty(),
@@ -250,7 +255,7 @@ fn an_opened_microphone_prompts_only_when_on_idle_and_no_prompt_is_up() {
         if row.prompt_up {
             assert_eq!(
                 harness.panel.current(),
-                Some(prompt("us.zoom.xos")),
+                Some(prompt("us.zoom.xos", 1)),
                 "{}: the first prompt stays",
                 row.what
             );
@@ -293,16 +298,16 @@ fn every_way_a_prompt_goes_takes_it_down_and_frees_the_slot() {
                 harness.controller.recorder_changed();
             }
             Close::TurnedOff => harness.controller.set_enabled(false),
-            Close::Dismissed => harness.controller.dismissed(),
-            Close::Record => harness.controller.record(),
+            Close::Dismissed => harness.controller.dismissed(Some(1)),
+            Close::Record => harness.controller.record(Some(1)),
         }
         assert!(!harness.controller.has_prompt(), "{close:?}: closed");
         // The panel took itself down for its own X and Record.
         let by_panel = matches!(close, Close::Dismissed | Close::Record);
         let expected = if by_panel {
-            vec![Some(prompt("us.zoom.xos"))]
+            vec![Some(prompt("us.zoom.xos", 1))]
         } else {
-            vec![Some(prompt("us.zoom.xos")), None]
+            vec![Some(prompt("us.zoom.xos", 1)), None]
         };
         assert_eq!(harness.panel.shown(), expected, "{close:?}: the panel");
         let sleepers = usize::from(!matches!(close, Close::TurnedOff));
@@ -336,6 +341,34 @@ fn every_way_a_prompt_goes_takes_it_down_and_frees_the_slot() {
     }
 }
 
+/// One numbering: the panel hands back the controller's number, so an X
+/// or a Record aimed at a prompt that closed, landing once another came
+/// up, answers nothing, and the prompt up stays with its countdown.
+#[test]
+fn a_stale_x_or_record_answers_nothing() {
+    let harness = harness();
+    harness.controller.set_enabled(true);
+    harness.controller.handle(opened(Some("us.zoom.xos")));
+    harness.controller.handle(MeetingEvent::MicrophoneReleased);
+    harness.controller.handle(opened(Some("com.example.meet")));
+    assert_eq!(harness.panel.current(), Some(prompt("com.example.meet", 2)));
+    harness.controller.dismissed(Some(1));
+    harness.controller.record(Some(1));
+    assert!(harness.controller.has_prompt(), "the second prompt stays");
+    assert_eq!(harness.recorder.starts(), Vec::<Option<String>>::new());
+    assert_eq!(
+        harness.panel.current(),
+        Some(prompt("com.example.meet", 2)),
+        "and so does its panel"
+    );
+    harness.controller.record(Some(2));
+    assert_eq!(
+        harness.recorder.starts(),
+        [Some("com.example.meet".to_owned())],
+        "its own Record records its app"
+    );
+}
+
 #[test]
 fn the_prompt_times_out_after_its_sixty_seconds() {
     let harness = harness();
@@ -351,7 +384,7 @@ fn the_prompt_times_out_after_its_sixty_seconds() {
         .panel
         .wait_until("the prompt timed out", |shown| shown.last() == Some(&None));
     assert!(!harness.controller.has_prompt());
-    harness.controller.record();
+    harness.controller.record(Some(1));
     assert_eq!(
         harness.recorder.starts(),
         Vec::<Option<String>>::new(),
@@ -369,7 +402,7 @@ fn events_while_recording_reach_the_recorder_with_the_name_resolved() {
     harness.controller.handle(opened(Some("us.zoom.xos")));
     assert!(harness.controller.has_prompt());
     assert_eq!(harness.recorder.activity(), []);
-    harness.controller.record();
+    harness.controller.record(Some(1));
     assert_eq!(harness.recorder.starts(), [Some("us.zoom.xos".to_owned())]);
 
     harness.recorder.busy.store(true, Ordering::SeqCst);
@@ -395,8 +428,8 @@ fn events_while_recording_reach_the_recorder_with_the_name_resolved() {
     harness.controller.handle(MeetingEvent::MicrophoneReleased);
     assert_eq!(harness.recorder.activity().len(), 3, "nothing while idle");
     harness.controller.handle(opened(None));
-    assert_eq!(harness.panel.current(), Some(prompt("?")));
-    harness.controller.record();
+    assert_eq!(harness.panel.current(), Some(prompt("?", 2)));
+    harness.controller.record(Some(2));
     assert_eq!(
         harness.recorder.starts()[1],
         None,
@@ -487,7 +520,7 @@ fn the_detector_s_events_reach_the_controller_after_the_debounce() {
     harness
         .panel
         .wait_until("the prompt after the debounce", |shown| {
-            shown == [Some(prompt("us.zoom.xos"))]
+            shown == [Some(prompt("us.zoom.xos", 1))]
         });
 
     // t = 2.75: Zoom lets go; the release's debounce ends at 4.75.
@@ -535,7 +568,7 @@ fn a_call_already_under_way_at_launch_prompts() {
     harness
         .panel
         .wait_until("the call under way prompts", |shown| {
-            shown == [Some(prompt("us.zoom.xos"))]
+            shown == [Some(prompt("us.zoom.xos", 1))]
         });
 }
 
@@ -556,7 +589,9 @@ async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again(
         .wait_until("Zoom prompts", |shown| !shown.is_empty());
 
     let controller = harness.controller.clone();
-    on_own_thread(PATIENCE, "Record returned", move || controller.record());
+    on_own_thread(PATIENCE, "Record returned", move || {
+        controller.record(Some(1));
+    });
     let status = capture.recorder.status();
     assert_eq!(status.state, RecordingState::Recording);
     assert_eq!(status.mode, Some(CaptureMode::Call));
@@ -566,7 +601,9 @@ async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again(
 
     // A second Record, a stale click, starts nothing more.
     let controller = harness.controller.clone();
-    on_own_thread(PATIENCE, "Record returned", move || controller.record());
+    on_own_thread(PATIENCE, "Record returned", move || {
+        controller.record(Some(1));
+    });
     let recorder = capture.recorder.clone();
     on_own_thread(PATIENCE, "Stop returned", move || recorder.stop());
     assert_eq!(
@@ -600,7 +637,8 @@ async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again(
 
 /// A recording started from the main window while the prompt is up takes
 /// the prompt down, and the prompt's Record, should a click still land,
-/// does not start a second recording.
+/// does not start a second recording; nor does a prompt's call start that
+/// reaches the recorder while it records, which the recorder refuses.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prompt_never_starts_a_second_recording() {
     let capture = synthetic_recorder();
@@ -617,10 +655,20 @@ async fn a_prompt_never_starts_a_second_recording() {
         "the recording took it down"
     );
     let controller = harness.controller.clone();
-    on_own_thread(PATIENCE, "Record returned", move || controller.record());
+    on_own_thread(PATIENCE, "Record returned", move || controller.record(None));
+    let recorder = capture.recorder.clone();
+    on_own_thread(PATIENCE, "the call's start returned", move || {
+        CallRecorder::start_call(&*recorder, Some("us.zoom.xos"));
+    });
     let meetings = capture.store.meetings(10, 0).unwrap();
     assert_eq!(meetings.len(), 1);
     assert_eq!(meetings[0].source, MeetingSource::MacInPerson);
+    let status = capture.recorder.status();
+    assert_eq!(status.mode, Some(CaptureMode::InPerson));
+    assert_eq!(
+        status.call_app, None,
+        "the refused start attributed nothing"
+    );
 }
 
 #[test]

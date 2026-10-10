@@ -62,6 +62,12 @@ pub struct DetectionPrompt {
     /// The app's name; "Another app" when it could not be named.
     pub app_name: String,
     pub seconds: u64,
+    /// The controller's number for this prompt, one more for each raised.
+    /// The panel shows it (the shell's `raised`) and hands it back with
+    /// the X ([`DetectionController::dismissed`]) and Record
+    /// ([`DetectionController::record`]), so a click aimed at an earlier
+    /// prompt answers nothing.
+    pub number: u64,
 }
 
 /// Where the prompt shows: the shell's floating panel (`panels::set_prompt`
@@ -429,24 +435,35 @@ impl DetectionController {
         }
     }
 
-    /// The prompt's X: the panel has already taken it down.
-    pub fn dismissed(&self) {
-        if let Some(prompt) = self.state().prompt.take() {
-            prompt.countdown.cancel();
+    /// The X of prompt `number` ([`DetectionPrompt::number`]; `None` for
+    /// a prompt shown unnumbered: whichever is up), the panel having taken
+    /// it down. Nothing when that prompt is no longer up: it closed, and
+    /// perhaps another came up, meanwhile.
+    pub fn dismissed(&self, number: Option<u64>) {
+        self.answered(number);
+    }
+
+    /// The Record of prompt `number`, as for [`Self::dismissed`]: a call
+    /// recording attributed to the app it named. Nothing when that prompt
+    /// is no longer up; a recording already in progress makes the
+    /// recorder refuse it, so a prompt never starts a second one. Blocks
+    /// for the start, as the recorder's start does. Swift:
+    /// `DetectionPromptViewModel.start`.
+    pub fn record(&self, number: Option<u64>) {
+        if let Some(prompt) = self.answered(number) {
+            self.recorder.start_call(prompt.call_app.as_deref());
         }
     }
 
-    /// The prompt's Record, the panel having taken it down: a call
-    /// recording attributed to the app it named. Nothing when no prompt is
-    /// up (it closed meanwhile); a recording already in progress makes the
-    /// recorder refuse it, so a prompt never starts a second one. Blocks
-    /// for the start, as the recorder's start does.
-    pub fn record(&self) {
-        let Some(prompt) = self.state().prompt.take() else {
-            return;
-        };
+    /// Takes prompt `number` (`None`: whichever is up) off the controller,
+    /// its countdown ended, when it is the one up.
+    fn answered(&self, number: Option<u64>) -> Option<OpenPrompt> {
+        let prompt = self
+            .state()
+            .prompt
+            .take_if(|prompt| number.is_none_or(|number| number == prompt.number))?;
         prompt.countdown.cancel();
-        self.recorder.start_call(prompt.call_app.as_deref());
+        Some(prompt)
     }
 
     fn raise(&self, state: &mut State, app_name: String, call_app: Option<String>) {
@@ -456,6 +473,7 @@ impl DetectionController {
         self.panel.show(Some(&DetectionPrompt {
             app_name,
             seconds: PROMPT_SECONDS,
+            number,
         }));
         state.prompt = Some(OpenPrompt {
             number,
