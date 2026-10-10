@@ -19,7 +19,7 @@
 //! | [`model_gate`] | The gates that keep a pipeline run from downloading a model, [`GatedSpeechEngine`](model_gate::GatedSpeechEngine) and [`GatedDiarizer`](model_gate::GatedDiarizer) over an [`InstalledCheck`](model_gate::InstalledCheck), and [`ResumingSpeechModels`](model_gate::ResumingSpeechModels): a refusal leaves the meeting queued until Settings or onboarding installs the models, or a reload or the launch finds them |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
 //! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`LOG_FILTER`], [`flush_logs`] |
-//! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, and the host's `Handover` over the listener |
+//! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, the host's `Handover` over the listener, and the listener's port ([`listener_port`](handover::listener_port), [`PORT_VARIABLE`](handover::PORT_VARIABLE)) |
 //! | [`secrets`] | The platform keyring, the Secret Service on Linux and the 0600 secrets file behind `SecretStore`, and [`KeepsApiKey`](secrets::KeepsApiKey), the app's store that keeps the API key for the pipeline's rebuilds; its Windows credential store module is the one place in the crate allowed `unsafe` |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
 //! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json`, `audio-folders.json` and `update-check.json` |

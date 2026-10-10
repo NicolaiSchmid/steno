@@ -64,7 +64,8 @@ impl HandoverConfiguration {
 
     /// The port the app listens on unless the user chose one:
     /// [`HandoverConfiguration::LINUX_PORT`] on Linux; on macOS and Windows
-    /// `0`, a port the system chooses, as Swift's listener did.
+    /// `0`, a port the system chooses. Rust only: Swift's
+    /// `HandoverConfiguration.port` is always 0.
     #[must_use]
     pub const fn platform_port() -> u16 {
         if cfg!(target_os = "linux") {
