@@ -242,7 +242,8 @@ default, saved to `panel-anchor.json` in the support directory by
 `panel_anchor.rs` when the user drags one, see The identifier; the
 geometry is `panel_geometry.rs`). One rule decides what shows: a busy
 recorder wins, else a pending detection prompt, else nothing. Each window
-is created once and then hidden and shown; the prompt's is navigated to each new request, which the shell numbers when
+is created once and then hidden and shown; the prompt's is navigated to
+each new request, which the shell numbers when
 the host raises it, so the page remounts and the countdown restarts; the X
 and Record send that number back and answer only their own prompt. The page
 measures its pill and reports the size in device pixels through the
