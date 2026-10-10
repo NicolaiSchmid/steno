@@ -16,7 +16,9 @@
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
 //! instance, on Linux the logout and shutdown clients (`session_end`) and
-//! the systemd drop-ins for the stop timeout (`stop_timeout`), and on a
+//! the systemd drop-ins for the stop timeout (`stop_timeout`), a scope of
+//! its own when it starts inside another program's service, and one for
+//! each of the `AppImage`'s mount servers (`own_scope`, `appimage`), and on a
 //! Wayland session the `XWayland` backend the panels need (`display`).
 //! Every one is a thin module over a Tauri plugin or an OS API with its
 //! rules in plain functions the tests cover. Everything that is on the
@@ -72,6 +74,8 @@ fn write_stderr_line(line: std::fmt::Arguments<'_>) {
 }
 
 mod actions;
+#[cfg(target_os = "linux")]
+mod appimage;
 mod autostart;
 mod bridge;
 mod deep_links;
@@ -86,6 +90,8 @@ mod host;
 #[cfg(target_os = "macos")]
 mod menu;
 mod navigation;
+#[cfg(target_os = "linux")]
+mod own_scope;
 mod packaged;
 mod panel_geometry;
 mod panels;
@@ -204,6 +210,11 @@ fn setup(
     handle: &tauri::AppHandle,
     runtime: &'static tokio::runtime::Runtime,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    // First, before the first window starts WebKit's processes, so they
+    // follow the app into its scope; and the AppImage's mount servers into
+    // theirs.
+    #[cfg(target_os = "linux")]
+    own_scope::take_own_scopes();
     handle.manage(std::sync::Arc::new(updater::ShellUpdates::new(
         handle.clone(),
     )));

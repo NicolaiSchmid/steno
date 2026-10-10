@@ -48,8 +48,13 @@ libc.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 gdk.workspace = true
 gio.workspace = true
-# The logout and shutdown clients (`session_end`) and the user manager's
-# reload after a stop timeout drop-in changes (`stop_timeout`).
+# The `AppImage`'s mount: `statfs` and the device number's parts, for
+# which FUSE mount `$APPDIR` and the executable are on (`appimage`).
+# Already in the lock.
+rustix.workspace = true
+# The logout and shutdown clients (`session_end`), the user manager's
+# reload after a stop timeout drop-in changes (`stop_timeout`) and the
+# app's own scopes (`own_scope`).
 zbus.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -65,8 +70,11 @@ block2.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
-# The temporary Nix layout and autostart entries of `packaged`'s tests.
+# The temporary Nix layout and autostart entries of `packaged`'s tests, and
+# the fake `/proc` of `appimage`'s.
 tempfile.workspace = true
+# The warnings the scope and mount server tests read.
+tracing-subscriber.workspace = true
 
 # The work packages named here are in .plans/2026-10-02-rust-core-and-tauri-shell.md.
 [features]

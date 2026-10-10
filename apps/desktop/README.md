@@ -147,8 +147,9 @@ only a kill cuts it off on any of them:
 | Xfce's Quit Program (Session settings) | `Stop`; the app unregisters first, so xfce4-session's kill 15 seconds later does not come |
 | KDE Plasma 6.6 (Wayland, X11) | the display closing |
 | A desktop whose portal reports the end | the portal's ending state, then the display closing |
+| Hyprland under uwsm (Omarchy) | at a logout, SIGTERM to Steno's scope or autostart unit while Hyprland still runs; at `hyprctl dispatch exit` or a crash, the display closing (see Hyprland) |
 | wlroots and others | the display closing |
-| A shutdown or reboot (all) | logind's delay lock (five seconds), then SIGTERM and the display closing, which both wait for the save |
+| A shutdown or reboot (all) | logind's delay lock (five seconds by default, 15 on Omarchy), then SIGTERM and the display closing, which both wait for the save |
 
 The session clients, the portal's monitor and inhibitor and the logind
 lock are tested against fakes on a private bus. The lost display ran
@@ -430,9 +431,38 @@ more than the save's ten; the user manager itself then gets only 5 s
 (`user@.service` `TimeoutStopSec=5s`), which a drop-in for Steno's unit
 cannot raise, so that path relies on the delay. Elsewhere logind waits 5 s
 by default and the user manager 120 s, so a save that outlasts logind's
-wait finishes under the drop-ins' 20 s. Started from a compositor key
-binding without `uwsm-app`, Steno runs in the compositor's own unit
-(uwsm's `wayland-wm@.service`, 10 s), where the drop-ins do not apply.
+wait finishes under the drop-ins' 20 s. Started inside another program's
+service, as a Hyprland key binding without `uwsm-app` starts it in uwsm's
+`wayland-wm@.service`, Steno moves into a scope of its own at launch,
+with the same 20 s (see Hyprland).
+
+Run from the AppImage, Steno reads its files from the image's mount,
+which the AppImage runtime's own process, the mount server, serves. Up
+to 0.1.0-rc.3 the mount server stays in the unit Steno was started in,
+on every systemd desktop, or in the launcher's own unit when the
+launcher moves only Steno into a scope after starting it (GNOME), and
+that unit's stop ends it while Steno saves: in a `uwsm-app`-style scope
+it was gone 0.26 s into the stop, and in one of two runs Steno went with
+it, unsaved; started as GNOME starts apps, Steno lost 3 of 3 recordings
+(the runs are listed under Hyprland).
+
+From the release after 0.1.0-rc.3 on, Steno finds its mount server at
+launch by the image's FUSE connection (Linux 6.16 and later) and the pipe
+the runtime keeps open to it (`src/appimage.rs`), however the image was
+started, and moves every process that matches into
+`app-steno\x2ddesktop\x2dimage-<pid>.scope` in `app.slice`, also when
+Steno itself stays in its unit. No session's end stops that scope. The
+mount server ends by itself once Steno has exited, together with every
+program Steno started that still holds the image's pipe (a browser it
+opened a link in), since those may run Steno's bundled libraries from the
+mount. After an update, the updated Steno is one of those programs, so
+the replaced image's mount, and the disk space of its deleted file, stay
+until the updated Steno quits. Each move is logged ("moved the AppImage's
+mount server"). A move that fails, or a mount server Steno cannot find,
+logs a warning.
+In a login's `session-<n>.scope` (Hyprland without uwsm), outside the
+user manager, the mount server stays beside Steno, with a warning, and
+that scope's stop ends both.
 
 ## Packaged installs
 
@@ -576,14 +606,121 @@ hyprctl clients -j | jq '.[] | select(.class | test("steno-desktop"; "i"))
   | {title, xwayland, floating, pinned}'
 ```
 
-On a `uwsm` session, as Omarchy's, start Steno from the app launcher or
-with `uwsm-app -- steno-desktop`, so it runs in a scope of its own and
-not in Hyprland's unit (stable plan X1). Steno runs under XWayland there
-even though Omarchy sets `GDK_BACKEND=wayland,x11,*`, since a list that
-names `x11` is a session default (above). Under native Wayland (a single
+On a `uwsm` session, as Omarchy's, Steno runs under XWayland even though
+Omarchy sets `GDK_BACKEND=wayland,x11,*`, since a list that names `x11`
+is a session default (above). Under native Wayland (a single
 `GDK_BACKEND=wayland`, or no XWayland) Hyprland places the panels itself
 and a drag is not saved; native panels on the layer-shell protocol,
 which would need no rules, are later work.
+
+### When the session ends
+
+On a `uwsm` session, as Omarchy's, start Steno from the app launcher, or
+with `uwsm-app -- steno-desktop` from a terminal or a key binding
+(Omarchy's own launch bindings already go through `uwsm-app`):
+
+```
+bind = SUPER SHIFT, S, exec, uwsm-app -- steno-desktop
+```
+
+`uwsm-app` runs Steno in a scope of its own in `app-graphical.slice`,
+which uwsm stops before Hyprland. No session manager or portal reports
+the session's end on Hyprland, so what saves a recording in progress is
+a signal, logind's delay or the display closing (from uwsm's, Omarchy's
+and systemd's source and the container runs below; not yet run on a real
+Hyprland session, stable plan X1):
+
+| End | What starts the save | How long it has |
+|---|---|---|
+| Log out (Omarchy's menu, `uwsm stop`) | SIGTERM to Steno's scope, with Hyprland and the display still up | 90 s in `uwsm-app`'s scope; 20 s in Steno's own scope (below) and in the autostart unit with its drop-in |
+| Reboot, power off (the menu, `systemctl reboot`) | logind's `PrepareForShutdown`, while Steno holds the delay lock; then the logout's SIGTERM | logind's delay: 15 s on Omarchy, and the save has to end inside it, since the user manager then gets only 5 s to stop; 5 s elsewhere, after which the SIGTERM waits for the save |
+| `hyprctl dispatch exit` | the display closing; then uwsm's shutdown target stops Steno's scope with SIGTERM, which waits for the save | as at a logout |
+| Hyprland crashes | as `hyprctl dispatch exit` | as at a logout |
+| Hyprland freezes, a hard power-off, `reboot -f` | nothing | none: the next launch recovers the recording from its audio file, with `failed` as its end reason |
+
+A key binding that runs `exec, steno-desktop` without `uwsm-app` starts
+Steno inside Hyprland's own unit, `wayland-wm@hyprland.desktop.service`.
+Up to 0.1.0-rc.3 Steno stays there, and a logout cuts its save off:
+stopping that unit sends SIGTERM to Hyprland and Steno together, and once
+Hyprland has exited, systemd sends a second SIGTERM to every process left
+in the unit, which ends Steno at once, unsaved, as a second Ctrl-C does.
+The unit's `TimeoutStopSec=10` would cut off a longer save too. The next
+launch recovers the recording from its audio file, with `failed` as its
+end reason and its last moments missing.
+
+From the release after 0.1.0-rc.3 on, Steno looks at its cgroup at
+launch (`/proc/self/cgroup`). When that is a service of the user manager
+that is not Steno's own (its name does not say `steno`) and whose main
+process is another program, Steno asks the user manager for a scope of
+its own, `app-steno\x2ddesktop-<pid>.scope` in `app-graphical.slice`,
+with `TimeoutStopSec=20s`, `PartOf=` and `After=graphical-session.target`,
+and moves there, usually before its first window opens
+(`src/own_scope.rs`). A logout then stops Steno as it stops a `uwsm-app`
+scope: first, with one SIGTERM and the display still up. Started at
+login (`exec-once`), Steno moves once the session is up
+(`graphical-session.target`); a logout before then, while the session is
+still starting, leaves it in Hyprland's unit, where the save is cut off
+as above. Its log (the user journal) says "moved into a scope of
+its own"; a move that fails logs a warning that names the unit Steno
+stays in, and the advice above holds. The same move covers any other
+program's service that starts Steno, such as a launcher that runs as a
+service. Steno's own units (the autostart unit, the NixOS module's
+`steno.service`, `uwsm-app -t service`'s) and every scope, another
+program's too, stay as they are. The speech sidecar's scope (above) then
+sits beside Steno's.
+
+Run from the AppImage, Steno also moves the image's mount server into a
+scope of its own and logs the move, as on every systemd desktop
+([Launch at login under systemd](#launch-at-login-under-systemd)).
+
+Where each start leaves Steno, from the release after 0.1.0-rc.3:
+
+| Started by | Steno runs in | At a logout |
+|---|---|---|
+| The launcher, `uwsm-app -- steno-desktop` | `uwsm-app`'s scope | SIGTERM, 90 s |
+| `bind = ..., exec, steno-desktop` | its own scope, moved at launch | SIGTERM, 20 s |
+| `exec-once = steno-desktop` | Hyprland's unit until the session is up, then its own scope | SIGTERM, 20 s |
+| Launch at login | `app-steno\x2ddesktop@autostart.service` | SIGTERM, 20 s (drop-in) |
+| Any start, Hyprland without uwsm | the login's `session-<n>.scope` | the display closing or SIGTERM |
+
+To see where Steno runs: `cat /proc/$(pidof -s steno-desktop)/cgroup`
+ends in a `.scope`, or in `app-steno\x2ddesktop@autostart.service` when a
+login started it, never in `wayland-wm@hyprland.desktop.service`.
+
+On NixOS, `programs.hyprland.withUWSM = true` makes the session a uwsm
+session, as above. Without uwsm, Hyprland and everything it starts run in
+the login's `session-<n>.scope`, outside the user manager, where Steno
+stays; the save then starts with the display closing or a SIGTERM, as on
+other wlroots desktops.
+
+Measured in a container limited to one CPU, under a real systemd 255 user
+manager with uwsm 0.26.4's `app-graphical.slice` and
+`wayland-session-shutdown.target` and a stand-in for its
+`wayland-wm@.service` (uwsm's ordering and stop propagation,
+`TimeoutStopSec=10`, and a stand-in compositor that starts Steno the way a
+key binding's `exec` does), stopping that unit as `uwsm stop` does, with a
+recording running and the display (Xvfb) up:
+
+| Steno | Save (a test build's added waits) | Result |
+|---|---|---|
+| In Hyprland's unit (the move turned off, as before) | as fast as it goes | gone 0.26 s after the stop, unsaved; the next launch recovered it, `failed` |
+| In Hyprland's unit (the move turned off) | 4 s before the save starts, 8 s in it | both SIGTERMs logged; ended at the second, unsaved |
+| Moved into its own scope | as fast as it goes | `queued`, `quit`; the scope stopped before the compositor |
+| Moved into its own scope | 4 s before the save starts, 8 s in it | `queued`, `quit`; gone 12.6 s after the stop, no kill |
+| Moved into its own scope, the compositor killed with SIGSEGV | 4 s before the save starts, 8 s in it | `queued`, `quit`, through uwsm's shutdown target; 12.6 s |
+| In a `uwsm-app`-style scope, graphical-session.target or the compositor's unit stopped | 8 s in it | `queued`, `quit`; the scope's 90 s; no move |
+| Started while graphical-session.target waited 8 s for the compositor (`exec-once`), moved once it was reached | 8 s in it | `queued`, `quit`; the move logged after the first window; gone 8.3 s after the stop |
+| The same, the compositor exiting instead (`hyprctl dispatch exit`) | 8 s in it | `queued`, `quit`; 8.3 s, with WebKit's processes left in the compositor's unit |
+| Moved from an AppImage (rc.3's runtime), the compositor exiting or its unit stopped | 8 s in it | `queued`, `quit`; 8.3 s; the mount server in its own scope, gone with Steno and not before |
+| From an AppImage in a `uwsm-app`-style scope, the mount server left in it (as up to 0.1.0-rc.3) | 8 s in it | the server gone 0.26 s after the stop; in one run the save still ended at 8.1 s (`queued`) and Steno was gone after 18.9 s, in the other Steno was gone after 6.8 s, unsaved (`recording`) |
+| From an AppImage in a `uwsm-app`-style scope, or as the autostart unit at a logout | 8 s in it | `queued`, `quit`; 8.3 s; the mount server in its own scope, gone with Steno and not before |
+| From an AppImage started as GNOME starts apps (the launcher's unit spawns it, then moves only Steno into a scope), the launcher's unit stopped, then Steno's scope; the mount server left in the launcher's unit (as up to 0.1.0-rc.3) | 8 s in it | the mount server gone 2.0 s in, with the launcher's unit; Steno unsaved (`recording`), 3 of 3 runs |
+| The same, the mount server moved | 8 s in it | `queued`, `quit`; the mount server in its own scope, gone with Steno 10.3 s after the launcher's stop; 23 of 23 runs |
+| From an AppImage as the main process of a user's own service, its stop; the mount server left in the service (as up to 0.1.0-rc.3) | 8 s in it | the mount server gone 0.26 s in; Steno unsaved (`recording`), 2 of 2 runs |
+| The same, the mount server moved | 8 s in it | `queued`, `quit`; 8.3 s, the mount server gone with Steno; 2 of 2 runs |
+
+WebKit's processes started in Steno's scope too, except those of a window
+that opened before a late move.
 
 ## Run
 

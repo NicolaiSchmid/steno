@@ -991,16 +991,18 @@ pub(crate) mod tests {
     }
 
     impl Daemon {
-        /// None when `dbus-daemon` is not installed, unless
-        /// `STENO_REQUIRE_DBUS_TEST` asks for it (CI on Linux), which fails
-        /// the test instead.
+        /// [`Daemon::start_at`] on a socket in the temp dir.
         pub(crate) fn start() -> Option<Self> {
+            Self::start_at(&format!("unix:tmpdir={}", std::env::temp_dir().display()))
+        }
+
+        /// The daemon on the D-Bus `address`; None when `dbus-daemon` is not
+        /// installed, unless `STENO_REQUIRE_DBUS_TEST` asks for it (CI on
+        /// Linux), which fails the test instead.
+        pub(crate) fn start_at(address: &str) -> Option<Self> {
             let spawned = std::process::Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
-                .arg(format!(
-                    "--address=unix:tmpdir={}",
-                    std::env::temp_dir().display()
-                ))
+                .arg(format!("--address={address}"))
                 .stdout(std::process::Stdio::piped())
                 .spawn();
             let mut child = match spawned {

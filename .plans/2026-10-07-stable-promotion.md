@@ -167,8 +167,11 @@ Forge and atlas.
     holds on every systemd desktop that runs XDG autostart through it;
   - `app.slice` is under systemd-oomd with `kill`, and the app and its speech
     sidecar share one cgroup, so a memory-pressure kill takes the recording;
-  - an app started outside a `uwsm` scope sits in Hyprland's own unit, stopped
-    with it after at most 10 s;
+  - an app started outside a `uwsm` scope sits in Hyprland's own unit, whose stop
+    sends SIGTERM to the app with Hyprland and a second one once Hyprland has
+    exited, which ends the app unsaved, and `SIGKILL` 10 s in (measured with a
+    stand-in for the unit, #272); from #272 the app moves into a scope of its own
+    at launch;
   - Hyprland's portal serves no Inhibit and no session monitor;
   - the bar is a Quickshell shell, whose tray is an SNI host behind a hover
     drawer; with `libayatana-appindicator` a left click on Steno's icon probably
@@ -448,7 +451,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 
 | ID | What | Targets |
 |---|---|---|
-| X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` | Omarchy, NixOS with Hyprland |
+| X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` (#272: an app started inside another program's service of the user manager, as a key binding without `uwsm-app` leaves it in `wayland-wm@hyprland.desktop.service`, whose stop ended it unsaved 0.26 s in, moves at launch into `app-steno\x2ddesktop-<pid>.scope` in `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and `After=graphical-session.target`; at login the start waits for the target and is never called off, and a session that ends before then leaves the app in the compositor's unit; from an AppImage every mount server, found by its FUSE connection and keepalive pipe however the image was started, moves into a scope of its own in `app.slice` wherever it runs (a launcher's unit too, where GNOME leaves it), also when the app stays, and stays beside the app in a login's `session-<n>.scope`; each move is written to the journal and a failure logged at `warn`. In a systemd 255 container with uwsm 0.26.4's slice and shutdown target and a stand-in compositor's unit, every case saved `queued`; the README's Hyprland section has the table. logind's delay is #220's, tested against a fake logind) | Omarchy, NixOS with Hyprland; the AppImage on every systemd desktop |
 | X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) (#267: a list naming `x11` or `*`, or a lone `*`, counts as unset, any other value still wins; the titles on Linux only, macOS and Windows keep "Steno"; the rules are `apps/desktop/src-tauri/linux/hyprland-steno.lua`, one `hl.window_rule` on class `[Ss]teno-desktop` and title `Steno (bubble\|prompt)` that also turns off focus on hover, the border, shadow and blur, checked by Hyprland 0.56.2's `--verify-config`; the `.deb` installs it as `/usr/share/steno-desktop/hyprland-steno.lua` (`check-bundle.sh` checks it), and so does the AUR package that repackages it (#265) from the next release, loaded with `dofile`; the Linux smoke finds both panels by their titles) | Omarchy, NixOS with Hyprland |
 | X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves | all |
 | X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port | Omarchy, NixOS |
@@ -1790,6 +1793,16 @@ interrupted" after one. On the GNOME machine,
      meeting is recovered with `failed` as `endReason` and processes (P3).
   7. Quit the `.deb`'s Steno; the AppImage starts (`pgrep -a steno-desktop`
      shows only its path) and finds the same meetings.
+  8. **GNOME, AppImage.** Note `uname -r`. Quit Steno, note the time, start
+     the release's AppImage from the app grid, through a desktop entry with
+     `Exec=<path to the AppImage>` (or the one an AppImage integration tool
+     wrote), and start a recording. While it records, `journalctl --user
+     --since '<launch time>' | grep 'mount server'` prints one line, "moved
+     the AppImage's mount server <pid> into a scope of its own,
+     app-steno\x2ddesktop\x2dimage-<pid>.scope, which the session's end does
+     not stop", and no warning, and `systemctl --user list-units 'app-steno*'`
+     lists that scope. Then log out with the system menu, log back in and
+     check the meeting.
 - **Omarchy** (Omarchy 4, Arch with Hyprland on Wayland).
   1. Before step 0: import the release key from a checkout (`gpg --import
      packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`), so
@@ -1827,7 +1840,20 @@ interrupted" after one. On the GNOME machine,
   6. Steps 4 to 6 of the GNOME gate, with the call in Chromium and the logout
      through the system menu, which is `uwsm stop`. Also `hyprctl dispatch exit`
      while recording: after logging back in, the meeting is saved with `quit` as
-     `endReason` (X1).
+     `endReason` (X1). Then the same logout with Steno started by a key binding
+     without `uwsm-app` (`bind = SUPER SHIFT, S, exec, steno-desktop`), noting
+     the launch time: `cat /proc/$(pidof -s steno-desktop)/cgroup` ends in
+     `app-steno\x2ddesktop-<pid>.scope`, `journalctl --user --since '<launch
+     time>' | grep 'moved into a scope of its own'` names
+     `wayland-wm@hyprland.desktop.service`, and the meeting is saved the same
+     way (#272). Then the same with `exec-once = steno-desktop` in
+     `hyprland.conf`, after logging out and in, with the login time as the
+     launch time. Then quit Steno, note the time, run the release's AppImage
+     with `uwsm-app -- <path>` and start a recording. While it records,
+     `journalctl --user --since '<launch time>' | grep 'mount server'` prints
+     one line, "moved the AppImage's mount server <pid> ...", and no warning,
+     and `systemctl --user list-units 'app-steno*'` lists that scope. Then log
+     out: the meeting is saved the same way.
   7. In the Steno that a login started, Settings says updates come from the
      package manager (X5), and `~/.config/autostart/steno-desktop.desktop`'s
      `Exec` names `/usr/bin/steno-desktop`.
