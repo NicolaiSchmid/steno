@@ -346,6 +346,10 @@ pub struct InFlight(Arc<SharedInFlight>);
 struct SharedInFlight {
     set: Mutex<InFlightSet>,
     released: tokio::sync::Notify,
+    /// A test's hold, dropped by the next wait between its check and its
+    /// wait: the moment a release must not be lost in.
+    #[cfg(test)]
+    dropped_after_the_check: Mutex<Option<JobHold>>,
 }
 
 #[derive(Debug, Default)]
@@ -422,6 +426,14 @@ impl InFlight {
             // and the wait still wakes it.
             let released = self.0.released.notified();
             let held = self.lock().held;
+            #[cfg(test)]
+            drop(
+                self.0
+                    .dropped_after_the_check
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
             if !held {
                 return;
             }
@@ -3266,6 +3278,26 @@ pub fn write_wav_16k(path: &Path, buffer: &AudioBuffer16k) -> std::io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hold dropped between a waiting job's check and its wait still
+    /// wakes the job, since its wake-up was registered before the check.
+    #[tokio::test]
+    async fn a_hold_dropped_between_the_check_and_the_wait_wakes_the_job() {
+        let in_flight = InFlight::default();
+        let hold = in_flight.try_hold().expect("idle");
+        *in_flight
+            .0
+            .dropped_after_the_check
+            .lock()
+            .expect("the slot") = Some(hold);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            in_flight.until_released(),
+        )
+        .await
+        .expect("woken by the release");
+        assert!(in_flight.try_hold().is_some());
+    }
 
     /// A stage's own failure keeps its stage however it travels: bare, or
     /// boxed as a boundary error by a crate behind a seam; anything else
