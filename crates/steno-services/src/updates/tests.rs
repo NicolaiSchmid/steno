@@ -217,11 +217,13 @@ impl UpdateSource for FakeSource {
 
 /// [`IdleGate`] over the world's recorder and the processing a test
 /// starts and ends (`processing`): idle while neither runs; a hold holds
-/// recording starts off, one hold at a time. Counts the holds alive.
+/// recording starts off, one hold at a time. Counts the holds alive and
+/// the holds ever given.
 struct FakeGate {
     processing: AtomicBool,
     recorder: Arc<FakeRecorder>,
     alive: Arc<AtomicUsize>,
+    given: AtomicUsize,
 }
 
 struct Hold(Arc<AtomicUsize>);
@@ -239,6 +241,7 @@ impl InstallGate for FakeGate {
         }
         let starts = self.recorder.hold_starts();
         self.alive.fetch_add(1, Ordering::SeqCst);
+        self.given.fetch_add(1, Ordering::SeqCst);
         Some(InstallHold::new(starts, Hold(self.alive.clone())))
     }
 
@@ -271,6 +274,7 @@ impl World {
             processing: AtomicBool::new(false),
             recorder: recorder.clone(),
             alive: Arc::default(),
+            given: AtomicUsize::new(0),
         });
         *lock(&source.gate) = Some(gate.clone());
         World {
@@ -959,6 +963,43 @@ async fn a_tick_during_the_users_install_downloads_and_installs_nothing() {
     world.source.download_release.notify_one();
     at_once(offer).await.unwrap();
     assert_eq!(world.installs(), 1);
+}
+
+/// A tick while the user's install waits for an idle app, with a package
+/// kept: the one-install check comes before the gate's hold, so the tick
+/// takes no hold, and a Record at that moment is not refused. The user's
+/// install then takes the kept package.
+#[tokio::test(start_paused = true)]
+async fn a_tick_while_the_users_install_waits_takes_no_hold() {
+    let world = World::new();
+    world.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, true);
+    world
+        .source
+        .busy_after_download
+        .store(true, Ordering::SeqCst);
+    world.source.answer(Ok(Some("0.12.0")));
+    let schedule = world.schedule();
+    schedule.tick().await;
+    assert!(schedule.state().staged.is_some());
+    world
+        .source
+        .busy_after_download
+        .store(false, Ordering::SeqCst);
+    world.source.reply(&[true, true]);
+    let offer = offer_in_background(&schedule, "0.12.0");
+    tokio::time::sleep(IDLE_POLL / 2).await;
+    assert_eq!(
+        world.source.asked(),
+        ["install 0.12.0", "after the processing"]
+    );
+
+    world.processing(false);
+    world.advance(TimeDelta::hours(1));
+    at_once(schedule.tick()).await;
+    assert_eq!(world.gate.given.load(Ordering::SeqCst), 0, "no hold taken");
+    at_once(offer).await.unwrap();
+    assert_eq!(world.downloads(), 1, "the kept package");
+    assert_eq!(world.source.steps(), ["download", "install", "relaunch"]);
 }
 
 /// The schedule's install holds processing jobs off while the updater
