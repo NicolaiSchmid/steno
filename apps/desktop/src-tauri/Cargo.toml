@@ -60,6 +60,9 @@ objc2-av-foundation.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 block2.workspace = true
+# Whether the user can write the bundle (`bundle_is_writable` in
+# `updater.rs`), with `access(2)` and no `unsafe`.
+rustix.workspace = true
 
 [dev-dependencies]
 # The temporary Nix layout and autostart entries of `packaged`'s tests.

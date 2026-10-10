@@ -255,15 +255,8 @@ fn installer_for(
 /// which the updater renames the bundle out of.
 #[cfg(target_os = "macos")]
 fn bundle_is_writable() -> bool {
-    use std::os::unix::ffi::OsStrExt as _;
-    let writable = |path: &std::path::Path| {
-        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-            return false;
-        };
-        // SAFETY: `path` is a NUL-terminated string that outlives the
-        // call, which only reads it.
-        unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
-    };
+    let writable =
+        |path: &std::path::Path| rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_ok();
     let Ok(executable) = std::env::current_exe() else {
         return false;
     };
