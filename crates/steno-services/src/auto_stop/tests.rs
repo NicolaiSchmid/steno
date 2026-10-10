@@ -683,11 +683,15 @@ fn on_the_notice_thread() -> bool {
     std::thread::current().name() == Some("steno-notices")
 }
 
-/// Swift's `testADeviceChangeNoticeLeavesTheCountdownRunning`: a device
-/// change during the countdown leaves it as it was, and it still ends the
-/// call.
+/// Swift's `testADeviceChangeNoticeLeavesTheCountdownRunning`, which
+/// differs in Rust: a device change during the countdown leaves it
+/// running until the capture resumes on the new device, and the resume
+/// arms a fresh 90 s (the capture recovered,
+/// [`CaptureRecorder::resume_auto_stop`]) that still ends the call.
+///
+/// [`CaptureRecorder::resume_auto_stop`]: crate::recorder::CaptureRecorder::resume_auto_stop
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_change_leaves_the_countdown_running() {
+async fn a_device_change_rearms_the_countdown_at_its_resume() {
     let recording = recording_whose_device_changes();
     let (changed, rebuilt) = std::sync::mpsc::channel();
     let watched = Arc::downgrade(&recording.recorder);
@@ -695,7 +699,12 @@ async fn a_device_change_leaves_the_countdown_running() {
         if on_the_notice_thread()
             && let Some(recorder) = watched.upgrade()
         {
-            let _ = changed.send(recorder.status().auto_stop.is_some());
+            let _ = changed.send(
+                recorder
+                    .status()
+                    .auto_stop
+                    .map(|armed| armed.remaining_seconds),
+            );
         }
     }));
     recording.start(CaptureMode::Call, None);
@@ -703,12 +712,31 @@ async fn a_device_change_leaves_the_countdown_running() {
     recording.released();
     recording.sleepers(1);
     recording.clock.advance(Duration::from_secs(10));
-    let armed_then = rebuilt.recv_timeout(PATIENCE).expect("the device changed");
-    assert!(armed_then, "the countdown ran when the device changed");
     assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 80.0)));
-    recording.sleepers(1);
-    recording.clock.advance(Duration::from_secs(80));
-    eventually("the grace stopped the recording", || {
+    // The fresh countdown on a clock of its own, at the same time, so
+    // each clock's sleepers are its own countdown's.
+    let resumed = Arc::new(ManualClock::new());
+    resumed.advance(Duration::from_secs(10));
+    recording.recorder.count_down_on(resumed.clone());
+    let armed_then = rebuilt.recv_timeout(PATIENCE).expect("the device changed");
+    assert_eq!(
+        armed_then,
+        Some(80.0),
+        "the countdown ran when the device changed"
+    );
+    while rebuilt.recv_timeout(PATIENCE).expect("the capture resumed") != Some(90.0) {}
+    assert_eq!(
+        recording.armed(),
+        Some((Some("Zen".to_owned()), 90.0)),
+        "a fresh grace"
+    );
+    recording.sleepers(0);
+    assert!(resumed.wait_for_sleepers(1), "the fresh countdown sleeps");
+    resumed.advance(Duration::from_secs(89));
+    assert_eq!(recording.recorder.status().state, RecordingState::Recording);
+    assert!(resumed.wait_for_sleepers(1));
+    resumed.advance(Duration::from_secs(1));
+    eventually("the fresh grace stopped the recording", || {
         recording.recorder.status().state == RecordingState::Idle
     })
     .await;
@@ -718,6 +746,150 @@ async fn a_device_change_leaves_the_countdown_running() {
             app_name: Some("Zen".to_owned())
         })
     );
+}
+
+/// A recording whose audio service restarts a second into it (coreaudiod
+/// restarting, say): the restarts fail past the attempts, so the
+/// capture warns that it is still trying, and then one runs.
+fn recording_whose_audio_service_restarts() -> Recording {
+    recording_over(synthetic_recorder_over(Arc::new(|configuration| {
+        let options = crate::testing::synthetic_tone(&configuration)
+            .change_device_after(1.0)
+            .change_reason(steno_audio::DeviceChangeReason::AudioServiceRestarted)
+            .restarts_that_fail(steno_audio::CaptureSession::RESTART_ATTEMPTS);
+        steno_audio::CaptureSession::with_backend(
+            configuration,
+            Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
+            None,
+            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+            Arc::new(steno_audio::SystemClock::new()),
+        )
+        .map_err(|error| error.to_string())
+    })))
+}
+
+/// What the status shows at one of the capture's notices.
+#[derive(Debug)]
+struct AtNotice {
+    armed: Option<f64>,
+    warning: Option<String>,
+}
+
+/// Holds the capture's notice thread in the change hook after each of its
+/// first `notices` notices, so the recorder's view of the capture stays
+/// there until the test lets it go on: each one sends the status and
+/// waits for the reply.
+fn hold_the_notices(
+    recording: &Recording,
+    notices: usize,
+) -> (
+    std::sync::mpsc::Receiver<AtNotice>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (at, seen) = std::sync::mpsc::channel();
+    let (go, gone) = std::sync::mpsc::channel::<()>();
+    let gone = std::sync::Mutex::new(gone);
+    let held = std::sync::atomic::AtomicUsize::new(0);
+    let watched = Arc::downgrade(&recording.recorder);
+    recording.recorder.on_change(Arc::new(move || {
+        let Some(recorder) = watched.upgrade() else {
+            return;
+        };
+        if !on_the_notice_thread() || held.fetch_add(1, Ordering::SeqCst) >= notices {
+            return;
+        }
+        let status = recorder.status();
+        drop(recorder);
+        let _ = at.send(AtNotice {
+            armed: status.auto_stop.map(|armed| armed.remaining_seconds),
+            warning: status.warning,
+        });
+        let _ = gone.lock().unwrap().recv_timeout(PATIENCE);
+    }));
+    (seen, go)
+}
+
+/// Asserts the recording goes on for a moment: a countdown that ran out
+/// while the capture recovers ends nothing, however soon after it woke.
+fn assert_still_recording(recording: &Recording) {
+    let until = std::time::Instant::now() + Duration::from_millis(300);
+    while std::time::Instant::now() < until {
+        assert_eq!(recording.recorder.status().state, RecordingState::Recording);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A restart of the audio service empties the call detector's process
+/// list, so the call app seems to let go of the microphone, before the
+/// capture's change (`released_before`) or during its recovery: 90 s and
+/// more of that end no recording, the warning dismissed and the stream
+/// resumed included, and once audio is back with the app still holding
+/// no microphone a fresh 90 s countdown runs and then ends the call.
+async fn a_restarted_audio_service_ends_no_call(released_before: bool) {
+    let recording = recording_whose_audio_service_restarts();
+    let (seen, go) = hold_the_notices(&recording, 3);
+    recording.start(CaptureMode::Call, None);
+    recording.opened(Some("Zen"));
+    if released_before {
+        recording.released();
+        recording.sleepers(1);
+    }
+    let changed = seen.recv_timeout(PATIENCE).expect("the service restarted");
+    assert_eq!(changed.armed, released_before.then_some(90.0));
+    if !released_before {
+        recording.released();
+        assert_eq!(
+            recording.armed(),
+            None,
+            "no countdown while the capture recovers"
+        );
+    }
+    go.send(()).unwrap();
+    let still_restarting = seen.recv_timeout(PATIENCE).expect("the restarts went on");
+    assert_eq!(
+        still_restarting.warning.as_deref(),
+        Some("No audio is arriving. Still trying.")
+    );
+    recording.recorder.clear_messages();
+    assert_eq!(recording.recorder.status().warning, None, "dismissed");
+    go.send(()).unwrap();
+    seen.recv_timeout(PATIENCE).expect("the capture resumed");
+    // Resumed after the restarts went on, so not yet back: the countdown
+    // armed before the change runs out, and ends nothing.
+    recording.clock.advance(Duration::from_secs(120));
+    recording.sleepers(0);
+    assert_still_recording(&recording);
+    go.send(()).unwrap();
+    // Audio is back (`Delivering`): a fresh grace from now.
+    eventually("a fresh countdown once audio is back", || {
+        recording.armed() == Some((Some("Zen".to_owned()), 90.0))
+    })
+    .await;
+    recording.sleepers(1);
+    recording.clock.advance(Duration::from_secs(89));
+    assert_eq!(recording.recorder.status().state, RecordingState::Recording);
+    recording.sleepers(1);
+    recording.clock.advance(Duration::from_secs(1));
+    eventually("the fresh grace stopped the recording", || {
+        recording.recorder.status().state == RecordingState::Idle
+    })
+    .await;
+    assert_eq!(
+        recording.meetings()[0].end_reason,
+        Some(RecordingEndReason::CallEnded {
+            app_name: Some("Zen".to_owned())
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_release_before_the_audio_service_restarted_ends_no_call() {
+    a_restarted_audio_service_ends_no_call(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_release_while_the_audio_service_restarts_ends_no_call() {
+    a_restarted_audio_service_ends_no_call(false).await;
 }
 
 /// Audio back after the capture recovered arms a fresh countdown when the

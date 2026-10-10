@@ -506,6 +506,53 @@ struct Outage {
     /// by a resume (a stream that resumes may stall again soon), and once
     /// dismissed.
     still_trying: bool,
+    /// The capture is recovering: from a `DeviceChanged` until it is back,
+    /// at its `DeviceResumed` when no `StillRestarting` is outstanding
+    /// (`restarting`), else at `Delivering`; a dismissal leaves it. The
+    /// call auto-stop's countdown neither arms nor ends the recording
+    /// meanwhile, and once the capture is back the notice thread calls
+    /// [`CaptureRecorder::resume_auto_stop`] (S2 in
+    /// `.plans/2026-10-07-stable-promotion.md`): a restart of the audio
+    /// service empties the call detector's process list too, so the call
+    /// app seems to have let go of the microphone. Rust only.
+    recovering: bool,
+    /// A `StillRestarting` came and no `Delivering` since: a resume then
+    /// does not end the recovery, since the stream may stall again soon.
+    /// Unlike `still_trying`, a dismissal leaves it. Rust only.
+    restarting: bool,
+}
+
+impl Outage {
+    /// Follows `notice` for the warning and the recovery (the stalled
+    /// device aside, which the notice thread reads from the session);
+    /// `true` when it ends a recovery, so the auto-stop resumes.
+    fn follow(&mut self, notice: &CaptureNotice) -> bool {
+        match notice {
+            CaptureNotice::DeviceChanged(_) => {
+                self.recovering = true;
+                false
+            }
+            CaptureNotice::StillRestarting { .. } => {
+                self.still_trying = true;
+                self.restarting = true;
+                false
+            }
+            CaptureNotice::DeviceResumed { .. } => {
+                !self.restarting && std::mem::take(&mut self.recovering)
+            }
+            CaptureNotice::Delivering => {
+                self.still_trying = false;
+                self.restarting = false;
+                std::mem::take(&mut self.recovering)
+            }
+        }
+    }
+
+    /// The user dismissed the messages: the warning goes until the
+    /// restarts go on once more; the recovery stands.
+    fn dismiss(&mut self) {
+        self.still_trying = false;
+    }
 }
 
 /// Whether the microphone's clock drives a capture in `mode`, so that a
@@ -695,17 +742,22 @@ fn forward_levels(
 /// stall of it started it, in a capture in `mode` that runs on the
 /// microphone's clock, and none otherwise; restarts that go on past
 /// `RESTART_ATTEMPTS` mark it there as still trying until audio arrives
-/// again (`Delivering`); and the resume re-reads the microphone into
-/// `fallback`, since a rebuild may record another one. It holds `session`
-/// weakly, so dropping the session ends the notices and the thread. None
-/// when it could not be spawned, and the warnings stay as the start left
-/// them.
+/// again (`Delivering`); the resume re-reads the microphone into
+/// `fallback`, since a rebuild may record another one; and the end of a
+/// recovery ([`Outage::recovering`]) resumes `recorder`'s auto-stop, with
+/// the outage's lock released, since the recorder takes its own lock and
+/// then the outage's. It holds `session` and `recorder` weakly, so
+/// dropping the session ends the notices and the thread, and the
+/// recorder, which holds the thread's handle, makes no cycle; a stop joins
+/// the thread without the recorder's lock. None when it could not be
+/// spawned, and the warnings stay as the start left them.
 fn follow_the_notices(
     notices: Receiver<CaptureNotice>,
     mode: CaptureMode,
     fallback: Arc<Mutex<Fallback>>,
     outage: Arc<Mutex<Outage>>,
     session: Weak<CaptureSession>,
+    recorder: Weak<CaptureRecorder>,
     hook: Hook,
 ) -> Option<JoinHandle<()>> {
     std::thread::Builder::new()
@@ -718,6 +770,7 @@ fn follow_the_notices(
                 let mut outage = outage
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let back = outage.follow(&notice);
                 match notice {
                     // The stream is still the replaced one until the resume.
                     CaptureNotice::DeviceChanged(reason) => {
@@ -725,17 +778,19 @@ fn follow_the_notices(
                             && microphone_is_the_master(mode))
                         .then(|| device_name(session.stream().as_ref()));
                     }
-                    CaptureNotice::StillRestarting { .. } => outage.still_trying = true,
-                    CaptureNotice::Delivering => outage.still_trying = false,
                     CaptureNotice::DeviceResumed { .. } => {
                         fallback
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .set(fallback_input(session.stream().as_ref()));
                     }
+                    CaptureNotice::StillRestarting { .. } | CaptureNotice::Delivering => {}
                 }
                 drop(outage);
                 drop(session);
+                if back && let Some(recorder) = recorder.upgrade() {
+                    recorder.resume_auto_stop();
+                }
                 if let Some(hook) = &hook {
                     hook();
                 }
@@ -877,7 +932,8 @@ impl CaptureRecorder {
                 inner.calls.opened(app_name);
             }
             MicrophoneActivity::Released => {
-                if !self.arm_auto_stop(&mut inner, |calls, now| calls.released(now, false)) {
+                let recovering = Self::capture_recovering(&inner);
+                if !self.arm_auto_stop(&mut inner, |calls, now| calls.released(now, recovering)) {
                     return;
                 }
             }
@@ -940,14 +996,28 @@ impl CaptureRecorder {
         true
     }
 
+    /// Whether the capture of the recording in progress is recovering
+    /// ([`Outage::recovering`]), so the auto-stop waits. Takes the outage's
+    /// lock under the recorder's, as the status does. Rust only.
+    fn capture_recovering(inner: &Inner) -> bool {
+        inner.active.as_ref().is_some_and(|active| {
+            active
+                .outage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recovering
+        })
+    }
+
     /// The auto-stop's countdown `number` ran out: the recording stops and
     /// is saved as Stop does, with the call's end reason, unless the
-    /// countdown was disarmed meanwhile or the recording is already
-    /// stopping.
+    /// countdown was disarmed meanwhile, the recording is already
+    /// stopping, or its capture is recovering (the countdown stays armed
+    /// for [`Self::resume_auto_stop`] to replace).
     fn call_ended(&self, number: u64) {
         let (active, reason) = {
             let mut inner = self.inner();
-            if inner.status.state != RecordingState::Recording {
+            if inner.status.state != RecordingState::Recording || Self::capture_recovering(&inner) {
                 return;
             }
             let Some(reason) = inner.calls.elapsed(number) else {
@@ -1172,6 +1242,7 @@ impl CaptureRecorder {
             fallback.clone(),
             outage.clone(),
             Arc::downgrade(&session),
+            self.this.clone(),
             self.hook(),
         );
         {
@@ -1736,7 +1807,7 @@ impl Recorder for CaptureRecorder {
                 .outage
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .still_trying = false;
+                .dismiss();
             active.disk_warning.dismiss();
         }
         drop(inner);
@@ -2675,6 +2746,67 @@ mod tests {
         )
         .await;
         assert!(seconds >= 1, "{seconds} s");
+    }
+
+    /// An ordinary device change, whose restarts did not go on past the
+    /// attempts, recovers at its resume, which resumes the auto-stop once;
+    /// a later resume ends no recovery.
+    #[test]
+    fn a_device_change_recovers_at_its_resume() {
+        let resumed = CaptureNotice::DeviceResumed {
+            attempt: 1,
+            gap_seconds: 0.3,
+        };
+        let mut outage = Outage::default();
+        assert!(!outage.follow(&CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DefaultInputChanged
+        )));
+        assert!(outage.recovering);
+        assert!(outage.follow(&resumed), "back at the resume");
+        assert!(!outage.recovering);
+        assert!(!outage.follow(&resumed), "nothing to end");
+    }
+
+    /// Restarts that went on past the attempts recover only once audio is
+    /// back (`Delivering`): neither their resumes, a stream that stalls
+    /// again and resumes, nor a dismissal of the warning ends the
+    /// recovery, while the dismissal does end the warning.
+    #[test]
+    fn restarts_that_went_on_recover_only_once_audio_is_back() {
+        let resumed = CaptureNotice::DeviceResumed {
+            attempt: CaptureSession::RESTART_ATTEMPTS + 1,
+            gap_seconds: 4.0,
+        };
+        let mut outage = Outage::default();
+        assert!(!outage.follow(&CaptureNotice::DeviceChanged(
+            DeviceChangeReason::AudioServiceRestarted
+        )));
+        assert!(!outage.follow(&CaptureNotice::StillRestarting {
+            attempt: CaptureSession::RESTART_ATTEMPTS,
+        }));
+        assert!(outage.still_trying);
+        outage.dismiss();
+        assert!(!outage.still_trying, "the warning went");
+        assert!(
+            outage.recovering && outage.restarting,
+            "the recovery stands"
+        );
+        assert!(!outage.follow(&resumed));
+        assert!(!outage.follow(&CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DeliveryStalled
+        )));
+        assert!(!outage.follow(&resumed));
+        assert!(outage.recovering);
+        assert!(outage.follow(&CaptureNotice::Delivering), "back");
+        assert!(!outage.recovering && !outage.restarting && !outage.still_trying);
+        assert!(!outage.follow(&CaptureNotice::Delivering), "nothing to end");
+        outage.follow(&CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DefaultInputChanged,
+        ));
+        assert!(
+            outage.follow(&resumed),
+            "the next change is back at its resume"
+        );
     }
 
     /// Only a microphone whose clock drives the capture is named for a

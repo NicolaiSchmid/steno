@@ -16,12 +16,13 @@
 //!
 //! A capture that recovers after a device change or a restart
 //! (coreaudiod restarting empties the detector's process list too) must
-//! not end the call it is keeping alive; the capture's recovery (#244) is
-//! to gate the countdown. `CallWatch` remembers that the call app let go,
-//! and
+//! not end the call it is keeping alive: while the recorder's capture
+//! recovers (its outage's `recovering`, which says from when until when),
+//! the countdown neither arms nor ends the recording. `CallWatch` remembers
+//! that the call app let go, and
 //! [`CaptureRecorder::resume_auto_stop`](crate::recorder::CaptureRecorder::resume_auto_stop),
-//! called when the capture is back, arms a fresh countdown when the app
-//! still holds no microphone.
+//! which the capture's notice thread calls when the capture is back, arms
+//! a fresh countdown when the app still holds no microphone.
 //!
 //! Swift: the "Auto-stop after the call ends" part of
 //! `apps/macos/Steno/Recording/RecordingController.swift` and
@@ -133,9 +134,7 @@ impl CallWatch {
     /// The microphone was released while a call records: remembered, and
     /// the countdown armed at `now` when a call was seen, none is armed
     /// and the capture is not `recovering` (then [`Self::resume`] arms it
-    /// once the capture is back). The recorder passes `false` until the
-    /// capture reports its recovery (S2 in
-    /// `.plans/2026-10-07-stable-promotion.md`).
+    /// once the capture is back).
     pub(crate) fn released(&mut self, now: Duration, recovering: bool) -> Option<Countdown> {
         self.released = true;
         if recovering || self.armed.is_some() {
