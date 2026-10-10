@@ -73,9 +73,11 @@ pub struct Settings {
     /// The port the phone handover listens on, `0` for one the system
     /// chooses; `None` means the platform's (`steno_handover`'s
     /// `HandoverConfiguration::platform_port`: a fixed port on Linux, which
-    /// the packages open in the firewall). No row in Settings: it is set in
-    /// the database, and `STENO_HANDOVER_PORT` wins over it (stable plan X4).
-    /// Rust only: the Swift app's settings save drops the row.
+    /// the packages open in the firewall). Settings does not show it: it is
+    /// set in the database, and `STENO_HANDOVER_PORT` wins over it (stable
+    /// plan X4). A stored value that is not a port loads as `None`
+    /// (`Store::settings`). Rust only: the Swift app's settings save drops
+    /// the row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handover_port: Option<u16>,
 }
