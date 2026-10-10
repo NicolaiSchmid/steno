@@ -728,10 +728,8 @@ async fn a_resume_on_the_notice_thread_during_a_stop_does_not_deadlock() {
     let (entered, in_hook) = std::sync::mpsc::channel();
     let (stopping, stop_began) = std::sync::mpsc::channel();
     let stop_began = std::sync::Mutex::new(stop_began);
-    let (once, resumed) = (
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(AtomicBool::new(false)),
-    );
+    let once = AtomicBool::new(false);
+    let resumed = Arc::new(AtomicBool::new(false));
     let watched = Arc::downgrade(&recording.recorder);
     let hook_resumed = resumed.clone();
     recording.recorder.on_change(Arc::new(move || {

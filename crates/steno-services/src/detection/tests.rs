@@ -99,29 +99,37 @@ fn test_names() -> AppNames {
     Arc::new(|bundle_id| bundle_id.unwrap_or("?").to_owned())
 }
 
-fn detector(activity: &FakeProcessAudioActivity, clock: &Arc<ManualClock>) -> MeetingDetector {
-    MeetingDetector::new(
-        Arc::new(activity.clone()),
-        clock.clone(),
-        Some(std::collections::BTreeSet::new()),
-        MeetingDetector::DEFAULT_DEBOUNCE,
-        MeetingDetector::DEFAULT_POLL_INTERVAL,
-    )
+/// A controller over `recorder` and the setting in `store`, its detector
+/// reading `activity`, with a fake panel and its own `ManualClock`.
+fn controller_over(
+    recorder: Arc<dyn CallRecorder>,
+    store: Arc<Store>,
+    activity: Arc<dyn steno_audio::ProcessAudioActivitySource>,
+) -> (Arc<DetectionController>, Arc<FakePanel>, Arc<ManualClock>) {
+    let clock = Arc::new(ManualClock::new());
+    let panel = Arc::new(FakePanel::default());
+    let controller = DetectionController::new(DetectionParts {
+        detector: MeetingDetector::new(
+            activity,
+            clock.clone(),
+            Some(std::collections::BTreeSet::new()),
+            MeetingDetector::DEFAULT_DEBOUNCE,
+            MeetingDetector::DEFAULT_POLL_INTERVAL,
+        ),
+        recorder,
+        panel: panel.clone(),
+        store,
+        clock: clock.clone(),
+        app_names: test_names(),
+    });
+    (controller, panel, clock)
 }
 
 fn harness_over(recorder: Arc<dyn CallRecorder>, fake: Arc<FakeRecorder>) -> Harness {
     let (dir, store) = temp_store();
     let activity = FakeProcessAudioActivity::new(Vec::new());
-    let clock = Arc::new(ManualClock::new());
-    let panel = Arc::new(FakePanel::default());
-    let controller = DetectionController::new(DetectionParts {
-        detector: detector(&activity, &clock),
-        recorder,
-        panel: panel.clone(),
-        store: store.clone(),
-        clock: clock.clone(),
-        app_names: test_names(),
-    });
+    let (controller, panel, clock) =
+        controller_over(recorder, store.clone(), Arc::new(activity.clone()));
     Harness {
         _dir: dir,
         store,
@@ -713,14 +721,20 @@ impl GatedActivity {
         })
     }
 
-    /// Waits until a snapshot waits at the gate.
-    fn until_held(&self) {
+    /// Turns `controller` on on a thread of its own and returns once its
+    /// detector's start waits at the gate, the thread still in it.
+    fn hold_a_start(&self, controller: &Arc<DetectionController>) -> std::thread::JoinHandle<()> {
+        let starting = {
+            let controller = controller.clone();
+            std::thread::spawn(move || controller.set_enabled(true))
+        };
         let (gate, timeout) = self
             .changed
             .wait_timeout_while(self.gate.lock().unwrap(), PATIENCE, |(_, held)| *held == 0)
             .unwrap();
         drop(gate);
         assert!(!timeout.timed_out(), "a snapshot waits at the gate");
+        starting
     }
 
     fn open(&self) {
@@ -749,31 +763,6 @@ impl steno_audio::ProcessAudioActivitySource for GatedActivity {
     }
 }
 
-/// A controller over `recorder` whose detector reads `activity`.
-fn gated_controller(
-    recorder: Arc<dyn CallRecorder>,
-    store: Arc<Store>,
-    activity: Arc<GatedActivity>,
-) -> (Arc<DetectionController>, Arc<FakePanel>) {
-    let clock = Arc::new(ManualClock::new());
-    let panel = Arc::new(FakePanel::default());
-    let controller = DetectionController::new(DetectionParts {
-        detector: MeetingDetector::new(
-            activity,
-            clock.clone(),
-            Some(std::collections::BTreeSet::new()),
-            MeetingDetector::DEFAULT_DEBOUNCE,
-            MeetingDetector::DEFAULT_POLL_INTERVAL,
-        ),
-        recorder,
-        panel: panel.clone(),
-        store,
-        clock,
-        app_names: test_names(),
-    });
-    (controller, panel)
-}
-
 /// The stop turns detection off and takes the prompt down at once, though
 /// a detector start still waits on its first snapshot; only the
 /// detector's own stop waits for that.
@@ -781,13 +770,9 @@ fn gated_controller(
 fn a_stop_takes_the_prompt_down_while_a_detector_start_still_waits() {
     let (_dir, store) = temp_store();
     let activity = GatedActivity::closed();
-    let (controller, panel) =
-        gated_controller(Arc::new(FakeRecorder::default()), store, activity.clone());
-    let starting = {
-        let controller = controller.clone();
-        std::thread::spawn(move || controller.set_enabled(true))
-    };
-    activity.until_held();
+    let (controller, panel, _clock) =
+        controller_over(Arc::new(FakeRecorder::default()), store, activity.clone());
+    let starting = activity.hold_a_start(&controller);
     controller.handle(opened(Some("us.zoom.xos")));
     assert!(controller.has_prompt(), "on while the start waits");
     let stopping = {
@@ -816,8 +801,8 @@ async fn the_quit_save_does_not_wait_for_a_held_detector_start() {
     let mut app =
         crate::testing::app_over_fakes(dir.path(), &store, crate::testing::synthetic_capture());
     let activity = GatedActivity::closed();
-    let (controller, _panel) =
-        gated_controller(app.recorder.clone(), store.clone(), activity.clone());
+    let (controller, _panel, _clock) =
+        controller_over(app.recorder.clone(), store.clone(), activity.clone());
     app.detection = Some(controller.clone());
     let app = Arc::new(app);
     let recorder = app.recorder.clone();
@@ -825,11 +810,7 @@ async fn the_quit_save_does_not_wait_for_a_held_detector_start() {
         recorder.start(CaptureMode::Call, None);
     });
     let meeting_id = app.recorder.status().meeting_id.expect("recording");
-    let starting = {
-        let controller = controller.clone();
-        std::thread::spawn(move || controller.set_enabled(true))
-    };
-    activity.until_held();
+    let starting = activity.hold_a_start(&controller);
     let quitting = {
         let app = app.clone();
         std::thread::spawn(move || app.shutdown())
