@@ -8,17 +8,11 @@ use std::time::Duration;
 
 use steno_audio::testing::ManualClock;
 use steno_bridge::{CaptureMode, RecordingState};
-use steno_core::{MeetingState, RecordingEndReason, Store};
-
-use crate::pipeline::CurrentPipeline;
+use steno_core::{MeetingState, RecordingEndReason};
 use steno_host::services::Recorder as _;
 
 use super::*;
-use crate::recorder::CaptureRecorder;
-use crate::testing::{
-    PATIENCE, current_pipeline, eventually, fake_dependencies, on_own_thread, synthetic_capture,
-    temp_store,
-};
+use crate::testing::{PATIENCE, SyntheticRecorder, eventually, on_own_thread, synthetic_recorder};
 
 /// One step of a [`CallWatch`] script.
 #[derive(Debug, Clone, Copy)]
@@ -245,56 +239,25 @@ fn the_end_reason_is_one_the_swift_app_decodes() {
 
 // The recorder.
 
+/// A [`SyntheticRecorder`] whose auto-stop runs on a manual clock.
 struct Recording {
-    _dir: tempfile::TempDir,
-    store: Arc<Store>,
-    pipeline: Arc<CurrentPipeline>,
+    capture: SyntheticRecorder,
     clock: Arc<ManualClock>,
-    recorder: Arc<CaptureRecorder>,
 }
 
-impl Drop for Recording {
-    /// Stops a recording still running and waits for the pipeline's runs,
-    /// so no file of a test's processing is left behind.
-    fn drop(&mut self) {
-        if self.recorder.is_busy() {
-            self.stop();
-        }
-        let pipeline = self.pipeline.current();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(pipeline.wait_until_idle());
-        });
+impl std::ops::Deref for Recording {
+    type Target = SyntheticRecorder;
+
+    fn deref(&self) -> &SyntheticRecorder {
+        &self.capture
     }
 }
 
-/// A recorder over the synthetic capture whose auto-stop runs on a
-/// manual clock.
 fn recording() -> Recording {
-    let (dir, store) = temp_store();
-    let mut settings = store.settings().unwrap();
-    settings.audio_folder = steno_core::paths::file_url(&dir.path().join("audio"), true);
-    store.save_settings(&settings).unwrap();
-    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
-    let pipeline = current_pipeline(fake_dependencies(&store, "fake-engine"));
-    let recorder = CaptureRecorder::new(
-        store.clone(),
-        pipeline.clone(),
-        synthetic_capture(),
-        fakes.permissions.clone(),
-        fakes.speech_models.clone(),
-        chrono::FixedOffset::east_opt(0).unwrap(),
-        tokio::runtime::Handle::current(),
-        dir.path().join("support"),
-    );
+    let capture = synthetic_recorder();
     let clock = Arc::new(ManualClock::new());
-    recorder.count_down_on(clock.clone());
-    Recording {
-        _dir: dir,
-        store,
-        pipeline,
-        clock,
-        recorder,
-    }
+    capture.recorder.count_down_on(clock.clone());
+    Recording { capture, clock }
 }
 
 impl Recording {

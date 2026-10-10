@@ -16,9 +16,7 @@ use steno_core::{MeetingSource, Store};
 
 use super::*;
 use crate::auto_stop::MicrophoneActivity;
-use crate::testing::{
-    PATIENCE, current_pipeline, fake_dependencies, on_own_thread, synthetic_capture, temp_store,
-};
+use crate::testing::{PATIENCE, SyntheticRecorder, on_own_thread, synthetic_recorder, temp_store};
 
 #[derive(Default)]
 struct FakeRecorder {
@@ -138,6 +136,20 @@ fn harness_over(recorder: Arc<dyn CallRecorder>, fake: Arc<FakeRecorder>) -> Har
 fn harness() -> Harness {
     let recorder = Arc::new(FakeRecorder::default());
     harness_over(recorder.clone(), recorder)
+}
+
+/// A harness over `capture`'s recorder, whose changes reach the
+/// controller as `App::launch` routes them. Declared after `capture`, so
+/// the controller stops before the capture waits for its pipeline.
+fn harness_over_capture(capture: &SyntheticRecorder) -> Harness {
+    let harness = harness_over(capture.recorder.clone(), Arc::new(FakeRecorder::default()));
+    let hooked = Arc::downgrade(&harness.controller);
+    capture.recorder.on_change(Arc::new(move || {
+        if let Some(controller) = hooked.upgrade() {
+            controller.recorder_changed();
+        }
+    }));
+    harness
 }
 
 fn opened(bundle_id: Option<&str>) -> MeetingEvent {
@@ -533,14 +545,8 @@ fn a_call_already_under_way_at_launch_prompts() {
 /// microphone released and opened again does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again() {
-    let capture = capture_recorder();
-    let harness = harness_over(capture.recorder.clone(), Arc::new(FakeRecorder::default()));
-    let hooked = Arc::downgrade(&harness.controller);
-    capture.recorder.on_change(Arc::new(move || {
-        if let Some(controller) = hooked.upgrade() {
-            controller.recorder_changed();
-        }
-    }));
+    let capture = synthetic_recorder();
+    let harness = harness_over_capture(&capture);
     harness.controller.set_enabled(true);
     advance(&harness, 1, 0.5);
     harness.activity.set(vec![zoom()]);
@@ -590,8 +596,6 @@ async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again(
         .wait_until("a microphone opened anew prompts again", |shown| {
             shown.len() == 2
         });
-    drop(harness);
-    capture.wait_until_idle();
 }
 
 /// A recording started from the main window while the prompt is up takes
@@ -599,14 +603,8 @@ async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again(
 /// does not start a second recording.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prompt_never_starts_a_second_recording() {
-    let capture = capture_recorder();
-    let harness = harness_over(capture.recorder.clone(), Arc::new(FakeRecorder::default()));
-    let hooked = Arc::downgrade(&harness.controller);
-    capture.recorder.on_change(Arc::new(move || {
-        if let Some(controller) = hooked.upgrade() {
-            controller.recorder_changed();
-        }
-    }));
+    let capture = synthetic_recorder();
+    let harness = harness_over_capture(&capture);
     harness.controller.set_enabled(true);
     harness.controller.handle(opened(Some("us.zoom.xos")));
     assert!(harness.controller.has_prompt());
@@ -623,52 +621,6 @@ async fn a_prompt_never_starts_a_second_recording() {
     let meetings = capture.store.meetings(10, 0).unwrap();
     assert_eq!(meetings.len(), 1);
     assert_eq!(meetings[0].source, MeetingSource::MacInPerson);
-    let recorder = capture.recorder.clone();
-    on_own_thread(PATIENCE, "Stop returned", move || recorder.stop());
-    drop(harness);
-    capture.wait_until_idle();
-}
-
-struct Capture {
-    _dir: tempfile::TempDir,
-    store: Arc<Store>,
-    pipeline: Arc<crate::pipeline::CurrentPipeline>,
-    recorder: Arc<CaptureRecorder>,
-}
-
-impl Capture {
-    fn wait_until_idle(&self) {
-        let pipeline = self.pipeline.current();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(pipeline.wait_until_idle());
-        });
-    }
-}
-
-/// The capture recorder over the synthetic capture.
-fn capture_recorder() -> Capture {
-    let (dir, store) = temp_store();
-    let mut settings = store.settings().unwrap();
-    settings.audio_folder = steno_core::paths::file_url(&dir.path().join("audio"), true);
-    store.save_settings(&settings).unwrap();
-    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
-    let pipeline = current_pipeline(fake_dependencies(&store, "fake-engine"));
-    let recorder = CaptureRecorder::new(
-        store.clone(),
-        pipeline.clone(),
-        synthetic_capture(),
-        fakes.permissions.clone(),
-        fakes.speech_models.clone(),
-        chrono::FixedOffset::east_opt(0).unwrap(),
-        tokio::runtime::Handle::current(),
-        dir.path().join("support"),
-    );
-    Capture {
-        _dir: dir,
-        store,
-        pipeline,
-        recorder,
-    }
 }
 
 #[test]

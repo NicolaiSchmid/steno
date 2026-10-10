@@ -132,6 +132,59 @@ pub fn synthetic_tone(
     options
 }
 
+/// A capture recorder over [`synthetic_capture`] and fakes, recording
+/// into a temp audio folder, for the tests that drive it from outside
+/// (the auto-stop, the detection prompt). Dropped, it stops a recording
+/// still running and waits for the pipeline's runs, so no file of a
+/// test's processing is left behind; that needs a multi-threaded runtime.
+pub struct SyntheticRecorder {
+    _dir: tempfile::TempDir,
+    pub store: Arc<Store>,
+    pipeline: Arc<CurrentPipeline>,
+    pub recorder: Arc<crate::recorder::CaptureRecorder>,
+}
+
+/// A [`SyntheticRecorder`] on the current runtime.
+pub fn synthetic_recorder() -> SyntheticRecorder {
+    let (dir, store) = temp_store();
+    let mut settings = store.settings().unwrap();
+    settings.audio_folder = steno_core::paths::file_url(&dir.path().join("audio"), true);
+    store.save_settings(&settings).unwrap();
+    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
+    let pipeline = current_pipeline(fake_dependencies(&store, "fake-engine"));
+    let recorder = crate::recorder::CaptureRecorder::new(
+        store.clone(),
+        pipeline.clone(),
+        synthetic_capture(),
+        fakes.permissions.clone(),
+        fakes.speech_models.clone(),
+        chrono::FixedOffset::east_opt(0).unwrap(),
+        tokio::runtime::Handle::current(),
+        dir.path().join("support"),
+    );
+    SyntheticRecorder {
+        _dir: dir,
+        store,
+        pipeline,
+        recorder,
+    }
+}
+
+impl Drop for SyntheticRecorder {
+    fn drop(&mut self) {
+        use steno_host::services::Recorder as _;
+
+        if self.recorder.is_busy() {
+            let recorder = self.recorder.clone();
+            on_own_thread(PATIENCE, "the stop returned", move || recorder.stop());
+        }
+        let pipeline = self.pipeline.current();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(pipeline.wait_until_idle());
+        });
+    }
+}
+
 /// The graph `build` assembles, over fakes, with a recorder over
 /// `make_session` that records into `root/audio`: what `App::shutdown`
 /// drives, the host's recorder, and the launch. On the current runtime.
