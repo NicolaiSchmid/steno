@@ -24,7 +24,7 @@
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
 //! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json`, `audio-folders.json` and `update-check.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the flags in `preferences.json` |
-//! | [`updates`] | The host's `Updater`: the daily update schedule over the shell's updater, its flags, the last check time, the install gate and the packaged-install switch |
+//! | [`updates`] | The host's `Updater`: the daily update schedule over the shell's updater, its flags, the last check time, the install gate (`IdleGate`, stable plan P25) and the packaged-install switch |
 //! | [`qr`] | The host's `QrEncoder`: the pairing code as a PNG |
 //!
 //! What stays a fake here is named in [`build`]'s doc: the platform

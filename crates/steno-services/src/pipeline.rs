@@ -197,6 +197,20 @@ impl CurrentPipeline {
         self.quit_latch.set();
     }
 
+    /// Whether [`quit`](Self::quit) ran: the app is shutting down.
+    #[must_use]
+    pub fn quitting(&self) -> bool {
+        self.quit_latch.is_set()
+    }
+
+    /// The in-flight set every pipeline this one builds shares, the
+    /// retired ones still finishing included: what an update's install
+    /// asks and holds ([`IdleGate`](crate::updates::IdleGate)).
+    #[must_use]
+    pub fn in_flight(&self) -> &InFlight {
+        &self.in_flight
+    }
+
     /// Replaces the pipeline with one built from the stored settings and
     /// the secret store's API key. A failed build keeps the current
     /// pipeline and its engine. The app's builds keep the speech engine,

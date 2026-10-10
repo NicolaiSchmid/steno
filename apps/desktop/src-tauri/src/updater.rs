@@ -27,7 +27,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use steno_services::updates::{
-    CHECK_TIMED_OUT, CHECK_TIMEOUT, MANAGED_CHECK, Question, UpdateSchedule, UpdateSource,
+    Busy, CHECK_TIMED_OUT, CHECK_TIMEOUT, MANAGED_CHECK, Question, UpdateSchedule, UpdateSource,
 };
 use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_dialog::{
@@ -44,8 +44,10 @@ pub const STABLE_ENDPOINT: &str =
 pub const BETA_ENDPOINT: &str =
     "https://github.com/NicolaiSchmid/steno/releases/download/desktop-beta/latest.json";
 
-/// The update alert's and the confirm's install button.
+/// The update alert's install button.
 const INSTALL: &str = "Install and Relaunch";
+/// The install button while a recording or a processing job runs.
+const INSTALL_AFTER: &str = "Install After It Ends";
 
 /// Whether a marketing version is a pre-release (`UpdateChannels.allowed`:
 /// a hyphen means the beta lane).
@@ -166,7 +168,9 @@ impl UpdateSource for ShellUpdates {
             .show_with_result(move |result| {
                 let _ = sender.send(result);
             });
-        receiver.await.is_ok_and(|result| installs(&result))
+        receiver
+            .await
+            .is_ok_and(|result| installs(&result, dialog.install))
     }
 
     /// An install that fails after the shutdown ran (Windows: the
@@ -200,11 +204,12 @@ impl UpdateSource for ShellUpdates {
 
 /// A question's dialog: its kind, its text and its buttons, the default
 /// first (macOS and Windows press the first button on Return, and GTK
-/// focuses it).
+/// focuses it), and the label of the one that installs.
 struct Dialog {
     kind: MessageDialogKind,
     message: String,
     buttons: MessageDialogButtons,
+    install: &'static str,
 }
 
 impl Dialog {
@@ -214,22 +219,32 @@ impl Dialog {
                 kind: MessageDialogKind::Info,
                 message: format!("Steno {version} is available. Install it and relaunch?"),
                 buttons: MessageDialogButtons::OkCancelCustom(INSTALL.into(), "Later".into()),
+                install: INSTALL,
             },
-            // "Not Now" first: the confirm comes up where the alert's
-            // Install was, so a second Return or click would pass it unread.
-            Question::StopRecording => Dialog {
-                kind: MessageDialogKind::Warning,
-                message: "Installing stops and saves the recording in progress.".to_owned(),
-                buttons: MessageDialogButtons::OkCancelCustom("Not Now".into(), INSTALL.into()),
+            // Installing after it ends is the default: neither button
+            // stops the recording or the processing (stable plan P25).
+            Question::AfterItEnds(busy) => Dialog {
+                kind: MessageDialogKind::Info,
+                message: match busy {
+                    Busy::Recording => "Steno is recording. It can install the update and relaunch once the recording ends and is saved.",
+                    Busy::Processing => "Steno is still processing a meeting. It can install the update and relaunch once that is done.",
+                }
+                .to_owned(),
+                buttons: MessageDialogButtons::OkCancelCustom(
+                    INSTALL_AFTER.into(),
+                    "Not Now".into(),
+                ),
+                install: INSTALL_AFTER,
             },
         }
     }
 }
 
-/// Whether the button pressed installs: only the install button's own
-/// label; the other button, Escape and closing the dialog do not.
-fn installs(result: &MessageDialogResult) -> bool {
-    matches!(result, MessageDialogResult::Custom(label) if label == INSTALL)
+/// Whether the button pressed installs: only the label `install`, the
+/// dialog's install button; the other button, Escape and closing the
+/// dialog do not.
+fn installs(result: &MessageDialogResult, install: &str) -> bool {
+    matches!(result, MessageDialogResult::Custom(label) if label == install)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -333,25 +348,39 @@ mod tests {
         }
     }
 
-    /// The update alert's default installs, as Sparkle's does; the
-    /// confirm's default is "Not Now", so a double Return or click passes
-    /// neither dialog into an install over a recording.
+    /// The update alert's default installs, as Sparkle's does; while the
+    /// app is busy the default installs once that ends, and the other
+    /// button is "Not Now". The busy dialog names what it waits for in
+    /// plain words.
     #[test]
-    fn the_confirms_default_button_does_not_install() {
-        let first = |question| match Dialog::of(question).buttons {
-            MessageDialogButtons::OkCancelCustom(first, second) => (first, second),
-            other => panic!("{other:?}"),
+    fn the_busy_dialogs_default_installs_once_it_ends() {
+        let buttons = |question| {
+            let dialog = Dialog::of(question);
+            match dialog.buttons {
+                MessageDialogButtons::OkCancelCustom(first, second) => {
+                    (first, second, dialog.install, dialog.message)
+                }
+                other => panic!("{other:?}"),
+            }
         };
-        assert_eq!(first(Question::Install("0.12.0")).0, INSTALL);
-        let (default, other) = first(Question::StopRecording);
-        assert_eq!(default, "Not Now");
-        assert_eq!(other, INSTALL);
-        assert!(!installs(&MessageDialogResult::Custom(default)));
-        assert!(installs(&MessageDialogResult::Custom(other)));
+        let (default, _, install, _) = buttons(Question::Install("0.12.0"));
+        assert_eq!((default.as_str(), install), (INSTALL, INSTALL));
+        for (busy, named) in [
+            (Busy::Recording, "recording"),
+            (Busy::Processing, "processing"),
+        ] {
+            let (default, other, install, message) = buttons(Question::AfterItEnds(busy));
+            assert_eq!(default, INSTALL_AFTER);
+            assert_eq!(install, INSTALL_AFTER);
+            assert_eq!(other, "Not Now");
+            assert!(message.contains(named), "{message}");
+            assert!(installs(&MessageDialogResult::Custom(default), install));
+            assert!(!installs(&MessageDialogResult::Custom(other), install));
+        }
     }
 
     /// Only the install button installs: Escape, closing the dialog and
-    /// any other result do not.
+    /// any other result do not, nor the other dialog's install button.
     #[test]
     fn only_the_install_button_installs() {
         for result in [
@@ -360,9 +389,14 @@ mod tests {
             MessageDialogResult::Yes,
             MessageDialogResult::No,
             MessageDialogResult::Custom("Later".into()),
+            MessageDialogResult::Custom(INSTALL_AFTER.into()),
         ] {
-            assert!(!installs(&result), "{result:?}");
+            assert!(!installs(&result, INSTALL), "{result:?}");
         }
+        assert!(!installs(
+            &MessageDialogResult::Custom(INSTALL.into()),
+            INSTALL_AFTER
+        ));
     }
 
     /// The download and the install name the update the last check found,

@@ -27,29 +27,33 @@
 //!   ([`UpdateSource::announce`]), as Sparkle's update alert, but not while
 //!   a recording starts, runs or stops; the first tick after it ends
 //!   announces it. The user installs it from there
-//!   ([`UpdateSchedule::offer`]): a yes given after a recording has
-//!   started asks once more, since installing stops and saves it, and a
-//!   "Not Now" there leaves the version to announce again
-//!   ([`UpdateSchedule::announce_again`]).
-//! - **An install** downloads first, unless the package is kept, and then
-//!   holds recording starts off ([`Recorder::hold_starts`]) through the
-//!   install, the shutdown and the relaunch; a Record meanwhile is refused
-//!   and says [`INSTALLING_UPDATE`](steno_host::services::INSTALLING_UPDATE).
-//!   A recording the user did not agree to stop, such as one that started
-//!   during the download, puts the install off: the package is kept and
-//!   the version announced again, and the next yes installs it without a
-//!   second download. One install runs at a time, and only of the version
-//!   the last check found.
-//! - **Automatic downloads** wait for P25's [`InstallGate`] (stable plan):
-//!   until it replaces [`NeverIdle`], the flag is stored and shown but
-//!   nothing downloads by itself. With the gate, a found update is
-//!   downloaded once the app is idle ([`InstallGate::is_idle_now`]), and
-//!   installed while the install holds the gate's [`InstallHold`] through
-//!   the install, the shutdown and the relaunch; while the app is busy the
-//!   download, and then the install, wait for a later tick. The schedule
-//!   keeps the downloaded package, its own or one a put-off install handed
-//!   back, until an install takes it, and frees it when a check finds
-//!   another version, or none, and when automatic downloads are turned off.
+//!   ([`UpdateSchedule::offer`]): a yes given while a recording or a
+//!   processing job runs asks once more, whether to install once it ends
+//!   ([`Question::AfterItEnds`]), and "Not Now" there leaves the version to
+//!   announce again ([`UpdateSchedule::announce_again`]).
+//! - **An install never stops a recording or a processing job** (stable
+//!   plan P25). It installs only while it holds the [`InstallGate`]'s
+//!   [`InstallHold`], which the app's gate ([`IdleGate`]) gives only while
+//!   no recording starts, runs or stops (its save runs while it stops),
+//!   no processing job runs or waits to, and the app is not shutting down.
+//!   The hold is kept through the install, the shutdown and the relaunch:
+//!   meanwhile a Record is refused and says
+//!   [`INSTALLING_UPDATE`](steno_host::services::INSTALLING_UPDATE), and a
+//!   processing job, such as one for a phone recording that arrives, waits
+//!   `queued`. The download comes first, unless the package is kept, and
+//!   only while the app is idle ([`InstallGate::is_idle_now`]), since a
+//!   recording or a processing job has the disk and the network to itself.
+//!   The user's install waits for both, looking again every [`IDLE_POLL`]
+//!   ([`UpdateSchedule::wait_until_idle`]). One install runs at a time,
+//!   and only of the version the last check found.
+//! - **Automatic downloads**: a found update is downloaded at the first
+//!   tick that finds the app idle, and installed at the first tick that
+//!   gets the gate's hold; while the app is busy each waits for a later
+//!   tick. The flag is read again when the download ends and once the
+//!   install holds the gate, so a switch turned off during the transfer
+//!   keeps and installs nothing. The schedule keeps the downloaded package
+//!   until an install takes it, and frees it when a check finds another
+//!   version, or none, and when automatic downloads are turned off.
 //! - **Packaged installs** ([`updates_are_managed`], stable plan X5): no
 //!   schedule, and no check, the user's included.
 //!
@@ -64,10 +68,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use steno_bridge::RecordingState;
-use steno_host::services::{Clock, Preferences, Recorder, RecorderStatus, UpdateOutcome, Updater};
-use uuid::Uuid;
+use steno_host::services::{Clock, Preferences, Recorder, UpdateOutcome, Updater};
 
 use crate::files::{Access, replace_file};
+use crate::pipeline::CurrentPipeline;
 
 /// Whether the schedule checks by itself. Swift: Sparkle's
 /// `SUEnableAutomaticChecks`.
@@ -97,6 +101,9 @@ pub const TICK: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 /// updater's own timeout would cap the download as well, so the limit
 /// wraps the check alone.
 pub const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often the user's install, waiting for a recording or a processing
+/// job to end, looks again ([`UpdateSchedule::wait_until_idle`]).
+pub const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 /// The outcome of a check that ran into [`CHECK_TIMEOUT`].
 pub const CHECK_TIMED_OUT: &str = "The update check timed out.";
 /// The outcome of a check asked for on a packaged install: the line the
@@ -124,31 +131,75 @@ fn managed_by(environment: Option<&str>, build: Option<&str>) -> bool {
 }
 
 /// What an install holds while it installs and relaunches: until it is
-/// dropped no recording starts, no save runs and no processing job begins.
-/// The recording half is the recorder's [`Recorder::hold_starts`], which
-/// every install takes itself; the gate adds the rest.
+/// dropped no recording starts and no processing job begins. [`IdleGate`]'s
+/// is the recorder's [`Recorder::hold_starts`] and the pipelines'
+/// [`JobHold`](steno_pipeline::JobHold).
 pub type InstallHold = Box<dyn Send>;
 
 /// Whether an update may install and relaunch the app now (stable plan
-/// P25). Rust only: Sparkle installed at quit.
+/// P25); the app's is [`IdleGate`]. Rust only: Sparkle installed at quit.
 pub trait InstallGate: Send + Sync {
     /// A hold when the app is idle (no recording starting, running or
-    /// stopping, no save in progress, no processing job), `None` while it
-    /// is busy.
+    /// stopping, no save in progress, no processing job, no shutdown),
+    /// `None` while it is busy. One hold lives at a time.
     fn try_hold(&self) -> Option<InstallHold>;
     /// Whether the app is idle now, without keeping a hold: a download
     /// waits for it, since a recording or a processing job has the disk
     /// and the network to itself. A gate may answer it more cheaply.
-    /// [`NeverIdle`] never is, so through it nothing downloads by itself
-    /// and no package sits in memory that could never install.
     fn is_idle_now(&self) -> bool {
         self.try_hold().is_some()
     }
 }
 
-/// Whether installing now would stop a recording: one is starting, running
-/// or stopping. The announcement waits while it does, and a yes given
-/// meanwhile asks again before it installs.
+/// The app's [`InstallGate`] (stable plan P25), over the recorder and the
+/// pipelines' in-flight set ([`InFlight`](steno_pipeline::InFlight)), which
+/// every reload shares. The app is idle when no recording starts, runs or
+/// stops (a stop saves the recording before the recorder is idle, and by
+/// then its processing job is claimed), the app is not shutting down
+/// ([`CurrentPipeline::quit`]), and no processing job runs or waits to (a
+/// meeting waiting for models waits for the user, so it does not count).
+/// Rust only.
+pub struct IdleGate {
+    recorder: Arc<dyn Recorder>,
+    pipeline: Arc<CurrentPipeline>,
+}
+
+impl IdleGate {
+    /// The gate over the app's recorder and pipeline.
+    #[must_use]
+    pub fn new(recorder: Arc<dyn Recorder>, pipeline: Arc<CurrentPipeline>) -> Self {
+        IdleGate { recorder, pipeline }
+    }
+}
+
+impl InstallGate for IdleGate {
+    /// Takes the recorder's start hold, then reads its status, so no
+    /// recording starts after the read; then the pipelines' job hold,
+    /// whose check that nothing is in flight is one step with the hold. A
+    /// busy app is told apart first without a start hold, so a Record
+    /// clicked while a job runs is never refused for an install that is
+    /// not coming.
+    fn try_hold(&self) -> Option<InstallHold> {
+        if !self.is_idle_now() {
+            return None;
+        }
+        let starts = self.recorder.hold_starts();
+        if stops_a_recording(self.recorder.status().state) || self.pipeline.quitting() {
+            return None;
+        }
+        let jobs = self.pipeline.in_flight().try_hold()?;
+        Some(Box::new((starts, jobs)))
+    }
+
+    fn is_idle_now(&self) -> bool {
+        !stops_a_recording(self.recorder.status().state)
+            && !self.pipeline.quitting()
+            && self.pipeline.in_flight().is_idle()
+    }
+}
+
+/// Whether a recording is under way: one is starting, running or
+/// stopping. The announcement waits while it does, and no install runs.
 fn stops_a_recording(state: RecordingState) -> bool {
     state != RecordingState::Idle
 }
@@ -158,11 +209,20 @@ fn stops_a_recording(state: RecordingState) -> bool {
 pub enum Question<'a> {
     /// The update alert for this version: install it now and relaunch?
     Install(&'a str),
-    /// A yes given while a recording is under way: installing stops and
-    /// saves it, go ahead? The answer that does not install is the
-    /// default, since this dialog follows the alert's yes and a second
-    /// Return would pass it unread.
-    StopRecording,
+    /// A yes given while the app is busy: install once that ends? The
+    /// answer that installs then is the default; neither answer stops the
+    /// recording or the processing.
+    AfterItEnds(Busy),
+}
+
+/// What an install waits for, as [`Question::AfterItEnds`] names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Busy {
+    /// A recording starts, runs or is being saved.
+    Recording,
+    /// A meeting is being processed, or waits to be; or the app is
+    /// shutting down.
+    Processing,
 }
 
 /// How an install ended, when it returned.
@@ -170,26 +230,11 @@ pub enum Question<'a> {
 enum Installed {
     /// The relaunch is under way (in a test, it returned).
     Relaunching,
-    /// A recording the user did not agree to stop is under way: the
-    /// package is kept and the version announced again.
-    PutOff,
     /// The install, or its download, failed; the user is told.
     Failed,
     /// Another install runs, or the last check found another version,
     /// whose own dialog asks, so nothing was installed.
     Skipped,
-}
-
-/// The gate until P25 builds the real one: never idle, so the schedule
-/// never downloads, installs or relaunches by itself, and a found update
-/// waits for the user to install it.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NeverIdle;
-
-impl InstallGate for NeverIdle {
-    fn try_hold(&self) -> Option<InstallHold> {
-        None
-    }
 }
 
 /// The updater the schedule drives, and the dialogs it asks through; the
@@ -299,8 +344,8 @@ pub struct ScheduleParts {
     pub preferences: Arc<dyn Preferences>,
     pub clock: Arc<dyn Clock>,
     pub gate: Arc<dyn InstallGate>,
-    /// The recorder, whose recording holds back the announcement and puts
-    /// an install off, and whose starts an install holds off.
+    /// The recorder, whose recording holds back the announcement and is
+    /// what the user's install says it waits for.
     pub recorder: Arc<dyn Recorder>,
     /// Where [`LAST_CHECK_FILE`] lives.
     pub support_directory: PathBuf,
@@ -423,7 +468,8 @@ impl UpdateSchedule {
     }
 
     /// Downloads the found update when the app is idle; while it is busy
-    /// the download waits for a later tick.
+    /// the download waits for a later tick. A package whose download ends
+    /// after automatic downloads were turned off is not kept.
     async fn download_when_idle(&self) {
         if !self.gate.is_idle_now() {
             return;
@@ -432,7 +478,10 @@ impl UpdateSchedule {
             return;
         };
         match self.source.download(&version).await {
-            Ok(package) => self.state().staged = Some(Staged { version, package }),
+            Ok(package) if self.automatically_downloads() => {
+                self.state().staged = Some(Staged { version, package });
+            }
+            Ok(_) => tracing::info!(%version, "automatic downloads were turned off; not kept"),
             Err(error) => {
                 tracing::warn!(%version, "the update could not be downloaded: {error}");
             }
@@ -488,56 +537,54 @@ impl UpdateSchedule {
     /// Asks whether to install `version` now and, when the user agrees,
     /// installs and relaunches as the module doc's "An install" says:
     /// after the tray's check, and when the schedule announced an update it
-    /// does not install by itself. The dialog may have been open since
-    /// before a recording started, so when the recorder is no longer idle
-    /// by the yes it asks again first ([`Question::StopRecording`]); "Not
-    /// Now", or closing that dialog, leaves the version to announce again
-    /// once the recording has ended. The confirm's yes names the recording
-    /// it may stop; one still starting when the confirm came up has no
-    /// meeting id yet, so the yes names the one under way when it is given.
-    /// Swift: Sparkle's update alert.
+    /// does not install by itself. When the app is busy by the yes (the
+    /// dialog may have been open since before a recording started) it asks
+    /// whether to install once that ends ([`Question::AfterItEnds`]), and
+    /// a yes there waits for it ([`Self::wait_until_idle`]); "Not Now", or
+    /// closing that dialog, leaves the version to announce again once the
+    /// recording has ended. Swift: Sparkle's update alert.
     pub async fn offer(&self, version: &str) {
         if !self.source.ask(Question::Install(version)).await {
             return;
         }
-        let status = self.recorder.status();
-        let agreed_to_stop = if stops_a_recording(status.state) {
-            if !self.source.ask(Question::StopRecording).await {
-                self.announce_again(version);
-                return;
-            }
-            status
-                .meeting_id
-                .or_else(|| self.recorder.status().meeting_id)
-        } else {
-            None
-        };
-        self.install_on_request(version, agreed_to_stop).await;
+        if let Some(busy) = self.busy()
+            && !self.source.ask(Question::AfterItEnds(busy)).await
+        {
+            self.announce_again(version);
+            return;
+        }
+        self.install_on_request(version).await;
     }
 
-    /// The user's install of `version`, after the dialog's yes: from the
-    /// kept package when it is that version (one a put-off install left
-    /// there included), else downloaded now; then installed as
-    /// [`Self::install_now`] does, which may stop the recording of meeting
-    /// `agreed_to_stop` and no other. Nothing installs while another
-    /// install runs, or when the last check found another version, whose
-    /// own dialog asks; a version no longer found fails with a message.
-    async fn install_on_request(&self, version: &str, agreed_to_stop: Option<Uuid>) -> Installed {
+    /// What keeps an install from running now; `None` while the app is
+    /// idle.
+    fn busy(&self) -> Option<Busy> {
+        if self.recording_under_way() {
+            Some(Busy::Recording)
+        } else if self.gate.is_idle_now() {
+            None
+        } else {
+            Some(Busy::Processing)
+        }
+    }
+
+    /// The user's install of `version`, after the dialog's yes: once the
+    /// app is idle, from the kept package when it is that version, else
+    /// downloaded then; then, once the app is idle again and the gate's
+    /// hold is taken ([`Self::wait_until_idle`]), installed as
+    /// [`Self::install_now`] does. A recording started during the download
+    /// is waited for, never stopped. Nothing installs while another
+    /// install runs (a second yes meanwhile does nothing), or when the
+    /// last check found another version, whose own dialog asks; a version
+    /// no longer found fails with a message.
+    async fn install_on_request(&self, version: &str) -> Installed {
         let Some(_one) = OneInstall::start(&self.installing) else {
             return Installed::Skipped;
         };
-        let found = self.state().found.clone();
-        match found {
-            Some(found) if found == version => {}
-            Some(found) => {
-                tracing::info!(%version, %found, "a yes for an update the last check replaced");
-                return Installed::Skipped;
-            }
-            None => {
-                self.install_failed(format!("Steno {version} is no longer the update on offer."));
-                return Installed::Failed;
-            }
+        if let Some(refused) = self.not_on_offer(version) {
+            return refused;
         }
+        self.until_idle().await;
         let kept = self
             .state()
             .staged
@@ -553,33 +600,63 @@ impl UpdateSchedule {
                 }
             },
         };
-        self.install_now(version, package, agreed_to_stop).await
+        let hold = self.wait_until_idle().await;
+        // A check during the waits may have found another version, or none.
+        if let Some(refused) = self.not_on_offer(version) {
+            return refused;
+        }
+        self.install_now(version, package, hold).await
+    }
+
+    /// Why the user's install of `version` does not go ahead, if it does
+    /// not: the last check found another version (skipped, since that one
+    /// has its own dialog) or none (failed, with a message).
+    fn not_on_offer(&self, version: &str) -> Option<Installed> {
+        let found = self.state().found.clone();
+        match found {
+            Some(found) if found == version => None,
+            Some(found) => {
+                tracing::info!(%version, %found, "a yes for an update the last check replaced");
+                Some(Installed::Skipped)
+            }
+            None => {
+                self.install_failed(format!("Steno {version} is no longer the update on offer."));
+                Some(Installed::Failed)
+            }
+        }
+    }
+
+    /// Returns once the gate says the app is idle, looking again every
+    /// [`IDLE_POLL`].
+    async fn until_idle(&self) {
+        while !self.gate.is_idle_now() {
+            tokio::time::sleep(IDLE_POLL).await;
+        }
+    }
+
+    /// The gate's hold, once the app is idle: tried at once and then every
+    /// [`IDLE_POLL`], so it waits for a recording to end and be saved and
+    /// for every processing job, and for an install that holds the gate
+    /// already (the schedule's, which then relaunches or, when it fails,
+    /// drops it). What the user's install waits for after its download.
+    pub async fn wait_until_idle(&self) -> InstallHold {
+        loop {
+            if let Some(hold) = self.gate.try_hold() {
+                return hold;
+            }
+            tokio::time::sleep(IDLE_POLL).await;
+        }
     }
 
     /// Installs the downloaded `package` of `version` and relaunches, while
-    /// holding recording starts off ([`Recorder::hold_starts`]) from just
-    /// before the install through the relaunch. The hold comes before the
-    /// install, not only before the relaunch, since on Windows the
-    /// installer ends the process itself. A recording under way once the
-    /// hold is taken, other than that of meeting `agreed_to_stop`, puts the
-    /// install off: the package goes back to the schedule ([`Self::keep`])
-    /// and the version is announced again. The hold spans the updater's
-    /// password prompt where it asks one (a `.deb` install always does),
-    /// so recording stays refused until the user answers or cancels it; a
-    /// cancel fails the install, which drops the hold.
-    async fn install_now(
-        &self,
-        version: &str,
-        package: Vec<u8>,
-        agreed_to_stop: Option<Uuid>,
-    ) -> Installed {
-        let hold = self.recorder.hold_starts();
-        if !may_stop(&self.recorder.status(), agreed_to_stop) {
-            drop(hold);
-            self.keep(version, package);
-            self.announce_again(version);
-            return Installed::PutOff;
-        }
+    /// `hold`, the gate's, keeps recording starts and processing jobs off
+    /// through the install, the shutdown and the relaunch. The hold is
+    /// taken before the install, not only before the relaunch, since on
+    /// Windows the installer ends the process itself. It spans the
+    /// updater's password prompt where it asks one (a `.deb` install
+    /// always does), so recording stays refused until the user answers or
+    /// cancels it; a cancel fails the install, which drops the hold.
+    async fn install_now(&self, version: &str, package: Vec<u8>, hold: InstallHold) -> Installed {
         match self.source.install(version, package).await {
             Ok(()) => {
                 self.source.relaunch().await;
@@ -594,37 +671,29 @@ impl UpdateSchedule {
         }
     }
 
-    /// A put-off install hands its package back, kept while the last check
-    /// still found `version`.
-    fn keep(&self, version: &str, package: Vec<u8>) {
-        let mut state = self.state();
-        if state.found.as_deref() == Some(version) {
-            state.staged = Some(Staged {
-                version: version.to_owned(),
-                package,
-            });
-        }
-    }
-
     /// Whether a recording is starting, running or stopping now
     /// ([`stops_a_recording`]).
     fn recording_under_way(&self) -> bool {
         stops_a_recording(self.recorder.status().state)
     }
 
-    /// An install of `version` was put off because a recording is under
-    /// way (the user's "Not Now", or a recording started during the
-    /// download): the first idle tick after it ends announces it again.
+    /// The user put the install of `version` off ("Not Now" while the app
+    /// was busy): the first idle tick after the recording ends announces
+    /// it again.
     pub fn announce_again(&self, version: &str) {
         self.state()
             .announced
             .take_if(|announced| *announced == version);
     }
 
-    /// Installs the kept package while holding the gate; true when the
-    /// relaunch is under way.
+    /// Installs the kept package while holding the gate, unless automatic
+    /// downloads were turned off meanwhile; true when the relaunch is
+    /// under way. With nothing kept it takes no hold.
     async fn install_when_idle(&self) -> bool {
-        let Some(_hold) = self.gate.try_hold() else {
+        if self.state().staged.is_none() {
+            return false;
+        }
+        let Some(hold) = self.gate.try_hold() else {
             return false;
         };
         let Some(_one) = OneInstall::start(&self.installing) else {
@@ -633,7 +702,10 @@ impl UpdateSchedule {
         let Some(staged) = self.state().staged.take() else {
             return false;
         };
-        self.install_now(&staged.version, staged.package, None)
+        if !self.automatically_downloads() {
+            return false;
+        }
+        self.install_now(&staged.version, staged.package, hold)
             .await
             == Installed::Relaunching
     }
@@ -731,14 +803,6 @@ impl Updater for UpdateSchedule {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Whether an install may stop what the recorder is doing, as `status`
-/// says once starts are held off: nothing, or the recording of the meeting
-/// the user agreed to stop.
-fn may_stop(status: &RecorderStatus, agreed_to_stop: Option<Uuid>) -> bool {
-    !stops_a_recording(status.state)
-        || agreed_to_stop.is_some_and(|meeting| status.meeting_id == Some(meeting))
 }
 
 /// An install under way: while it lives a second one returns at once.
