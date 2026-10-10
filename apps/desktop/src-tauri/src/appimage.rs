@@ -501,18 +501,21 @@ pub(crate) mod tests {
     }
 
     /// A folder is no FUSE mount; a path's own file system and device, the
-    /// kernel's device numbers.
+    /// kernel's device numbers, and the magic numbers `libc` gives.
     #[test]
     fn a_folder_has_no_fuse_connection() {
         let folder = tempfile::tempdir().unwrap();
         assert_eq!(fuse_connection(folder.path()), None);
         assert_eq!(fuse_connection(Path::new("/nonexistent")), None);
         assert_eq!(file_system(Path::new("/nonexistent")), None);
-        // `/proc` is a file system of its own, `PROC_SUPER_MAGIC`.
+        assert_eq!(u32::try_from(libc::FUSE_SUPER_MAGIC), Ok(FUSE_SUPER_MAGIC));
         let proc = Path::new("/proc");
         assert_eq!(
             file_system(proc),
-            Some((0x9fa0, std::fs::metadata(proc).unwrap().dev()))
+            Some((
+                u32::try_from(libc::PROC_SUPER_MAGIC).unwrap(),
+                std::fs::metadata(proc).unwrap().dev()
+            ))
         );
         let (_, dev) = file_system(folder.path()).unwrap();
         assert_eq!(dev, std::fs::metadata(folder.path()).unwrap().dev());

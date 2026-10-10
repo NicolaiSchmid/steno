@@ -49,8 +49,8 @@ libc.workspace = true
 gdk.workspace = true
 gio.workspace = true
 # The `AppImage`'s mount: `statfs` and the device number's parts, for
-# whether `$APPDIR` is a FUSE mount and which (`appimage`). Already in the
-# lock.
+# which FUSE mount `$APPDIR` and the executable are on (`appimage`).
+# Already in the lock.
 rustix.workspace = true
 # The logout and shutdown clients (`session_end`), the user manager's
 # reload after a stop timeout drop-in changes (`stop_timeout`) and the

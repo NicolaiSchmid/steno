@@ -211,9 +211,10 @@ fn setup(
     runtime: &'static tokio::runtime::Runtime,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // First, before the first window starts WebKit's processes, so they
-    // follow the app into its scope.
+    // follow the app into its scope; and the AppImage's mount servers into
+    // theirs.
     #[cfg(target_os = "linux")]
-    own_scope::leave_foreign_service();
+    own_scope::take_own_scopes();
     handle.manage(std::sync::Arc::new(updater::ShellUpdates::new(
         handle.clone(),
     )));

@@ -57,7 +57,7 @@
 //! bus's socket in `$XDG_RUNTIME_DIR` and carries the pids, the scopes'
 //! names and their fixed settings, nothing else.
 //!
-//! - [`leave_foreign_service`]: the one entry point, called first in
+//! - [`take_own_scopes`]: the one entry point, called first in
 //!   `setup`.
 //! - [`launch`]: the plan from the app's cgroup and its mount servers,
 //!   carried out.
@@ -106,7 +106,8 @@ const SYSTEMD_MANAGER: &str = "org.freedesktop.systemd1.Manager";
 const SYSTEMD_JOB: &str = "org.freedesktop.systemd1.Job";
 const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 
-/// Why the app is not in a scope of its own.
+/// Why a process, the app or a mount server, is not in the scope it was to
+/// move into.
 #[derive(Debug, thiserror::Error)]
 enum MoveError {
     #[error("no user bus: XDG_RUNTIME_DIR is not an absolute path")]
@@ -117,7 +118,10 @@ enum MoveError {
     Bus(#[from] zbus::Error),
     #[error("the user manager's job ended without the move")]
     NotMoved,
-    #[error("the user manager had not started the scope after {}s; its start stays queued", QUEUE_LIMIT.as_secs())]
+    #[error(
+        "the user manager had not started the scope {} s after the launch; its start stays queued",
+        QUEUE_LIMIT.as_secs()
+    )]
     StillQueued,
     #[error("the move still waits for the user manager")]
     Waiting,
@@ -583,7 +587,7 @@ fn report(unit: &str, outcome: &Outcome, late: bool) {
 /// servers out of the units they run in (the module docs). Called at
 /// launch, before the first window. Never fails: the app records where it
 /// is otherwise.
-pub fn leave_foreign_service() {
+pub fn take_own_scopes() {
     launch(
         std::process::id(),
         crate::appimage::mount_servers,
@@ -976,7 +980,7 @@ mod tests {
     /// [`move_out`] for the app 4242 in Hyprland's unit, bounded.
     fn move_app(app: &Connection, servers: &[u32], cgroup_of: CgroupOf) -> Outcome {
         let (app, servers) = (app.clone(), servers.to_vec());
-        bounded(move || move_out(&app, HYPRLAND, 4242, &servers, cgroup_of, soon()))
+        bounded(move || move_out(&app, HYPRLAND, 4242, &servers, cgroup_of, in_time()))
     }
 
     /// Every process once the manager moved it: the app 4242 in its scope,
@@ -992,8 +996,14 @@ mod tests {
     /// Every process when the manager never moved it.
     const LEFT_BEHIND: CgroupOf = |_| Ok(below_user_manager(&format!("session.slice/{HYPRLAND}")));
 
+    /// A deadline the test lets pass: the start stays queued.
     fn soon() -> Instant {
         Instant::now() + Duration::from_millis(300)
+    }
+
+    /// A deadline a move that succeeds meets on a loaded machine.
+    fn in_time() -> Instant {
+        Instant::now() + Duration::from_secs(3)
     }
 
     fn property(properties: &[(String, OwnedValue)], key: &str) -> OwnedValue {
@@ -1044,7 +1054,7 @@ mod tests {
                 4242,
                 connect,
                 cgroup_of,
-                soon(),
+                in_time(),
             )
             .expect("a thread moves the servers")
             .join()
@@ -1182,32 +1192,32 @@ mod tests {
     #[test]
     fn the_mount_servers_move_is_checked() {
         let unit = "app-steno\\x2ddesktop@autostart.service";
-        let image = |app: &Connection, cgroup_of: CgroupOf| {
+        let image = |app: &Connection, cgroup_of: CgroupOf, deadline: Instant| {
             let app = app.clone();
-            bounded(move || move_server(&app, 77, unit, cgroup_of, soon()))
+            bounded(move || move_server(&app, 77, unit, cgroup_of, deadline))
         };
 
         let Some((_daemon, asked, _manager, app)) = fake(true, Some(7)) else {
             return;
         };
-        image(&app, MOVED).unwrap();
+        image(&app, MOVED, in_time()).unwrap();
         assert_eq!(starts(asked), servers_before(&[77], unit));
         assert!(asked.units.lock().unwrap().is_empty());
-        let error = image(&app, LEFT_BEHIND).unwrap_err();
+        let error = image(&app, LEFT_BEHIND, soon()).unwrap_err();
         assert!(matches!(error, MoveError::StillQueued), "{error}");
         nothing_undone(asked);
 
         let Some((_daemon, _asked, _manager, app)) = fake(false, Some(7)) else {
             return;
         };
-        let error = image(&app, LEFT_BEHIND).unwrap_err();
+        let error = image(&app, LEFT_BEHIND, in_time()).unwrap_err();
         assert!(matches!(error, MoveError::NotMoved), "{error}");
-        image(&app, MOVED).unwrap();
+        image(&app, MOVED, in_time()).unwrap();
 
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let error = image(&daemon.connect(), MOVED).unwrap_err();
+        let error = image(&daemon.connect(), MOVED, in_time()).unwrap_err();
         assert!(matches!(error, MoveError::Bus(_)), "{error}");
     }
 
@@ -1241,7 +1251,7 @@ mod tests {
                 4242,
                 move || Ok(connection),
                 MOVED,
-                soon(),
+                in_time(),
             )
         });
         assert!(moved.is_none());
@@ -1257,7 +1267,13 @@ mod tests {
         nothing_undone(asked);
 
         let ((), logged) = warnings(|| {
-            let none = carry_out(Plan::Stay, 4242, || Err(MoveError::NotMoved), MOVED, soon());
+            let none = carry_out(
+                Plan::Stay,
+                4242,
+                || Err(MoveError::NotMoved),
+                MOVED,
+                in_time(),
+            );
             assert!(none.is_none());
         });
         assert_eq!(logged, "");
@@ -1277,7 +1293,7 @@ mod tests {
                 4242,
                 no_bus,
                 MOVED,
-                soon(),
+                in_time(),
             )
         });
         assert_eq!(stayed(&logged), ["60", "77"], "{logged}");
@@ -1298,8 +1314,15 @@ mod tests {
         assert_eq!(stayed(&logged), ["60", "77"], "{logged}");
         assert!(logged.contains("without the move"), "{logged}");
 
-        let (none, logged) =
-            warnings(|| carry_out(Plan::ServersStay(vec![60, 77]), 4242, no_bus, MOVED, soon()));
+        let (none, logged) = warnings(|| {
+            carry_out(
+                Plan::ServersStay(vec![60, 77]),
+                4242,
+                no_bus,
+                MOVED,
+                in_time(),
+            )
+        });
         assert!(none.is_none());
         assert_eq!(stayed(&logged), ["60", "77"], "{logged}");
         assert!(logged.contains("session scope"), "{logged}");
@@ -1351,7 +1374,8 @@ mod tests {
     /// The launch reads the app's cgroup, takes the mount servers found
     /// that are not in a scope of their own yet, and moves them: for an app
     /// that stays in GNOME's scope, the mount server 60, in its scope
-    /// already, stays, and 77 moves, which is written to stderr.
+    /// already, stays, and 77 moves, which is written to stderr; an app that
+    /// leaves Hyprland's unit writes its own move.
     #[test]
     fn the_launch_moves_the_mount_servers_found_and_writes_each_move_to_stderr() {
         static READS: AtomicUsize = AtomicUsize::new(0);
@@ -1363,12 +1387,13 @@ mod tests {
             };
             let moves: Vec<&str> = stderr
                 .lines()
-                .filter(|line| line.contains("mount server"))
+                .filter(|line| line.contains("scope of its own"))
                 .collect();
             assert_eq!(
                 moves,
                 [
-                    "[steno-desktop] moved the AppImage's mount server 77 into a scope of its own, app-steno\\x2ddesktop\\x2dimage-77.scope, which the session's end does not stop"
+                    "[steno-desktop] moved the AppImage's mount server 77 into a scope of its own, app-steno\\x2ddesktop\\x2dimage-77.scope, which the session's end does not stop",
+                    "[steno-desktop] started inside wayland-wm@hyprland.desktop.service and moved into a scope of its own, app-steno\\x2ddesktop-4242.scope, where a save at the session's end has 20 s",
                 ],
                 "{stderr}"
             );
@@ -1385,11 +1410,24 @@ mod tests {
             77 if READS.fetch_add(1, Ordering::SeqCst) == 0 => LEFT_BEHIND(pid),
             _ => MOVED(pid),
         };
-        launch(4242, || vec![60, 77], move || Ok(app), cgroup_of, soon())
+        let leaving = app.clone();
+        launch(4242, || vec![60, 77], move || Ok(app), cgroup_of, in_time())
             .expect("a thread moves the servers")
             .join()
             .unwrap();
         assert_eq!(starts(asked), servers_before(&[77], GNOME));
+
+        let none = carry_out(
+            Plan::Leave(HYPRLAND, vec![]),
+            4242,
+            move || Ok(leaving),
+            MOVED,
+            in_time(),
+        );
+        assert!(none.is_none());
+        let mut expected = servers_before(&[77], GNOME);
+        expected.push((scope_name(4242), None));
+        assert_eq!(starts(asked), expected);
         nothing_undone(asked);
     }
 
@@ -1433,7 +1471,8 @@ mod tests {
         };
 
         let started = Instant::now();
-        let error = move_app(&app, &[], LEFT_BEHIND).unwrap_err();
+        let error =
+            bounded(move || move_out(&app, HYPRLAND, 4242, &[], LEFT_BEHIND, soon())).unwrap_err();
         assert!(matches!(error, MoveError::StillQueued), "{error}");
         assert!(started.elapsed() < Duration::from_secs(2));
         nothing_undone(asked);
