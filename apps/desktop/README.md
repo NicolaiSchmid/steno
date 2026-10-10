@@ -727,25 +727,29 @@ stops: the first hourly tick after the recording ends brings it up.
 
 An update never stops a recording or a processing run (P25 of
 `.plans/2026-10-07-stable-promotion.md`). A yes given while Steno records
-or processes a meeting asks again, in plain words ("Steno is recording.
-Install the update and relaunch once the recording is saved and
-processed?", or "Steno is still processing a meeting. Install the update
-and relaunch once it is done?"), with Install After It Ends as the default
-button; Not Now leaves the update for the next tick with no recording
-under way. After a yes the app waits until nothing records or processes,
-looking every two seconds, then downloads the update, waits again if a
-recording started during the download, and installs. A newer version
-that a check finds meanwhile is installed instead, without asking again.
+or processes a meeting asks again ("Steno is recording. Install the
+update and relaunch once the recording is saved and processed?", or
+"Steno is still processing a meeting. Install the update and relaunch
+once it is done?"), with Install After It Ends as the default button; Not
+Now leaves the update for the next tick with no recording under way.
+After a yes the app waits until nothing records or processes, looking
+every two seconds, then downloads the update, waits again if a recording
+started during the download, and installs. A newer version that a check
+finds meanwhile is installed instead; an install that asks for a
+password or for consent asks about it first (below).
 
 Recording always wins over an install. A `.deb` or `.rpm` install asks
-for a password first (pkexec, then a zenity or kdialog dialog), and
-nobody may be there to answer, so Record keeps working while the update
-installs. A processing run that would start meanwhile (a phone recording
-that arrives) waits, saved as queued, for a minute at most. Once the
-update is installed Steno relaunches; when a recording or a processing
-run started during the install, Steno says "Steno 0.12.0 is installed.
-Steno relaunches into it once the recording is saved and processed." and
-relaunches once it is done. Cancelling every password prompt ends the
+for a password first (pkexec, then a zenity or kdialog dialog), and the
+prompt may wait, so Record keeps working while the update installs. A
+macOS app in a folder the user cannot write asks for an administrator
+too; that prompt holds Steno's windows until it is answered. A
+processing run that would start meanwhile (a phone recording that
+arrives) waits, saved as queued, for a minute at most; a password typed
+later still installs. Once the update is installed Steno relaunches;
+when a recording or a processing run started during the install, Steno
+says "Steno 0.12.0 is installed. Steno relaunches once the recording is
+saved and processed." and relaunches once it is done, and says it again
+to a yes given meanwhile. Cancelling every password prompt ends the
 install with an error. Only while Steno shuts down to relaunch, and on
 Windows while it starts the installer, which ends the app, is Record
 refused, with "Steno is relaunching to finish installing an update. You
@@ -753,12 +757,22 @@ can record again in a moment."; a summary re-run or an export asked for
 in those seconds is not kept and has to be asked for again after the
 relaunch.
 
+An install that asks for a password or for consent (the MSI, whose
+Windows prompt comes after it has ended Steno) runs only right after a
+yes given while Steno is idle, so someone is there to answer and Steno is
+not left down behind the prompt. A yes given while Steno was busy, or one it
+turned busy after, asks once more when it is idle: "Steno 0.12.0 is
+ready to install. Install it and relaunch now?", with Later leaving the
+update for the next tick. The NSIS setup installs for the user alone and
+asks nothing.
+
 With automatic downloads on, the schedule downloads a found update at the
 first tick that finds the app idle and no install under way, and installs
 it in that tick, or in the first later one that finds it idle; turning
 the switch off during the download keeps nothing. The schedule does not
-run a `.deb` or `.rpm` install by itself, since it asks for a password:
-it offers the downloaded update instead. The gate is
+run a `.deb`, `.rpm` or MSI install, or one of a macOS app it cannot
+write, by itself, since it asks for a password or for consent: it offers
+the downloaded update instead. The gate is
 `steno_services::updates::IdleGate`.
 
 With `STENO_DISTRIBUTION` set to `aur` or `nix` the schedule does not

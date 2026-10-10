@@ -2915,7 +2915,7 @@ touch and admission lines; each fix is ported to Swift before cutover.
   stops (the save runs while it stops, and its processing job is claimed before the
   recorder is idle), no processing job, summary re-run or re-export is in flight or
   claimed, and the app is not shutting down. A yes given while the app is busy asks
-  again in plain words ("Steno is recording. Install the update and relaunch once the
+  again ("Steno is recording. Install the update and relaunch once the
   recording is saved and processed?" or "Steno is still processing a meeting. Install
   the update and relaunch once it is done?"), with "Install After It Ends" as the
   default and "Not Now", which leaves the version to be raised again. After a yes the
@@ -2923,17 +2923,31 @@ touch and admission lines; each fix is ported to Swift before cutover.
   for the gate's hold (`UpdateSchedule::hold_once_idle`), so a recording started
   during the download is waited for, never stopped. The hold is the recorder's start
   hold (`Recorder::hold_starts`) and the pipelines' `JobHold`. Recording always wins:
-  an installer that returns (`Installer::InPlace`, an AppImage or a macOS bundle;
-  `Installer::AsksForAPassword`, a `.deb` or `.rpm`, which asks through pkexec, then a
-  zenity or kdialog password dialog, then a terminal `sudo`, and may wait for good)
-  lets the start hold go at once and the job hold after `INSTALL_HOLD_LIMIT`, one
-  minute, so a Record during the password prompt records, and a job claimed meanwhile
-  (a phone recording's) waits `queued` for a minute at most. Once it has installed, the
-  relaunch takes the gate's hold again, and when a recording or a job started meanwhile
-  it tells the user ("Steno 0.12.0 is installed. Steno relaunches into it once the
-  recording is saved and processed.") and waits for it. On Windows the installer ends
-  the app (`Installer::EndsTheApp`), and the hold is kept through the install, which
-  waits on nothing outside Steno before the shutdown. The hold is kept through the
+  an installer that returns (`Installer::InPlace`, an AppImage or a macOS bundle the
+  user can write; `Installer::AsksForAPassword`, a `.deb` or `.rpm`, which asks through
+  pkexec, then a zenity or kdialog password dialog, then a terminal `sudo`, and may
+  wait for good, or a macOS bundle the user cannot write, which asks for an
+  administrator, a prompt that holds the app's windows until it is answered) lets the
+  start hold go at once and the job hold after `JOB_HOLD_LIMIT`, one minute, so a
+  Record during the `.deb`'s password prompt records, and a job claimed meanwhile (a
+  phone recording's) waits `queued` for a minute at most. The
+  install is awaited however long the prompt waits, so a password typed after the
+  minute still installs and relaunches. Once it has installed, the relaunch takes the
+  gate's hold again, and when a recording or a job started meanwhile it tells the user
+  ("Steno 0.12.0 is installed. Steno relaunches once the recording is saved and
+  processed.") and waits for it; a yes given meanwhile (the tray's check still finds
+  the installed version) gets the same message, and an install that returns during a
+  Quit says nothing, since the app quits instead. On Windows the installer ends the
+  app, and the hold is kept through the install: the NSIS setup
+  (`Installer::EndsTheApp`) installs for the user alone and waits on nothing outside
+  Steno before the shutdown; the MSI (`Installer::EndsTheAppThenAsks`) installs for
+  every user, so Windows asks for consent after the app has ended, and Steno stays
+  down until someone answers. An installer that asks an administrator (a `.deb`, an
+  `.rpm`, an unwritable macOS bundle, the MSI) therefore runs only right after a yes
+  given while the app is idle: a yes given while it was busy, or one it turned busy
+  after, asks once more when it is idle ("Steno 0.12.0 is ready to install. Install it
+  and relaunch now?"), holding nothing while that dialog is up, and "Later" leaves the
+  version to be raised again. The hold is kept through the
   shutdown and the relaunch: a Record then, from the sidebar, the tray or a meeting
   prompt, is refused and says "Steno is relaunching to finish installing an update.
   You can record again in a moment."; a background run claimed then stays `queued`
@@ -2944,8 +2958,8 @@ touch and admission lines; each fix is ported to Swift before cutover.
   `InstallGate::is_idle_now` says idle and no install runs (a recording or a
   processing job has the disk and the network to itself), keeps the package until an
   install takes it, and installs only with the gate's hold from `try_hold`, taken after
-  the one-install guard; it does not run an installer that asks for a password, whose
-  package it announces instead. The flag is read again when the download ends, and
+  the one-install guard; it does not run an installer that asks an administrator,
+  whose package it announces instead. The flag is read again when the download ends, and
   turning it off frees the kept package, so a switch turned off during the transfer
   keeps and installs nothing. Sparkle installed a download at quit. Settings' footer
   now says only "Updates are checked once a day." (`general-section.tsx`, the
@@ -3281,7 +3295,7 @@ PR off `main`.
 | Stable plan X6: the AUR package `steno-desktop-bin` (`packaging/aur/`), repackaging the release `.deb` verified against the release key, the binary and the sidecar in `/usr/lib/steno-desktop/` behind a `/usr/bin` wrapper that sets `STENO_DISTRIBUTION=aur` and `STENO_EXEC_PATH`, P5's drop-ins (copies until the pinned `.deb` ships them), no install script, pinned to rc.3 until a release contains #227 and #261; checked in an Arch container by `packaging/check-aur.sh` (`aur-ci.yml`) | `feat/aur-steno-desktop-bin` | #265 | open |
 | Tests never write placeholder models into a models directory `STENO_MODELS_DIR` names: the reload test that installed them into the app's resolved directory (and so over a developer's real models) pins its own in the settings, the CLI tests clear the variable, `steno-services`' model writers panic outside the temp directory or inside the named one, and a child-process test proves the named directory is left alone | `fix/test-models-dir-guard` | #273 | open |
 | S2: meeting detection on every platform (`steno_services::detection`: one prompt at a time for 60 s through the shell's panel, none while recording or with detection off, its Record attributed to the prompt's app through `recordFromPrompt`, the setting read every two seconds, which retries a detector that could not start) and the auto-stop after a call (`steno_services::auto_stop`: the 90-second grace, Keep recording, the call resuming, the Stop path with `callEnded`) (`steno-services`, desktop shell, web prompt) | `feat/rust-recorder-policy` | #271 | open |
-| No update stops a recording or a processing run: the app's install gate over the recorder and the pipelines' in-flight set, whose job hold keeps jobs claimed during the install waiting for a minute at most; Record always works while an installer that returns (a `.deb`'s password prompt) runs, and the relaunch waits for what started; the user's yes while busy installs after it ends; automatic downloads on, not for a password installer (P25 of `.plans/2026-10-07-stable-promotion.md`; `steno-pipeline`, `steno-services`, desktop shell) | `fix/desktop-updates-wait-for-idle` | #270 | open |
+| No update stops a recording or a processing run: the app's install gate over the recorder and the pipelines' in-flight set, whose job hold keeps jobs claimed during the install waiting for a minute at most; Record always works while an installer that returns (a `.deb`'s password prompt) runs, and the relaunch waits for what started; the user's yes while busy installs after it ends; automatic downloads on, not for an installer that asks an administrator, which runs only right after a yes given while idle (P25 of `.plans/2026-10-07-stable-promotion.md`; `steno-pipeline`, `steno-services`, desktop shell) | `fix/desktop-updates-wait-for-idle` | #270 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
