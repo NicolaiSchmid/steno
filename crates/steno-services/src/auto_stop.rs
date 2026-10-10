@@ -14,10 +14,11 @@
 //! Swift app's `RecordingEndReason` decodes; any other stop (Stop, quit, a
 //! failure) disarms it first and keeps its own end reason.
 //!
-//! A capture that recovers from a lost device (coreaudiod restarting
-//! empties the detector's process list too) must not end the call it is
-//! keeping alive; the capture gates the countdown. `CallWatch` remembers
-//! that the call app let go, and
+//! A capture that recovers after a device change or a restart
+//! (coreaudiod restarting empties the detector's process list too) must
+//! not end the call it is keeping alive; the capture's recovery (#244) is
+//! to gate the countdown. `CallWatch` remembers that the call app let go,
+//! and
 //! [`CaptureRecorder::resume_auto_stop`](crate::recorder::CaptureRecorder::resume_auto_stop),
 //! called when the capture is back, arms a fresh countdown when the app
 //! still holds no microphone.
@@ -176,9 +177,9 @@ impl CallWatch {
 
     /// "Keep recording": the countdown goes and does not come back until
     /// the next call is seen (`opened`, then `released`). Swift:
-    /// `RecordingController.keepRecording`. A click that
-    /// lands once nothing is armed (the app opened the microphone again, a
-    /// double click) changes nothing; `true` when it disarmed.
+    /// `RecordingController.keepRecording`. A click that lands once nothing
+    /// is armed (the app opened the microphone again, a double click)
+    /// changes nothing; `true` when it disarmed.
     pub(crate) fn keep_recording(&mut self) -> bool {
         if self.armed.is_none() {
             return false;

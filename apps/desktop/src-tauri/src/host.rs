@@ -685,10 +685,9 @@ impl Host {
         }
     }
 
-    /// The X of prompt `raised` took it down: the detection controller
-    /// hears of it
-    /// (`steno_services::detection::DetectionController::dismissed`); a
-    /// no-op for the fixtures and without detection.
+    /// The X of prompt `raised` took it down: the detection controller hears
+    /// of it (`steno_services::detection::DetectionController::dismissed`);
+    /// a no-op for the fixtures and without detection.
     #[cfg_attr(feature = "fixture-host", allow(unused_variables))]
     pub fn prompt_dismissed(&self, raised: Option<u64>) {
         #[cfg(not(feature = "fixture-host"))]

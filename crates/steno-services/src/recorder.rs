@@ -761,10 +761,10 @@ impl CaptureRecorder {
     /// recorder's lock only to arm, spawns the countdown's thread and
     /// waits for nothing, so the capture's notice thread may call it: a
     /// stop joins that thread without the lock. An armed countdown is
-    /// reported through the change hook ([`Self::on_change`]) on the
-    /// calling thread. Call it holding no lock the change hook takes, the
-    /// capture's outage lock among them: the hook runs on the calling
-    /// thread and reads the status.
+    /// reported through the change hook ([`Self::on_change`]). Call it
+    /// holding no lock the change hook takes, the capture's outage lock
+    /// among them: the hook runs on the calling thread and reads the
+    /// status.
     pub fn resume_auto_stop(&self) {
         if self.arm_auto_stop(&mut self.inner(), CallWatch::resume) {
             self.notify();
