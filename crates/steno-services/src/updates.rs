@@ -66,10 +66,10 @@
 //!   [`LONG_DOWNLOAD`] counts as such a wait. On Windows the app ends
 //!   before the MSI's prompt, so Steno is down until the prompt is
 //!   answered; a no or a failure starts the version that ran again, as a
-//!   failed NSIS setup does (the shell's Windows watcher). A yes given while the app was
-//!   busy, or one the app turned busy after, is asked again once it is
-//!   idle ([`Question::InstallNow`]), before the install takes the hold.
-//!   "Later" there keeps a package the schedule had kept.
+//!   failed NSIS setup does (the shell's Windows watcher). A yes given
+//!   while the app was busy, or one the app turned busy after, is asked
+//!   again once it is idle ([`Question::InstallNow`]), before the install
+//!   takes the hold. "Later" there keeps a package the schedule had kept.
 //! - **Between an install that returned and the relaunch** the running
 //!   version works beside the new files. A recording reads none of them; a
 //!   processing job starts the new speech sidecar, which fails cleanly
@@ -329,14 +329,14 @@ pub enum Installer {
     /// `.deb` or an `.rpm`, or a macOS bundle the user cannot write.
     AsksForAPassword,
     /// Ends the app and leaves the installer to a watcher: Windows' NSIS
-    /// setup, which installs for the user alone. Nothing outside Steno is waited on
-    /// before the shutdown, and a setup that fails starts the version that
-    /// ran again.
+    /// setup, which installs for the user alone. Nothing outside Steno is
+    /// waited on before the shutdown, and a setup that fails starts the
+    /// version that ran again.
     EndsTheApp,
     /// Ends the app; the installer then asks for an administrator's consent
-    /// and installs for every user: Windows' MSI.
-    /// Steno is down until the prompt is answered; a no or a failure
-    /// starts the version that ran again.
+    /// and installs for every user: Windows' MSI. Steno is down until the
+    /// prompt is answered; a no or a failure starts the version that ran
+    /// again.
     EndsTheAppThenAsks,
 }
 
