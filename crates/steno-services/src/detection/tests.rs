@@ -822,7 +822,12 @@ async fn the_quit_save_does_not_wait_for_a_held_detector_start() {
             .is_some_and(|meeting| meeting.end_reason == Some(RecordingEndReason::Quit))
     })
     .await;
-    assert_eq!(app.recorder.status().state, RecordingState::Idle);
+    // The meeting is written before the stop joins its threads and goes
+    // idle.
+    crate::testing::eventually("the recorder settled", || {
+        app.recorder.status().state == RecordingState::Idle
+    })
+    .await;
     activity.open();
     tokio::task::block_in_place(|| {
         starting.join().unwrap();
