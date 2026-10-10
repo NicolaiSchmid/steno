@@ -403,7 +403,7 @@ mod tests {
     /// its arguments, one per line, into `<name>.ran` beside itself, and
     /// exits with `STENO_TEST_EXIT_CODE`. A window app, as Steno is.
     #[cfg(windows)]
-    const STUB: &str = r##"
+    const STUB: &str = r#"
 #![windows_subsystem = "windows"]
 fn main() {
     let exe = std::env::current_exe().unwrap();
@@ -421,7 +421,7 @@ fn main() {
     let code = std::env::var("STENO_TEST_EXIT_CODE").ok().and_then(|code| code.parse().ok());
     std::process::exit(code.unwrap_or(0));
 }
-"##;
+"#;
 
     /// [`STUB`], compiled into `folder` with the toolchain that runs the
     /// tests.
