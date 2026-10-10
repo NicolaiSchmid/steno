@@ -745,7 +745,7 @@ impl CaptureRecorder {
                 inner.calls.opened(app_name);
             }
             MicrophoneActivity::Released => {
-                if !self.arm_auto_stop(&mut inner, CallWatch::released) {
+                if !self.arm_auto_stop(&mut inner, |calls, now| calls.released(now, false)) {
                     return;
                 }
             }
@@ -754,15 +754,17 @@ impl CaptureRecorder {
         self.notify();
     }
 
-    /// Audio is delivered again after the capture recovered from a lost
-    /// device: while a call records whose app let go of the microphone and
-    /// has not opened it since, a fresh countdown is armed
-    /// ([`crate::auto_stop`]), since the detector does not report that
-    /// release again. Takes the recorder's lock only to arm, spawns the
-    /// countdown's thread and waits for nothing, so the capture's notice
-    /// thread may call it: a stop joins that thread without the lock. An
-    /// armed countdown is reported through the change hook
-    /// ([`Self::on_change`]) on the calling thread.
+    /// The capture is back after a device change or a restart: while a
+    /// call records whose app let go of the microphone and has not opened
+    /// it since, a fresh countdown is armed ([`crate::auto_stop`]), since
+    /// the detector does not report that release again. Takes the
+    /// recorder's lock only to arm, spawns the countdown's thread and
+    /// waits for nothing, so the capture's notice thread may call it: a
+    /// stop joins that thread without the lock. An armed countdown is
+    /// reported through the change hook ([`Self::on_change`]) on the
+    /// calling thread. Call it holding no lock the change hook takes, the
+    /// capture's outage lock among them: the hook runs on the calling
+    /// thread and reads the status.
     pub fn resume_auto_stop(&self) {
         if self.arm_auto_stop(&mut self.inner(), CallWatch::resume) {
             self.notify();
@@ -1742,7 +1744,6 @@ mod tests {
     use steno_speech::SpeechSettings;
 
     struct Harness {
-        dir: tempfile::TempDir,
         store: Arc<Store>,
         /// The bytes the disk watch reads as free; plenty unless a test
         /// lowers it.
@@ -1756,6 +1757,9 @@ mod tests {
         /// While set, a reload fails as a build error would and the
         /// current pipeline stays.
         failing_reloads: Arc<AtomicBool>,
+        /// Last, so a recorder dropped mid-recording closes its files
+        /// before the folder goes.
+        dir: tempfile::TempDir,
     }
 
     impl Drop for Harness {
@@ -2342,6 +2346,31 @@ mod tests {
         let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
         assert_eq!(meeting.end_reason, Some(RecordingEndReason::Manual));
         manual.join().unwrap();
+    }
+
+    /// A recorder dropped mid-call with the auto-stop armed lets the
+    /// countdown's thread go, rather than leave it asleep for the rest of
+    /// the grace, or for good on a clock nobody advances.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_recorder_lets_its_countdown_go() {
+        let harness = harness(&[]);
+        let clock = Arc::new(steno_audio::testing::ManualClock::new());
+        harness.recorder.count_down_on(clock.clone());
+        let starting = harness.recorder.clone();
+        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
+            .await
+            .unwrap();
+        harness
+            .recorder
+            .microphone_activity(MicrophoneActivity::Opened { app_name: None });
+        harness
+            .recorder
+            .microphone_activity(MicrophoneActivity::Released);
+        assert!(clock.wait_for_sleepers(1), "the countdown sleeps");
+        let recorder = Arc::downgrade(&harness.recorder);
+        drop(harness);
+        assert!(recorder.upgrade().is_none(), "the recorder dropped");
+        assert!(clock.wait_for_sleepers(0), "its countdown let go");
     }
 
     /// A Quit while a start is under way stops the recording it starts,

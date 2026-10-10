@@ -24,8 +24,10 @@ enum Step {
     Begin(Option<&'static str>),
     Opened(Option<&'static str>),
     Released,
+    /// A release while the capture recovers.
+    ReleasedRecovering,
     Keep,
-    /// Audio delivered again after the capture recovered.
+    /// The capture is back after recovering.
     Resume,
     /// Any stop.
     Reset,
@@ -46,7 +48,10 @@ fn run(script: &[Step]) -> Option<(Option<String>, f64)> {
             Step::Begin(app) => watch.begin(app),
             Step::Opened(app) => watch.opened(app.map(str::to_owned)),
             Step::Released => {
-                watch.released(now);
+                watch.released(now, false);
+            }
+            Step::ReleasedRecovering => {
+                watch.released(now, true);
             }
             Step::Keep => {
                 watch.keep_recording();
@@ -66,7 +71,7 @@ fn run(script: &[Step]) -> Option<(Option<String>, f64)> {
 #[test]
 #[allow(clippy::too_many_lines, reason = "one row per case of the table")]
 fn the_policy_arms_cancels_and_forgets_as_swift_s_did() {
-    use Step::{Begin, Keep, Opened, Released, Reset, Resume, Wait};
+    use Step::{Begin, Keep, Opened, Released, ReleasedRecovering, Reset, Resume, Wait};
     let zen = Some("Zen");
     let rows: &[(&str, &[Step], Armed)] = &[
         (
@@ -208,6 +213,27 @@ fn the_policy_arms_cancels_and_forgets_as_swift_s_did() {
             None,
         ),
         (
+            "a new start forgets the release",
+            &[Begin(None), Opened(zen), Released, Begin(zen), Resume],
+            None,
+        ),
+        (
+            "a release while the capture recovers arms nothing",
+            &[Begin(None), Opened(zen), ReleasedRecovering],
+            None,
+        ),
+        (
+            "and the capture back arms it",
+            &[
+                Begin(None),
+                Opened(zen),
+                ReleasedRecovering,
+                Wait(30.0),
+                Resume,
+            ],
+            Some((zen, 90.0)),
+        ),
+        (
             "a stop forgets the release",
             &[
                 Begin(None),
@@ -234,13 +260,13 @@ fn only_the_armed_countdown_ends_the_call_with_its_app() {
     let mut watch = CallWatch::default();
     watch.begin(None);
     watch.opened(Some("Zen".to_owned()));
-    let first = watch.released(Duration::ZERO).expect("armed");
+    let first = watch.released(Duration::ZERO, false).expect("armed");
     watch.opened(Some("Zen".to_owned()));
     assert!(
         first.cancel.is_cancelled(),
         "the opened microphone withdrew it"
     );
-    let second = watch.released(Duration::ZERO).expect("armed again");
+    let second = watch.released(Duration::ZERO, false).expect("armed again");
     assert_eq!(
         watch.elapsed(first.number),
         None,
@@ -257,7 +283,7 @@ fn only_the_armed_countdown_ends_the_call_with_its_app() {
     let mut unnamed = CallWatch::default();
     unnamed.begin(None);
     unnamed.opened(None);
-    let countdown = unnamed.released(Duration::ZERO).expect("armed");
+    let countdown = unnamed.released(Duration::ZERO, false).expect("armed");
     assert_eq!(
         unnamed.elapsed(countdown.number),
         Some(RecordingEndReason::CallEnded { app_name: None }),
@@ -338,6 +364,15 @@ impl Recording {
     fn released(&self) {
         self.recorder
             .microphone_activity(MicrophoneActivity::Released);
+    }
+
+    /// The capture is back, on a thread of its own, so a resume that
+    /// deadlocks fails the test rather than hangs it.
+    fn resume(&self) {
+        let recorder = self.recorder.clone();
+        on_own_thread(PATIENCE, "the resume returned", move || {
+            recorder.resume_auto_stop();
+        });
     }
 
     /// The armed countdown's app and seconds, as the status shows them.
@@ -672,13 +707,23 @@ async fn a_device_change_leaves_the_countdown_running() {
 /// Audio back after the capture recovered arms a fresh countdown when the
 /// call app let go and holds no microphone, since the detector does not
 /// report that release again; the earlier countdown is withdrawn, and the
-/// fresh one ends the call.
+/// fresh one ends the call. The change hook reads the status, as the
+/// app's does, so a resume that notified under the recorder's lock would
+/// deadlock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audio_back_arms_a_fresh_countdown_once_the_call_app_let_go() {
-    let recording = recording();
+    // Not dropped until the resumes returned: a deadlocked resume holds
+    // the recorder's lock, and the drop's stop would wait on it.
+    let recording = std::mem::ManuallyDrop::new(recording());
+    let watched = Arc::downgrade(&recording.recorder);
+    recording.recorder.on_change(Arc::new(move || {
+        if let Some(recorder) = watched.upgrade() {
+            let _ = recorder.status();
+        }
+    }));
     recording.start(CaptureMode::Call, None);
     recording.opened(Some("Zen"));
-    recording.recorder.resume_auto_stop();
+    recording.resume();
     assert_eq!(
         recording.armed(),
         None,
@@ -693,7 +738,8 @@ async fn audio_back_arms_a_fresh_countdown_once_the_call_app_let_go() {
     let resumed = Arc::new(ManualClock::new());
     resumed.advance(Duration::from_secs(30));
     recording.recorder.count_down_on(resumed.clone());
-    recording.recorder.resume_auto_stop();
+    recording.resume();
+    let recording = std::mem::ManuallyDrop::into_inner(recording);
     assert_eq!(
         recording.armed(),
         Some((Some("Zen".to_owned()), 90.0)),

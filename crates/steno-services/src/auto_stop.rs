@@ -16,9 +16,10 @@
 //!
 //! A capture that recovers from a lost device (coreaudiod restarting
 //! empties the detector's process list too) must not end the call it is
-//! keeping alive. `CallWatch` remembers that the call app let go, and
+//! keeping alive; the capture gates the countdown. `CallWatch` remembers
+//! that the call app let go, and
 //! [`CaptureRecorder::resume_auto_stop`](crate::recorder::CaptureRecorder::resume_auto_stop),
-//! once audio is delivered again, arms a fresh countdown when the app
+//! called when the capture is back, arms a fresh countdown when the app
 //! still holds no microphone.
 //!
 //! Swift: the "Auto-stop after the call ends" part of
@@ -129,20 +130,23 @@ impl CallWatch {
     }
 
     /// The microphone was released while a call records: remembered, and
-    /// the countdown armed at `now` when a call was seen and none is
-    /// armed.
-    pub(crate) fn released(&mut self, now: Duration) -> Option<Countdown> {
+    /// the countdown armed at `now` when a call was seen, none is armed
+    /// and the capture is not `recovering` (then [`Self::resume`] arms it
+    /// once the capture is back). The recorder passes `false` until the
+    /// capture reports its recovery (S2 in
+    /// `.plans/2026-10-07-stable-promotion.md`).
+    pub(crate) fn released(&mut self, now: Duration, recovering: bool) -> Option<Countdown> {
         self.released = true;
-        if self.armed.is_some() {
+        if recovering || self.armed.is_some() {
             return None;
         }
         self.arm(now)
     }
 
-    /// Audio is delivered again after the capture recovered: when the
-    /// call app let go and has not opened the microphone since, a fresh
-    /// countdown is armed at `now`, in place of one armed before (which
-    /// may have run out while the capture recovered); else nothing.
+    /// The capture is back after recovering: when the call app let go and
+    /// has not opened the microphone since, a fresh countdown is armed at
+    /// `now`, in place of one armed before (which may have run out while
+    /// the capture recovered); else nothing.
     pub(crate) fn resume(&mut self, now: Duration) -> Option<Countdown> {
         if !self.released {
             return None;
@@ -207,6 +211,14 @@ impl CallWatch {
         if let Some(armed) = self.armed.take() {
             armed.cancel.cancel();
         }
+    }
+}
+
+/// A recorder dropped with a countdown armed lets its thread go rather
+/// than leave it asleep for the rest of the grace.
+impl Drop for CallWatch {
+    fn drop(&mut self) {
+        self.disarm();
     }
 }
 

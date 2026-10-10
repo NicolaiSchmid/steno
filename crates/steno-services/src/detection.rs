@@ -10,7 +10,7 @@
 //! - an opened microphone raises the prompt only while detection is on in
 //!   Settings, nothing records and no prompt is up;
 //! - a released microphone, a recording starting, detection turned off and
-//!   the countdown running out take it down, and so do the panel's own X
+//!   its minute running out take it down, and so do the panel's own X
 //!   ([`DetectionController::dismissed`]) and Record
 //!   ([`DetectionController::record`]), which starts a call recording
 //!   attributed to the app the prompt named;
