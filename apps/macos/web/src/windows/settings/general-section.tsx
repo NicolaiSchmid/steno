@@ -229,10 +229,7 @@ export function GeneralSection() {
 					/>
 				</FormCard>
 			) : (
-				<FormCard
-					footer="Updates are checked once a day and installed when you relaunch Steno."
-					title="Updates"
-				>
+				<FormCard footer="Updates are checked once a day." title="Updates">
 					<FormRow
 						control={
 							<Button
