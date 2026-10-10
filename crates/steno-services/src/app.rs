@@ -37,7 +37,7 @@ use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
 use crate::recovery::{Interrupted, LiveRecordingCheck, adopt_orphans, reconcile_interrupted};
 use crate::secrets::{KeepsApiKey, KeyringUnavailable, SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
-use crate::updates::{InstallGate, NeverIdle, ScheduleParts, UpdateSchedule, UpdateSource};
+use crate::updates::{IdleGate, ScheduleParts, UpdateSchedule, UpdateSource};
 
 /// What stops the graph from being built: another process holds the
 /// database ([`DatabaseLock`]), or the database could not be opened or
@@ -72,10 +72,6 @@ pub struct AppOptions {
     /// The updater the update schedule drives; the shell's (`updater.rs`),
     /// `None` for a fake that never checks (the CLI, the tests).
     pub update_source: Option<Arc<dyn UpdateSource>>,
-    /// Whether an update may install now (stable plan P25); [`NeverIdle`]
-    /// until the shell supplies the real gate, and through it nothing
-    /// downloads or installs by itself.
-    pub install_gate: Arc<dyn InstallGate>,
     /// The runtime the host's synchronous service calls block on.
     pub runtime: tokio::runtime::Handle,
     /// `CFBundleShortVersionString`'s equivalent.
@@ -111,7 +107,6 @@ impl AppOptions {
             opener,
             login_item: None,
             update_source: None,
-            install_gate: Arc::new(NeverIdle),
             runtime,
             version: version.to_owned(),
             make_capture_session: Arc::new(|configuration| {
@@ -593,7 +588,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
             source,
             preferences: preferences.clone(),
             clock: clock.clone(),
-            gate: options.install_gate,
+            // Stable plan P25: no update installs over a recording or a
+            // processing job.
+            gate: Arc::new(IdleGate::new(recorder.clone(), pipeline.clone())),
             recorder: recorder.clone(),
             support_directory: paths.support_directory.clone(),
             managed: crate::updates::updates_are_managed(),
@@ -2362,7 +2359,11 @@ mod tests {
             async fn ask(&self, _question: crate::updates::Question<'_>) -> bool {
                 false
             }
+            fn installer(&self) -> crate::updates::Installer {
+                crate::updates::Installer::InPlace
+            }
             fn tell_install_failed(&self, _message: &str) {}
+            fn tell_relaunch_waits(&self, _version: &str, _busy: crate::updates::Busy) {}
             fn announce(&self, _version: &str) {}
         }
         let dir = tempfile::tempdir().unwrap();
@@ -2402,7 +2403,6 @@ mod tests {
             opener: Arc::new(steno_host::fakes::FakeOpener::default()),
             login_item: None,
             update_source: None,
-            install_gate: Arc::new(NeverIdle),
             runtime: tokio::runtime::Handle::current(),
             version: "0.0.0".to_owned(),
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),

@@ -139,7 +139,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 # Without `unsafe`: on macOS the plain `fsync` the recording writer falls
 # back to when a file system refuses `F_FULLFSYNC` (a WebDAV share answers
 # ENOTTY), and on Linux and macOS the `statfs` the pipeline reads a folder's
-# file system with. Already in the lock (`tempfile` uses it).
+# file system with, and the macOS updater's `access(2)` on the bundle.
+# Already in the lock (`tempfile` uses it).
 rustix = { version = "1.1", features = ["fs"] }
 # Adapters: IANA time zones for the dates in the notes (Swift's `TimeZone`),
 # the machine's zone name, and the canonical decomposition `Slug` strips

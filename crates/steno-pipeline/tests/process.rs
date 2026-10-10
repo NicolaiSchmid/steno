@@ -4937,3 +4937,84 @@ async fn process_again_with_models_missing_parks_the_failed_meeting_with_its_aud
     assert_eq!(meeting_state(&world, already), MeetingState::Ready);
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
 }
+
+/// An update's job hold (P25 of the stable plan) is taken only while no
+/// job is in flight: not while a run transcribes, and again once it ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_job_hold_while_a_run_is_in_flight() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+    let in_flight = pipeline.dependencies().in_flight.clone();
+    assert!(in_flight.is_idle());
+    let meeting = enqueue_call(&world, &pipeline);
+    engine.wait_until_entered().await;
+    assert!(!in_flight.is_idle());
+    assert!(in_flight.try_hold().is_none(), "a run transcribes");
+
+    engine.open.notify_one();
+    tokio::time::timeout(PATIENCE, pipeline.wait_until_idle())
+        .await
+        .unwrap();
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    assert!(in_flight.is_idle());
+    assert!(in_flight.try_hold().is_some());
+}
+
+/// While the hold lives, a run enqueued meanwhile is claimed and its
+/// meeting saved `queued`, but the run reads nothing; a second hold is
+/// refused. Once the hold is dropped the run goes through to `ready`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_hold_keeps_a_queued_run_from_starting_until_it_drops() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(FakeSpeechEngine::default());
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+    let in_flight = pipeline.dependencies().in_flight.clone();
+    let hold = in_flight.try_hold().expect("idle");
+    let meeting = enqueue_call(&world, &pipeline);
+    assert!(!in_flight.is_idle(), "the queued run holds its asset");
+    assert!(in_flight.try_hold().is_none(), "one hold at a time");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Queued);
+    assert_eq!(engine.transcriptions.count(), 0);
+    assert_eq!(world.decoder.decodes.lock().unwrap().len(), 0);
+
+    drop(hold);
+    tokio::time::timeout(PATIENCE, pipeline.wait_until_idle())
+        .await
+        .unwrap();
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    assert!(engine.transcriptions.count() > 0);
+}
+
+/// A summary re-run and a re-export claimed under the hold keep their
+/// claim and wait; each runs once the hold is dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_hold_keeps_a_claimed_operation_waiting_until_it_drops() {
+    type Claim = fn(
+        &ProcessingPipeline,
+        Uuid,
+    ) -> Result<steno_pipeline::Operation, steno_pipeline::PipelineFailure>;
+    let world = world(true, None, AudioRetention::KeepForever);
+    let meeting = enqueue_call(&world, &world.pipeline);
+    world.pipeline.wait_until_idle().await;
+    let in_flight = world.pipeline.dependencies().in_flight.clone();
+    let claims: [Claim; 2] = [
+        |pipeline, id| pipeline.claim_rerun_summary(id, "default"),
+        |pipeline, id| pipeline.claim_redeliver(id),
+    ];
+    for claim in claims {
+        let hold = in_flight.try_hold().expect("idle");
+        let mut operation = claim(&world.pipeline, meeting).unwrap();
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut operation).await;
+        assert!(waited.is_err(), "the operation waits for the hold");
+        assert_eq!(world.pipeline.in_flight(), [meeting]);
+        drop(hold);
+        tokio::time::timeout(PATIENCE, operation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(in_flight.is_idle());
+    }
+}

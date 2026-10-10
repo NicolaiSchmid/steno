@@ -333,8 +333,24 @@ impl QuitLatch {
 /// in `Sources/StenoCore/Pipeline/ProcessingPipeline.swift`, which each
 /// pipeline kept for itself, so after `reloadPipeline()` the new one could
 /// run beside a retired one. Rust only: the sharing.
+///
+/// The set is also what an update's install asks before it relaunches the
+/// app (P25 of `.plans/2026-10-07-stable-promotion.md`): it installs only
+/// once [`is_idle`](Self::is_idle) holds, and while its
+/// [`JobHold`] lives no job starts. Rust only: Sparkle installed at quit.
 #[derive(Debug, Clone, Default)]
-pub struct InFlight(Arc<Mutex<InFlightSet>>);
+pub struct InFlight(Arc<SharedInFlight>);
+
+/// The set, and the wake-up for the jobs a [`JobHold`] kept waiting.
+#[derive(Debug, Default)]
+struct SharedInFlight {
+    set: Mutex<InFlightSet>,
+    released: tokio::sync::Notify,
+    /// A test's hold, dropped by the next wait between its check and its
+    /// wait: the moment a release must not be lost in.
+    #[cfg(test)]
+    dropped_after_the_check: Mutex<Option<JobHold>>,
+}
 
 #[derive(Debug, Default)]
 struct InFlightSet {
@@ -347,13 +363,95 @@ struct InFlightSet {
     /// ([`ProcessingPipeline::claim_start`], for `enqueue`, `reprocess` and
     /// `resume_unfinished`), from the claim to the run's end.
     assets: BTreeSet<Uuid>,
+    /// A [`JobHold`] lives.
+    held: bool,
+}
+
+impl InFlightSet {
+    fn is_idle(&self) -> bool {
+        self.meetings.is_empty() && self.assets.is_empty()
+    }
 }
 
 impl InFlight {
     fn lock(&self) -> MutexGuard<'_, InFlightSet> {
         self.0
+            .set
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether no job is in flight: no operation holds a meeting, and no
+    /// background run holds its asset, from its claim (a run still waiting
+    /// for its turn included) to its end. A meeting waiting for models is
+    /// not in flight ([`ModelWaits`]): it waits for the user, not for a
+    /// job.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.lock().is_idle()
+    }
+
+    /// While idle ([`is_idle`](Self::is_idle)) and no other hold lives, a
+    /// hold that keeps every job from starting until it is dropped; `None`
+    /// otherwise. The check and the hold are one step under the set's
+    /// lock, so a job claimed after it waits: a background run before its
+    /// first stage, a summary re-run or a re-export before its work. The
+    /// claims still succeed, so an intake that saves a meeting meanwhile
+    /// keeps it `queued`, and its run starts once the hold is dropped, or
+    /// at the next launch when the process ends first.
+    ///
+    /// ```
+    /// use steno_pipeline::InFlight;
+    ///
+    /// let in_flight = InFlight::default();
+    /// let hold = in_flight.try_hold().expect("idle");
+    /// assert!(in_flight.try_hold().is_none(), "one hold at a time");
+    /// drop(hold);
+    /// assert!(in_flight.try_hold().is_some());
+    /// ```
+    #[must_use]
+    pub fn try_hold(&self) -> Option<JobHold> {
+        let mut set = self.lock();
+        if set.held || !set.is_idle() {
+            return None;
+        }
+        set.held = true;
+        Some(JobHold(self.clone()))
+    }
+
+    /// Returns once no [`JobHold`] lives.
+    async fn until_released(&self) {
+        loop {
+            // Created before the check, so a release between the check
+            // and the wait still wakes it.
+            let released = self.0.released.notified();
+            let held = self.lock().held;
+            #[cfg(test)]
+            drop(
+                self.0
+                    .dropped_after_the_check
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
+            if !held {
+                return;
+            }
+            released.await;
+        }
+    }
+}
+
+/// [`InFlight::try_hold`]'s hold: until it is dropped no job starts on any
+/// pipeline sharing the set, and the jobs it kept waiting then start.
+#[derive(Debug)]
+#[must_use = "the jobs start again once the hold is dropped"]
+pub struct JobHold(InFlight);
+
+impl Drop for JobHold {
+    fn drop(&mut self) {
+        self.0.lock().held = false;
+        self.0.0.released.notify_waiters();
     }
 }
 
@@ -1750,7 +1848,8 @@ impl ProcessingPipeline {
     /// Once the pipeline [quits](Self::quit), a failure is returned and
     /// not persisted, and a call made after it fails at once: the meeting
     /// stays `queued` or `processing`, which the next launch's
-    /// `resume_unfinished` processes again.
+    /// `resume_unfinished` processes again. While a [`JobHold`] lives the
+    /// run waits before it reads anything ([`InFlight::try_hold`]).
     pub async fn process(&self, asset_id: Uuid) -> Result<()> {
         let (result, refused) = self.process_held(asset_id).await;
         if let Some(refused) = refused {
@@ -1764,6 +1863,7 @@ impl ProcessingPipeline {
     /// [`wait_for_models`](Self::wait_for_models) needs once nothing holds
     /// the meeting any more.
     async fn process_held(&self, asset_id: Uuid) -> (Result<()>, Option<Refused>) {
+        self.until_jobs_may_start().await;
         if self.quitting() {
             let quitting = PipelineFailure::new(PipelineStage::Decode, "the app is quitting");
             return (Err(quitting), None);
@@ -2170,6 +2270,7 @@ impl ProcessingPipeline {
         let pipeline = self.clone();
         let template_id = template_id.to_owned();
         Ok(Box::pin(async move {
+            pipeline.until_jobs_may_start().await;
             let result = unless_it_panics(
                 || PipelineStage::Summarize,
                 pipeline.resummarize(meeting, &template_id),
@@ -2264,6 +2365,7 @@ impl ProcessingPipeline {
         let meeting_id = meeting.id;
         let pipeline = self.clone();
         Box::pin(async move {
+            pipeline.until_jobs_may_start().await;
             let result =
                 unless_it_panics(|| PipelineStage::Deliver, pipeline.deliver_again(&meeting)).await;
             // A row still `pending` here was left by a panic or a
@@ -2360,6 +2462,12 @@ impl ProcessingPipeline {
         let run = ProcessingRun::new(estimator, stages, self.inner.dependencies.clock.seconds());
         self.state().runs.insert(meeting.id, run);
         Ok(())
+    }
+
+    /// Returns once no [`JobHold`] on the in-flight set lives: what every
+    /// job waits for after its claim and before its work.
+    async fn until_jobs_may_start(&self) {
+        self.inner.dependencies.in_flight.until_released().await;
     }
 
     /// Marks `meeting_id` in flight for the duration of `body`; a second
@@ -3170,6 +3278,26 @@ pub fn write_wav_16k(path: &Path, buffer: &AudioBuffer16k) -> std::io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hold dropped between a waiting job's check and its wait still
+    /// wakes the job, since its wake-up was registered before the check.
+    #[tokio::test]
+    async fn a_hold_dropped_between_the_check_and_the_wait_wakes_the_job() {
+        let in_flight = InFlight::default();
+        let hold = in_flight.try_hold().expect("idle");
+        *in_flight
+            .0
+            .dropped_after_the_check
+            .lock()
+            .expect("the slot") = Some(hold);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            in_flight.until_released(),
+        )
+        .await
+        .expect("woken by the release");
+        assert!(in_flight.try_hold().is_some());
+    }
 
     /// A stage's own failure keeps its stage however it travels: bare, or
     /// boxed as a boundary error by a crate behind a seam; anything else

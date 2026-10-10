@@ -124,8 +124,9 @@ exits reach the shutdown these ways:
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).
 - An update's relaunch bypasses the request, so it waits for the shutdown
-  first too; on Windows the installer's own exit runs it, and an install
-  that fails after that ends the app once its message is closed.
+  first too; on Windows the install runs it before it hands the installer
+  to a watcher (below), and an install that fails after that restarts
+  the app at once.
 - A logoff or a shutdown on Windows also arrives as `RunEvent::Exit`
   (tao answers `WM_ENDSESSION` with it), and the shutdown runs until
   Windows' end-session timeout ends the process: about five seconds,
@@ -723,26 +724,79 @@ missing) in `preferences.json`; the last check time is `lastCheckAt`, RFC
 that succeeded. To make the next launch check, set it back a day or
 delete the file. A found update brings up the Install and Relaunch dialog
 once per version in a run, and not while a recording starts, runs or
-stops: the first hourly tick after the recording ends brings it up. A yes
-given once a recording has started asks again before it installs
-("Installing stops and saves the recording in progress."); Not Now, the
-default button, leaves the update for the next idle tick. A yes downloads
-the update first and then installs and relaunches. From just before the
-install, Record in the sidebar or the tray is refused with "Steno is
-installing an update. You can record again once it relaunches, or if you
-cancel the install." On a `.deb` install the system asks for a password
-first, a second time if the first prompt is cancelled; until it is
-answered or cancelled, Record stays refused, and cancelling ends the
-install with an error and frees Record. A recording started during the
-download puts the install off: no restart, and the dialog comes back at
-the first idle tick, whose yes installs without downloading again. The
-app downloads and installs by itself only when its install gate says it
-is idle, and no build has that gate until P25 of
-`.plans/2026-10-07-stable-promotion.md` builds it; until then automatic
-downloads stay off in effect, and every install is the user's, from the
-dialog. With `STENO_DISTRIBUTION` set to `aur` or
-`nix` the schedule does not run, and a check makes no request and says
-the package manager delivers the updates.
+stops: the first hourly tick after the recording ends brings it up.
+
+An update never stops a recording or a processing run (P25 of
+`.plans/2026-10-07-stable-promotion.md`). A yes given while Steno records
+or processes a meeting asks again ("Steno is recording. Install the
+update and relaunch once the recording is saved and processed?", or
+"Steno is still processing a meeting. Install the update and relaunch
+once it is done?"), with Install After It Ends as the default button; Not
+Now leaves the update for the next tick with no recording under way.
+After a yes the app waits until nothing records or processes, looking
+every two seconds, then downloads the update, waits again if a recording
+started during the download, and installs. A newer version that a check
+finds meanwhile is installed instead; an install that asks for a
+password or for consent asks about it first (below).
+
+Recording always wins over an install. A `.deb` or `.rpm` install asks
+for a password first (pkexec, then a zenity or kdialog dialog), and the
+prompt may wait, so Record keeps working while the update installs. A
+macOS app in a folder the user cannot write asks for an administrator
+too; that prompt holds Steno's windows until it is answered. A
+processing run that would start meanwhile (a phone recording that
+arrives) waits, saved as queued, for a minute at most; a password typed
+later still installs. Once the update is installed Steno relaunches;
+when a recording or a processing run started during the install, Steno
+says "Steno 0.12.0 is installed. Steno relaunches once the recording is
+saved and processed." and relaunches once it is done, and says it again
+to a yes given meanwhile. Cancelling every password prompt ends the
+install with an error. Only while Steno shuts down to relaunch, and on
+Windows from the install until Steno ends, is Record refused, with
+"Steno is relaunching to finish installing an update. You can record
+again in a moment."; a summary re-run or an export asked for in those
+seconds is not kept and has to be asked for again after the relaunch.
+
+An install that asks for a password or for consent (a `.deb` or `.rpm`,
+a macOS app in a folder the user cannot write, and the MSI, whose Windows
+prompt comes after Steno has ended) runs only right after a yes given
+while Steno is idle, so someone is there to answer. A yes given while
+Steno was busy, one it turned busy after, and one whose download took
+more than 30 seconds ask once more when it is idle: "Steno 0.12.0 is
+ready to install. Install it and relaunch now?", with Later leaving the
+update for the next tick (a package the schedule had downloaded stays
+downloaded). The NSIS setup installs for the user alone and asks nothing.
+
+On Windows Steno does not start the installer itself. It writes the
+verified installer to `%LOCALAPPDATA%\uno.schmid.steno.desktop\update\`,
+saves and shuts down, and leaves a hidden `cmd.exe` running that starts
+the installer and waits for it. Steno ends once that `cmd.exe` says it
+runs. A successful install starts the new version. When the consent
+prompt is declined, the MSI fails or another install is under way (any
+`msiexec` exit code but 0, 1641 or 3010), or the NSIS setup fails or is
+aborted (any exit code but 0), the `cmd.exe` starts the version that was
+running, so Steno is back within seconds. Steno is down only while the
+installer runs, its consent prompt included. If the `cmd.exe` cannot
+start, ends before it runs (a policy that turns off the command prompt
+ends it at once) or says nothing for 10 seconds, Steno restarts at once
+and the error goes to the log. Steno lets go of its single-instance lock
+just before it ends, so an old version started again at once (`msiexec`
+exits at once while another install runs) comes up rather than handing
+over to the ending Steno. An install that fails while Steno quits
+restarts nothing.
+
+With automatic downloads on, the schedule downloads a found update at the
+first tick that finds the app idle and no install under way, and installs
+it in that tick, or in the first later one that finds it idle; turning
+the switch off during the download keeps nothing. The schedule does not
+run a `.deb`, `.rpm` or MSI install, or one of a macOS app it cannot
+write, by itself, since it asks for a password or for consent: it offers
+the downloaded update instead. The gate is
+`steno_services::updates::IdleGate`.
+
+With `STENO_DISTRIBUTION` set to `aur` or `nix` the schedule does not
+run, and a check makes no request and says the package manager delivers
+the updates.
 
 To run a debug binary against the embedded bundle instead of the dev server
 (what the smoke does), drop the dev URL through Tauri's own configuration

@@ -413,7 +413,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`) | capture and recovery (`wp-cap-*`) |
 | P23 | Audio the relay dropped: a warning at stop and a log line; no stored count, since a column would need a migration | capture and recovery (`wp-cap-*`) |
 | P24 | A transcript cut short by a sidecar shorter than its master: the sidecar's duration is checked against the master's | audio (#228) |
-| P25 | A recording or a processing run stopped by an update: updates wait while either runs | Linux desktop |
+| P25 | A recording or a processing run stopped by an update: updates wait while either runs. Every install holds the app's install gate (`IdleGate`), which gives its hold only while no recording starts, runs or is saved, no processing job, summary re-run or re-export runs or is claimed, and the app is not shutting down. Recording always wins: while an installer that returns runs (a `.deb`'s password prompt may wait for good), Record works, a job claimed meanwhile (a phone recording's) waits `queued` for a minute at most, and the relaunch waits for a recording or a job started meanwhile, telling the user so; the hold refuses Record only through the shutdown and the relaunch, and on Windows from the install, which ends the app. An installer that asks an administrator (a `.deb`, an `.rpm`, a macOS bundle the user cannot write, and the MSI, whose consent prompt comes after the app has ended, so Steno is down until the prompt is answered) runs only right after a yes given while the app is idle; a yes given while busy, or one whose download took over 30 s, asks once more when it is idle. On Windows the app runs neither installer itself: it writes the verified installer, shuts down and leaves a hidden `cmd.exe` that starts it, waits and starts the version that ran again when it did not install (`msiexec` not 0, 1641 or 3010; the NSIS setup not 0), so a declined consent prompt, a failed MSI or an aborted setup leaves Steno down for seconds. If the `cmd.exe` cannot start, ends before it runs (a policy that turns off the command prompt ends it at once) or says nothing for 10 seconds, Steno restarts at once and the error goes to the log. Steno lets go of its single-instance lock just before it ends, so an old version started again at once (`msiexec` exits at once while another install runs) comes up rather than handing over to the ending Steno. An install that fails while Steno quits restarts nothing. A summary re-run or re-export claimed in those seconds is not kept, and the user asks again. The user's yes while busy asks whether to install after it ends, "Install After It Ends" (the default) or "Not Now", and waits; a recording started during the download is waited for, never stopped, and a newer version found meanwhile keeps the yes. Automatic downloads wait for an idle app and no install under way; the flag is read again after the download, turning it off frees the kept package, and the schedule never runs an installer that asks an administrator, which it announces instead (#270). Not part of the gate, by design: the launch's recovery of interrupted recordings, which survives a relaunch as it survives a kill (P3), and a phone upload before its intake claims the run, which the phone keeps until `complete` (P2) | Linux desktop (#270, every platform) |
 | P26 | A person page: a case-only rename of a person loses the page on a case-insensitive disk | pipeline, store and export (`wp-pse-*`) |
 | P27 | Notes written at once to one vault: deliveries are serialised per vault | pipeline, store and export (`wp-pse-*`) |
 | P28 | A note never written: a delivery left Pending is resumed at launch. Amended 2026-10-08 under D3: a Failed delivery is retried at launch too, at most once a day (by its `lastAttemptAt`); after three launch retries in a row that did not deliver every row the launch stops retrying it and the meeting's export line says "Export to <destination> keeps failing: <reason>" until Export again resets the count. The count lives in `export-retries.json` in the support directory, which the Swift app ignores, so no migration | pipeline, store and export (`wp-pse-*`) |
@@ -599,16 +599,22 @@ Every package is written in parallel except where a dependency is named:
     install off, with the package kept and the version raised again. A
     refused Record shows only in the main window (S2 carries the prompt's
     part). P25's `InstallHold` takes the same recorder start hold rather
-    than building a second one. Automatic
-    downloads wait for P25's gate: the schedule downloads by itself only
-    while `InstallGate::is_idle_now` says idle and installs only with the
-    gate's hold from `InstallGate::try_hold`; the stand-in
-    `NeverIdle` is never idle, so it downloads nothing, and P25's gate turns
-    automatic downloads on. P25 also re-reads the automatic-downloads flag when
-    a download ends and before the install: a switch turned off during the
-    transfer finds nothing kept yet, so today the same tick would still keep
-    and install the package. `updates_are_managed` is X5's switch. The QR code
-    is the `qrcode` crate's, level M, as a greyscale PNG.
+    than building a second one. P25 (#270) changed the rest: the install
+    waits for the recording and is never put off by one; an installer that
+    returns no longer holds Record off, so a `.deb`'s password prompt never
+    keeps Record refused, and the refusal now says "Steno is relaunching to
+    finish installing an update. You can record again in a moment.", since
+    the hold lasts only through the shutdown and the relaunch (on Windows,
+    from the install). Automatic downloads wait for P25's gate: the
+    schedule downloads by itself only while `InstallGate::is_idle_now` says
+    idle and installs only with the gate's hold from
+    `InstallGate::try_hold`; the stand-in `NeverIdle` was never idle, so it
+    downloaded nothing, and P25's gate (#270) turns automatic downloads on.
+    P25 also re-reads the automatic-downloads flag when a download ends,
+    and turning it off frees the kept package, so a switch turned off
+    during the transfer keeps and installs nothing. `updates_are_managed`
+    is X5's switch. The QR code is the `qrcode` crate's, level M, as a
+    greyscale PNG.
 - **S5 Handover on a changing network** (`fix/handover-republish`).
   - Re-register the Bonjour record when the interfaces change, on every
     platform.
@@ -1899,7 +1905,32 @@ interrupted" after one. On the GNOME machine,
 
 **The Windows gate** (before the site lists Windows): a Windows machine runs the
 `--ignored` WASAPI tests, one real call, a logoff during a recording of at least
-an hour that saves it (P5), and a `kill` that P3 recovers.
+an hour that saves it (P5), and a `kill` that P3 recovers. It also installs an
+update from each Windows installer (P25), from a build one version behind the
+candidate:
+1. With the MSI install: Check for Updates, Install and Relaunch, then decline
+   the consent prompt (or press Cancel in the MSI's window). The prompt comes
+   up in front. Steno is back in the tray within 10 s on the old version, and
+   its log shows the shutdown.
+2. Again, accepting the prompt: the new version starts by itself.
+3. With the NSIS install: the update installs and the new version starts. Then,
+   from the old version again, ending `Steno-<version>-setup.exe` in Task
+   Manager while it runs brings the old version back within 10 s.
+4. No `cmd.exe` window flashes up in any of these, and none is left in Task
+   Manager once Steno is back.
+5. With "Prevent access to the command prompt" on (`DisableCMD=1` under
+   `HKCU\Software\Policies\Microsoft\Windows\System`), Install and Relaunch
+   brings the old version back within 15 s, and its log says the installer's
+   watcher ended before it ran. Turn the policy off again after the step.
+6. With the MSI install, while the consent prompt is up, start Steno from the
+   Start menu and start a recording, then accept the prompt: the installer
+   closes Steno, the recording is saved, and the new version starts.
+7. With the MSI install, while the consent prompt is up, start Steno from the
+   Start menu, then decline the prompt: one Steno runs afterwards, on the old
+   version.
+8. With the MSI install, choose Install and Relaunch while another MSI package
+   is installing (its progress bar moving), so `msiexec` exits at once with
+   1618: Steno is back on the old version within 10 s.
 
 ## Order of operations and gates
 
