@@ -8,8 +8,9 @@
 //! One rule decides what shows (`FloatingContent::resolve`): a busy
 //! recorder wins, else a prompt if one is pending, else nothing. The shell
 //! reads the recorder off the `recording` snapshots passing through
-//! `bridge::emit`; the host raises and clears the prompt
-//! (`set_prompt`, `WP6b` wires the detection controller to it).
+//! `bridge::emit`; the host's detection controller raises and clears the
+//! prompt (`set_prompt`, through `host::ShellPromptPanel`), and hears of
+//! the prompt's X and Record (`dismiss_prompt`, `record_from_prompt`).
 //!
 //! Each panel's window is created once and then hidden and shown; the
 //! prompt's is navigated to the new request each time one is raised, so
@@ -715,19 +716,23 @@ pub fn note_recording(app: &AppHandle, state: RecordingState) {
     refresh(app);
 }
 
-/// The host raised (`Some`) or cleared (`None`) the detection prompt; a
-/// raised one is numbered here (`Panels::set_prompt`). `WP6b`'s detection
-/// controller is the caller; nothing raises a prompt before it.
-#[allow(dead_code)]
+/// The host's detection controller raised (`Some`) or cleared (`None`)
+/// the detection prompt; a raised one is numbered here
+/// (`Panels::set_prompt`). The slot changes at once, in the controller's
+/// order; the refresh is posted from the async runtime, as
+/// `dismiss_prompt`'s is, so a caller on the main thread (a Record from
+/// the tray, whose start takes the prompt down) never builds a window in
+/// place.
+#[cfg_attr(feature = "fixture-host", allow(dead_code))]
 pub fn set_prompt(app: &AppHandle, request: Option<PromptRequest>) {
     app.state::<Panels>().set_prompt(request);
-    refresh(app);
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move { refresh(&handle) });
 }
 
 /// The prompt's X: the prompt goes away, unless the X was another
-/// prompt's (`Panels::dismiss_prompt`). The host's detection controller learns
-/// of it through `WP6b`'s hook here; the fixture host has no detection to
-/// tell.
+/// prompt's (`Panels::dismiss_prompt`), and the host's detection
+/// controller hears of it; the fixture host has no detection to tell.
 ///
 /// The caller is `bridge::panel_call`, a synchronous command on the main
 /// thread, where `refresh` would run `apply` in place, and `apply` may
@@ -738,6 +743,27 @@ pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
     if app.state::<Panels>().dismiss_prompt(raised) {
         let handle = app.clone();
         tauri::async_runtime::spawn(async move { refresh(&handle) });
+        if crate::host::is_running(app) {
+            crate::host::host(app).prompt_dismissed();
+        }
+    }
+}
+
+/// The prompt's Record: the prompt goes away as for its X, and the host's
+/// detection controller starts a call recording for the app it named, on
+/// a blocking thread, since a start opens the audio devices and the
+/// caller is the synchronous `bridge::panel_call`. A click aimed at an
+/// earlier prompt does nothing. Swift: `DetectionPromptViewModel.start`.
+pub fn record_from_prompt(app: &AppHandle, raised: Option<u64>) {
+    if app.state::<Panels>().dismiss_prompt(raised) {
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move { refresh(&handle) });
+        if crate::host::is_running(app) {
+            let handle = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::host::host(&handle).record_from_prompt();
+            });
+        }
     }
 }
 
