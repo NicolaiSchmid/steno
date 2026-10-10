@@ -20,7 +20,10 @@ fn steno(args: &[&str], home: &Path) -> Run {
         .env("HOME", home)
         .env("XDG_DATA_HOME", home.join("share"))
         .env("APPDATA", home.join("appdata"))
-        .env_remove("STENO_LLM_API_KEY");
+        .env_remove("STENO_LLM_API_KEY")
+        // The models directory is the support directory's, never one the
+        // developer's environment names for the real-model tests.
+        .env_remove("STENO_MODELS_DIR");
     // Every run on Unix carries a variable that is not Unicode, as a
     // user's environment may: the secret overrides, which read every
     // variable, must read past it (`std::env::vars()` would panic).
@@ -573,6 +576,7 @@ fn relative_paths_are_taken_from_the_working_directory() {
             .env("XDG_DATA_HOME", home.join("share"))
             .env("APPDATA", home.join("appdata"))
             .env_remove("STENO_LLM_API_KEY")
+            .env_remove("STENO_MODELS_DIR")
             .output()
             .unwrap();
         assert!(
