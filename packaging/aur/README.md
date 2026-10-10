@@ -24,7 +24,8 @@ below first.
 | `/usr/share/licenses/steno-desktop-bin/speexdsp-COPYING` | [`speexdsp-COPYING`](speexdsp-COPYING), a copy of `crates/steno-audio/vendor/speexdsp/COPYING`: the binary compiles in SpeexDSP's echo canceller, and its BSD licence asks for the notice with the binary |
 
 The install script, [`steno-desktop.install`](steno-desktop.install), only
-prints `sudo ufw allow Steno` after an install or an upgrade. Arch's
+prints `sudo ufw allow Steno` after an install or an upgrade, and
+`sudo ufw delete allow Steno` after a removal. Arch's
 `systemd` package reloads every running user manager after any package
 changes a file under `usr/lib/systemd/user/`
 (`30-systemd-daemon-reload-user.hook`), so a running Steno picks the
@@ -43,7 +44,7 @@ copy. `check-aur.sh` requires each copy to be its file in
 `crates/steno-handover/src/configuration.rs` (the AUR job also runs when
 that file changes), the profile in `backup=`, `ufw app info Steno` to read
 it, `ufw`'s own rules to still admit mDNS, and the install script to do
-nothing but print `sudo ufw allow Steno`.
+nothing but print those two hints.
 
 ## Hyprland
 
@@ -133,7 +134,9 @@ Once no recording runs, quit Steno and start it again from the launcher.
 Quit Steno before `pacman -R steno-desktop-bin`: the removal takes the
 drop-ins away, so a running, autostarted Steno has the generator's 5 s stop
 timeout until it exits. The removal leaves `~/.local/share/Steno` and
-`~/.config` as they are.
+`~/.config` as they are. The rule `sudo ufw allow Steno` added outlives
+the package. The removal prints `sudo ufw delete allow Steno`, which
+closes the port even though the profile has gone with the package.
 
 ## Bump to a new release
 

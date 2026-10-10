@@ -598,11 +598,15 @@ Windows the system chooses the port at each launch.
 
 | Desktop | What to open |
 |---|---|
-| Omarchy, or Arch with `ufw` | `sudo ufw allow Steno`. The AUR package installs the `ufw` profile `Steno` as `/etc/ufw/applications.d/steno-desktop`. `ufw` admits mDNS by default |
+| Omarchy, or Arch with `ufw` | `sudo ufw allow Steno`. The AUR package installs the `ufw` profile `Steno` as `/etc/ufw/applications.d/steno-desktop`. `ufw` admits mDNS by default. After `pacman -R steno-desktop-bin`, `sudo ufw delete allow Steno` closes it again |
 | Ubuntu or Debian with `ufw` turned on | `sudo ufw allow 23820/tcp`; the `.deb` ships no profile. With `ufw` off, as Ubuntu installs it, nothing |
 | `firewalld` (Fedora and others) | `sudo firewall-cmd --permanent --add-port=23820/tcp`, `sudo firewall-cmd --permanent --add-service=mdns`, then `sudo firewall-cmd --reload`. Fedora Workstation's default zone already admits both |
 | NixOS with the module | Nothing: `programs.steno.openFirewall` (on by default) opens `programs.steno.handoverPort` and UDP 5353 on every interface. To open them on one network only, set `openFirewall = false` and list both under `networking.firewall.interfaces.<name>` |
 | NixOS without the module | `networking.firewall.allowedTCPPorts = [23820];` and `networking.firewall.allowedUDPPorts = [5353];` |
+
+Removing Steno leaves a rule you added: `sudo ufw delete allow 23820/tcp`
+or `sudo firewall-cmd --permanent --remove-port=23820/tcp` closes it.
+Under NixOS the ports close with the module.
 
 To check from another computer on the same network:
 `openssl s_client -connect <address>:23820 </dev/null` prints the
@@ -623,7 +627,8 @@ To use another port, set one of these; the first wins:
    ```
 
    `delete from setting where key = 'handoverPort'` goes back to the
-   default. A value that is not a port is ignored with a warning.
+   default. A value that is not a port is ignored with a warning, and the
+   next change in Settings removes it.
 
 `0` lets the system choose a port at each launch, which no firewall rule
 can name. The phone resolves the port before every connection, so a new
@@ -1174,7 +1179,8 @@ evaluates the module in a system-wide and a per-user system down to the
 user units, the session variables and the firewall's ports, in one with
 `launchAtLogin = false` and `openFirewall = false`, and in one each with
 `programs.ssh.startAgent` and with GnuPG's SSH support, and checks that
-`handoverPort`'s default is the app's `LINUX_PORT`.
+`handoverPort`'s default is the app's `LINUX_PORT`, and that
+`handoverPort` 0 and 1024 evaluate and 80 is refused.
 
 ## Release
 
