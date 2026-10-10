@@ -829,10 +829,13 @@ once the database is open:
    unless it is the job this very process was started as at login, which
    it would end; then the file is deleted. The log says what happened. A
    `Steno.plist` that starts another program stays. Only the app run from
-   its installed bundle removes it: a `fixture-host` build, a binary run
-   from `target/` that shares the home folder with an installed Steno, or
-   Steno opened from its mounted disk image (`/Volumes/…`) or translocated
-   by Gatekeeper (`…/AppTranslocation/…`), leaves it to the installed app.
+   its installed bundle removes it: a `fixture-host` build, a plain binary
+   run from `target/` that shares the home folder with an installed Steno,
+   or Steno opened from its mounted disk image (`/Volumes/…`) or
+   translocated by Gatekeeper (`…/AppTranslocation/…`), leaves it to the
+   installed app. A bundle built under `target/` counts as installed: it
+   registers that path and sets `steno.mainAppRegistered`, so open one only
+   in a test account.
 2. Then the host's first-launch registration
    (`Host::register_login_item_on_first_launch`, as the Swift app's
    `registerLoginItemOnFirstLaunch`) registers the login item once, at the
@@ -857,6 +860,13 @@ Background" in System Settings, with the setting still on, gets Steno
 back at login after the update: the agent's file goes, the first launch
 registers the main app, and macOS offers no cheap way to read that
 switch. Turning the setting off in General removes it again.
+
+An earlier build that its agent started at login may quit instead of
+relaunching when it installs this update. Its updater starts the new
+binary as a child and exits, and launchd ends the child with the agent's
+job, because the agent does not set `AbandonProcessGroup`. This build
+cannot change that. Opening Steno once removes the agent, and the next
+login starts Steno once, from Login Items.
 
 A smoke run registers and removes nothing. Linux and Windows keep the
 plugin.

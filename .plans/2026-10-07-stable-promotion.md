@@ -1536,9 +1536,10 @@ except case e.
      again (P9) runs it; record a second call.
 
   Pass when:
-  - the app relaunches as `com.nicolaischmid.steno.desktop`, and launch at login starts
-    it once; `~/Library/LaunchAgents` holds no Steno plist, and with launch at
-    login off a login starts nothing;
+  - the app relaunches as `com.nicolaischmid.steno.desktop` (one a login started may
+    quit instead; open it once), and launch at login starts it once;
+    `~/Library/LaunchAgents` holds no Steno plist, and with launch at login off
+    a login starts nothing;
   - on the Mac, an earlier build's agent switched off under "Allow in the
     Background" while the setting stayed on opens Steno at login again after
     the update, as expected: the agent's file goes, the first launch registers

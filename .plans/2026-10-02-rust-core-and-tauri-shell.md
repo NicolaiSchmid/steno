@@ -2800,8 +2800,9 @@ touch and admission lines; each fix is ported to Swift before cutover.
   the new identifier, `com.nicolaischmid.steno.desktop`, each launch first removes the
   Launch Agent a build under `uno.schmid.steno.desktop` left behind
   (`~/Library/LaunchAgents/Steno.plist`), but only when it runs from an installed app
-  bundle (not from `target/`, a mounted disk image under `/Volumes/` or an
-  `AppTranslocation` copy) and is not a `fixture-host` build. Then the host's
+  bundle (not a plain binary under `target/`, a mounted disk image under `/Volumes/`
+  or an `AppTranslocation` copy; a bundle built under `target/` counts as installed)
+  and is not a `fixture-host` build. Then the host's
   first-launch registration (`Host::register_login_item_on_first_launch`, one path on
   every platform) registers the main app once, at the first launch with the stored
   `launch_at_login` setting on, counted under `steno.mainAppRegistered` on the Mac
