@@ -1457,8 +1457,9 @@ still has to draw the window side. `[ ]` is not ported yet.
     Windows' end-session timeout ends the process: about five seconds, less than
     `SHUTDOWN_PATIENCE` (WP10).
   - The updater's relaunch bypasses the exit request and runs the shutdown before it
-    relaunches; on Windows the installer's own exit runs it (`on_before_exit`), and an
-    install that fails after it ends the app once its message is closed.
+    relaunches; on Windows the install runs it before it starts the installer's watcher
+    (P25 of `.plans/2026-10-07-stable-promotion.md`), and an install that fails after it
+    restarts the app at once.
   - On Linux an exit that went through ends the process two seconds later at the latest
     (`end_within` in the shell's `main.rs`), with its code; an update's relaunch is left to
     the teardown. `tauri-plugin-single-instance` 2.5 releases its bus name in its
@@ -2921,48 +2922,84 @@ touch and admission lines; each fix is ported to Swift before cutover.
   not answered after 60 seconds fails, so a stalled request cannot hold the next one.
   Where Sparkle showed its alert for a found update, the schedule raises the shell's
   "Install and Relaunch" dialog once per version in a run, and not while a recording
-  starts, runs or stops: the first tick after it ends raises it. A yes given once a
-  recording has started since the dialog came up asks again ("Installing stops and
-  saves the recording in progress." with "Not Now", the default, or "Install and
-  Relaunch"; the confirm comes up where the alert's Install was, so a second Return
-  would otherwise pass it unread), and "Not Now" leaves the version to be raised again
-  after the recording. The install downloads first and then holds recording starts off
-  (`Recorder::hold_starts`) from just before the updater writes the package through
-  the relaunch: a Record meanwhile, from the sidebar or the tray, is refused and says
-  "Steno is installing an update. You can record again once it relaunches, or if you
-  cancel the install."; a meeting prompt's Record (`recordFromPrompt`) reaches the
-  same start and is refused the same way. The hold also spans
-  the updater's password prompt: a `.deb` install always asks (pkexec, then a zenity
-  or kdialog password dialog, then a terminal `sudo`), and on macOS an app folder the
-  user cannot write asks for an administrator. Cancelling every prompt fails the
-  install, which drops the hold and clears the message. A recording the user did not
-  agree to stop, such as one that started during the download, puts the install off:
-  the package is kept, the version is raised again at the first idle tick, and the
-  next yes installs without a second download. A confirm's yes may stop only the
-  recording it named; one still starting when the confirm came up is named by the
-  meeting id it has at the yes.
-  Automatic downloads wait for P25's `InstallGate` (stable plan): its stand-in
-  `NeverIdle` never gives a hold, so until P25 lands the flag downloads nothing and
-  every install waits for the user's yes; with the gate the schedule downloads by
-  itself only while `InstallGate::is_idle_now` says idle (a recording or a processing
-  job has the disk and the network to itself), keeps the package until an install
-  takes it, and installs only with the gate's hold from `try_hold`, beside the
-  recorder's start hold. Sparkle installed a download at quit. Settings' footer
-  ("installed when you relaunch Steno", `general-section.tsx`) describes Sparkle; in
-  the Rust app the dialog's yes installs once downloaded, after a second confirm when
-  a recording has started since the dialog came up, and the shared copy follows when
-  the Swift app retires (`.plans/2026-10-04-mac-cutover.md`). One install runs at a
-  time, and the install is of the version the dialog named; a yes for a version a
-  later check replaced installs nothing, since the newer one has its own dialog. The
-  schedule's launch tick waits for the keyring's answer where the Secret Service asks,
-  so its dialog does not come up beside that prompt. A packaged install
-  (`STENO_DISTRIBUTION=aur|nix`, the environment before the build's value; stable
-  plan X5, `updates_are_managed`) runs no schedule, and its checks, the tray's
-  included, fail without a request; the tray says the package manager delivers the
-  updates. A smoke run (`STENO_SMOKE_SECONDS`) and the fixture host pass no update
-  source, so they never check on their own; the tray's check there has the same 60
-  second limit and only says what it found. The network is the updater's: the same
-  lane manifests, nothing new sent.
+  starts, runs or stops: the first tick with no recording under way raises it. No
+  update stops a recording or a processing run (stable plan P25): every install holds
+  the `InstallGate`'s hold, and the app's gate (`IdleGate` over the recorder and the
+  pipelines' shared `InFlight` set) gives one only while no recording starts, runs or
+  stops (the save runs while it stops, and its processing job is claimed before the
+  recorder is idle), no processing job, summary re-run or re-export is in flight or
+  claimed, and the app is not shutting down. A yes given while the app is busy asks
+  again ("Steno is recording. Install the update and relaunch once the
+  recording is saved and processed?" or "Steno is still processing a meeting. Install
+  the update and relaunch once it is done?"), with "Install After It Ends" as the
+  default and "Not Now", which leaves the version to be raised again. After a yes the
+  install waits until the gate says idle (every two seconds), downloads, then waits
+  for the gate's hold (`UpdateSchedule::hold_once_idle`), so a recording started
+  during the download is waited for, never stopped. The hold is the recorder's start
+  hold (`Recorder::hold_starts`) and the pipelines' `JobHold`. Recording always wins:
+  an installer that returns (`Installer::InPlace`, an AppImage or a macOS bundle the
+  user can write; `Installer::AsksForAPassword`, a `.deb` or `.rpm`, which asks through
+  pkexec, then a zenity or kdialog password dialog, then a terminal `sudo`, and may
+  wait for good, or a macOS bundle the user cannot write, which asks for an
+  administrator, a prompt that holds the app's windows until it is answered) lets the
+  start hold go at once and the job hold after `JOB_HOLD_LIMIT`, one minute, so a
+  Record during the `.deb`'s password prompt records, and a job claimed meanwhile (a
+  phone recording's) waits `queued` for a minute at most. The
+  install is awaited however long the prompt waits, so a password typed after the
+  minute still installs and relaunches. Once it has installed, the relaunch takes the
+  gate's hold again, and when a recording or a job started meanwhile it tells the user
+  ("Steno 0.12.0 is installed. Steno relaunches once the recording is saved and
+  processed.") and waits for it; a yes given meanwhile (the tray's check still finds
+  the installed version) gets the same message, and an install that returns during a
+  Quit says nothing, since the app quits instead. On Windows the install ends the app,
+  and the hold is kept through the install: the NSIS setup (`Installer::EndsTheApp`)
+  installs for the user alone and waits on nothing outside Steno before the shutdown;
+  the MSI (`Installer::EndsTheAppThenAsks`) installs for every user, so Windows asks
+  for consent after the app has ended, and Steno is down until the prompt is answered.
+  The app runs neither installer itself: it writes the verified download to its local
+  data folder, runs the shutdown and leaves a hidden `cmd.exe`
+  (`updater/windows_setup.rs` in the desktop shell) that starts the installer as the
+  plugin's passive install did, waits, and starts the version that ran again unless
+  the installer installed (`msiexec` 0, 1641 or 3010; the setup 0), so a no at the
+  prompt, a failed MSI or an aborted setup brings Steno back within seconds. If the
+  `cmd.exe` cannot start, ends before it runs (a policy that turns off the command
+  prompt ends it at once) or says nothing for 10 seconds, Steno restarts at once and
+  the error goes to the log. Steno lets go of its single-instance lock just before it
+  ends, so an old version started again at once (`msiexec` exits at once while another
+  install runs) comes up rather than handing over to the ending Steno. An install that
+  fails while Steno quits restarts nothing. An installer that asks an administrator (a
+  `.deb`, an `.rpm`, an unwritable macOS bundle, the MSI) therefore runs only right
+  after a yes given while the app is idle: a yes given while it was busy, one it
+  turned busy after, or one whose download took over 30 s, asks once more when it is
+  idle ("Steno 0.12.0 is ready to install. Install it and relaunch now?"), holding
+  nothing while that dialog is up, and "Later" leaves the version to be raised again.
+  The hold is kept through the shutdown and the relaunch: a Record then, from the
+  sidebar, the tray or a meeting prompt, is refused and says "Steno is relaunching to
+  finish installing an update. You can record again in a moment."; a background run
+  claimed then stays `queued` for the relaunched app, and a summary re-run or a
+  re-export claimed then is not kept (the user asks again). Cancelling every prompt
+  fails the install, which drops the hold. A yes given while the schedule's own
+  install runs installs nothing. With automatic downloads on, the schedule downloads
+  by itself only while `InstallGate::is_idle_now` says idle and no install runs (a
+  recording or a processing job has the disk and the network to itself), keeps the
+  package until an install takes it, and installs only with the gate's hold from
+  `try_hold`, taken after the one-install guard; it does not run an installer that
+  asks an administrator, whose package it announces instead. The flag is read again
+  when the download ends, and turning it off frees the kept package, so a switch
+  turned off during the transfer keeps and installs nothing. Sparkle installed a
+  download at quit. Settings' footer now says only "Updates are checked once a day."
+  (`general-section.tsx`, the settings redesign's footnote), which holds for both
+  apps. One install runs at a time, and the install is of the version the last check
+  found: a yes carries over to a newer version a check finds while the install waits.
+  The schedule's launch tick waits for the keyring's answer where the Secret Service
+  asks, so its dialog does not come up beside that prompt. A packaged install
+  (`STENO_DISTRIBUTION=aur|nix`, the environment before the build's value; stable plan
+  X5, `updates_are_managed`) runs no schedule, and its checks, the tray's included,
+  fail without a request; the tray says the package manager delivers the updates. A
+  smoke run (`STENO_SMOKE_SECONDS`) and the fixture host pass no update source, so
+  they never check on their own; the tray's check there has the same 60 second limit
+  and only says what it found. The network is the updater's: the same lane manifests,
+  nothing new sent.
 
 ### Bridge
 
@@ -3247,28 +3284,29 @@ PR off `main`.
 | The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | merged |
 | The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | merged |
 | Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back and opens; one that does not open waits for the next rebuild), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
-| On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`, `create_new_dir_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | merged |
-| Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and are admitted once, the same bytes in another split restart the partial; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | merged |
-| A device that will not run at 48 kHz (a headset in the hands-free profile) is recorded at its own rate and converted to 48 kHz on the processing thread, at start and after a switch mid-call, instead of failing (`steno-audio`, Swift core) | `t3code/check-rust-audio-sample-rate` | #198 | merged |
-| Settings warns under an audio folder on a network mount on Linux and macOS too (`statfs`: NFS, SMB, VM host shares and remote FUSE mounts on Linux; a mount without `MNT_LOCAL`, SMB, NFS, AFP, WebDAV and macFUSE on macOS; `steno-pipeline`) | `fix/network-folder-warning` | #245 | merged |
+| On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`, `create_new_dir_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | open |
+| Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and are admitted once, the same bytes in another split restart the partial; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | open |
+| A device that will not run at 48 kHz (a headset in the hands-free profile) is recorded at its own rate and converted to 48 kHz on the processing thread, at start and after a switch mid-call, instead of failing (`steno-audio`, Swift core) | `t3code/check-rust-audio-sample-rate` | #198 | open |
+| Settings warns under an audio folder on a network mount on Linux and macOS too (`statfs`: NFS, SMB, VM host shares and remote FUSE mounts on Linux; a mount without `MNT_LOCAL`, SMB, NFS, AFP, WebDAV and macFUSE on macOS; `steno-pipeline`) | `fix/network-folder-warning` | #245 | open |
 | The Bonjour record follows a network change on every platform, and the Mac advertises its computer name (`steno-handover`, `whoami` 2) | `fix/handover-republish` | #247 | merged |
-| On Windows two writers of one path in the process rename and flush one after the other, and std's rename and the reopen for the flush are retried on a sharing or lock violation or "access denied" for about 0.9 s, so a durable replace no longer fails because of another writer's flush (`steno-pipeline`) | `fix/windows-parallel-replace` | #252 | merged |
-| The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | merged |
-| On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | merged |
-| Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | merged |
-| On Windows the credential store keeps the API key and the handover identity on this computer (`CRED_PERSIST_LOCAL_MACHINE`) instead of with the roaming profile, and moves the `keyring` crate's roaming credentials there on their first read, keeping the stored blob under `CRED_PRESERVE_CREDENTIAL_BLOB` (`steno-services`) | `fix/windows-credential-persist` | #262 | merged |
-| A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | merged |
-| Stable plan A9: the AAC priming trimmed from the edit list, the gapless tag or, in the phone recorder's layout alone, AVFoundation's default; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | merged |
-| S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | merged |
-| The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | merged |
-| Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | merged |
+| On Windows two writers of one path in the process rename and flush one after the other, and std's rename and the reopen for the flush are retried on a sharing or lock violation or "access denied" for about 0.9 s, so a durable replace no longer fails because of another writer's flush (`steno-pipeline`) | `fix/windows-parallel-replace` | #252 | open |
+| The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | open |
+| On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
+| Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
+| On Windows the credential store keeps the API key and the handover identity on this computer (`CRED_PERSIST_LOCAL_MACHINE`) instead of with the roaming profile, and moves the `keyring` crate's roaming credentials there on their first read, keeping the stored blob under `CRED_PRESERVE_CREDENTIAL_BLOB` (`steno-services`) | `fix/windows-credential-persist` | #262 | open |
+| A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
+| Stable plan A9: the AAC priming trimmed from the edit list, the gapless tag or, in the phone recorder's layout alone, AVFoundation's default; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | open |
+| S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | open |
+| The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | open |
+| Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | merged |
-| The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | merged |
-| An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | merged |
-| The panels under Hyprland: a `GDK_BACKEND` list keeps them on XWayland, they carry their own titles on Linux, and the Hyprland window rules ship in `apps/desktop/src-tauri/linux/hyprland-steno.lua` (X2 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-panels` | #267 | merged |
-| Stable plan X6: the AUR package `steno-desktop-bin` (`packaging/aur/`), repackaging the release `.deb` verified against the release key, the binary and the sidecar in `/usr/lib/steno-desktop/` behind a `/usr/bin` wrapper that sets `STENO_DISTRIBUTION=aur` and `STENO_EXEC_PATH`, P5's drop-ins (copies until the pinned `.deb` ships them), no install script, pinned to rc.3 until a release contains #227 and #261; checked in an Arch container by `packaging/check-aur.sh` (`aur-ci.yml`) | `feat/aur-steno-desktop-bin` | #265 | merged |
-| Tests never write placeholder models into a models directory `STENO_MODELS_DIR` names: the reload test that installed them into the app's resolved directory (and so over a developer's real models) pins its own in the settings, the CLI tests clear the variable, `steno-services`' model writers panic outside the temp directory or inside the named one, and a child-process test proves the named directory is left alone | `fix/test-models-dir-guard` | #273 | merged |
-| S2: meeting detection on every platform (`steno_services::detection`: one prompt at a time for 60 s through the shell's panel, none while recording or with detection off, its Record attributed to the prompt's app through `recordFromPrompt`, the setting read every two seconds, which retries a detector that could not start) and the auto-stop after a call (`steno_services::auto_stop`: the 90-second grace, Keep recording, the call resuming, the Stop path with `callEnded`) (`steno-services`, desktop shell, web prompt) | `feat/rust-recorder-policy` | #271 | merged |
+| The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | open |
+| An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | open |
+| The panels under Hyprland: a `GDK_BACKEND` list keeps them on XWayland, they carry their own titles on Linux, and the Hyprland window rules ship in `apps/desktop/src-tauri/linux/hyprland-steno.lua` (X2 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-panels` | #267 | open |
+| Stable plan X6: the AUR package `steno-desktop-bin` (`packaging/aur/`), repackaging the release `.deb` verified against the release key, the binary and the sidecar in `/usr/lib/steno-desktop/` behind a `/usr/bin` wrapper that sets `STENO_DISTRIBUTION=aur` and `STENO_EXEC_PATH`, P5's drop-ins (copies until the pinned `.deb` ships them), no install script, pinned to rc.3 until a release contains #227 and #261; checked in an Arch container by `packaging/check-aur.sh` (`aur-ci.yml`) | `feat/aur-steno-desktop-bin` | #265 | open |
+| Tests never write placeholder models into a models directory `STENO_MODELS_DIR` names: the reload test that installed them into the app's resolved directory (and so over a developer's real models) pins its own in the settings, the CLI tests clear the variable, `steno-services`' model writers panic outside the temp directory or inside the named one, and a child-process test proves the named directory is left alone | `fix/test-models-dir-guard` | #273 | open |
+| S2: meeting detection on every platform (`steno_services::detection`: one prompt at a time for 60 s through the shell's panel, none while recording or with detection off, its Record attributed to the prompt's app through `recordFromPrompt`, the setting read every two seconds, which retries a detector that could not start) and the auto-stop after a call (`steno_services::auto_stop`: the 90-second grace, Keep recording, the call resuming, the Stop path with `callEnded`) (`steno-services`, desktop shell, web prompt) | `feat/rust-recorder-policy` | #271 | open |
+| No update stops a recording or a processing run: the app's install gate over the recorder and the pipelines' in-flight set, whose job hold keeps jobs claimed during the install waiting for a minute at most; Record always works while an installer that returns (a `.deb`'s password prompt) runs, and the relaunch waits for what started; the user's yes while busy installs after it ends; automatic downloads on, not for an installer that asks an administrator, which runs only right after a yes given while idle; on Windows a hidden `cmd.exe` starts the old version again when the installer does not install (P25 of `.plans/2026-10-07-stable-promotion.md`; `steno-pipeline`, `steno-services`, desktop shell) | `fix/desktop-updates-wait-for-idle` | #270 | merged |
 | S6, the identifier half: `com.nicolaischmid.steno.desktop` on every platform, the Swift `SUPublicEDKey` in `Info.plist` (checked in the built bundle), `panel-anchor.json` in the support directory and read once from the earlier identifier's config directory, and the macOS login item on `SMAppService.mainApp`, which removes the earlier build's Launch Agent at each launch and registers itself once, at the first launch with `launch_at_login` on (`steno.mainAppRegistered`; S6 of `.plans/2026-10-07-stable-promotion.md`; desktop shell) | `feat/desktop-identifier` | #268 | open |
 | S7, release mechanics: `v*` tags release the Tauri app as "Steno <version>", the build number (the commit count, above the `appcast` branch's) in `CFBundleVersion`, `check-bundle.sh --signed --handoff`, the signed Sparkle handoff item on tag runs, a stable release as "latest" with `appcast.xml`, the cask and AUR bumps and the flake lines, the `handoff` job behind the `appcast` environment, the 0.11.0 release notes, `release.yml` removed (S7 of `.plans/2026-10-07-stable-promotion.md`; `desktop-release.yml`, `apps/desktop/scripts`) | `ci/desktop-stable-release` | #274 | open |
 
