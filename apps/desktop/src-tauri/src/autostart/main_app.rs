@@ -20,9 +20,11 @@
 //! The rules run over two traits, [`MainApp`] and [`LaunchAgents`], which
 //! the tests fake; the system's are [`SystemMainApp`] and
 //! [`UserLaunchAgents`], macOS only. A smoke run (`STENO_SMOKE_SECONDS`)
-//! registers and removes nothing, and only a run from an app bundle
-//! outside a `fixture-host` build removes the agent
-//! ([`removes_earlier_agent`]).
+//! registers and removes nothing. Only a run from an installed app bundle
+//! ([`installed_bundle`]: not from `target/`, a mounted disk image or a
+//! copy Gatekeeper translocated) removes the agent, outside a
+//! `fixture-host` build ([`removes_earlier_agent`]), and only such a run
+//! lets the host count its first launch (`HostConfig::installed_bundle`).
 //!
 //! Swift: `LoginItemController.swift`.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -162,11 +164,27 @@ pub fn smoke_run() -> bool {
 
 /// Whether the launch removes the earlier agent: not in a smoke run
 /// (`smoke`), nor in a `fixture-host` build, nor when the executable `exe`
-/// is not inside an app bundle ([`inside_app_bundle`]). A `cargo run`
-/// binary under `target/` shares the home folder with an installed Steno
-/// and must not remove the agent that Steno still starts at login.
+/// is not in an installed app bundle ([`installed_bundle`]). A `cargo run`
+/// binary under `target/`, or Steno opened from its disk image, shares the
+/// home folder with an installed Steno and must not remove the agent that
+/// Steno still starts at login.
 pub fn removes_earlier_agent(smoke: bool, exe: Option<&std::path::Path>) -> bool {
-    !smoke && !cfg!(feature = "fixture-host") && exe.is_some_and(inside_app_bundle)
+    !smoke && !cfg!(feature = "fixture-host") && exe.is_some_and(installed_bundle)
+}
+
+/// Whether `exe` runs from an installed app bundle: inside one
+/// ([`inside_app_bundle`]), and neither on a mounted disk image
+/// (`/Volumes/…`) nor in the copy Gatekeeper runs an app from that was
+/// opened where it was downloaded (`…/AppTranslocation/…`). Both paths go
+/// away, when the image is ejected or the app is moved, so such a run
+/// registers no login item and removes no agent; the copy in
+/// Applications does both at its own first launch.
+pub fn installed_bundle(exe: &std::path::Path) -> bool {
+    inside_app_bundle(exe)
+        && !exe.starts_with("/Volumes")
+        && !exe
+            .components()
+            .any(|component| component.as_os_str() == "AppTranslocation")
 }
 
 /// Whether `exe` runs from an app bundle, `<name>.app/Contents/MacOS/`.
@@ -541,31 +559,78 @@ mod tests {
         assert!(removal < launch);
     }
 
-    /// Only an executable inside an app bundle removes the earlier agent,
-    /// and never in a smoke run or a `fixture-host` build: a `cargo run`
-    /// binary does not, whatever it is named.
+    /// Only an executable in an installed app bundle removes the earlier
+    /// agent, and never in a smoke run or a `fixture-host` build: a
+    /// `cargo run` binary does not, whatever it is named, nor does Steno
+    /// opened from its disk image or translocated by Gatekeeper.
     #[test]
-    fn only_a_run_from_an_app_bundle_removes_the_agent() {
+    fn only_a_run_from_an_installed_bundle_removes_the_agent() {
         use std::path::Path;
-        let bundled = Path::new("/Applications/Steno.app/Contents/MacOS/steno-desktop");
-        assert!(inside_app_bundle(bundled));
-        assert_eq!(
-            removes_earlier_agent(false, Some(bundled)),
-            !cfg!(feature = "fixture-host")
-        );
-        assert!(!removes_earlier_agent(true, Some(bundled)));
+        for exe in [
+            "/Applications/Steno.app/Contents/MacOS/steno-desktop",
+            "/Users/me/Applications/Steno.app/Contents/MacOS/steno-desktop",
+            // `Volumes` counts only as the top folder.
+            "/Users/me/Volumes/Steno.app/Contents/MacOS/steno-desktop",
+        ] {
+            let exe = Path::new(exe);
+            assert!(installed_bundle(exe), "{}", exe.display());
+            assert_eq!(
+                removes_earlier_agent(false, Some(exe)),
+                !cfg!(feature = "fixture-host"),
+                "{}",
+                exe.display()
+            );
+            assert!(!removes_earlier_agent(true, Some(exe)));
+        }
         assert!(!removes_earlier_agent(false, None));
+        // Each misses one part of `<name>.app/Contents/MacOS/`.
         for exe in [
             "/Users/me/steno/target/debug/steno-desktop",
             "/Users/me/target/MacOS/steno-desktop",
             "/Users/me/Steno/Contents/MacOS/steno-desktop",
             "/Users/me/Steno.app/MacOS/steno-desktop",
             "/Users/me/Steno.app/Contents/steno-desktop",
+            "/Applications/Steno.app/Contents/Resources/steno-desktop",
+            "/Applications/Steno.app/Other/MacOS/steno-desktop",
+            "/Applications/Steno.bundle/Contents/MacOS/steno-desktop",
             "steno-desktop",
         ] {
             assert!(!inside_app_bundle(Path::new(exe)), "{exe}");
+            assert!(!installed_bundle(Path::new(exe)), "{exe}");
             assert!(!removes_earlier_agent(false, Some(Path::new(exe))), "{exe}");
         }
+        // A bundle, but not an installed one.
+        for exe in [
+            "/Volumes/Steno/Steno.app/Contents/MacOS/steno-desktop",
+            "/private/var/folders/x1/abc/T/AppTranslocation/0A1B2C3D/d/Steno.app/Contents/MacOS/steno-desktop",
+        ] {
+            assert!(inside_app_bundle(Path::new(exe)), "{exe}");
+            assert!(!installed_bundle(Path::new(exe)), "{exe}");
+            assert!(!removes_earlier_agent(false, Some(Path::new(exe))), "{exe}");
+        }
+    }
+
+    /// The launch's removal asks the gate before it touches the agent
+    /// (`autostart::remove_earlier_agent`), and the shell tells the host
+    /// whether it runs from an installed bundle (`host::Host::real`), so
+    /// neither is left to a run from `target/` or a disk image.
+    #[test]
+    fn the_launch_asks_whether_it_runs_from_an_installed_bundle() {
+        // Without the carriage returns a Windows checkout may add.
+        let autostart = include_str!("../autostart.rs").replace("\r\n", "\n");
+        let removal = &autostart[autostart
+            .find("\npub fn remove_earlier_agent() {")
+            .expect("the launch's removal")..];
+        let gate = removal
+            .find("if !main_app::removes_earlier_agent(main_app::smoke_run(), exe.as_deref()) {\n        return;\n    }")
+            .expect("the removal returns early unless the gate lets it");
+        let remove = removal
+            .find("main_app::remove_earlier_agent(")
+            .expect("the removal removes the agent");
+        assert!(gate < remove);
+
+        let host = include_str!("../host.rs").replace("\r\n", "\n");
+        assert!(host.contains("options.installed_bundle = crate::autostart::installed_bundle();"));
     }
 
     /// A boot-out that fails still deletes the file, so the next login

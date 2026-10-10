@@ -828,9 +828,10 @@ once the database is open:
    unless it is the job this very process was started as at login, which
    it would end; then the file is deleted. The log says what happened. A
    `Steno.plist` that starts another program stays. Only the app run from
-   its bundle removes it: a `fixture-host` build, or a binary run from
-   `target/` that shares the home folder with an installed Steno, leaves
-   it to the installed app.
+   its installed bundle removes it: a `fixture-host` build, a binary run
+   from `target/` that shares the home folder with an installed Steno, or
+   Steno opened from its mounted disk image (`/Volumes/…`) or translocated
+   by Gatekeeper (`…/AppTranslocation/…`), leaves it to the installed app.
 2. Then the host's first-launch registration
    (`Host::register_login_item_on_first_launch`, as the Swift app's
    `registerLoginItemOnFirstLaunch`) registers the login item once, at the
@@ -841,8 +842,12 @@ once the database is open:
    its Launch Agent, counts only off the Mac. A launch whose login item
    macOS cannot find is not counted: a binary run outside a bundle reads
    that, and counting it would keep the installed app from ever
-   registering. A failed registration is logged as a warning, General
-   shows the switch off, and the next launch tries again.
+   registering. Nor does a run from outside an installed bundle, as in
+   step 1, register or count anything (`HostConfig::installed_bundle`,
+   which the shell sets from its own path): the copy in Applications
+   registers at its own first launch. A failed registration is logged as
+   a warning, General shows the switch off, and the next launch tries
+   again.
    After that only the switch in General registers or removes the login
    item, so one the user removed in System Settings stays removed.
 

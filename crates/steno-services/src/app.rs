@@ -91,6 +91,10 @@ pub struct AppOptions {
     /// [`LOCK_PATIENCE`] in the product, whose update relaunch starts the
     /// new process before the old one has exited; zero in the tests.
     pub lock_patience: std::time::Duration,
+    /// The shell runs from an installed app bundle
+    /// ([`HostConfig::installed_bundle`]); false for the CLI and the tests,
+    /// and in [`AppOptions::product`] until the shell says otherwise.
+    pub installed_bundle: bool,
 }
 
 /// The product's [`AppOptions::lock_patience`].
@@ -119,6 +123,7 @@ impl AppOptions {
             }),
             detection: None,
             lock_patience: LOCK_PATIENCE,
+            installed_bundle: false,
         })
     }
 }
@@ -150,6 +155,8 @@ pub struct App {
     /// The runtime the graph's async calls block on.
     pub runtime: tokio::runtime::Handle,
     pub version: String,
+    /// [`AppOptions::installed_bundle`], for [`App::host`].
+    pub installed_bundle: bool,
     /// What went wrong while building, for the shell's log; an unreadable
     /// API key is logged where it is read.
     pub startup_warnings: Vec<String>,
@@ -650,6 +657,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         zone,
         runtime,
         version: options.version,
+        installed_bundle: options.installed_bundle,
         startup_warnings: warnings,
         live_recording_check: LiveRecordingCheck::default(),
         launch_work: std::sync::Mutex::default(),
@@ -884,9 +892,11 @@ fn log_operation_failure(event: &MeetingEvent) {
 }
 
 impl App {
-    /// The host over this graph, with the viewer's zone, the version and
+    /// The host over this graph, with the viewer's zone, the version,
     /// whether a package manager delivers the updates
-    /// ([`updates_are_managed`](crate::updates::updates_are_managed)).
+    /// ([`updates_are_managed`](crate::updates::updates_are_managed)) and
+    /// whether the shell runs from an installed bundle
+    /// ([`AppOptions::installed_bundle`]).
     pub fn host(&self) -> Result<Host, steno_host::host::HostError> {
         Host::new(
             self.store.clone(),
@@ -896,6 +906,7 @@ impl App {
                 zone: self.zone,
                 platform: steno_bridge::Platform::CURRENT,
                 updates_managed: crate::updates::updates_are_managed(),
+                installed_bundle: self.installed_bundle,
             },
         )
     }
@@ -1881,6 +1892,34 @@ mod tests {
         );
     }
 
+    /// The shell's word on its bundle reaches the host: on the Mac only a
+    /// graph built for an installed bundle registers the login item at its
+    /// first launch; off the Mac both do.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_first_launch_follows_the_shells_installed_bundle() {
+        for installed_bundle in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let login_item = Arc::new(FakeLoginItem::new(LoginItemStatus::NotRegistered));
+            let app = build(AppOptions {
+                login_item: Some(login_item.clone() as Arc<dyn LoginItem>),
+                installed_bundle,
+                ..options_under(&dir.path().join("support"))
+            })
+            .unwrap();
+            let mut settings = app.store.settings().unwrap();
+            settings.launch_at_login = true;
+            app.store.save_settings(&settings).unwrap();
+            app.host().unwrap().register_login_item_on_first_launch();
+            let registers = installed_bundle || !cfg!(target_os = "macos");
+            let changes = login_item.changes.lock().unwrap().clone();
+            assert_eq!(
+                changes == [true],
+                registers,
+                "{installed_bundle}: {changes:?}"
+            );
+        }
+    }
+
     /// [`crate::testing::app_over_fakes`] under `dir` over a synthetic
     /// tone.
     fn recording_app(dir: &tempfile::TempDir, store: &Arc<Store>) -> App {
@@ -2408,6 +2447,7 @@ mod tests {
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
             detection: None,
             lock_patience: std::time::Duration::ZERO,
+            installed_bundle: false,
         }
     }
 

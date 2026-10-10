@@ -130,6 +130,15 @@ pub struct HostConfig {
     /// section offers no check and says where updates come from, and
     /// `updates.check` checks nothing. Rust only.
     pub updates_managed: bool,
+    /// The shell runs from an installed app bundle: inside a `.app`, and
+    /// neither on a mounted disk image nor translocated by Gatekeeper. On
+    /// the Mac only such a launch registers the login item at its first
+    /// launch and counts it ([`Host::register_login_item_on_first_launch`]),
+    /// so a run that would register a path about to disappear leaves the
+    /// first launch to the installed copy. The shell decides from its own
+    /// path; off the Mac it is not read. False by default, as for the CLI
+    /// and the tests. Rust only.
+    pub installed_bundle: bool,
 }
 
 impl Default for HostConfig {
@@ -139,6 +148,7 @@ impl Default for HostConfig {
             zone: crate::labels::utc(),
             platform: Platform::CURRENT,
             updates_managed: false,
+            installed_bundle: false,
         }
     }
 }
@@ -937,14 +947,20 @@ impl Host {
     /// system cannot find (`NotFound`) is not counted either: a run outside
     /// an app bundle, such as `cargo run`, reads it, shares the installed
     /// app's preferences, and would otherwise stop the installed app's
-    /// first registration for good. Swift:
+    /// first registration for good. Nor, on the Mac, does a launch from
+    /// outside an installed bundle register or count anything
+    /// ([`HostConfig::installed_bundle`]). Swift:
     /// `AppController.registerLoginItemOnFirstLaunch`, which counts the
     /// launch before it registers.
     pub fn register_login_item_on_first_launch(&self) {
         use crate::services::LoginItemStatus;
+        let config = &self.shared.config;
+        if config.platform == Platform::Macos && !config.installed_bundle {
+            return;
+        }
         let preferences = &self.shared.services.preferences;
         let login_item = &self.shared.services.login_item;
-        let key = first_launch_key(self.shared.config.platform);
+        let key = first_launch_key(config.platform);
         if preferences.flag(key) || login_item.status() == LoginItemStatus::Managed {
             return;
         }
@@ -962,7 +978,7 @@ impl Host {
                     false
                 }
             },
-            LoginItemStatus::NotFound => self.shared.config.platform != Platform::Macos,
+            LoginItemStatus::NotFound => config.platform != Platform::Macos,
             LoginItemStatus::Enabled | LoginItemStatus::RequiresApproval => true,
             LoginItemStatus::Managed => false,
         };

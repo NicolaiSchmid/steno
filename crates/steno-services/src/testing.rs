@@ -234,6 +234,7 @@ pub fn app_over_fakes(
         zone,
         runtime: tokio::runtime::Handle::current(),
         version: "0.0.0".to_owned(),
+        installed_bundle: false,
         startup_warnings: Vec::new(),
         live_recording_check: crate::recovery::LiveRecordingCheck::default(),
         launch_work: std::sync::Mutex::default(),

@@ -188,6 +188,14 @@ fn first_launch_on_mac(
     status: LoginItemStatus,
     flags: &'static [&'static str],
 ) -> (Vec<bool>, bool) {
+    let harness = launched_on_mac(on, status, flags);
+    let changes = harness.fakes.login_item.changes.lock().unwrap().clone();
+    (changes, launch_counted(&harness))
+}
+
+/// The host after two launches on the Mac from an installed bundle, as
+/// [`first_launch_on_mac`] sets them up.
+fn launched_on_mac(on: bool, status: LoginItemStatus, flags: &'static [&'static str]) -> Harness {
     let harness = Harness::builder()
         .platform(Platform::Macos)
         .seed(move |store, fakes| {
@@ -202,8 +210,7 @@ fn first_launch_on_mac(
         .build();
     harness.host.register_login_item_on_first_launch();
     harness.host.register_login_item_on_first_launch();
-    let changes = harness.fakes.login_item.changes.lock().unwrap().clone();
-    (changes, launch_counted(&harness))
+    harness
 }
 
 /// A desktop build under the earlier identifier set
@@ -212,13 +219,16 @@ fn first_launch_on_mac(
 /// under its own flag (stable plan S6). Rust only.
 #[test]
 fn the_earlier_builds_flag_does_not_stop_the_main_apps_first_registration() {
-    let (changes, counted) = first_launch_on_mac(
+    let harness = launched_on_mac(
         true,
         LoginItemStatus::NotRegistered,
         &[LOGIN_ITEM_REGISTERED_KEY],
     );
-    assert_eq!(changes, [true]);
-    assert!(counted);
+    assert_eq!(*harness.fakes.login_item.changes.lock().unwrap(), [true]);
+    assert!(launch_counted(&harness));
+    // General shows the login item the launch registered.
+    let general = harness.snapshot(BridgeTopic::SettingsGeneral);
+    assert_eq!(general["loginItem"], "enabled");
 }
 
 /// After the first launch, a login item the user removed in System
@@ -266,14 +276,45 @@ fn a_login_item_the_mac_cannot_find_leaves_the_first_launch_uncounted() {
     );
 }
 
+/// On the Mac a launch from outside an installed bundle (a binary under
+/// `target/`, an app on a mounted disk image or translocated by
+/// Gatekeeper) registers nothing and counts nothing, so the installed
+/// copy, on the same preferences and login item, registers at its own
+/// first launch. Rust only.
+#[test]
+fn on_the_mac_only_an_installed_bundle_counts_the_first_launch() {
+    let outside = Harness::builder()
+        .outside_installed_bundle()
+        .seed(seed_launch_at_login)
+        .build();
+    outside.host.register_login_item_on_first_launch();
+    assert!(outside.fakes.login_item.changes.lock().unwrap().is_empty());
+    assert!(!launch_counted(&outside));
+
+    let preferences = outside.fakes.preferences.clone();
+    let login_item = outside.fakes.login_item.clone();
+    let installed = Harness::builder()
+        .seed(seed_launch_at_login)
+        .change_services(move |services| {
+            services.preferences = preferences;
+            services.login_item = login_item;
+        })
+        .build();
+    installed.host.register_login_item_on_first_launch();
+    assert_eq!(*outside.fakes.login_item.changes.lock().unwrap(), [true]);
+    assert!(launch_counted(&outside));
+}
+
 /// Off the Mac the first launch keeps the Swift app's flag, and the Mac's
-/// own flag means nothing there. A login item the plugin could not read
-/// (`NotFound`) counts there, as in Swift.
+/// own flag means nothing there, nor whether the shell runs from an
+/// installed bundle. A login item the plugin could not read (`NotFound`)
+/// counts there, as in Swift.
 #[test]
 fn off_the_mac_the_first_launch_is_counted_under_the_swift_flag() {
     for platform in [Platform::Linux, Platform::Windows] {
         let harness = Harness::builder()
             .platform(platform)
+            .outside_installed_bundle()
             .seed(seed_launch_at_login)
             .seed(|_, fakes| fakes.preferences.set_flag(MAIN_APP_REGISTERED_KEY, true))
             .build();

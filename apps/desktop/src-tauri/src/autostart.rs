@@ -318,7 +318,8 @@ fn with_off_at_exit(status: LoginItemStatus, mark: Option<&std::path::Path>) -> 
 /// first-launch registration: the Launch Agent a build under the earlier
 /// identifier left behind goes (`main_app::remove_earlier_agent`), also
 /// while the system manages the login item. Nothing goes in a smoke run, a
-/// `fixture-host` build or a run from outside an app bundle
+/// `fixture-host` build or a run from outside an installed app bundle,
+/// such as one from `target/` or from the mounted disk image
 /// (`main_app::removes_earlier_agent`), which would remove the agent an
 /// installed Steno still starts. Linux's `remove_earlier_entry` does the
 /// same for its autostart entry, but only while the system manages the
@@ -333,6 +334,17 @@ pub fn remove_earlier_agent() {
         &main_app::UserLaunchAgents::of_home(),
         std::process::id(),
     ));
+}
+
+/// Whether this app runs from an installed app bundle
+/// (`main_app::installed_bundle`), which the shell passes to the host
+/// (`HostConfig::installed_bundle`): on the Mac a run from `target/`, from
+/// the mounted disk image or translocated by Gatekeeper registers no login
+/// item at its first launch and leaves that launch to the installed copy.
+/// Off the Mac the host does not read it.
+#[cfg(not(feature = "fixture-host"))]
+pub fn installed_bundle() -> bool {
+    std::env::current_exe().is_ok_and(|exe| main_app::installed_bundle(&exe))
 }
 
 /// An update's relaunch is about to exit (`updater`): the next process
