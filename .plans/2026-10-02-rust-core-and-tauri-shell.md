@@ -1444,10 +1444,14 @@ still has to draw the window side. `[ ]` is not ported yet.
     user manager that is not Steno's own (its name does not say `steno`) and whose
     main process is another asks for `app-steno\x2ddesktop-<pid>.scope` in
     `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and
-    `After=graphical-session.target`, waits up to 2 s for the move and calls the
-    start off otherwise, as the sidecar's scope does; a scope, Steno's own
-    services and an app outside the user manager stay, and a failed move logs a
-    warning (`own_scope.rs`, X1 of `.plans/2026-10-07-stable-promotion.md`). Tested
+    `After=graphical-session.target`, and waits up to 2 s for the move. Unlike
+    the sidecar's scope, a start still queued then (at login, behind
+    `graphical-session.target`) is never called off: the request's thread waits
+    up to 60 s more and logs the outcome. The AppImage runtime's mount server,
+    in the same cgroup, moves into a scope of its own in `app.slice`, which no
+    session's end stops. A scope, Steno's own services and an app outside the
+    user manager stay, and a failed move logs a warning (`own_scope.rs`, X1 of
+    `.plans/2026-10-07-stable-promotion.md`). Tested
     against a fake manager on a private `dbus-daemon`, and in a container under a
     real systemd 255 user manager with a stand-in for uwsm's units (desktop README,
     Hyprland).
