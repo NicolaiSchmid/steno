@@ -194,6 +194,9 @@ struct State {
     raised: u64,
     /// Raised to stop [`DetectionController::run`]'s thread.
     running: Option<Cancel>,
+    /// [`DetectionController::stop`] ran: detection stays off, whatever
+    /// a read of the setting still under way finds.
+    stopped: bool,
 }
 
 /// The meeting detection controller; see the module doc.
@@ -240,7 +243,7 @@ impl DetectionController {
         let running = Cancel::new();
         {
             let mut state = self.state();
-            if state.running.is_some() {
+            if state.running.is_some() || state.stopped {
                 return;
             }
             state.running = Some(running.clone());
@@ -271,8 +274,12 @@ impl DetectionController {
     /// Detection off for good: the setting is no longer followed, the
     /// detector stops and the prompt goes. For the app's shutdown.
     pub fn stop(&self) {
-        if let Some(running) = self.state().running.take() {
-            running.cancel();
+        {
+            let mut state = self.state();
+            state.stopped = true;
+            if let Some(running) = state.running.take() {
+                running.cancel();
+            }
         }
         self.set_enabled(false);
     }
@@ -306,19 +313,22 @@ impl DetectionController {
     }
 
     /// Turns detection on (the detector starts, or is started again when
-    /// it did not) or off (the detector stops and the prompt goes).
+    /// it did not) or off (the detector stops and the prompt goes). Once
+    /// [`Self::stop`] ran, it stays off.
     pub fn set_enabled(&self, enabled: bool) {
         let mut detecting = self
             .detecting
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        {
+        let enabled = {
             let mut state = self.state();
+            let enabled = enabled && !state.stopped;
             state.enabled = enabled;
             if !enabled {
                 self.close(&mut state);
             }
-        }
+            enabled
+        };
         if enabled {
             if !self.detector.is_running() {
                 *detecting = self.start_detector(detecting.take());

@@ -429,8 +429,13 @@ fn the_setting_starts_and_stops_the_detector_and_a_failed_start_is_retried() {
 
     harness.controller.stop();
     assert!(!harness.controller.is_detecting(), "stop ends the detector");
+    // A read of the setting that was under way when the app quit.
     harness.controller.follow_settings();
-    harness.controller.stop();
+    assert!(
+        !harness.controller.is_detecting(),
+        "and nothing starts it again"
+    );
+    assert!(!harness.controller.is_enabled());
 }
 
 const ZOOM: i32 = 4242;
