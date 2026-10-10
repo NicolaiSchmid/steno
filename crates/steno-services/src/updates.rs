@@ -45,22 +45,40 @@
 //!   only of the version the last check found: a yes carries over to a
 //!   newer version a check finds while the install waits.
 //! - **Recording always wins.** An installer that returns
-//!   ([`Installer::InPlace`], [`Installer::AsksForAPassword`]) may wait on
-//!   a password prompt nobody answers, so the install lets recording
-//!   starts go at once and processing jobs after [`INSTALL_HOLD_LIMIT`]; a
-//!   recording started meanwhile is waited for, and its processing, before
-//!   the relaunch takes the hold again, and the user is told
-//!   ([`UpdateSource::tell_relaunch_waits`]). The hold is kept through the
-//!   shutdown and the relaunch, and, where the installer ends the app
-//!   ([`Installer::EndsTheApp`], Windows), through the install: meanwhile a
-//!   Record is refused and says
+//!   ([`Installer::returns`]) may wait on a password prompt nobody
+//!   answers, so the install lets recording starts go at once and
+//!   processing jobs after [`JOB_HOLD_LIMIT`]; a recording started
+//!   meanwhile is waited for, and its processing, before the relaunch
+//!   takes the hold again, and the user is told
+//!   ([`UpdateSource::tell_relaunch_waits`]).
+//!   A password typed after the limit still installs, and the relaunch
+//!   follows as it would have. The hold is kept through the shutdown and
+//!   the relaunch, and, where the installer ends the app (Windows), through
+//!   the install: meanwhile a Record is refused and says
 //!   [`INSTALLING_UPDATE`](steno_host::services::INSTALLING_UPDATE), and a
 //!   processing job, such as one for a phone recording that arrives, waits
 //!   `queued`.
+//! - **An installer that asks an administrator**
+//!   ([`Installer::asks_an_administrator`]: a `.deb`'s or an `.rpm`'s
+//!   password, a macOS bundle the user cannot write, the MSI's consent
+//!   prompt) runs only right after a yes given while the app is idle, so
+//!   someone is at the screen to answer. The MSI ends the app before its
+//!   prompt, and Steno stays down until the prompt is answered. A yes given
+//!   while the app was busy, or one the app turned busy after, is asked
+//!   again once it is idle ([`Question::InstallNow`]), before the install
+//!   takes the hold.
+//! - **Between an install that returned and the relaunch** the running
+//!   version works beside the new files. A recording reads none of them; a
+//!   processing job starts the new speech sidecar, which fails cleanly
+//!   when its protocol changed and keeps the audio for Process again after
+//!   the relaunch. A password prompt left open at Quit outlives the app:
+//!   an answer given later installs beside a Steno started meanwhile,
+//!   which runs the old version until its next launch, and whose next
+//!   check offers the update again.
 //! - **Automatic downloads**: a found update is downloaded at the first
 //!   tick that finds the app idle and no install under way, and installed
 //!   at the first tick that gets the gate's hold; while the app is busy
-//!   each waits for a later tick. An installer that asks for a password
+//!   each waits for a later tick. An installer that asks an administrator
 //!   is not run by the schedule, since nobody may be there to answer: the
 //!   kept package is announced instead. The flag is read again when the
 //!   download ends, so a switch turned off during the transfer keeps
@@ -117,14 +135,14 @@ pub const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60
 /// How often the user's install, waiting for a recording or a processing
 /// job to end, looks again ([`UpdateSchedule::hold_once_idle`]).
 pub const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
-/// How long an installer that returns ([`Installer::InPlace`],
-/// [`Installer::AsksForAPassword`]) keeps processing jobs waiting; recording
-/// starts it never holds off. It covers what the install does by itself, a
-/// password typed by someone at the screen and the package manager's run,
-/// which take seconds; past a minute nobody is answering the prompt, and a
-/// meeting recorded meanwhile, or a phone's that arrives, is processed
-/// while the prompt waits.
-pub const INSTALL_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long an installer that returns ([`Installer::returns`]) keeps
+/// processing jobs waiting; it never holds recording starts off. It
+/// covers what the install does by itself, a password typed by someone at
+/// the screen and the package manager's run, which take seconds; past a
+/// minute nobody is answering the prompt, and a meeting recorded
+/// meanwhile, or a phone's that arrives, is processed while the prompt
+/// waits.
+pub const JOB_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// The outcome of a check that ran into [`CHECK_TIMEOUT`].
 pub const CHECK_TIMED_OUT: &str = "The update check timed out.";
 /// The outcome of a check asked for on a packaged install: the line the
@@ -250,6 +268,10 @@ pub enum Question<'a> {
     /// answer that installs then is the default; neither answer stops the
     /// recording or the processing.
     AfterItEnds(Busy),
+    /// A yes put off while the app was busy, now that it is idle, for an
+    /// installer that asks an administrator: install this version now and
+    /// relaunch? Asked so someone is at the screen to answer the prompt.
+    InstallNow(&'a str),
 }
 
 /// What an install waits for, as [`Question::AfterItEnds`] names it.
@@ -272,6 +294,9 @@ enum Installed {
     Failed,
     /// Another install runs, so nothing was installed.
     Skipped,
+    /// The user answered no when asked again ([`Question::InstallNow`]):
+    /// the version is left to announce again.
+    PutOff,
 }
 
 /// How [`UpdateSource::install`] writes the new version, which decides
@@ -280,16 +305,39 @@ enum Installed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Installer {
     /// Replaces the app where it lies and returns: an `AppImage`, or a macOS
-    /// bundle, which asks for an administrator first when the user cannot
-    /// write its folder.
+    /// bundle the user can write.
     InPlace,
-    /// Asks for an administrator's password, then installs the package and
-    /// returns: a `.deb` or an `.rpm`. The schedule does not run it by
-    /// itself.
+    /// Asks for an administrator's password, then installs and returns: a
+    /// `.deb` or an `.rpm`, or a macOS bundle the user cannot write.
     AsksForAPassword,
-    /// Starts the installer, which ends the app: Windows. Nothing outside
-    /// Steno is waited on before the shutdown.
+    /// Starts the installer, which ends the app and installs for the user
+    /// alone: Windows' NSIS setup. Nothing outside Steno is waited on
+    /// before the shutdown.
     EndsTheApp,
+    /// Starts the installer, which ends the app, then asks for an
+    /// administrator's consent and installs for every user: Windows' MSI.
+    /// Steno is down until someone answers the prompt.
+    EndsTheAppThenAsks,
+}
+
+impl Installer {
+    /// Whether the install returns, so recording starts go on while it
+    /// runs, and processing jobs after [`JOB_HOLD_LIMIT`].
+    #[must_use]
+    pub fn returns(self) -> bool {
+        matches!(self, Installer::InPlace | Installer::AsksForAPassword)
+    }
+
+    /// Whether the install asks an administrator, so it needs someone at
+    /// the screen: the schedule does not run it, and the user's yes given
+    /// while the app was busy is asked again once it is idle.
+    #[must_use]
+    pub fn asks_an_administrator(self) -> bool {
+        matches!(
+            self,
+            Installer::AsksForAPassword | Installer::EndsTheAppThenAsks
+        )
+    }
 }
 
 /// The updater the schedule drives, and the dialogs it asks through; the
@@ -320,9 +368,9 @@ pub trait UpdateSource: Send + Sync {
     async fn ask(&self, question: Question<'_>) -> bool;
     /// Tells the user an install failed, with the updater's `message`.
     fn tell_install_failed(&self, message: &str);
-    /// Tells the user `version` is installed and Steno relaunches into it
-    /// once `busy` has ended: a recording started, or a processing job
-    /// began, while the installer ran.
+    /// Tells the user `version` is installed and Steno relaunches once
+    /// `busy` has ended: a recording started, or a processing job began,
+    /// while the installer ran.
     fn tell_relaunch_waits(&self, version: &str, busy: Busy);
     /// Offers the found update to the user ([`UpdateSchedule::offer`]).
     /// Swift: Sparkle's update alert.
@@ -610,13 +658,15 @@ impl UpdateSchedule {
         if !self.source.ask(Question::Install(version)).await {
             return;
         }
-        if let Some(busy) = self.busy()
-            && !self.source.ask(Question::AfterItEnds(busy)).await
-        {
-            self.announce_again(version);
-            return;
-        }
-        self.install_on_request(version).await;
+        let put_off = match self.busy() {
+            Some(busy) if !self.source.ask(Question::AfterItEnds(busy)).await => {
+                self.announce_again(version);
+                return;
+            }
+            Some(_) => true,
+            None => false,
+        };
+        self.install_on_request(version, put_off).await;
     }
 
     /// What keeps an install from running now; `None` while the app is
@@ -631,23 +681,23 @@ impl UpdateSchedule {
         }
     }
 
-    /// The user's install of `version`, after the dialog's yes: once the
-    /// app is idle, from the kept package when it is that version, else
-    /// downloaded then; then, once the app is idle again and the gate's
-    /// hold is taken ([`Self::hold_once_idle`]), installed as
-    /// [`Self::install_now`] does. A recording started during the download
-    /// is waited for, never stopped. Nothing installs while another
-    /// install runs (a second yes meanwhile does nothing). A newer version
-    /// a check found during a wait keeps the yes: the install downloads
-    /// and installs that one instead. A version no longer found fails with
-    /// a message.
-    async fn install_on_request(&self, version: &str) -> Installed {
+    /// The user's install of `version`, after the dialog's yes (`put_off`
+    /// when it was given while the app was busy): once the app is idle,
+    /// from the kept package when it is that version, else downloaded
+    /// then; then, once the app is idle again and the gate's hold is taken
+    /// ([`Self::hold_for_install`]), installed as [`Self::install_now`]
+    /// does. A recording started during the download is waited for, never
+    /// stopped. Nothing installs while another install runs (a second yes
+    /// meanwhile does nothing). A newer version a check found during a
+    /// wait keeps the yes: the install downloads and installs that one
+    /// instead. A version no longer found fails with a message.
+    async fn install_on_request(&self, version: &str, mut put_off: bool) -> Installed {
         let Some(_one) = OneInstall::start(&self.installing) else {
             return Installed::Skipped;
         };
         let mut version = version.to_owned();
         loop {
-            self.until_idle().await;
+            put_off |= self.until_idle().await;
             let Some(found) = self.on_offer(&version) else {
                 return Installed::Failed;
             };
@@ -667,14 +717,18 @@ impl UpdateSchedule {
                     }
                 },
             };
-            let hold = self.hold_once_idle().await;
+            let Some(hold) = self.hold_for_install(&version, put_off).await else {
+                self.announce_again(&version);
+                return Installed::PutOff;
+            };
             // A check during the waits may have found a newer version, which
             // is downloaded without the hold, or none.
             match self.on_offer(&version) {
                 Some(found) if found == version => {
                     return self.install_now(&version, package, hold).await;
                 }
-                Some(_) => {}
+                // The user has not seen the newer version.
+                Some(_) => put_off = true,
                 None => return Installed::Failed,
             }
         }
@@ -699,18 +753,46 @@ impl UpdateSchedule {
     }
 
     /// Returns once the gate says the app is idle, looking again every
-    /// [`IDLE_POLL`].
-    async fn until_idle(&self) {
+    /// [`IDLE_POLL`]; true when it had to wait.
+    async fn until_idle(&self) -> bool {
+        let mut waited = false;
         while !self.gate.is_idle_now() {
+            waited = true;
             tokio::time::sleep(IDLE_POLL).await;
+        }
+        waited
+    }
+
+    /// The gate's hold for the user's install of `version`, as
+    /// [`Self::hold_once_idle`] takes it. An installer that asks an
+    /// administrator ([`Installer::asks_an_administrator`]) runs only right
+    /// after a yes given while the app is idle: when the yes was put off
+    /// (`put_off`), or the app is busy by now, it asks again once the app
+    /// is idle ([`Question::InstallNow`]), and holds nothing while it asks.
+    /// `None` when the answer is no.
+    async fn hold_for_install(&self, version: &str, put_off: bool) -> Option<InstallHold> {
+        if !self.source.installer().asks_an_administrator() {
+            return Some(self.hold_once_idle().await);
+        }
+        let mut just_said_yes = !put_off;
+        loop {
+            if just_said_yes && let Some(hold) = self.gate.try_hold() {
+                return Some(hold);
+            }
+            self.until_idle().await;
+            if !self.source.ask(Question::InstallNow(version)).await {
+                return None;
+            }
+            just_said_yes = true;
         }
     }
 
     /// The gate's hold, once the app is idle: tried at once and then every
     /// [`IDLE_POLL`], so it waits for a recording to end and be saved, for
     /// every processing job, and for a tick holding the gate for a moment.
-    /// What the user's install waits for after its download, and the
-    /// relaunch after an installer that let recording go on.
+    /// What the user's install waits for after its download (an installer
+    /// that asks an administrator asks again first), and the relaunch
+    /// after an installer that let recording go on.
     pub async fn hold_once_idle(&self) -> InstallHold {
         loop {
             if let Some(hold) = self.gate.try_hold() {
@@ -722,33 +804,33 @@ impl UpdateSchedule {
 
     /// Installs the downloaded `package` of `version` and relaunches, with
     /// `hold`, the gate's, taken before the install. Where the installer
-    /// ends the app ([`Installer::EndsTheApp`]) the hold is kept through the
-    /// install, since the process ends inside it. An installer that returns
-    /// may wait on a password prompt (a `.deb` install always asks), so
-    /// recording starts are let go at once and processing jobs after
-    /// [`INSTALL_HOLD_LIMIT`]; once it has installed, the relaunch takes
-    /// the gate's hold again ([`Self::hold_to_relaunch`]). The relaunch
-    /// keeps the hold through the shutdown. A failed install, a cancelled
-    /// prompt's included, drops it.
+    /// ends the app the hold is kept through the install, since the process
+    /// ends inside it. An installer that returns may wait on a password
+    /// prompt (a `.deb` install always asks), so recording starts are let
+    /// go at once and processing jobs after [`JOB_HOLD_LIMIT`]; the
+    /// install is awaited however long it takes, and once it has installed
+    /// the relaunch takes the gate's hold again
+    /// ([`Self::hold_to_relaunch`]). The relaunch keeps the hold through
+    /// the shutdown. A failed install, a cancelled prompt's included, drops
+    /// it.
     async fn install_now(
         &self,
         version: &str,
         package: Vec<u8>,
         mut hold: InstallHold,
     ) -> Installed {
-        let installed = match self.source.installer() {
-            Installer::EndsTheApp => self.source.install(version, package).await,
-            Installer::InPlace | Installer::AsksForAPassword => {
-                hold.starts = None;
-                let mut install = std::pin::pin!(self.source.install(version, package));
-                match tokio::time::timeout(INSTALL_HOLD_LIMIT, &mut install).await {
-                    Ok(installed) => installed,
-                    Err(_elapsed) => {
-                        hold.jobs = None;
-                        install.await
-                    }
+        let installed = if self.source.installer().returns() {
+            hold.starts = None;
+            let mut install = std::pin::pin!(self.source.install(version, package));
+            match tokio::time::timeout(JOB_HOLD_LIMIT, &mut install).await {
+                Ok(installed) => installed,
+                Err(_elapsed) => {
+                    hold.jobs = None;
+                    install.await
                 }
             }
+        } else {
+            self.source.install(version, package).await
         };
         if let Err(message) = installed {
             drop(hold);
@@ -798,11 +880,11 @@ impl UpdateSchedule {
 
     /// Installs the kept package while holding the gate; true when the
     /// relaunch is under way. It takes no hold with nothing kept, while
-    /// another install runs, or for an installer that asks for a password,
-    /// whose kept package is announced instead. Automatic downloads turned
+    /// another install runs, or for an installer that asks an
+    /// administrator, whose kept package is announced instead. Automatic downloads turned
     /// off free the kept package, so nothing is left to install.
     async fn install_when_idle(&self) -> bool {
-        if self.state().staged.is_none() || self.source.installer() == Installer::AsksForAPassword {
+        if self.state().staged.is_none() || self.source.installer().asks_an_administrator() {
             return false;
         }
         let Some(_one) = OneInstall::start(&self.installing) else {

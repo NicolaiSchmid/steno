@@ -30,6 +30,7 @@ use steno_services::updates::{
     Busy, CHECK_TIMED_OUT, CHECK_TIMEOUT, Installer, MANAGED_CHECK, Question, UpdateSchedule,
     UpdateSource,
 };
+use tauri::utils::config::BundleType;
 use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
@@ -148,20 +149,13 @@ impl UpdateSource for ShellUpdates {
             .map_err(|error| error.to_string())
     }
 
-    /// The updater's choice by the bundle the binary came in: on Windows
-    /// it starts the installer and ends the process; a `.deb` or an `.rpm`
-    /// is installed through pkexec, then a zenity or kdialog password
-    /// dialog, then `sudo`, each of which waits for an answer; anything
-    /// else (an `AppImage`, the macOS bundle) is replaced in place.
+    /// [`installer_for`] this build's platform and bundle.
     fn installer(&self) -> Installer {
-        use tauri::utils::config::BundleType;
-        if cfg!(windows) {
-            return Installer::EndsTheApp;
-        }
-        match tauri::utils::platform::bundle_type() {
-            Some(BundleType::Deb | BundleType::Rpm) => Installer::AsksForAPassword,
-            _ => Installer::InPlace,
-        }
+        installer_for(
+            cfg!(windows),
+            tauri::utils::platform::bundle_type().as_ref(),
+            bundle_is_writable,
+        )
     }
 
     /// Runs the shutdown first (`shut_down_for_relaunch`), as Sparkle's
@@ -228,6 +222,64 @@ impl UpdateSource for ShellUpdates {
     }
 }
 
+/// How the updater installs for the bundle the binary came in (`bundle`,
+/// on Windows when `windows`). On Windows it starts the installer and ends
+/// the process: the NSIS setup installs for the user alone
+/// (`bundle.windows.nsis.installMode` in `tauri.conf.json`), and the MSI
+/// for every user, after Windows' consent prompt. A `.deb` or an `.rpm` is
+/// installed through pkexec, then a zenity or kdialog password dialog,
+/// then `sudo`, each of which waits for an answer. The macOS bundle is
+/// replaced in place, after an administrator's password when the user
+/// cannot write it or its folder (`writable`, asked only then; the prompt
+/// holds the app's windows until it is answered). Anything else (an
+/// `AppImage`) is replaced in place.
+fn installer_for(
+    windows: bool,
+    bundle: Option<&BundleType>,
+    writable: impl FnOnce() -> bool,
+) -> Installer {
+    if windows {
+        return match bundle {
+            Some(BundleType::Msi) => Installer::EndsTheAppThenAsks,
+            _ => Installer::EndsTheApp,
+        };
+    }
+    match bundle {
+        Some(BundleType::Deb | BundleType::Rpm) => Installer::AsksForAPassword,
+        Some(BundleType::App) if !writable() => Installer::AsksForAPassword,
+        _ => Installer::InPlace,
+    }
+}
+
+/// Whether the user can write the running macOS bundle and its folder,
+/// which the updater renames the bundle out of.
+#[cfg(target_os = "macos")]
+fn bundle_is_writable() -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let writable = |path: &std::path::Path| {
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: `path` is a NUL-terminated string that outlives the
+        // call, which only reads it.
+        unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+    };
+    let Ok(executable) = std::env::current_exe() else {
+        return false;
+    };
+    // `Steno.app/Contents/MacOS/steno-desktop`.
+    let Some(bundle) = executable.ancestors().nth(3) else {
+        return false;
+    };
+    writable(bundle) && bundle.parent().is_some_and(writable)
+}
+
+/// No macOS bundle here.
+#[cfg(not(target_os = "macos"))]
+fn bundle_is_writable() -> bool {
+    true
+}
+
 /// A question's dialog: its kind, its text and its buttons, the default
 /// first (macOS and Windows press the first button on Return, and GTK
 /// focuses it), and the label of the one that installs.
@@ -262,20 +314,26 @@ impl Dialog {
                 ),
                 install: INSTALL_AFTER,
             },
+            Question::InstallNow(version) => Dialog {
+                kind: MessageDialogKind::Info,
+                message: format!("Steno {version} is ready to install. Install it and relaunch now?"),
+                buttons: MessageDialogButtons::OkCancelCustom(INSTALL.into(), "Later".into()),
+                install: INSTALL,
+            },
         }
     }
 }
 
 /// What the user is told when an update installed while a recording or a
-/// processing job began: Steno relaunches into it once that is done.
+/// processing job began: Steno relaunches once that is done.
 fn relaunch_waits_message(version: &str, busy: Busy) -> String {
     match busy {
         Busy::Recording => format!(
-            "Steno {version} is installed. Steno relaunches into it once the recording is saved and processed."
+            "Steno {version} is installed. Steno relaunches once the recording is saved and processed."
         ),
-        Busy::Processing => format!(
-            "Steno {version} is installed. Steno relaunches into it once the meeting is processed."
-        ),
+        Busy::Processing => {
+            format!("Steno {version} is installed. Steno relaunches once the meeting is processed.")
+        }
     }
 }
 
@@ -429,6 +487,54 @@ mod tests {
         assert!(recording.contains("recording is saved"), "{recording}");
         let processing = relaunch_waits_message("0.12.0", Busy::Processing);
         assert!(processing.contains("processed"), "{processing}");
+    }
+
+    /// Asked again before an installer that needs an administrator, the
+    /// default installs now and the other button is "Later".
+    #[test]
+    fn asked_again_the_default_installs_now() {
+        let dialog = Dialog::of(Question::InstallNow("0.12.0"));
+        assert!(dialog.message.contains("0.12.0"), "{}", dialog.message);
+        assert!(dialog.message.contains("now"), "{}", dialog.message);
+        let MessageDialogButtons::OkCancelCustom(default, other) = dialog.buttons else {
+            panic!("{:?}", dialog.buttons);
+        };
+        assert_eq!((default.as_str(), other.as_str()), (INSTALL, "Later"));
+        assert_eq!(dialog.install, INSTALL);
+    }
+
+    /// Every platform and bundle: Windows ends the app, and its MSI asks
+    /// for consent after; a `.deb` or an `.rpm` asks for a password, and so
+    /// does a macOS bundle the user cannot write; the rest is replaced in
+    /// place. Writability is asked only of the macOS bundle.
+    #[test]
+    fn the_installer_follows_the_platform_and_the_bundle() {
+        use BundleType::{App, AppImage, Deb, Dmg, Msi, Nsis, Rpm};
+        let never = || -> bool { panic!("writability asked") };
+        assert_eq!(
+            installer_for(true, Some(&Msi), never),
+            Installer::EndsTheAppThenAsks
+        );
+        for bundle in [Some(&Nsis), None] {
+            assert_eq!(installer_for(true, bundle, never), Installer::EndsTheApp);
+        }
+        for bundle in [Deb, Rpm] {
+            assert_eq!(
+                installer_for(false, Some(&bundle), never),
+                Installer::AsksForAPassword
+            );
+        }
+        for bundle in [Some(&AppImage), Some(&Dmg), None] {
+            assert_eq!(installer_for(false, bundle, never), Installer::InPlace);
+        }
+        assert_eq!(
+            installer_for(false, Some(&App), || true),
+            Installer::InPlace
+        );
+        assert_eq!(
+            installer_for(false, Some(&App), || false),
+            Installer::AsksForAPassword
+        );
     }
 
     /// Only the install button installs: Escape, closing the dialog and

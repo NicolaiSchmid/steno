@@ -2602,6 +2602,15 @@ mod tests {
                 "relaunch: a Record was refused"
             ]
         );
+        assert_eq!(
+            *source.asked.lock().unwrap(),
+            [
+                "install 0.12.0",
+                "after the recording",
+                "install now 0.12.0"
+            ],
+            "the password installer asks again once the app is idle"
+        );
         assert_eq!(harness.recorder.status().error, None, "the hold is gone");
     }
 
@@ -2670,6 +2679,7 @@ mod tests {
                 Question::Install(version) => format!("install {version}"),
                 Question::AfterItEnds(Busy::Recording) => "after the recording".to_owned(),
                 Question::AfterItEnds(Busy::Processing) => "after the processing".to_owned(),
+                Question::InstallNow(version) => format!("install now {version}"),
             });
             true
         }
