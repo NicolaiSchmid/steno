@@ -266,7 +266,8 @@ fi
 # A stub `gh` on PATH: it logs each call to gh.log, and finds no release,
 # so "Publish the release" creates one. `gh api` fails with GH_API_EXIT
 # when that is set (a 404 or 403), and otherwise answers with the JSON
-# GH_API_ANSWER, through jq as gh applies `--jq`.
+# GH_API_ANSWER, or GH_API_LIST for an endpoint with a query (a list),
+# through jq as gh applies `--jq`.
 stubs="$scratch/stubs"
 mkdir -p "$stubs" "$scratch/runner"
 cat > "$stubs/gh" <<'SH'
@@ -279,11 +280,13 @@ case "$1 $2" in
       exit "$GH_API_EXIT"
     fi
     filter=.
+    answer="${GH_API_ANSWER:-null}"
+    [[ "$2" == *"?"* ]] && answer="${GH_API_LIST:-null}"
     while [ "$#" -gt 0 ]; do
       [ "$1" = --jq ] && filter="$2"
       shift
     done
-    jq -r "$filter" <<< "${GH_API_ANSWER:-null}"
+    jq -r "$filter" <<< "$answer"
     ;;
   "release view") [[ "$*" == *--json* ]] && echo "https://github.com/x/y/releases/tag/$3" || exit 1 ;;
 esac
@@ -350,7 +353,8 @@ reviewer_step "$reviewed" 1 && fail "a failed environment read was accepted"
 
 # "Push the AUR bump" over a fresh checkout of a scratch origin, with a
 # stub aur-bump.sh: the first run pushes chore/aur-0.11.0 and opens its
-# pull request; a re-run of publish finds the branch and does neither.
+# pull request; a re-run of publish finds the branch and pushes nothing,
+# and opens the pull request only if none exists for the branch.
 aur_origin="$scratch/aur-origin"
 git init --quiet --bare --initial-branch=main "$aur_origin"
 aur_seed="$scratch/aur-seed"
@@ -365,24 +369,34 @@ chmod +x "$aur_seed/apps/desktop/scripts/aur-bump.sh"
 git -C "$aur_seed" add .
 git -C "$aur_seed" -c user.name=test -c user.email=test@example.com commit --quiet -m seed
 git -C "$aur_seed" push --quiet "$aur_origin" main
+# aur_step <the branch's pull requests, as JSON>: the step's gh calls.
 aur_step() {
   local clone="$scratch/aur-clone"
   command rm -rf "$clone"
   git clone --quiet "$aur_origin" "$clone"
   : > "$scratch/gh.log"
-  (cd "$clone" && PATH="$stubs:$PATH" STUB_LOG="$scratch/gh.log" GH_API_ANSWER='{"html_url":"https://example.com/pull/1"}' \
+  (cd "$clone" && PATH="$stubs:$PATH" STUB_LOG="$scratch/gh.log" GH_API_ANSWER='{"html_url":"https://example.com/pull/1"}' GH_API_LIST="$1" \
     AUR_SSH_PRIVATE_KEY=key VERSION=0.11.0 TAG=v0.11.0 GITHUB_REPOSITORY=NicolaiSchmid/steno \
     bash -e "$scratch/aur-step.sh" >"$scratch/error" 2>&1) || { cat "$scratch/error"; return 1; }
   cat "$scratch/gh.log"
 }
-calls="$(aur_step)" || fail "the AUR step failed: $calls"
-[[ "$calls" == "api repos/NicolaiSchmid/steno/pulls -f title=chore(desktop): steno-desktop-bin 0.11.0-1 "* ]] \
-  || fail "the AUR step did not open the pull request: $calls"
+opened="api repos/NicolaiSchmid/steno/pulls -f title=chore(desktop): steno-desktop-bin 0.11.0-1 -f head=chore/aur-0.11.0 -f base=main "
+listed="api repos/NicolaiSchmid/steno/pulls?head=NicolaiSchmid:chore/aur-0.11.0&state=all --jq length"
+calls="$(aur_step '[]')" || fail "the AUR step failed: $calls"
+[[ "$calls" == "$opened"* && "$calls" != *$'\n'* ]] || fail "the AUR step did not open the pull request once: $calls"
 pushed="$(git -C "$aur_origin" rev-parse --verify --quiet refs/heads/chore/aur-0.11.0)" \
   || fail "the AUR step did not push chore/aur-0.11.0"
-calls="$(aur_step)" || fail "a re-run of the AUR step failed: $calls"
-[[ -z "$calls" ]] || fail "a re-run of the AUR step opened another pull request: $calls"
-grep -q '::notice::chore/aur-0.11.0 exists already' "$scratch/error" || fail "a re-run of the AUR step skipped without a notice: $(cat "$scratch/error")"
+# A re-run after the branch was pushed but its pull request was never
+# opened (the API failed in between): the pull request, once.
+calls="$(aur_step '[]')" || fail "a re-run of the AUR step without a pull request failed: $calls"
+[[ "$calls" == "$listed"$'\n'"$opened"* && "$(wc -l <<< "$calls")" == 2 ]] \
+  || fail "a re-run of the AUR step without a pull request did not open it once: $calls"
+[[ "$(git -C "$aur_origin" rev-parse refs/heads/chore/aur-0.11.0)" == "${pushed:-}" ]] || fail "a re-run of the AUR step without a pull request moved the branch"
+# A re-run after both: nothing new.
+calls="$(aur_step '[{"number":1}]')" || fail "a re-run of the AUR step failed: $calls"
+[[ "$calls" == "$listed" ]] || fail "a re-run of the AUR step opened another pull request: $calls"
+grep -q '::notice::chore/aur-0.11.0 and its pull request exist already' "$scratch/error" \
+  || fail "a re-run of the AUR step skipped without a notice: $(cat "$scratch/error")"
 [[ "$(git -C "$aur_origin" rev-parse refs/heads/chore/aur-0.11.0)" == "${pushed:-}" ]] || fail "a re-run of the AUR step moved the branch"
 
 # "Date the item" over a checkout whose origin's `appcast` branch holds the

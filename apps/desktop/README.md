@@ -1046,9 +1046,12 @@ finding.
    environment's reviewer, the first time and when
    `HANDOFF_ITEM_REPLACE` names the version (see The handoff item). Approve
    it only after the stable build's rehearsal (R7 in the stable plan) has
-   passed; reject it to leave the Swift app's users where they are. If a
-   newer stable release is published while an earlier handoff waits,
-   reject the earlier and approve only the newest: the handoff item is
+   passed. If R7 fails, reject it to leave the Swift app's users where
+   they are, then follow the stable plan's Rollback: run
+   `gh release edit v<version> --prerelease`, and when the bundle is at
+   fault put both lanes back (A bad release). If a newer stable release
+   is published while an earlier handoff waits, reject the earlier and
+   approve only the newest: the handoff item is
    written once, and an earlier release approved after a newer one wrote
    fails (see When a run fails, handoff).
 6. A stable release only, without waiting for the approval: open the
@@ -1132,8 +1135,10 @@ new assets until **Update lanes** finishes.
   PKGBUILD in another form than it rewrites (`scripts/aur-bump.sh` names
   it). Bump by hand as `packaging/aur/README.md` and the tap say. On a
   re-run of `publish`, the AUR step finds `chore/aur-<version>` from the
-  first run, says so in a notice, and opens no second pull request; that
-  needs nothing.
+  first run and pushes nothing again. It asks GitHub for the branch's pull
+  request: when the first run opened one, a notice says so and opens no
+  second; when the first run failed before opening it, it opens it now.
+  Neither needs anything.
 - **handoff**: "the appcast environment has no required reviewer" means
   GitHub ran the job unapproved and nothing was written; set the
   environment up (Cutting a release, step 0) and re-run it. Two releases'
@@ -1592,7 +1597,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh`, `smoke-macos.sh` | The smoke CI runs under Xvfb on Linux and in the runner's session on macOS |
 | `apps/desktop/scripts/lost-display-linux.sh` | Ends the display server under a recording and fails unless the app saved it first; CI's Linux job runs it |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
-| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh`, `release-workflow.test.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `v*` tag, and the Sparkle handoff (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh`; `release-workflow.test.sh` checks the workflow against the stable plan and runs `plan`'s version step |
+| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh`, `release-workflow.test.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `v*` tag, and the Sparkle handoff (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh`; `release-workflow.test.sh` checks the workflow against the stable plan and runs six of its steps against a stub `gh` and scratch origins |
 | `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check, and runs the `.app` check's bundle id and Sparkle key, and the `--handoff` checks, over stub bundles (`check-bundle.test.sh`) |
 | `apps/desktop/scripts/handoff-item.sh`, `handoff-appcast.py`, `aur-bump.sh` | The Sparkle handoff item, the appcast reads and the `pubDate` stamp around it, and the AUR bump of a stable release (see Publishing, on a tag); `bump-homebrew-cask.test.sh` checks the token check of `apps/macos/scripts/bump-homebrew-cask.sh` |
 | `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh`, `release-assets.sh`, `release-signatures.sh`, `release-notes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json`, the lanes a release moves, the assets gathered from each platform's artifact, `SHA256SUMS` and the OpenPGP signatures, and the release notes (Rust CI runs every `*.test.sh` here) |

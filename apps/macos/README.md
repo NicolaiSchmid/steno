@@ -207,15 +207,8 @@ Apple:
   private key, store it in 1Password. The public key is committed in `project.yml`
   (`SUPublicEDKey`).
 
-GitHub (`NicolaiSchmid/steno`, Settings > Secrets and variables > Actions):
-
-| Secret | Value |
-|---|---|
-| `MACOS_CERTIFICATE_P12_BASE64` | the base64 `.p12` |
-| `MACOS_CERTIFICATE_PASSWORD` | its password |
-| `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY` | the App Store Connect key (contents of the `.p8`) |
-| `SPARKLE_PRIVATE_KEY` | the exported EdDSA private key |
-| `HOMEBREW_TAP_TOKEN` | optional: fine-grained PAT, repository access `homebrew-tap` only, permission Contents read and write; the cask bump is skipped without it |
+The GitHub secrets these keys go into, with the ones the desktop release adds, are in
+`apps/desktop/README.md` (Secrets).
 
 Variable `MACOS_RUNS_ON`: `"macos-15"` (default) or `["self-hosted","macOS","ARM64"]` once
 the Forge runner is registered. Settings > Actions: keep "Require approval for all outside
@@ -223,12 +216,13 @@ collaborators" on, so a fork never reaches the self-hosted runner.
 
 ### Release rehearsal
 
-Tag `v0.9.0-rc.1` (pre-release), install the DMG on a fresh macOS 15.1+ user, run the manual
-checklist from the plan, tag `v0.9.0`, then `v0.9.1` and confirm Sparkle offers and installs
-it before tagging `v1.0.0`. After each tag, `curl -s
-https://raw.githubusercontent.com/NicolaiSchmid/steno/appcast/appcast.xml` should list the
-new build at the top; a candidate build (`-rc`) must be offered a newer candidate, a stable
-build must not see candidates.
+The Swift release's rehearsal was to tag `v0.9.0-rc.1` (pre-release), install the DMG on a
+fresh macOS 15.1+ user, run the manual checklist from the plan, tag `v0.9.0`, then `v0.9.1`,
+and confirm that Sparkle offered and installed it before a `v1.0.0`. After each tag, `curl -s
+https://raw.githubusercontent.com/NicolaiSchmid/steno/appcast/appcast.xml` was to list the new
+build at the top; a candidate build (`-rc`) was to be offered a newer candidate, and a stable
+build no candidates. Only candidates were tagged, `v0.9.0-rc.1` to `v0.10.0-rc.2`. The desktop
+release's rehearsal is R7 in the stable plan.
 
 ### Homebrew
 

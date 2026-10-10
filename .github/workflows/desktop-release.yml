@@ -680,17 +680,24 @@ jobs:
           apps/desktop/scripts/aur-bump.sh "$VERSION" assets
           branch="chore/aur-$VERSION"
           # A re-run of publish: the AUR has the bump (aur-bump.sh says so)
-          # and the branch is pushed, so neither is pushed again.
+          # and the branch is pushed, so neither is pushed again. The pull
+          # request is opened unless the earlier run opened it (it may have
+          # failed between the push and the pull request).
           if git ls-remote --quiet --exit-code --heads origin "$branch" >/dev/null; then
-            echo "::notice::$branch exists already, from an earlier run; no new branch or pull request"
-            exit 0
+            pulls="$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=${GITHUB_REPOSITORY%%/*}:$branch&state=all" --jq length)"
+            if [ "$pulls" != 0 ]; then
+              echo "::notice::$branch and its pull request exist already, from an earlier run; nothing new"
+              exit 0
+            fi
+            echo "::notice::$branch exists already, from an earlier run, without a pull request; opening it"
+          else
+            git switch --quiet -c "$branch"
+            git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
+            git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit --quiet -m "chore(desktop): steno-desktop-bin $VERSION-1, as pushed to the AUR"
+            git push --quiet origin "HEAD:refs/heads/$branch"
           fi
-          git switch --quiet -c "$branch"
-          git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
-          git -c user.name='github-actions[bot]' \
-            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit --quiet -m "chore(desktop): steno-desktop-bin $VERSION-1, as pushed to the AUR"
-          git push --quiet origin "HEAD:refs/heads/$branch"
           gh api "repos/$GITHUB_REPOSITORY/pulls" -f title="chore(desktop): steno-desktop-bin $VERSION-1" \
             -f head="$branch" -f base=main \
             -f body="The AUR bump the release workflow pushed for $TAG (apps/desktop/scripts/aur-bump.sh), so packaging/aur follows the AUR." \

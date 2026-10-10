@@ -9,11 +9,14 @@ an appcast file:
       Exit 1 with an ::error:: unless <build> is above every
       `sparkle:version` in the file, the element or the enclosure's
       attribute: Sparkle orders by build number alone, so a lower one is
-      never offered. `plan` runs it before any bundle is built.
+      never offered. `plan` runs it before any bundle is built,
+      `handoff-item.sh` on the item it signed, and the `handoff` job at
+      the approval.
 
   has-handoff-item <appcast.xml>
       Print `true` when an item carries no `sparkle:channel`, `false`
-      otherwise. `publish` writes it as the output the `handoff` job reads.
+      otherwise. `publish` outputs it for the `handoff` job's `if`; the
+      `handoff` job asks again at the approval.
 
   has-build <appcast.xml> <build>
       Print `true` when an item carries `sparkle:version` <build>, `false`
