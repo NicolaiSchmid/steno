@@ -1449,14 +1449,12 @@ still has to draw the window side. `[ ]` is not ported yet.
     `graphical-session.target`) is never called off: the request's thread waits
     up to 60 s more and logs the outcome; a session that ends before then leaves
     the app in the compositor's unit. The AppImage runtime's mount server, found
-    by the keepalive pipe it shares with the app (`appimage.rs`) wherever it runs,
-    as in the launcher's unit when GNOME moves only the app into a scope, moves
-    into a scope of its own in `app.slice`, also when the app stays, so no unit's
-    stop at the session's end ends it while the app saves; the move is checked
-    and a failure logged, and in a login's `session-<n>.scope`, outside the user
-    manager, it stays beside the app with a warning. A scope, Steno's own services and an app outside the
-    user manager stay, and a failed move logs a warning (`own_scope.rs`, X1 of
-    `.plans/2026-10-07-stable-promotion.md`). Tested
+    by its FUSE connection and keepalive pipe (`appimage.rs`), moves into a scope
+    of its own in `app.slice` wherever it runs, also when the app stays; the move
+    is checked and a failure logged. In a login's `session-<n>.scope` it stays
+    beside the app with a warning. A scope, Steno's own services and an app
+    outside the user manager stay, and a failed move logs a warning
+    (`own_scope.rs`, X1 of `.plans/2026-10-07-stable-promotion.md`). Tested
     against a fake manager on a private `dbus-daemon`, and in a container under a
     real systemd 255 user manager with a stand-in for uwsm's units (desktop README,
     Hyprland).
