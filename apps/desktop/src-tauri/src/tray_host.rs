@@ -3,10 +3,12 @@
 //! Waybar, Omarchy's bar, GNOME with the `AppIndicator` extension. Hosts
 //! register with a watcher, which owns `org.kde.StatusNotifierWatcher` on
 //! the session bus and says through its `IsStatusNotifierHostRegistered`
-//! property whether one did. Stock GNOME runs neither, and a watcher can
-//! run with no host (KDE's `kded`, started for a KDE app under another
-//! desktop), so the shell asks whether a watcher runs and whether a host
-//! registered with it.
+//! property whether one did. Stock GNOME runs neither. A watcher can run
+//! with no host (Waybar's says none until its tray registers), so the shell
+//! asks whether a watcher runs and whether a host registered with it. KDE's
+//! watcher, in `kded`, always says one did and sends no host signal, so on
+//! Plasma only its name counts: while `kded` runs, a close hides the main
+//! window, also after the panel has gone.
 //!
 //! A thread follows them for the whole run (`follow`): it reads the
 //! watcher's owner and the property at launch, and again whenever the
@@ -21,7 +23,8 @@
 //! shell counts no host: closing the main window then ends the app
 //! instead of leaving it running unseen, the safe side. A failed reading
 //! (a watcher that does not answer within five seconds, for one) is read
-//! again ten seconds later, three times at most before the next change.
+//! again ten seconds later, three times at most before the next change; a
+//! watcher that serves no object yet waits for the next change (below).
 //! An `XEmbed`-only tray is not asked for and counts as none too.
 //!
 //! The property is asked of the watcher's unique name, so asking never
@@ -29,9 +32,11 @@
 //! has no such property (`UnknownProperty`, `InvalidArgs`,
 //! `UnknownInterface`) counts as a host: its name is all there is to go
 //! on. One that serves no object at the path yet (`UnknownObject`,
-//! `UnknownMethod`), as a watcher that takes the name before it exports
-//! its object would, fails the reading: it counts as none and is read
-//! again.
+//! `UnknownMethod`), as `kded` does between taking the name and exporting
+//! its watcher, counts as none and is not read again before the next
+//! change: the tray library registers the icon again only when the name
+//! changes owner, so a later reading would count a host that does not
+//! list it.
 //!
 //! When the host goes while the main window is hidden, nothing on the
 //! desktop shows the window: during a recording the bubble stays on
@@ -60,13 +65,15 @@ const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 /// The watcher's property that says whether a host registered.
 const HOST_REGISTERED: &str = "IsStatusNotifierHostRegistered";
 
-/// How long the follower waits to read again after a reading failed, and
-/// how many times it does before the next change.
+/// How long the follower waits to read again after a reading failed, other
+/// than one that found no object (`serves_nothing`), and how many times it
+/// does before the next change.
 const RETRY: Duration = Duration::from_secs(10);
 const RETRIES: u32 = 3;
 
-/// The watcher's signals that change `HOST_REGISTERED`; KDE's watcher
-/// sends both, the specification names only the first.
+/// The watcher's signals that change `HOST_REGISTERED`: Waybar's watcher
+/// and GNOME's extension send both, KDE's neither (its property is always
+/// true); the specification names only the first.
 const HOST_SIGNALS: [&str; 2] = [
     "StatusNotifierHostRegistered",
     "StatusNotifierHostUnregistered",
@@ -121,13 +128,25 @@ fn read(session: &Connection) -> zbus::Result<Watcher> {
 /// object has no such property: zbus and sd-bus answer `UnknownProperty`,
 /// `GDBus` and older Qt `InvalidArgs`, and an object without the watcher's
 /// interface `UnknownInterface`. `UnknownObject` and `UnknownMethod` say
-/// nothing is served at the path, so they are not this answer.
+/// nothing is served at the path (`serves_nothing`), so they are not this
+/// answer.
 fn lacks_the_property(error: &zbus::fdo::Error) -> bool {
     use zbus::fdo::Error::{InvalidArgs, UnknownInterface, UnknownProperty};
     matches!(
         error,
         UnknownProperty(_) | InvalidArgs(_) | UnknownInterface(_)
     )
+}
+
+/// Whether `error` says the watcher's name is owned but nothing is served
+/// at its path yet (zbus answers `UnknownObject`, `GDBus` `UnknownMethod`).
+/// Such a reading is not read again before the next change.
+fn serves_nothing(error: &zbus::Error) -> bool {
+    use zbus::fdo::Error::{UnknownMethod, UnknownObject};
+    let zbus::Error::FDO(error) = error else {
+        return false;
+    };
+    matches!(**error, UnknownObject(_) | UnknownMethod(_))
 }
 
 /// What the follower last found; no host until its first reading.
@@ -184,11 +203,11 @@ pub fn follow() {
 /// Keeps `hosted` up to date from `session` until the bus closes: a
 /// reading now, and one after every change of the watcher's owner or of
 /// its hosts; a reading that failed is read again `retry` later, `RETRIES`
-/// times at most before the next change. Two threads forward the signals,
-/// so neither stream waits while a reading runs; the readings run here,
-/// one at a time, and a burst of signals makes one reading. An error is
-/// one setting the follower up; the bus closing ends it with `Ok`, logged
-/// here.
+/// times at most before the next change, unless the watcher served no
+/// object (`serves_nothing`). Two threads forward the signals, so neither
+/// stream waits while a reading runs; the readings run here, one at a
+/// time, and a burst of signals makes one reading. An error is one setting
+/// the follower up; the bus closing ends it with `Ok`, logged here.
 fn follow_on(session: &Connection, hosted: &Hosted, retry: Duration) -> zbus::Result<()> {
     let owners = zbus::MatchRule::builder()
         .msg_type(Type::Signal)
@@ -245,7 +264,8 @@ fn follow_on(session: &Connection, hosted: &Hosted, retry: Duration) -> zbus::Re
                     );
                 }
             }
-            let next = if reading.is_err() && retried < RETRIES {
+            let read_again = matches!(&reading, Err(error) if !serves_nothing(error));
+            let next = if read_again && retried < RETRIES {
                 retried += 1;
                 nudged.recv_timeout(retry)
             } else {
@@ -505,16 +525,33 @@ mod tests {
         reads(&hosted, true);
     }
 
-    /// A watcher that owns the name but serves no object at its path yet
-    /// is no host: zbus answers `UnknownObject`, which fails the reading.
+    /// A watcher that owns the name but serves no object at its path is no
+    /// host, also once it exports one: zbus answers `UnknownObject`, and
+    /// only the next change reads again.
     #[test]
     fn a_watcher_without_its_object_is_no_host() {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let _watcher = serve_at(&daemon, "/Elsewhere", BareWatcher { version: 0 });
-        let hosted = follow_daemon(&daemon);
+        let watcher = serve_at(&daemon, "/Elsewhere", BareWatcher { version: 0 });
+        let retry = Duration::from_millis(300);
+        let hosted = spawn_follower(daemon.connect(), retry);
         reads(&hosted, false);
+        let asked = Arc::default();
+        let exported = FakeWatcher {
+            registered: true,
+            hangs: 0.into(),
+            asked: Arc::clone(&asked),
+        };
+        assert!(watcher.object_server().at(WATCHER_PATH, exported).unwrap());
+        // Time for the readings again that a failed reading gets.
+        std::thread::sleep(retry * 3);
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        assert!(!hosted.shown());
+        watcher
+            .emit_signal(None::<&str>, WATCHER_PATH, WATCHER, HOST_SIGNALS[0], &())
+            .unwrap();
+        reads(&hosted, true);
     }
 
     /// A watcher that does not answer in time is no host, also after the

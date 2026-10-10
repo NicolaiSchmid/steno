@@ -4,7 +4,9 @@
 //! the logout and shutdown clients (`session_end`), the user manager's
 //! reload (`stop_timeout`) and the tray host follower (`tray_host`). They
 //! ask the bus who owns a name (`owner_of`), which starts no service, and
-//! talk to that owner through a proxy that caches no property (`proxy`).
+//! talk to that owner through a proxy that caches no property (`proxy`),
+//! and to the bus itself through one too (`bus`), with which `session_end`
+//! starts the portal.
 //! `tests::Daemon` is the private bus their tests run on, and
 //! `own_scope`'s too.
 //!
@@ -20,8 +22,12 @@ use zbus::proxy::CacheProperties;
 /// How long a client waits for a method's answer, so a frozen bus holds
 /// its thread this long at most per call: `EndSession` still quits in time
 /// (`session_end`), and a watcher that does not answer counts as no host
-/// (`tray_host`).
+/// (`tray_host`); five seconds at most, which the build checks.
 const CALL_PATIENCE: Duration = Duration::from_secs(5);
+
+// A longer wait would let a frozen bus hold `EndSession`'s answer past the
+// session manager's patience.
+const _: () = assert!(CALL_PATIENCE.as_millis() <= 5_000);
 
 /// The connection `builder` makes, whose method calls wait `CALL_PATIENCE`
 /// at most.
