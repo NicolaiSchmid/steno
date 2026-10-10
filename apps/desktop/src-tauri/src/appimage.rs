@@ -146,59 +146,57 @@ mod tests {
         assert_eq!(access("flags:\tx\n"), None);
     }
 
-    /// `sleep` with `stdin` and `stdout`, and no stderr, which may be a
-    /// pipe this test holds too.
-    fn sleeping(stdin: Stdio, stdout: Stdio) -> Child {
+    /// `sleep` with `stdin`, `stdout` and `stderr`.
+    fn sleeping(stdin: Stdio, stdout: Stdio, stderr: Stdio) -> Child {
         Command::new("sleep")
             .arg("30")
             .stdin(stdin)
             .stdout(stdout)
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .unwrap()
     }
 
-    /// Real processes stand in: this test is the app and holds the read
-    /// end of a pipe, and `sleep` is the image. The one that holds the
-    /// write end is the server. One that holds the read end too (as the
-    /// app's children do), one that holds the write end of a pipe this
-    /// test writes to as well (a shared stderr), and one with no pipe are
-    /// not.
+    /// Real processes stand in, each a `sleep`, so `sleep` is the image.
+    /// The app holds the keepalive pipe's read end and writes to a second
+    /// pipe (a shared stderr); the server holds the keepalive pipe's write
+    /// end and is started last. A child of the app's that holds the read
+    /// end too, another instance's server that writes to the second pipe,
+    /// and a process with no pipe are not the server. The test holds no
+    /// end of either pipe once they run, so nothing else in the test
+    /// process can change what the processes hold.
     #[test]
     fn the_mount_server_holds_the_write_end_of_the_apps_pipe() {
-        let (reader, writer) = std::io::pipe().unwrap();
+        let (keepalive, write_end) = std::io::pipe().unwrap();
         let (shared_reader, shared) = std::io::pipe().unwrap();
         drop(shared_reader);
-        let mut children = vec![
-            sleeping(Stdio::null(), Stdio::null()),
-            sleeping(Stdio::from(reader.try_clone().unwrap()), Stdio::null()),
-            sleeping(Stdio::null(), Stdio::from(shared.try_clone().unwrap())),
-        ];
-        let server = sleeping(Stdio::null(), Stdio::from(writer));
-        let id = server.id();
-        children.push(server);
+        let app = sleeping(
+            Stdio::from(keepalive.try_clone().unwrap()),
+            Stdio::null(),
+            Stdio::from(shared.try_clone().unwrap()),
+        );
+        let child = sleeping(Stdio::from(keepalive), Stdio::null(), Stdio::null());
+        let other = sleeping(Stdio::null(), Stdio::from(shared), Stdio::null());
+        let none = sleeping(Stdio::null(), Stdio::null(), Stdio::null());
+        let server = sleeping(Stdio::null(), Stdio::from(write_end), Stdio::null());
         let proc = Path::new("/proc");
-        let image = std::fs::read_link(format!("/proc/{id}/exe")).unwrap();
-        let own = std::process::id();
+        let image = std::fs::read_link(format!("/proc/{}/exe", server.id())).unwrap();
 
-        assert_eq!(server_of(proc, own, &image), Some(id));
-        // Another image; a missing one; seen from a process with no pipe
-        // of the server's; a `/proc` with no processes.
+        assert_eq!(server_of(proc, app.id(), &image), Some(server.id()));
+        // Another image; a missing one; seen from a process with no pipe;
+        // a `/proc` with no processes.
         let test = std::env::current_exe().unwrap();
-        assert_eq!(server_of(proc, own, &test), None);
-        assert_eq!(server_of(proc, own, Path::new("/nonexistent")), None);
-        assert_eq!(server_of(proc, children[0].id(), &image), None);
-        let empty = std::env::temp_dir().join(format!("steno-appimage-{own}"));
+        assert_eq!(server_of(proc, app.id(), &test), None);
+        assert_eq!(server_of(proc, app.id(), Path::new("/nonexistent")), None);
+        assert_eq!(server_of(proc, none.id(), &image), None);
+        let empty = std::env::temp_dir().join(format!("steno-appimage-{}", app.id()));
         std::fs::create_dir_all(&empty).unwrap();
-        assert_eq!(server_of(&empty, own, &image), None);
+        assert_eq!(server_of(&empty, app.id(), &image), None);
         std::fs::remove_dir(&empty).unwrap();
 
-        // Once the app holds no end of the pipe, nothing matches.
-        drop(reader);
-        assert_eq!(server_of(proc, own, &image), None);
-        for mut child in children {
-            child.kill().unwrap();
-            child.wait().unwrap();
+        for mut process in [app, child, other, none, server] {
+            process.kill().unwrap();
+            process.wait().unwrap();
         }
     }
 }
