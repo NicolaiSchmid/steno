@@ -450,8 +450,12 @@ finds its mount server at launch by the image's FUSE connection (Linux
 (`src/appimage.rs`), however the image was started, and moves every
 process that matches into `app-steno\x2ddesktop\x2dimage-<pid>.scope` in
 `app.slice`, also when Steno itself stays in its unit. No session's end
-stops that scope, and the mount server ends by itself when Steno exits.
-A move that fails, or a mount server Steno cannot find, logs a warning.
+stops that scope. The mount server ends by itself once Steno has exited,
+together with every program Steno started that still holds the image's
+pipe (a browser it opened a link in), since those may run Steno's
+bundled libraries from the mount. Each move is logged ("moved the
+AppImage's mount server"). A move that fails, or a mount server Steno
+cannot find, logs a warning.
 In a login's `session-<n>.scope` (Hyprland without uwsm), outside the
 user manager, the mount server stays beside Steno, with a warning, and
 that scope's stop ends both.
@@ -661,8 +665,8 @@ service. Steno's own units (the autostart unit, the NixOS module's
 program's too, stay as they are. The speech sidecar's scope (above) then
 sits beside Steno's.
 
-Run from the AppImage, Steno moves the image's mount server out of the
-unit it starts in, as on every systemd desktop
+Run from the AppImage, Steno also moves the image's mount server into a
+scope of its own and logs the move, as on every systemd desktop
 ([Launch at login under systemd](#launch-at-login-under-systemd)).
 
 Where each start leaves Steno, from the release after 0.1.0-rc.3:
