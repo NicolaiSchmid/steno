@@ -2,7 +2,8 @@
 # and wrapper, and the NixOS module evaluated in minimal systems (a
 # system-wide and a per-user install down to the user units it generates,
 # the session variables and the firewall, one without launch at login or
-# the firewall, and one each with OpenSSH's and GnuPG's SSH agent).
+# the firewall, one each with OpenSSH's and GnuPG's SSH agent, and one with
+# a handover port below 1024, which must not evaluate).
 {
   nixpkgs,
   self,
@@ -54,6 +55,8 @@
       programs.steno.openFirewall = false;
     }
   ];
+  # A port Steno, running as the user, cannot bind: refused.
+  lowPort = system [{programs.steno.handoverPort = 80;}];
   # Another SSH agent: the keyring default must stay off and evaluate.
   withAgent = system [{programs.ssh.startAgent = true;}];
   withGpgAgent = system [
@@ -146,6 +149,8 @@ in {
   assert lib.elem steno perUser.config.users.users.alice.packages;
   assert evaluates systemWide.config && evaluates perUser.config && evaluates noLogin.config;
   assert evaluates withAgent.config && evaluates withGpgAgent.config;
+  assert lib.assertMsg (!(evaluates lowPort.config))
+  "handoverPort = 80 evaluates, but Steno cannot listen below 1024";
   assert systemWide.config.services.pipewire.enable;
   assert systemWide.config.services.gnome.gnome-keyring.enable;
   assert !withAgent.config.services.gnome.gnome-keyring.enable;

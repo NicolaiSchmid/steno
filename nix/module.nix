@@ -69,11 +69,13 @@ in {
       default = 23820;
       description = ''
         The TCP port Steno listens on for recordings from the paired phone,
-        set for every session as `STENO_HANDOVER_PORT`. The phone finds the
-        port through mDNS, so changing it needs no change on the phone.
-        When another program holds the port, Steno listens on one the
-        system chooses and logs a warning; the firewall blocks that one.
-        `0` lets the system choose every time, and opens no TCP port.
+        set as `STENO_HANDOVER_PORT` on the user service and for every
+        session, so Steno's own `handoverPort` setting is never read; one
+        value for every user. The phone finds the port through mDNS, so
+        changing it needs no change on the phone. When another program
+        holds the port, Steno listens on one the system chooses and logs a
+        warning; the firewall blocks that one. `0` lets the system choose
+        every time, and opens no TCP port. Ports 1 to 1023 are refused.
       '';
     };
 
@@ -81,11 +83,14 @@ in {
       type = lib.types.bool;
       default = true;
       description = ''
-        Open `handoverPort` (TCP) and mDNS (UDP 5353) in the firewall, so the
-        paired phone finds Steno on the local network and uploads its
-        recordings. The handover serves only connections that arrive on a
-        LAN address or loopback, over TLS 1.3 with the certificate the phone
-        pinned at pairing.
+        Open `handoverPort` (TCP) and mDNS (UDP 5353) in the firewall on
+        every interface, so the paired phone finds Steno on the local
+        network and uploads its recordings. Steno answers only on the
+        computer's own non-VPN addresses and loopback, over TLS 1.3 with the
+        certificate the phone pinned at pairing. To open one network only,
+        set this to `false` and use
+        `networking.firewall.interfaces.<name>.allowedTCPPorts` and
+        `allowedUDPPorts`.
       '';
     };
 
@@ -102,6 +107,13 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.handoverPort == 0 || cfg.handoverPort >= 1024;
+        message = "programs.steno.handoverPort is ${toString cfg.handoverPort}: Steno runs as the user and cannot listen below 1024. Choose 0 or a port from 1024 to 65535.";
+      }
+    ];
+
     environment.systemPackages = lib.mkIf (cfg.users == []) [cfg.package];
     users.users = lib.genAttrs cfg.users (_: {packages = [cfg.package];});
 
