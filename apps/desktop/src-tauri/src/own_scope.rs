@@ -668,6 +668,8 @@ mod tests {
 
     const USER: &str = "0::/user.slice/user-1000.slice/user@1000.service";
     const HYPRLAND: &str = "wayland-wm@hyprland.desktop.service";
+    /// GNOME's scope, which the app 4242 stays in.
+    const GNOME: &str = "app-gnome-steno\\x2ddesktop-4242.scope";
 
     /// A cgroup file below the user manager.
     fn below_user_manager(rest: &str) -> String {
@@ -785,7 +787,7 @@ mod tests {
     #[test]
     fn the_plan_moves_the_app_out_of_another_programs_service_and_the_server_out_of_any_unit() {
         let hyprland = below_user_manager(&format!("session.slice/{HYPRLAND}"));
-        let gnome = below_user_manager("app.slice/app-gnome-steno\\x2ddesktop-4242.scope");
+        let gnome = below_user_manager(&format!("app.slice/{GNOME}"));
         let autostart = below_user_manager("app.slice/app-steno\\x2ddesktop@autostart.service");
         let uwsm = below_user_manager(
             "app.slice/app-graphical.slice/app-Hyprland-steno\\x2ddesktop-1a2b3c4d.scope",
@@ -794,10 +796,7 @@ mod tests {
         let servers = || vec![60, 77];
         assert_eq!(plan(&hyprland, servers()), Plan::Leave(HYPRLAND, servers()));
         assert_eq!(plan(&hyprland, vec![]), Plan::Leave(HYPRLAND, vec![]));
-        assert_eq!(
-            plan(&gnome, servers()),
-            Plan::MoveServers(servers(), "app-gnome-steno\\x2ddesktop-4242.scope")
-        );
+        assert_eq!(plan(&gnome, servers()), Plan::MoveServers(servers(), GNOME));
         assert_eq!(
             plan(&autostart, servers()),
             Plan::MoveServers(servers(), "app-steno\\x2ddesktop@autostart.service")
@@ -1032,9 +1031,6 @@ mod tests {
         expected.extend(servers_before(servers, &scope_name(4242)));
         expected
     }
-
-    /// GNOME's scope, which the app 4242 stays in.
-    const GNOME: &str = "app-gnome-steno\\x2ddesktop-4242.scope";
 
     /// [`carry_out`] for the app 4242 that stays in [`GNOME`] with the mount
     /// servers 60 and 77, its thread joined: what it logged.
@@ -1339,7 +1335,7 @@ mod tests {
     /// What the test `name` wrote to stderr, run again in a copy of this
     /// test binary with [`STDERR_CHILD`] set, which has to pass; `None`
     /// when the copy found no `dbus-daemon`. `--nocapture`, or the test
-    /// harness would catch its warnings.
+    /// harness would keep the copy's `SKIPPED` line from its stderr.
     fn stderr_of(name: &str) -> Option<String> {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", name, "--nocapture"])
