@@ -21,63 +21,23 @@
 # with no watcher on it. Needs Xvfb, xdotool and python3 (to read the
 # store and to send the close), and the web dist embedded as for the smoke
 # (smoke-linux.sh). The app's log stays in the work directory it prints.
+# The steps it shares with lost-display-linux.sh are in
+# xvfb-recording-linux.sh.
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-binary="${1:-$root/target/debug/steno-desktop}"
-seconds="${2:-4}"
-
-[[ -x "$binary" ]] || { echo "close-without-tray: $binary is not an executable" >&2; exit 2; }
-[[ "$seconds" =~ ^[1-9][0-9]*$ ]] \
-  || { echo "close-without-tray: seconds must be a positive number, got \"$seconds\"" >&2; exit 2; }
-for tool in Xvfb xdotool python3 ldd; do
-  command -v "$tool" >/dev/null || { echo "close-without-tray: $tool is not on PATH" >&2; exit 2; }
-done
-# The X library the binary links, which sends the close.
-libx11="$(ldd "$binary" | awk '/libX11\.so\.6/ { print $3; exit }')"
-[[ -n "$libx11" ]] || { echo "close-without-tray: $binary does not link libX11" >&2; exit 2; }
-
-work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/steno-close-without-tray.XXXXXX")"
-echo "close-without-tray: work directory $work"
-server=""
-app=""
-# Ends only the processes this script started.
-cleanup() {
-  for pid in "$app" "$server"; do
-    [[ -z "$pid" ]] || kill -KILL "$pid" 2>/dev/null || true
-  done
-}
-trap cleanup EXIT
-
-fail() {
-  echo "close-without-tray: FAILED, $*" >&2
-  echo "close-without-tray: the app's log:" >&2
-  sed 's/^/  /' "$work/app.log" >&2 || true
-  exit 1
-}
-
-# The meeting rows the store holds, one "state duration endReason" line
-# each; the store keeps the end reason as JSON (`"quit"`).
-meetings() {
-  python3 - "$1" <<'EOF'
-import json, sqlite3, sys
-try:
-    store = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=5)
-    for state, duration, reason in store.execute(
-        "select state, duration, endReason from meeting"
-    ):
-        try:
-            reason = json.loads(reason) if reason else reason
-        except ValueError:
-            pass
-        print(state, duration, reason)
-except sqlite3.Error:
-    pass
-EOF
-}
+name=close-without-tray
+# shellcheck source=apps/desktop/scripts/xvfb-recording-linux.sh
+source "$(dirname "${BASH_SOURCE[0]}")/xvfb-recording-linux.sh" "$@"
+command -v ldd >/dev/null || { echo "$name: ldd is not on PATH" >&2; exit 2; }
+# The X library the binary links, which sends the close. awk reads all of
+# ldd's output: an early exit fails ldd's write, and the pipeline with it.
+libx11="$(ldd "$binary" | awk '$1 == "libX11.so.6" { print $3 }')"
+[[ -n "$libx11" ]] || { echo "$name: $binary does not link libX11" >&2; exit 2; }
 
 # Sends WM_DELETE_WINDOW to the window $1, as a window manager does for
-# its close button; Xvfb runs none.
+# its close button; Xvfb runs none. Not xdotool's `windowquit`: that asks
+# a window manager (`_NET_CLOSE_WINDOW`), and Ubuntu 24.04's xdotool
+# predates it.
 close_window() {
   python3 - "$libx11" "$1" <<'EOF'
 import ctypes, sys
@@ -129,57 +89,8 @@ x11.XCloseDisplay(display)
 EOF
 }
 
-# Xvfb writes the display it took to fd 3 once it is ready.
-Xvfb -displayfd 3 -screen 0 2200x1500x24 -nolisten tcp \
-  3>"$work/display" >"$work/server.log" 2>&1 &
-server=$!
-for _ in $(seq 100); do
-  [[ -s "$work/display" ]] && break
-  sleep 0.1
-done
-[[ -s "$work/display" ]] || fail "Xvfb did not start"
-
-mkdir -p "$work/home"
-export HOME="$work/home"
-export XDG_DATA_HOME="$HOME/.local/share" XDG_CONFIG_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.cache"
-DISPLAY=":$(cat "$work/display")"
-export DISPLAY GDK_BACKEND=x11
-unset WAYLAND_DISPLAY XDG_SESSION_TYPE
-# Software rendering, as in smoke-linux.sh.
-export WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 LIBGL_ALWAYS_SOFTWARE=1
-export RUST_LOG=info
-store="$XDG_DATA_HOME/Steno/steno.sqlite"
 echo "close-without-tray: session bus ${DBUS_SESSION_BUS_ADDRESS:-none}"
-
-"$binary" >"$work/app.log" 2>&1 &
-app=$!
-
-main=""
-for _ in $(seq 120); do
-  main="$(xdotool search --onlyvisible --name '^Steno$' 2>/dev/null | head -n 1 || true)"
-  [[ -n "$main" ]] && break
-  kill -0 "$app" 2>/dev/null || fail "the app ended before its main window showed"
-  sleep 0.5
-done
-[[ -n "$main" ]] || fail "no main window within 60 s"
-
-# As in lost-display-linux.sh: the shortcut again while the store holds
-# no meeting at all, since a press after a recording started would stop it.
-recording=""
-for _ in $(seq 6); do
-  if [[ -z "$(meetings "$store")" ]]; then
-    xdotool windowfocus --sync "$main" 2>/dev/null || true
-    xdotool key --clearmodifiers ctrl+shift+r
-  fi
-  for _ in $(seq 20); do
-    if grep -q '^recording ' <<<"$(meetings "$store")"; then
-      recording=yes
-      break 2
-    fi
-    sleep 0.5
-  done
-done
-[[ -n "$recording" ]] || fail "no recording started"
+start_recording
 grep -qF "no tray host shows the tray icon" "$work/app.log" \
   || grep -qF "no session bus, so no tray host" "$work/app.log" \
   || fail "the app did not say that no tray host shows its icon"
@@ -187,29 +98,15 @@ echo "close-without-tray: recording; closing the main window in $seconds s"
 sleep "$seconds"
 
 close_window "$main" || fail "the close could not be sent"
-for _ in $(seq 300); do
-  kill -0 "$app" 2>/dev/null || break
-  sleep 0.1
-done
-kill -0 "$app" 2>/dev/null && fail "the app was still running 30 s after its main window closed"
-code=0
-wait "$app" || code=$?
-app=""
-echo "close-without-tray: the app exited with $code"
+await_exit "its main window closed"
 [[ "$code" == 0 ]] || fail "the app exited with $code, not 0"
 
 grep -qF "the main window closed with no tray" "$work/app.log" \
   || fail "the app did not quit for the close"
 grep -qF "the shutdown ended" "$work/app.log" \
   || fail "the app did not log the shutdown's end"
-rows="$(meetings "$store")"
-echo "close-without-tray: the store holds: ${rows:-nothing}"
-[[ -n "$rows" && "$(wc -l <<<"$rows")" == 1 ]] || fail "expected one meeting"
-read -r state duration reason <<<"$rows"
-[[ "$state" == queued ]] || fail "the meeting is $state, not queued"
+require_saved
 [[ "$reason" == quit ]] || fail "the meeting ended with $reason, not quit"
-python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) > 0 else 1)' "$duration" \
-  || fail "the meeting has no duration ($duration)"
 echo "close-without-tray: the app's lines on the tray and the exit:"
 grep -E "tray host|main window closed|shutdown ended" "$work/app.log" | sed 's/^/  /'
 echo "close-without-tray: ok, closing the main window quit and saved the recording"
