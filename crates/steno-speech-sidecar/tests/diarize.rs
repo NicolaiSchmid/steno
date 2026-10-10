@@ -712,24 +712,27 @@ async fn only_the_real_model_that_fails_its_checksum_is_deleted() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the ONNX diarizer models (STENO_MODELS_DIR)"]
 async fn the_real_engine_failing_its_load_keeps_the_real_models() {
-    let real_engine = |dir: &Path, adjust: &dyn Fn(&mut SidecarConfig)| {
+    // A new copy of the models, the real child over it, `adjust`ed, and
+    // the diarizer the app builds over that child.
+    let over_a_copy = |adjust: &dyn Fn(&mut SidecarConfig)| {
+        let dir = tempfile::tempdir().unwrap();
+        copy_of_real_models(dir.path());
         let mut config = SidecarConfig::new(binary());
         config.heartbeat = Duration::from_millis(5);
         adjust(&mut config);
-        Arc::new(SidecarSpeechEngine::with_assets(
-            ModelStore::new(dir),
+        let engine = Arc::new(SidecarSpeechEngine::with_assets(
+            ModelStore::new(dir.path()),
             config,
             Vec::new(),
-        ))
+        ));
+        let diarizer = SidecarDiarizer::new(Arc::clone(&engine), Install::Never, 4);
+        (dir, engine, diarizer)
     };
     let asset = steno_diarize::models::asset();
 
-    let dir = tempfile::tempdir().unwrap();
-    copy_of_real_models(dir.path());
-    let engine = real_engine(dir.path(), &|config| {
+    let (_dir, engine, diarizer) = over_a_copy(&|config| {
         config.load_timeout = Duration::from_millis(1);
     });
-    let diarizer = SidecarDiarizer::new(Arc::clone(&engine), Install::Never, 4);
     let error = diarizer.diarize(&tone(2.0)).await.unwrap_err();
     let load = failed_load(error.as_ref()).unwrap_or_else(|| panic!("{error}"));
     assert!(matches!(load, SidecarError::Timeout { .. }), "{load}");
@@ -738,12 +741,9 @@ async fn the_real_engine_failing_its_load_keeps_the_real_models() {
 
     let mut ended_in_the_load = 0;
     for mib in [16u64, 32, 64] {
-        let dir = tempfile::tempdir().unwrap();
-        copy_of_real_models(dir.path());
-        let engine = real_engine(dir.path(), &|config| {
+        let (_dir, engine, diarizer) = over_a_copy(&|config| {
             config.memory_ceiling_bytes = mib << 20;
         });
-        let diarizer = SidecarDiarizer::new(Arc::clone(&engine), Install::Never, 4);
         match diarizer.diarize(&tone(2.0)).await {
             Ok(result) => eprintln!("{mib} MiB: {} clusters", result.clusters.len()),
             Err(error) => {
