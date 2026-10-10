@@ -242,24 +242,29 @@ nothing on screen reaches.
 On Linux "shows it" means a status notifier host (`tray_host.rs`). A
 thread follows the session bus for the whole run: whether
 `org.kde.StatusNotifierWatcher` has an owner and, if it does, whether
-that watcher's `IsStatusNotifierHostRegistered` says a host registered (a
-watcher can run with no host, for example KDE's `kded` started for a KDE
-app on another desktop). It reads both at launch and again whenever the
-name changes owner or the watcher says a host came or went, so a close
-reads the last answer without asking the bus. With no session bus,
-before the first reading and after the bus closed, the shell counts no
-host, the safe side; a watcher that says it lacks the property still
-counts as one; one that serves no watcher object yet, or a reading that
-fails (no answer within five seconds, for one), counts as none and is
-read again ten seconds later, three times at most before the next
-change. The log says `no tray host shows the tray icon` at launch on
-stock GNOME, and again whenever the host goes. On stock GNOME the
-AppIndicator extension brings the tray back. When the host goes while
-the main window is hidden (the bar restarts, the extension is turned
-off), nothing on the desktop shows the window: during a recording the
-bubble stays on screen, with Stop, and a click on it opens the main
-window; otherwise starting Steno again from the launcher brings it back.
-An `XEmbed`-only tray is not asked for, so there closing main also quits.
+that watcher's `IsStatusNotifierHostRegistered` says a host registered
+(a watcher can run with no host: Waybar's says none until its tray
+registers). It reads both at launch and again whenever the name changes
+owner or the watcher says a host came or went, so a close reads the last
+answer without asking the bus. Waybar's watcher and GNOME's extension
+say when a host comes or goes. KDE's always says one registered, so on
+Plasma a close hides the main window while `kded` runs, also after the
+panel has gone. With no session bus, before the first reading and after
+the bus closed, the shell counts no host, the safe side; a watcher that
+says it lacks the property still counts as one; a reading that fails (no
+answer within five seconds, for one) counts as none and is read again
+ten seconds later, three times at most before the next change; a watcher
+that serves no watcher object yet counts as none until the name changes
+owner or a host signal comes, since the tray library registers the icon
+again only then. The log says `no tray host shows the tray icon` at
+launch on stock GNOME, and again whenever a watcher says its host went.
+On stock GNOME the AppIndicator extension brings the tray back. When the
+host goes while the main window is hidden (the bar restarts, the
+extension is turned off), nothing on the desktop shows the window:
+during a recording the bubble stays on screen, with Stop, and a click on
+it opens the main window; otherwise starting Steno again from the
+launcher brings it back. An `XEmbed`-only tray is not asked for, so
+there closing main also quits.
 
 On macOS the menu bar carries the shell's own menu (`menu.rs`): Quit goes
 through the run loop, the Edit menu gives the pages their copy and paste
@@ -1444,16 +1449,16 @@ thread, in emit order, without the emit waiting. On Linux the tray host's
 follower decides by a table of the watcher's answers (which mean it lacks
 the property, which fail the reading) and runs against a fake watcher on a
 private `dbus-daemon`: no watcher, a watcher that comes and goes, one
-whose host registers and goes, one without the property, one that serves
-no object at its path, one that does not answer in time and one that
-answers only the second time it is asked, and the bus closing; a call that
-gets no answer gives up after five seconds (`STENO_REQUIRE_DBUS_TEST=1`
-fails the tests when `dbus-daemon` is missing, as in CI). `cargo test -p
-steno-desktop --features fixture-host` runs the same with the fixture
-host, plus the fixture table against `index.json` and the mock transport;
-Rust CI runs both. In the web app, `tauri-transport.test.ts` covers the
-page's half of the wire and `src/windows/panels/*.test.tsx` the two
-panels.
+whose host registers and goes, one without the property, one that serves no
+object at its path, also after it exports one, one that does not answer in
+time and one that answers only the second time it is asked, and the bus
+closing; a call that gets no answer gives up after five seconds
+(`STENO_REQUIRE_DBUS_TEST=1` fails the tests when `dbus-daemon` is missing,
+as in CI). `cargo test -p steno-desktop --features fixture-host` runs the
+same with the fixture host, plus the fixture table against `index.json` and
+the mock transport; Rust CI runs both. In the web app,
+`tauri-transport.test.ts` covers the page's half of the wire and
+`src/windows/panels/*.test.tsx` the two panels.
 
 ## Smoke
 
@@ -1597,7 +1602,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop`, `linux/*-stop-timeout.conf` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles); the stop timeout drop-ins for the autostart unit and GNOME's scope (see Launch at login under systemd) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, quits through Quit's path otherwise, saving a recording first; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `dbus.rs`, on Linux: what the D-Bus clients share (a connection with a five-second call timeout, the client's thread, the name owner, the proxy) and the tests' private bus. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display. `stop_timeout.rs`, on Linux: the systemd drop-ins for the stop timeout |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, quits through Quit's path otherwise, saving a recording first; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `dbus.rs`, on Linux: what the D-Bus clients share (a connection with a five-second call timeout, the client's thread, the name owner, the bus's and the owner's proxies) and the tests' private bus. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display. `stop_timeout.rs`, on Linux: the systemd drop-ins for the stop timeout |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items and their words per platform, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/tray_host.rs` | On Linux, whether a status notifier host shows the tray's icon: the follower on the session bus and the rule it decides by |
 | `apps/desktop/src-tauri/src/platform.rs` | The initialization script that tells every page its platform |
