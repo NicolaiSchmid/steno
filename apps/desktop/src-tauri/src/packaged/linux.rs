@@ -24,10 +24,6 @@ const BINARY: &str = "steno-desktop";
 /// Where Nix keeps its builds, which a garbage collection removes.
 const STORE: &str = "/nix/store/";
 
-/// The unit systemd's XDG autostart generator makes from the entry
-/// (`app-<escaped entry name>@autostart.service`).
-const AUTOSTART_UNIT: &str = "app-steno\\x2ddesktop@autostart.service";
-
 /// Where a package puts the app's launcher, in the order they are tried:
 /// `/usr/bin` (the `.deb`, and a package that installs the binary or a
 /// link to it there), `/usr/local/bin`, the NixOS system profile, the
@@ -191,9 +187,11 @@ fn exec_value(path: &str) -> String {
     quoted
 }
 
-/// Writes the autostart entry of `app_name` naming [`launcher_path`].
-/// With no such path it writes nothing and fails with [`NO_STABLE_PATH`],
-/// so the setting is not saved and the General section says why.
+/// Writes the autostart entry of `app_name` naming [`launcher_path`],
+/// atomically (`stop_timeout::install`), so a reload of the user manager
+/// never reads a half-written entry. With no such path it writes nothing
+/// and fails with [`NO_STABLE_PATH`], so the setting is not saved and the
+/// General section says why.
 pub fn write_entry(app_name: &str) -> io::Result<()> {
     let path = entry_path_here(app_name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
@@ -207,10 +205,7 @@ fn write_entry_at(path: &Path, app_name: &str, exec: Option<&Path>) -> io::Resul
         );
         return Err(io::Error::new(io::ErrorKind::NotFound, NO_STABLE_PATH));
     };
-    if let Some(directory) = path.parent() {
-        std::fs::create_dir_all(directory)?;
-    }
-    std::fs::write(path, entry(app_name, exec))
+    crate::stop_timeout::install(path, &entry(app_name, exec)).map(|_| ())
 }
 
 /// An entry's `Exec` value, without the spaces around it.
@@ -248,7 +243,7 @@ enum Removal {
     AtExit,
 }
 
-/// What [`at_launch`] does with the entry: see [`Removal`].
+/// What [`remove_or_defer`] does with the entry: see [`Removal`].
 fn removal(managed: bool, earlier: bool, as_autostart_unit: bool) -> Removal {
     match (managed && earlier, as_autostart_unit) {
         (false, _) => Removal::Keep,
@@ -265,17 +260,17 @@ static EARLIER_ENTRY_AT_EXIT: AtomicBool = AtomicBool::new(false);
 /// (`packaged::login_item_is_managed`), the autostart entry of `app_name`
 /// an earlier build wrote ([`is_earlier_entry`]) goes, and only such an
 /// entry. While the app runs as the autostart unit
-/// ([`runs_as_autostart_unit`]) it goes at the exit instead
+/// (`stop_timeout::runs_as_autostart_unit`) it goes at the exit instead
 /// ([`remove_earlier_entry_at_exit`]).
 pub fn remove_earlier_entry(app_name: &str) {
     let Some(path) = entry_path_here(app_name) else {
         return;
     };
-    let removal = at_launch(
+    let removal = remove_or_defer(
         &path,
         super::login_item_is_managed(),
         &candidates_here(),
-        runs_as_autostart_unit(),
+        crate::stop_timeout::runs_as_autostart_unit(),
     );
     if removal == Removal::AtExit {
         EARLIER_ENTRY_AT_EXIT.store(true, Ordering::Relaxed);
@@ -283,7 +278,7 @@ pub fn remove_earlier_entry(app_name: &str) {
 }
 
 /// [`remove_earlier_entry`]'s launch step for the entry at `path`.
-fn at_launch(
+fn remove_or_defer(
     path: &Path,
     managed: bool,
     candidates: &[PathBuf],
@@ -312,14 +307,11 @@ fn at_launch(
 /// on Wayland, which relaunches the app when the session goes on
 /// (`session_end::SaveAndQuit::of`); xfce4-session starts autostart
 /// entries itself, so that app is not the autostart unit and never
-/// leaves the entry for the exit.
-pub fn remove_earlier_entry_at_exit(app_name: &str, relaunching: bool) {
-    if !removes_at_exit(EARLIER_ENTRY_AT_EXIT.load(Ordering::Relaxed), relaunching) {
-        return;
-    }
-    if let Some(path) = entry_path_here(app_name) {
-        remove_if_earlier(&path, &candidates_here());
-    }
+/// leaves the entry for the exit. True when the entry went.
+pub fn remove_earlier_entry_at_exit(app_name: &str, relaunching: bool) -> bool {
+    removes_at_exit(EARLIER_ENTRY_AT_EXIT.load(Ordering::Relaxed), relaunching)
+        && entry_path_here(app_name)
+            .is_some_and(|path| remove_if_earlier(&path, &candidates_here()))
 }
 
 /// Whether the exit removes the entry: it waited for the exit
@@ -349,24 +341,6 @@ fn remove_if_earlier(path: &Path, candidates: &[PathBuf]) -> bool {
             false
         }
     }
-}
-
-/// Whether this process runs in the autostart unit (`AUTOSTART_UNIT`):
-/// a component of its cgroup's path in `/proc/self/cgroup` is that unit.
-/// False when the file cannot be read.
-fn runs_as_autostart_unit() -> bool {
-    std::fs::read_to_string("/proc/self/cgroup")
-        .is_ok_and(|cgroup| runs_in(&cgroup, AUTOSTART_UNIT))
-}
-
-/// Whether a cgroup listing, as `/proc/<pid>/cgroup` holds it (one
-/// `<id>:<controllers>:<path>` line per hierarchy), puts the process in
-/// `unit` or below it.
-fn runs_in(cgroup: &str, unit: &str) -> bool {
-    cgroup
-        .lines()
-        .filter_map(|line| line.splitn(3, ':').nth(2))
-        .any(|path| path.split('/').any(|component| component == unit))
 }
 
 #[cfg(test)]
@@ -623,6 +597,12 @@ mod tests {
             path,
             dir.path().join(".config/autostart/steno-desktop.desktop")
         );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[Desktop Entry]\n").unwrap();
+        // A hard link to the old entry keeps its bytes: the entry is
+        // written atomically, not rewritten in place.
+        let old = dir.path().join("old");
+        std::fs::hard_link(&path, &old).unwrap();
         write_entry_at(
             &path,
             "steno-desktop",
@@ -632,6 +612,7 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("\nExec=/usr/bin/steno-desktop\n"));
         assert!(!is_earlier_entry(&written, &[]));
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "[Desktop Entry]\n");
     }
 
     /// With no launcher at a stable path nothing is written, and turning
@@ -706,26 +687,26 @@ mod tests {
         let write = |exec: &Path| write_entry_at(&path, "steno-desktop", Some(exec)).unwrap();
 
         assert_eq!(
-            at_launch(&path, true, &[], false),
+            remove_or_defer(&path, true, &[], false),
             Removal::Keep,
             "no entry"
         );
 
         write(store);
-        assert_eq!(at_launch(&path, false, &[], false), Removal::Keep);
+        assert_eq!(remove_or_defer(&path, false, &[], false), Removal::Keep);
         assert!(path.exists(), "an unmanaged launch keeps it");
-        assert_eq!(at_launch(&path, true, &[], false), Removal::Now);
+        assert_eq!(remove_or_defer(&path, true, &[], false), Removal::Now);
         assert!(!path.exists(), "outside the unit it goes at once");
 
         write(store);
-        assert_eq!(at_launch(&path, true, &[], true), Removal::AtExit);
+        assert_eq!(remove_or_defer(&path, true, &[], true), Removal::AtExit);
         assert!(path.exists(), "as the unit it stays while the app runs");
         assert!(removes_at_exit(true, false));
         assert!(remove_if_earlier(&path, &[]));
         assert!(!path.exists(), "gone after the exit");
 
         write(Path::new("/opt/steno/steno-desktop"));
-        assert_eq!(at_launch(&path, true, &[], false), Removal::Keep);
+        assert_eq!(remove_or_defer(&path, true, &[], false), Removal::Keep);
         assert!(!remove_if_earlier(&path, &[]));
         assert!(path.exists(), "an entry no earlier build wrote stays");
     }
@@ -760,12 +741,12 @@ mod tests {
             // update's relaunch keeps it.
             EARLIER_ENTRY_AT_EXIT.store(true, Ordering::Relaxed);
             write_entry(BINARY).unwrap();
-            remove_earlier_entry_at_exit(BINARY, false);
+            assert!(!remove_earlier_entry_at_exit(BINARY, false));
             assert!(path.exists(), "this build's own entry stays");
             write_entry_at(&path, BINARY, Some(&per_user)).unwrap();
-            remove_earlier_entry_at_exit(BINARY, true);
+            assert!(!remove_earlier_entry_at_exit(BINARY, true));
             assert!(path.exists(), "an update's relaunch keeps it");
-            remove_earlier_entry_at_exit(BINARY, false);
+            assert!(remove_earlier_entry_at_exit(BINARY, false));
             assert!(!path.exists(), "gone after the exit");
             return;
         }
@@ -796,29 +777,5 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-    }
-
-    #[test]
-    fn the_cgroup_names_the_autostart_unit() {
-        let unit = AUTOSTART_UNIT;
-        let v2 = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-steno\\x2ddesktop@autostart.service\n";
-        assert!(runs_in(v2, unit));
-        let uwsm = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-graphical.slice/app-steno\\x2ddesktop@autostart.service/sub\n";
-        assert!(runs_in(uwsm, unit), "a cgroup below the unit is in it");
-        let hybrid = "12:cpu,cpuacct:/\n1:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/app-steno\\x2ddesktop@autostart.service\n0::/\n";
-        assert!(runs_in(hybrid, unit));
-        let service = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/steno.service\n";
-        assert!(!runs_in(service, unit));
-        let other = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-steno\\x2ddesktop@autostart.service.bak\n";
-        assert!(!runs_in(other, unit));
-        assert!(!runs_in("", unit));
-    }
-
-    /// On this process's real cgroup listing: the test runner is not the
-    /// autostart unit.
-    #[test]
-    fn the_test_runner_is_not_the_autostart_unit() {
-        let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-        assert!(!runs_as_autostart_unit(), "{cgroup}");
     }
 }

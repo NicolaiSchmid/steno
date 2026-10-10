@@ -121,7 +121,9 @@ Forge and atlas.
   sets the AppUserModelID (taskbar pins), while the MSI upgrade code and the
   NSIS registry keys come from the product name, so an installer with a new
   identifier still upgrades in place; the NSIS uninstaller's opt-in data cleanup
-  removes only its own identifier's folders.
+  removes only its own identifier's folders. On Linux the login item's marks
+  (`launch-at-login-off-at-exit`, `systemd-reload-owed`) are in the support
+  directory (#227).
 - **The keyring service is not the identifier.** Every Steno keyring entry is
   filed under the service string `uno.schmid.steno.mac` (`KEYRING_SERVICE`), in
   the Keychain, in the Windows credential store, and on Linux in the Secret
@@ -391,7 +393,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P2 | A recording, or a second meeting: a `complete` answer that never reaches the phone. A `handoverAdmission` table answers the retry "delivered", also for a recording whose meeting was deleted; the Rust migrator ignores later migrations and the desktop shows a dialog instead of panicking; the backfill runs on every open; other bytes under a recording id are a new recording, and the same bytes from another device take the receipt over (P33) (`fix/handover-lost-complete-answer`, D11; design `.plans/2026-10-08-handover-admission-ledger.md`) | handover |
 | P3 | A recording ended by a kill, a crash or a power loss: salvage the CAF at launch into a meeting that processes, instead of leaving it failed and unprocessed. The salvage writes the existing end reason `failed` (the interrupted row has none), so the Swift app still decodes the row during the rollback window (a new value in a stored enum column would break that); a recovered meeting is told apart additively, by a log line now and, if the UI needs it, a nullable column in a later add-only migration. A master with no row at all (a phone upload copied in before a crash or a failed commit, a row a power loss took before it was durable, a recording whose meeting was deleted while it recorded) is adopted by the same launch where it lies, from the settings' folder, the recorded, the known and each stored asset's folder, when the record of recording folders names it: the recorder writes that entry before a recording's row and the phone intake before its copy. An entry is forgotten only by a delete that goes through (one refused, whose commit fails or that a panic unwinds records it again), by a start that failed (nothing was recorded), by the phone intake once its admission committed durably or its copy is gone, by a launch that finds the meeting's row no longer `recording` after a durable checkpoint, or by a launch that finds no master (the meeting folder there with none, with a CAF short of one whole frame or with a header and no audio, or missing from an audio folder that lists others; an empty, missing or unreadable audio folder keeps it). A meeting folder another install put into a shared audio folder, and one the Swift app or an earlier release wrote (no record), are left alone, and the launch logs their count; a recorded master the launch cannot read (a channel count the salvage does not take) keeps its entry, and the launch logs those in one line too. A recording starts only in a meeting folder it creates: the writer refuses one that exists, so a start with an existing meeting's id (`steno record --meeting-id`) writes over nothing, and a start whose devices do not open removes only the folder it created. The adoption is a meeting with its folder's id, `queued`, kept forever, the CAF salvaged with the end reason `failed`, an m4a or WAV as a phone recording with none, inserted only while no row has the id; a master modified within the live check's ten seconds waits for the next launch, nothing in the handover inbox is adopted, and the main window says "Recovered a recording that was missing from your list. It is being processed." Deleting a meeting whose files no asset names removes its folder in each of those folders, so it does not come back. A delete forgets the entry before its rows go, and the adoption reads the record again after the rows, so a meeting deleted while a launch runs does not come back either. During the rollback window a recording can come back once: a Rust recording is killed, the Swift app fails its row and the user deletes it there; Swift removes only what an asset names, so the next Rust launch adopts it again, and a delete there removes it | capture and recovery (`wp-cap-*`, `fix/recording-recovery`, `fix/recovery-adopts-orphans`) |
 | P4 | A recording's stop: a `stop()` that waited behind a writer failure's or a device loss's finalise returns that recording, as Swift's actor did | capture and recovery (`wp-cap-*`) |
-| P5 | The recording in progress: a save that outlasts the session's wait. Measure the save; an autostarted Linux app gets a systemd drop-in raising `TimeoutStopSec` from the generator's 5 s to 20 s, in the `.deb`, the AUR and Nix packages and written by the app for the AppImage (for the generator's `app-steno\x2ddesktop@autostart.service` under uwsm and Plasma, named after the Linux product name `steno-desktop`; GNOME starts autostart apps in its own `app-gnome-steno\x2ddesktop-<pid>.scope`, whose drop-in directory `app-gnome-steno\x2ddesktop-.scope.d` gets one too if its stop timeout is under 20 s); the save logs its duration at `warn`, so it shows under the default filter; on Windows, `ShutdownBlockReasonCreate` while recording | Linux desktop (with #220) |
+| P5 | The recording in progress: a save that outlasts the session's wait. Measure the save; an autostarted Linux app gets a systemd drop-in raising `TimeoutStopSec` from the generator's 5 s to 20 s, in the `.deb`, the AUR and Nix packages and written by the app for the AppImage (for the generator's `app-steno\x2ddesktop@autostart.service` under uwsm and Plasma, named after the Linux product name `steno-desktop`; GNOME starts autostart apps in its own `app-gnome-steno\x2ddesktop-<pid>.scope`, which gnome-session's `app-gnome-.scope.d/override.conf` gives `TimeoutStopSec=5s`, so a `[Scope]` drop-in named to sort after `override.conf` raises it too); the save logs its duration at `warn`, so it shows under the default filter; on Windows, `ShutdownBlockReasonCreate` while recording. #227 delivers the Linux half: both drop-ins in the `.deb` (with a `postinst` that reloads the running user managers) and written by the app, the autostart entry kept until the exit when Launch at login is turned off while the app runs as its unit, the autostart unit's drop-in while managed (X5) for the app that runs as the unit made from an earlier build's entry, removed with that entry at the exit, and the logged duration; the AUR and Nix packages ship the files under X6 and X7 | Linux desktop (#227, with #220); Windows |
 | P6 | The recording in progress: systemd-oomd kills the app's cgroup with its sidecar. The sidecar moves into its own transient scope on Linux: right after the spawn the app asks the user manager over the user bus for `app-steno\x2dspeech\x2dsidecar-<pid>.scope`, in the app's slice and `PartOf` the app's unit, and waits about 2 s for the sidecar to be in it, so oomd takes the sidecar's cgroup first and the job fails as after any crash of the sidecar; a start the manager has not carried out by then is called off, and a sidecar that joined just before stays in its scope; an app outside a user unit, a missing bus or a refusal leaves the sidecar in the app's cgroup, and a manager that answers after the wait leaves it there or moves it later. Open: speaker diarization still runs in the app's process, so while it runs, or under pressure that lasts after the sidecar is gone, oomd can still take the app's cgroup; the diarizer's move into the sidecar is A3 (audio) | Linux desktop (#260) |
 | P7 | Every note: a people folder typed as `./People` or `.` in the Swift Settings makes each Rust delivery fail. `./People` becomes `People`; `.` becomes no people folder, as Swift wrote it | pipeline, store and export (`wp-pse-*`) |
 | P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221. At #221's first move, a key only `secrets.json` holds is copied; where both hold one, the file's API key wins and the Secret Service keeps its own `handover-identity`; after the move's mark, the Secret Service wins for every key | audio (with #221) |
@@ -482,7 +484,7 @@ after the port".
 ## Work packages
 
 Each package lands in one or more pull requests off `main`, reviewed and merged
-by merge commit; a pull request may close several rows (#220: P37 and X1, and P5 with #227; #222: A7, A8 and P19).
+by merge commit; a pull request may close several rows (#220: P37 and X1, and P5's session end; #227: P5's Linux stop timeout and save log; #222: A7, A8 and P19).
 Steps marked **Nicolai** need him: secrets, settings on GitHub, his machines
 and the phone. The letters: S for the Mac and the release,
 A for the audio path, P for the other data-loss fixes, X for the Linux targets.
@@ -1077,8 +1079,17 @@ The table above names each package and its owner. Their tests:
   `validpgpkeys` set to the release key
   (`048B527950E4F609B90E63495F8810A6E6D4DB46`), depends on `webkit2gtk-4.1`,
   `gtk3`, `glib2`, `libsoup3`, `libayatana-appindicator`, `pipewire` and
-  `dbus`, and ships P5's drop-in, X4's `ufw` profile and a `/usr/bin` wrapper
-  that sets X5's flag and the path the autostart entry names. The first stable
+  `dbus`, and ships P5's two drop-ins (the `.deb`'s `/usr/lib/systemd/user/`),
+  X4's `ufw` profile and a `/usr/bin` wrapper
+  that sets X5's flag and the path the autostart entry names. It needs no
+  `post_upgrade`: Arch's `systemd` package ships the pacman hook
+  `30-systemd-daemon-reload-user.hook`, which reloads every running user
+  manager (`systemctl reload 'user@*.service'`) after any package installs,
+  upgrades or removes a file under `usr/lib/systemd/user/`, with no condition
+  a package could add. So on Arch only the autostart entry the app keeps until
+  its exit (P5) protects a running autostart unit from that reload, and the
+  kept entry is a D3 requirement for Omarchy: X6 is accepted only with step 8
+  of the Omarchy gate passing. The first stable
   push is by hand; then **Nicolai** adds
   `AUR_SSH_PRIVATE_KEY`, and `publish` pushes from the second stable release
   on. A candidate is installed with `makepkg -si` from `packaging/aur/`, with
@@ -1088,9 +1099,20 @@ The table above names each package and its owner. Their tests:
   `ORT_LIB_LOCATION` against nixpkgs' `onnxruntime` with
   `ORT_PREFER_DYNAMIC_LINK=1`, the sidecar staged by `stage-sidecar.sh`, the
   tray library's `dlopen` path patched, `STENO_DISTRIBUTION=nix`, and P5's
-  drop-in, built from `self` with every hash in the tree, so any tag builds as
-  it is. Without the module, the autostart entry names, as an absolute path, the
-  first of `$HOME/.nix-profile/bin/steno-desktop` and
+  two drop-ins, which the module links into the user units
+  (`systemd.packages`); without the module the app's own copies cover them.
+  `nixos-rebuild switch` and `home-manager switch` reload the user managers
+  too, so without the module (a profile or home-manager install with launch
+  at login on) only the autostart entry the app keeps until its exit (P5)
+  protects a running autostart unit; with it, Steno runs as `steno.service`,
+  which the module gives `TimeoutStopSec=20s` and no rebuild stops. The kept
+  entry is a D3 requirement for NixOS wherever Steno runs as the autostart
+  unit (the Hyprland session; GNOME runs the entry in a scope, which a reload
+  leaves alone): X7 is accepted only with step 9 of the NixOS gate passing,
+  in the session that step names. Built from `self` with every hash in the
+  tree, so any tag builds as it is. Without the module, the autostart entry
+  names, as an absolute path, the first of
+  `$HOME/.nix-profile/bin/steno-desktop` and
   `/etc/profiles/per-user/$USER/bin/steno-desktop` that resolves into the
   running package, else the bare `steno-desktop`; never a store path. Because this links a
   different ONNX Runtime build, the PR re-runs
@@ -1121,7 +1143,7 @@ The table above names each package and its owner. Their tests:
     and `programs.gnupg.agent.enableSSHSupport` is on: its gcr SSH agent
     conflicts with `startAgent`, and takes `SSH_AUTH_SOCK` from gpg-agent's.
     X4's firewall port is not in the module; X4 adds it. P5's drop-ins arrive
-    through the `.deb`'s `files` map once #227 merges. Without the module, the
+    through the `.deb`'s `files` map (#227). Without the module, the
     autostart entry names the profile's path by X5's rule (#261), so the
     wrapper sets no `STENO_EXEC_PATH`. ONNX Runtime is nixpkgs' 1.27.1 against the
     1.28.0 build `ort` downloads, at FLEURS 4.9 % with both. Nix CI
@@ -1744,6 +1766,16 @@ interrupted" after one. On the GNOME machine,
   7. In the Steno that a login started, Settings says updates come from the
      package manager (X5), and `~/.config/autostart/steno-desktop.desktop`'s
      `Exec` names `/usr/bin/steno-desktop`.
+  8. The kept entry (P5, D3). With launch at login on, log out and in, so
+     Steno runs as `app-steno\x2ddesktop@autostart.service` (step 5 of the
+     GNOME gate's cgroup check names it), and start a recording. Turn launch
+     at login off in Settings: `~/.config/autostart/steno-desktop.desktop`
+     stays. Run
+     `makepkg -si` in `packaging/aur/` again, which runs systemd's reload
+     hook: `systemctl --user show 'app-steno\x2ddesktop@autostart.service' -p
+     LoadState -p TimeoutStopUSec` still shows `loaded` and 20 s. Log out:
+     after logging back in, `q` shows the meeting with its full length and
+     `quit` as `endReason`, and the entry is gone.
 - **NixOS** (x86_64-linux, GNOME, and Hyprland with `withUWSM = true` if
   Nicolai runs it).
   1. Step 0 uses a flake input at the previous candidate's tag
@@ -1778,7 +1810,9 @@ interrupted" after one. On the GNOME machine,
         Pass when `cg` prints one line, ending in
         `app-steno\x2ddesktop@autostart.service`; `systemctl --user
         is-active 'app-steno\x2ddesktop@autostart.service'` prints `active`;
-        and the entry is still there. Log out: the entry is gone.
+        `systemctl --user show 'app-steno\x2ddesktop@autostart.service' -p
+        TimeoutStopUSec` is 20 s (P5); and the entry is still there. Log
+        out: the entry is gone.
      2. Unmasked: `systemctl --user unmask steno.service`, write the entry
         again, then log out and in. Both units start Steno; the one
         `steno.service` starts wins and removes the entry at launch, and the
@@ -1796,6 +1830,13 @@ interrupted" after one. On the GNOME machine,
      `nix profile install github:NicolaiSchmid/steno/v0.11.0-rc.N#steno`);
      `nix-collect-garbage -d` as that user; log out and in: Steno starts once,
      as the new version, and its file chooser opens.
+  9. The kept entry (P5, D3), in step 8's package-only install, in the
+     Hyprland session with `withUWSM = true`: step 8 of the Omarchy gate, with
+     `nixos-rebuild switch` (and `home-manager switch` where Nicolai uses
+     home-manager) as the reload in place of `makepkg -si`. Under GNOME alone,
+     step 5 of the GNOME gate, naming `app-gnome-steno\x2ddesktop-<pid>.scope`,
+     stands in for it: gnome-session runs the entry in a scope, which a reload
+     leaves alone.
 
 **The Windows gate** (before the site lists Windows): a Windows machine runs the
 `--ignored` WASAPI tests, one real call, a logoff during a recording of at least

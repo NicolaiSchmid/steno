@@ -15,12 +15,13 @@
 //! and on a packaged install `packaged`),
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
-//! instance, on Linux the logout and shutdown clients (`session_end`), and
-//! on a Wayland session the `XWayland` backend the panels need
-//! (`display`). Every one is a thin module over a Tauri plugin or an
-//! OS API with its rules in plain functions the tests cover. Everything
-//! that is on the wire (errors, topics, windows, sections, params) is the
-//! `steno-bridge` crate's type; the shell adds only what it needs on top
+//! instance, on Linux the logout and shutdown clients (`session_end`) and
+//! the systemd drop-ins for the stop timeout (`stop_timeout`), and on a
+//! Wayland session the `XWayland` backend the panels need (`display`).
+//! Every one is a thin module over a Tauri plugin or an OS API with its
+//! rules in plain functions the tests cover. Everything that is on the
+//! wire (errors, topics, windows, sections, params) is the `steno-bridge`
+//! crate's type; the shell adds only what it needs on top
 //! (`recording::RecorderState`, `windows::Spec`). Secrets are not the
 //! shell's: the keyring `SecretStore` lives in `steno-services` (#173,
 //! `WP6b`).
@@ -94,6 +95,8 @@ mod recording;
 #[cfg(target_os = "linux")]
 mod session_end;
 mod smoke;
+#[cfg(target_os = "linux")]
+mod stop_timeout;
 mod tray;
 mod updater;
 mod windows;
@@ -234,10 +237,12 @@ fn setup(
         windows::open(handle, windows::BridgeWindow::Onboarding, None, None)?;
     }
     #[cfg(target_os = "linux")]
-    autostart::at_launch(handle);
+    autostart::remove_earlier_entry(handle);
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle);
+    #[cfg(target_os = "linux")]
+    autostart::sync_at_launch(handle);
     #[cfg(unix)]
     exit_on_signals(handle, runtime);
     Ok(true)
@@ -524,6 +529,16 @@ fn shut_down_before_exit(app: &tauri::AppHandle) {
     steno_services::flush_logs();
 }
 
+/// The shutdown before an update's relaunch (`updater`, and the smoke's
+/// `STENO_SMOKE_RELAUNCH`): on Linux it marks the exit as a relaunch first
+/// (`autostart::relaunching`), so the exit's step keeps the login item for
+/// the next process, which runs on in the same unit.
+fn shut_down_for_relaunch(app: &tauri::AppHandle) {
+    #[cfg(target_os = "linux")]
+    autostart::relaunching();
+    shut_down_before_exit(app);
+}
+
 /// The save before an end that no exit request announced, on Linux: the
 /// pipeline quits first, as for an exit signal (`Host::quit_pipeline`),
 /// then the shutdown runs on the calling thread's behalf
@@ -544,27 +559,36 @@ fn onboarding_closed(app: &tauri::AppHandle) {
 }
 
 /// What every exit runs once (`ExitGate`): the host's shutdown
-/// (`Host::shutdown_action`), then, on Linux, an autostart entry an
-/// earlier build wrote that waited for the exit goes
-/// (`autostart::at_exit`): only once the save is over, since until then
-/// the unit the app runs as needs the entry.
+/// (`Host::shutdown_action`), then a `warn` line with how long it took, so
+/// a machine's log, under the default filter (`LOG_FILTER`), shows how
+/// long a save takes against the waits it has to fit in: systemd's stop
+/// timeout, the session manager's, logind's delay. A shutdown cut off at
+/// `SHUTDOWN_PATIENCE` logs the gate's warning first, and this line only
+/// if the save ends before the process does. After it, on Linux, Launch
+/// at login turned off while the app ran as the autostart unit goes off,
+/// and an autostart entry an earlier build wrote that waited for the exit
+/// goes, unless the exit is an update's relaunch (`autostart::at_exit`):
+/// only once the save is over, since until then the unit the app runs as
+/// needs the entry.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
     let shutdown = host::host(app).shutdown_action();
     #[cfg(target_os = "linux")]
     let app = app.clone();
-    then(shutdown, move || {
+    timed_then(shutdown, move || {
         #[cfg(target_os = "linux")]
-        autostart::at_exit(&app);
+        autostart::at_exit(&app, autostart::relaunching_now());
     })
 }
 
-/// `shutdown`, then `after`, in that order.
-fn then(
+/// `shutdown`, the line with its duration, then `after`, in that order.
+fn timed_then(
     shutdown: impl FnOnce() + Send + 'static,
     after: impl FnOnce() + Send + 'static,
 ) -> impl FnOnce() + Send + 'static {
     move || {
+        let started = std::time::Instant::now();
         shutdown();
+        tracing::warn!(elapsed = ?started.elapsed(), "the shutdown ended");
         after();
     }
 }
@@ -900,14 +924,14 @@ mod tests {
         assert!(!platform_app_running("com.nicolaischmid.steno.no-such-app"));
     }
 
-    /// What runs after the shutdown (on Linux, an earlier build's
-    /// autostart entry that waited for the exit) runs only once the save
-    /// is over.
+    /// What runs after the shutdown (on Linux, Launch at login turned off
+    /// as the autostart unit, and an earlier build's autostart entry that
+    /// waited for the exit) runs only once the save is over.
     #[test]
     fn the_exit_action_runs_its_after_step_once_the_shutdown_ended() {
         let steps = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (shutdown, after) = (steps.clone(), steps.clone());
-        then(
+        timed_then(
             move || shutdown.lock().unwrap().push("shutdown"),
             move || after.lock().unwrap().push("after"),
         )();

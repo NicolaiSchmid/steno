@@ -1366,8 +1366,10 @@ still has to draw the window side. `[ ]` is not ported yet.
     So a save that outlasts a session manager's or logind's wait still ends, at
     most `SHUTDOWN_PATIENCE` after it began, unless the process is killed first
     (systemd's `SIGKILL` once a stop has waited out the unit's `TimeoutStopSec`,
-    90 s unless the unit sets another, xfce4-session's `SIGKILL` 15 s after its
-    `Stop`, which the shell calls off by unregistering first, or a second SIGTERM).
+    90 s unless the unit sets another, and 5 s for the autostart unit and GNOME's
+    app scope, which the drop-ins of the next item raise to 20 s; xfce4-session's
+    `SIGKILL` 15 s after its `Stop`, which the shell calls off by unregistering
+    first; or a second SIGTERM).
     On KDE Plasma this is the save: ksmserver speaks XSMP to X11 clients, which
     GTK 3 does not, and KWin closes only native Wayland windows at a logout, not
     the shell's, which run under XWayland.
@@ -1385,6 +1387,51 @@ still has to draw the window side. `[ ]` is not ported yet.
     `apps/desktop/scripts/lost-display-linux.sh`) and headless sway with a recording
     running; a real xfce4-session 4.20.4 logout on X11 and on Wayland (labwc 0.9.7),
     and its Quit Program and Save Session under a recording on X11, in a container.
+  - An autostarted app on a desktop that runs XDG autostart through systemd (KDE
+    Plasma, uwsm sessions such as Omarchy's) is the unit
+    `app-steno\x2ddesktop@autostart.service`, which `systemd-xdg-autostart-generator`
+    writes with `TimeoutStopSec=5s`. On GNOME the app runs in
+    `app-gnome-steno\x2ddesktop-<pid>.scope`, at login and from the dash alike, and
+    gnome-session's `app-gnome-.scope.d/override.conf` gives that scope 5 s too.
+    Either way systemd's `SIGKILL` follows SIGTERM once the stop has waited out that
+    `TimeoutStopSec`, 5 s, before a save that needs `SHUTDOWN_PATIENCE` (10 s) plus
+    `EXIT_GRACE` (2 s), and Launch at login is on by default. Two drop-ins in
+    `apps/desktop/src-tauri/linux/` raise the timeout to 20 s: `[Service]` as
+    `10-steno.conf` for the unit, `[Scope]` as `zz-steno.conf` for the
+    scope, named to sort after `override.conf`. The `.deb` installs both under
+    `/usr/lib/systemd/user/`, and its `postinst` (`linux/deb-postinst.sh`) reloads
+    every running user manager, so an app autostarted before the upgrade gets them
+    too (all three checked by `check-bundle.sh`). The app writes them under
+    `~/.config/systemd/user/` whatever `XDG_CONFIG_HOME` says, the scope's at every
+    launch and the unit's while Launch at login is on, and reloads the user manager
+    after a write; the write leaves a mark (`systemd-reload-owed`) that only a
+    reload that went through clears, so a reload that failed, was skipped or was cut
+    off is asked for again at the next launch or switch, and with nothing written
+    and nothing owed there is no reload (`stop_timeout.rs`). A reload while the
+    autostart entry is gone unloads the running unit, and the session's end then
+    sends no SIGTERM, so the app, while it runs as the unit (its cgroup), never
+    reloads without the entry, the `postinst` skips a user whose entry is gone
+    unless their unit is known to be stopped (`inactive` or `failed`), and Launch
+    at login turned off while the app runs as the unit is marked and goes after the
+    exit's save (`autostart.rs`). Turned on again before the exit, it clears the
+    mark and leaves the entry unwritten, since the plugin empties an entry before it
+    rewrites it. A launch as the unit that finds no entry (an older release removed
+    it at once, then its update relaunched in the unit) puts it back with the mark,
+    and fails unless the entry is there after it. While the system manages the
+    login item (`STENO_LOGIN_ITEM=managed`), the switch writes nothing; the app that
+    runs as the unit made from an earlier build's entry, or from the user's own,
+    writes the unit's drop-in and reloads while that entry stands, and the exit that
+    removes an earlier build's entry removes the drop-in with it. The AUR and Nix
+    packages ship the files (X6 and X7 of `.plans/2026-10-07-stable-promotion.md`);
+    on Arch and NixOS every package change reloads the user managers, so only the
+    kept entry protects the unit there. Each shutdown logs its duration at `warn`.
+    Measured under a real systemd 255 user manager (desktop README, Launch at
+    login under systemd). A reboot saves inside logind's delay; on
+    Omarchy the delay is 15 s and the user manager then gets 5 s (`user@.service`),
+    which no drop-in for this unit can raise, so that path depends on the delay
+    lock. A save still needs to fit in the compositor's own stop when the app runs
+    in the compositor's unit rather than its own (uwsm's `wayland-wm@.service`,
+    `TimeoutStopSec=10`).
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -3016,7 +3063,9 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   display under Xvfb and headless sway, and real logouts only in xfce4-session 4.20.4
   (X11, and Wayland under labwc); GNOME's logout dialog for the inhibitor is read from
   gnome-session's source only. The writer recognises GDK's lost-display lines by GTK
-  3.24.52's wording; a GTK that rewords them falls back to the unsaved exit. Where:
+  3.24.52's wording; a GTK that rewords them falls back to the unsaved exit. The 5 s
+  stop timeout of an autostarted app under systemd, and of GNOME's app scope, is raised
+  to 20 s by drop-ins (#227, the shutdown items). Where:
   `apps/desktop/src-tauri/src/session_end.rs`,
   `apps/desktop/src-tauri/src/display_lost.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185, #203, #220.
@@ -3195,9 +3244,8 @@ PR off `main`.
 | The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | open |
 | Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | open |
-||||||| parent of ff1dfb5e9 (docs(plans): the CoreML Parakeet download joins invariant 3, and the S1 items close)
-||||||| parent of 6affe8721 (docs(plans): the S1 progress row names #237)
 | The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | open |
+| An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

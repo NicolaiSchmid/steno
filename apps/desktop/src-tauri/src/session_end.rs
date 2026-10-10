@@ -57,10 +57,12 @@
 //! the save in progress, or one it starts, has ended. So a save that
 //! outlasts a session manager's or logind's wait still ends, at most
 //! `SHUTDOWN_PATIENCE` after it began, unless something kills the process
-//! first: systemd's `SIGKILL` once a stop has waited its timeout, 90 s by
-//! default, or xfce4-session's 15 seconds after its `Stop`, which the app
-//! calls off by unregistering before it saves. On KDE Plasma, which does
-//! not ask the app, that is the save.
+//! first: systemd's `SIGKILL` once a stop has waited its timeout (90 s by
+//! default; 5 s for the autostart unit and GNOME's app scope, which the
+//! drop-ins of `stop_timeout` raise to 20 s); or xfce4-session's 15
+//! seconds after its `Stop`, which the app calls off by unregistering
+//! before it saves. On KDE Plasma, which does not ask the app, that is the
+//! save.
 //!
 //! None of it follows sleep or the screen lock: a recording goes on
 //! through both, as it does on the Mac. A bus that is missing or refuses, a
@@ -321,13 +323,13 @@ fn wayland_session_of(
 
 /// The connection `builder` makes, whose method calls wait `CALL_PATIENCE`
 /// at most.
-fn patient(builder: Builder<'_>) -> zbus::Result<Connection> {
+pub fn patient(builder: Builder<'_>) -> zbus::Result<Connection> {
     builder.method_timeout(CALL_PATIENCE).build()
 }
 
 /// Runs `client` on a thread named `name`; an error ends it with `gap`,
 /// what the app is left without, in the log.
-fn spawn_client(
+pub fn spawn_client(
     name: &'static str,
     gap: &'static str,
     client: impl FnOnce() -> zbus::Result<()> + Send + 'static,
@@ -855,7 +857,7 @@ fn hold_logout_inhibitor(session: &Connection, busy: &mpsc::Receiver<bool>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{BufRead as _, Read as _};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -983,7 +985,7 @@ mod tests {
 
     /// A private bus: `dbus-daemon` on a socket of its own, ended with the
     /// value.
-    struct Daemon {
+    pub(crate) struct Daemon {
         child: std::process::Child,
         address: String,
     }
@@ -992,7 +994,7 @@ mod tests {
         /// None when `dbus-daemon` is not installed, unless
         /// `STENO_REQUIRE_DBUS_TEST` asks for it (CI on Linux), which fails
         /// the test instead.
-        fn start() -> Option<Self> {
+        pub(crate) fn start() -> Option<Self> {
             let spawned = std::process::Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
                 .arg(format!(
@@ -1022,11 +1024,11 @@ mod tests {
             })
         }
 
-        fn builder(&self) -> Builder<'_> {
+        pub(crate) fn builder(&self) -> Builder<'_> {
             Builder::address(self.address.as_str()).unwrap()
         }
 
-        fn connect(&self) -> Connection {
+        pub(crate) fn connect(&self) -> Connection {
             patient(self.builder()).unwrap()
         }
     }

@@ -53,4 +53,4 @@ if [[ "$(id -u)" != "0" ]]; then
 fi
 
 $sudo apt-get update
-$sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+$sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"

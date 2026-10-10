@@ -48,7 +48,8 @@ libc.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 gdk.workspace = true
 gio.workspace = true
-# The logout and shutdown clients (`session_end`).
+# The logout and shutdown clients (`session_end`) and the user manager's
+# reload after a stop timeout drop-in changes (`stop_timeout`).
 zbus.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

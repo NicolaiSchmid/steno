@@ -9,7 +9,11 @@
 #
 # <types> is the comma-separated list Tauri's `--bundles` takes:
 #
-#   deb       deb/*.deb, unpacked with dpkg-deb -x, into usr/bin/
+#   deb       deb/*.deb, unpacked with dpkg-deb -x, into usr/bin/; also
+#             the stop timeout drop-ins for the autostart unit and GNOME's
+#             scope under usr/lib/systemd/user/, the postinst that
+#             reloads the user managers for them, the dependency on
+#             PipeWire, and the one on the glibc the binaries need
 #   appimage  appimage/*.AppImage, unpacked with --appimage-extract, into
 #             usr/bin/
 #   app       macos/*.app, into Contents/MacOS/. With --signed, also the
@@ -39,6 +43,7 @@ fi
 bundle="${1:?bundle directory, e.g. target/release/bundle}"
 types="${2:?bundle types, e.g. deb,appimage}"
 sidecar_name=steno-speech-sidecar
+linux="$(cd "$(dirname "${BASH_SOURCE[0]}")/../src-tauri/linux" && pwd)"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
@@ -85,11 +90,48 @@ side_by_side() {
   no_host_paths "$dir/$app" "$dir/$sidecar"
 }
 
+# drop_in <path below usr/lib/systemd/user/> <file in src-tauri/linux/>:
+# the unpacked .deb holds that file there, byte for byte.
+drop_in() {
+  local target="usr/lib/systemd/user/$1"
+  cmp -s "$scratch/deb/$target" "$linux/$2" \
+    || die "the .deb does not install linux/$2 as /$target"
+  echo "ok: the .deb installs /$target"
+}
+
 check_deb() {
   local deb
   deb="$(one "$bundle/deb/*.deb")"
   dpkg-deb -x "$deb" "$scratch/deb"
   side_by_side "$scratch/deb/usr/bin" steno-desktop "$sidecar_name"
+  # The stop timeout drop-ins for the unit systemd makes from the autostart
+  # entry and for GNOME's scope (apps/desktop/src-tauri/src/stop_timeout.rs);
+  # `\x2d` is literal, as systemd names the directories.
+  drop_in 'app-steno\x2ddesktop@autostart.service.d/10-steno.conf' autostart-service-stop-timeout.conf
+  drop_in 'app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf' gnome-scope-stop-timeout.conf
+  dpkg-deb -e "$deb" "$scratch/deb-control"
+  [[ -x "$scratch/deb-control/postinst" ]] \
+    || die "the .deb has no executable postinst"
+  cmp -s "$scratch/deb-control/postinst" "$linux/deb-postinst.sh" \
+    || die "the .deb's postinst is not linux/deb-postinst.sh"
+  echo "ok: the .deb's postinst is linux/deb-postinst.sh"
+  # PipeWire's library under either name (Ubuntu 24.04's t64 rename),
+  # and its client.conf (pipewire-bin, through pipewire), without which
+  # every recording fails at its start.
+  local depends glibc
+  depends="$(dpkg-deb -f "$deb" Depends)"
+  # Whether Depends lists $1 as one of its entries, alternatives and all.
+  depends_on() { [[ ", $depends," == *", $1,"* ]]; }
+  { depends_on 'libpipewire-0.3-0t64 | libpipewire-0.3-0' && depends_on pipewire; } \
+    || die "the .deb does not depend on PipeWire: $depends"
+  echo "ok: the .deb depends on PipeWire ($depends)"
+  # The newest glibc symbol version the binaries need, which the
+  # dependency on libc6 must name, so apt refuses an older system instead
+  # of installing binaries that cannot start there.
+  glibc="$(objdump -T "$scratch/deb/usr/bin/"* | grep -o 'GLIBC_[0-9.]*' | cut -d_ -f2 | sort -uV | tail -n1)"
+  { [[ -n "$glibc" ]] && depends_on "libc6 (>= $glibc)"; } \
+    || die "the binaries need glibc $glibc and the .deb does not depend on libc6 (>= $glibc): $depends"
+  echo "ok: the .deb depends on libc6 (>= $glibc), the newest glibc its binaries need"
 }
 
 check_appimage() {

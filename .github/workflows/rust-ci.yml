@@ -407,10 +407,10 @@ jobs:
           grep -qF "(NoDevice)" "$log" || { echo "::error::without a GPU DirectML must refuse to start (NoDevice)"; exit 1; }
 
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
-      # the dev URL is dropped through Tauri's configuration merge. The run
+      # the dev URL is dropped through Tauri's configuration merge. Each run
       # ends itself after 15 s; the step limit catches a hang before that.
-      # The runner's user manager starts the scope the managed run as the
-      # autostart unit needs, so it may not be skipped here.
+      # The runner's user manager starts the scope the runs as the
+      # autostart unit need, so they may not be skipped here.
       - name: Desktop smoke
         if: matrix.name == 'linux'
         timeout-minutes: 5
