@@ -68,6 +68,33 @@ impl FingerprintRecord for FingerprintFile {
     }
 }
 
+/// The variable that sets the handover's port, over the stored setting:
+/// the NixOS module sets it to the port it opens in the firewall.
+pub const PORT_VARIABLE: &str = "STENO_HANDOVER_PORT";
+
+/// The port the app's listener binds (stable plan X4): [`PORT_VARIABLE`]
+/// from the environment, else the stored [`Settings::handover_port`], else
+/// [`HandoverConfiguration::platform_port`]. An empty variable counts as
+/// unset; one that is not a port is ignored with a warning.
+///
+/// [`Settings::handover_port`]: steno_core::Settings::handover_port
+#[must_use]
+pub fn listener_port(environment: Option<&str>, stored: Option<u16>) -> u16 {
+    let from_environment = environment
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| {
+            let port = value.parse().ok();
+            if port.is_none() {
+                tracing::warn!("{PORT_VARIABLE} is not a port from 0 to 65535, so it is ignored");
+            }
+            port
+        });
+    from_environment
+        .or(stored)
+        .unwrap_or(HandoverConfiguration::platform_port())
+}
+
 /// The listener over the store and the recording intake.
 pub fn service(
     configuration: HandoverConfiguration,
@@ -260,6 +287,20 @@ impl Handover for ListenerHandover {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_port_is_the_environment_s_else_the_stored_one_else_the_platform_s() {
+        let platform = HandoverConfiguration::platform_port();
+        assert_eq!(listener_port(None, None), platform);
+        assert_eq!(listener_port(None, Some(40000)), 40000);
+        assert_eq!(listener_port(None, Some(0)), 0, "the system chooses");
+        assert_eq!(listener_port(Some("23900"), Some(40000)), 23900);
+        assert_eq!(listener_port(Some(" 23900\n"), None), 23900);
+        assert_eq!(listener_port(Some("0"), None), 0);
+        assert_eq!(listener_port(Some(""), Some(40000)), 40000, "unset");
+        assert_eq!(listener_port(Some("65536"), Some(40000)), 40000);
+        assert_eq!(listener_port(Some("steno"), None), platform);
+    }
 
     #[test]
     fn the_fingerprint_file_records_and_reads_back() {
