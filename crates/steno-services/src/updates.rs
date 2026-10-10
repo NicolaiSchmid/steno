@@ -741,12 +741,12 @@ impl UpdateSchedule {
             Installer::InPlace | Installer::AsksForAPassword => {
                 hold.starts = None;
                 let mut install = std::pin::pin!(self.source.install(version, package));
-                if let Ok(installed) = tokio::time::timeout(INSTALL_HOLD_LIMIT, &mut install).await
-                {
-                    installed
-                } else {
-                    hold.jobs = None;
-                    install.await
+                match tokio::time::timeout(INSTALL_HOLD_LIMIT, &mut install).await {
+                    Ok(installed) => installed,
+                    Err(_elapsed) => {
+                        hold.jobs = None;
+                        install.await
+                    }
                 }
             }
         };
