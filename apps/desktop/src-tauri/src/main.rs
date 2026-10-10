@@ -765,21 +765,20 @@ fn build_tray(app: &tauri::AppHandle) {
 }
 
 /// Whether a tray stands (`tray_stands`): `tray::build` manages `Tray` on
-/// success, and the host is asked last.
+/// success.
 fn has_tray(app: &tauri::AppHandle) -> bool {
     tray_stands(
         app.try_state::<tray::Tray>().is_some(),
         app.state::<smoke::Smoke>().is_armed(),
-        tray::has_host,
+        tray::has_host(),
     )
 }
 
-/// Whether a tray stands: it was `built` and something shows it, a host
-/// (`tray::has_host`, asked only when it decides) or a smoke run, which
-/// stands in for the host Xvfb lacks so it checks the close rule a desktop
-/// with a tray gets.
-fn tray_stands(built: bool, smoke: bool, host: impl FnOnce() -> bool) -> bool {
-    built && (smoke || host())
+/// Whether a tray stands: it was `built` and something shows it, a `host`
+/// (`tray::has_host`) or a smoke run, which stands in for the host Xvfb
+/// lacks so it checks the close rule a desktop with a tray gets.
+fn tray_stands(built: bool, smoke: bool, host: bool) -> bool {
+    built && (smoke || host)
 }
 
 /// What `has_tray` said when the main window last closed, so the
@@ -1082,25 +1081,22 @@ mod tests {
             .expect("the shutdown ran");
     }
 
-    /// A tray stands when it was built and a host or a smoke run shows it;
-    /// the host is asked only when that decides.
+    /// A tray stands when it was built and a host or a smoke run shows it.
     #[test]
     fn a_tray_stands_when_built_and_shown() {
-        for (built, smoke, host, stands, asks) in [
-            (true, false, true, true, true),
-            (true, false, false, false, true),
-            (true, true, false, true, false),
-            (true, true, true, true, false),
-            (false, false, true, false, false),
-            (false, true, true, false, false),
+        for (built, smoke, host, stands) in [
+            (true, false, true, true),
+            (true, false, false, false),
+            (true, true, false, true),
+            (true, true, true, true),
+            (false, false, true, false),
+            (false, true, true, false),
         ] {
-            let asked = std::cell::Cell::new(false);
-            let result = tray_stands(built, smoke, || {
-                asked.set(true);
-                host
-            });
-            assert_eq!(result, stands, "{built} {smoke} {host}");
-            assert_eq!(asked.get(), asks, "{built} {smoke} {host}");
+            assert_eq!(
+                tray_stands(built, smoke, host),
+                stands,
+                "{built} {smoke} {host}"
+            );
         }
     }
 

@@ -8,7 +8,7 @@
 //! Only the Mac's menu shows shortcut hints (`shortcut`).
 //!
 //! Every action is in the menu (`MENU`), and a click on the icon does
-//! nothing else: macOS and Windows open the menu on a left click as on a
+//! nothing the menu does not: macOS and Windows open the menu on a left click as on a
 //! right one, and on Linux the host decides what a left click does. KDE
 //! Plasma and GNOME's `AppIndicator` extension open the menu; a host that
 //! sends `Activate` instead, as Omarchy's bar may, gets no answer from

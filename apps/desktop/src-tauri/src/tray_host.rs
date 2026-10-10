@@ -5,7 +5,8 @@
 //! the session bus and says through its `IsStatusNotifierHostRegistered`
 //! property whether one did. Stock GNOME runs neither, and a watcher can
 //! run with no host (KDE's `kded`, started for a KDE app under another
-//! desktop), so the shell asks for both.
+//! desktop), so the shell asks whether a watcher runs and whether a host
+//! registered with it.
 //!
 //! A thread follows them for the whole run (`follow`): it reads the
 //! watcher's owner and the property at launch, and again whenever the
@@ -16,20 +17,29 @@
 //! `tray.rs`): with a host the window hides behind the tray, without one
 //! the close quits through Quit's path, which saves a recording in
 //! progress first (`main.rs`). Until the first reading, with no session
-//! bus, and once the bus has closed, the shell counts no host: closing
-//! the main window then ends the app instead of leaving it running
-//! unseen, the safe side. An `XEmbed`-only tray is not asked for and
-//! counts as none too.
+//! bus, after a reading that failed and once the bus has closed, the
+//! shell counts no host: closing the main window then ends the app
+//! instead of leaving it running unseen, the safe side. A failed reading
+//! (a watcher that does not answer within five seconds, for one) is read
+//! again ten seconds later, three times at most before the next change.
+//! An `XEmbed`-only tray is not asked for and counts as none too.
 //!
 //! The property is asked of the watcher's unique name, so asking never
-//! starts a watcher the bus could activate. A watcher that does not answer
-//! it still counts as a host, as its name alone did before the property
-//! was asked.
+//! starts a watcher the bus could activate. A watcher that answers that it
+//! has no such property (`UnknownProperty`, `InvalidArgs`,
+//! `UnknownInterface`, `UnknownMethod`, `UnknownObject`) counts as a host:
+//! its name is all there is to go on.
+//!
+//! When the host goes while the main window is hidden, nothing on the
+//! desktop shows the window: during a recording the bubble stays on
+//! screen, with Stop, and a click on it opens the main window; otherwise
+//! starting Steno again brings it forward (single instance).
 //!
 //! Swift: none needed; an `NSStatusItem` always shows in the menu bar.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 use zbus::blocking::connection::Builder;
 use zbus::blocking::{Connection, MessageIterator};
@@ -39,13 +49,18 @@ use crate::dbus::{owner_of, patient, proxy, spawn_client};
 
 /// The name a status notifier watcher owns on the session bus, and the
 /// interface it serves.
-pub const WATCHER: &str = "org.kde.StatusNotifierWatcher";
+const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 
 /// The watcher's object.
 const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 
 /// The watcher's property that says whether a host registered.
 const HOST_REGISTERED: &str = "IsStatusNotifierHostRegistered";
+
+/// How long the follower waits to read again after a reading failed, and
+/// how many times it does before the next change.
+const RETRY: Duration = Duration::from_secs(10);
+const RETRIES: u32 = 3;
 
 /// The watcher's signals that change `HOST_REGISTERED`; KDE's watcher
 /// sends both, the specification names only the first.
@@ -56,18 +71,18 @@ const HOST_SIGNALS: [&str; 2] = [
 
 /// What the session bus says about the watcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Watcher {
+enum Watcher {
     /// No peer owns `WATCHER`.
     Absent,
-    /// A peer owns it; `host` is its `HOST_REGISTERED`, none when it did
-    /// not answer.
+    /// A peer owns it; `host` is its `HOST_REGISTERED`, none when the
+    /// watcher has no such property.
     Present { host: Option<bool> },
 }
 
 /// Whether a host shows the icon, from a reading of the bus: a watcher
-/// that says a host registered, or one that does not say; no watcher, a
-/// watcher with no host, or a bus that failed the reading is none.
-pub fn shows_icon(reading: &zbus::Result<Watcher>) -> bool {
+/// that says a host registered, or one without the property; no watcher,
+/// a watcher with no host, or a failed reading is none.
+fn shows_icon(reading: &zbus::Result<Watcher>) -> bool {
     match reading {
         Ok(Watcher::Present {
             host: Some(registered),
@@ -78,16 +93,43 @@ pub fn shows_icon(reading: &zbus::Result<Watcher>) -> bool {
 }
 
 /// One reading: the watcher's owner (`GetNameOwner`), then its
-/// `HOST_REGISTERED`, asked of that unique name.
+/// `HOST_REGISTERED`, asked of that unique name. Only an answer that the
+/// watcher has no such property is `host: None`; any other failure (no
+/// answer in time, the owner gone, a value of another type) fails the
+/// reading.
 fn read(session: &Connection) -> zbus::Result<Watcher> {
     let Some(owner) = owner_of(session, WATCHER)? else {
         return Ok(Watcher::Absent);
     };
-    let host = proxy(session, owner.as_str(), WATCHER_PATH, WATCHER)?
-        .get_property::<bool>(HOST_REGISTERED)
-        .inspect_err(|error| tracing::debug!(%error, "the tray's watcher has no host property"))
-        .ok();
+    let asked = proxy(session, owner.as_str(), WATCHER_PATH, WATCHER)?
+        .get_property::<bool>(HOST_REGISTERED);
+    let host = match asked {
+        Ok(registered) => Some(registered),
+        Err(zbus::Error::FDO(error)) if lacks_the_property(&error) => {
+            tracing::debug!(%error, "the tray's watcher has no host property");
+            None
+        }
+        Err(error) => return Err(error),
+    };
     Ok(Watcher::Present { host })
+}
+
+/// Whether `error`, a watcher's answer to the property's `Get`, says it
+/// has no such property: zbus and sd-bus answer `UnknownProperty`,
+/// `GDBus` and older Qt `InvalidArgs`, and a watcher without the properties
+/// interface or the object one of the other three.
+fn lacks_the_property(error: &zbus::fdo::Error) -> bool {
+    use zbus::fdo::Error::{
+        InvalidArgs, UnknownInterface, UnknownMethod, UnknownObject, UnknownProperty,
+    };
+    matches!(
+        error,
+        UnknownProperty(_)
+            | InvalidArgs(_)
+            | UnknownInterface(_)
+            | UnknownMethod(_)
+            | UnknownObject(_)
+    )
 }
 
 /// What the follower last found; no host until its first reading.
@@ -100,7 +142,7 @@ const NO_HOST: u8 = 1;
 const HOST: u8 = 2;
 
 impl Hosted {
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         Self(AtomicU8::new(UNREAD))
     }
 
@@ -130,16 +172,19 @@ pub fn follow() {
     spawn_client(
         "steno-tray-host",
         "no tray host is followed, so closing the main window quits Steno",
-        || follow_on(&patient(Builder::session()?)?, &HOSTED),
+        || follow_on(&patient(Builder::session()?)?, &HOSTED, RETRY),
     );
 }
 
 /// Keeps `hosted` up to date from `session` until the bus closes: a
 /// reading now, and one after every change of the watcher's owner or of
-/// its hosts. Two threads forward the signals, so neither stream waits
-/// while a reading runs; the readings run here, one at a time, and a burst
-/// of signals makes one reading.
-fn follow_on(session: &Connection, hosted: &Hosted) -> zbus::Result<()> {
+/// its hosts; a reading that failed is read again `retry` later, `RETRIES`
+/// times at most before the next change. Two threads forward the signals,
+/// so neither stream waits while a reading runs; the readings run here,
+/// one at a time, and a burst of signals makes one reading. An error is
+/// one setting the follower up; the bus closing ends it with `Ok`, logged
+/// here.
+fn follow_on(session: &Connection, hosted: &Hosted, retry: Duration) -> zbus::Result<()> {
     let owners = zbus::MatchRule::builder()
         .msg_type(Type::Signal)
         .sender("org.freedesktop.DBus")?
@@ -178,6 +223,7 @@ fn follow_on(session: &Connection, hosted: &Hosted) -> zbus::Result<()> {
             .name("steno-tray-hosts".to_owned())
             .spawn_scoped(scope, forward(hosts, is_host_signal))?;
         drop(nudge);
+        let mut retried = 0;
         loop {
             let reading = read(session);
             let shown = shows_icon(&reading);
@@ -191,17 +237,26 @@ fn follow_on(session: &Connection, hosted: &Hosted) -> zbus::Result<()> {
                     );
                 }
             }
-            if nudged.recv().is_err() {
-                break;
+            let next = if reading.is_err() && retried < RETRIES {
+                retried += 1;
+                nudged.recv_timeout(retry)
+            } else {
+                retried = 0;
+                nudged.recv().map_err(|_| RecvTimeoutError::Disconnected)
+            };
+            match next {
+                Ok(()) => {
+                    retried = 0;
+                    while nudged.try_recv().is_ok() {}
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
-            while nudged.try_recv().is_ok() {}
         }
-        if hosted.note(false) {
-            tracing::warn!("the session bus closed; closing the main window quits Steno");
-        }
+        hosted.note(false);
+        tracing::warn!("the session bus closed; closing the main window quits Steno");
         Ok(())
-    })?;
-    Err(zbus::Error::Failure("the session bus closed".to_owned()))
+    })
 }
 
 /// Whether `signal` is one of the watcher's `HOST_SIGNALS`.
@@ -215,7 +270,8 @@ fn is_host_signal(signal: &zbus::Message) -> bool {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
 
     use super::*;
     use crate::dbus::tests::Daemon;
@@ -261,6 +317,34 @@ mod tests {
         }
     }
 
+    /// A watcher whose first `hangs` answers to the property come only
+    /// after `HANG`, longer than `follow_slowly`'s calls wait; `asked`
+    /// counts the questions.
+    struct SlowWatcher {
+        hangs: std::sync::Mutex<usize>,
+        asked: Arc<AtomicUsize>,
+    }
+
+    /// How long `SlowWatcher` takes to answer while it hangs, and how long
+    /// `follow_slowly`'s calls wait.
+    const HANG: Duration = Duration::from_millis(600);
+    const SHORT_PATIENCE: Duration = Duration::from_millis(200);
+
+    #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
+    impl SlowWatcher {
+        #[zbus(property)]
+        fn is_status_notifier_host_registered(&self) -> bool {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            let mut hangs = self.hangs.lock().unwrap();
+            if *hangs > 0 {
+                *hangs -= 1;
+                drop(hangs);
+                std::thread::sleep(HANG);
+            }
+            true
+        }
+    }
+
     /// A watcher without the host property: only the specification's
     /// `ProtocolVersion`.
     struct BareWatcher {
@@ -288,9 +372,24 @@ mod tests {
 
     /// The follower on `daemon`, its reading in the returned `Hosted`.
     fn follow_daemon(daemon: &Daemon) -> Arc<Hosted> {
+        follow(daemon.connect(), RETRY)
+    }
+
+    /// The follower on `daemon` over a connection whose calls wait
+    /// `SHORT_PATIENCE`, reading again `retry` after a failure.
+    fn follow_slowly(daemon: &Daemon, retry: Duration) -> Arc<Hosted> {
+        let session = daemon
+            .builder()
+            .method_timeout(SHORT_PATIENCE)
+            .build()
+            .unwrap();
+        follow(session, retry)
+    }
+
+    fn follow(session: Connection, retry: Duration) -> Arc<Hosted> {
         let hosted = Arc::new(Hosted::new());
-        let (session, kept) = (daemon.connect(), hosted.clone());
-        std::thread::spawn(move || follow_on(&session, &kept));
+        let kept = hosted.clone();
+        std::thread::spawn(move || follow_on(&session, &kept, retry));
         hosted
     }
 
@@ -358,7 +457,55 @@ mod tests {
         reads(&hosted, true);
     }
 
-    /// The bus closing ends the follower with an error and no host.
+    /// A watcher that does not answer in time is no host, also after the
+    /// readings again, although its late answer says one registered.
+    #[test]
+    fn a_watcher_that_does_not_answer_is_no_host() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let asked = Arc::default();
+        let _watcher = serve(
+            &daemon,
+            SlowWatcher {
+                hangs: usize::MAX.into(),
+                asked: Arc::clone(&asked),
+            },
+        );
+        let retry = Duration::from_millis(50);
+        let hosted = follow_slowly(&daemon, retry);
+        reads(&hosted, false);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while asked.load(Ordering::SeqCst) <= RETRIES as usize && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Time for one more question, which must not come.
+        std::thread::sleep(HANG + retry * 2);
+        assert_eq!(asked.load(Ordering::SeqCst), RETRIES as usize + 1);
+        assert!(!hosted.shown());
+    }
+
+    /// A reading that failed is read again without a signal: a watcher
+    /// that hangs once and then answers is a host.
+    #[test]
+    fn a_failed_reading_is_read_again() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let asked = Arc::default();
+        let _watcher = serve(
+            &daemon,
+            SlowWatcher {
+                hangs: 1.into(),
+                asked: Arc::clone(&asked),
+            },
+        );
+        let hosted = follow_slowly(&daemon, Duration::from_millis(500));
+        reads(&hosted, true);
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+    }
+
+    /// The bus closing ends the follower, with no host.
     #[test]
     fn a_closed_bus_is_no_host() {
         let Some(daemon) = Daemon::start() else {
@@ -369,12 +516,12 @@ mod tests {
         let (session, kept) = (daemon.connect(), hosted.clone());
         let (done, ended) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = done.send(follow_on(&session, &kept));
+            let _ = done.send(follow_on(&session, &kept, RETRY));
         });
         reads(&hosted, true);
         drop(daemon);
         let ended = ended.recv_timeout(Duration::from_secs(10)).unwrap();
-        assert!(ended.is_err());
+        assert!(ended.is_ok(), "{ended:?}");
         assert!(!hosted.shown());
     }
 }
