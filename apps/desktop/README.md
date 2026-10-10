@@ -728,28 +728,42 @@ stops: the first hourly tick after the recording ends brings it up.
 An update never stops a recording or a processing run (P25 of
 `.plans/2026-10-07-stable-promotion.md`). A yes given while Steno records
 or processes a meeting asks again, in plain words ("Steno is recording.
-It can install the update and relaunch once the recording ends and is
-saved.", or "Steno is still processing a meeting. ..."), with Install
-After It Ends as the default button; Not Now leaves the update for the
-next idle tick. After a yes the app waits until nothing records or
-processes, looking every two seconds, then downloads the update, waits
-again if a recording started during the download, and installs and
-relaunches. From just before the install, Record in the sidebar or the
-tray is refused with "Steno is installing an update. You can record
-again once it relaunches, or if you cancel the install.", and a
-processing run that would start meanwhile (a phone recording that
-arrives) waits, saved as queued; the relaunched app processes it, or it
-runs as soon as the install fails. On a `.deb` install the system asks for a password first, a
-second time if the first prompt is cancelled; until it is answered or
-cancelled, Record stays refused, and cancelling ends the install with an
-error and frees Record. With automatic downloads on, the schedule
-downloads a found update at the first tick that finds the app idle and
-installs it in that tick, or in the first later one that finds it idle;
-turning the switch off during the download keeps nothing. The gate is
+Install the update and relaunch once the recording is saved and
+processed?", or "Steno is still processing a meeting. Install the update
+and relaunch once it is done?"), with Install After It Ends as the default
+button; Not Now leaves the update for the next tick with no recording
+under way. After a yes the app waits until nothing records or processes,
+looking every two seconds, then downloads the update, waits again if a
+recording started during the download, and installs. A newer version
+that a check finds meanwhile is installed instead, without asking again.
+
+Recording always wins over an install. A `.deb` or `.rpm` install asks
+for a password first (pkexec, then a zenity or kdialog dialog), and
+nobody may be there to answer, so Record keeps working while the update
+installs. A processing run that would start meanwhile (a phone recording
+that arrives) waits, saved as queued, for a minute at most. Once the
+update is installed Steno relaunches; when a recording or a processing
+run started during the install, Steno says "Steno 0.12.0 is installed.
+Steno relaunches into it once the recording is saved and processed." and
+relaunches once it is done. Cancelling every password prompt ends the
+install with an error. Only while Steno shuts down to relaunch, and on
+Windows while it starts the installer, which ends the app, is Record
+refused, with "Steno is relaunching to finish installing an update. You
+can record again in a moment."; a summary re-run or an export asked for
+in those seconds is not kept and has to be asked for again after the
+relaunch.
+
+With automatic downloads on, the schedule downloads a found update at the
+first tick that finds the app idle and no install under way, and installs
+it in that tick, or in the first later one that finds it idle; turning
+the switch off during the download keeps nothing. The schedule does not
+run a `.deb` or `.rpm` install by itself, since it asks for a password:
+it offers the downloaded update instead. The gate is
 `steno_services::updates::IdleGate`.
 
-With `STENO_DISTRIBUTION` set to `aur` or `nix` the schedule does not run, and a check makes no request and says
-the package manager delivers the updates.
+With `STENO_DISTRIBUTION` set to `aur` or `nix` the schedule does not
+run, and a check makes no request and says the package manager delivers
+the updates.
 
 To run a debug binary against the embedded bundle instead of the dev server
 (what the smoke does), drop the dev URL through Tauri's own configuration

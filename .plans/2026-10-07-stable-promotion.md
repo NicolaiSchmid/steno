@@ -413,7 +413,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`) | capture and recovery (`wp-cap-*`) |
 | P23 | Audio the relay dropped: a warning at stop and a log line; no stored count, since a column would need a migration | capture and recovery (`wp-cap-*`) |
 | P24 | A transcript cut short by a sidecar shorter than its master: the sidecar's duration is checked against the master's | audio (#228) |
-| P25 | A recording or a processing run stopped by an update: updates wait while either runs. Every install holds the app's install gate (`IdleGate`), which gives its hold only while no recording starts, runs or is saved, no processing job, summary re-run or re-export runs or is claimed, and the app is not shutting down; the hold refuses Record and keeps a job claimed meanwhile (a phone recording's) waiting, saved `queued`, through the install and the relaunch. The user's yes while busy asks again in plain words, "Install After It Ends" (the default) or "Not Now", and waits; a recording started during the download is waited for, never stopped. Automatic downloads wait for an idle app, and the flag is read again after the download and before the install (#270). Not part of the gate, by design: the launch's recovery of interrupted recordings, which survives a relaunch as it survives a kill (P3), and a phone upload before its intake claims the run, which the phone keeps until `complete` (P2) | Linux desktop (#270) |
+| P25 | A recording or a processing run stopped by an update: updates wait while either runs. Every install holds the app's install gate (`IdleGate`), which gives its hold only while no recording starts, runs or is saved, no processing job, summary re-run or re-export runs or is claimed, and the app is not shutting down. Recording always wins: while an installer that returns runs (a `.deb`'s password prompt may wait for good) Record works, a job claimed meanwhile (a phone recording's) waits `queued` for a minute at most, and the relaunch waits for a recording or a job started meanwhile, telling the user so; the hold refuses Record only through the shutdown and the relaunch, and on Windows from the install, whose installer ends the app. A summary re-run or re-export claimed in those seconds is not kept, and the user asks again. The user's yes while busy asks again in plain words, "Install After It Ends" (the default) or "Not Now", and waits; a recording started during the download is waited for, never stopped, and a newer version found meanwhile keeps the yes. Automatic downloads wait for an idle app and no install under way; the flag is read again after the download, turning it off frees the kept package, and the schedule never runs an installer that asks for a password, which it announces instead (#270). Not part of the gate, by design: the launch's recovery of interrupted recordings, which survives a relaunch as it survives a kill (P3), and a phone upload before its intake claims the run, which the phone keeps until `complete` (P2) | Linux desktop (#270) |
 | P26 | A person page: a case-only rename of a person loses the page on a case-insensitive disk | pipeline, store and export (`wp-pse-*`) |
 | P27 | Notes written at once to one vault: deliveries are serialised per vault | pipeline, store and export (`wp-pse-*`) |
 | P28 | A note never written: a delivery left Pending is resumed at launch. Amended 2026-10-08 under D3: a Failed delivery is retried at launch too, at most once a day (by its `lastAttemptAt`); after three launch retries in a row that did not deliver every row the launch stops retrying it and the meeting's export line says "Export to <destination> keeps failing: <reason>" until Export again resets the count. The count lives in `export-retries.json` in the support directory, which the Swift app ignores, so no migration | pipeline, store and export (`wp-pse-*`) |
@@ -599,15 +599,22 @@ Every package is written in parallel except where a dependency is named:
     install off, with the package kept and the version raised again. A
     refused Record shows only in the main window (S2 carries the prompt's
     part). P25's `InstallHold` takes the same recorder start hold rather
-    than building a second one. Automatic
-    downloads wait for P25's gate: the schedule downloads by itself only
-    while `InstallGate::is_idle_now` says idle and installs only with the
-    gate's hold from `InstallGate::try_hold`; the stand-in
-    `NeverIdle` was never idle, so it downloaded nothing, and P25's gate
-    (#270) turns automatic downloads on. P25 also re-reads the
-    automatic-downloads flag when a download ends and before the install, so a
-    switch turned off during the transfer keeps and installs nothing. `updates_are_managed` is X5's switch. The QR code
-    is the `qrcode` crate's, level M, as a greyscale PNG.
+    than building a second one. P25 (#270) changed the rest: the install
+    waits for the recording and is never put off by one; an installer that
+    returns no longer holds Record off, so a `.deb`'s password prompt never
+    keeps Record refused, and the refusal now says "Steno is relaunching to
+    finish installing an update. You can record again in a moment.", since
+    the hold lasts only through the shutdown and the relaunch (on Windows,
+    from the install). Automatic downloads wait for P25's gate: the
+    schedule downloads by itself only while `InstallGate::is_idle_now` says
+    idle and installs only with the gate's hold from
+    `InstallGate::try_hold`; the stand-in `NeverIdle` was never idle, so it
+    downloaded nothing, and P25's gate (#270) turns automatic downloads on.
+    P25 also re-reads the automatic-downloads flag when a download ends,
+    and turning it off frees the kept package, so a switch turned off
+    during the transfer keeps and installs nothing. `updates_are_managed`
+    is X5's switch. The QR code is the `qrcode` crate's, level M, as a
+    greyscale PNG.
 - **S5 Handover on a changing network** (`fix/handover-republish`).
   - Re-register the Bonjour record when the interfaces change, on every
     platform.
