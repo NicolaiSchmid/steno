@@ -4,6 +4,7 @@
 //! and the tests wait for its sleepers.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use steno_audio::testing::ManualClock;
@@ -625,17 +626,13 @@ async fn a_stop_forgets_the_call_and_idle_events_are_not_remembered() {
 async fn a_microphone_opened_while_starting_is_remembered() {
     let recording = recording();
     let watched = Arc::downgrade(&recording.recorder);
-    let once = std::sync::Once::new();
+    let once = AtomicBool::new(false);
     recording.recorder.on_change(Arc::new(move || {
+        // Once: the change it reports comes back here.
         if let Some(recorder) = watched.upgrade()
             && recorder.status().state == RecordingState::Starting
+            && !once.swap(true, Ordering::SeqCst)
         {
-            // Once: the change it reports comes back here.
-            let mut first = false;
-            once.call_once(|| first = true);
-            if !first {
-                return;
-            }
             recorder.microphone_activity(MicrophoneActivity::Opened {
                 app_name: Some("Zen".to_owned()),
             });
@@ -769,7 +766,6 @@ async fn audio_back_arms_a_fresh_countdown_once_the_call_app_let_go() {
 /// neither waits for the other, and a stopping recording arms nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_resume_on_the_notice_thread_during_a_stop_does_not_deadlock() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     let recording = recording_whose_device_changes();
     let (entered, in_hook) = std::sync::mpsc::channel();
     let (stopping, stop_began) = std::sync::mpsc::channel();
