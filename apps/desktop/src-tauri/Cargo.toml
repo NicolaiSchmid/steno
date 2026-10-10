@@ -64,6 +64,9 @@ objc2-av-foundation.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 block2.workspace = true
+# Whether the user can write the bundle (`bundle_is_writable` in
+# `updater.rs`), with `access(2)` and no `unsafe`.
+rustix.workspace = true
 # The login item (`autostart`).
 smappservice-rs.workspace = true
 
