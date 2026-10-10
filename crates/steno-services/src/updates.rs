@@ -50,7 +50,7 @@
 //!   processing jobs after [`JOB_HOLD_LIMIT`]; a recording started
 //!   meanwhile is waited for, and its processing, before the relaunch
 //!   takes the hold again, and the user is told
-//!   ([`UpdateSource::tell_relaunch_waits`]).
+//!   ([`UpdateSource::tell_relaunch_waits`]), as is a yes given meanwhile.
 //!   A password typed after the limit still installs, and the relaunch
 //!   follows as it would have. The hold is kept through the shutdown and
 //!   the relaunch, and, where the installer ends the app (Windows), through
@@ -204,6 +204,11 @@ pub trait InstallGate: Send + Sync {
     fn is_idle_now(&self) -> bool {
         self.try_hold().is_some()
     }
+    /// Whether the app is shutting down, so a relaunch that waits never
+    /// comes: the app quits instead.
+    fn is_shutting_down(&self) -> bool {
+        false
+    }
 }
 
 /// The app's [`InstallGate`] (stable plan P25), over the recorder and the
@@ -250,6 +255,10 @@ impl InstallGate for IdleGate {
         !stops_a_recording(self.recorder.status().state)
             && !self.pipeline.quitting()
             && self.pipeline.in_flight().is_idle()
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.pipeline.quitting()
     }
 }
 
@@ -397,6 +406,9 @@ struct State {
     /// this run does not ask again; a relaunch asks again, as Sparkle
     /// re-alerted at each scheduled check.
     announced: Option<String>,
+    /// The version an installer that returned installed, while the
+    /// relaunch waits for the app to be idle.
+    installed: Option<String>,
 }
 
 /// A downloaded and verified package and its version.
@@ -488,6 +500,7 @@ impl UpdateSchedule {
                 to_download: None,
                 staged: None,
                 announced: None,
+                installed: None,
             }),
             one_check: tokio::sync::Mutex::new(()),
             installing: AtomicBool::new(false),
@@ -652,9 +665,16 @@ impl UpdateSchedule {
     /// whether to install once that ends ([`Question::AfterItEnds`]), and
     /// a yes there waits for it ([`Self::hold_once_idle`]); "Not Now", or
     /// closing that dialog, leaves the version to announce again at the
-    /// first tick with no recording under way. Swift: Sparkle's update
-    /// alert.
+    /// first tick with no recording under way. Once an update is
+    /// installed and the relaunch waits, the offer (the tray's check runs
+    /// against the version still running) tells the user so instead.
+    /// Swift: Sparkle's update alert.
     pub async fn offer(&self, version: &str) {
+        let installed = self.state().installed.clone();
+        if let Some(installed) = installed {
+            self.tell_relaunch_waits(&installed);
+            return;
+        }
         if !self.source.ask(Question::Install(version)).await {
             return;
         }
@@ -842,9 +862,11 @@ impl UpdateSchedule {
         } else {
             // One hold at a time: the jobs' part goes before the new one.
             drop(hold);
+            self.state().installed = Some(version.to_owned());
             self.hold_to_relaunch(version).await
         };
         self.source.relaunch().await;
+        self.state().installed = None;
         drop(hold);
         Installed::Relaunching
     }
@@ -857,10 +879,20 @@ impl UpdateSchedule {
         if let Some(hold) = self.gate.try_hold() {
             return hold;
         }
+        self.tell_relaunch_waits(version);
+        self.hold_once_idle().await
+    }
+
+    /// Tells the user `version` is installed and the relaunch waits, and
+    /// for what; nothing while the app is idle, since the relaunch is under
+    /// way, or shutting down, since it quits instead.
+    fn tell_relaunch_waits(&self, version: &str) {
+        if self.gate.is_shutting_down() {
+            return;
+        }
         if let Some(busy) = self.busy() {
             self.source.tell_relaunch_waits(version, busy);
         }
-        self.hold_once_idle().await
     }
 
     /// Whether a recording is starting, running or stopping now

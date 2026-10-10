@@ -226,12 +226,13 @@ impl UpdateSource for FakeSource {
     }
 }
 
-/// [`IdleGate`] over the world's recorder and the processing a test
-/// starts and ends (`processing`): idle while neither runs; a hold holds
-/// recording starts off, one hold at a time. Counts the holds alive and
-/// the holds ever given.
+/// [`IdleGate`] over the world's recorder, the processing a test starts
+/// and ends (`processing`) and a shutdown it starts (`quitting`): idle
+/// while none runs; a hold holds recording starts off, one hold at a
+/// time. Counts the holds alive and the holds ever given.
 struct FakeGate {
     processing: AtomicBool,
+    quitting: AtomicBool,
     recorder: Arc<FakeRecorder>,
     alive: Arc<AtomicUsize>,
     given: AtomicUsize,
@@ -258,7 +259,12 @@ impl InstallGate for FakeGate {
 
     fn is_idle_now(&self) -> bool {
         !self.processing.load(Ordering::SeqCst)
+            && !self.quitting.load(Ordering::SeqCst)
             && self.recorder.status().state == RecordingState::Idle
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.quitting.load(Ordering::SeqCst)
     }
 }
 
@@ -283,6 +289,7 @@ impl World {
         *lock(&source.recorder) = Some(recorder.clone());
         let gate = Arc::new(FakeGate {
             processing: AtomicBool::new(false),
+            quitting: AtomicBool::new(false),
             recorder: recorder.clone(),
             alive: Arc::default(),
             given: AtomicUsize::new(0),
@@ -1704,6 +1711,50 @@ async fn a_job_begun_during_the_install_is_what_the_relaunch_waits_for() {
     world.processing(false);
     at_once(offer).await.unwrap();
     assert_eq!(world.relaunches(), 1);
+}
+
+/// A yes while the relaunch waits for a recording (the tray's check runs
+/// against the version still running and finds the installed one) asks
+/// nothing and says the update is installed and what the relaunch waits
+/// for.
+#[tokio::test(start_paused = true)]
+async fn a_yes_while_the_relaunch_waits_says_the_update_is_installed() {
+    let world = World::new();
+    let (schedule, offer) = an_install_under_way(&world).await;
+    assert!(!world.source.try_record());
+    world.source.install_release.notify_one();
+    tokio::time::sleep(IDLE_POLL * 3).await;
+    assert_eq!(
+        *lock(&world.source.relaunch_waits),
+        ["0.12.0 after the Recording"]
+    );
+
+    world.source.reply(&[true]);
+    at_once(schedule.offer("0.12.0")).await;
+    assert_eq!(world.source.asked(), ["install 0.12.0"], "asks nothing");
+    assert_eq!(
+        *lock(&world.source.relaunch_waits),
+        ["0.12.0 after the Recording", "0.12.0 after the Recording"]
+    );
+    world.recording(RecordingState::Idle);
+    at_once(offer).await.unwrap();
+    assert_eq!(world.relaunches(), 1);
+    assert_eq!(world.installs(), 1);
+}
+
+/// An install that returns while the app shuts down says nothing about a
+/// relaunch, which never comes: the app quits instead.
+#[tokio::test(start_paused = true)]
+async fn an_install_that_returns_during_a_quit_tells_nothing() {
+    let world = World::new();
+    let (_schedule, offer) = an_install_under_way(&world).await;
+    world.gate.quitting.store(true, Ordering::SeqCst);
+    world.source.install_release.notify_one();
+    tokio::time::sleep(IDLE_POLL * 3).await;
+    assert_eq!(*lock(&world.source.installed), ["0.12.0"]);
+    assert_eq!(*lock(&world.source.relaunch_waits), Vec::<String>::new());
+    assert_eq!(world.relaunches(), 0);
+    offer.abort();
 }
 
 /// A newer version a tick's check found while a recording ran, which the
