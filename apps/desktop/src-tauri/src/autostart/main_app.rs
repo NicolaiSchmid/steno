@@ -20,7 +20,9 @@
 //! The rules run over two traits, [`MainApp`] and [`LaunchAgents`], which
 //! the tests fake; the system's are [`SystemMainApp`] and
 //! [`UserLaunchAgents`], macOS only. A smoke run (`STENO_SMOKE_SECONDS`)
-//! registers and removes nothing.
+//! registers and removes nothing, and only a run from an app bundle
+//! outside a `fixture-host` build removes the agent
+//! ([`removes_earlier_agent`]).
 //!
 //! Swift: `LoginItemController.swift`.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -156,6 +158,31 @@ pub fn pid_in(description: &str) -> Option<u32> {
 /// Whether this is a smoke run, which registers and removes nothing.
 pub fn smoke_run() -> bool {
     std::env::var_os(crate::smoke::SECONDS_VARIABLE).is_some()
+}
+
+/// Whether the launch removes the earlier agent: not in a smoke run
+/// (`smoke`), nor in a `fixture-host` build, nor when the executable `exe`
+/// is not inside an app bundle ([`inside_app_bundle`]). A `cargo run`
+/// binary under `target/` shares the home folder with an installed Steno
+/// and must not remove the agent that Steno still starts at login.
+pub fn removes_earlier_agent(smoke: bool, exe: Option<&std::path::Path>) -> bool {
+    !smoke && !cfg!(feature = "fixture-host") && exe.is_some_and(inside_app_bundle)
+}
+
+/// Whether `exe` runs from an app bundle, `<name>.app/Contents/MacOS/`.
+pub fn inside_app_bundle(exe: &std::path::Path) -> bool {
+    let named = |dir: Option<&std::path::Path>, name: &str| {
+        dir.and_then(std::path::Path::file_name)
+            .is_some_and(|dir_name| dir_name == name)
+    };
+    let macos = exe.parent();
+    let contents = macos.and_then(std::path::Path::parent);
+    named(macos, "MacOS")
+        && named(contents, "Contents")
+        && contents
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::extension)
+            .is_some_and(|extension| extension == "app")
 }
 
 #[cfg(target_os = "macos")]
@@ -512,6 +539,33 @@ mod tests {
             .find("host::host(handle).launch(runtime);")
             .expect("setup launches the host");
         assert!(removal < launch);
+    }
+
+    /// Only an executable inside an app bundle removes the earlier agent,
+    /// and never in a smoke run or a `fixture-host` build: a `cargo run`
+    /// binary does not, whatever it is named.
+    #[test]
+    fn only_a_run_from_an_app_bundle_removes_the_agent() {
+        use std::path::Path;
+        let bundled = Path::new("/Applications/Steno.app/Contents/MacOS/steno-desktop");
+        assert!(inside_app_bundle(bundled));
+        assert_eq!(
+            removes_earlier_agent(false, Some(bundled)),
+            !cfg!(feature = "fixture-host")
+        );
+        assert!(!removes_earlier_agent(true, Some(bundled)));
+        assert!(!removes_earlier_agent(false, None));
+        for exe in [
+            "/Users/me/steno/target/debug/steno-desktop",
+            "/Users/me/target/MacOS/steno-desktop",
+            "/Users/me/Steno/Contents/MacOS/steno-desktop",
+            "/Users/me/Steno.app/MacOS/steno-desktop",
+            "/Users/me/Steno.app/Contents/steno-desktop",
+            "steno-desktop",
+        ] {
+            assert!(!inside_app_bundle(Path::new(exe)), "{exe}");
+            assert!(!removes_earlier_agent(false, Some(Path::new(exe))), "{exe}");
+        }
     }
 
     /// A boot-out that fails still deletes the file, so the next login

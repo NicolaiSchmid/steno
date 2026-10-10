@@ -317,11 +317,16 @@ fn with_off_at_exit(status: LoginItemStatus, mark: Option<&std::path::Path>) -> 
 /// At launch, on macOS, once the database is open and before the host's
 /// first-launch registration: the Launch Agent a build under the earlier
 /// identifier left behind goes (`main_app::remove_earlier_agent`), also
-/// while the system manages the login item; nothing in a smoke run. The
-/// counterpart of Linux's `remove_earlier_entry`.
+/// while the system manages the login item. Nothing goes in a smoke run, a
+/// `fixture-host` build or a run from outside an app bundle
+/// (`main_app::removes_earlier_agent`), which would remove the agent an
+/// installed Steno still starts. Linux's `remove_earlier_entry` does the
+/// same for its autostart entry, but only while the system manages the
+/// login item.
 #[cfg(target_os = "macos")]
 pub fn remove_earlier_agent() {
-    if main_app::smoke_run() {
+    let exe = std::env::current_exe().ok();
+    if !main_app::removes_earlier_agent(main_app::smoke_run(), exe.as_deref()) {
         return;
     }
     main_app::log(&main_app::remove_earlier_agent(
