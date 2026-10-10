@@ -157,6 +157,44 @@ mod tests {
             .unwrap()
     }
 
+    /// What the process `pid` holds, for a failure's message: its
+    /// executable and each descriptor's link and `fdinfo` flags.
+    fn held(pid: u32) -> String {
+        let process = Path::new("/proc").join(pid.to_string());
+        let mut fds: Vec<String> = match std::fs::read_dir(process.join("fd")) {
+            Ok(fds) => fds
+                .filter_map(Result::ok)
+                .map(|fd| {
+                    let name = fd.file_name();
+                    let link = std::fs::read_link(fd.path());
+                    let info = std::fs::read_to_string(process.join("fdinfo").join(&name));
+                    let flags = info.as_deref().map(|info| {
+                        info.lines()
+                            .find(|line| line.starts_with("flags:"))
+                            .unwrap_or("")
+                            .to_owned()
+                    });
+                    format!("{}={link:?}/{flags:?}", name.to_string_lossy())
+                })
+                .collect(),
+            Err(error) => vec![format!("fd: {error}")],
+        };
+        fds.sort();
+        format!(
+            "{pid} exe {} fds [{}]",
+            exe(&process.join("exe")),
+            fds.join(" ")
+        )
+    }
+
+    /// A file's device and inode, for a failure's message.
+    fn exe(path: &Path) -> String {
+        std::fs::metadata(path).map_or_else(
+            |error| format!("{}: {error}", path.display()),
+            |file| format!("{} {}:{}", path.display(), file.dev(), file.ino()),
+        )
+    }
+
     /// Real processes stand in, each a `sleep`, so `sleep` is the image.
     /// The app holds the keepalive pipe's read end and writes to a second
     /// pipe (a shared stderr); the server holds the keepalive pipe's write
@@ -182,7 +220,15 @@ mod tests {
         let proc = Path::new("/proc");
         let image = std::fs::read_link(format!("/proc/{}/exe", server.id())).unwrap();
 
-        assert_eq!(server_of(proc, app.id(), &image), Some(server.id()));
+        let found = server_of(proc, app.id(), &image);
+        assert_eq!(
+            found,
+            Some(server.id()),
+            "app: {}; server: {}; image: {}",
+            held(app.id()),
+            held(server.id()),
+            exe(&image)
+        );
         // Another image; a missing one; seen from a process with no pipe;
         // a `/proc` with no processes.
         let test = std::env::current_exe().unwrap();
