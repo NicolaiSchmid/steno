@@ -395,7 +395,7 @@ fn listener_over_identity(
     ));
     let mac_id = identity.mac_id();
     let service = Arc::new(crate::handover::service(
-        listener_configuration(paths),
+        listener_configuration(paths, store),
         store.clone(),
         intake,
         identity,
@@ -422,18 +422,29 @@ fn lock_or_run_without(
     }
 }
 
-/// The listener's configuration: the default, and in this crate's tests
-/// loopback only, unadvertised, with the inbox under the test's support
-/// directory.
-fn listener_configuration(paths: &StenoPaths) -> steno_handover::HandoverConfiguration {
-    let configuration = steno_handover::HandoverConfiguration::default();
-    if !cfg!(test) {
-        return configuration;
+/// The listener's configuration, with the inbox under the support
+/// directory: [`crate::handover::configuration`] over the environment, and
+/// in this crate's tests loopback only, unadvertised, on a port the system
+/// chooses.
+fn listener_configuration(
+    paths: &StenoPaths,
+    store: &Store,
+) -> steno_handover::HandoverConfiguration {
+    let inbox_directory = paths
+        .support_directory
+        .join(steno_handover::HandoverConfiguration::INBOX_DIRECTORY_NAME);
+    if cfg!(test) {
+        return steno_handover::HandoverConfiguration {
+            advertise: false,
+            inbox_directory,
+            ..steno_handover::HandoverConfiguration::default()
+        };
     }
+    let environment = std::env::var_os(crate::handover::PORT_VARIABLE)
+        .map(|value| value.to_string_lossy().into_owned());
     steno_handover::HandoverConfiguration {
-        advertise: false,
-        inbox_directory: paths.support_directory.join("handover-inbox"),
-        ..configuration
+        inbox_directory,
+        ..crate::handover::configuration(store, environment.as_deref())
     }
 }
 

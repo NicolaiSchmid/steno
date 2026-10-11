@@ -1,7 +1,8 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
-//! old, and the waits that fail a test instead of hanging it.
+//! old, the waits that fail a test instead of hanging it, and
+//! [`warnings`], what a call logs at `warn` and above.
 //!
 //! A test that writes models gives the app an explicit models directory in
 //! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
@@ -9,7 +10,7 @@
 //! the directory `STENO_MODELS_DIR` names, so no test overwrites the
 //! models a developer keeps for the real-model tests.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use steno_adapters::DeliveryCoordinator;
@@ -308,4 +309,35 @@ pub fn write_frames(writer: &mut steno_audio::RecordingWriter, frames: usize) {
             })
             .unwrap();
     }
+}
+
+/// A `Write` into a shared buffer, for a test's log subscriber.
+#[derive(Clone, Default)]
+struct Logged(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logged {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// What `run` returns, and the warnings it logged on this thread.
+pub fn warnings<T>(run: impl FnOnce() -> T) -> (T, String) {
+    let logged = Logged::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer({
+            let logged = logged.clone();
+            move || logged.clone()
+        })
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let value = tracing::subscriber::with_default(subscriber, run);
+    let logged = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
+    (value, logged)
 }

@@ -1,0 +1,14 @@
+# Prints how to let the paired phone's recordings through ufw after an
+# install or upgrade, and how to close the port after a removal (stable
+# plan X4); changes nothing. The port lives only in the ufw profile.
+post_install() {
+  echo 'Steno receives recordings from the paired phone. If ufw is on, let them through once with: sudo ufw allow Steno'
+}
+
+post_upgrade() {
+  post_install
+}
+
+post_remove() {
+  echo 'Steno is removed. If you let the paired phone through ufw, close its port with: sudo ufw delete allow Steno'
+}
