@@ -88,9 +88,7 @@
     /// deleted first, and the stored identity is read back.
     public static func stage(_ identity: MintedIdentity, label: String) throws -> HandoverIdentity {
       try delete(label: label)
-      try store(identity, label: label)
-      guard let staged = try load(label: label) else { throw IdentityError.notFound(label: label) }
-      return try HandoverIdentity(secIdentity: staged)
+      return try storeAndReadBack(identity, label: label)
     }
 
     /// Gives the identity under `staging` the label `label`: what `label`
@@ -181,14 +179,19 @@
     public static func loadOrCreate(
       label: String = defaultLabel, commonName: String
     ) throws -> HandoverIdentity {
-      if let existing = try load(label: label) {
-        return try HandoverIdentity(secIdentity: existing)
-      }
-      try store(try MintedIdentity.mint(commonName: commonName), label: label)
-      guard let created = try load(label: label) else {
+      if let existing = try handoverIdentity(label: label) { return existing }
+      return try storeAndReadBack(try MintedIdentity.mint(commonName: commonName), label: label)
+    }
+
+    /// Stores `identity` under `label` and reads it back.
+    private static func storeAndReadBack(
+      _ identity: MintedIdentity, label: String
+    ) throws -> HandoverIdentity {
+      try store(identity, label: label)
+      guard let stored = try handoverIdentity(label: label) else {
         throw IdentityError.notFound(label: label)
       }
-      return try HandoverIdentity(secIdentity: created)
+      return stored
     }
 
     /// The items labelled `defaultLabel`, with `stagingLabel` for a new
@@ -196,13 +199,9 @@
     public struct Store: HandoverIdentityKeychain {
       public init() {}
 
-      public func load() throws -> HandoverIdentity? {
-        try IdentityKeychain.load(label: defaultLabel).map(HandoverIdentity.init(secIdentity:))
-      }
+      public func load() throws -> HandoverIdentity? { try handoverIdentity(label: defaultLabel) }
 
-      public func staged() throws -> HandoverIdentity? {
-        try IdentityKeychain.load(label: stagingLabel).map(HandoverIdentity.init(secIdentity:))
-      }
+      public func staged() throws -> HandoverIdentity? { try handoverIdentity(label: stagingLabel) }
 
       public func stage(_ identity: MintedIdentity) throws -> HandoverIdentity {
         try IdentityKeychain.stage(identity, label: stagingLabel)
@@ -214,6 +213,11 @@
     }
 
     // MARK: - Lookups
+
+    /// `load(label:)` as a `HandoverIdentity`.
+    private static func handoverIdentity(label: String) throws -> HandoverIdentity? {
+      try load(label: label).map(HandoverIdentity.init(secIdentity:))
+    }
 
     /// The private key the keychain pairs with `certificate`, found by its
     /// hash; nil when it holds none.
