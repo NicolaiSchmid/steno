@@ -914,3 +914,119 @@ async fn a_retry_under_an_update_hold_runs_once_the_hold_is_given_up() {
     pipeline.wait_until_idle().await;
     assert_eq!(world.state(meeting), MeetingState::Ready);
 }
+
+/// Two meetings the last process left `queued`, a launch's resume the
+/// lock refused at its write that fails the older one, and then, with the
+/// lock let go, a meeting that waits for its models (the newest): the
+/// world, the engine, the older left meeting, the other and the one
+/// waiting for models. The launch's resume is owed to the store's retry.
+async fn an_owed_launch_resume_and_a_meeting_waiting_for_models()
+-> (World, Arc<Uninstalled>, Uuid, Uuid, Uuid) {
+    let engine = Arc::new(Uninstalled::default());
+    let world = world(engine.clone(), identity);
+    let pipeline = &world.pipeline;
+    let (gone, queued) = world.left_queued();
+    world.without_busy_timeout();
+    let lock = world.lock();
+    assert!(pipeline.resume_unfinished().unwrap_err().is_busy());
+    assert!(store_retry_woken(pipeline).await);
+    drop(lock);
+    let models = world.enqueue_call(5);
+    pipeline.wait_until_idle().await;
+    assert_eq!(pipeline.dependencies().model_waits.waiting(), [models]);
+    (world, engine, gone, queued, models)
+}
+
+/// The store's retry that reruns a launch's resume takes the meetings
+/// waiting for models, as the launch's resume does: with the models in
+/// place, it runs the one waiting for them to `ready`, and it no longer
+/// reads as waiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owed_launch_resume_takes_the_meetings_waiting_for_models() {
+    let (world, engine, gone, queued, models) =
+        an_owed_launch_resume_and_a_meeting_waiting_for_models().await;
+    let pipeline = &world.pipeline;
+    engine.installed.store(true, Ordering::SeqCst);
+
+    assert_eq!(
+        sorted(pipeline.resume_waiting_for_store().unwrap()),
+        sorted([queued, models])
+    );
+    pipeline.wait_until_idle().await;
+    assert_eq!(world.state(queued), MeetingState::Ready);
+    assert_eq!(world.state(models), MeetingState::Ready);
+    assert!(matches!(world.state(gone), MeetingState::Failed { .. }));
+    assert_eq!(
+        pipeline.dependencies().model_waits.waiting(),
+        Vec::<Uuid>::new()
+    );
+}
+
+/// The store's retry that reruns a launch's resume while another
+/// operation (a re-export) holds the meeting waiting for models puts it
+/// back to wait for them: the models install then starts it, rather than
+/// only the next launch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owed_launch_resume_keeps_a_held_meeting_waiting_for_its_models() {
+    let (world, engine, gone, queued, models) =
+        an_owed_launch_resume_and_a_meeting_waiting_for_models().await;
+    let pipeline = &world.pipeline;
+    let waits = pipeline.dependencies().model_waits.clone();
+
+    let held = pipeline.claim_redeliver(models).unwrap();
+    assert_eq!(pipeline.resume_waiting_for_store().unwrap(), [queued]);
+    pipeline.wait_until_idle().await;
+    assert!(matches!(world.state(gone), MeetingState::Failed { .. }));
+    // `queued` met the missing models too.
+    assert_eq!(waits.waiting(), sorted([queued, models]));
+    assert_eq!(waits.waiting_for_store(), Vec::<Uuid>::new());
+    drop(held);
+
+    engine.installed.store(true, Ordering::SeqCst);
+    assert_eq!(
+        sorted(pipeline.resume_waiting().unwrap()),
+        sorted([queued, models])
+    );
+    pipeline.wait_until_idle().await;
+    assert_eq!(world.state(models), MeetingState::Ready);
+    assert_eq!(world.state(queued), MeetingState::Ready);
+}
+
+/// The store's retry that reruns a launch's resume and fails for another
+/// reason than the lock (the store refuses writes) is not owed again and
+/// wakes no retry: the left meetings stay `queued` for the next launch,
+/// and the one waiting for models is put back to wait for them, so the
+/// models install starts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owed_launch_resume_another_failure_ends_keeps_the_meetings_waiting_for_models() {
+    let (world, engine, gone, queued, models) =
+        an_owed_launch_resume_and_a_meeting_waiting_for_models().await;
+    let pipeline = &world.pipeline;
+    let waits = pipeline.dependencies().model_waits.clone();
+
+    world
+        .store
+        .read(|connection| Ok(connection.pragma_update(None, "query_only", true)?))
+        .unwrap();
+    let refused = pipeline.resume_waiting_for_store().unwrap_err();
+    assert!(!refused.is_busy(), "{refused}");
+    assert!(!store_retry_woken(pipeline).await, "not woken again");
+    assert_eq!(waits.waiting(), [models]);
+    world
+        .store
+        .read(|connection| Ok(connection.pragma_update(None, "query_only", false)?))
+        .unwrap();
+    assert_eq!(
+        pipeline.resume_waiting_for_store().unwrap(),
+        Vec::<Uuid>::new(),
+        "the failed owed resume is not owed again"
+    );
+    for meeting in [gone, queued] {
+        assert_eq!(world.state(meeting), MeetingState::Queued);
+    }
+
+    engine.installed.store(true, Ordering::SeqCst);
+    assert_eq!(pipeline.resume_waiting().unwrap(), [models]);
+    pipeline.wait_until_idle().await;
+    assert_eq!(world.state(models), MeetingState::Ready);
+}

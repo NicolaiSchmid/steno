@@ -1563,12 +1563,13 @@ impl ProcessingPipeline {
     /// wakes the next retry ([`ModelWaits::until_store_retry`]). Another
     /// failure leaves them `queued` for the next launch. The meetings
     /// waiting for models are left waiting, except by an owed launch
-    /// resume, which starts every queued meeting as the launch does. The
-    /// services call it on a timer while anything waits for the store; the
-    /// next launch's [`resume_unfinished`](Self::resume_unfinished) takes
-    /// the meetings too, as they are `queued`. Returns the meetings
-    /// started, none once the pipeline [quits](Self::quit). Needs a `tokio`
-    /// runtime. Rust only: Swift's pipeline failed the meeting.
+    /// resume, which starts every queued meeting as the launch does and
+    /// puts back for models those it could not start. The services call it
+    /// on a timer while anything waits for the store; the next launch's
+    /// [`resume_unfinished`](Self::resume_unfinished) takes the meetings
+    /// too, as they are `queued`. Returns the meetings started, none once
+    /// the pipeline [quits](Self::quit). Needs a `tokio` runtime. Rust
+    /// only: Swift's pipeline failed the meeting.
     pub fn resume_waiting_for_store(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
@@ -1580,8 +1581,9 @@ impl ProcessingPipeline {
         } = waits.take_store_waits();
         // An owed launch resume takes every `queued` meeting, those waiting
         // for the store or for models among them.
+        let mut for_models = BTreeSet::new();
         let among = if unfinished_owed {
-            waits.resume();
+            for_models = waits.resume();
             None
         } else if meetings.is_empty() {
             return Ok(Vec::new());
@@ -1590,19 +1592,23 @@ impl ProcessingPipeline {
         };
         match self.resume_among(among) {
             Ok((resumed, held)) => {
+                waits.put_back(held.iter().copied().filter(|id| for_models.contains(id)));
                 waits.wait_for_store(held.into_iter().filter(|id| meetings.contains(id)));
                 Ok(resumed)
             }
-            Err(failure) if failure.is_busy() => {
-                if unfinished_owed {
-                    waits.owe_unfinished();
-                } else {
-                    waits.wait_for_store(meetings);
+            Err(failure) => {
+                waits.put_back(for_models);
+                if failure.is_busy() {
+                    if unfinished_owed {
+                        waits.owe_unfinished();
+                    } else {
+                        waits.wait_for_store(meetings);
+                    }
                 }
+                // Not the lock: those waiting for the store stay `queued`
+                // for the next launch.
                 Err(failure)
             }
-            // Not the lock: they stay `queued` for the next launch.
-            Err(failure) => Err(failure),
         }
     }
 
