@@ -404,7 +404,7 @@ impl InFlight {
     /// for its turn included) to its end. A meeting waiting for models is
     /// not in flight ([`ModelWaits`]): it waits for the user, not for a
     /// job. Nor is one waiting for the store: it waits for another process,
-    /// and the next launch resumes it.
+    /// not for a job, and the store's retry or the next launch starts it.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.lock().is_idle()
@@ -506,12 +506,13 @@ impl Drop for JobHold {
 /// rule 1, and those of a models resume the store refused.
 /// [`ProcessingPipeline::resume_waiting_for_store`] starts them, and puts
 /// back those a run holds; a meeting waits for one thing at a time, so
-/// neither it nor [`ProcessingPipeline::resume_waiting`] takes the other's
-/// (the launch's resume starts every `queued` meeting). Rule 3 has no part here: the
-/// caller of that resume tries again for as long as a meeting waits for
-/// the store ([`until_store_retry`](Self::until_store_retry) says when),
-/// so a meeting a retry skipped is taken by the next one. A launch's
-/// resume the store refused is owed the same way.
+/// neither it nor [`ProcessingPipeline::resume_waiting`] takes the other's,
+/// except when it reruns a launch's resume, which starts every `queued`
+/// meeting as the launch does. Rule 3 has no part here: the caller of
+/// the store's retry tries again for as long as a meeting waits for the
+/// store ([`until_store_retry`](Self::until_store_retry) says when), so a
+/// meeting a retry skipped is taken by the next one. A launch's resume
+/// the store refused is owed the same way.
 #[derive(Debug, Clone, Default)]
 pub struct ModelWaits(Arc<SharedWaits>);
 
@@ -607,8 +608,13 @@ impl ModelWaits {
         self.lock().waiting.extend(meetings);
     }
 
-    /// Records `meetings` as waiting for the store and wakes its retry.
+    /// Records `meetings` as waiting for the store and wakes its retry;
+    /// none leaves both as they are.
     fn wait_for_store(&self, meetings: impl IntoIterator<Item = Uuid>) {
+        let mut meetings = meetings.into_iter().peekable();
+        if meetings.peek().is_none() {
+            return;
+        }
         self.lock().for_store.extend(meetings);
         self.0.store_retry.notify_one();
     }
@@ -1522,7 +1528,10 @@ impl ProcessingPipeline {
     /// Starts `meetings`, taken from the waiting ones, as
     /// [`resume_waiting`](Self::resume_waiting) does: a meeting a run holds
     /// goes back to waiting, and all of them do when the store fails, for
-    /// the store when another process held it.
+    /// the store when another process held it. Those include any the
+    /// resume started before the write the store refused: such a meeting's
+    /// card reads as waiting for the store until its run's first progress
+    /// event, and the retry skips it while its run holds it.
     fn start_waiting(&self, meetings: BTreeSet<Uuid>) -> Result<Vec<Uuid>> {
         let waits = &self.inner.dependencies.model_waits;
         match self.resume_among(Some(&meetings)) {
@@ -1547,17 +1556,19 @@ impl ProcessingPipeline {
     /// Starts again the meetings runs left `queued` because another process
     /// held the store's write lock past its busy timeout ([`ModelWaits`]),
     /// as [`resume_waiting`](Self::resume_waiting) starts those waiting for
-    /// models; a launch's resume the store refused runs first instead, as
-    /// it covers every queued meeting. A meeting a run holds goes back to
-    /// waiting for the store, and so do all of them when the store fails
-    /// again; either wakes the next retry
-    /// ([`ModelWaits::until_store_retry`]). The meetings waiting for models
-    /// are left waiting. The services call it on a timer while anything
-    /// waits for the store; the next launch's
-    /// [`resume_unfinished`](Self::resume_unfinished) takes the meetings
-    /// too, as they are `queued`. Returns the meetings started, none once
-    /// the pipeline [quits](Self::quit). Needs a `tokio` runtime. Rust only:
-    /// Swift's pipeline failed the meeting.
+    /// models; a launch's resume the store refused runs instead, as it
+    /// covers every queued meeting. A meeting a run holds goes back to
+    /// waiting for the store, and so do all of them when another process
+    /// holds the store again (an owed launch resume is owed again); either
+    /// wakes the next retry ([`ModelWaits::until_store_retry`]). Another
+    /// failure leaves them `queued` for the next launch. The meetings
+    /// waiting for models are left waiting, except by an owed launch
+    /// resume, which starts every queued meeting as the launch does. The
+    /// services call it on a timer while anything waits for the store; the
+    /// next launch's [`resume_unfinished`](Self::resume_unfinished) takes
+    /// the meetings too, as they are `queued`. Returns the meetings
+    /// started, none once the pipeline [quits](Self::quit). Needs a `tokio`
+    /// runtime. Rust only: Swift's pipeline failed the meeting.
     pub fn resume_waiting_for_store(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
@@ -1567,25 +1578,31 @@ impl ProcessingPipeline {
             meetings,
             unfinished_owed,
         } = waits.take_store_waits();
-        if unfinished_owed {
-            // Every `queued` meeting, those waiting for the store among
-            // them; refused again, it is owed again.
-            return self.resume_unfinished();
-        }
-        if meetings.is_empty() {
+        // An owed launch resume takes every `queued` meeting, those waiting
+        // for the store or for models among them.
+        let among = if unfinished_owed {
+            waits.resume();
+            None
+        } else if meetings.is_empty() {
             return Ok(Vec::new());
-        }
-        match self.resume_among(Some(&meetings)) {
+        } else {
+            Some(&meetings)
+        };
+        match self.resume_among(among) {
             Ok((resumed, held)) => {
-                if !held.is_empty() {
-                    waits.wait_for_store(held);
-                }
+                waits.wait_for_store(held.into_iter().filter(|id| meetings.contains(id)));
                 Ok(resumed)
             }
-            Err(failure) => {
-                waits.wait_for_store(meetings);
+            Err(failure) if failure.is_busy() => {
+                if unfinished_owed {
+                    waits.owe_unfinished();
+                } else {
+                    waits.wait_for_store(meetings);
+                }
                 Err(failure)
             }
+            // Not the lock: they stay `queued` for the next launch.
+            Err(failure) => Err(failure),
         }
     }
 
@@ -2165,8 +2182,8 @@ impl ProcessingPipeline {
 
     /// Once nothing holds a refused run's meeting, records it as waiting
     /// for what it awaits ([`wait_for_models`](Self::wait_for_models), or
-    /// the store, whose retry is woken). Once the pipeline quits, nothing is
-    /// recorded: the next launch's resume processes it.
+    /// the store, whose retry is woken). Once the pipeline quits, a store
+    /// wait is not recorded: the next launch's resume processes it.
     fn set_aside(&self, refused: Refused) {
         match refused.awaits {
             Awaits::Models { resumes_seen } => {
