@@ -370,6 +370,9 @@ pub struct Advertiser {
     daemon: ServiceDaemon,
     fullname: String,
     published: Arc<Mutex<Published>>,
+    /// The port of the record registered (`ServiceInfo::get_port`).
+    #[cfg(test)]
+    port: u16,
 }
 
 impl Advertiser {
@@ -442,7 +445,11 @@ impl Advertiser {
     /// and filled once the computer joins a network.
     pub fn publish(service_name: &str, mac_id: Uuid, port: u16) -> mdns_sd::Result<Self> {
         let daemon = ServiceDaemon::new()?;
-        let (fullname, published) =
+        #[cfg_attr(
+            not(test),
+            expect(unused_variables, reason = "only the tests read the port")
+        )]
+        let (fullname, registered_port, published) =
             Self::start(&daemon, service_name, mac_id, port).inspect_err(|_| {
                 stop(&daemon);
             })?;
@@ -450,7 +457,15 @@ impl Advertiser {
             daemon,
             fullname,
             published,
+            #[cfg(test)]
+            port: registered_port,
         })
+    }
+
+    /// The port of the record registered (`ServiceInfo::get_port`).
+    #[cfg(test)]
+    pub(crate) fn port(&self) -> u16 {
+        self.port
     }
 
     fn start(
@@ -458,7 +473,7 @@ impl Advertiser {
         service_name: &str,
         mac_id: Uuid,
         port: u16,
-    ) -> mdns_sd::Result<(String, Arc<Mutex<Published>>)> {
+    ) -> mdns_sd::Result<(String, u16, Arc<Mutex<Published>>)> {
         daemon.set_ip_check_interval(IP_CHECK_SECONDS)?;
         // Watch before the first read, so a change between the two is
         // reported.
@@ -472,6 +487,7 @@ impl Advertiser {
         }
         let info = Self::service_info(service_name, mac_id, port, &addresses)?;
         let fullname = info.get_fullname().to_owned();
+        let registered_port = info.get_port();
         daemon.register(info)?;
         let published = Arc::new(Mutex::new(Published {
             addresses,
@@ -498,7 +514,7 @@ impl Advertiser {
                 "the Bonjour record will not follow a network change: {error}"
             );
         }
-        Ok((fullname, published))
+        Ok((fullname, registered_port, published))
     }
 
     /// Withdraws the record and stops the daemon; the thread that follows

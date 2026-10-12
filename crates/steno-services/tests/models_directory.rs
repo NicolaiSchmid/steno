@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use steno_core::{Settings, StenoPaths};
 
+mod common;
+
 const CHILD: &str = "STENO_MODELS_DIRECTORY_CHILD";
 const NAME: &str = "the_app_the_cli_and_the_example_read_one_models_directory";
 
@@ -21,29 +23,19 @@ fn child(
     variables: &[(&str, &str)],
     labels: &[&str],
 ) -> Vec<String> {
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command
-        .args(["--exact", name, "--nocapture", "--test-threads=1"])
+    let output = common::child_in(home, name)
         .current_dir(cwd)
         .env(CHILD, "1")
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", home.join("data"))
-        .env("APPDATA", home.join("appdata"))
         .env_remove(steno_speech::ModelStore::ENVIRONMENT_VARIABLE)
         .env_remove(steno_speech::ModelStore::MIRROR_ENVIRONMENT_VARIABLE)
-        .envs(variables.iter().copied());
-    let output = command.output().unwrap();
+        .envs(variables.iter().copied())
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
     labels
         .iter()
-        .map(|label| {
-            stdout
-                .lines()
-                // The harness may print the test's name on the same line first.
-                .find_map(|line| line.split_once(label).map(|(_, value)| value.to_owned()))
-                .unwrap_or_else(|| panic!("no {label} in {stdout}"))
-        })
+        .map(|label| common::printed(&stdout, label).to_owned())
         .collect()
 }
 
@@ -60,6 +52,7 @@ fn roots_in(cwd: &Path, home: &Path, variable: Option<&str>) -> (PathBuf, PathBu
 #[test]
 fn the_app_the_cli_and_the_example_read_one_models_directory() {
     if std::env::var_os(CHILD).is_some() {
+        common::assert_temporary_home();
         let paths = StenoPaths::new(StenoPaths::default_support_directory());
         let app = steno_speech::ModelStore::in_models_directory(
             &steno_services::speech::models_directory(&Settings::default(), &paths),
@@ -117,6 +110,7 @@ const MIRROR: &str = "the_mirror_variable_reaches_the_speech_setup";
 #[test]
 fn the_mirror_variable_reaches_the_speech_setup() {
     if std::env::var_os(CHILD).is_some() {
+        common::assert_temporary_home();
         let paths = StenoPaths::new(StenoPaths::default_support_directory());
         let setup = steno_services::speech::SpeechSetup::new(&Settings::default(), &paths);
         println!(

@@ -7,17 +7,20 @@
 //! answered from the recorded fixtures instead, so the UI runs without a
 //! database.
 //!
-//! What the shell owns beside the windows (WP8): the tray (`tray`), the
-//! macOS menu bar (`menu`), the actions behind both menus (`actions`), the
-//! recorder state the shell follows (`recording`), the panels (`panels`)
-//! and their geometry (`panel_geometry`), window lifetime (`windows`; the
-//! close and exit rules are in this file), launch at login (`autostart`,
-//! and on a packaged install `packaged`),
-//! updates (`updater`), the OS permissions (`permissions`), the `steno:`
-//! links (`deep_links`), the native dialogs (`dialogs`), the single
-//! instance, on Linux the logout and shutdown clients (`session_end`) and
-//! the systemd drop-ins for the stop timeout (`stop_timeout`), and on a
-//! Wayland session the `XWayland` backend the panels need (`display`).
+//! What the shell owns beside the windows (WP8): the tray (`tray`, and on
+//! Linux whether a status notifier host shows it, `tray_host`), the macOS
+//! menu bar (`menu`), the actions behind both menus (`actions`), the recorder
+//! state the shell follows (`recording`), the panels (`panels`) and their
+//! geometry (`panel_geometry`), window lifetime (`windows`; the close and
+//! exit rules are in this file), launch at login (`autostart`, and on a
+//! packaged install `packaged`), updates (`updater`), the OS permissions
+//! (`permissions`), the `steno:` links (`deep_links`), the native dialogs
+//! (`dialogs`), the single instance, on Linux the D-Bus helpers its clients
+//! share (`dbus`), the logout and shutdown clients (`session_end`) and the
+//! systemd drop-ins for the stop timeout (`stop_timeout`), a scope of its own
+//! when it starts inside another program's service, and one for each of the
+//! `AppImage`'s mount servers (`own_scope`, `appimage`), and on a Wayland
+//! session the `XWayland` backend the panels need (`display`).
 //! Every one is a thin module over a Tauri plugin or an OS API with its
 //! rules in plain functions the tests cover. Everything that is on the
 //! wire (errors, topics, windows, sections, params) is the `steno-bridge`
@@ -72,8 +75,12 @@ fn write_stderr_line(line: std::fmt::Arguments<'_>) {
 }
 
 mod actions;
+#[cfg(target_os = "linux")]
+mod appimage;
 mod autostart;
 mod bridge;
+#[cfg(target_os = "linux")]
+mod dbus;
 mod deep_links;
 mod dialogs;
 #[cfg(target_os = "linux")]
@@ -87,6 +94,8 @@ mod identifier;
 #[cfg(target_os = "macos")]
 mod menu;
 mod navigation;
+#[cfg(target_os = "linux")]
+mod own_scope;
 mod packaged;
 mod panel_anchor;
 mod panel_geometry;
@@ -100,6 +109,8 @@ mod smoke;
 #[cfg(target_os = "linux")]
 mod stop_timeout;
 mod tray;
+#[cfg(target_os = "linux")]
+mod tray_host;
 mod updater;
 mod windows;
 
@@ -210,6 +221,11 @@ fn setup(
     handle: &tauri::AppHandle,
     runtime: &'static tokio::runtime::Runtime,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    // First, before the first window starts WebKit's processes, so they
+    // follow the app into its scope; and the AppImage's mount servers into
+    // theirs.
+    #[cfg(target_os = "linux")]
+    own_scope::take_own_scopes();
     handle.manage(std::sync::Arc::new(updater::ShellUpdates::new(
         handle.clone(),
     )));
@@ -652,6 +668,12 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         } if label == BridgeWindow::Main.as_str() => {
             let tray = has_tray(app);
             app.state::<TrayAtClose>().note(tray);
+            if !tray {
+                tracing::warn!(
+                    "the main window closed with no tray to bring it back; \
+                     quitting, which saves a recording in progress first"
+                );
+            }
             if hides_on_close(&label, tray) {
                 api.prevent_close();
                 if let Some(main) = app.get_webview_window(&label)
@@ -731,19 +753,16 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
 /// closing main then ends the process (`exits_when_destroyed`). On Linux
 /// the tray crate panics (rather than errs) when libayatana-appindicator
 /// is not installed, so the panic is caught here; the .deb depends on the
-/// library, the `AppImage` does not bundle it (README, Bundles). A tray
-/// nothing shows (`tray::has_host`) is logged once here.
+/// library, the `AppImage` does not bundle it (README, Bundles). On
+/// Linux a built tray starts the follower that tells whether a host shows
+/// it (`tray_host::follow`), which logs what it finds.
 fn build_tray(app: &tauri::AppHandle) {
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tray::build(app)));
     match built {
         Ok(Ok(())) => {
             app.state::<smoke::Smoke>().note_tray();
-            if !tray::has_host() {
-                stderr_line!(
-                    "[steno-desktop] no tray host shows the tray icon; \
-                     closing the main window ends the app"
-                );
-            }
+            #[cfg(target_os = "linux")]
+            tray_host::follow();
         }
         Ok(Err(error)) => stderr_line!("[steno-desktop] the tray could not be built: {error}"),
         Err(_) => {
@@ -755,26 +774,25 @@ fn build_tray(app: &tauri::AppHandle) {
 }
 
 /// Whether a tray stands (`tray_stands`): `tray::build` manages `Tray` on
-/// success, and the host is asked last.
+/// success.
 fn has_tray(app: &tauri::AppHandle) -> bool {
     tray_stands(
         app.try_state::<tray::Tray>().is_some(),
         app.state::<smoke::Smoke>().is_armed(),
-        tray::has_host,
+        tray::has_host(),
     )
 }
 
-/// Whether a tray stands: it was `built` and something shows it, a host
-/// (`tray::has_host`, asked only when it decides) or a smoke run, which
-/// stands in for the host Xvfb lacks so it checks the close rule a desktop
-/// with a tray gets.
-fn tray_stands(built: bool, smoke: bool, host: impl FnOnce() -> bool) -> bool {
-    built && (smoke || host())
+/// Whether a tray stands: it was `built` and something shows it, a `host`
+/// (`tray::has_host`) or a smoke run, which stands in for the host Xvfb
+/// lacks so it checks the close rule a desktop with a tray gets.
+fn tray_stands(built: bool, smoke: bool, host: bool) -> bool {
+    built && (smoke || host)
 }
 
 /// What `has_tray` said when the main window last closed, so the
-/// `Destroyed` and the exit request that follow a close do not ask the
-/// session bus again.
+/// `Destroyed` and the exit request that follow a close decide as the
+/// close did, even when a tray host comes or goes between them.
 #[derive(Default)]
 struct TrayAtClose(std::sync::Mutex<Option<bool>>);
 
@@ -1091,25 +1109,22 @@ mod tests {
             .expect("the shutdown ran");
     }
 
-    /// A tray stands when it was built and a host or a smoke run shows it;
-    /// the host is asked only when that decides.
+    /// A tray stands when it was built and a host or a smoke run shows it.
     #[test]
     fn a_tray_stands_when_built_and_shown() {
-        for (built, smoke, host, stands, asks) in [
-            (true, false, true, true, true),
-            (true, false, false, false, true),
-            (true, true, false, true, false),
-            (true, true, true, true, false),
-            (false, false, true, false, false),
-            (false, true, true, false, false),
+        for (built, smoke, host, stands) in [
+            (true, false, true, true),
+            (true, false, false, false),
+            (true, true, false, true),
+            (true, true, true, true),
+            (false, false, true, false),
+            (false, true, true, false),
         ] {
-            let asked = std::cell::Cell::new(false);
-            let result = tray_stands(built, smoke, || {
-                asked.set(true);
-                host
-            });
-            assert_eq!(result, stands, "{built} {smoke} {host}");
-            assert_eq!(asked.get(), asks, "{built} {smoke} {host}");
+            assert_eq!(
+                tray_stands(built, smoke, host),
+                stands,
+                "{built} {smoke} {host}"
+            );
         }
     }
 
