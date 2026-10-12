@@ -1,7 +1,7 @@
 //! The admission ledger (schema v5) over the wire: a recording the computer
 //! admitted is answered delivered when it is announced again, whatever
-//! happened to its receipt (a revoke, a meeting delete, a line save after
-//! the intake's commit, a restart); other bytes under a recording id are a
+//! happened to its receipt (a revoke, a meeting delete, Pair again, a line
+//! save after the intake's commit, a restart); other bytes under a recording id are a
 //! new recording; the same bytes in another split restart the partial; the
 //! same bytes from another device take the receipt over, and admitted
 //! twice are one meeting; and a late `complete` of replaced bytes never
@@ -634,5 +634,121 @@ async fn a_recording_an_older_app_admitted_is_answered_delivered_after_the_backf
     assert_eq!(completed(&phone, id).await, meeting_id);
     assert_eq!(intake.meetings(), Vec::<Uuid>::new(), "no second admission");
     assert_eq!(store.all_meetings().unwrap().len(), 1);
+    test.stop().await;
+}
+
+/// A fingerprint record in memory, as the app's `handover-identity.json`:
+/// the recorded fingerprint and the next one.
+#[derive(Default)]
+struct RecordInMemory(std::sync::Mutex<(Option<String>, Option<String>)>);
+
+impl steno_handover::FingerprintRecord for RecordInMemory {
+    fn recorded(&self) -> steno_core::BoundaryResult<Option<String>> {
+        Ok(self.0.lock().unwrap().0.clone())
+    }
+
+    fn record(&self, fingerprint: &str) -> steno_core::BoundaryResult<()> {
+        *self.0.lock().unwrap() = (Some(fingerprint.to_owned()), None);
+        Ok(())
+    }
+
+    fn next(&self) -> steno_core::BoundaryResult<Option<String>> {
+        Ok(self.0.lock().unwrap().1.clone())
+    }
+
+    fn note_next(&self, fingerprint: Option<&str>) -> steno_core::BoundaryResult<()> {
+        self.0.lock().unwrap().1 = fingerprint.map(str::to_owned);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_resend_after_pair_again_is_delivered_with_the_first_meeting_unchanged() {
+    // The phone's recording became meeting M, which the user renamed and
+    // whose speaker they named. Pair again (`HandoverIdentity::mint_anew`)
+    // removes the phone, and its receipts with it, and mints a new
+    // identity. The phone pairs with the new identity and sends the same
+    // recording again, under the same device id and once more as a new
+    // install: the admission ledger answers delivered with M, nothing is
+    // admitted (so no transcript run), and M, its title and its speakers
+    // stay as the user left them.
+    let (store, intake) = store_and_intake();
+    let secrets = steno_core::testing::InMemorySecretStore::default();
+    let record = RecordInMemory::default();
+    let now = chrono::Utc::now();
+    let identity =
+        steno_handover::HandoverIdentity::load_or_create(&secrets, &record, &store, "Steno", now)
+            .await
+            .unwrap();
+    let test = service(&store, &intake).await;
+    let phone = Phone::pair(&test).await;
+    let bytes = seeded_bytes(2 * CHUNK_SIZE as usize + 3, 41);
+    let metadata = phone.metadata(&bytes, CHUNK_SIZE);
+    let id = metadata.recording_id;
+    phone.upload_all(&metadata, &bytes).await;
+    let meeting_id = completed(&phone, id).await;
+    assert_eq!(intake.meetings(), [meeting_id]);
+
+    store.rename(meeting_id, "Planning review", now).unwrap();
+    let person = steno_core::testing::sample_data::person(0, "Ada");
+    store.save_person(&person).unwrap();
+    store
+        .save_speaker(&steno_core::Speaker {
+            id: Uuid::new_v4(),
+            meeting_id,
+            cluster_label: "Speaker 1".to_owned(),
+            assignment: steno_core::SpeakerAssignment::Confirmed {
+                person_id: person.id,
+            },
+            embedding: None,
+            sample_clip_range: None,
+            sample_clip_url: None,
+            cluster_confidence: 0.9,
+        })
+        .unwrap();
+    let meetings = store.all_meetings().unwrap();
+    let speakers = store.speakers(meeting_id).unwrap();
+    assert_eq!(meetings[0].title, "Planning review");
+    test.stop().await;
+
+    let minted =
+        steno_handover::HandoverIdentity::mint_anew(&secrets, &record, &store, "Steno", now)
+            .await
+            .unwrap();
+    assert_ne!(
+        minted.fingerprint(),
+        identity.fingerprint(),
+        "a new identity"
+    );
+    assert!(
+        store.paired_devices().unwrap().is_empty(),
+        "every phone goes"
+    );
+    assert_eq!(
+        store.handover_receipt(id).unwrap(),
+        None,
+        "and its receipts"
+    );
+    assert_eq!(
+        store
+            .admitted_meeting(id, metadata.byte_count, &metadata.sha256)
+            .unwrap(),
+        Some(meeting_id),
+        "the ledger stays"
+    );
+
+    let test = service(&store, &intake).await;
+    let phone = pair_again(&test, &phone).await;
+    delivered(&test, &phone, &metadata).await;
+    assert_eq!(completed(&phone, id).await, meeting_id);
+    test.service.revoke(phone.device_id).await.unwrap();
+    let reinstalled = Phone::pair(&test).await;
+    let resent = under(&reinstalled, id, &bytes, CHUNK_SIZE);
+    delivered(&test, &reinstalled, &resent).await;
+    assert_eq!(completed(&reinstalled, id).await, meeting_id);
+
+    assert_eq!(intake.meetings(), [meeting_id], "admitted once");
+    assert_eq!(store.all_meetings().unwrap(), meetings, "M unchanged");
+    assert_eq!(store.speakers(meeting_id).unwrap(), speakers);
     test.stop().await;
 }
