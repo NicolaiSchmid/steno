@@ -4,14 +4,19 @@
 //! `END` element, decoding every Huffman codeword on the way but none of
 //! the audio, and the packet ends at the next byte.
 //!
-//! Only the shape the phone's recorder writes is accepted (mono AAC-LC at
-//! 44.1 kHz): one single channel element (`SCE`), any fill (`FIL`) and data
-//! stream (`DSE`) elements, and `END`. A channel pair, a coupling or
-//! low-frequency channel, a program config, predictor data or gain control
-//! (neither of which AAC-LC has), a reserved codebook, a section past the
-//! last band, a scale factor out of its range, an impossible escape or a
-//! packet longer than [`MAX_PACKET_BYTES`] is [`PacketError::Invalid`]: bytes
-//! that are not a packet of that shape, which ends the salvage there.
+//! Only the shape the phone's recorder writes is accepted (mono AAC-LC):
+//! one single channel element (`SCE`), any fill (`FIL`) and data stream
+//! (`DSE`) elements, and `END`, so a stream of more than one channel is
+//! refused. A channel pair, a coupling or low-frequency channel, a program
+//! config, predictor data or gain control (neither of which AAC-LC has), a
+//! reserved codebook, a section past the last band, a scale factor out of
+//! its range, an impossible escape or a packet longer than
+//! [`MAX_PACKET_BYTES`] is [`PacketError::Invalid`]: bytes that are not a
+//! packet of that shape, which ends the salvage there.
+//!
+//! The rate is not in the bits: 44.1 and 48 kHz share their band tables, so
+//! a packet at either parses the same. The salvage takes the rate from the
+//! phone's fixed preset instead ([`super::SAMPLE_RATE`]).
 
 use std::sync::LazyLock;
 

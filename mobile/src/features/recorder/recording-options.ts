@@ -9,6 +9,11 @@ import type { AudioMode, RecordingOptions } from "expo-audio";
  * Type-only import from expo-audio keeps this file testable on Node; the two
  * iOS enum values are spelled out (`IOSOutputFormat.MPEG4AAC === "aac "`,
  * `AudioQuality.HIGH === 96`).
+ *
+ * The Mac reads a recording the recorder was killed in, which has no index,
+ * with this rate and channel count (`SAMPLE_RATE` in
+ * `crates/steno-audio/src/codec/salvage/mod.rs`); a test there fails when
+ * `sampleRate: 44_100` or `numberOfChannels: 1` changes, so change both.
  */
 export const RECORDING_FORMAT: AudioFormat = "m4aAAC";
 export const RECORDING_EXTENSION = ".m4a";

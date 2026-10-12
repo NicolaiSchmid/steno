@@ -279,6 +279,40 @@ fn mdat_64(packets: &[u8]) -> Vec<u8> {
     .concat()
 }
 
+/// A stream of more than one channel is refused, as the phone's preset is
+/// mono (`salvage::SAMPLE_RATE`): packets of a channel pair, or of two
+/// single channels, in the recorder's layout stay failed, and the file is
+/// not written to.
+#[test]
+fn a_stream_of_two_channels_is_not_salvaged() {
+    let directory = tempfile::tempdir().unwrap();
+    let bytes = killed();
+    // Apple's silent packet less its `END`: a single channel element with a
+    // long window and no bands.
+    let channel = |id: &str, tag: &str| format!("{id}{tag}0110100000000000000000");
+    assert_eq!(
+        bits(&[&channel("000", "0000"), "111"]),
+        [0x00, 0xd0, 0x00, 0x07]
+    );
+    let pair = bits(&[&channel("001", "0000"), "111"]);
+    let two = bits(&[&channel("000", "0000"), &channel("000", "0001"), "111"]);
+    assert_eq!(
+        packet_length(&two),
+        Err(PacketError::Invalid("a second channel"))
+    );
+    assert!(matches!(packet_length(&pair), Err(PacketError::Invalid(_))));
+    for (name, packet) in [("pair", pair), ("two", two)] {
+        let variant = [&bytes[..PACKETS_AT], &packet.repeat(64)].concat();
+        let path = written(directory.path(), &format!("{name}.m4a"), &variant);
+        assert!(
+            matches!(decode(&path), Err(CodecError::UnsupportedFormat(_))),
+            "{name}: {:?}",
+            decode(&path).map(|d| d.samples.len())
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), variant, "{name}");
+    }
+}
+
 /// A recording cut inside a packet (the kill came mid-write) decodes up
 /// to the cut: the packets before it, as the finished file decodes them;
 /// one cut between packets keeps all of them.
@@ -424,6 +458,25 @@ fn bytes_that_are_not_packets_end_the_salvage() {
         decode(&path).unwrap().samples.len(),
         KILLED_PACKETS * 1_024 - PRIMING
     );
+}
+
+/// The salvage's rate and channels are the phone's preset's: the test fails
+/// when `recording-options.ts` stops asking for 44.1 kHz mono, which the
+/// salvage then has to follow ([`salvage::SAMPLE_RATE`]).
+#[test]
+fn the_salvage_assumes_the_phones_preset() {
+    let preset = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../mobile/src/features/recorder/recording-options.ts");
+    let preset = std::fs::read_to_string(&preset).unwrap();
+    assert!(
+        preset.contains("sampleRate: 44_100,"),
+        "the phone's rate changed"
+    );
+    assert!(
+        preset.contains("numberOfChannels: 1,"),
+        "the phone's channels changed"
+    );
+    assert_eq!(salvage::SAMPLE_RATE, 44_100);
 }
 
 /// A packet that parses but that the decoder cannot read goes through the

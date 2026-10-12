@@ -19,20 +19,25 @@
 //! AAC-LC, mono, 44.1 kHz, 1 024 samples a packet. Each packet's length
 //! comes from its own bits ([`packet_length`]), which matched the sample
 //! table of every finished file of Apple's encoder at those settings
-//! (101 375 packets). Only a file in the recorder's layout is salvaged: a
-//! `ftyp` with major brand `M4A ` and `mp42` among its compatible brands
-//! (the brands [`super::priming`] checks), no `moov` among the top-level
-//! boxes, and packets that parse from the first; any other file stays
-//! failed. Where the packets start is found, not assumed: past the zeros
-//! (or the body of an `mdat` box, should a writer leave one), at the offset
-//! from which [`START_RUN`] packets parse in a row.
+//! (101 375 packets). The bits say nothing of the rate (a 48 kHz stream
+//! parses the same), so the rate is the preset's ([`SAMPLE_RATE`]); a
+//! stream of more than one channel does not parse. Only a file in the
+//! recorder's layout is salvaged: a `ftyp` with major brand `M4A ` and
+//! `mp42` among its compatible brands (the brands [`super::priming`]
+//! checks), no `moov` among the top-level boxes, and packets that parse
+//! from the first; any other file stays failed. Where the packets start is
+//! found, not assumed: past the zeros, or from the body of an `mdat` box
+//! should a writer leave one (else past the zeros in it), at the offset
+//! from which [`START_RUN`] packets parse in a row. In the app only the
+//! phone's uploads are `.m4a` masters, so only they reach the salvage.
 //!
 //! A packet that does not parse ends the salvage there, and so does the end
 //! of the file, inside a packet cut off by the kill or after the last whole
-//! one; the file itself is never written. A salvage that reads less than
-//! half of the bytes after the start is no salvage
-//! ([`SalvagedPackets::too_little`]), as a file with more than half of its
-//! packets damaged is none ([`super::MAX_DAMAGED_SHARE`]).
+//! one; the file itself is never written. Zeros from there to the end of the
+//! file are space no packet was written to, not a part of the recording. A
+//! salvage that reads less than half of the other bytes after the start is
+//! no salvage ([`SalvagedPackets::too_little`]), as a file with more than
+//! half of its packets damaged is none ([`super::MAX_DAMAGED_SHARE`]).
 
 pub mod packet;
 mod tables;
@@ -50,7 +55,11 @@ pub use packet::{MAX_PACKET_BYTES, PacketError, packet_length};
 
 use super::priming::recorder_brands;
 
-/// The phone recorder's rate, in hertz.
+/// The phone recorder's rate, in hertz: `sampleRate` in the phone's
+/// preset, `mobile/src/features/recorder/recording-options.ts`, which is
+/// mono (`numberOfChannels: 1`). The packets cannot confirm it (see the
+/// module doc), so a test fails when the preset changes either
+/// (`tests/codec_salvage.rs`); a change there must change the salvage too.
 pub const SAMPLE_RATE: u32 = 44_100;
 
 /// Samples in one AAC-LC packet.
@@ -88,7 +97,9 @@ pub struct SalvagedPackets {
     at: usize,
     /// The file offset of `buffer[0]`.
     buffer_offset: u64,
-    /// Where the packets start, and the file's length.
+    /// Where the packets start, and where they end: the file's length,
+    /// or, once the salvage meets zeros that run to the end of the file,
+    /// where those start.
     start: u64,
     end: u64,
     /// The packets handed out, and their bytes.
