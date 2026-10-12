@@ -5464,7 +5464,13 @@ async fn a_damaged_recording_stays_unstamped_through_every_automatic_stamp() {
         &stored.segments,
         &asset,
     ));
-    assert_eq!(expires_at(&world, &asset), None, "after the run");
+    // The first export fails, so the run leaves it unstamped either way;
+    // the steps below, whose exports succeed, show the damage keeping it.
+    assert_eq!(
+        expires_at(&world, &asset),
+        None,
+        "after the run (its export failed, so unstamped either way)"
+    );
     assert_eq!(damaged().parts(meeting.id), 3, "synced before the stamp");
 
     let launch = ProcessingPipeline::new(
