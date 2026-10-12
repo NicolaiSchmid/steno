@@ -71,7 +71,9 @@
 //!   the mono test tone, 5 * 10^-3 on the stereo one, `tests/codec.rs`). A
 //!   file with more damaged packets than clean ones fails
 //!   ([`MAX_DAMAGED_SHARE`]), so a corrupt file never becomes a meeting of
-//!   silence.
+//!   silence. A panic in symphonia's probe (its MP4 reader on a box size
+//!   near 2^64, in a debug build) is caught the same way and fails the
+//!   file as the probe's error does.
 //! - **A recording without an index.** The phone's `AVAudioRecorder`
 //!   writes the `moov` only when it stops, so a recorder killed
 //!   mid-recording (a crash, a jetsam kill, a force-quit) leaves raw AAC
@@ -758,19 +760,33 @@ impl SymphoniaFrames {
         if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(extension);
         }
-        let probed = symphonia::default::get_probe()
-            .format(
-                &hint,
-                stream,
-                // Gapless: trims the encoder delay and padding where the
-                // container declares them (MP3's LAME tag; not MP4 yet).
-                &FormatOptions {
-                    enable_gapless: true,
-                    ..FormatOptions::default()
-                },
-                &MetadataOptions::default(),
+        // A panic in the probe is caught as its failure, as `decode_packet`
+        // catches the decoder's: symphonia 0.5.5's MP4 reader adds a box's
+        // size to its offset unchecked, which panics in a debug build on a
+        // 64-bit size near 2^64. Nothing the probe built outlives it.
+        let probed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crash_log::expected(|| {
+                symphonia::default::get_probe().format(
+                    &hint,
+                    stream,
+                    // Gapless: trims the encoder delay and padding where the
+                    // container declares them (MP3's LAME tag; not MP4 yet).
+                    &FormatOptions {
+                        enable_gapless: true,
+                        ..FormatOptions::default()
+                    },
+                    &MetadataOptions::default(),
+                )
+            })
+        }))
+        .map_err(|panic| {
+            format!(
+                "the demuxer panicked: {}",
+                crash_log::panic_message(panic.as_ref())
             )
-            .map_err(|e| CodecError::UnsupportedFormat(format!("{}: {e}", path.display())))?;
+        })
+        .and_then(|probed| probed.map_err(|e| e.to_string()))
+        .map_err(|e| CodecError::UnsupportedFormat(format!("{}: {e}", path.display())))?;
         let format = probed.format;
         let track = format
             .default_track()

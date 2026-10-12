@@ -202,10 +202,11 @@ fn every_packet_ends_where_the_sample_table_says() {
 
 /// Only the recorder's layout is salvaged: the killed file with another
 /// major brand, without `mp42`, with a `moov` box in its reserve or after
-/// an `mdat` (of a 32- or a 64-bit size, next to it or after another box),
-/// or that is no MP4 file at all stays failed with symphonia's error, as
-/// any file it cannot read; so does a file that holds only the `ftyp`, or
-/// the `ftyp` and the reserve. None of them is written to.
+/// an `mdat` (of a 32- or a 64-bit size, next to it or after another box,
+/// or after a `uuid` box before the `mdat`), or that is no MP4 file at all
+/// stays failed with symphonia's error, as any file it cannot read; so does
+/// a file that holds only the `ftyp`, or the `ftyp` and the reserve. None of
+/// them is written to.
 #[test]
 fn only_the_recorders_layout_is_salvaged() {
     let directory = tempfile::tempdir().unwrap();
@@ -613,6 +614,36 @@ fn a_packet_the_decoder_refuses_becomes_silence_in_a_salvage() {
     assert_eq!(decoded.damage.parts, 1);
     assert!((decoded.damage.seconds - 1_024.0 / 44_100.0).abs() < 1e-9);
     assert!(decoded.damage.salvaged);
+}
+
+/// A file that makes symphonia's probe panic fails as one it refuses, with
+/// the file kept: symphonia 0.5.5's MP4 reader adds a box's size to its
+/// offset unchecked, so a `free` box whose 64-bit size is 2^64 - 1 after
+/// the `ftyp` overflows in a debug build (and is an error in a release
+/// one). With the phone's brands the salvage then refuses it too, as with
+/// another major brand. Neither file is written to.
+#[test]
+fn a_file_the_probe_panics_on_fails_and_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let bytes = killed();
+    let huge = [
+        1u32.to_be_bytes().as_slice(),
+        b"free",
+        &u64::MAX.to_be_bytes(),
+    ]
+    .concat();
+    let mut other = bytes[..28].to_vec();
+    other[8..12].copy_from_slice(b"isom");
+    for (name, ftyp) in [("phone", &bytes[..28]), ("isom", other.as_slice())] {
+        let variant = [ftyp, &huge, &bytes[PACKETS_AT..]].concat();
+        let path = written(directory.path(), &format!("{name}.m4a"), &variant);
+        assert!(
+            matches!(decode(&path), Err(CodecError::UnsupportedFormat(_))),
+            "{name}: {:?}",
+            decode(&path).map(|d| d.samples.len())
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), variant, "{name}");
+    }
 }
 
 /// The phone's settings, as the decode is built from them.
