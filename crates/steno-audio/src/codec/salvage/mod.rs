@@ -24,12 +24,12 @@
 //! stream of more than one channel does not parse. Only a file in the
 //! recorder's layout is salvaged: a `ftyp` with major brand `M4A ` and
 //! `mp42` among its compatible brands (the brands [`super::priming`]
-//! checks), no `moov` among the first 16 top-level boxes, and
-//! packets that parse from the first; any other file stays failed. Where the packets start is
-//! found, not assumed: past the zeros, or from the body of an `mdat` box
-//! should a writer leave one (else past the zeros in it), at the offset
-//! from which [`START_RUN`] packets parse in a row. In the app only the
-//! phone's uploads are `.m4a` masters, so only they reach the salvage.
+//! checks), no `moov` among the first 16 top-level boxes, and packets that
+//! parse from the first; any other file stays failed. Where the packets
+//! start is found, not assumed: past the zeros, or from the body of an
+//! `mdat` box should a writer leave one (else past the zeros in it), at the
+//! offset from which [`START_RUN`] packets parse in a row. In the app only
+//! the phone's uploads are `.m4a` masters, so only they reach the salvage.
 //!
 //! A packet that does not parse ends the salvage there, and so does the end
 //! of the file, inside a packet cut off by the kill or after the last whole

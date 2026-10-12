@@ -71,9 +71,11 @@
 //!   the mono test tone, 5 * 10^-3 on the stereo one, `tests/codec.rs`). A
 //!   file with more damaged packets than clean ones fails
 //!   ([`MAX_DAMAGED_SHARE`]), so a corrupt file never becomes a meeting of
-//!   silence. A panic in symphonia's probe (its MP4 reader on a box size
-//!   near 2^64, in a debug build) is caught the same way and fails the
-//!   file as the probe's error does.
+//!   silence. A panic in symphonia's probe is caught the same way and
+//!   fails the file as the probe's error does: its MP4 reader panics on a
+//!   box size near 2^64 in a debug build, and on a metadata `mean` or
+//!   `name` box too short for its version and flags in a release build
+//!   too, where the length wraps and the read asks for about 2^64 bytes.
 //! - **A recording without an index.** The phone's `AVAudioRecorder`
 //!   writes the `moov` only when it stops, so a recorder killed
 //!   mid-recording (a crash, a jetsam kill, a force-quit) leaves raw AAC
@@ -763,7 +765,10 @@ impl SymphoniaFrames {
         // A panic in the probe is caught as its failure, as `decode_packet`
         // catches the decoder's: symphonia 0.5.5's MP4 reader adds a box's
         // size to its offset unchecked, which panics in a debug build on a
-        // 64-bit size near 2^64. Nothing the probe built outlives it.
+        // 64-bit size near 2^64, and subtracts the 4 bytes of version and
+        // flags from a `mean` or `name` box's length unchecked, which in a
+        // release build wraps into a capacity overflow (ilst.rs:536).
+        // Nothing the probe built outlives it.
         let probed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crash_log::expected(|| {
                 symphonia::default::get_probe().format(
