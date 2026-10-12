@@ -10,8 +10,9 @@
 # - keys/pgp/ holds another key than apps/desktop/release-signing-key.asc,
 #   validpgpkeys names another fingerprint, or source= lacks the .deb's .asc;
 # - LICENSE differs from the repository's, speexdsp-COPYING from
-#   crates/steno-audio/vendor/speexdsp/COPYING, or a copy here of a drop-in
-#   from its file in apps/desktop/src-tauri/linux/;
+#   crates/steno-audio/vendor/speexdsp/COPYING, symphonia-aac-tables.rs
+#   from crates/steno-audio/src/codec/salvage/tables.rs, or a copy here of a
+#   drop-in from its file in apps/desktop/src-tauri/linux/;
 # - the PKGBUILD's _copy, while it has one, installs a copy over a file the
 #   .deb ships or not where the .deb lacks it;
 # - the .deb's checksum or its signature from the release key does not
@@ -73,7 +74,9 @@ echo "ok: the PKGBUILD checks the .deb's .asc against the release key $fpr"
 cmp -s "$root/LICENSE" "$work/LICENSE" || die "packaging/aur/LICENSE is not the repository's LICENSE"
 cmp -s "$root/crates/steno-audio/vendor/speexdsp/COPYING" "$work/speexdsp-COPYING" \
   || die "packaging/aur/speexdsp-COPYING is not crates/steno-audio/vendor/speexdsp/COPYING"
-echo "ok: LICENSE is the repository's, speexdsp-COPYING the vendored SpeexDSP's"
+cmp -s "$root/crates/steno-audio/src/codec/salvage/tables.rs" "$work/symphonia-aac-tables.rs" \
+  || die "packaging/aur/symphonia-aac-tables.rs is not crates/steno-audio/src/codec/salvage/tables.rs"
+echo "ok: LICENSE is the repository's, speexdsp-COPYING the vendored SpeexDSP's, symphonia-aac-tables.rs the salvage's tables"
 
 # The stop timeout drop-ins (P5): the path under /usr/lib/systemd/user, the
 # file in apps/desktop/src-tauri/linux (and its copy here while the pinned
@@ -138,7 +141,8 @@ for path in \
   /usr/lib/steno-desktop/steno-speech-sidecar \
   /usr/share/applications/steno-desktop.desktop \
   /usr/share/licenses/$pkgname/LICENSE \
-  /usr/share/licenses/$pkgname/speexdsp-COPYING; do
+  /usr/share/licenses/$pkgname/speexdsp-COPYING \
+  /usr/share/licenses/$pkgname/symphonia-aac-tables.rs; do
   grep -qxF "$path" <<<"$files" || die "the package does not install $path"
 done
 [[ -x /usr/lib/steno-desktop/steno-desktop && -x /usr/lib/steno-desktop/steno-speech-sidecar ]] \

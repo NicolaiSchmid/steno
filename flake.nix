@@ -80,9 +80,10 @@
         description = "Bot-free meeting recorder for the Mac: records calls locally, transcribes and summarises on-device";
         homepage = "https://github.com/NicolaiSchmid/steno";
         changelog = "https://github.com/NicolaiSchmid/steno/releases/tag/v${release.version}";
-        # TODO: README.md says MIT but the repository has no LICENSE file
-        # yet. Add one and this line is right; until then nixpkgs' license
-        # checks would call the package unlicensed.
+        # The Swift release `release` names is MIT. The Tauri app, which the
+        # first stable bump names, also compiles in SpeexDSP (BSD) and AAC
+        # tables under MPL-2.0 (README.md, "License"): that bump adds bsd3
+        # and mpl20 here, as nix/package.nix lists them.
         license = lib.licenses.mit;
         platforms = [system];
         sourceProvenance = [lib.sourceTypes.binaryNativeCode];
