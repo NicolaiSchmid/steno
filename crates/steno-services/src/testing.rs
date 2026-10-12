@@ -18,6 +18,7 @@ use steno_adapters::DeliveryCoordinator;
 use steno_audio::SymphoniaAudioCodec;
 use steno_core::Store;
 use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory};
+use steno_host::services::Recorder as _;
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
 use steno_speech::SpeechRuntime;
 
@@ -190,8 +191,6 @@ impl SyntheticRecorder {
     /// Starts a recording in `mode` for `call_app` on a thread of its own,
     /// as the host calls it, and returns once the start did.
     pub fn start(&self, mode: steno_bridge::CaptureMode, call_app: Option<&str>) {
-        use steno_host::services::Recorder as _;
-
         let (recorder, call_app) = (self.recorder.clone(), call_app.map(str::to_owned));
         on_own_thread(HANG_GUARD, "the start returned", move || {
             recorder.start(mode, call_app.as_deref());
@@ -201,8 +200,6 @@ impl SyntheticRecorder {
     /// Stops the recording on a thread of its own, as the host calls it,
     /// and returns once the stop saved it.
     pub fn stop(&self) {
-        use steno_host::services::Recorder as _;
-
         let recorder = self.recorder.clone();
         on_own_thread(HANG_GUARD, "the stop returned", move || recorder.stop());
     }
@@ -210,8 +207,6 @@ impl SyntheticRecorder {
     /// Waits until the recorder is idle again: a stop it began on its own
     /// (a grace that ran out, a quit) saved the recording.
     pub async fn idle(&self, what: &str) {
-        use steno_host::services::Recorder as _;
-
         eventually_within(HANG_GUARD, what, || {
             self.recorder.status().state == steno_bridge::RecordingState::Idle
         })

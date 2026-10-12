@@ -2381,6 +2381,16 @@ mod tests {
         });
     }
 
+    /// The harness's recorder after a start on a thread of its own, which
+    /// may refuse it.
+    fn status_after_a_start(harness: &Harness) -> RecorderStatus {
+        let starter = harness.recorder.clone();
+        on_own_thread(HANG_GUARD, "the start returned", move || {
+            starter.start(CaptureMode::InPerson, None);
+        });
+        harness.recorder.status()
+    }
+
     /// Every change that finds the recorder in `state` holds it there for
     /// a while; the receiver hears of each one as it begins.
     fn held_in(
@@ -3087,11 +3097,7 @@ mod tests {
     async fn no_recording_starts_after_quitting() {
         let harness = harness(&[]);
         quit(&harness.recorder);
-        let starter = harness.recorder.clone();
-        on_own_thread(HANG_GUARD, "the start returned", move || {
-            starter.start(CaptureMode::InPerson, None);
-        });
-        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
+        assert_eq!(status_after_a_start(&harness).state, RecordingState::Idle);
         assert_eq!(harness.store.all_meetings().unwrap(), []);
     }
 
@@ -3103,22 +3109,17 @@ mod tests {
     async fn a_start_during_an_install_is_refused_with_a_message() {
         let harness = harness(&[]);
         let hold = harness.recorder.hold_starts();
-        let starter = harness.recorder.clone();
-        on_own_thread(HANG_GUARD, "the start returned", move || {
-            starter.start(CaptureMode::InPerson, None);
-        });
-        let status = harness.recorder.status();
+        let status = status_after_a_start(&harness);
         assert_eq!(status.state, RecordingState::Idle);
         assert_eq!(status.error.as_deref(), Some(INSTALLING_UPDATE));
         assert_eq!(harness.store.all_meetings().unwrap(), []);
 
         drop(hold);
         assert_eq!(harness.recorder.status().error, None);
-        let starter = harness.recorder.clone();
-        on_own_thread(HANG_GUARD, "the start returned", move || {
-            starter.start(CaptureMode::InPerson, None);
-        });
-        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+        assert_eq!(
+            status_after_a_start(&harness).state,
+            RecordingState::Recording
+        );
         let hold = harness.recorder.hold_starts();
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
         drop(hold);
@@ -3198,15 +3199,6 @@ mod tests {
         });
         schedule.check_on_request().await.unwrap();
         tokio::spawn(async move { schedule.offer("0.12.0").await })
-    }
-
-    /// The harness's recorder after a start on a thread of its own.
-    fn status_after_a_start(harness: &Harness) -> RecorderStatus {
-        let starter = harness.recorder.clone();
-        on_own_thread(HANG_GUARD, "the start returned", move || {
-            starter.start(CaptureMode::InPerson, None);
-        });
-        harness.recorder.status()
     }
 
     /// A Record while the install waits on a password prompt records at
