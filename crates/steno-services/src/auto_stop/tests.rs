@@ -361,6 +361,12 @@ fn the_release_s_countdown_runs_out_into_one_fresh_grace_while_the_capture_recov
             app_name: Some("Zen".to_owned())
         })
     );
+    watch.opened(Some("Zen".to_owned()));
+    watch.released(grace * 2).expect("armed again");
+    assert!(
+        watch.postpone(first.number, grace * 2, true).is_none(),
+        "a stale countdown postpones nothing"
+    );
 }
 
 /// The end reason an auto-stop writes is one the Swift app decodes: the
