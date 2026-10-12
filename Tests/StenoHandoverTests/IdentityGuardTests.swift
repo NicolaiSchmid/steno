@@ -358,6 +358,29 @@ import Testing
     #expect(try await store.pairedDevices().isEmpty)
   }
 
+  /// A recorded identity with a leftover staged one beside it (Pair Again
+  /// cut short after the stage, then the old keychain added back): the
+  /// launch loads the recorded one, asks nothing and writes nothing, so no
+  /// promote's delete reaches the identity the phones know.
+  @Test(arguments: [0, 1])
+  func aRecordedIdentityWithALeftoverStagedOneLoadsAndWritesNothing(phones: Int) async throws {
+    let keychain = FakeKeychain(known, next: other)
+    keychain.stagedIdentity = other
+    let identityGuard = try await identityGuard(keychain, recorded: known, phones: phones)
+    let bytes = try Data(contentsOf: identityGuard.record.url)
+    var asked = false
+    let identity = try await identityGuard.loadOrPairAgain(commonName: "A") {
+      asked = true
+      return true
+    }
+    #expect(hex(identity) == hex(known) && !asked)
+    #expect(keychain.stages == 0 && keychain.promotes == 0)
+    #expect(keychain.identity.map(hex) == hex(known))
+    #expect(keychain.stagedIdentity.map(hex) == hex(other))
+    #expect(try Data(contentsOf: identityGuard.record.url) == bytes)
+    #expect(try await store.pairedDevices().count == phones)
+  }
+
   /// Cut short after the record, before the promote: the staged identity
   /// is the recorded one, so the next launch promotes it.
   @Test(arguments: [false, true])
