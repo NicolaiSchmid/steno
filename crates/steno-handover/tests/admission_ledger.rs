@@ -637,31 +637,6 @@ async fn a_recording_an_older_app_admitted_is_answered_delivered_after_the_backf
     test.stop().await;
 }
 
-/// A fingerprint record in memory, as the app's `handover-identity.json`:
-/// the recorded fingerprint and the next one.
-#[derive(Default)]
-struct RecordInMemory(std::sync::Mutex<(Option<String>, Option<String>)>);
-
-impl steno_handover::FingerprintRecord for RecordInMemory {
-    fn recorded(&self) -> steno_core::BoundaryResult<Option<String>> {
-        Ok(self.0.lock().unwrap().0.clone())
-    }
-
-    fn record(&self, fingerprint: &str) -> steno_core::BoundaryResult<()> {
-        *self.0.lock().unwrap() = (Some(fingerprint.to_owned()), None);
-        Ok(())
-    }
-
-    fn next(&self) -> steno_core::BoundaryResult<Option<String>> {
-        Ok(self.0.lock().unwrap().1.clone())
-    }
-
-    fn note_next(&self, fingerprint: Option<&str>) -> steno_core::BoundaryResult<()> {
-        self.0.lock().unwrap().1 = fingerprint.map(str::to_owned);
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn a_resend_after_pair_again_is_delivered_with_the_first_meeting_unchanged() {
     // The phone's recording became meeting M, which the user renamed and
@@ -674,7 +649,7 @@ async fn a_resend_after_pair_again_is_delivered_with_the_first_meeting_unchanged
     // stay as the user left them.
     let (store, intake) = store_and_intake();
     let secrets = steno_core::testing::InMemorySecretStore::default();
-    let record = RecordInMemory::default();
+    let record = common::MemoryRecord::default();
     let now = chrono::Utc::now();
     let identity =
         steno_handover::HandoverIdentity::load_or_create(&secrets, &record, &store, "Steno", now)

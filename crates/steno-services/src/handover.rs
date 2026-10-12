@@ -286,7 +286,7 @@ impl IdentitySource {
             tracing::warn!(%error, "Pair again did not finish");
             match error {
                 // A stop after the write, which the next read finishes.
-                IdentityError::Store(_) | IdentityError::Record(_) => UNFINISHED.to_owned(),
+                IdentityError::Store(_) | IdentityError::Record(_) => unfinished(),
                 error => identity_failure(&error),
             }
         })
@@ -356,11 +356,9 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
 
 /// What Pair again answers when it stopped after the new identity was
 /// written (the phones' removal or the record failed).
-const UNFINISHED: &str = if cfg!(target_os = "macos") {
-    "Steno could not finish the new phone pairing on this Mac. Choose Pair again."
-} else {
-    "Steno could not finish the new phone pairing on this computer. Choose Pair again."
-};
+fn unfinished() -> String {
+    format!("Steno could not finish the new phone pairing on this {COMPUTER}. Choose Pair again.")
+}
 
 /// What the iPhone section says the handover waits for, by why the
 /// identity was not available: a stored identity that does not parse, a
@@ -1137,10 +1135,9 @@ mod tests {
             crate::swift_import::STEP_UNDER_WAY,
             MARKER_NOT_WRITTEN,
             WAITING_FOR_IMPORT,
-            UNFINISHED,
         ]
         .map(str::to_owned);
-        for answer in answers.iter().chain(&failures) {
+        for answer in answers.iter().chain(&failures).chain([&unfinished()]) {
             for word in [
                 "identity",
                 "secret",
@@ -1404,79 +1401,31 @@ mod tests {
         /// (its receipt `complete`, its row in the admission ledger).
         fn seed_recordings(&self) -> Recordings {
             let now = chrono::Utc::now();
-            let receipt = |recording_id, state| HandoverReceipt {
-                recording_id,
-                device_id: self.phone(),
-                state,
-                byte_count: 4,
-                sha256: vec![7; 32],
-                chunk_size: 4,
-                received_chunks: Vec::new(),
-                created_at: now,
-                updated_at: now,
-            };
             let receiving = Uuid::new_v4();
             self.store
-                .save_handover_receipt(&receipt(receiving, steno_core::HandoverState::Receiving))
+                .save_handover_receipt(&HandoverReceipt {
+                    recording_id: receiving,
+                    device_id: self.phone(),
+                    state: steno_core::HandoverState::Receiving,
+                    byte_count: 4,
+                    sha256: vec![7; 32],
+                    chunk_size: 4,
+                    received_chunks: Vec::new(),
+                    created_at: now,
+                    updated_at: now,
+                })
                 .unwrap();
             let inbox = self.dir.path().join("inbox");
             std::fs::create_dir_all(&inbox).unwrap();
             let partial = inbox.join(format!("{}.partial", receiving.hyphenated()));
             std::fs::write(&partial, b"aac").unwrap();
-            let meeting = steno_core::Meeting {
-                id: Uuid::new_v4(),
-                ..steno_core::testing::sample_data::meeting()
-            };
-            let asset = steno_core::AudioAsset {
-                id: Uuid::new_v4(),
-                meeting_id: meeting.id,
-                url: format!("file:///tmp/Audio/{}/master.m4a", meeting.id),
-                format: steno_core::AudioFormat::M4aAac,
-                lanes: vec![steno_core::AudioLane::Mixed],
-                sidecars_16k: BTreeMap::new(),
-                mixdown_url: None,
-                retention: steno_core::AudioRetention::KeepForever,
-                expires_at: None,
-            };
-            let admitted = Uuid::new_v4();
-            let complete = steno_core::HandoverState::Complete {
-                meeting_id: meeting.id,
-            };
-            self.store
-                .save_admission_durably(&receipt(admitted, complete), &meeting, &asset)
-                .unwrap();
+            let (admitted, meeting) = crate::testing::admit_a_recording(&self.store);
             Recordings {
                 receiving,
                 partial,
                 admitted,
-                meeting: meeting.id,
+                meeting,
             }
-        }
-
-        /// Keeps the last paired phone whatever deletes it, as a disk that
-        /// refuses the write would, until [`Self::let_the_phone_go`]: Pair
-        /// again stops right after the write with one phone paired, and
-        /// after the first phone with two.
-        fn keep_the_phone(&self) {
-            self.store
-                .write(|transaction| {
-                    transaction.execute_batch(
-                        "CREATE TRIGGER keep_the_phone BEFORE DELETE ON pairedDevice \
-                         WHEN (SELECT COUNT(*) FROM pairedDevice) = 1 \
-                         BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;",
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
-        }
-
-        fn let_the_phone_go(&self) {
-            self.store
-                .write(|transaction| {
-                    transaction.execute_batch("DROP TRIGGER keep_the_phone;")?;
-                    Ok(())
-                })
-                .unwrap();
         }
 
         /// No fingerprint recorded, as on the first launch after the Swift
@@ -1770,13 +1719,13 @@ mod tests {
                     if refuse_record {
                         paired.record.refuse.store(true, Ordering::SeqCst);
                     } else {
-                        paired.keep_the_phone();
+                        crate::testing::keep_the_last_phone(&paired.store, true);
                     }
                     tokio::task::block_in_place(|| handover.pair_again()).unwrap_err();
                     if refuse_record {
                         paired.record.refuse.store(false, Ordering::SeqCst);
                     } else {
-                        paired.let_the_phone_go();
+                        crate::testing::keep_the_last_phone(&paired.store, false);
                     }
                     let (stored, recorded, next, phones) = paired.places().await;
                     let new_identity = HandoverIdentity::from_pem(
@@ -1896,9 +1845,9 @@ mod tests {
         paired.keychain.refuse_writes.store(false, Ordering::SeqCst);
         recordings.assert_kept(&paired.store, true, "a refused write");
 
-        paired.keep_the_phone();
+        crate::testing::keep_the_last_phone(&paired.store, true);
         pair_again().unwrap_err();
-        paired.let_the_phone_go();
+        crate::testing::keep_the_last_phone(&paired.store, false);
         recordings.assert_kept(&paired.store, true, "a stop after the write");
 
         paired.record.refuse.store(true, Ordering::SeqCst);

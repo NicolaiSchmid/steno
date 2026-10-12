@@ -166,25 +166,24 @@ impl HandoverIdentity {
         };
         let identity = Self::from_pem(&stored)?;
         let fingerprint = hex(&identity.fingerprint());
-        if let Some(next) = next {
-            if next == fingerprint {
+        match (next, recorded) {
+            // Finished: the identity an unfinished Pair again wrote.
+            (Some(next), _) if next == fingerprint => {
                 remove_paired_phones(store)?;
                 identity.record_fingerprint(record)?;
-                return Ok(identity);
             }
-            if recorded.as_ref() != Some(&fingerprint) {
-                return Err(Unavailability::Replaced.into());
+            // The recorded identity; a note beside it was abandoned.
+            (next, Some(recorded)) if recorded == fingerprint => {
+                if next.is_some() {
+                    drop_the_note(record);
+                }
             }
-            drop_the_note(record);
+            // Unknown, or another identity than the recorded one.
+            (Some(_), None) | (_, Some(_)) => return Err(Unavailability::Replaced.into()),
+            // Found without a record: recorded again.
+            (None, None) => identity.record_fingerprint(record)?,
         }
-        match recorded {
-            Some(recorded) if recorded != fingerprint => Err(Unavailability::Replaced.into()),
-            Some(_) => Ok(identity),
-            None => {
-                identity.record_fingerprint(record)?;
-                Ok(identity)
-            }
-        }
+        Ok(identity)
     }
 
     /// Pair again's identity step, the user's choice when the identity the

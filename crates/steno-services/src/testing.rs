@@ -1,7 +1,8 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
-//! old, a paired phone, a fingerprint record that refuses writes, the
+//! old, a paired phone, a recording it delivered, a store that keeps the
+//! last phone, a fingerprint record that refuses writes, the
 //! waits that fail a test instead of hanging it, and [`warnings`], what a
 //! call logs at `warn` and above.
 //!
@@ -302,6 +303,66 @@ pub fn pair_a_phone(store: &Store) {
             &token,
         )
         .unwrap();
+}
+
+/// While `keep`, keeps the last paired phone in `store` whatever deletes
+/// it, as a disk that refuses the write would: Pair again stops right
+/// after the write with one phone paired, and after the first phone with
+/// two.
+pub fn keep_the_last_phone(store: &Store, keep: bool) {
+    let sql = if keep {
+        "CREATE TRIGGER keep_the_last_phone BEFORE DELETE ON pairedDevice \
+         WHEN (SELECT COUNT(*) FROM pairedDevice) = 1 \
+         BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;"
+    } else {
+        "DROP TRIGGER keep_the_last_phone;"
+    };
+    store
+        .write(|transaction| {
+            transaction.execute_batch(sql)?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Admits a recording of the first paired phone in `store` as a meeting,
+/// with its `complete` receipt and its row in the admission ledger (4
+/// bytes, SHA-256 `[7; 32]`): the recording's and the meeting's ids.
+pub fn admit_a_recording(store: &Store) -> (uuid::Uuid, uuid::Uuid) {
+    let now = chrono::Utc::now();
+    let meeting = steno_core::Meeting {
+        id: uuid::Uuid::new_v4(),
+        ..steno_core::testing::sample_data::meeting()
+    };
+    let asset = steno_core::AudioAsset {
+        id: uuid::Uuid::new_v4(),
+        meeting_id: meeting.id,
+        url: format!("file:///tmp/Audio/{}/master.m4a", meeting.id),
+        format: steno_core::AudioFormat::M4aAac,
+        lanes: vec![steno_core::AudioLane::Mixed],
+        sidecars_16k: std::collections::BTreeMap::new(),
+        mixdown_url: None,
+        retention: steno_core::AudioRetention::KeepForever,
+        expires_at: None,
+    };
+    let recording = uuid::Uuid::new_v4();
+    let receipt = steno_core::HandoverReceipt {
+        recording_id: recording,
+        device_id: store.paired_devices().unwrap()[0].id,
+        state: steno_core::HandoverState::Complete {
+            meeting_id: meeting.id,
+        },
+        byte_count: 4,
+        sha256: vec![7; 32],
+        chunk_size: 4,
+        received_chunks: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    store
+        .save_admission_durably(&receipt, &meeting, &asset)
+        .unwrap();
+    (recording, meeting.id)
 }
 
 /// Waits until `done` holds, failing the test with `what` after

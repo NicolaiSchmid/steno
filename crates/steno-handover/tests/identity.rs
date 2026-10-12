@@ -10,11 +10,14 @@
     clippy::too_many_lines
 )]
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{TimeZone as _, Utc};
+use common::MemoryRecord;
 use steno_core::{BoundaryResult, PairedDevice, SecretKey, SecretStore, Store};
 use steno_handover::identity::hex;
 use steno_handover::{FingerprintRecord, HandoverIdentity, IdentityError, Unavailability};
@@ -157,54 +160,6 @@ impl SecretStore for MemorySecrets {
     }
 }
 
-/// A fingerprint record in memory, with the next fingerprint of an
-/// unfinished Pair again, that refuses records while `refuse` is set and
-/// notes while `refuse_note` is.
-#[derive(Default)]
-struct MemoryRecord {
-    value: Mutex<Option<String>>,
-    next: Mutex<Option<String>>,
-    refuse: AtomicBool,
-    refuse_note: AtomicBool,
-}
-
-impl MemoryRecord {
-    fn get(&self) -> Option<String> {
-        self.value.lock().unwrap().clone()
-    }
-
-    fn get_next(&self) -> Option<String> {
-        self.next.lock().unwrap().clone()
-    }
-}
-
-impl FingerprintRecord for MemoryRecord {
-    fn recorded(&self) -> BoundaryResult<Option<String>> {
-        Ok(self.get())
-    }
-
-    fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
-        if self.refuse.load(Ordering::SeqCst) {
-            return Err("No space left on device".into());
-        }
-        *self.value.lock().unwrap() = Some(fingerprint.to_owned());
-        *self.next.lock().unwrap() = None;
-        Ok(())
-    }
-
-    fn next(&self) -> BoundaryResult<Option<String>> {
-        Ok(self.get_next())
-    }
-
-    fn note_next(&self, fingerprint: Option<&str>) -> BoundaryResult<()> {
-        if self.refuse_note.load(Ordering::SeqCst) {
-            return Err("No space left on device".into());
-        }
-        *self.next.lock().unwrap() = fingerprint.map(str::to_owned);
-        Ok(())
-    }
-}
-
 /// The three inputs of `load_or_create`, empty.
 #[derive(Default)]
 struct Places {
@@ -265,12 +220,7 @@ impl Places {
         } else {
             "DROP TRIGGER keep_the_last_phone;"
         };
-        self.store()
-            .write(|transaction| {
-                transaction.execute_batch(sql)?;
-                Ok(())
-            })
-            .unwrap();
+        common::execute_batch(self.store(), sql);
     }
 
     /// The stored identity, the recorded fingerprint, the next fingerprint

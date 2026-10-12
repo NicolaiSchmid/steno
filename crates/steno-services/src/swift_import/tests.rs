@@ -1561,7 +1561,7 @@ async fn an_import_pair_again_that_stopped_is_finished_at_the_next_launch() {
         if stop == "after phone 1 of 2" {
             crate::testing::pair_a_phone(&app.store);
         }
-        let admitted = admit_a_recording(&app.store);
+        let admitted = crate::testing::admit_a_recording(&app.store);
         let step = app.services.swift_import.clone().unwrap();
         let status = tokio::task::spawn_blocking(move || step.run())
             .await
@@ -1569,28 +1569,14 @@ async fn an_import_pair_again_that_stopped_is_finished_at_the_next_launch() {
         assert_eq!(status.stage, SwiftImportStage::Waiting);
         assert_eq!(record.recorded().unwrap(), None, "{stop}: nothing recorded");
 
-        app.store
-            .write(|transaction| {
-                transaction.execute_batch(
-                    "CREATE TRIGGER keep_the_last_phone BEFORE DELETE ON pairedDevice \
-                     WHEN (SELECT COUNT(*) FROM pairedDevice) = 1 \
-                     BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        crate::testing::keep_the_last_phone(&app.store, true);
         let gated = app.gated_handover.clone().unwrap();
         tokio::task::block_in_place(|| gated.pair_again()).unwrap_err();
         assert_eq!(*keychain.marker.lock().unwrap(), Ok(true), "{stop}");
         let next = record.next().unwrap().expect("the note");
         assert_eq!(record.recorded().unwrap(), None, "{stop}");
         assert_eq!(app.store.paired_devices().unwrap().len(), 1, "{stop}");
-        app.store
-            .write(|transaction| {
-                transaction.execute_batch("DROP TRIGGER keep_the_last_phone;")?;
-                Ok(())
-            })
-            .unwrap();
+        crate::testing::keep_the_last_phone(&app.store, false);
         app.shutdown();
         drop(app);
 
@@ -1621,45 +1607,6 @@ async fn an_import_pair_again_that_stopped_is_finished_at_the_next_launch() {
         );
         app.shutdown();
     }
-}
-
-/// Admits a recording of the first paired phone as a meeting, with its
-/// row in the admission ledger: the recording's and the meeting's ids.
-fn admit_a_recording(store: &steno_core::Store) -> (uuid::Uuid, uuid::Uuid) {
-    let now = chrono::Utc::now();
-    let meeting = steno_core::Meeting {
-        id: uuid::Uuid::new_v4(),
-        ..steno_core::testing::sample_data::meeting()
-    };
-    let asset = steno_core::AudioAsset {
-        id: uuid::Uuid::new_v4(),
-        meeting_id: meeting.id,
-        url: format!("file:///tmp/Audio/{}/master.m4a", meeting.id),
-        format: steno_core::AudioFormat::M4aAac,
-        lanes: vec![steno_core::AudioLane::Mixed],
-        sidecars_16k: std::collections::BTreeMap::new(),
-        mixdown_url: None,
-        retention: steno_core::AudioRetention::KeepForever,
-        expires_at: None,
-    };
-    let recording = uuid::Uuid::new_v4();
-    let receipt = steno_core::HandoverReceipt {
-        recording_id: recording,
-        device_id: store.paired_devices().unwrap()[0].id,
-        state: steno_core::HandoverState::Complete {
-            meeting_id: meeting.id,
-        },
-        byte_count: 4,
-        sha256: vec![7; 32],
-        chunk_size: 4,
-        received_chunks: Vec::new(),
-        created_at: now,
-        updated_at: now,
-    };
-    store
-        .save_admission_durably(&receipt, &meeting, &asset)
-        .unwrap();
-    (recording, meeting.id)
 }
 
 /// The meeting detail asks what the pipeline asks, over the real gate:
