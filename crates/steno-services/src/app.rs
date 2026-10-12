@@ -1096,6 +1096,50 @@ fn log_operation_failure(event: &MeetingEvent) {
     }
 }
 
+/// How often the launch's poll reloads the meetings and the pairing
+/// ([`App::launch`]).
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What the event follower does with one event from the pipeline's bus,
+/// on the blocking pool ([`App::launch`]): the host applies it, then
+/// reloads where the event changed rows the progress does not carry. A
+/// retention applied also sweeps first. `None` is a follower that fell
+/// behind the bus and missed events: it reloads everything.
+fn follow_event(host: &Host, sweep: &RetentionSweep, event: Option<&MeetingEvent>) {
+    let Some(event) = event else {
+        host.store_changed();
+        return;
+    };
+    host.apply_meeting_event(event);
+    match event {
+        MeetingEvent::Progress { .. } => {}
+        MeetingEvent::RetentionApplied { .. } => {
+            run_sweep(sweep);
+            host.store_changed();
+        }
+        MeetingEvent::SpeakersNeedReview { .. }
+        | MeetingEvent::Deleted { .. }
+        | MeetingEvent::ModelsMissing { .. }
+        | MeetingEvent::StoreBusy { .. } => host.store_changed(),
+        MeetingEvent::OperationFailed { .. } => {
+            log_operation_failure(event);
+            host.store_changed();
+        }
+    }
+}
+
+/// Runs `body` on the runtime's blocking pool and waits for it there, so
+/// a host call that waits on the store holds no runtime worker. A panic
+/// in `body` resumes here. False when the runtime is shutting down and
+/// did not run it, which ends the calling task.
+async fn off_the_workers(body: impl FnOnce() + Send + 'static) -> bool {
+    match tokio::task::spawn_blocking(body).await {
+        Ok(()) => true,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => false,
+    }
+}
+
 impl App {
     /// The host over this graph, with the viewer's zone, the version,
     /// whether a package manager delivers the updates
@@ -1219,36 +1263,25 @@ impl App {
         }
         self.report_update_checks(host);
 
+        // The host's reloads read the store, and the sweep writes it: each
+        // waits, behind a write, for as long as another process holds the
+        // write lock. So both tasks hand the host to the blocking pool and
+        // await it there, one event at a time in the bus's order, and no
+        // wait holds a runtime worker, which the pipeline's runs, the
+        // handover and the timers need.
         let mut receiver = self.events.subscribe();
         let sweep = self.sweep.clone();
         let event_host = host.clone();
         tokio::spawn(async move {
             loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        event_host.apply_meeting_event(&event);
-                        match &event {
-                            MeetingEvent::Progress { .. } => {}
-                            MeetingEvent::RetentionApplied { .. } => {
-                                run_sweep(&sweep);
-                                event_host.store_changed();
-                            }
-                            MeetingEvent::SpeakersNeedReview { .. }
-                            | MeetingEvent::Deleted { .. }
-                            | MeetingEvent::ModelsMissing { .. }
-                            | MeetingEvent::StoreBusy { .. } => {
-                                event_host.store_changed();
-                            }
-                            MeetingEvent::OperationFailed { .. } => {
-                                log_operation_failure(&event);
-                                event_host.store_changed();
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        event_host.store_changed();
-                    }
+                let event = match receiver.recv().await {
+                    Ok(event) => Some(event),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                };
+                let (host, sweep) = (event_host.clone(), sweep.clone());
+                if !off_the_workers(move || follow_event(&host, &sweep, event.as_ref())).await {
+                    return;
                 }
             }
         });
@@ -1257,13 +1290,22 @@ impl App {
         // itself (the Swift app had GRDB observation). The same tick is
         // the pairing poll Swift's Phones pane ran every two seconds: a
         // phone that paired closes the code, a code that ran out closes.
+        // A tick that waited is followed by the next one a full interval
+        // later, never by a burst.
         let poll_host = host.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            let mut interval = tokio::time::interval(POLL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
-                poll_host.store_changed();
-                poll_host.refresh_pairing();
+                let host = poll_host.clone();
+                let tick = move || {
+                    host.store_changed();
+                    host.refresh_pairing();
+                };
+                if !off_the_workers(tick).await {
+                    return;
+                }
             }
         });
 
@@ -3771,5 +3813,228 @@ mod tests {
         memory.fail_reads(Some("the keyring is locked"));
         assert_eq!(sent().await, None);
         server.stop();
+    }
+
+    /// A pipeline whose `export_keeps_failing`, which the detail's reload
+    /// asks, waits at a gate while the gate is armed: a reload held there
+    /// stands for one that waits on the store behind another process's
+    /// write lock. Everything else is the host's fake.
+    #[derive(Default)]
+    struct GatedPipeline {
+        fake: steno_host::fakes::FakePipeline,
+        gate: ReloadGate,
+    }
+
+    #[derive(Default)]
+    struct ReloadGate {
+        state: std::sync::Mutex<GateState>,
+        changed: std::sync::Condvar,
+    }
+
+    #[derive(Default)]
+    struct GateState {
+        armed: bool,
+        /// Reloads waiting at the gate now.
+        held: usize,
+        /// Reloads the gate has held, in all.
+        entered: usize,
+        reloads: usize,
+    }
+
+    impl ReloadGate {
+        fn state(&self) -> std::sync::MutexGuard<'_, GateState> {
+            self.state.lock().unwrap()
+        }
+
+        fn pass(&self) {
+            let mut state = self.state();
+            state.reloads += 1;
+            if state.armed {
+                state.held += 1;
+                state.entered += 1;
+                self.changed.notify_all();
+                while state.armed {
+                    state = self.changed.wait(state).unwrap();
+                }
+                state.held -= 1;
+            }
+            self.changed.notify_all();
+        }
+
+        fn reloads(&self) -> usize {
+            self.state().reloads
+        }
+
+        /// Waits up to `patience` for `reached`; whether it was.
+        fn wait_for(
+            &self,
+            patience: std::time::Duration,
+            reached: impl Fn(&GateState) -> bool,
+        ) -> bool {
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(self.state(), patience, |state| !reached(state))
+                .unwrap();
+            reached(&state)
+        }
+
+        /// Arms the gate; the next reload waits there until the guard
+        /// drops, also when the test fails.
+        fn arm(&self) -> ArmedGate<'_> {
+            self.state().armed = true;
+            ArmedGate(self)
+        }
+    }
+
+    struct ArmedGate<'a>(&'a ReloadGate);
+
+    impl Drop for ArmedGate<'_> {
+        fn drop(&mut self) {
+            self.0.state().armed = false;
+            self.0.changed.notify_all();
+        }
+    }
+
+    impl steno_host::services::Pipeline for GatedPipeline {
+        fn rerun_summary(&self, meeting_id: uuid::Uuid, template_id: &str) -> BoundaryResult<()> {
+            self.fake.rerun_summary(meeting_id, template_id)
+        }
+
+        fn redeliver(&self, meeting_id: uuid::Uuid) -> BoundaryResult<()> {
+            self.fake.redeliver(meeting_id)
+        }
+
+        fn export_keeps_failing(&self, meeting_id: uuid::Uuid) -> bool {
+            self.gate.pass();
+            self.fake.export_keeps_failing(meeting_id)
+        }
+
+        fn process_again(
+            &self,
+            meeting_id: uuid::Uuid,
+        ) -> Result<(), steno_host::services::ProcessAgainRefusal> {
+            self.fake.process_again(meeting_id)
+        }
+
+        fn damaged_audio(&self, meeting_id: uuid::Uuid) -> steno_core::AudioDamage {
+            self.fake.damaged_audio(meeting_id)
+        }
+
+        fn audio_may_be_damaged(&self, meeting_id: uuid::Uuid) -> bool {
+            self.fake.audio_may_be_damaged(meeting_id)
+        }
+
+        fn apply_retention(
+            &self,
+            meeting_id: uuid::Uuid,
+            rule: steno_core::AudioRetention,
+        ) -> BoundaryResult<()> {
+            self.fake.apply_retention(meeting_id, rule)
+        }
+
+        fn reload(&self) -> BoundaryResult<()> {
+            self.fake.reload()
+        }
+
+        fn keep_all_recordings(&self) -> BoundaryResult<i64> {
+            self.fake.keep_all_recordings()
+        }
+    }
+
+    /// Fails unless the timer behind `ticked` keeps ticking for `length`:
+    /// no gap of 200 ms or more between its ticks, read from the test's
+    /// own thread, which is not one of the runtime's.
+    fn assert_live(
+        ticked: &std::sync::Mutex<std::time::Instant>,
+        length: std::time::Duration,
+        what: &str,
+    ) {
+        let start = std::time::Instant::now();
+        while start.elapsed() < length {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let since = ticked.lock().unwrap().elapsed();
+            assert!(
+                since < std::time::Duration::from_millis(200),
+                "{what}: the runtime's timer stopped for {since:?}"
+            );
+        }
+    }
+
+    /// The launch's two tasks, the event follower and the two-second
+    /// poll, reload the host on the blocking pool: while a reload is held
+    /// (the detail asks the pipeline whether its export keeps failing, at
+    /// a gate), a timer task on the services runtime, which has one
+    /// worker, keeps ticking. Run on that worker, a held reload would stop
+    /// every task there: the pipeline's runs, the handover, the timers.
+    #[test]
+    fn the_poll_and_the_events_task_never_block_a_worker() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let mut app = runtime.block_on(async { build(options_under(&support)).unwrap() });
+        let pipeline = Arc::new(GatedPipeline::default());
+        app.services.pipeline = pipeline.clone();
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = steno_core::MeetingState::Ready;
+        app.store.save_meeting(&meeting).unwrap();
+        let host = Arc::new(app.host().unwrap());
+        host.request_meeting(meeting.id);
+        assert!(pipeline.gate.reloads() > 0, "the meeting's detail is shown");
+        {
+            let _inside = runtime.enter();
+            app.launch(&host);
+        }
+        runtime.block_on(app.launch_finished());
+        let ticked = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let ticks = ticked.clone();
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                *ticks.lock().unwrap() = std::time::Instant::now();
+            }
+        });
+        let gate = &pipeline.gate;
+        let patience = std::time::Duration::from_secs(5);
+
+        // Right after a poll's reload, so the next one is two seconds off:
+        // the reload the gate holds is the event follower's.
+        let before = gate.reloads();
+        assert!(
+            gate.wait_for(patience, |state| state.reloads > before),
+            "the poll reloads"
+        );
+        let armed = gate.arm();
+        app.events.post(MeetingEvent::Deleted {
+            meeting_id: uuid::Uuid::new_v4(),
+        });
+        assert!(
+            gate.wait_for(std::time::Duration::from_secs(1), |state| state.entered
+                == 1),
+            "the event follower's reload reaches the gate"
+        );
+        assert_live(
+            &ticked,
+            std::time::Duration::from_millis(600),
+            "the event follower",
+        );
+        drop(armed);
+        assert!(
+            gate.wait_for(patience, |state| state.held == 0),
+            "the event follower's reload goes on"
+        );
+
+        // No event now: the next reload the gate holds is the poll's.
+        let armed = gate.arm();
+        assert!(
+            gate.wait_for(patience, |state| state.entered == 2),
+            "the poll's reload reaches the gate"
+        );
+        assert_live(&ticked, std::time::Duration::from_millis(600), "the poll");
+        drop(armed);
+        runtime.shutdown_background();
     }
 }
