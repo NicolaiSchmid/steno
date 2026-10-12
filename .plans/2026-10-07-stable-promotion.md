@@ -1033,8 +1033,9 @@ Each lands before `0.11.0-rc.1`.
        grep -A8 "<the headset's name>"`. Pass when the headset stays at 44.1
        or 48 kHz. A switch to 16 or 24 kHz is compared with main while
        `afplay` plays. The aggregate's own inputs are A11's, not A10's: a
-       headset that drops to hands-free because the aggregate runs its
-       inputs is A11's known limit, noted (step 6), not a failure here.
+       headset that drops to hands-free because recording the call also
+       opens the headset's microphone is A11's known limit, noted (step 6),
+       not a failure here.
     4. Alerts on the speakers, the output on a headset: in System Settings,
        Sound, set "Play sound effects through" to the Mac's speakers and the
        output to a headset, then run step 2's `cargo test` command with
@@ -1160,9 +1161,9 @@ Each lands before `0.11.0-rc.1`.
   that file, and the Mac failed it, though its audio is all there.
   - **Measured on Forge** (macOS 26.7.1), with the phone's settings
     (`recording-options.ts`: AAC-LC in `.m4a`, mono, 44.1 kHz, 64 kbps,
-    quality 96). `AVAudioRecorder` SIGKILLed after 1, 4 and 30 s, under the
-    live-audio lock, and `AVAudioFile` (the same encoder and file writer)
-    killed mid-encode on synthetic speech, music, noise and clicks. A
+    quality 96). `AVAudioRecorder` SIGKILLed after 1, 4 and 30 s, and
+    `AVAudioFile` (the same encoder and file writer) killed mid-encode on
+    synthetic speech, music, noise and clicks. A
     finished file is `ftyp` (28 bytes: `M4A `, then `M4A `, `mp42`,
     `isom`), `moov`, a `free` box filling the reserve, `mdat`, whose body
     starts at byte 57 344 (a 19-minute file: `ftyp`, `free`, `mdat`, then
@@ -1183,10 +1184,10 @@ Each lands before `0.11.0-rc.1`.
     minutes: speech in eight synthetic voices, chords, a chirp, noise
     bursts, clicks, silence, a full-scale square wave, levels from 0.02 to
     3 times), it split all 101 375 packets where `stsz` says; the 19-minute
-    file splits in 0.16 s. Those packets hold 4 050 short-window frames,
+    file splits in 0.16 s. Those packets hold 4 050 short-window packets,
     11 352 with TNS and 479 336 codebook-11 escapes; Apple's encoder wrote
     no noise band, pulse, fill or data element in them, so those branches
-    are tested on hand-built frames only. Apple's encoder is not always
+    are tested on hand-built packets only. Apple's encoder is not always
     deterministic: one of four killed encodes of the same input diverged
     from its finished twin inside packet 36 (both valid streams). Nothing
     else gives the sizes: these files hold no `mdat` header and no partial
@@ -1194,8 +1195,9 @@ Each lands before `0.11.0-rc.1`.
     (`AVAudioFile` fails on them).
   - **The salvage.** When symphonia cannot read a file and it is in the
     recorder's layout (the `ftyp` brands #246's priming checks, no `moov`
-    among the top-level boxes, before an `mdat` or after it, whatever the
-    size field's width), the decoder reads its packets with the phone's
+    among the first 16 top-level boxes, before an `mdat` or after it or
+    after a box of another type, whatever the size field's width), the
+    decoder reads its packets with the phone's
     settings and trims `AVAudioRecorder`'s 2 112 samples of priming. Where
     the packets start is found, not assumed: past the zeros (or an `mdat`
     header, should iOS leave one, then past the zeros in its body if the
@@ -1211,8 +1213,9 @@ Each lands before `0.11.0-rc.1`.
     bits cannot tell the two apart (a 48 kHz stream would decode 8.8 %
     slow, unflagged). The evidence is the phone's fixed preset instead: the
     salvage assumes 44.1 kHz mono (`salvage::SAMPLE_RATE`), the preset in
-    `recording-options.ts` asks for it, and a Rust test fails when the
-    preset stops saying `sampleRate: 44_100` or `numberOfChannels: 1`. A
+    `recording-options.ts` asks for it, and a Rust test fails unless the
+    preset holds exactly one `sampleRate:` and one `numberOfChannels:`,
+    reading `44_100` and `1`; Rust CI runs it whenever the preset changes. A
     stream of more than one channel does not parse, so it stays failed. In
     the app only the phone's uploads are `.m4a` masters (the Mac records
     CAF, `steno process` takes WAV), so only they reach the salvage. A
@@ -1250,8 +1253,10 @@ Each lands before `0.11.0-rc.1`.
     of silence; every packet of the finished fixtures splits where `stsz`
     says; other brands, a `moov` in the reserve, no `ftyp`, an `ftyp` alone
     and a reserve alone stay failed, as does a `moov` after an `mdat` (next to
-    it, after a `free` box, or after a 64-bit `mdat`), none of them written
-    to; packets of a channel pair or of two channels stay failed; a file cut
+    it, after a `free` box, after a 64-bit `mdat`, or after a `uuid` box
+    before the `mdat`, which the box walk alone also refuses), none of them
+    written to; a file on which symphonia's probe panics in a debug build (a
+    64-bit box size of 2^64 - 1) fails, the panic caught, with the file kept; packets of a channel pair or of two channels stay failed; a file cut
     mid-packet decodes up to the cut; a reserve of 0, 1 000 or 70 000 bytes, a
     longer `ftyp`, an `mdat` header (of size 0 or a 64-bit size) or a
     placeholder `mdat` before the zeros decodes the same; a finished file
