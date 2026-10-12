@@ -101,8 +101,13 @@ pub struct FilePreferences {
 }
 
 impl FilePreferences {
+    /// Crate-only, as is [`Self::in_support_directory`]: every write
+    /// replaces the whole file from this instance's map, so a second
+    /// instance on the same file would drop the first one's later flags.
+    /// The graph builds the one instance (`crate::build_with_import`) and
+    /// hands it to the Swift import's launch half and to the host.
     #[must_use]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let (values, writable) = read_json(&path);
         FilePreferences {
@@ -110,6 +115,24 @@ impl FilePreferences {
             values: Mutex::new(values),
             writable,
         }
+    }
+}
+
+impl FilePreferences {
+    /// `preferences.json` under `support_directory`.
+    #[must_use]
+    pub(crate) fn in_support_directory(support_directory: &Path) -> Self {
+        Self::new(support_directory.join("preferences.json"))
+    }
+
+    /// Whether the file holds `key` at all, whatever its value: the Swift
+    /// import copies the Swift app's onboarding flag only while it does not.
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.values
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(key)
     }
 }
 
@@ -149,6 +172,17 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn a_flag_set_to_false_is_there_and_an_unset_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let preferences = FilePreferences::in_support_directory(dir.path());
+        assert!(!preferences.contains("a"));
+        preferences.set_flag("a", false);
+        assert!(preferences.contains("a"));
+        assert!(!preferences.flag("a"));
+        assert!(FilePreferences::in_support_directory(dir.path()).contains("a"));
     }
 
     /// A flag lands in one whole file, beside which no temporary is left,

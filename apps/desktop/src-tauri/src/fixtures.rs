@@ -70,6 +70,8 @@ fixtures![
     "params.ui.confirmDestructive",
     "reply.confirm",
     "reply.chosenPath",
+    "onboarding.import",
+    "meeting.detail.keyWithheld",
 ];
 
 /// The contract's topics (`bridgeTopics` in `contract.ts`). The other
@@ -198,6 +200,8 @@ mod tests {
             "settings.summaries.fileKey",
             "settings.iphone.pairing",
             "onboarding.setup",
+            "onboarding.import",
+            "meeting.detail.keyWithheld",
         ] {
             assert!(fixture(key).is_some(), "{key} is recorded");
             assert!(
