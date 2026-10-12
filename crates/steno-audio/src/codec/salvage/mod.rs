@@ -58,8 +58,10 @@ use super::priming::recorder_brands;
 /// The phone recorder's rate, in hertz: `sampleRate` in the phone's
 /// preset, `mobile/src/features/recorder/recording-options.ts`, which is
 /// mono (`numberOfChannels: 1`). The packets cannot confirm it (see the
-/// module doc), so a test fails when the preset changes either
-/// (`tests/codec_salvage.rs`); a change there must change the salvage too.
+/// module doc). The phone preset in recording-options.ts is pinned by
+/// `the_salvage_assumes_the_phones_preset` (`tests/codec_salvage.rs`), which
+/// fails when either value changes; a change there must change the salvage
+/// too.
 pub const SAMPLE_RATE: u32 = 44_100;
 
 /// Samples in one AAC-LC packet.
