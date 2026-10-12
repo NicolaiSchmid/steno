@@ -6,6 +6,11 @@
 # against its references (spikes/onnx-speech/fleurs/score_fleurs.py, the
 # normaliser of the gate).
 #
+# The head's FLEURS mean WER is the CoreML accuracy gate: the script prints
+# PASS or FAIL against STENO_COREML_FLEURS_MAX_WER (percent, default 5.0)
+# and, after the variants, exits 1 on FAIL. The Swift agreement printed
+# beside it is drift, not accuracy.
+#
 #   scripts/coreml-parity-forge.sh <base-ref> <head-ref> [variant...]
 #
 # A variant is a label and environment switches, `label:VAR=value,VAR=value`,
@@ -22,6 +27,7 @@
 #                               ~/steno-spikes/baseline-bakeoff)
 #   SCRATCH                     clones, target dirs and outputs (default
 #                               ~/steno-coreml-parity); delete it afterwards
+#   STENO_COREML_FLEURS_MAX_WER the gate's limit (default 5.0)
 #
 # Nothing here is audio or a transcript; the outputs stay in SCRATCH. Every
 # build runs with CARGO_BUILD_JOBS=4 under nice, and every run prints the
@@ -33,6 +39,7 @@ fleurs=${STENO_FLEURS_DIR:-$HOME/steno-spikes/fleurs}
 corpus=${STENO_CALIBRATION_CORPUS:-$HOME/steno-spikes/corpus}
 baseline=${STENO_CALIBRATION_BASELINE:-$HOME/steno-spikes/baseline-bakeoff}
 scratch=${SCRATCH:-$HOME/steno-coreml-parity}
+max_wer=${STENO_COREML_FLEURS_MAX_WER:-5.0}
 repo=$(git -C "${0:A:h}" rev-parse --show-toplevel)
 export CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0
 
@@ -60,14 +67,29 @@ run() {
   nice -n 19 $bin --out $out/corpus $corpus $baseline > $out/corpus.md
   print "FLEURS against Swift: $(tail -1 $out/fleurs.md)"
   print "Corpus against Swift: $(tail -1 $out/corpus.md)"
-  python3 $repo/spikes/onnx-speech/fleurs/score_fleurs.py $fleurs/cat --bakeoff $out/fleurs rust | grep '^| rust'
+  python3 $repo/spikes/onnx-speech/fleurs/score_fleurs.py $fleurs/cat --bakeoff $out/fleurs rust \
+    --out $out/fleurs-score.json | grep '^| rust'
   print "(load after $(sysctl -n vm.loadavg))"
+}
+
+# gate <label>: PASS or FAIL for the run's FLEURS mean WER; FAIL returns 1.
+gate() {
+  python3 - $scratch/out/$1/fleurs-score.json $max_wer <<'PY'
+import json, sys
+wer = json.load(open(sys.argv[1]))["columns"]["rust"]["summary"]["mean_wer"] * 100
+limit = float(sys.argv[2])
+verdict = "PASS" if wer <= limit else "FAIL"
+print(f"CoreML FLEURS gate: {wer:.3f} % mean WER, limit {limit:.1f} %: {verdict}")
+sys.exit(verdict == "FAIL")
+PY
 }
 
 build base $base
 build head $head
 run base $scratch/target-base/release/steno-coreml-parity
 run head $scratch/target-head/release/steno-coreml-parity
+verdict=0
+gate head || verdict=1
 print "## Swift"
 python3 $repo/spikes/onnx-speech/fleurs/score_fleurs.py $fleurs/cat --bakeoff $fleurs/cat/bakeoff parakeet-v3 | grep '^| parakeet-v3'
 
@@ -79,3 +101,4 @@ if (( $# > 0 )); then
     (export $switches; run $label $scratch/target-variants/release/steno-coreml-parity)
   done
 fi
+exit $verdict
