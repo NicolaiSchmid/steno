@@ -214,6 +214,11 @@ const SETTINGS_STATES: readonly SettingsState[] = [
 		query: "section=iphone&scenario=phone-unavailable",
 		testId: "phone-unavailable",
 	},
+	{
+		name: "iphone-waiting",
+		query: "section=iphone&scenario=phone-waiting",
+		testId: "phone-waiting",
+	},
 ];
 
 for (const scheme of SCHEMES) {

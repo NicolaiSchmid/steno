@@ -33,8 +33,9 @@ function importIntro(prompts: number): string {
  * Always Allow is the answer, then Continue runs the import. A denied or
  * failed export leaves the step open with the reason and Try again; phone
  * uploads wait until then. Not now (Continue for now once it failed) goes on
- * to page 1, or to page 2 when the permissions are already granted, and the
- * step returns at the next launch.
+ * to page 1, or to page 2 when the permissions are already granted; Settings'
+ * iPhone section then offers Try again, and the step returns at the next
+ * launch.
  */
 export function ImportPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 	const client = useBridge();
@@ -80,8 +81,8 @@ export function ImportPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 				data-testid="import-always-allow"
 				description={`Then Steno reads what the previous version stored without asking again. Your meetings and settings are already here. ${
 					waiting
-						? "Continue for now leaves phone uploads waiting until this step comes back at the next launch."
-						: "Not now leaves phone uploads waiting until this step comes back at the next launch. If your summaries use an API key, new meetings get no summary until then, or until you enter the key in Settings."
+						? "Continue for now leaves phone uploads waiting until you choose Try again in Settings > iPhone, or this step comes back at the next launch."
+						: "Not now leaves phone uploads waiting until you choose Try again in Settings > iPhone, or this step comes back at the next launch. If your summaries use an API key, new meetings get no summary until then, or until you enter the key in Settings."
 				}`}
 				icon={<KeyRoundIcon aria-hidden="true" />}
 				title="Choose Always Allow in each prompt."
