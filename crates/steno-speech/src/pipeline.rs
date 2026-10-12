@@ -736,4 +736,84 @@ mod tests {
         assert!(transcript.chunks.is_empty());
         assert_eq!(t.render(&[]), "");
     }
+
+    /// A xorshift64 generator, so the random cases are the same every run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            (x % n as u64) as usize
+        }
+    }
+
+    /// Windows at random starts, on the grid, inside the first frame and
+    /// anywhere: every token starts at its exact sample time, never before
+    /// 0, and on the grid with the bits it had before tokens had a phase.
+    #[test]
+    fn a_window_at_any_sample_times_every_token_at_its_exact_sample() {
+        let mut t = transcriber(PipelineConfig::default(), 0);
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let (mut checked, mut frame0_clamped, mut on_grid) = (0, 0, 0);
+        for case in 0..3000 {
+            let start = match case % 4 {
+                0 => rng.below(FRAME_SAMPLES),
+                1 => rng.below(200) * FRAME_SAMPLES,
+                _ => rng.below(10 * SAMPLE_RATE),
+            };
+            let frames = 2 + rng.below(30);
+            let len = frames * FRAME_SAMPLES + rng.below(FRAME_SAMPLES);
+            let mut samples = vec![0.0f32; start + len];
+            let mut expected = Vec::new();
+            let (mut k, mut id) = (rng.below(3), 1u32);
+            while k < frames {
+                let at = start + k * FRAME_SAMPLES;
+                samples[at..at + FRAME_SAMPLES].fill(id as f32 / 1000.0);
+                expected.push((id, k));
+                id = id % 20 + 1;
+                k += 2 + rng.below(3);
+            }
+            let mut stats = DecodeStats::default();
+            let tokens = t
+                .decode_range(&samples, start..start + len, &mut stats)
+                .unwrap();
+            assert_eq!(
+                tokens
+                    .iter()
+                    .map(|t| (t.id, t.frame - start / FRAME_SAMPLES))
+                    .collect::<Vec<_>>(),
+                expected,
+                "case {case} start {start}"
+            );
+            let pieces = timed_pieces(&tokens, t.vocab());
+            for ((piece, token), &(_, k)) in pieces.iter().zip(&tokens).zip(&expected) {
+                let exact = (start as i64 + (k as i64 - 1) * FRAME_SAMPLES as i64) as f64
+                    / SAMPLE_RATE as f64;
+                assert!(piece.start >= 0.0, "case {case}: {}", piece.start);
+                assert!(
+                    (piece.start - exact.max(0.0)).abs() < 1e-9,
+                    "case {case} start {start} k {k}: {} != {exact}",
+                    piece.start
+                );
+                assert_eq!(token.sample(), start + k * FRAME_SAMPLES);
+                if exact < 0.0 {
+                    frame0_clamped += 1;
+                }
+                if start % FRAME_SAMPLES == 0 {
+                    on_grid += 1;
+                    let old = token.frame.saturating_sub(1) as f64 * crate::backend::FRAME_SECONDS;
+                    assert_eq!(piece.start.to_bits(), old.to_bits(), "case {case}");
+                }
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 10_000 && frame0_clamped > 50 && on_grid > 2_000,
+            "{checked} {frame0_clamped} {on_grid}"
+        );
+    }
 }

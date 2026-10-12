@@ -185,6 +185,8 @@ fn merge_by_midpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::FRAME_SAMPLES;
+    use crate::segmentation::timed_pieces;
 
     /// Pieces 0..4 start words, 4..8 continue them, 8 is punctuation, 9 blank.
     fn vocab() -> Vocab {
@@ -439,5 +441,92 @@ mod tests {
             [(0, 10, 900), (1, 12, 900), (2, 12, 900), (3, 14, 100)]
         );
         assert!(merged.windows(2).all(|w| w[0].sample() <= w[1].sample()));
+    }
+
+    /// A xorshift64 generator, so the random cases are the same every run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            (x % n as u64) as usize
+        }
+    }
+
+    /// Random runs of overlapping or gapped windows at random starts: the
+    /// merge keeps the same tokens, frames and durations as with every
+    /// phase 0, and the merged tokens' samples and starts never decrease.
+    #[test]
+    fn the_phase_changes_no_merge_decision_and_starts_never_decrease() {
+        let vocab = vocab();
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        let mut raised_inside_a_frame = 0;
+        for case in 0..20_000 {
+            let n = 2 + rng.below(4);
+            let mut windows = Vec::new();
+            let mut start = rng.below(5 * 16_000);
+            let mut phases = Vec::new();
+            for _ in 0..n {
+                let frames = 10 + rng.below(40);
+                let (f0, phase) = (start / FRAME_SAMPLES, start % FRAME_SAMPLES);
+                phases.push(phase);
+                let mut tokens = Vec::new();
+                let mut k = rng.below(3);
+                while k < frames {
+                    tokens.push(Token {
+                        id: rng.below(9) as u32,
+                        frame: f0 + k,
+                        phase,
+                        confidence: 1.0,
+                        duration: 1 + rng.below(3),
+                    });
+                    k += rng.below(3);
+                }
+                windows.push(tokens);
+                let len = frames * FRAME_SAMPLES;
+                start = start + len - rng.below(len.min(2 * 16_000))
+                    + if rng.below(4) == 0 {
+                        rng.below(3 * 16_000)
+                    } else {
+                        0
+                    };
+            }
+            let zeroed: Vec<Vec<Token>> = windows
+                .iter()
+                .map(|w| w.iter().map(|t| Token { phase: 0, ..*t }).collect())
+                .collect();
+            let merged = merge_all(&windows, 1.5, &vocab);
+            let reference = merge_all(&zeroed, 1.5, &vocab);
+            let key = |t: &Token| (t.id, t.frame, t.duration);
+            assert_eq!(
+                merged.iter().map(key).collect::<Vec<_>>(),
+                reference.iter().map(key).collect::<Vec<_>>(),
+                "case {case}"
+            );
+            assert!(
+                merged.windows(2).all(|w| w[0].sample() <= w[1].sample()),
+                "case {case}"
+            );
+            assert!(
+                merged
+                    .iter()
+                    .all(|t| phases.contains(&t.phase) && t.phase < FRAME_SAMPLES)
+            );
+            let pieces = timed_pieces(&merged, &vocab);
+            assert!(pieces.iter().all(|p| p.start >= 0.0 && p.end > p.start));
+            assert!(
+                pieces.windows(2).all(|w| w[0].start <= w[1].start),
+                "case {case}"
+            );
+            raised_inside_a_frame += merged
+                .windows(2)
+                .filter(|w| w[0].frame == w[1].frame && w[0].phase == w[1].phase)
+                .count();
+        }
+        assert!(raised_inside_a_frame > 0);
     }
 }
