@@ -97,7 +97,8 @@
     /// labelled certificate without its private key is an error, not nil, so
     /// a half-deleted identity is reported instead of silently replaced
     /// (which would re-pair every phone). The guard's `Store` prefers the
-    /// recorded one of several (`IdentityItems.identity(labelled:preferring:)`).
+    /// recorded one of several (`IdentityItems.identity(labelled:preferring:)`)
+    /// and, with none recorded, refuses (`LabelledIdentityKeychain.load`).
     public static func load(label: String) throws -> SecIdentity? {
       try Items().certificate(labelled: label).map { try secIdentity(of: $0, labelled: label) }
     }

@@ -9,7 +9,8 @@ import Testing
 /// their keys) and its two relabels. Every next launch either asks again,
 /// until the record names the new identity, or loads the new one; none is
 /// stuck unable to read the keychain, and none mints. Of two identities
-/// under the current label, the recorded one loads. The fake keeps
+/// under the current label, the recorded one loads, and with nothing
+/// recorded the launch asks. The fake keeps
 /// certificates and keys as separate items, as the file keychain does, and
 /// runs the product's order and choice (`IdentityItems`' extension).
 @Suite final class IdentityItemsTests {
@@ -109,17 +110,21 @@ import Testing
 
   let known: HandoverIdentity
   let other: HandoverIdentity
+  /// A third identity, for two under the current label beside a staged one.
+  let third: HandoverIdentity
   let directory: URL
 
   init() throws {
     known = try TestIdentity.load()
     other = try TestIdentity.load("other-identity")
+    third = try TestIdentity.load("third-identity")
     directory = try Fixtures.temporaryDirectory("steno-identity-items")
   }
 
   deinit { try? FileManager.default.removeItem(at: directory) }
 
-  /// One Mac: a keychain, a record and a store with one paired phone.
+  /// One Mac: a keychain, a record and a store with one paired phone or
+  /// none.
   struct Mac {
     let items: FakeItems
     let record: IdentityRecordFile
@@ -146,17 +151,22 @@ import Testing
   }
 
   /// A Mac whose keychain holds `held`, in that order, under the labels
-  /// given, with `recorded` in its record.
-  func mac(holding held: [(HandoverIdentity, String)], recorded: String?) async throws -> Mac {
+  /// given, with `recorded` in its record and one paired phone unless
+  /// `phone` is false.
+  func mac(holding held: [(HandoverIdentity, String)], recorded: String?, phone: Bool = true)
+    async throws -> Mac
+  {
     let items = FakeItems(next: other)
     for (identity, label) in held { items.add(identity, label: label) }
     let record = IdentityRecordFile(
       supportDirectory: directory.appendingPathComponent(UUID().uuidString))
     if let recorded { try record.record(recorded) }
     let store = try MeetingStore.inMemory()
-    try await store.save(
-      PairedDevice(id: UUID(), name: "Phone", pairedAt: Date()),
-      tokenHash: Data(repeating: 1, count: 32))
+    if phone {
+      try await store.save(
+        PairedDevice(id: UUID(), name: "Phone", pairedAt: Date()),
+        tokenHash: Data(repeating: 1, count: 32))
+    }
     return Mac(items: items, record: record, store: store)
   }
 
@@ -276,6 +286,57 @@ import Testing
     }
     #expect(mac.items.writes.isEmpty)
     #expect(try mac.record.recorded() == Self.previous)
+    #expect(try await mac.store.pairedDevices().count == 1)
+  }
+
+  /// The same with nothing recorded (an upgrade from a build without the
+  /// record, or a record file lost), whichever comes first: one of the two
+  /// is not the phones', so the launch asks rather than choose and record
+  /// one, with a paired phone or none. A confirmed Pair Again leaves only
+  /// the new identity.
+  @Test(arguments: [false, true], [false, true])
+  func ofTwoIdentitiesUnderTheLabelWithNoRecordIsReplaced(knownFirst: Bool, phone: Bool)
+    async throws
+  {
+    let held = knownFirst ? [known, third] : [third, known]
+    let mac = try await mac(holding: held.map { ($0, Self.label) }, recorded: nil, phone: phone)
+    var asked = false
+    await #expect(throws: IdentityUnavailability.replaced) {
+      try await mac.launch.loadOrPairAgain(commonName: "A") {
+        asked = true
+        return false
+      }
+    }
+    #expect(asked)
+    #expect(mac.items.writes.isEmpty)
+    #expect(mac.items.certificateItems.map { hex($0.identity) } == held.map(hex))
+    #expect(try mac.record.recorded() == nil)
+    #expect(try await mac.store.pairedDevices().count == (phone ? 1 : 0))
+
+    #expect(hex(try await mac.launch.loadOrPairAgain(commonName: "A") { true }) == hex(other))
+    expectOnlyTheNewIdentity(mac.items)
+    #expect(try mac.record.recorded() == hex(other))
+    #expect(try await mac.store.pairedDevices().isEmpty)
+  }
+
+  /// Two identities under the label, neither recorded, beside the staged
+  /// one the record names (Pair Again cut short after the record, with an
+  /// old login keychain added back): the launch finishes the move without
+  /// asking, and the promote sweeps both.
+  @Test(arguments: [false, true])
+  func ofTwoIdentitiesUnderTheLabelARecordedStagedOneIsPromoted(knownFirst: Bool) async throws {
+    let held = knownFirst ? [known, third] : [third, known]
+    let mac = try await mac(
+      holding: held.map { ($0, Self.label) } + [(other, Self.staging)], recorded: hex(other))
+    var asked = false
+    let identity = try await mac.launch.loadOrPairAgain(commonName: "A") {
+      asked = true
+      return false
+    }
+    #expect(hex(identity) == hex(other) && !asked)
+    #expect(!mac.items.writes.contains { $0.hasPrefix("store") })
+    expectOnlyTheNewIdentity(mac.items)
+    #expect(try mac.record.recorded() == hex(other))
     #expect(try await mac.store.pairedDevices().count == 1)
   }
 }

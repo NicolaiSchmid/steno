@@ -114,8 +114,13 @@ struct LabelledIdentityKeychain<Items: IdentityItems>: HandoverIdentityKeychain 
   let label: String
   let stagingLabel: String
 
+  /// With nothing recorded and several identities under `label`, one of
+  /// them is not the phones', so this throws `replaced` rather than choose.
   func load(preferring recorded: String?) throws -> HandoverIdentity? {
-    try items.identity(labelled: label, preferring: recorded)
+    if recorded == nil, try items.certificates(labelled: label).count > 1 {
+      throw IdentityUnavailability.replaced
+    }
+    return try items.identity(labelled: label, preferring: recorded)
   }
 
   func staged() throws -> HandoverIdentity? { try items.identity(labelled: stagingLabel) }

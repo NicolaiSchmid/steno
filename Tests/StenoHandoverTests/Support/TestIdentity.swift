@@ -14,7 +14,8 @@ import StenoCore
 /// on Linux only the certificate DER beside it is read, for the plaintext
 /// loopback listener. `other-identity` beside it (`CN=Steno other test
 /// identity`, same password) is a second one, for a keychain holding
-/// another identity.
+/// another identity, and `third-identity` (`CN=Steno third test identity`)
+/// a third.
 enum TestIdentity {
   static let password = "steno-test"
   static let commonName = "Steno test identity"

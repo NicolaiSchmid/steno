@@ -9,7 +9,8 @@ public protocol HandoverIdentityKeychain: Sendable {
   /// The current identity, nil when none is stored; throws when the
   /// keychain cannot be read. Of several under its label (one per keychain
   /// in the search list, an old login keychain added back), the one whose
-  /// fingerprint is `recorded`, else the keychain's first.
+  /// fingerprint is `recorded`, else the keychain's first; with nothing
+  /// recorded, throws `IdentityUnavailability.replaced` rather than choose.
   func load(preferring recorded: String?) throws -> HandoverIdentity?
   /// The staged identity, nil when none is staged; throws when it cannot
   /// be read.
@@ -30,7 +31,8 @@ public enum IdentityUnavailability: Error, CustomStringConvertible, Equatable, S
   /// The keychain holds no identity, though a fingerprint is recorded or a
   /// phone is paired.
   case missing
-  /// The keychain's identity is not the one whose fingerprint is recorded.
+  /// The keychain's identity is not the one whose fingerprint is recorded,
+  /// or it holds several and none is recorded.
   case replaced
 
   public var description: String {
@@ -60,20 +62,22 @@ public struct HandoverIdentityGuard: Sendable {
     self.store = store
   }
 
-  /// The current identity; an identity without a record has its
+  /// The current identity; the only identity, without a record, has its
   /// fingerprint recorded. Throws `IdentityUnavailability` when the
   /// keychain cannot be read, holds no identity while a fingerprint is
-  /// recorded or a phone is paired, or holds one whose fingerprint is not
-  /// the recorded one. A staged identity is a mint or a Pair Again cut
-  /// short: when it is the recorded one it becomes the current one, and
-  /// with no record, no identity and no paired phone it is installed. Only
-  /// then, with nothing staged, is a new identity minted, staged and
-  /// installed.
+  /// recorded or a phone is paired, holds one whose fingerprint is not the
+  /// recorded one, or holds several with nothing recorded. A staged
+  /// identity is a mint or a Pair Again cut short: when it is the recorded
+  /// one it becomes the current one, and with no record, no identity and
+  /// no paired phone it is installed. Only then, with nothing staged, is a
+  /// new identity minted, staged and installed.
   public func loadOrCreate(commonName: String) async throws -> HandoverIdentity {
     let recorded = try record.recorded()
     let current: HandoverIdentity?
     do {
       current = try keychain.load(preferring: recorded)
+    } catch let refusal as IdentityUnavailability {
+      throw refusal
     } catch {
       throw IdentityUnavailability.unreadable(String(describing: error))
     }
