@@ -3531,16 +3531,80 @@ mod tests {
         })
     }
 
-    /// The busy timeout the quit tests give the store: one commit try waits
-    /// this long, so a test that allows `2 * QUIT_BUSY` tells one try (plus
-    /// a slow runner's overhead, over a second on Windows CI) from two.
-    const QUIT_BUSY: std::time::Duration = std::time::Duration::from_secs(2);
+    /// What the busy handler of one quit test ([`count_tries`]) shares
+    /// with the test: how many commit tries found the database held, and
+    /// whether the try in progress may end.
+    struct BusyTries {
+        tries: AtomicUsize,
+        open: AtomicBool,
+    }
+
+    /// One [`BusyTries`] for each quit test, as SQLite takes a plain
+    /// function for its busy handler.
+    static BUSY: [BusyTries; 3] = [const {
+        BusyTries {
+            tries: AtomicUsize::new(0),
+            open: AtomicBool::new(false),
+        }
+    }; 3];
+
+    /// The quit tests' slots in [`BUSY`].
+    const EXIT: usize = 0;
+    const UNDER_WAY: usize = 1;
+    const DURING_THE_TRY: usize = 2;
+
+    /// The busy handler of quit test `TEST`, in place of the store's busy
+    /// timeout. SQLite calls it with `waits` 0 when a try first finds the
+    /// database held, so it counts the commit's tries, and it keeps
+    /// the try in progress waiting until the test opens it (or for
+    /// [`HANG_GUARD`]), as a long busy timeout would.
+    fn count_tries<const TEST: usize>(waits: i32) -> bool {
+        let busy = &BUSY[TEST];
+        if waits == 0 {
+            busy.tries.fetch_add(1, Ordering::SeqCst);
+        }
+        if busy.open.load(Ordering::SeqCst) {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        u128::from(waits.unsigned_abs()) < HANG_GUARD.as_millis()
+    }
+
+    /// Gives the harness's store `handler`, a quit test's [`count_tries`],
+    /// for its busy handler, and holds the database from another
+    /// connection until the hold is dropped.
+    fn held_with_counted_tries(
+        harness: &Harness,
+        handler: fn(i32) -> bool,
+    ) -> steno_core::testing::WriteLockHold {
+        harness
+            .store
+            .read(|connection| Ok(connection.busy_handler(Some(handler))?))
+            .unwrap();
+        steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"))
+    }
+
+    /// Quits on a thread of its own while the busy commit waits in quit
+    /// test `test`'s [`count_tries`], lets the try in progress end once the
+    /// quit is in, and returns once quitting did, failing the test as hung
+    /// after [`HANG_GUARD`].
+    async fn quit_while_busy(recorder: &Arc<CaptureRecorder>, test: usize) {
+        let quitting = recorder.clone();
+        let (returned, quit) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            quitting.stop_for_quit();
+            let _ = returned.send(());
+        });
+        eventually("the quit came", || recorder.inner().quitting).await;
+        BUSY[test].open.store(true, Ordering::SeqCst);
+        quit.recv_timeout(HANG_GUARD).expect("quitting returned");
+    }
 
     /// A stop for the app's exit tries its commit once: with the database
-    /// held past the busy timeout ([`QUIT_BUSY`]), quitting returns after
-    /// one wait, where three tries would take three waits (15 s at the product's
-    /// 5 s timeout, past the exit's 10 s patience), and the meeting stays
-    /// `recording` for the next launch, its folder still recorded.
+    /// held, quitting returns after one try, where the product's three
+    /// would each wait out the store's 5 s busy timeout (15 s, past the
+    /// exit's 10 s patience), and the meeting stays `recording` for the
+    /// next launch, its folder still recorded.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_for_the_exit_tries_its_commit_once() {
         let harness = harness_over(
@@ -3548,19 +3612,12 @@ mod tests {
             "parakeet-v3",
             platform_rule(SpeechSettings::default()),
         );
-        harness
-            .store
-            .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
-            .unwrap();
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let hold =
-            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
-        let started = std::time::Instant::now();
-        quit(&harness.recorder);
-        let took = started.elapsed();
+        let hold = held_with_counted_tries(&harness, count_tries::<EXIT>);
+        quit_while_busy(&harness.recorder, EXIT).await;
         drop(hold);
-        assert!(took < 2 * QUIT_BUSY, "{took:?}");
+        assert_eq!(BUSY[EXIT].tries.load(Ordering::SeqCst), 1, "one try");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
@@ -3583,61 +3640,47 @@ mod tests {
     }
 
     /// A stop under way when the app quits tries its commit no more once
-    /// the quit came: with the database held past the busy timeout
-    /// ([`QUIT_BUSY`]), quitting returns after the try in progress, where a
-    /// second try would take one busy timeout more, and the meeting is kept
-    /// for the next launch.
+    /// the quit came: with the database held, quitting returns after the
+    /// try in progress, where a second try would wait out the busy
+    /// timeout once more, and the meeting is kept for the next launch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_under_way_when_the_app_quits_tries_its_commit_no_more() {
         let harness = harness(&[]);
-        harness
-            .store
-            .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
-            .unwrap();
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let hold =
-            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
+        let hold = held_with_counted_tries(&harness, count_tries::<UNDER_WAY>);
         let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
         let stopper = harness.recorder.clone();
         let manual = std::thread::spawn(move || stopper.stop());
         stop_seen.recv_timeout(PATIENCE).expect("the stop began");
-        let started = std::time::Instant::now();
-        quit(&harness.recorder);
-        let took = started.elapsed();
+        quit_while_busy(&harness.recorder, UNDER_WAY).await;
         drop(hold);
         manual.join().unwrap();
-        // The stop's notice holds it 0.3 s ([`held_in`]), then one try.
-        assert!(took < 2 * QUIT_BUSY, "{took:?}");
+        assert_eq!(BUSY[UNDER_WAY].tries.load(Ordering::SeqCst), 1, "one try");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
     /// A quit that comes while the stop's first try waits on the busy
-    /// database (past the notice's 0.3 s hold, [`held_in`]) is seen before
-    /// the next try: quitting returns once that try ends, where a second
-    /// try would take one busy timeout more, and the meeting is kept.
+    /// database is seen before the next try: quitting returns once that
+    /// try ends, where a second try would wait out the busy timeout once
+    /// more, and the meeting is kept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_quit_during_the_stop_s_first_try_tries_no_more() {
         let harness = harness(&[]);
-        harness
-            .store
-            .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
-            .unwrap();
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let hold =
-            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
-        let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
+        let hold = held_with_counted_tries(&harness, count_tries::<DURING_THE_TRY>);
         let stopper = harness.recorder.clone();
-        let started = std::time::Instant::now();
         let manual = std::thread::spawn(move || stopper.stop());
-        stop_seen.recv_timeout(PATIENCE).expect("the stop began");
-        std::thread::sleep(std::time::Duration::from_millis(700));
-        quit(&harness.recorder);
-        let took = started.elapsed();
+        let tries = &BUSY[DURING_THE_TRY].tries;
+        eventually_within(HANG_GUARD, "the stop's first try waits", || {
+            tries.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        quit_while_busy(&harness.recorder, DURING_THE_TRY).await;
         drop(hold);
         manual.join().unwrap();
-        assert!(took < 2 * QUIT_BUSY, "{took:?}");
+        assert_eq!(tries.load(Ordering::SeqCst), 1, "one try");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
