@@ -88,9 +88,10 @@ pub struct Token {
 /// dropped: every window this crate decodes starts on the frame grid
 /// (`chunking`'s starts and fills and the repair's windows are whole
 /// frames, and `decode_frames` leaves the phase at 0), so a frame's time
-/// is exact.
+/// is exact. Debug builds assert the phase is 0.
 impl From<steno_speech::Token> for Token {
     fn from(token: steno_speech::Token) -> Self {
+        debug_assert_eq!(token.phase, 0, "a CoreML window off the frame grid");
         Token {
             id: token.id as usize,
             frame: token.frame,
