@@ -1467,15 +1467,13 @@ impl ProcessingPipeline {
         }
         let waits = &self.inner.dependencies.model_waits;
         waits.resume();
-        match self.resume_among(None) {
-            Ok((resumed, _)) => Ok(resumed),
-            Err(failure) => {
+        self.resume_among(None)
+            .map(|(resumed, _)| resumed)
+            .inspect_err(|failure| {
                 if failure.is_busy() {
                     waits.owe_unfinished();
                 }
-                Err(failure)
-            }
-        }
+            })
     }
 
     /// [`resume_unfinished`](Self::resume_unfinished) for the meetings
@@ -1931,7 +1929,7 @@ impl ProcessingPipeline {
             );
             return;
         }
-        if refused.is_some_and(|refused| refused.awaits == Awaits::Store) {
+        if refused.is_some_and(|refused| matches!(refused.awaits, Awaits::Store)) {
             tracing::info!(
                 target: BACKGROUND_RUN_LOG,
                 %asset_id,
@@ -3454,7 +3452,7 @@ struct Refused {
 }
 
 /// What a refused run's meeting waits for.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum Awaits {
     /// The models, with the resume count when the run started.
     Models { resumes_seen: u64 },

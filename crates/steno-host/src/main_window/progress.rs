@@ -40,6 +40,24 @@ pub enum Parked {
     StoreBusy,
 }
 
+impl Parked {
+    /// What the entry says instead of a stage.
+    pub(crate) const fn title(self) -> &'static str {
+        match self {
+            Parked::ModelsMissing => ProgressEntry::MODELS_MISSING_TITLE,
+            Parked::StoreBusy => ProgressEntry::STORE_BUSY_TITLE,
+        }
+    }
+
+    /// The entry's bridge stage.
+    pub(crate) const fn stage(self) -> &'static str {
+        match self {
+            Parked::ModelsMissing => ProgressEntry::MODELS_MISSING_STAGE,
+            Parked::StoreBusy => ProgressEntry::STORE_BUSY_STAGE,
+        }
+    }
+}
+
 impl ProgressEntry {
     /// The card, chip, list entry and menu bar row before a run's first
     /// event.
@@ -74,10 +92,8 @@ impl ProgressEntry {
     /// by a busy store.
     #[must_use]
     pub fn title(&self) -> String {
-        match self.parked {
-            Some(Parked::ModelsMissing) => return Self::MODELS_MISSING_TITLE.to_owned(),
-            Some(Parked::StoreBusy) => return Self::STORE_BUSY_TITLE.to_owned(),
-            None => {}
+        if let Some(parked) = self.parked {
+            return parked.title().to_owned();
         }
         self.progress.as_ref().map_or_else(
             || Self::WAITING_TITLE.to_owned(),
