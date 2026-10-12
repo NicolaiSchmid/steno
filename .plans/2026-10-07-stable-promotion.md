@@ -325,6 +325,12 @@ why and the alternative.
     | Call mode without an output client (the tap's IOProc runs only once another client opens the output) | Fixed first (A10) | Forge reproduces the loss over SSH: 0 callbacks while nothing plays. The tap aggregate runs only while a process the tap includes drives the output. The Swift app shares the defect and keeps its exclusion of its own process until the handoff, so this is not a regression, but D3 makes the loss blocking. The fix includes Steno in the tap, so the rule is: no in-app playback while recording, enforced by `Playback`. |
     | A damaged AAC packet (AVFoundation conceals it; symphonia stopped the whole decode) | Fixed (A12, #264) | Under D3 one bad packet must not lose a phone recording. The packet becomes silence of its container duration, so later audio keeps its time; the meeting says how long the silence lasts. A file in which more than half of the packets fail is an error, never a meeting of silence. |
 
+  - **A known limit, A11** (Nicolai, 2026-10-12): a Bluetooth headset that is
+    the system output may drop to hands-free while a call is recorded, because
+    Core Audio runs every input of the aggregate's clock master. It costs
+    quality only, no audio is lost, and the Swift app is unchanged. It is
+    revisited after stable; A10's step 6 notes whether it happens on
+    Nicolai's Mac.
   - The Swift defects under "Store", "Adapters", "Handover", "LLM" and "Audio"
     and the CLI's `--title`, and the parity notes' other "before cutover" ports
     to Swift, close with the handoff. If a bridge release ships (Release
@@ -447,6 +453,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A8 | Meeting detection on Linux, over PipeWire's streams | #222 |
 | A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; the call-mode start is A10's, whose step 2 runs the tone check on the Mac | audio (#246) |
 | A10 | Call mode without an output client: the tap includes Steno, and the capture starts a silent output IOProc of its own on the aggregate's clock master, so with nothing playing the first callback comes within 100 ms of `start` returning and 200 ms of the call to `start`; no in-app playback while recording, enforced by `Playback` | audio |
+| A11 | Known limit (Nicolai, 2026-10-12): a Bluetooth headset that is the system output may drop to hands-free while a call is recorded, because Core Audio runs every input of the aggregate's clock master; quality only, no audio lost; Swift unchanged; revisit after stable | none before stable (A10's step 6 notes it) |
 | A12 | An undecodable AAC packet becomes silence of its length, counted and shown on the meeting | audio (#264) |
 | A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
 
@@ -1017,7 +1024,9 @@ Each lands before `0.11.0-rc.1`.
        headset's "Current SampleRate" with `system_profiler SPAudioDataType |
        grep -A8 "<the headset's name>"`. Pass when the headset stays at 44.1
        or 48 kHz. A switch to 16 or 24 kHz is compared with main while
-       `afplay` plays. The aggregate's own inputs are A11's, not A10's.
+       `afplay` plays. The aggregate's own inputs are A11's, not A10's: a
+       headset that drops to hands-free because the aggregate runs its
+       inputs is A11's known limit, noted (step 6), not a failure here.
     4. Alerts on the speakers, the output on a headset: in System Settings,
        Sound, set "Play sound effects through" to the Mac's speakers and the
        output to a headset, then run step 2's `cargo test` command with
@@ -1034,6 +1043,14 @@ Each lands before `0.11.0-rc.1`.
        start` line; when the `mic ... dBFS  system ... dBFS` lines go on
        after each `device resumed`; and when the summary prints `duration`
        within 1 s of 60.
+    6. AirPods, A11's known limit (noted, neither passed nor failed): with
+       AirPods connected as the output and the built-in microphone chosen as
+       the input, record a two-minute call in the app while a call or a video
+       plays through the AirPods. Note whether the AirPods switch to
+       hands-free while it records (their sound turns narrow, and
+       `system_profiler SPAudioDataType | grep -A8 AirPods` shows a "Current
+       SampleRate" of 16 or 24 kHz) and whether they switch back after the
+       stop. The note goes on A11's row.
   - Owner: audio. It lands before `0.11.0-rc.1`, with its own pipeline.
 - **A12 An undecodable AAC packet becomes silence.** A packet the decoder
   cannot read (corrupt payload: symphonia's invalid data, an element its
