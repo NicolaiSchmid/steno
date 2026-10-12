@@ -2410,6 +2410,218 @@ fn process_again_words_a_gone_recording_for_the_platform() {
     );
 }
 
+/// Every prompt the destructive dialog was shown.
+type Prompts = Arc<Mutex<Vec<steno_bridge::ConfirmDestructiveParams>>>;
+
+/// The prompts the destructive dialog was shown, answered with `answer`
+/// as it stands when asked.
+fn recording_prompts(
+    answer: &Arc<AtomicBool>,
+) -> (
+    Prompts,
+    impl Fn(&steno_host::Host, &steno_bridge::ConfirmDestructiveParams) -> bool + Send + Sync + 'static,
+) {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let prompt = {
+        let asked = asked.clone();
+        let answer = answer.clone();
+        move |_: &steno_host::Host, params: &steno_bridge::ConfirmDestructiveParams| {
+            asked.lock().unwrap().push(params.clone());
+            answer.load(Ordering::SeqCst)
+        }
+    };
+    (asked, prompt)
+}
+
+/// "Process again" on a ready meeting kept incomplete whose speakers the
+/// user confirmed (the sample's Nicolai and Jérôme) asks first, in plain
+/// words: a run that diarizes may clear their names, and the note is
+/// written again. A decline changes nothing: the pipeline is not asked,
+/// the meeting stays ready, no error line. The accept runs it. A ready,
+/// complete meeting is refused without the prompt. Rust only.
+#[test]
+fn process_again_asks_before_it_clears_confirmed_speaker_names() {
+    let answer = Arc::new(AtomicBool::new(false));
+    let (asked, prompt) = recording_prompts(&answer);
+    let harness = Harness::builder()
+        .confirm_with(prompt)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+            empty_the_mic_lane(store);
+        })
+        .build();
+    let pipeline = &harness.fakes.pipeline;
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+        true
+    );
+    harness.sink.clear();
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [steno_host::host::process_again_prompt()]
+    );
+    assert_eq!(
+        steno_host::host::process_again_prompt(),
+        steno_bridge::ConfirmDestructiveParams {
+            title: "Process this meeting again?".to_owned(),
+            message: "Speaker names Steno cannot find again are cleared, and the note is \
+                      written again. If you edited it, your version stays and Steno's goes \
+                      beside it."
+                .to_owned(),
+            confirm_title: "Process again".to_owned(),
+        }
+    );
+    assert!(
+        pipeline.processed_again.lock().unwrap().is_empty(),
+        "declined: the pipeline is not asked"
+    );
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["state"], "ready");
+    assert_eq!(detail["error"], Value::Null, "{detail}");
+    assert_eq!(detail["retention"]["kind"], "keptIncomplete");
+
+    answer.store(true, Ordering::SeqCst);
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    assert_eq!(*pipeline.processed_again.lock().unwrap(), [uuid(MEETING)]);
+    assert_eq!(
+        harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"],
+        Value::Null
+    );
+
+    // Ready and complete: refused without a prompt.
+    let (asked, prompt) = recording_prompts(&answer);
+    let complete = Harness::builder()
+        .confirm_with(prompt)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+        })
+        .build();
+    complete.host.meeting_process_again().unwrap();
+    assert!(asked.lock().unwrap().is_empty(), "not offered: no prompt");
+    assert!(
+        complete
+            .fakes
+            .pipeline
+            .processed_again
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A failed meeting with no confirmed speaker runs at once, as before; one
+/// whose speaker the user named asks first too, and a decline leaves it
+/// failed and unasked of the pipeline.
+#[test]
+fn process_again_on_a_failed_meeting_asks_only_with_a_confirmed_speaker() {
+    let answer = Arc::new(AtomicBool::new(false));
+    let (asked, prompt) = recording_prompts(&answer);
+    let harness = Harness::builder()
+        .confirm_with(prompt)
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            give_the_failed_meeting_a_recording(store, fakes);
+        })
+        .build();
+    let pipeline = &harness.fakes.pipeline;
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(MEETING_FAILED),
+        })
+        .unwrap();
+    harness.host.meeting_process_again().unwrap();
+    assert!(
+        asked.lock().unwrap().is_empty(),
+        "no name to lose: no prompt"
+    );
+    assert_eq!(
+        *pipeline.processed_again.lock().unwrap(),
+        [uuid(MEETING_FAILED)]
+    );
+
+    let failed = harness
+        .store
+        .meeting(uuid(MEETING_FAILED))
+        .unwrap()
+        .unwrap();
+    let named = steno_core::Speaker {
+        id: uuid(0x7A),
+        meeting_id: failed.id,
+        cluster_label: "Speaker 1".to_owned(),
+        assignment: steno_core::SpeakerAssignment::Confirmed {
+            person_id: uuid(PERSON_ANNA),
+        },
+        embedding: None,
+        sample_clip_range: None,
+        sample_clip_url: None,
+        cluster_confidence: 0.0,
+    };
+    harness
+        .store
+        .replace_transcript(&failed, &[], &[named])
+        .unwrap();
+    harness.host.store_changed();
+    harness.host.meeting_process_again().unwrap();
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [steno_host::host::process_again_prompt()]
+    );
+    assert_eq!(
+        *pipeline.processed_again.lock().unwrap(),
+        [uuid(MEETING_FAILED)],
+        "declined: asked of the pipeline only the first time"
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["state"],
+        "failed"
+    );
+}
+
+/// The prompt runs with the lock released, so the selection can move
+/// while it is up: an accept then starts nothing, neither on the meeting
+/// asked about nor on the one now selected.
+#[test]
+fn process_again_starts_nothing_when_the_selection_moved_during_its_prompt() {
+    let harness = Harness::builder()
+        .confirm_with(|host, _| {
+            host.meetings_select(MeetingIdParams {
+                meeting_id: uuid(MEETING_FAILED),
+            })
+            .unwrap();
+            true
+        })
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+            empty_the_mic_lane(store);
+            give_the_failed_meeting_a_recording(store, fakes);
+        })
+        .build();
+    let host = harness.host.clone();
+    within_five_seconds("the process-again prompt", move || {
+        host.meeting_process_again()
+    })
+    .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["id"],
+        id(MEETING_FAILED)
+    );
+    assert!(
+        harness
+            .fakes
+            .pipeline
+            .processed_again
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// A ready meeting whose recording may be damaged (the pipeline's record
 /// of parts replaced by silence) is kept incomplete and offered "Process
 /// again", every lane transcribed or not; "Delete recording now" still

@@ -8,7 +8,8 @@ use steno_bridge::DetailTab;
 use steno_core::protocols::{BoundaryResult, BoxError};
 use steno_core::{
     AudioRetention, Delivery, Meeting, MeetingExport, MeetingOperation, MeetingStateKind, Platform,
-    Settings, Store, StoreError, SummaryTemplate, paths::file_url_path, results_need_the_audio,
+    Settings, SpeakerAssignment, Store, StoreError, SummaryTemplate, paths::file_url_path,
+    results_need_the_audio,
 };
 use uuid::Uuid;
 
@@ -205,6 +206,20 @@ impl MeetingDetailViewModel {
     #[must_use]
     pub fn can_process_again(&self) -> bool {
         self.process_again_refusal().is_none()
+    }
+
+    /// "Process again" asks first ([`crate::host::process_again_prompt`]):
+    /// it is offered, and a speaker of the meeting is confirmed to a
+    /// person, by a pick or a typed name, which a run whose diarizer works
+    /// may not find again. Failed or ready alike.
+    #[must_use]
+    pub fn process_again_asks_first(&self) -> bool {
+        self.can_process_again()
+            && self.export.as_ref().is_some_and(|export| {
+                export.speakers.iter().any(|speaker| {
+                    matches!(speaker.assignment, SpeakerAssignment::Confirmed { .. })
+                })
+            })
     }
 
     /// Why the detail itself refuses "Process again": the meeting is not
