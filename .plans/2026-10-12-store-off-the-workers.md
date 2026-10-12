@@ -420,8 +420,9 @@ store's row: no log line marks a save), and `require_saved` holds.
 
 - **Measured.** A whole run, the headless PipeWire's start included, took
   25.9 s on atlas (a debug build; the row read "Stopping…" 0.23 s after the
-  click, and the meeting was queued 0.11 s after the release). That is under
-  2 minutes, so it joins `rust-ci.yml`'s Linux hosted job, beside
+  click, and the meeting was queued 0.11 s after the release), and 24 s as a
+  step of the hosted Linux job on PR 1's first run. That is under 2 minutes,
+  so it joins `rust-ci.yml`'s Linux hosted job, beside
   `close-without-tray-linux.sh`, as "Desktop stop under a locked store".
   It runs by hand with
   `scripts/pipewire-headless.sh apps/desktop/scripts/locked-store-linux.sh target/debug/steno-desktop`.

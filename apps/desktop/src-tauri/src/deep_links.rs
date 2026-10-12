@@ -31,7 +31,10 @@
 
 use steno_bridge::{SettingsSection, WindowParams};
 use steno_core::json::parse_uuid;
-use tauri::{AppHandle, Manager, Url};
+// `app.env()`, for the `AppImage` that registers its own scheme.
+#[cfg(target_os = "linux")]
+use tauri::Manager as _;
+use tauri::{AppHandle, Url};
 use tauri_plugin_deep_link::DeepLinkExt;
 use uuid::Uuid;
 

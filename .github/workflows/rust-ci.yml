@@ -484,7 +484,7 @@ jobs:
       # menu while Python's sqlite3 holds the store's write lock for 8 s.
       # The stop runs off the main thread (P40), so the menu's row reads
       # Stopping… within 1 s, and the save lands within 2 s of the release.
-      # About 30 s on atlas (P40's plan, check 7).
+      # About 25 s, here and on atlas (P40's plan, check 7).
       - name: Desktop stop under a locked store
         if: matrix.name == 'linux'
         timeout-minutes: 5
