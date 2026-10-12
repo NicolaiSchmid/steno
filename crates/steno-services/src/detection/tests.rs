@@ -612,7 +612,7 @@ async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again(
 
     // A second Record, a stale click, starts nothing more.
     let controller = harness.controller.clone();
-    on_own_thread(PATIENCE, "Record returned", move || {
+    on_own_thread(HANG_GUARD, "Record returned", move || {
         controller.record(Some(1));
     });
     capture.stop();
@@ -661,10 +661,11 @@ async fn a_prompt_never_starts_a_second_recording() {
         !harness.controller.has_prompt(),
         "the recording took it down"
     );
+    // Each call returns at once, unless it starts a recording after all.
     let controller = harness.controller.clone();
-    on_own_thread(PATIENCE, "Record returned", move || controller.record(None));
+    on_own_thread(HANG_GUARD, "Record returned", move || controller.record(None));
     let recorder = capture.recorder.clone();
-    on_own_thread(PATIENCE, "the call's start returned", move || {
+    on_own_thread(HANG_GUARD, "the call's start returned", move || {
         CallRecorder::start_call(&*recorder, Some("us.zoom.xos"));
     });
     let meetings = capture.store.meetings(10, 0).unwrap();
