@@ -22,10 +22,9 @@ pub fn merge_all(windows: &[Vec<Token>], overlap_seconds: f64, vocab: &Vocab) ->
     merged
 }
 
-/// Raises a token that starts before the one ahead of it to that one's
-/// frame and phase. The frames come out as a running maximum of frames
-/// alone would make them; the phase only orders tokens on the same frame
-/// from windows that started at different points inside it.
+/// Raises each token that starts before its predecessor to the
+/// predecessor's (frame, phase). The frames are the running maximum of the
+/// frames alone; the phase only orders tokens on one frame.
 fn enforce_monotonic(tokens: &mut [Token]) {
     let mut max = (0, 0);
     for token in tokens {

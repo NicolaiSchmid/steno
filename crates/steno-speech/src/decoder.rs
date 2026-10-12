@@ -32,12 +32,11 @@ pub struct Token {
     /// The encoder frame (80 ms) the token was emitted at, counted from the
     /// start of the recording.
     pub frame: usize,
-    /// Samples by which the window's frames lie after the recording's: a
-    /// window that starts between two frame boundaries starts its frame
-    /// `frame` this far into the recording's, so the frame begins at sample
-    /// `frame * FRAME_SAMPLES + phase` (see [`Token::sample`]). Below
-    /// [`FRAME_SAMPLES`]; 0 for a window on the frame grid. Only the
-    /// timings read it; the merge and the recovery count whole frames.
+    /// Samples the window started past a frame boundary of the recording,
+    /// so the token's frame begins at sample `frame * FRAME_SAMPLES + phase`
+    /// ([`Token::sample`]). Below [`FRAME_SAMPLES`]; 0 on the grid. The
+    /// timings add it and the merge's monotonic pass orders by (frame,
+    /// phase); the merge's matching and the recovery count whole frames.
     pub phase: usize,
     /// The joint's probability for the piece ([`confidence`]).
     pub confidence: f32,
@@ -177,7 +176,7 @@ pub struct Decoded {
 /// Decodes the first `frames` encoder frames of `model`'s window with a
 /// fresh prediction-network state; token frames are offset by
 /// `frame_offset`, the window's first frame in the recording, and their
-/// phase is 0, a window on the frame grid ([`decode_window`] sets it).
+/// phase is 0, as on the grid; [`decode_window`] sets it.
 pub fn decode_frames<M: TdtModel + ?Sized>(
     model: &mut M,
     frames: usize,
@@ -293,17 +292,17 @@ impl<B: SpeechBackend + ?Sized> TdtModel for BackendWindow<'_, B> {
     }
 }
 
-/// Decodes `encoder` with a fresh prediction-network state. `start` is the
-/// window's first sample in the recording: token frames count from the
-/// frame it falls in, and the samples it lies past that frame's start are
-/// each token's [`Token::phase`], so a window off the frame grid times its
-/// tokens from where it really starts. A window abandoned at the token
+/// Decodes `encoder` with a fresh prediction-network state. `start_sample`
+/// is the window's first sample in the recording: token frames count from
+/// the frame it falls in, and the samples it lies past that frame's start
+/// are each token's [`Token::phase`], so a window off the frame grid times
+/// its tokens from where it really starts. A window abandoned at the token
 /// budget is logged as a warning; it reports the tokens kept, which under
 /// [`TokenBudget::PerWindow`] is the budget itself.
 pub fn decode_window<B: SpeechBackend + ?Sized>(
     backend: &mut B,
     encoder: &EncoderOutput,
-    start: usize,
+    start_sample: usize,
     config: &DecoderConfig,
     stats: &mut DecodeStats,
 ) -> Result<Vec<Token>, SpeechError> {
@@ -325,7 +324,7 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
         },
     };
     let runaways = stats.runaways;
-    let (frame_offset, phase) = (start / FRAME_SAMPLES, start % FRAME_SAMPLES);
+    let (frame_offset, phase) = (start_sample / FRAME_SAMPLES, start_sample % FRAME_SAMPLES);
     let mut tokens = decode_frames(&mut window, frames, frame_offset, config, stats)?.tokens;
     for token in &mut tokens {
         token.phase = phase;
@@ -334,7 +333,7 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
         tracing::warn!(
             frames,
             tokens = tokens.len(),
-            start,
+            start_sample,
             "runaway decode: window abandoned at the token budget, its tail is lost"
         );
     }

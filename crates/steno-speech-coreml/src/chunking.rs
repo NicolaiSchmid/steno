@@ -819,8 +819,9 @@ mod tests {
     #[test]
     fn every_window_starts_on_the_frame_grid() {
         // Word starts are frame times from `frame_origin` (the shared
-        // `Token::phase` is dropped), exact only on the grid: pauses off the
-        // grid, a length and a speech end off it, and the end-aligned fill.
+        // `Token::phase` is dropped), exact only on the grid. This test
+        // uses: pauses off the grid, a length and a speech end off it, and
+        // the end-aligned fill.
         let layout = Layout::v3();
         let mut audio = tone(47.0, 0.1);
         audio.extend(std::iter::repeat_n(0.0, 777));
