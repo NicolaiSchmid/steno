@@ -361,6 +361,12 @@ fn the_release_s_countdown_runs_out_into_one_fresh_grace_while_the_capture_recov
             app_name: Some("Zen".to_owned())
         })
     );
+    watch.opened(Some("Zen".to_owned()));
+    watch.released(grace * 2).expect("armed again");
+    assert!(
+        watch.postpone(first.number, grace * 2, true).is_none(),
+        "a stale countdown postpones nothing"
+    );
 }
 
 /// The end reason an auto-stop writes is one the Swift app decodes: the
@@ -1185,28 +1191,31 @@ impl steno_audio::CaptureBackend for GatedRestart {
     }
 }
 
-/// The notice thread reads the session before it takes the outage's lock:
-/// a rebuild's start holds the session's lock for seconds, and the
-/// status, the microphone's activity and the countdown's end, which take
-/// the outage's lock, do not wait for it. Here the thread handles a
-/// resume while the next rebuild's start waits at a gate.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
+/// A recording whose device changes twice for `reason`, a second into
+/// each start, and whose second rebuild's start waits at a gate: the
+/// receiver hears when it waits, and the sender opens it.
+fn recording_whose_second_rebuild_waits(
+    reason: steno_audio::DeviceChangeReason,
+) -> (
+    Recording,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
     let (entered, waiting) = std::sync::mpsc::channel();
     let (open, opened) = std::sync::mpsc::channel();
     let gate = Arc::new(Gate {
         entered: std::sync::Mutex::new(entered),
         open: std::sync::Mutex::new(opened),
     });
-    let gated = gate.clone();
     let recording = recording_over(synthetic_recorder_over(Arc::new(move |configuration| {
         let options = crate::testing::synthetic_tone(&configuration)
             .change_device_after(1.0)
-            .changes(2);
+            .changes(2)
+            .change_reason(reason);
         let backend = GatedRestart {
             synthetic: steno_audio::testing::SyntheticCaptureBackend::new(options),
             starts: std::sync::atomic::AtomicUsize::new(0),
-            gate: gated.clone(),
+            gate: gate.clone(),
         };
         steno_audio::CaptureSession::with_backend(
             configuration,
@@ -1217,6 +1226,18 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
         )
         .map_err(|error| error.to_string())
     })));
+    (recording, waiting, open)
+}
+
+/// The notice thread reads the session with the outage's lock released:
+/// a rebuild's start holds the session's lock for seconds, and the
+/// status, the microphone's activity and the countdown's end, which take
+/// the outage's lock, do not wait for it. Here the thread handles a
+/// resume while the next rebuild's start waits at a gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
+    let (recording, waiting, open) =
+        recording_whose_second_rebuild_waits(steno_audio::DeviceChangeReason::DefaultInputChanged);
     // The first change's notice waits until the second rebuild's start
     // holds the session, so the thread reads the session for the first
     // resume while that start runs.
@@ -1247,6 +1268,52 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
             }
         },
     );
+    open.send(()).unwrap();
+    recording.stop();
+    assert_eq!(
+        recording.meetings()[0].end_reason,
+        Some(RecordingEndReason::Manual)
+    );
+}
+
+/// A device change begins the recovery before the notice thread reads the
+/// session for the stalled microphone, a read that waits behind the
+/// rebuild's start (a call on Windows runs on the microphone's clock, and
+/// a start there takes up to 10 s): a release's countdown that runs out
+/// meanwhile is not shown, ends nothing, and a fresh one takes its place
+/// (S2 in `.plans/2026-10-07-stable-promotion.md`). Elsewhere a call's
+/// change reads nothing, and the test pins the same outcome. Here the
+/// second stall's rebuild waits at a gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call() {
+    let (recording, waiting, open) =
+        recording_whose_second_rebuild_waits(steno_audio::DeviceChangeReason::DeliveryStalled);
+    let (seen, go) = hold_the_notices(&recording, 2);
+    recording.start(CaptureMode::Call, None);
+    recording.opened(Some("Zen"));
+    seen.recv_timeout(PATIENCE).expect("the first stall");
+    go.send(()).unwrap();
+    seen.recv_timeout(PATIENCE).expect("the first resume");
+    // Back from the first stall: the release's countdown runs, shown.
+    recording.released();
+    recording.sleepers(1);
+    assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 90.0)));
+    waiting
+        .recv_timeout(PATIENCE)
+        .expect("the second stall's rebuild starts");
+    go.send(()).unwrap();
+    // Well inside the gate's own patience, so a read that came first
+    // fails here rather than once the gate gave up.
+    eventually_within(PATIENCE / 2, "not shown from the second stall on", || {
+        recording.armed().is_none()
+    })
+    .await;
+    recording.clock.advance(Duration::from_secs(90));
+    eventually("a fresh grace in its place", || {
+        recording.armed() == Some((Some("Zen".to_owned()), 90.0))
+    })
+    .await;
+    assert_still_recording(&recording);
     open.send(()).unwrap();
     recording.stop();
     assert_eq!(
