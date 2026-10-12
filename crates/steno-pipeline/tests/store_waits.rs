@@ -657,7 +657,8 @@ async fn a_retry_the_lock_refuses_keeps_its_meetings_and_another_failure_leaves_
 /// The store's retry that reruns a launch's resume puts back the meeting
 /// waiting for the store that another operation (a re-export) holds at
 /// that moment, and only that one: a held meeting that did not wait for
-/// the store is left `queued` for the next launch, as a launch leaves it.
+/// the store is left `queued` for the next launch, as a launch leaves it,
+/// and neither is put back to wait for models.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owed_launch_resume_puts_back_the_held_meeting_that_waits_for_the_store() {
     let world = world(
@@ -686,6 +687,11 @@ async fn an_owed_launch_resume_puts_back_the_held_meeting_that_waits_for_the_sto
     );
     assert!(matches!(world.state(gone), MeetingState::Failed { .. }));
     assert_eq!(waits.waiting_for_store(), [parked]);
+    assert_eq!(
+        waits.waiting(),
+        Vec::<Uuid>::new(),
+        "neither waits for models"
+    );
     drop(held);
 
     assert_eq!(pipeline.resume_waiting_for_store().unwrap(), [parked]);
