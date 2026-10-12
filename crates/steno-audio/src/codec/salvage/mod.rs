@@ -24,8 +24,8 @@
 //! stream of more than one channel does not parse. Only a file in the
 //! recorder's layout is salvaged: a `ftyp` with major brand `M4A ` and
 //! `mp42` among its compatible brands (the brands [`super::priming`]
-//! checks), no `moov` among the top-level boxes, and packets that parse
-//! from the first; any other file stays failed. Where the packets start is
+//! checks), no `moov` among the first 16 top-level boxes, and
+//! packets that parse from the first; any other file stays failed. Where the packets start is
 //! found, not assumed: past the zeros, or from the body of an `mdat` box
 //! should a writer leave one (else past the zeros in it), at the offset
 //! from which [`START_RUN`] packets parse in a row. In the app only the
@@ -58,10 +58,12 @@ use super::priming::recorder_brands;
 /// The phone recorder's rate, in hertz: `sampleRate` in the phone's
 /// preset, `mobile/src/features/recorder/recording-options.ts`, which is
 /// mono (`numberOfChannels: 1`). The packets cannot confirm it (see the
-/// module doc). The phone preset in recording-options.ts is pinned by
-/// `the_salvage_assumes_the_phones_preset` (`tests/codec_salvage.rs`), which
-/// fails when either value changes; a change there must change the salvage
-/// too.
+/// module doc). The preset is pinned by
+/// `the_salvage_assumes_the_phones_preset` (`tests/codec_salvage.rs`): it
+/// fails unless the file holds exactly one `sampleRate:` and one
+/// `numberOfChannels:`, reading `44_100` and `1`, and Rust CI runs it on a
+/// change to that file (`.github/workflows/rust-ci.yml`). A change there
+/// must change the salvage too.
 pub const SAMPLE_RATE: u32 = 44_100;
 
 /// Samples in one AAC-LC packet.
@@ -79,8 +81,9 @@ const AUDIO_SPECIFIC_CONFIG: [u8; 2] = [0x12, 0x08];
 /// 57 316 bytes; a megabyte leaves room for another writer's reserve.
 const MAX_RESERVE: u64 = 1 << 20;
 
-/// The top-level boxes looked at, before the packets and after an `mdat`:
-/// a few at most.
+/// The top-level boxes looked at, before the packets and after an `mdat`
+/// or an unknown box: the recorder writes a few at most. A `moov` past
+/// them is not found.
 const MAX_BOXES: usize = 16;
 
 /// The bytes read from the file at a time.
@@ -261,7 +264,8 @@ impl SalvagedPackets {
 /// its top-level boxes: past the `ftyp` and any `free`, `skip` or `wide`,
 /// either the body of an `mdat` or, where the boxes stop, the zeros of the
 /// reserve. `None` when the `ftyp` is not the recorder's or a `moov` is
-/// among the boxes, before the `mdat` or after it.
+/// among the boxes, before the `mdat` or after it, or after the first box
+/// of another type.
 fn packet_region(file: &mut File, end: u64) -> std::io::Result<Option<Region>> {
     if end < 8 {
         return Ok(None);
@@ -293,6 +297,7 @@ fn packet_region(file: &mut File, end: u64) -> std::io::Result<Option<Region>> {
                 return Ok(Some(Region::Mdat(body.min(end))));
             }
             b"free" | b"skip" | b"wide" if size >= 8 => at = at.saturating_add(size),
+            _ if moov_after(file, at, end)? => return Ok(None),
             _ => return Ok(Some(Region::Reserve(at))),
         }
     }
@@ -357,7 +362,8 @@ enum Region {
 /// leave a placeholder `mdat` header before zeros), the first byte that is
 /// not zero or one of the three before it (a packet may start with zero
 /// bytes: Apple's first one does), whichever [`START_RUN`] packets parse
-/// from first, nearest that byte first.
+/// from first: one byte before it first (Apple's first packet starts with a
+/// zero byte), then the byte, then two and three before.
 fn first_packet(file: &mut File, region: Region, end: u64) -> std::io::Result<Option<u64>> {
     let reserve = match region {
         Region::Mdat(body) if packets_parse_from(file, body, end)? => return Ok(Some(body)),
@@ -440,6 +446,42 @@ mod tests {
 
     /// Apple's silent packet: a long window with no bands, then `END`.
     const SILENT: [u8; 4] = [0x00, 0xd0, 0x00, 0x07];
+
+    /// The region `packet_region` finds in `bytes`.
+    fn region_of(bytes: &[u8]) -> Option<Region> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("boxes.m4a");
+        std::fs::write(&path, bytes).unwrap();
+        let mut file = File::open(&path).unwrap();
+        packet_region(&mut file, bytes.len() as u64).unwrap()
+    }
+
+    /// A box of type `kind` holding `body`, with a 32-bit size.
+    fn mp4_box(kind: [u8; 4], body: &[u8]) -> Vec<u8> {
+        let size = u32::try_from(body.len() + 8).unwrap();
+        [size.to_be_bytes().as_slice(), &kind, body].concat()
+    }
+
+    /// A box the walk does not know (a `uuid`) ends it where the reserve
+    /// would start, but a `moov` after it still refuses the file: `ftyp,
+    /// uuid, mdat` is `Reserve` at the `uuid`, and the same with a `moov`
+    /// (one symphonia cannot read) after the `mdat` is `None`.
+    #[test]
+    fn a_moov_after_an_unknown_box_refuses_the_file() {
+        let ftyp = mp4_box(*b"ftyp", b"M4A \0\0\0\0M4A mp42isom");
+        let uuid = mp4_box(*b"uuid", &[0x5a; 24]);
+        let mdat = mp4_box(*b"mdat", &SILENT.repeat(16));
+        let moov = mp4_box(*b"moov", &[0xff; 8]);
+        let at = ftyp.len() as u64;
+        assert_eq!(
+            region_of(&[ftyp.as_slice(), &uuid, &mdat].concat()),
+            Some(Region::Reserve(at))
+        );
+        assert_eq!(
+            region_of(&[ftyp.as_slice(), &uuid, &mdat, &moov].concat()),
+            None
+        );
+    }
 
     fn parses_from(bytes: &[u8]) -> bool {
         let directory = tempfile::tempdir().unwrap();

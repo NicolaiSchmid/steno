@@ -252,6 +252,19 @@ fn only_the_recorders_layout_is_salvaged() {
         "a moov after a 64-bit mdat",
         [&bytes[..28], &mdat_64(packets), &broken_moov].concat(),
     ));
+    let uuid = [32u32.to_be_bytes().as_slice(), b"uuid", &[0x5a; 24]].concat();
+    variants.push((
+        "a moov after a uuid box and the mdat",
+        [
+            &bytes[..28],
+            &uuid,
+            &mdat_size,
+            b"mdat",
+            packets,
+            &broken_moov,
+        ]
+        .concat(),
+    ));
     variants.push(("only the ftyp", bytes[..28].to_vec()));
     variants.push(("only the reserve", bytes[..PACKETS_AT].to_vec()));
     for (name, variant) in variants {
@@ -386,7 +399,7 @@ fn the_packets_are_found_wherever_the_reserve_ends() {
 }
 
 /// A stream whose first packet starts with a byte that is not zero (the
-/// killed file less its first packet, Apple's silent priming frame, whose
+/// killed file less its first packet, Apple's silent priming packet, whose
 /// first byte is zero): the first byte that is not zero is where the
 /// packets start, and an alignment a byte earlier, which may parse a packet
 /// or two by chance, is not taken.
@@ -525,19 +538,30 @@ fn a_salvage_reads_at_least_half_of_the_bytes() {
 }
 
 /// The salvage's rate and channels are the phone's preset's: the test fails
-/// when `recording-options.ts` stops asking for 44.1 kHz mono, which the
+/// unless `recording-options.ts` holds exactly one `sampleRate:` and one
+/// `numberOfChannels:`, asking for 44.1 kHz mono, so neither a changed
+/// value nor a second one (a per-platform override) gets past it; the
 /// salvage then has to follow ([`salvage::SAMPLE_RATE`]).
 #[test]
 fn the_salvage_assumes_the_phones_preset() {
     let preset = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../mobile/src/features/recorder/recording-options.ts");
     let preset = std::fs::read_to_string(&preset).unwrap();
-    assert!(
-        preset.contains("sampleRate: 44_100,"),
+    let values = |key: &str| -> Vec<String> {
+        preset
+            .split(key)
+            .skip(1)
+            .map(|rest| rest.split(',').next().unwrap().trim().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        values("sampleRate:"),
+        ["44_100"],
         "the phone's rate changed"
     );
-    assert!(
-        preset.contains("numberOfChannels: 1,"),
+    assert_eq!(
+        values("numberOfChannels:"),
+        ["1"],
         "the phone's channels changed"
     );
     assert_eq!(salvage::SAMPLE_RATE, 44_100);
