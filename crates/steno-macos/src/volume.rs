@@ -8,7 +8,7 @@
 //! 0 however much is free, a real answer, not a full disk. Rust only: the
 //! Swift app had no disk check.
 //!
-//! Every call is safe in `objc2-foundation` but for the two resource key
+//! Every call is safe in `objc2-foundation` but for the resource key
 //! constants, which are `extern` statics.
 #![allow(unsafe_code)]
 
@@ -21,56 +21,55 @@ use objc2_foundation::{
     NSURLVolumeTotalCapacityKey,
 };
 
-/// What the volume that holds a path reports, in bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Capacity {
-    /// Free for important use
-    /// (`NSURLVolumeAvailableCapacityForImportantUsageKey`), the space
-    /// macOS would purge for it included; 0 on a volume `CacheDelete` does
-    /// not manage, whatever is free there (see the module doc).
-    pub available_for_important_usage: u64,
-    /// The whole volume (`NSURLVolumeTotalCapacityKey`).
-    pub total: u64,
+/// The bytes free for important use on the volume that holds `path`,
+/// which must exist (`NSURLVolumeAvailableCapacityForImportantUsageKey`):
+/// the space macOS would purge for it included; 0 on a volume
+/// `CacheDelete` does not manage, whatever is free there, a value the
+/// volume reports and not an error: a caller reads `statvfs` beside it
+/// (see the module doc). A path that does not exist, or a volume that
+/// reports no value or something other than a count of bytes, is an
+/// error. Only this key is asked for, so no other value can fail the
+/// read.
+pub fn available_for_important_usage(path: &Path) -> io::Result<u64> {
+    // SAFETY: Foundation's constant `NSString`, defined in the framework's
+    // image (since macOS 10.13; Steno needs 15), so it is initialised
+    // before any Rust code runs and lives, unchanged, for the whole
+    // process. Reading it copies a `&'static` reference and writes nothing.
+    let key = unsafe { NSURLVolumeAvailableCapacityForImportantUsageKey };
+    read(path, key)
 }
 
-/// The capacity of the volume that holds `path`, which must exist. A path
-/// that does not, or a volume that reports either value not at all or as
-/// something other than a count of bytes, is an error. An important-use
-/// reading of 0 is a value the volume reports, not an error: a caller
-/// reads `statvfs` beside it (see the module doc).
-pub fn capacity(path: &Path) -> io::Result<Capacity> {
+/// The size of the volume that holds `path`, which must exist
+/// (`NSURLVolumeTotalCapacityKey`), with the errors of
+/// [`available_for_important_usage`]. The disk floor does not read it;
+/// tests and probes check the important-use value against it.
+pub fn total_capacity(path: &Path) -> io::Result<u64> {
+    // SAFETY: as in `available_for_important_usage`, a constant `NSString`
+    // of Foundation's image.
+    let key = unsafe { NSURLVolumeTotalCapacityKey };
+    read(path, key)
+}
+
+/// The byte count `key` reports for the volume of `path`, on an `NSURL`
+/// made for this read. Never reuse one: a URL caches its resource values,
+/// so a second read on it answers the first one's (on a Mac it stayed the
+/// same while the free space moved 2.7 GB).
+fn read(path: &Path, key: &NSURLResourceKey) -> io::Result<u64> {
     let url = NSURL::from_file_path(path).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{} has no file URL", path.display()),
         )
     })?;
-    // SAFETY: both are Foundation's constant `NSString`s, defined in the
-    // framework's image (the important-usage key since macOS 10.13; Steno
-    // needs 15), so they are initialised before any Rust code runs and
-    // live, unchanged, for the whole process. Reading them copies a
-    // `&'static` reference and writes nothing.
-    let (available_key, total_key) = unsafe {
-        (
-            NSURLVolumeAvailableCapacityForImportantUsageKey,
-            NSURLVolumeTotalCapacityKey,
-        )
-    };
     let values = url
-        .resourceValuesForKeys_error(&NSArray::from_slice(&[available_key, total_key]))
+        .resourceValuesForKeys_error(&NSArray::from_slice(&[key]))
         .map_err(|error| ns_error(path, &error))?;
-    let bytes = |key: &NSURLResourceKey| -> io::Result<u64> {
-        let number = values
-            .objectForKey(key)
-            .and_then(|value| value.downcast::<NSNumber>().ok())
-            .ok_or_else(|| io::Error::other(format!("the volume reports no {key}")))?;
-        u64::try_from(number.longLongValue())
-            .map_err(|_| io::Error::other(format!("the volume reports a negative {key}")))
-    };
-    Ok(Capacity {
-        available_for_important_usage: bytes(available_key)?,
-        total: bytes(total_key)?,
-    })
+    let number = values
+        .objectForKey(key)
+        .and_then(|value| value.downcast::<NSNumber>().ok())
+        .ok_or_else(|| io::Error::other(format!("the volume reports no {key}")))?;
+    u64::try_from(number.longLongValue())
+        .map_err(|_| io::Error::other(format!("the volume reports a negative {key}")))
 }
 
 /// `error` from reading the resource values of `path`, as an I/O error:
@@ -93,26 +92,29 @@ fn ns_error(path: &Path, error: &NSError) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::capacity;
+    use super::{available_for_important_usage, total_capacity};
 
-    /// The volume of a temporary folder reports some space free, no more
-    /// than it holds.
+    /// The volume of a temporary folder reports some space free for
+    /// important use, no more than it holds.
     #[test]
     fn a_folder_s_volume_reports_its_free_space_within_its_size() {
         let folder = tempfile::tempdir().unwrap();
-        let capacity = capacity(folder.path()).unwrap();
-        assert!(capacity.available_for_important_usage > 0, "{capacity:?}");
-        assert!(
-            capacity.available_for_important_usage <= capacity.total,
-            "{capacity:?}"
-        );
+        let available = available_for_important_usage(folder.path()).unwrap();
+        let total = total_capacity(folder.path()).unwrap();
+        assert!(available > 0, "{available} of {total}");
+        assert!(available <= total, "{available} of {total}");
     }
 
     /// A path that does not exist is an error, not an empty volume.
     #[test]
     fn a_missing_path_is_an_error() {
         let folder = tempfile::tempdir().unwrap();
-        let error = capacity(&folder.path().join("missing")).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+        let missing = folder.path().join("missing");
+        for error in [
+            available_for_important_usage(&missing).unwrap_err(),
+            total_capacity(&missing).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+        }
     }
 }

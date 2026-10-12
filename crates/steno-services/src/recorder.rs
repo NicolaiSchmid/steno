@@ -172,17 +172,19 @@ impl DiskWatch {
 
 /// The volume that holds `path` as the system reports it
 /// ([`DiskWatch::system`]): `statvfs`, an error when that read fails, and
-/// the space free for important use beside it ([`mac_volume`]), left out
-/// when that read fails.
+/// the space free for important use beside it ([`mac_volume`]), left out,
+/// with a `warn` line, when that read fails: the reading drops to
+/// `statvfs`, which can stop a recording. Each read asks macOS afresh on a
+/// new `NSURL` (a reused one caches its values; see
+/// `steno_macos::volume`), so the reading follows the writes.
 #[cfg(target_os = "macos")]
 fn system_volume(path: &Path) -> std::io::Result<Volume> {
     let statvfs = statvfs(path)?;
-    let important = steno_macos::volume::capacity(path)
+    let important = steno_macos::volume::available_for_important_usage(path)
         .inspect_err(|error| {
-            tracing::debug!(%error, "the space free for important use could not be read");
+            tracing::warn!(%error, "the space free for important use could not be read");
         })
-        .ok()
-        .map(|capacity| capacity.available_for_important_usage);
+        .ok();
     Ok(mac_volume(statvfs, important))
 }
 
@@ -4949,17 +4951,14 @@ mod tests {
         for file_system in ["APFS", "HFS+"] {
             let image = DiskImage::attach(file_system);
             let volume = image.mount_point.as_path();
-            let important = steno_macos::volume::capacity(volume).unwrap();
+            let important = steno_macos::volume::available_for_important_usage(volume).unwrap();
+            let total = steno_macos::volume::total_capacity(volume).unwrap();
             let statvfs = statvfs(volume).unwrap();
             let disk = DiskWatch::system(Some(volume));
             let reading = (disk.free_space)(volume).unwrap();
             eprintln!(
                 "{file_system}: important use {} of {}, statvfs {} of {}, the disk watch {}",
-                important.available_for_important_usage,
-                important.total,
-                statvfs.available,
-                statvfs.total,
-                reading.available,
+                important, total, statvfs.available, statvfs.total, reading.available,
             );
             assert!(
                 reading.available.abs_diff(statvfs.available) < 16 * MIB,
