@@ -1157,7 +1157,10 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
 }
 
 /// Where a test holds a rebuild's start: the backend says when the start
-/// is waiting, and goes on once the test opens it.
+/// is waiting, and goes on once the test opens it or after [`PATIENCE`].
+/// From that word on the test does only its own checks before it opens
+/// the gate, and times a claim against this patience; [`HANG_GUARD`] here
+/// would turn a notice thread that fell behind into a 120 s failure.
 struct Gate {
     entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
     open: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,

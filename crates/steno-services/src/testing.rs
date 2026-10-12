@@ -36,13 +36,15 @@ pub const PATIENCE: Duration = Duration::from_secs(5);
 /// How long a test waits for real work over the synthetic capture before
 /// it fails as hung: a start, a stop and save, a quit, a rebuild or
 /// restart, a recording that ends on its own. A loaded runner stretches
-/// that work past [`PATIENCE`]. A gate the test opens only after such work
-/// takes this bound too, and so does a call that does the work only when
-/// the behaviour under test is broken (a refused start accepted after
-/// all), so the break fails on its assertion. No verdict rests on how
-/// long the work took: a test about how often something happens counts
-/// it, and a product patience a test passes in takes this bound unless
-/// that patience is what it checks.
+/// that work past [`PATIENCE`]. A gate that waits while such work runs,
+/// before the test can open it, takes this bound too, and so does a call
+/// that does the work only when the behaviour under test is broken (a
+/// refused start accepted after all), so the break fails on its
+/// assertion. A gate the test opens after only its own checks keeps
+/// [`PATIENCE`], so a claim can be timed against it. No verdict rests on
+/// how long the work took: a test about how often something happens
+/// counts it, and a product patience a test passes in takes this bound
+/// unless that patience is what it checks.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// A fresh store; the directory lives as long as the guard.

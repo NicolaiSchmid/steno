@@ -2360,11 +2360,17 @@ mod tests {
     /// Starts an in-person recording on a thread of its own, failing the
     /// test as hung after [`HANG_GUARD`], and checks that it records.
     fn start(recorder: &Arc<CaptureRecorder>) {
+        try_start(recorder, CaptureMode::InPerson);
+        assert_eq!(recorder.status().state, RecordingState::Recording);
+    }
+
+    /// Starts a `mode` recording on a thread of its own, which may refuse
+    /// it, failing the test as hung after [`HANG_GUARD`].
+    fn try_start(recorder: &Arc<CaptureRecorder>, mode: CaptureMode) {
         let starting = recorder.clone();
         on_own_thread(HANG_GUARD, "the start returned", move || {
-            starting.start(CaptureMode::InPerson, None);
+            starting.start(mode, None);
         });
-        assert_eq!(recorder.status().state, RecordingState::Recording);
     }
 
     /// Stops the recording on a thread of its own and returns once the
@@ -2386,10 +2392,7 @@ mod tests {
     /// The harness's recorder's status after a start on a thread of its
     /// own, which may refuse it.
     fn status_after_a_start(harness: &Harness) -> RecorderStatus {
-        let starter = harness.recorder.clone();
-        on_own_thread(HANG_GUARD, "the start returned", move || {
-            starter.start(CaptureMode::InPerson, None);
-        });
+        try_start(&harness.recorder, CaptureMode::InPerson);
         harness.recorder.status()
     }
 
@@ -2564,7 +2567,7 @@ mod tests {
     /// A stall's note names a cause, so it stays.
     fn without_the_missing_audio_note(recorder: &CaptureRecorder) -> Option<String> {
         let warning = recorder.status().warning?;
-        let Some(rest) = seconds_noted(&warning)
+        let Some(rest) = leading_seconds(&warning)
             .and_then(|seconds| note_for_seconds(seconds, None))
             .and_then(|note| warning.strip_prefix(note.as_str()))
         else {
@@ -2674,10 +2677,7 @@ mod tests {
             input(Some("Built-in Audio"), true),
             input(Some("Built-in Audio"), true),
         );
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::Call);
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
         stop(&harness.recorder);
         assert_eq!(
@@ -2772,7 +2772,7 @@ mod tests {
     /// `stalled` device, or none: "About 1 second" as well as the plural.
     fn seconds_missing(note: &str, stalled: Option<&str>) -> u64 {
         let missing = note.find("About ").map_or("", |start| &note[start..]);
-        let seconds = seconds_noted(missing).unwrap_or_else(|| panic!("the note: {note}"));
+        let seconds = leading_seconds(missing).unwrap_or_else(|| panic!("the note: {note}"));
         assert_eq!(
             Some(missing),
             note_for_seconds(seconds, stalled).as_deref(),
@@ -2783,7 +2783,7 @@ mod tests {
 
     /// The seconds a `note` that starts with a missing-audio note says are
     /// missing.
-    fn seconds_noted(note: &str) -> Option<u64> {
+    fn leading_seconds(note: &str) -> Option<u64> {
         note.strip_prefix("About ")?.split(' ').next()?.parse().ok()
     }
 
@@ -2797,10 +2797,16 @@ mod tests {
     /// Waits for the recorder to show `warning`, as it does once the
     /// restarts pass the attempts, failing the test as hung after
     /// [`HANG_GUARD`]: the restarts are real work, which a loaded runner
-    /// stretches.
+    /// stretches. A still-trying warning stays once it shows, so another
+    /// one fails the test at once, on its value.
     async fn until_the_warning(harness: &Harness, warning: &str) {
         let deadline = std::time::Instant::now() + HANG_GUARD;
         while harness.recorder.status().warning.as_deref() != Some(warning) {
+            if let Some(shown) = harness.recorder.status().warning
+                && shown.ends_with("Still trying.")
+            {
+                assert_eq!(shown, warning, "the still-trying warning");
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "the warning once the restarts pass the attempts: {:?}",
@@ -2876,10 +2882,7 @@ mod tests {
         } else {
             "No audio is arriving. Still trying."
         };
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::Call);
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
         until_the_warning(&harness, warning).await;
         stop(&harness.recorder);
@@ -3079,10 +3082,7 @@ mod tests {
         let harness = harness(&[]);
         let clock = Arc::new(steno_audio::testing::ManualClock::new());
         harness.recorder.count_down_on(clock.clone());
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::Call);
         harness
             .recorder
             .microphone_activity(MicrophoneActivity::Opened { app_name: None });
@@ -3917,10 +3917,7 @@ mod tests {
             .unwrap();
         let hold =
             steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::InPerson, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::InPerson);
         drop(hold);
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Idle);
@@ -3972,10 +3969,7 @@ mod tests {
             platform_rule(SpeechSettings::default()),
             failing,
         );
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::InPerson, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::InPerson);
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
 
         let audio_folder = harness.dir.path().join("audio");
@@ -4294,9 +4288,9 @@ mod tests {
         start(recorder);
         let meeting_id = recorder.status().meeting_id.unwrap();
         let finished = backend.clone();
-        tokio::task::spawn_blocking(move || finished.wait_until_finished())
-            .await
-            .unwrap();
+        on_own_thread(HANG_GUARD, "the backend delivered", move || {
+            finished.wait_until_finished();
+        });
         go.send(()).unwrap();
         stop(recorder);
         let text = log.text();
@@ -4606,10 +4600,7 @@ mod tests {
         harness
             .free
             .store(DiskWatch::STOP_BELOW_BYTES - 1, Ordering::SeqCst);
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::Call);
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Idle);
         assert_eq!(
