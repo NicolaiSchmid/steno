@@ -11,7 +11,7 @@ import Testing
 /// The record is the Swift app's own file; the Rust app's is never touched.
 /// Rust: `crates/steno-handover/tests/identity.rs` and
 /// `crates/steno-services/src/keychain_reset_tests.rs`.
-@Suite struct IdentityGuardTests {
+@Suite final class IdentityGuardTests {
   /// The keychain: holds one identity or none; a store puts `next` in, as
   /// the login keychain would hold the minted one.
   final class FakeKeychain: HandoverIdentityStore, @unchecked Sendable {
@@ -40,11 +40,19 @@ import Testing
     }
   }
 
-  let known = try! TestIdentity.load()
-  let other = try! TestIdentity.load("other-identity")
-  let directory = FileManager.default.temporaryDirectory
-    .appendingPathComponent("steno-identity-guard-\(UUID().uuidString)", isDirectory: true)
-  let store = try! MeetingStore.inMemory()
+  let known: HandoverIdentity
+  let other: HandoverIdentity
+  let directory: URL
+  let store: MeetingStore
+
+  init() throws {
+    known = try TestIdentity.load()
+    other = try TestIdentity.load("other-identity")
+    directory = try Fixtures.temporaryDirectory("steno-identity-guard")
+    store = try MeetingStore.inMemory()
+  }
+
+  deinit { try? FileManager.default.removeItem(at: directory) }
 
   func identityGuard(_ keychain: FakeKeychain, recorded: HandoverIdentity? = nil, phones: Int = 0)
     async throws -> HandoverIdentityGuard
@@ -59,22 +67,14 @@ import Testing
     return HandoverIdentityGuard(keychain: keychain, record: record, store: store)
   }
 
-  func refusal(_ body: () async throws -> HandoverIdentity) async -> IdentityUnavailability? {
-    do {
-      _ = try await body()
-      return nil
-    } catch {
-      return error as? IdentityUnavailability
-    }
-  }
-
   func hex(_ identity: HandoverIdentity) -> String { ContentHash.hex(identity.fingerprint) }
 
   @Test func anEmptyKeychainWithPairedPhonesMintsNothing() async throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
     let keychain = FakeKeychain(nil, next: other)
     let identityGuard = try await identityGuard(keychain, phones: 1)
-    #expect(await refusal { try await identityGuard.loadOrCreate(commonName: "A") } == .missing)
+    await #expect(throws: IdentityUnavailability.missing) {
+      try await identityGuard.loadOrCreate(commonName: "A")
+    }
     #expect(keychain.stores == 0)
     #expect(try identityGuard.record.recorded() == nil)
     #expect(try await store.pairedDevices().count == 1)
@@ -83,12 +83,13 @@ import Testing
   /// A recorded fingerprint over an empty keychain is missing at every
   /// launch until the identity is back; then it loads and the phones stay.
   @Test func aRecordOverAnEmptyKeychainWaitsUntilTheIdentityIsRestored() async throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
     let keychain = FakeKeychain(nil, next: other)
     let identityGuard = try await identityGuard(keychain, recorded: known, phones: 1)
     let bytes = try Data(contentsOf: identityGuard.record.url)
     for _ in 0..<2 {
-      #expect(await refusal { try await identityGuard.loadOrCreate(commonName: "A") } == .missing)
+      await #expect(throws: IdentityUnavailability.missing) {
+        try await identityGuard.loadOrCreate(commonName: "A")
+      }
     }
     #expect(keychain.stores == 0)
     #expect(try Data(contentsOf: identityGuard.record.url) == bytes)
@@ -100,13 +101,14 @@ import Testing
   }
 
   @Test func anotherIdentityIsNotAdoptedAndNeitherIsTouched() async throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
     let keychain = FakeKeychain(other, next: other)
     let identityGuard = try await identityGuard(keychain, recorded: known, phones: 1)
-    #expect(await refusal { try await identityGuard.loadOrCreate(commonName: "A") } == .replaced)
-    #expect(
-      await refusal { try await identityGuard.loadOrPairAgain(commonName: "A") { false } }
-        == .replaced)
+    await #expect(throws: IdentityUnavailability.replaced) {
+      try await identityGuard.loadOrCreate(commonName: "A")
+    }
+    await #expect(throws: IdentityUnavailability.replaced) {
+      try await identityGuard.loadOrPairAgain(commonName: "A") { false }
+    }
     #expect(hex(try #require(keychain.identity)) == hex(other))
     #expect(keychain.stores == 0 && keychain.deletes == 0)
     #expect(try identityGuard.record.recorded() == hex(known))
@@ -116,27 +118,22 @@ import Testing
   /// A locked or denied keychain is unavailable for the run, without the
   /// question.
   @Test func aReadThatFailsAsksNothingAndMintsNothing() async throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
     let keychain = FakeKeychain(nil, next: other)
-    keychain.readError = IdentityError.security("SecItemCopyMatching(certificate)", -25308)
+    let readError = IdentityError.security("SecItemCopyMatching(certificate)", -25308)
+    keychain.readError = readError
     let identityGuard = try await identityGuard(keychain)
     var asked = false
-    let refused = await refusal {
+    await #expect(throws: IdentityUnavailability.unreadable(String(describing: readError))) {
       try await identityGuard.loadOrPairAgain(commonName: "A") {
         asked = true
         return true
       }
-    }
-    guard case .unreadable = refused else {
-      Issue.record("unreadable, got \(String(describing: refused))")
-      return
     }
     #expect(!asked)
     #expect(keychain.stores == 0 && keychain.deletes == 0)
   }
 
   @Test func theFirstRunMintsStoresAndRecords() async throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
     let keychain = FakeKeychain(nil, next: other)
     let identityGuard = try await identityGuard(keychain)
     #expect(hex(try await identityGuard.loadOrCreate(commonName: "A")) == hex(other))
@@ -148,7 +145,6 @@ import Testing
   /// The identity of a build from before the guard has its fingerprint
   /// recorded, not replaced.
   @Test func anIdentityWithoutARecordIsRecordedNotMinted() async throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
     let keychain = FakeKeychain(known, next: other)
     let identityGuard = try await identityGuard(keychain, phones: 1)
     #expect(hex(try await identityGuard.loadOrCreate(commonName: "A")) == hex(known))
@@ -157,7 +153,6 @@ import Testing
   }
 
   @Test func pairAgainRemovesThePhonesAndMintsANewIdentity() async throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
     let keychain = FakeKeychain(nil, next: other)
     let identityGuard = try await identityGuard(keychain, recorded: known, phones: 2)
     var questions = 0
@@ -174,20 +169,18 @@ import Testing
   }
 
   @Test func aDeclinedPairAgainChangesNothing() async throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
     let keychain = FakeKeychain(nil, next: other)
     let identityGuard = try await identityGuard(keychain, recorded: known, phones: 1)
     let bytes = try Data(contentsOf: identityGuard.record.url)
-    #expect(
-      await refusal { try await identityGuard.loadOrPairAgain(commonName: "A") { false } }
-        == .missing)
+    await #expect(throws: IdentityUnavailability.missing) {
+      try await identityGuard.loadOrPairAgain(commonName: "A") { false }
+    }
     #expect(keychain.identity == nil && keychain.stores == 0 && keychain.deletes == 0)
     #expect(try Data(contentsOf: identityGuard.record.url) == bytes)
     #expect(try await store.pairedDevices().count == 1)
   }
 
   @Test func aSettingsSaveKeepsTheRecord() async throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
     let keychain = FakeKeychain(known, next: other)
     let identityGuard = try await identityGuard(keychain, recorded: known, phones: 1)
     let bytes = try Data(contentsOf: identityGuard.record.url)
@@ -202,8 +195,6 @@ import Testing
   /// reads or writes the Rust app's `handover-identity.json`, even when that
   /// names another identity.
   @Test func theRustAppsRecordIsNeitherReadNorWritten() async throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let rust = directory.appendingPathComponent("handover-identity.json")
     let rustBytes = Data("{\"\(IdentityRecordFile.key)\": \"\(hex(other))\"}".utf8)
     try rustBytes.write(to: rust)
@@ -216,7 +207,6 @@ import Testing
   }
 
   @Test func theRecordFileReplacesForgetsAndRefusesDamage() throws {
-    defer { try? FileManager.default.removeItem(at: directory) }
     let record = IdentityRecordFile(supportDirectory: directory)
     try record.forget()
     try record.record("ab12")
