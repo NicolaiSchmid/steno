@@ -25,8 +25,7 @@ pub fn mark_ui_thread() {
 }
 
 /// Whether the calling thread is the one [`mark_ui_thread`] marked.
-#[must_use]
-pub fn on_ui_thread() -> bool {
+fn on_ui_thread() -> bool {
     MARKED.get()
 }
 

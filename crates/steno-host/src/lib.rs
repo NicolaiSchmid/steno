@@ -75,4 +75,4 @@ mod ui_thread;
 
 pub use host::{Host, HostConfig};
 pub use services::Services;
-pub use ui_thread::{assert_off_ui_thread, mark_ui_thread, on_ui_thread};
+pub use ui_thread::{assert_off_ui_thread, mark_ui_thread};
