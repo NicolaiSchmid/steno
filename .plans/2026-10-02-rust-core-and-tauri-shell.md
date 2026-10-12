@@ -1097,7 +1097,8 @@ still has to draw the window side. `[ ]` is not ported yet.
     speech on a re-run) goes to one unknown room speaker without an embedding, the
     earlier fallback speaker when it owns a segment there, otherwise a new row under
     the next "Speaker N" after the highest stored one ("Speaker 1" on a first run),
-    so a label merged away is not reused; the mic lane goes to it too when it is the
+    never at or below the highest stored label (one merged away above every stored
+    label can come back); the mic lane goes to it too when it is the
     room, so the other party is never "me". A stored room speaker of the other lane
     takes none of this lane's segments; after such a lane switch that row can be left
     with no segment, and it then keeps the recording (the safe direction) and shows
@@ -1328,6 +1329,19 @@ still has to draw the window side. `[ ]` is not ported yet.
   `keep_forever_for_every_recording_commits_durably`). Rust only: Swift stamps once
   every delivery succeeded, at its store's default level, and its diarizer failure fails
   the meeting; the rollback consequence is in the stable plan's Rollback section.
+  A recording whose decode replaced parts by silence (#264) counts as incomplete too:
+  the pipeline ORs `DamagedAudio::may_be_damaged` (damaged parts, or a
+  `damaged-audio.json` that cannot be read) into every automatic stamp, after decode
+  recorded and synced the damage, and the detail ORs `audio_may_be_damaged` into
+  `keptIncomplete`; the pure `results_need_the_audio` is unchanged. A rule the user
+  applies ("Delete recording now") is stamped as chosen
+  (`a_damaged_recording_stays_unstamped_through_every_automatic_stamp`,
+  `a_damaged_recording_reads_kept_incomplete_and_can_still_be_deleted_now`). Every
+  failure of the speech sidecar's child while it diarizes (#266: a crash, a
+  systemd-oomd kill, the deadline, the 6 GiB ceiling) reaches the diarizer fallback and
+  keeps the recording the same way
+  (`every_sidecar_diarize_failure_keeps_the_recording_incomplete`,
+  `a_child_that_dies_while_it_diarizes_fails_that_stage_and_the_next_job_diarizes`).
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file
@@ -1638,15 +1652,31 @@ still has to draw the window side. `[ ]` is not ported yet.
   `canProcessAgain`, `Meeting::offers_process_again` (a failed meeting, and since #241
   a ready one whose results could still need the recording,
   `steno_core::results_need_the_audio` over its stored speakers, segments and asset,
-  so the detail's `keptIncomplete` line offers what it names) and the master on disk,
-  and the pipeline's `process_again` checks the same rule under its own read of those
-  rows, so a stale detail cannot run a ready, complete meeting again
+  or a recording that may be damaged, `DamagedAudio::may_be_damaged`, so the detail's
+  `keptIncomplete` line offers what it names) and the master on disk, and the
+  pipeline's `process_again` checks the same rule under its own read of those rows, so
+  a stale detail cannot run a ready, complete meeting again
   (`a_failed_meeting_and_a_ready_one_kept_incomplete_offer_process_again`,
   `process_again_runs_a_ready_meeting_kept_incomplete`,
   `a_ready_meeting_kept_incomplete_offers_process_again`,
-  `process_again_through_the_host_runs_a_ready_meeting_kept_incomplete`). The Swift app sends
-  `canProcessAgain: false` and refuses the method in words. `steno process --meeting
-  <id>` is Rust only and takes a ready meeting only with `--allow-ready`.
+  `process_again_through_the_host_runs_a_ready_meeting_kept_incomplete`). A meeting a
+  run left waiting for models is refused with the models line first, kept incomplete
+  or not (`process_again_on_a_meeting_waiting_for_models_says_to_download_them`).
+  When the meeting has a speaker the user confirmed or named, ready or failed, the
+  host asks first with `ui.confirmDestructive` ("Process this meeting again?": names
+  Steno cannot find again are cleared, and the note is written again, beside the
+  user's edited one per D13); a run whose diarizer works gives new speakers, and the
+  room speaker's confirmation never carries over to them. A decline changes nothing,
+  and a selection that moved while the prompt was up starts nothing
+  (`process_again_asks_before_it_clears_confirmed_speaker_names`,
+  `process_again_on_a_failed_meeting_asks_only_with_a_confirmed_speaker`,
+  `process_again_starts_nothing_when_the_selection_moved_during_its_prompt`). Speaker
+  merges and confirmations do not take the pipeline's claim, so one that removes the
+  room row between the rule's check and the run reprocesses a meeting that is complete
+  by then; that is benign, since nothing is lost beyond what a run on that meeting
+  replaces anyway. The Swift app sends `canProcessAgain: false` and refuses the method
+  in words. `steno process --meeting <id>` is Rust only, asks nothing, and takes a
+  ready, complete meeting only with `--allow-ready`.
 - Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds
   under 5 % of the mic lane's speech and under ten seconds is diarized on the mic lane
   (`pipeline::diarized_lane_after_transcription`, `tap_carried_no_conversation`); the
