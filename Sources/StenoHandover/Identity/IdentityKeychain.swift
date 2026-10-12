@@ -87,16 +87,6 @@
       try setLabel(label, on: stored)
     }
 
-    /// `IdentityItems.stage(_:label:)` in the login keychain.
-    public static func stage(_ identity: MintedIdentity, label: String) throws -> HandoverIdentity {
-      try Items().stage(identity, label: label)
-    }
-
-    /// `IdentityItems.promote(from:to:)` in the login keychain.
-    public static func promote(from staging: String, to label: String) throws {
-      try Items().promote(from: staging, to: label)
-    }
-
     /// The identity whose certificate is labelled `label`, or nil when no
     /// certificate carries that label. Never an identity that is not ours:
     /// the certificate is looked up by label (which certificate queries
@@ -201,9 +191,6 @@
         try IdentityKeychain.setLabel(label, on: key)
       }
 
-      /// The file keychain deletes one item per `SecItemDelete` unless the
-      /// query says `kSecMatchLimitAll`; without it a second labelled
-      /// certificate would survive the delete.
       func deleteCertificates(labelled label: String) throws {
         try deleteAll(kSecClassCertificate, labelled: label)
       }
@@ -219,6 +206,9 @@
         try deleteAll(kSecClassKey, labelled: label)
       }
 
+      /// The file keychain deletes one item per `SecItemDelete` unless the
+      /// query says `kSecMatchLimitAll`; without it a second labelled
+      /// certificate would survive the delete.
       private func deleteAll(_ itemClass: CFString, labelled label: String) throws {
         let status = SecItemDelete(
           [kSecClass: itemClass, kSecAttrLabel: label, kSecMatchLimit: kSecMatchLimitAll]

@@ -62,21 +62,22 @@ import X509
         try? IdentityKeychain.delete(label: label)
         try? IdentityKeychain.delete(label: staging)
       }
+      let items = IdentityKeychain.Items()
       let current = try MintedIdentity.mint(commonName: "Steno on Test Mac")
       try IdentityKeychain.store(current, label: label)
 
-      _ = try IdentityKeychain.stage(try MintedIdentity.mint(commonName: "first"), label: staging)
+      _ = try items.stage(try MintedIdentity.mint(commonName: "first"), label: staging)
       let next = try MintedIdentity.mint(commonName: "Steno on Test Mac")
-      let staged = try IdentityKeychain.stage(next, label: staging)
+      let staged = try items.stage(next, label: staging)
       #expect(staged.fingerprint == next.fingerprint, "the second stage replaces the first")
       let loaded = try #require(try IdentityKeychain.load(label: label))
       #expect(try HandoverIdentity(secIdentity: loaded).fingerprint == current.fingerprint)
 
-      try IdentityKeychain.promote(from: staging, to: label)
+      try items.promote(from: staging, to: label)
       #expect(try IdentityKeychain.load(label: staging) == nil)
       let promoted = try #require(try IdentityKeychain.load(label: label))
       #expect(try HandoverIdentity(secIdentity: promoted).fingerprint == next.fingerprint)
-      #expect(throws: IdentityError.self) { try IdentityKeychain.promote(from: staging, to: label) }
+      #expect(throws: IdentityError.self) { try items.promote(from: staging, to: label) }
       #expect(
         try IdentityKeychain.load(label: label) != nil, "a promote of nothing deletes nothing")
     }
