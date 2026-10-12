@@ -297,9 +297,9 @@ impl<B: SpeechBackend + ?Sized> TdtModel for BackendWindow<'_, B> {
 /// window's first sample in the recording: token frames count from the
 /// frame it falls in, and the samples it lies past that frame's start are
 /// each token's [`Token::phase`], so a window off the frame grid times its
-/// tokens from where it really starts. A window abandoned at the token budget is logged as a warning; it
-/// reports the tokens kept, which under [`TokenBudget::PerWindow`] is the
-/// budget itself.
+/// tokens from where it really starts. A window abandoned at the token
+/// budget is logged as a warning; it reports the tokens kept, which under
+/// [`TokenBudget::PerWindow`] is the budget itself.
 pub fn decode_window<B: SpeechBackend + ?Sized>(
     backend: &mut B,
     encoder: &EncoderOutput,
@@ -318,17 +318,17 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
     let mut window = BackendWindow {
         backend,
         encoder,
-        // Replaced by `start` before the first joint.
+        // Replaced by `TdtModel::start` before the first joint.
         step: DecoderStep {
             projection: Vec::new(),
             state: DecoderState::zeros(0, 0),
         },
     };
     let runaways = stats.runaways;
-    let frame_offset = start / FRAME_SAMPLES;
+    let (frame_offset, phase) = (start / FRAME_SAMPLES, start % FRAME_SAMPLES);
     let mut tokens = decode_frames(&mut window, frames, frame_offset, config, stats)?.tokens;
     for token in &mut tokens {
-        token.phase = start % FRAME_SAMPLES;
+        token.phase = phase;
     }
     if stats.runaways > runaways {
         tracing::warn!(
