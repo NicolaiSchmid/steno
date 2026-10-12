@@ -2621,12 +2621,13 @@ mod tests {
 
     /// Records over `harness` until `warning` shows, within `patience`,
     /// and checks the meter reads silence then and the warning stands for
-    /// `holds` more; stops, checks the note after the stop ends with
-    /// `cause` and returns the seconds it says are missing.
+    /// `holds` more; stops, checks the note after the stop names the
+    /// `stalled` device, or none, and returns the seconds it says are
+    /// missing.
     async fn until_still_trying(
         harness: &Harness,
         warning: &str,
-        cause: &str,
+        stalled: Option<&str>,
         patience: Duration,
         holds: Duration,
     ) -> u64 {
@@ -2655,9 +2656,11 @@ mod tests {
             .and_then(|rest| rest.split(' ').next())
             .and_then(|seconds| seconds.parse().ok())
             .unwrap_or_else(|| panic!("the note: {note}"));
+        // A gap that rounds to `seconds`, past the note's 1 s floor, so
+        // "About 1 second" matches as well as the plural.
         assert_eq!(
-            note,
-            format!("About {seconds} seconds of the recording are missing{cause}")
+            Some(note),
+            missing_audio_note(Duration::from_secs(seconds).as_secs_f64() + 0.25, stalled)
         );
         // Before the harness waits for the pipeline's runs, so none starts
         // after that wait and writes into the folder it removed.
@@ -2689,7 +2692,7 @@ mod tests {
     /// the stall's 2 s, and four restarts that wait 2 s each for a frame.
     const STILL_TRYING_WITHIN: Duration = Duration::from_secs(30);
     const STILL_TRYING_ON_USB: &str = "No audio from USB Microphone. Still trying.";
-    const FROM_USB: &str = ": no audio arrived from USB Microphone.";
+    const USB_MICROPHONE: &str = "USB Microphone";
 
     /// A device that stops delivering and whose restarts keep failing (a
     /// graph that does not run): once they pass `RESTART_ATTEMPTS` the
@@ -2708,7 +2711,7 @@ mod tests {
         let seconds = until_still_trying(
             &harness,
             STILL_TRYING_ON_USB,
-            FROM_USB,
+            Some(USB_MICROPHONE),
             STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
@@ -2731,7 +2734,7 @@ mod tests {
         let seconds = until_still_trying(
             &harness,
             STILL_TRYING_ON_USB,
-            FROM_USB,
+            Some(USB_MICROPHONE),
             STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
@@ -2782,7 +2785,7 @@ mod tests {
         let seconds = until_still_trying(
             &harness,
             "No audio is arriving. Still trying.",
-            ".",
+            None,
             STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
