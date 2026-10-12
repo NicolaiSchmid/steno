@@ -2559,6 +2559,22 @@ mod tests {
         )
     }
 
+    /// The recorder's warning without a leading missing-audio note
+    /// ([`missing_audio_note`]): a rebuild that takes over a second on a
+    /// loaded runner leaves a gap the stop notes, and the fallback tests
+    /// check the fallback's warning and note, not how long a rebuild took.
+    fn without_a_gap_note(recorder: &CaptureRecorder) -> Option<String> {
+        let warning = recorder.status().warning?;
+        let Some((_, rest)) = warning
+            .strip_prefix("About ")
+            .and_then(|note| note.split_once(" of the recording "))
+            .and_then(|(_, note)| note.split_once(" missing."))
+        else {
+            return Some(warning);
+        };
+        Some(rest.trim_start().to_owned()).filter(|rest| !rest.is_empty())
+    }
+
     /// A rebuild that records the default input in place of the chosen
     /// microphone shows a warning naming the one recorded, until it is
     /// dismissed (then no note follows the stop) or the recording stops.
@@ -2575,7 +2591,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }));
-        let warning = || harness.recorder.status().warning;
+        let warning = || without_a_gap_note(&harness.recorder);
         start(&harness.recorder);
         assert_eq!(warning(), None, "the chosen microphone records");
         eventually_within(HANG_GUARD, "the rebuild's fallback is named", || {
@@ -2600,7 +2616,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_that_starts_on_the_fallback_microphone_warns_at_once() {
         let harness = harness_on_inputs(input(Some("Built-in Audio"), true), input(None, true));
-        let warning = || harness.recorder.status().warning;
+        let warning = || without_a_gap_note(&harness.recorder);
         start(&harness.recorder);
         assert_eq!(
             warning().as_deref(),
@@ -2635,7 +2651,7 @@ mod tests {
             input(Some("Built-in Audio"), true),
             input(Some("USB Microphone"), false),
         );
-        let warning = || harness.recorder.status().warning;
+        let warning = || without_a_gap_note(&harness.recorder);
         start(&harness.recorder);
         assert!(warning().is_some(), "on the fallback at the start");
         eventually_within(HANG_GUARD, "back on the chosen microphone", || {
