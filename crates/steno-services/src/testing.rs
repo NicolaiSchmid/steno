@@ -153,14 +153,18 @@ pub fn synthetic_tone(
 
 /// A capture recorder over [`synthetic_capture`] and fakes, recording
 /// into a temp audio folder, for the tests that drive it from outside
-/// (the auto-stop, the detection prompt). Dropped, it stops a recording
-/// still running and waits for the pipeline's runs, so no file of a
-/// test's processing is left behind; that needs a multi-threaded runtime.
+/// (the auto-stop, the detection prompt). Dropped after a test that
+/// passed, it stops a recording still running; after a failed one it
+/// leaves the recording, since a stop stuck on the recorder's lock would
+/// hang the test binary. Either way it then waits for the pipeline's
+/// runs, so no file of a test's processing is left behind; that needs a
+/// multi-threaded runtime. The temp directory is dropped last, after the
+/// store, the pipeline and the recorder.
 pub struct SyntheticRecorder {
-    _dir: tempfile::TempDir,
     pub store: Arc<Store>,
     pipeline: Arc<CurrentPipeline>,
     pub recorder: Arc<crate::recorder::CaptureRecorder>,
+    _dir: tempfile::TempDir,
 }
 
 /// A [`SyntheticRecorder`] on the current runtime.
@@ -188,10 +192,10 @@ pub fn synthetic_recorder_over(make_session: MakeCaptureSession) -> SyntheticRec
         dir.path().join("support"),
     );
     SyntheticRecorder {
-        _dir: dir,
         store,
         pipeline,
         recorder,
+        _dir: dir,
     }
 }
 
@@ -226,7 +230,9 @@ impl SyntheticRecorder {
 
 impl Drop for SyntheticRecorder {
     fn drop(&mut self) {
-        if self.recorder.is_busy() {
+        // Panicking first: `is_busy` takes the recorder's lock, which a
+        // stop that failed the test may still hold.
+        if !std::thread::panicking() && self.recorder.is_busy() {
             self.stop();
         }
         let pipeline = self.pipeline.current();
