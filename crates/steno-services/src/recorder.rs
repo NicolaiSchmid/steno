@@ -3593,8 +3593,8 @@ mod tests {
     }
 
     /// Gives the harness's store `handler`, a quit test's
-    /// [`BusyTries::on_busy`], for its busy handler, and holds the database from another
-    /// connection until the hold is dropped.
+    /// [`BusyTries::on_busy`], for its busy handler, and holds the
+    /// database from another connection until the hold is dropped.
     fn held_with_counted_tries(
         harness: &Harness,
         handler: fn(i32) -> bool,

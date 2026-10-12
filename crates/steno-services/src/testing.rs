@@ -28,20 +28,21 @@ use crate::recorder::MakeCaptureSession;
 
 /// How long a test waits for work driven by its own fakes, gates and
 /// manual clock, or for the synthetic capture's first audio once it
-/// records (a level, frames in the files), before it fails. That work takes milliseconds, so this bound only turns a hang
-/// into a failure; for real capture work see [`HANG_GUARD`].
+/// records (a level, frames in the files), before it fails. That work
+/// takes milliseconds, so this bound only turns a hang into a failure;
+/// for real capture work see [`HANG_GUARD`].
 pub const PATIENCE: Duration = Duration::from_secs(5);
 
 /// How long a test waits for real work over the synthetic capture before
 /// it fails as hung: a start, a stop and save, a quit, a rebuild or
 /// restart, a recording that ends on its own. A loaded runner stretches
 /// that work past [`PATIENCE`]. A gate the test opens only after such work
-/// takes this bound too. A call that does the work only when the
-/// behaviour under test is broken (a refused start accepted after all)
-/// takes this bound too, so the break fails on its assertion. No verdict
-/// rests on how long the work took: a test about how often something
-/// happens counts it, and a product patience a test passes in takes this
-/// bound unless that patience is what it checks.
+/// takes this bound too, and so does a call that does the work only when
+/// the behaviour under test is broken (a refused start accepted after
+/// all), so the break fails on its assertion. No verdict rests on how
+/// long the work took: a test about how often something happens counts
+/// it, and a product patience a test passes in takes this bound unless
+/// that patience is what it checks.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// A fresh store; the directory lives as long as the guard.
