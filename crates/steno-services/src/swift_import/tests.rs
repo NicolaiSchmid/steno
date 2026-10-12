@@ -1492,7 +1492,10 @@ async fn settings_try_again_or_pair_again_ends_a_denied_export() {
             tokio::task::block_in_place(|| gated.try_again())
         };
         answer.unwrap();
-        follow.await.unwrap();
+        tokio::time::timeout(crate::testing::PATIENCE, follow)
+            .await
+            .expect("the listener comes up")
+            .unwrap();
         assert_eq!(gated.waiting(), None);
         assert!(app.services.preferences.flag(IMPORT_RAN_KEY));
         assert_eq!(*keychain.marker.lock().unwrap(), Ok(true));

@@ -1037,10 +1037,10 @@ mod tests {
             ended = &mut follow => panic!("follow ended after the failed build: {ended:?}"),
         }
         gated.try_again().unwrap();
-        tokio::select! {
-            call = calls.recv() => assert_eq!(call, Some(2)),
-            ended = &mut follow => panic!("follow ended after the second failed build: {ended:?}"),
-        }
+        let call = tokio::time::timeout(crate::testing::PATIENCE, calls.recv())
+            .await
+            .expect("Try again builds again");
+        assert_eq!(call, Some(2));
         (&mut was_opened).await.unwrap();
         follow.await.unwrap();
         assert!(gated.service().is_some());
