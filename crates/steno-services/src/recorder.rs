@@ -2651,23 +2651,34 @@ mod tests {
         }
         stop(&harness.recorder).await;
         let note = status().warning.unwrap_or_default();
-        let seconds: u64 = note
-            .strip_prefix("About ")
-            .and_then(|rest| rest.split(' ').next())
-            .and_then(|seconds| seconds.parse().ok())
-            .unwrap_or_else(|| panic!("the note: {note}"));
-        // A gap that rounds to `seconds`, past the note's 1 s floor, so
-        // "About 1 second" matches as well as the plural.
-        assert_eq!(
-            Some(note),
-            missing_audio_note(Duration::from_secs(seconds).as_secs_f64() + 0.25, stalled)
-        );
+        assert!(note.starts_with("About "), "only the missing audio: {note}");
+        let seconds = seconds_missing(&note, stalled);
         // Before the harness waits for the pipeline's runs, so none starts
         // after that wait and writes into the folder it removed.
         eventually("the pipeline picked the saved meeting up", || {
             harness.engine.transcriptions.count() > 0
         })
         .await;
+        seconds
+    }
+
+    /// The seconds the note after a stop says are missing, checking that
+    /// it ends with [`missing_audio_note`]'s note for them and the
+    /// `stalled` device, or none: "About 1 second" as well as the plural.
+    fn seconds_missing(note: &str, stalled: Option<&str>) -> u64 {
+        let missing = note.find("About ").map_or("", |start| &note[start..]);
+        let seconds: u64 = missing
+            .strip_prefix("About ")
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|seconds| seconds.parse().ok())
+            .unwrap_or_else(|| panic!("the note: {note}"));
+        // A gap that rounds to `seconds`, past the note's 1 s floor.
+        let gap = Duration::from_secs(seconds).as_secs_f64() + 0.25;
+        assert_eq!(
+            Some(missing),
+            missing_audio_note(gap, stalled).as_deref(),
+            "{note}"
+        );
         seconds
     }
 
@@ -2763,9 +2774,10 @@ mod tests {
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
         until_the_warning(&harness, warning, STILL_TRYING_WITHIN).await;
         stop(&harness.recorder).await;
-        let note = harness.recorder.status().warning.unwrap_or_default();
-        assert!(note.contains("of the recording are missing"), "{note}");
-        assert_eq!(note.contains("USB Microphone"), cfg!(windows), "{note}");
+        seconds_missing(
+            &harness.recorder.status().warning.unwrap_or_default(),
+            cfg!(windows).then_some(USB_MICROPHONE),
+        );
         eventually("the pipeline picked the saved meeting up", || {
             harness.engine.transcriptions.count() > 0
         })
