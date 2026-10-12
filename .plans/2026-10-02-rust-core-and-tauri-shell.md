@@ -1436,9 +1436,28 @@ still has to draw the window side. `[ ]` is not ported yet.
     login under systemd). A reboot saves inside logind's delay; on
     Omarchy the delay is 15 s and the user manager then gets 5 s (`user@.service`),
     which no drop-in for this unit can raise, so that path depends on the delay
-    lock. A save still needs to fit in the compositor's own stop when the app runs
-    in the compositor's unit rather than its own (uwsm's `wayland-wm@.service`,
-    `TimeoutStopSec=10`).
+    lock. An app started inside another program's service, as a Hyprland key
+    binding without `uwsm-app` starts it in uwsm's `wayland-wm@.service`, got
+    SIGTERM with the compositor and a second one from systemd once the compositor
+    had exited, which ends it unsaved (`forced_exit`), and `SIGKILL` 10 s in. So at
+    launch, before the first window, an app whose cgroup names a service of the
+    user manager that is not Steno's own (its name does not say `steno`) and whose
+    main process is another asks for `app-steno\x2ddesktop-<pid>.scope` in
+    `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and
+    `After=graphical-session.target`, and waits up to 2 s for the move. Unlike
+    the sidecar's scope, a start still queued then (at login, behind
+    `graphical-session.target`) is never called off: the request's thread waits
+    up to 60 s more and logs the outcome; a session that ends before then leaves
+    the app in the compositor's unit. The AppImage runtime's mount server, found
+    by its FUSE connection and keepalive pipe (`appimage.rs`), moves into a scope
+    of its own in `app.slice` wherever it runs, also when the app stays; each move
+    is checked and written to stderr. In a login's `session-<n>.scope` it stays
+    beside the app with a warning. A scope, Steno's own services and an app
+    outside the user manager stay, and a failed move logs a warning
+    (`own_scope.rs`, X1 of `.plans/2026-10-07-stable-promotion.md`). Tested
+    against a fake manager on a private `dbus-daemon`, and in a container under a
+    real systemd 255 user manager with a stand-in for uwsm's units (desktop README,
+    Hyprland).
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -2875,7 +2894,15 @@ touch and admission lines; each fix is ported to Swift before cutover.
   the focus without touching the main window.
 - Linux shows the tray only where a status notifier host runs (KDE, most desktop
   panels, GNOME with the AppIndicator extension); elsewhere closing the main window
-  quits, where the Swift `NSStatusItem` is always in the menu bar.
+  quits and saves a recording in progress first, where the Swift `NSStatusItem` is
+  always in the menu bar. The shell follows the watcher's owner and its
+  `IsStatusNotifierHostRegistered` on the session bus for the whole run
+  (`apps/desktop/src-tauri/src/tray_host.rs`), so a host that comes or goes decides
+  the next close where the watcher says so (Waybar, GNOME's extension; KDE's watcher
+  always says a host registered, so on Plasma the name alone decides, as before); a
+  reading that fails counts as none and is read again 10 s later, three times at most
+  before the next change, and a watcher that serves no object yet counts as none
+  until the next change.
 - One process per database (Rust only; the stable plan's P15). The app takes an
   exclusive advisory lock on the database's own lock file, beside it with the extension
   `lock` (`<support>/steno.lock` for the default `steno.sqlite`), before it opens it,
@@ -3237,6 +3264,15 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   still to be decided. Where: `crates/steno-pipeline/src/pipeline.rs`,
   `crates/steno-services/src/pipeline.rs`, `crates/steno-core/src/store/mod.rs`.
   Found: #237.
+- **Unowned.** A Pair that lands during the quit starts a listener after it:
+  `App::shutdown` stops the listener, but `ListenerHandover::close` only keeps a
+  waiting handover from receiving one, so a `start` waiting on the stop's lock binds
+  once the stop returns and runs until the process exits. It loses nothing. With the
+  fixed port, an update's relaunch that binds before the old process exits falls back
+  to a port the system chooses, which the firewall blocks until the next launch. The
+  likely remedy: `ListenerHandover::start` refuses once `close` ran. Where:
+  `crates/steno-services/src/handover.rs`, `crates/steno-services/src/app.rs`
+  (`shutdown`). Found: #276.
 
 ## Progress
 
@@ -3321,6 +3357,9 @@ PR off `main`.
 | Tests never write placeholder models into a models directory `STENO_MODELS_DIR` names: the reload test that installed them into the app's resolved directory (and so over a developer's real models) pins its own in the settings, the CLI tests clear the variable, `steno-services`' model writers panic outside the temp directory or inside the named one, and a child-process test proves the named directory is left alone | `fix/test-models-dir-guard` | #273 | open |
 | S2: meeting detection on every platform (`steno_services::detection`: one prompt at a time for 60 s through the shell's panel, none while recording or with detection off, its Record attributed to the prompt's app through `recordFromPrompt`, the setting read every two seconds, which retries a detector that could not start) and the auto-stop after a call (`steno_services::auto_stop`: the 90-second grace, Keep recording, the call resuming, the Stop path with `callEnded`) (`steno-services`, desktop shell, web prompt) | `feat/rust-recorder-policy` | #271 | open |
 | No update stops a recording or a processing run: the app's install gate over the recorder and the pipelines' in-flight set, whose job hold keeps jobs claimed during the install waiting for a minute at most; Record always works while an installer that returns (a `.deb`'s password prompt) runs, and the relaunch waits for what started; the user's yes while busy installs after it ends; automatic downloads on, not for an installer that asks an administrator, which runs only right after a yes given while idle; on Windows a hidden `cmd.exe` starts the old version again when the installer does not install (P25 of `.plans/2026-10-07-stable-promotion.md`; `steno-pipeline`, `steno-services`, desktop shell) | `fix/desktop-updates-wait-for-idle` | #270 | merged |
+| An app started inside another program's service (a Hyprland key binding without `uwsm-app`) moves at launch into a scope of its own with 20 s to save, an AppImage's mount servers into scopes of their own wherever the app runs, and the desktop README says what saves at each session end under Hyprland (X1 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-session-end` | #272 | merged |
+| Stable plan X3: every tray action is in the tray's menu, a click doing nothing the menu does not, and on Linux a follower of the status notifier watcher on the session bus (its owner and `IsStatusNotifierHostRegistered`, at launch and at every change) decides the close: with no host, as on GNOME without the AppIndicator extension, closing the main window quits through Quit's path and saves a recording first, which `close-without-tray-linux.sh` checks in CI (`apps/desktop`) | `fix/desktop-linux-tray` | #275 | merged |
+| The handover behind a firewall: TCP 23820 on Linux (`HandoverConfiguration::LINUX_PORT`), set otherwise by `STENO_HANDOVER_PORT` or the setting `handoverPort` (a stored port that is not one ignored with a warning), a taken port giving way to one the system chooses with a warning, a start during a stop waiting for it, so a restart keeps the port; the AUR package's `ufw` profile `Steno`; the NixOS module's `programs.steno.openFirewall` and `handoverPort` (X4 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-core`, `steno-services`, `packaging/aur/`, `nix/`) | `fix/desktop-handover-firewall` | #276 | merged |
 | S6, the identifier half: `com.nicolaischmid.steno.desktop` on every platform, the Swift `SUPublicEDKey` in `Info.plist` (checked in the built bundle), `panel-anchor.json` in the support directory and read once from the earlier identifier's config directory, and the macOS login item on `SMAppService.mainApp`, which removes the earlier build's Launch Agent at each launch and registers itself once, at the first launch with `launch_at_login` on (`steno.mainAppRegistered`; S6 of `.plans/2026-10-07-stable-promotion.md`; desktop shell) | `feat/desktop-identifier` | #268 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
