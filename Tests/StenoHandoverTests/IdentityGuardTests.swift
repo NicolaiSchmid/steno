@@ -14,13 +14,15 @@ import Testing
 /// Rust: `crates/steno-handover/tests/identity.rs` and
 /// `crates/steno-services/src/keychain_reset_tests.rs`.
 @Suite final class IdentityGuardTests {
-  /// The keychain: a current identity or none, and a staged one (`pending`)
-  /// or none; a stage puts `next` there, as the login keychain would hold
-  /// the minted one, and a promote moves it to the current one.
+  /// The keychain: a current identity or none, and a staged one or none; a
+  /// stage puts `next` there, as the login keychain would hold the minted
+  /// one, and a promote moves it to the current one. Its promote cannot be
+  /// cut short; `IdentityItemsTests` cuts the real one at every write.
   final class FakeKeychain: HandoverIdentityKeychain, @unchecked Sendable {
     var identity: HandoverIdentity?
-    var pending: HandoverIdentity?
+    var stagedIdentity: HandoverIdentity?
     var readError: (any Error)?
+    var stagedError: (any Error)?
     var stageError: (any Error)?
     var promoteError: (any Error)?
     let next: HandoverIdentity
@@ -36,19 +38,22 @@ import Testing
       if let readError { throw readError }
       return identity
     }
-    func staged() throws -> HandoverIdentity? { pending }
+    func staged() throws -> HandoverIdentity? {
+      if let stagedError { throw stagedError }
+      return stagedIdentity
+    }
     func stage(_: MintedIdentity) throws -> HandoverIdentity {
       if let stageError { throw stageError }
       stages += 1
-      pending = next
+      stagedIdentity = next
       return next
     }
     func promote() throws {
       if let promoteError { throw promoteError }
       promotes += 1
-      guard let pending else { throw Refused() }
-      identity = pending
-      self.pending = nil
+      guard let stagedIdentity else { throw Refused() }
+      identity = stagedIdentity
+      self.stagedIdentity = nil
     }
   }
 
@@ -197,7 +202,7 @@ import Testing
     #expect(hex(try await identityGuard.loadOrCreate(commonName: "A")) == hex(other))
     #expect(try identityGuard.record.recorded() == hex(other))
     #expect(hex(try await identityGuard.loadOrCreate(commonName: "A")) == hex(other))
-    #expect(keychain.stages == 1 && keychain.promotes == 1 && keychain.pending == nil)
+    #expect(keychain.stages == 1 && keychain.promotes == 1 && keychain.stagedIdentity == nil)
   }
 
   /// The identity of a build from before the guard has its fingerprint
@@ -239,7 +244,7 @@ import Testing
     #expect(hex(identity) == hex(other))
     #expect(try await store.pairedDevices().isEmpty)
     #expect(try identityGuard.record.recorded() == hex(other))
-    #expect(hex(try #require(keychain.identity)) == hex(other) && keychain.pending == nil)
+    #expect(hex(try #require(keychain.identity)) == hex(other) && keychain.stagedIdentity == nil)
     #expect(keychain.stages == 1 && keychain.promotes == 1)
     #expect(hex(try await identityGuard.loadOrCreate(commonName: "A")) == hex(other))
   }
@@ -273,7 +278,7 @@ import Testing
     #expect(try await store.pairedDevices().isEmpty == false)
     #expect(try Data(contentsOf: identityGuard.record.url) == bytes)
     #expect(keychain.identity.map(hex) == (replaced ? hex(known) : nil))
-    #expect(keychain.pending.map(hex) == hex(other) && keychain.promotes == 0)
+    #expect(keychain.stagedIdentity.map(hex) == hex(other) && keychain.promotes == 0)
 
     await #expect(throws: refusal(replaced: replaced)) {
       try await identityGuard.loadOrCreate(commonName: "A")
@@ -291,7 +296,7 @@ import Testing
   @Test(arguments: [false, true])
   func aPairAgainCutShortBeforeTheRecordAsksAgain(replaced: Bool) async throws {
     let (keychain, identityGuard) = try await pairing(replaced: replaced, phones: 0)
-    keychain.pending = other
+    keychain.stagedIdentity = other
     let bytes = try Data(contentsOf: identityGuard.record.url)
     await #expect(throws: refusal(replaced: replaced)) {
       try await identityGuard.loadOrCreate(commonName: "A")
@@ -301,11 +306,29 @@ import Testing
     #expect(try Data(contentsOf: identityGuard.record.url) == bytes)
   }
 
+  /// A staged item that cannot be read (a certificate whose key is gone)
+  /// is no identity to finish with: the launch is missing or replaced as
+  /// without it, and Pair Again stages over it.
+  @Test(arguments: [false, true])
+  func aStagedItemThatCannotBeReadIsIgnored(replaced: Bool) async throws {
+    let (keychain, identityGuard) = try await pairing(replaced: replaced)
+    keychain.stagedError = IdentityError.malformed("no private key")
+    await #expect(throws: refusal(replaced: replaced)) {
+      try await identityGuard.loadOrCreate(commonName: "A")
+    }
+    #expect(keychain.stages == 0 && keychain.promotes == 0)
+    #expect(try await store.pairedDevices().count == 2)
+
+    #expect(hex(try await identityGuard.loadOrPairAgain(commonName: "A") { true }) == hex(other))
+    #expect(keychain.stages == 1 && keychain.promotes == 1)
+    #expect(try identityGuard.record.recorded() == hex(other))
+  }
+
   /// The same with no record (phones paired without one): the staged
   /// identity is installed, not a new one minted.
   @Test func aStagedIdentityWithNoRecordAndNoPhoneIsInstalledNotMinted() async throws {
     let keychain = FakeKeychain(nil, next: known)
-    keychain.pending = other
+    keychain.stagedIdentity = other
     let identityGuard = try await identityGuard(keychain)
     #expect(hex(try await identityGuard.loadOrCreate(commonName: "A")) == hex(other))
     #expect(keychain.stages == 0 && keychain.promotes == 1)
