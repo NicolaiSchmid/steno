@@ -5,69 +5,29 @@
 //! resume the store refuses is owed to that retry. The lock is a second
 //! connection's `BEGIN IMMEDIATE`, as a `steno` command's write holds it.
 
-use std::path::Path;
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use steno_core::paths::{file_url, file_url_path};
+use common::Uninstalled;
+use steno_core::paths::file_url_path;
 use steno_core::protocols::{BoundaryResult, BoxError};
 use steno_core::testing::{
-    FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory, PassthroughCleaner, sample_data,
+    FakeSpeechEngine, InMemorySpeakerMemory, PassthroughCleaner, WriteLockHold, sample_data,
 };
 use steno_core::{
-    AudioAsset, AudioBuffer16k, AudioFormat, AudioLane, AudioRetention, CleanupInput,
-    CleanupOutput, Delivery, DeliveryDispatcher, Embedding, LanguageTag, MeetingEvent,
-    MeetingState, PipelineStage, RawSegment, SpeakerMatch, SpeakerMemory, SpeechEngine, Store,
+    AudioBuffer16k, AudioRetention, CleanupInput, CleanupOutput, Embedding, LanguageTag,
+    MeetingEvent, MeetingState, RawSegment, SpeakerMatch, SpeakerMemory, SpeechEngine, Store,
     StoreError, TranscriptCleaner, async_trait,
 };
-use steno_pipeline::{
-    EventReceiver, MeetingEventBus, PipelineDependencies, PipelineFailure, ProcessingPipeline,
-    ReprocessError,
-};
+use steno_pipeline::{EventReceiver, PipelineDependencies, ProcessingPipeline, ReprocessError};
 use uuid::Uuid;
 
 /// How long a test waits for a gate, or for a run that waits out the
 /// store's five-second busy timeout.
 const PATIENCE: Duration = Duration::from_secs(30);
-
-/// Reads the 16 kHz mono WAV fixtures.
-struct WavDecoder;
-
-#[async_trait]
-impl steno_core::AudioDecoder for WavDecoder {
-    async fn decode(&self, asset: &AudioAsset, lane: AudioLane) -> BoundaryResult<AudioBuffer16k> {
-        let url = asset.sidecars_16k.get(&lane).unwrap_or(&asset.url);
-        let bytes = std::fs::read(file_url_path(url).ok_or("not a file URL")?)?;
-        Ok(AudioBuffer16k::new(
-            bytes[44..]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|pair| f32::from(i16::from_le_bytes(*pair)) / 32768.0)
-                .collect(),
-        ))
-    }
-
-    fn mixdown_format(&self) -> AudioFormat {
-        AudioFormat::Wav16kInt16
-    }
-
-    async fn mixdown(&self, asset: &AudioAsset, to: &Path) -> BoundaryResult<()> {
-        std::fs::copy(file_url_path(&asset.url).ok_or("not a file URL")?, to)?;
-        Ok(())
-    }
-}
-
-/// Delivers to no destination.
-struct NoDestinations;
-
-#[async_trait]
-impl DeliveryDispatcher for NoDestinations {
-    async fn deliver_all(&self, _meeting_id: Uuid) -> Vec<Delivery> {
-        Vec::new()
-    }
-}
 
 /// A gate a fake waits at once: `entered` when it is reached, then it
 /// waits for `open`.
@@ -142,41 +102,6 @@ impl TranscriptCleaner for HeldCleaner {
     }
 }
 
-/// A speech engine refused for missing models until `installed` is set.
-#[derive(Default)]
-struct Uninstalled {
-    installed: AtomicBool,
-    inner: FakeSpeechEngine,
-}
-
-#[async_trait]
-impl SpeechEngine for Uninstalled {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-
-    fn supported_languages(&self) -> &std::collections::BTreeSet<LanguageTag> {
-        self.inner.supported_languages()
-    }
-
-    async fn prepare(&self) -> BoundaryResult<()> {
-        self.inner.prepare().await
-    }
-
-    async fn transcribe(
-        &self,
-        audio: &AudioBuffer16k,
-        hint: Option<&LanguageTag>,
-    ) -> BoundaryResult<Vec<RawSegment>> {
-        if !self.installed.load(Ordering::SeqCst) {
-            return Err(Box::new(PipelineFailure::models_missing(
-                PipelineStage::Transcribe,
-            )));
-        }
-        self.inner.transcribe(audio, hint).await
-    }
-}
-
 /// The store's busy error, as SQLite reports a lock another connection
 /// held past the busy timeout.
 fn busy() -> StoreError {
@@ -225,20 +150,8 @@ fn world(
 ) -> World {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("steno.sqlite");
-    let audio = dir.path().join("audio");
-    let store = Arc::new(Store::open(&path).unwrap());
-    let mut settings = store.settings().unwrap();
-    settings.audio_folder = file_url(&audio, true);
-    store.save_settings(&settings).unwrap();
-    let pipeline = ProcessingPipeline::new(dependencies(PipelineDependencies::new(
-        Arc::new(WavDecoder),
-        engine,
-        Arc::new(FakeDiarizer::default()),
-        Arc::new(InMemorySpeakerMemory::new(Vec::new())),
-        Arc::new(NoDestinations),
-        store.clone(),
-        MeetingEventBus::new(),
-    )));
+    let (store, audio) = common::store_with_audio(&path);
+    let pipeline = ProcessingPipeline::new(dependencies(common::dependencies(&store, engine)));
     World {
         _dir: dir,
         path,
@@ -268,10 +181,8 @@ impl World {
 
     /// A second connection that holds the write lock until it is dropped,
     /// as another process's write transaction does.
-    fn lock(&self) -> WriteLock {
-        let connection = rusqlite::Connection::open(&self.path).unwrap();
-        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-        WriteLock(connection)
+    fn lock(&self) -> WriteLockHold {
+        WriteLockHold::new(&self.path)
     }
 
     /// The pipeline's connection gives up on a lock at once instead of
@@ -296,16 +207,6 @@ impl World {
         })
         .await
         .expect("the meeting waits for the store");
-    }
-}
-
-/// Another connection's write transaction; dropping it rolls back and
-/// lets go of the lock.
-struct WriteLock(rusqlite::Connection);
-
-impl Drop for WriteLock {
-    fn drop(&mut self) {
-        let _ = self.0.execute_batch("ROLLBACK");
     }
 }
 
