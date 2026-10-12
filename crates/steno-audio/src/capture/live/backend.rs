@@ -23,14 +23,19 @@
 //! fallback also resolves them every
 //! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification and
 //! looks only for another microphone
-//! ([`DeviceSnapshot::input_difference`]). Nothing changed means the burst
+//! ([`DeviceSnapshot::input_difference`]). A burst that holds
+//! `kAudioHardwarePropertyServiceRestarted` (`coreaudiod` restarted, and
+//! the aggregate with it) is reported as
+//! [`DeviceChangeReason::AudioServiceRestarted`] whatever the devices read
+//! (Rust only: Swift does not listen for it). Nothing changed means the burst
 //! is logged and ignored; otherwise the sink gets one
 //! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
 //! `start` again. Nothing here runs on the IO thread except `io_proc`,
 //! which only calls [`deliver`] and marks the first callback's host time
 //! ([`FirstCallback`]), and `silent_io_proc` (below), which only zeroes
 //! its output; `stop()` logs that callback's offset from the start
-//! at `info`, so a call recording shows whether the IOProc ran at once.
+//! at `info`, so a call recording shows whether the IOProc ran at once
+//! (at `debug` while the session's restarts go on, `start_log`).
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,
 //! `AudioDeviceDestroyIOProcID`, the callback context, listeners,
@@ -56,7 +61,9 @@
 //! IOProc's input streams are off. It is rebuilt with the capture, so a
 //! change of the system output moves it to the new clock master; one that
 //! does not start is logged, and the capture then records only while
-//! another app plays, as before A10. No in-app playback while recording,
+//! another app plays, as before A10: the session restarts it on its
+//! backoff until one runs, on the microphone it recorded, and logs that
+//! about once a minute (`CaptureSession`). No in-app playback while recording,
 //! enforced by [`Playback`](crate::playback::Playback): Steno's own output
 //! would land in the system lane, and the capture session holds that gate
 //! while it records. In-person mode has no tap and needs no output client.
@@ -71,7 +78,8 @@ use objc2_core_audio::{
     AudioObjectPropertySelector, kAudioDevicePropertyDeviceIsAlive,
     kAudioDevicePropertyNominalSampleRate, kAudioHardwarePropertyDefaultInputDevice,
     kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultSystemOutputDevice,
-    kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
+    kAudioHardwarePropertyDevices, kAudioHardwarePropertyServiceRestarted,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
     kAudioObjectPropertyScopeOutput,
 };
 use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp};
@@ -82,6 +90,7 @@ use super::hal::{
 };
 use super::{AudioDeviceInfo, AudioDevices, chosen_or_default};
 use crate::SAMPLE_RATE;
+use crate::capture::start_log::start_log;
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     LaneSource, NominalSampleRate, StreamLayout,
@@ -170,24 +179,31 @@ unsafe extern "C-unwind" fn silent_io_proc(
 /// aggregate was built with as its main sub-device, when that read fails.
 /// The device it runs on is logged at `info` (its name read for the line
 /// alone), and a failure to start at `warn`: the capture then goes on
-/// without it, as it did before A10.
+/// without it, as it did before A10; both at `debug` while the session's
+/// restarts go on (`start_log`), so a call whose silent output keeps
+/// failing logs it once a streak, not at every restart.
 fn start_silent_output(aggregate: &AggregateDevice, requested: Id) -> Option<IoProc> {
     let device = aggregate.main_sub_device().unwrap_or_else(|error| {
-        tracing::warn!("the aggregate's clock master did not read ({error}); using {requested}");
+        start_log!(
+            warn,
+            "the aggregate's clock master did not read ({error}); using {requested}"
+        );
         requested
     });
     // SAFETY: `silent_io_proc` reads no client data, so a null client
     // stays valid for as long as the IOProc runs.
     match unsafe { IoProc::start_output_only(device, Some(silent_io_proc), std::ptr::null_mut()) } {
         Ok(io) => {
-            tracing::info!(
+            start_log!(
+                info,
                 "the silent output runs on {} (audio device {device}), the aggregate's clock master",
                 hal::name(device)
             );
             Some(io)
         }
         Err(error) => {
-            tracing::warn!(
+            start_log!(
+                warn,
                 "the silent output on audio device {device} did not start ({error}); \
                  the call capture runs only while another app plays"
             );
@@ -245,7 +261,8 @@ impl DeviceProbe {
 /// What the listeners share with the watcher thread.
 #[derive(Default)]
 struct WatchState {
-    /// The last notification's selector and arrival, `None` once judged.
+    /// The last notification's selector (a service restart's kept over
+    /// later ones) and arrival, `None` once judged.
     pending: Option<(AudioObjectPropertySelector, Instant)>,
     stop: bool,
 }
@@ -271,9 +288,15 @@ impl Watcher {
     }
 
     /// One notification for the watch loop: the latest of its burst,
-    /// judged once the burst settles.
+    /// judged once the burst settles. A service restart outranks the
+    /// notifications that follow it in the same burst.
     fn notify(&self, selector: AudioObjectPropertySelector) {
-        self.lock().pending = Some((selector, Instant::now()));
+        let mut state = self.lock();
+        let kept = match state.pending {
+            Some((pending, _)) if pending == kAudioHardwarePropertyServiceRestarted => pending,
+            _ => selector,
+        };
+        state.pending = Some((kept, Instant::now()));
         self.condvar.notify_all();
     }
 }
@@ -439,12 +462,19 @@ impl LiveCaptureBackend {
     /// What a judgement reports of the devices `resolved` now: after a
     /// notification their first difference from `baseline`, on a re-check
     /// only another microphone ([`DeviceSnapshot::input_difference`]).
+    /// A restart of the audio service is a change whatever they read: the
+    /// aggregate is gone, and the devices may resolve as before.
     fn judgement(
         judged: Judged,
         resolved: &DeviceSnapshot,
         baseline: &DeviceSnapshot,
     ) -> Option<DeviceChangeReason> {
         match judged {
+            Judged::Notification(selector)
+                if selector == kAudioHardwarePropertyServiceRestarted =>
+            {
+                Some(DeviceChangeReason::AudioServiceRestarted)
+            }
             Judged::Notification(_) => resolved.difference(baseline),
             Judged::Recheck => resolved.input_difference(baseline),
         }
@@ -497,7 +527,8 @@ impl CaptureBackend for LiveCaptureBackend {
             let (device, is_fallback) = chosen_or_default_input(input_device_uid)
                 .ok_or(CaptureError::InputDeviceUnavailable)?;
             if is_fallback {
-                tracing::warn!(
+                start_log!(
+                    warn,
                     "the input device {} is not connected; recording from the default input {}",
                     input_device_uid.unwrap_or_default(),
                     device.uid
@@ -606,8 +637,10 @@ impl CaptureBackend for LiveCaptureBackend {
         // output device (alerts); a change of either moves the far-end
         // alignment, so both are watched. The listener carries no value,
         // so every notification is judged by resolving the devices again
-        // after the burst settles.
+        // after the burst settles. A restart of `coreaudiod` destroys the
+        // aggregate and the tap, which no device property tells.
         let mut selectors: Vec<(Id, AudioObjectPropertySelector)> = vec![
+            (SYSTEM, kAudioHardwarePropertyServiceRestarted),
             (SYSTEM, kAudioHardwarePropertyDefaultSystemOutputDevice),
             (SYSTEM, kAudioHardwarePropertyDefaultOutputDevice),
             (output.id, kAudioDevicePropertyDeviceIsAlive),
@@ -639,6 +672,14 @@ impl CaptureBackend for LiveCaptureBackend {
                     kAudioObjectPropertyScopeGlobal,
                     Box::new(move |selector| watcher.notify(selector)),
                 )
+                // Without the listener that change goes unnoticed until the
+                // session's stall watchdog sees the capture stop.
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        "could not listen for {}; that change goes unnoticed",
+                        hal::selector_name(selector)
+                    );
+                })
                 .ok()
             })
             .collect();
@@ -751,7 +792,8 @@ impl CaptureBackend for LiveCaptureBackend {
         } = active;
         drop(io_proc);
         // The IOProc is stopped: nothing writes the mark any more.
-        tracing::info!(
+        start_log!(
+            info,
             "{}",
             first_callback_line(
                 context
@@ -766,6 +808,26 @@ impl CaptureBackend for LiveCaptureBackend {
         drop(aggregate);
         drop(tap);
         drop(silent_output);
+    }
+
+    /// The IOProc runs on the aggregate's clock, silence included: in call
+    /// mode from the start, its silent output driving the tap (A10; see the
+    /// module doc). A call capture whose silent output did not start runs
+    /// only while another app plays, and is restarted as one that stalled,
+    /// on the microphone it recorded (`stall_may_be_the_microphone`).
+    fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
+        true
+    }
+
+    /// Only without the system lane: an in-person capture runs on the
+    /// microphone's clock, a call capture on the output's (the aggregate's
+    /// clock master), so a call capture that stops delivering says nothing
+    /// of the microphone, and one whose silent output did not start stops
+    /// until another app plays. The session then keeps a chosen
+    /// microphone through the restarts rather than giving it up for the
+    /// default input. Rust only.
+    fn stall_may_be_the_microphone(&self, lanes: &[AudioLane]) -> bool {
+        !lanes.contains(&AudioLane::System)
     }
 }
 
@@ -998,7 +1060,8 @@ mod tests {
 
     /// A notification reports the first difference; a re-check only
     /// another microphone, so a bad read of the outputs, or a microphone
-    /// that did not resolve, costs no rebuild.
+    /// that did not resolve, costs no rebuild. A restart of the audio
+    /// service is a change with the devices as they were.
     #[test]
     fn a_recheck_reports_another_microphone_alone() {
         let baseline = DeviceSnapshot {
@@ -1043,6 +1106,11 @@ mod tests {
             ),
             (Judged::Recheck, &misread, None),
             (Judged::Recheck, &unresolved, None),
+            (
+                Judged::Notification(kAudioHardwarePropertyServiceRestarted),
+                &baseline,
+                Some(DeviceChangeReason::AudioServiceRestarted),
+            ),
         ];
         for (judged, resolved, reported) in table {
             assert_eq!(

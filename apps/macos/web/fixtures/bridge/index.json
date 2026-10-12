@@ -6,6 +6,7 @@
   "meetings.list",
   "meeting.detail",
   "meeting.detail.damagedAudio",
+  "meeting.detail.keptIncomplete",
   "settings.general",
   "settings.recording",
   "settings.transcription",
