@@ -223,7 +223,7 @@ Forge and atlas.
 |---|---|---|---|
 | D1 | `v*` tags | as recommended | Confirmed |
 | D2 | 0.11.0 | as recommended | Confirmed |
-| D3 | the blocking list gates data loss, core flows and silent failures | "we should never loose any data" | Changed: every data-loss path blocks (P1 to P38) |
+| D3 | the blocking list gates data loss, core flows and silent failures | "we should never loose any data" | Changed: every data-loss path blocks (P1 to P39) |
 | D4 | `SMAppService`, the Swift registration carrying over | as recommended | Confirmed; with D5 the app registers itself (S6) |
 | D5 | `uno.schmid.steno.mac` on the Mac, `uno.schmid.steno.desktop` elsewhere | "it should be com.nicolaischmid.steno", then "Desktop gets .desktop" | Changed: `com.nicolaischmid.steno.desktop`; directories decoupled; confirmed |
 | D6 | Linux and Windows listed once gated | "also omarchy and nixos users" | Changed: GNOME, Omarchy and NixOS, X1 to X8 |
@@ -431,6 +431,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P36 | Secrets and files on Windows: credentials persist on this computer (`CRED_PERSIST_LOCAL_MACHINE`, not with the roaming profile; the `keyring` crate's roaming credentials move there on their first read, keeping the stored blob, #262), and renames are durable (#242: the durable writes in `steno_pipeline::files` rename with `MOVEFILE_WRITE_THROUGH` or with std, then flush the renamed file and the folders; a failed flush answers the phone 500, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS, or on a network drive) | handover (#242, #262) |
 | P37 | A recording through a cancelled logout: a cancelled logout does not stop the recording; only where the app saves as soon as the logout is announced (Xfce on Wayland) and the session then goes on does it stop, and it says so and relaunches, ready to record. Xfce's Quit Program saves before xfce4-session's kill, and its Save Session never stops the recording (#220) | Linux desktop (#220) |
 | P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks write one `crash-<UTC>.log` file per panic in the support directory, with the message, the location and the backtrace; the newest 20 are kept | capture and recovery (`wp-cap-*`) |
+| P39 | A meeting whose run meets the store locked by another process (the Swift app during the rollback window, or any program with the database open for writing; a `steno` writing command refuses while the app runs, P15) for longer than the 5 s busy timeout: it ended `failed` with "database is locked", a speaker match the store refused dropped the match, and a resume the store refused was logged and never tried again. The run now leaves the meeting `queued` with what it committed, waiting for the store beside the meetings waiting for models (`ModelWaits`), and writes `queued` back only over its own `processing`, so the park does not wait on the lock again (a refused write leaves `processing`, which the resumes take too). The services try those meetings again on a timer, 15 s doubling to 4 minutes, for as long as any waits and the app runs; an install's resume the store refused hands its meetings to that retry, and a launch's resume is owed to it. The card and the list say "Waiting for another app to finish with Steno's library", and so does a refused Process again; the CLI says the meeting stays queued. No stored value, no migration (`fix/pipeline-waits-for-a-locked-store`) | pipeline, store and export (`wp-pse-*`) |
 
 **The final audio path (D9), on every platform:**
 
@@ -1100,6 +1101,23 @@ The table above names each package and its owner. Their tests:
 - **P9.** A failed meeting with its master processes again from the button and
   from `steno process --meeting <id>`; a meeting queued for missing models
   resumes after the install.
+- **P39.** A second connection holds `BEGIN IMMEDIATE`: a run whose first
+  write waits out the whole 5 s busy timeout ends `queued`, not `failed`, posts
+  `StoreBusy` and not `ModelsMissing`, and an install's resume leaves it
+  waiting; once the lock is let go the store's retry (short waits in the test)
+  processes it to `ready`. A lock taken after the merge leaves the transcript,
+  the recording and the asset row as they were, and the meeting `processing`
+  when the park's write is refused too. A speaker match the store refuses waits
+  instead of dropping the match. The store's retry leaves a meeting waiting for
+  models alone, and Process again says what each waits for, in the pipeline,
+  the detail and the CLI. An install's resume and a launch's resume the store
+  refuses wake the retry, which processes their meetings. Where:
+  `crates/steno-pipeline/src/pipeline.rs` (`ModelWaits`,
+  `resume_waiting_for_store`, `park_for_store`), `crates/steno-services/src/pipeline.rs`
+  (`StoreRetry`), `crates/steno-host/src/main_window/progress.rs`,
+  `apps/macos/web/src/windows/main/`, `crates/steno-cli/src/commands/process.rs`;
+  tests in `crates/steno-pipeline/tests/store_waits.rs` and
+  `crates/steno-services/src/pipeline.rs`.
 
 ### X: the Linux targets (D6)
 
@@ -2004,7 +2022,7 @@ candidate:
 1. **Every decision is confirmed** (2026-10-07). The call-mode row of D9
    closes with A10 in step 2.
 2. **Every package is written,** in parallel except for the dependencies under
-   "Work packages": S1 to S7, A1 to A10, P1 to P38, X1 to X7. Any further gap the
+   "Work packages": S1 to S7, A1 to A10, P1 to P39, X1 to X7. Any further gap the
    data-loss audit finds joins the P table: before G1 it lands with the others;
    after G1 it lands as a new candidate (G2).
 3. **Gate G1.** Every S, A and P row and X1 to X7 are closed, the pull requests
