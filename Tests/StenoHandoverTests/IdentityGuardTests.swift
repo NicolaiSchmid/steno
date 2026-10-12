@@ -15,8 +15,8 @@ import Testing
 /// `crates/steno-services/src/keychain_reset_tests.rs`.
 @Suite final class IdentityGuardTests {
   /// The keychain: a current identity or none, and a staged one (`pending`)
-  /// or none; a stage puts `next` there, as the login keychain would hold the minted
-  /// one, and a promote moves it to the current one.
+  /// or none; a stage puts `next` there, as the login keychain would hold
+  /// the minted one, and a promote moves it to the current one.
   final class FakeKeychain: HandoverIdentityKeychain, @unchecked Sendable {
     var identity: HandoverIdentity?
     var pending: HandoverIdentity?
@@ -37,7 +37,7 @@ import Testing
       return identity
     }
     func staged() throws -> HandoverIdentity? { pending }
-    func stage(_ identity: MintedIdentity) throws -> HandoverIdentity {
+    func stage(_: MintedIdentity) throws -> HandoverIdentity {
       if let stageError { throw stageError }
       stages += 1
       pending = next
@@ -341,6 +341,7 @@ import Testing
     #expect(try Data(contentsOf: identityGuard.record.url) == bytes)
     #expect(try await store.pairedDevices().count == 1)
   }
+
   @Test func aSettingsSaveKeepsTheRecord() async throws {
     let keychain = FakeKeychain(known, next: other)
     let identityGuard = try await identityGuard(keychain, recorded: known, phones: 1)
