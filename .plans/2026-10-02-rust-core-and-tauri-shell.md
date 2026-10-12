@@ -221,10 +221,11 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   implements `SpeechBackend` over the four models, and `CoreMlParakeetEngine` runs
   `steno_speech::Transcriber` over four of them at once (`Transcriber::with_more_workers`,
   FluidAudio's `parallelChunkConcurrency`), with `AdaptiveEnergyVad` (Silero runs on ONNX
-  Runtime, which the Mac app keeps out of its process) and two chunker settings of its
-  own (`pipeline_config` in `crates/steno-speech-coreml/src/engine.rs`: the 15 s clamp
-  and no long-pause skip; the detector and the workers are set where the engine builds
-  its `Transcriber`, not in `pipeline_config`). One decode loop
+  Runtime, which the Mac app keeps out of its process) and three chunker settings of its
+  own (`pipeline_config` in `crates/steno-speech-coreml/src/engine.rs`: the 15 s clamp,
+  no long-pause skip, and extra windows over the audio the chunks leave out; the detector
+  and the workers are set where the engine builds its `Transcriber`, not in
+  `pipeline_config`). One decode loop
   (`decode_window`), one merge (`merge_all`), one chunker (`layout`), one segmentation.
   Numbers are mean WER on FLEURS German `cat/` through the CoreML backend on Forge (load
   2 to 18), from `scripts/coreml-parity-forge.sh`, the variants through
@@ -275,11 +276,22 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   - [x] Chunking: the VAD layout, under the CoreML engine's 15 s window. With the energy
     detector, skipping long pauses cost words at chunk starts after them (at 1.5 s
     overlap 5.86 % against 5.09 % without the skip, 5.13 % with 1 s of padding instead
-    of 0.25 s; at 2 s 5.9 % against 4.87 %), so the CoreML engine skips none. It still
-    decodes nothing before the first chunk (0.25 s before the first speech the detector
-    finds), after the last (0.25 s after the last speech) or in the rest of a pause that a
-    chunk's start moves past, so quiet speech the detector takes for silence there is lost;
-    decoding those stretches in extra windows is open (#263). Its detector follows the
+    of 0.25 s; at 2 s 5.9 % against 4.87 %), so the CoreML engine skips none. The chunks
+    still leave out the audio before the first chunk (0.25 s before the first speech the
+    detector finds), after the last (0.25 s after the last speech) and the rest of a pause
+    a chunk's start moves past. Each such stretch of 2.5 s or more
+    (`steno_speech::chunker::MIN_GAP_SECONDS`) is decoded in extra windows that stay
+    inside it (`gap_windows`), and their words go in between the chunks' without changing
+    one (`splice_gaps`); a window of digital silence is left out. FLEURS and the corpus
+    are unchanged (4.874 %, 8.46 %, no word added), quiet speech at -20 and -26 dB comes
+    through as the lead-in, a 9.1 s gap and the tail (14, 19 and 14 words, main's level),
+    and the cost is +13 % on FLEURS, +4 % on the corpus and +9 % on a 15-minute meeting's
+    two lanes. Known limit: a stretch under 2.5 s is not decoded, the uncovered edge of a
+    longer pause included, because windows that short inserted words (eight on FLEURS,
+    all wrong); a 6.65 s gap the chunks cover but 1.3 s of keeps 12 of 14 words at
+    -26 dB. Windows reaching 2 s into the neighbouring chunks replaced their words at the
+    merge (5.50 %); chunks laid over all of that audio moved every later cut (5.74 %).
+    Its detector follows the
     recording's level (`AdaptiveEnergyVad`; the fixed 0.01 RMS detector 5.2 % at the
     shipped settings, 6.77 % with the skip at 1.5 s; no detector 5.53 % there). Shorter
     cut windows did worse (at 1.5 s overlap: 13 s plus or minus 2 s 6.20 % with the
@@ -311,8 +323,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     because Swift's windows sit on the frame grid and the shared chunks do not. The
     test's limit on that mean is 15 ms.
   - The settings that still differ, CoreML then ONNX: the clamp (15 s, 60 s), the
-    long-pause skip (none, 3 s), the detector (`AdaptiveEnergyVad`, Silero) and the
-    workers (four, one: ONNX Runtime spreads one call over its threads).
+    long-pause skip (none, 3 s), the extra windows (on, off; A16 of the stable plan for
+    ONNX), the detector (`AdaptiveEnergyVad`, Silero) and the workers (four, one: ONNX
+    Runtime spreads one call over its threads).
 
   **WP4c sidecar and models.** `crates/steno-speech-sidecar` (binary
   `steno-speech-sidecar`) hosts the ONNX `Transcriber`; `SidecarSpeechEngine` in

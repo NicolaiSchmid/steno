@@ -928,6 +928,11 @@ Each lands before `0.11.0-rc.1`.
   2026-10-12): FLEURS German `cat/` through CoreML at or below 5.0 % mean WER,
   a hard limit (`scripts/coreml-parity-forge.sh` prints PASS or FAIL against it
   and exits 1 above it). The Swift corpus tracks drift, with a limit of 10 %.
+  The audio the CoreML chunks leave out (the lead-in, the tail, the rest of a
+  pause a chunk's start moves past) is decoded in extra windows, unchanged
+  FLEURS and corpus, at +13 % cost on FLEURS. Known limit: a stretch shorter
+  than 2.5 s is not decoded, the edges of a longer pause included, because
+  windows that short insert words.
   Measured with A13 (#279) in: FLEURS German `cat/` through CoreML 4.87 % mean
   WER, from 5.46 % (the ONNX engine 4.88 %). The parity test against the Swift
   transcripts of the calibration corpus tracks drift from the old Swift output:
