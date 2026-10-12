@@ -1098,9 +1098,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   Pair again's note, in each of its four cases, and a record that does not parse, which
   waits until Pair again sets it aside. Swift keeps its own identity in the Keychain and,
   since #284, the same guard (`HandoverIdentityGuard`) over its own record,
-  `swift-handover-identity.json` (`IdentityRecordFile`); neither app reads the other's
-  record. Instead of waiting in Settings > iPhone, the Swift app asks once at launch in a
-  native alert: Pair Again, after a second warning, or Not Now; a relaunch reads the
+  `swift-handover-identity.json` (`IdentityRecordFile`); the guards never read each
+  other's file. Instead of waiting in Settings > iPhone, the Swift app asks once at launch
+  in a native alert: Pair Again, after a second warning, or Not Now; a relaunch reads the
   keychain again. A keychain or a record it cannot read turns its handover off for the run
   with the startup warning, without the alert. Pair Again writes the new identity first,
   then removes the phones, then records it, in both apps (`HandoverIdentity::mint_anew`,
@@ -1115,7 +1115,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   keys, so a run cut short never leaves a certificate without its key, and a launch that
   finds the staged identity recorded finishes the move. Of several identities under the
   default label across the keychain search list (an old login keychain added back), the
-  Swift app loads the recorded one.
+  Swift app loads the recorded one; with none recorded, it asks as for a replaced one.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
