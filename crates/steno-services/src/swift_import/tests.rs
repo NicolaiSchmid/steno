@@ -2351,7 +2351,7 @@ impl ExportedWithoutAKey {
             AudioRetention::KeepForever,
         )
         .unwrap();
-        let exported = ExportedWithoutAKey {
+        let mut exported = ExportedWithoutAKey {
             store,
             paths,
             graph,
@@ -2373,13 +2373,10 @@ impl ExportedWithoutAKey {
         let delivery = exported.delivery();
         assert_eq!(delivery.status, DeliveryStatus::Delivered);
         let folder = vault.join(&delivery.receipt.unwrap().folder);
-        let stem = folder.file_name().unwrap().to_string_lossy().into_owned();
-        ExportedWithoutAKey {
-            meeting: stored,
-            folder,
-            stem,
-            ..exported
-        }
+        exported.stem = folder.file_name().unwrap().to_string_lossy().into_owned();
+        exported.folder = folder;
+        exported.meeting = stored;
+        exported
     }
 
     /// The pipeline the graph builds now, on core's fakes for the rest.

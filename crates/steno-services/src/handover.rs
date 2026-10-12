@@ -327,7 +327,7 @@ impl ListenerHandover {
         store: Arc<Store>,
         runtime: tokio::runtime::Handle,
     ) -> Self {
-        let handover = Self::empty(String::new(), None, None, store, runtime);
+        let handover = Self::empty(None, store, runtime);
         let _ = handover.listener.set((service, mac_id));
         handover
     }
@@ -339,7 +339,7 @@ impl ListenerHandover {
     pub fn read(source: Arc<IdentitySource>) -> Self {
         let (store, runtime) = (source.store.clone(), source.runtime.clone());
         let read = source.read();
-        let handover = Self::empty(String::new(), None, Some(source), store, runtime);
+        let handover = Self::empty(Some(source), store, runtime);
         match read {
             Ok((service, mac_id)) => {
                 let _ = handover.listener.set((service, mac_id));
@@ -352,16 +352,7 @@ impl ListenerHandover {
         handover
     }
 
-    /// A handover over `store` without its listener, for `reason`, and no
-    /// identity to read again.
-    #[must_use]
-    pub fn waiting(reason: String, store: Arc<Store>, runtime: tokio::runtime::Handle) -> Self {
-        Self::empty(reason, None, None, store, runtime)
-    }
-
     fn empty(
-        reason: String,
-        wait: Option<PhoneWaitingReason>,
         identity: Option<Arc<IdentitySource>>,
         store: Arc<Store>,
         runtime: tokio::runtime::Handle,
@@ -369,8 +360,8 @@ impl ListenerHandover {
         ListenerHandover {
             listener: OnceLock::new(),
             waiting: Mutex::new(Waiting {
-                reason,
-                wait,
+                reason: String::new(),
+                wait: None,
                 closed: false,
             }),
             identity,
@@ -391,7 +382,7 @@ impl ListenerHandover {
     /// or the app shut down. The start runs under the lock `close` takes,
     /// so a shutdown either stops the started listener or comes first and
     /// keeps it from starting.
-    pub fn set(&self, service: Arc<HandoverService>, mac_id: Uuid) -> bool {
+    fn set(&self, service: Arc<HandoverService>, mac_id: Uuid) -> bool {
         let mut waiting = self.lock();
         if waiting.closed || self.listener.set((service, mac_id)).is_err() {
             return false;
@@ -819,6 +810,8 @@ impl Handover for GatedHandover {
         if let Some(listener) = self.listener.get() {
             return listener.try_again();
         }
+        // Copied out: the step sets the gate, which a held borrow would
+        // block.
         let gate = *self.gate.borrow();
         match gate {
             HandoverGate::Waiting(_) => Ok(self.import.run_again()?),
@@ -840,6 +833,7 @@ impl Handover for GatedHandover {
         if *self.lock_closed() {
             return Err(SHUT_DOWN.into());
         }
+        // Copied out, as in `try_again`.
         let gate = *self.gate.borrow();
         match gate {
             HandoverGate::Waiting(_) => Ok(self.import.pair_again(&*self.mint)?),
@@ -974,6 +968,22 @@ mod tests {
         )
     }
 
+    /// The handover over a [`test_service`] on a newly minted identity.
+    fn minted_listener(
+        store: &Arc<Store>,
+        dir: &Path,
+        runtime: &tokio::runtime::Handle,
+    ) -> Arc<ListenerHandover> {
+        let identity = HandoverIdentity::mint("Steno on a test", chrono::Utc::now()).unwrap();
+        let mac_id = identity.mac_id();
+        Arc::new(ListenerHandover::over(
+            Arc::new(test_service(store, dir, identity)),
+            mac_id,
+            store.clone(),
+            runtime.clone(),
+        ))
+    }
+
     /// A build that fails is tried again at the next ready, and at Try
     /// again, not dropped: whatever puts the identity in place opens the
     /// listener by setting the gate once more, and Try again builds again
@@ -998,15 +1008,7 @@ mod tests {
                 if attempt < 2 {
                     return Err("the store could not be synced".to_owned());
                 }
-                let identity =
-                    HandoverIdentity::mint("Steno on a test", chrono::Utc::now()).unwrap();
-                let mac_id = identity.mac_id();
-                Ok(Arc::new(ListenerHandover::over(
-                    Arc::new(test_service(&listener_store, &inbox, identity)),
-                    mac_id,
-                    listener_store.clone(),
-                    runtime.clone(),
-                )))
+                Ok(minted_listener(&listener_store, &inbox, &runtime))
             }),
             Arc::new(FakeImport::default()),
             Box::new(|| unreachable!("no Pair again here")),
@@ -1408,17 +1410,9 @@ mod tests {
             Box::new(move || {
                 building.send(()).unwrap();
                 may_finish.lock().unwrap().recv().unwrap();
-                let identity =
-                    HandoverIdentity::mint("Steno on a test", chrono::Utc::now()).unwrap();
-                let mac_id = identity.mac_id();
-                let service = Arc::new(test_service(&listener_store, &inbox, identity));
-                *kept.lock().unwrap() = Some(service.clone());
-                Ok(Arc::new(ListenerHandover::over(
-                    service,
-                    mac_id,
-                    listener_store.clone(),
-                    runtime.clone(),
-                )))
+                let listener = minted_listener(&listener_store, &inbox, &runtime);
+                *kept.lock().unwrap() = listener.listener().cloned();
+                Ok(listener)
             }),
             Arc::new(FakeImport::default()),
             Box::new(|| unreachable!("no Pair again here")),
