@@ -426,8 +426,8 @@ fn a_finished_file_that_lost_its_moov_is_read_from_its_mdat() {
 /// Bytes that are not a packet end the salvage there: overwritten from
 /// packet 40, the first 40 packets decode, as the finished file decodes
 /// them; overwritten from packet 8, less than half of the bytes read as
-/// packets, and the file fails (its recording is kept and offers Process
-/// again). Zeros after the last packet are no part of the recording.
+/// packets, and the file fails (its recording is kept). Zeros after the
+/// last packet are no part of the recording.
 #[test]
 fn bytes_that_are_not_packets_end_the_salvage() {
     let directory = tempfile::tempdir().unwrap();
@@ -458,6 +458,70 @@ fn bytes_that_are_not_packets_end_the_salvage() {
         decode(&path).unwrap().samples.len(),
         KILLED_PACKETS * 1_024 - PRIMING
     );
+}
+
+/// A recording longer than one read of the file (64 KiB): the killed
+/// file's packets 24 times over, about 198 KB, read across three refills of
+/// the buffer to the last packet, its first copy as the killed file
+/// decodes.
+#[test]
+fn a_salvage_reads_the_file_to_its_end_across_refills() {
+    let directory = tempfile::tempdir().unwrap();
+    let bytes = killed();
+    let copies = 24;
+    let long = [&bytes[..PACKETS_AT], &bytes[PACKETS_AT..].repeat(copies)].concat();
+    assert!(long.len() - PACKETS_AT > 3 * 64 * 1_024);
+    let decoded = decode(&written(directory.path(), "long.m4a", &long)).unwrap();
+    assert_eq!(
+        decoded.samples.len(),
+        copies * KILLED_PACKETS * 1_024 - PRIMING
+    );
+    assert_eq!(
+        decoded.damage,
+        AudioDamage {
+            parts: 0,
+            seconds: 0.0,
+            salvaged: true,
+        }
+    );
+    let single = decode(&fixture("speech-44k1-avaudiofile-killed.m4a"))
+        .unwrap()
+        .samples;
+    assert!(same(&decoded.samples[..single.len()], &single));
+}
+
+/// The half rule ([`salvage::SalvagedPackets::too_little`]): bytes that
+/// are not packets from about 45 % of the packets' bytes fail the salvage;
+/// from about 55 %, it reads the packets before them. As many such bytes as
+/// the packets read, exactly half, still read: less than half fails.
+#[test]
+fn a_salvage_reads_at_least_half_of_the_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let bytes = killed();
+    let data = bytes.len() - PACKETS_AT;
+    for (percent, reads) in [(45, false), (55, true)] {
+        let target = data * percent / 100;
+        let packet = (0..=KILLED_PACKETS)
+            .min_by_key(|&k| packet_offset(k).abs_diff(target))
+            .unwrap();
+        let share = packet_offset(packet) * 100 / data;
+        assert!(share.abs_diff(percent) <= 2, "{percent} %: {share} %");
+        let mut variant = bytes.clone();
+        variant[PACKETS_AT + packet_offset(packet)..].fill(0xAA);
+        let path = written(directory.path(), &format!("{percent}.m4a"), &variant);
+        match decode(&path) {
+            Ok(decoded) if reads => {
+                assert_eq!(decoded.samples.len(), packet * 1_024 - PRIMING);
+            }
+            Err(CodecError::ConversionFailed(e)) if !reads => assert!(e.contains("half"), "{e}"),
+            other => panic!("{percent} %: {:?}", other.map(|d| d.samples.len())),
+        }
+    }
+    let packet = 24;
+    let read = packet_offset(packet);
+    let half = [&bytes[..PACKETS_AT + read], &vec![0xAA; read]].concat();
+    let decoded = decode(&written(directory.path(), "half.m4a", &half)).unwrap();
+    assert_eq!(decoded.samples.len(), packet * 1_024 - PRIMING);
 }
 
 /// The salvage's rate and channels are the phone's preset's: the test fails
