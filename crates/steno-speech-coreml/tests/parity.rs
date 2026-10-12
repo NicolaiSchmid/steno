@@ -23,7 +23,7 @@
 //! - `STENO_PARITY_MAX_START_OFFSET_MS` (default 15) on the mean signed
 //!   word-start offset from Swift's starts over the matched words. The
 //!   shared pipeline times words from each chunk's exact start (A13), and
-//!   its chunks start anywhere while Swift's sit on the frame grid: +2.5 ms
+//!   its chunks start anywhere while Swift's sit on the frame grid: +4.2 ms
 //!   on the corpus when A2 landed, with a wider spread than Swift's grid
 //!   (p10 -56 ms, p90 +56 ms); a start counted from the frame below the
 //!   chunk's, as before A13, is about -30 ms.

@@ -11,8 +11,8 @@
 //! steno-coreml-parity -- ~/steno-spikes/corpus
 //! ~/steno-spikes/baseline-bakeoff` on Forge, or the ignored test in
 //! `tests/parity.rs` with `STENO_CALIBRATION_CORPUS` set.
-//! `crates/steno-speech-coreml/scripts/fleurs-forge.sh` runs it over
-//! FLEURS German against a base revision and scores both.
+//! `scripts/coreml-parity-forge.sh` runs it over FLEURS German and the
+//! corpus at a base and a head revision and scores both.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
