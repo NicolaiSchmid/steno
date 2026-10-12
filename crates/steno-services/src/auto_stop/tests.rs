@@ -1255,6 +1255,75 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
     );
 }
 
+/// A device change begins the recovery before the notice thread reads the
+/// session for the stalled microphone, a read that waits behind the
+/// rebuild's start (a call on Windows runs on the microphone's clock, and
+/// a start there takes up to 10 s): a release's countdown that runs out
+/// meanwhile is not shown, ends nothing, and a fresh one takes its place
+/// (S2). Elsewhere a call's change reads nothing, and the test pins the
+/// same outcome. Here the second stall's rebuild waits at a gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call() {
+    let (entered, waiting) = std::sync::mpsc::channel();
+    let (open, opened) = std::sync::mpsc::channel();
+    let gate = Arc::new(Gate {
+        entered: std::sync::Mutex::new(entered),
+        open: std::sync::Mutex::new(opened),
+    });
+    let gated = gate.clone();
+    let recording = recording_over(synthetic_recorder_over(Arc::new(move |configuration| {
+        let options = crate::testing::synthetic_tone(&configuration)
+            .change_device_after(1.0)
+            .changes(2)
+            .change_reason(steno_audio::DeviceChangeReason::DeliveryStalled);
+        let backend = GatedRestart {
+            synthetic: steno_audio::testing::SyntheticCaptureBackend::new(options),
+            starts: std::sync::atomic::AtomicUsize::new(0),
+            gate: gated.clone(),
+        };
+        steno_audio::CaptureSession::with_backend(
+            configuration,
+            Arc::new(backend),
+            None,
+            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+            Arc::new(steno_audio::SystemClock::new()),
+        )
+        .map_err(|error| error.to_string())
+    })));
+    let (seen, go) = hold_the_notices(&recording, 2);
+    recording.start(CaptureMode::Call, None);
+    recording.opened(Some("Zen"));
+    seen.recv_timeout(PATIENCE).expect("the first stall");
+    go.send(()).unwrap();
+    seen.recv_timeout(PATIENCE).expect("the first resume");
+    // Back from the first stall: the release's countdown runs, shown.
+    recording.released();
+    recording.sleepers(1);
+    assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 90.0)));
+    waiting
+        .recv_timeout(PATIENCE)
+        .expect("the second stall's rebuild starts");
+    go.send(()).unwrap();
+    // Well inside the gate's own patience, so a read that came first
+    // fails here rather than once the gate gave up.
+    eventually_within(PATIENCE / 2, "not shown from the second stall on", || {
+        recording.armed().is_none()
+    })
+    .await;
+    recording.clock.advance(Duration::from_secs(90));
+    eventually("a fresh grace in its place", || {
+        recording.armed() == Some((Some("Zen".to_owned()), 90.0))
+    })
+    .await;
+    assert_still_recording(&recording);
+    open.send(()).unwrap();
+    recording.stop();
+    assert_eq!(
+        recording.meetings()[0].end_reason,
+        Some(RecordingEndReason::Manual)
+    );
+}
+
 /// Audio back after the capture recovered arms a fresh countdown when the
 /// call app let go and holds no microphone, since the detector does not
 /// report that release again; the earlier countdown is withdrawn, and the

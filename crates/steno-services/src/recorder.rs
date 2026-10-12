@@ -749,8 +749,10 @@ fn forward_levels(
 /// `fallback`, since a rebuild may record another one; and the end of a
 /// recovery ([`Outage::recovering`]) resumes `recorder`'s auto-stop, with
 /// the outage's lock released, since the recorder takes its own lock and
-/// then the outage's. It reads the session before it takes the outage's
-/// lock, so nothing that waits for that lock waits on a rebuild's start.
+/// then the outage's. It reads the session with the outage's lock
+/// released, so nothing that waits for that lock waits on a rebuild's
+/// start; a device change begins the recovery before that read, so a
+/// countdown that runs out while it waits ends nothing.
 /// It holds `session` and `recorder` weakly, so dropping the session ends
 /// the notices and the thread, and the recorder, which holds the thread's
 /// handle, makes no cycle; a stop joins the thread without the recorder's
@@ -768,11 +770,22 @@ fn follow_the_notices(
     std::thread::Builder::new()
         .name("steno-notices".into())
         .spawn(move || {
+            let lock_outage = || {
+                outage
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            };
             while let Ok(notice) = notices.recv() {
                 let Some(session) = session.upgrade() else {
                     return;
                 };
-                // The session first, with no lock held: a rebuild's start
+                // A device change begins the recovery before the session is
+                // read: that read may wait behind a rebuild's start, and a
+                // countdown that runs out meanwhile ends nothing (S2).
+                if matches!(notice, CaptureNotice::DeviceChanged(_)) {
+                    lock_outage().follow(&notice);
+                }
+                // Then the session, with no lock held: a rebuild's start
                 // holds the session's lock for seconds, and the status, the
                 // microphone's activity and the auto-stop's countdown take
                 // the outage's lock.
@@ -788,13 +801,15 @@ fn follow_the_notices(
                 let resumed_on = matches!(notice, CaptureNotice::DeviceResumed { .. })
                     .then(|| fallback_input(session.stream().as_ref()));
                 drop(session);
-                let mut outage = outage
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let back = outage.follow(&notice);
-                if let Some(stalled) = stalled {
-                    outage.stalled = stalled;
-                }
+                let mut outage = lock_outage();
+                let back = match stalled {
+                    // A device change, followed above.
+                    Some(stalled) => {
+                        outage.stalled = stalled;
+                        false
+                    }
+                    None => outage.follow(&notice),
+                };
                 drop(outage);
                 if let Some(input) = resumed_on {
                     fallback
