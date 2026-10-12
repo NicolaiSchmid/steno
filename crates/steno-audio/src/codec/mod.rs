@@ -80,6 +80,7 @@
 
 pub mod priming;
 pub mod resample;
+pub mod salvage;
 pub mod sinc;
 
 use std::path::{Path, PathBuf};
