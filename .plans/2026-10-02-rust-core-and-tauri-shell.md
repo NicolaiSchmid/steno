@@ -1104,9 +1104,17 @@ still has to draw the window side. `[ ]` is not ported yet.
   aside. Swift keeps its own identity in the Keychain and, since #284, the same guard
   (`HandoverIdentityGuard`) over its own record, `swift-handover-identity.json`
   (`IdentityRecordFile`); neither app reads the other's record. Where the Tauri app's
-  Settings > iPhone offers Try again and Pair again, the Swift app asks once at launch in
-  a native alert: Pair Again, after a second warning, or Not Now; a relaunch reads the
-  keychain again.
+  Settings > iPhone offers Try again and Pair again, the Swift app asks once at launch
+  in a native alert: Pair Again, after a second warning, or Not Now; a relaunch reads
+  the keychain again. A keychain or a record it cannot read turns the Swift app's
+  handover off for the run with the startup warning, without the alert, where the
+  Tauri app waits for Try again. Pair Again writes the new identity first, then
+  removes the phones, then records it, in both apps, so a refused write changes
+  nothing and a run cut short never mints. Rust overwrites its one secret. Swift
+  stages the new keychain items under a second label, `Steno handover identity (new)`,
+  and gives them the default label last, because the file keychain cannot replace a
+  certificate and its key in one write; a launch that finds the staged identity
+  recorded finishes the move.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
@@ -3493,7 +3501,7 @@ PR off `main`.
 | Phone handover waits instead of minting over the identity the paired phones know (a refused or locked read, a missing or replaced identity, the Swift import's export not through): Settings > iPhone says why, Try again reads it again (behind the import's gate, the export) without a restart, and Pair again, after the warning that every phone must pair again, writes the `swift-import-done` marker first and then mints (a Pair again that stopped is finished at the next launch); the gated handover's closed latch keeps a listener built after the shutdown from starting; P30's re-export through a summary re-run after the key is saved (S6 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-services`, `steno-host`, `steno-bridge`, web) | `feat/handover-waiting` | #281 | open |
 | S3, calendar and permissions: the event under way at a recording's start (or the next within fifteen minutes, Swift's `CalendarMatch.pick`) names it and its attendees, read on a thread of its own over EventKit on the Mac (`steno_macos::calendar`, `steno_services::calendar`) and never holding a start up, a later answer going to the store's rule; the host's `Permissions` over the shell's (`permissions::ShellPermissions`: the microphone and calendar status and prompts) with the Mac's system audio probe (`steno_audio::capture::permission`, `steno_services::permissions`); `unknown` missing on the Mac only (`permission_is_missing`), so a missing grant opens onboarding on its permissions page whatever `steno.onboardingCompleted` says, and off the Mac an `unknown` row says when the system decides (S3 of `.plans/2026-10-07-stable-promotion.md`; `steno-core`, `steno-macos`, `steno-audio`, `steno-host`, `steno-services`, desktop shell, web) | `feat/rust-calendar-permissions` | #288 | open |
 | P35's test of a reset Mac keychain, over the secrets file standing in for the Keychain: a keychain that comes back empty (Create New Keychain after a password reset) or holding another identity makes the handover wait, mint nothing and keep the record and the paired phones, end to end through the graph and Settings' iPhone section, with Try again and Pair again; a launch over an unfinished Pair again's note decides it by what the keychain holds, and a record with a value that is not a string waits until Pair again sets it aside (stable plan P35; `steno-services`) | `fix/handover-keychain-reset` | #282 | open |
-| The Swift app's handover identity guard: nothing minted while a fingerprint is recorded in `swift-handover-identity.json` or a phone is paired, another identity not adopted, and a launch alert with Pair Again and Not Now (stable plan P35; `StenoHandover`, `apps/macos`) | `fix/swift-handover-identity-guard` | #284 | open |
+| The Swift app's handover identity guard: nothing minted while a fingerprint is recorded in `swift-handover-identity.json` or a phone is paired, another identity not adopted, and a launch alert with Pair Again and Not Now; Pair Again writes the new identity first (stable plan P35; `StenoHandover`, `apps/macos`) | `fix/swift-handover-identity-guard` | #284 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
