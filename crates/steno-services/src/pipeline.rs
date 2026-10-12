@@ -791,7 +791,14 @@ mod tests {
     ) -> MeetingState {
         let upload = dir.join(format!("{fixture}-{}.m4a", Uuid::new_v4()));
         std::fs::copy(fixture_path(fixture), &upload).unwrap();
-        process_phone_upload(service, store, meeting, &upload).await
+        process_phone_upload(
+            service,
+            store,
+            meeting,
+            &upload,
+            AudioRetention::KeepForever,
+        )
+        .await
     }
 
     /// A file in `Tests/Fixtures/audio/`.
@@ -801,13 +808,15 @@ mod tests {
             .join(name)
     }
 
-    /// The phone meeting of the recording at `upload` processed through
-    /// `service`'s real decoder, to the state it ends in.
+    /// The phone meeting of the recording at `upload`, kept by
+    /// `retention`, processed through `service`'s real decoder, to the
+    /// state it ends in.
     async fn process_phone_upload(
         service: &HostPipeline,
         store: &Store,
         meeting: &steno_core::Meeting,
         upload: &std::path::Path,
+        retention: AudioRetention,
     ) -> MeetingState {
         let asset = steno_core::AudioAsset {
             id: Uuid::new_v4(),
@@ -817,7 +826,7 @@ mod tests {
             lanes: vec![steno_core::AudioLane::Mixed],
             sidecars_16k: std::collections::BTreeMap::new(),
             mixdown_url: None,
-            retention: AudioRetention::KeepForever,
+            retention,
             expires_at: None,
         };
         let pipeline = service.pipeline.current();
@@ -896,7 +905,14 @@ mod tests {
         let meeting = phone_meeting();
         let upload = dir.path().join("killed.m4a");
         std::fs::write(&upload, &killed).unwrap();
-        let state = process_phone_upload(&service, &store, &meeting, &upload).await;
+        let state = process_phone_upload(
+            &service,
+            &store,
+            &meeting,
+            &upload,
+            AudioRetention::KeepForever,
+        )
+        .await;
         assert_eq!(state, MeetingState::Ready);
         let damage = service.damaged_audio(meeting.id);
         assert!(damage.salvaged, "{damage:?}");
@@ -915,7 +931,14 @@ mod tests {
         let second = phone_meeting();
         let upload = dir.path().join("other.m4a");
         std::fs::write(&upload, &other).unwrap();
-        let state = process_phone_upload(&service, &store, &second, &upload).await;
+        let state = process_phone_upload(
+            &service,
+            &store,
+            &second,
+            &upload,
+            AudioRetention::KeepForever,
+        )
+        .await;
         assert!(matches!(state, MeetingState::Failed { .. }), "{state:?}");
         assert_eq!(
             std::fs::read(&upload).unwrap(),
@@ -923,6 +946,73 @@ mod tests {
             "the recording is kept as it was"
         );
         assert!(service.damaged_audio(second.id).is_none());
+    }
+
+    /// Through #241's wiring, a salvaged phone recording under "delete
+    /// after processing" is kept: the meeting is Ready, retention leaves
+    /// the recording unstamped because the pipeline's damage record says
+    /// the recording may be damaged, the sweep leaves the file, and the
+    /// meeting's detail, read through the host pipeline, says it is kept
+    /// because the results may be incomplete. The finished twin of the
+    /// same recording, which needs no salvage, is stamped and reads
+    /// "deletes on", so the salvage's mark is what keeps it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_salvaged_recording_is_kept_incomplete_and_never_swept() {
+        let (dir, store) = temp_store();
+        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(dir.path()));
+        let service = pipeline_over(
+            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
+            &store,
+        );
+        for (fixture, salvaged) in [
+            ("speech-44k1-avaudiofile-killed.m4a", true),
+            ("speech-44k1-avaudiofile.m4a", false),
+        ] {
+            let bytes = std::fs::read(fixture_path(fixture)).unwrap();
+            let meeting = phone_meeting();
+            let upload = dir.path().join(format!("{}.m4a", meeting.id));
+            std::fs::write(&upload, &bytes).unwrap();
+            let state = process_phone_upload(
+                &service,
+                &store,
+                &meeting,
+                &upload,
+                AudioRetention::DeleteAfterProcessing,
+            )
+            .await;
+            assert_eq!(state, MeetingState::Ready, "{fixture}");
+            assert_eq!(
+                service.damaged_audio(meeting.id).salvaged,
+                salvaged,
+                "{fixture}"
+            );
+            let stamped = store.asset(meeting.id).unwrap().unwrap().expires_at;
+            assert_eq!(stamped.is_none(), salvaged, "{fixture}: {stamped:?}");
+
+            let mut detail = steno_host::main_window::MeetingDetailViewModel::new(
+                meeting.id,
+                Some(&store.settings().unwrap()),
+            );
+            detail.reload(&store, &steno_host::services::RealFileSystem, &service);
+            let status = detail.recording_status();
+            if salvaged {
+                assert_eq!(
+                    status,
+                    Some(steno_host::main_window::RecordingStatus::KeptIncomplete),
+                    "{fixture}"
+                );
+                run_sweep(&RetentionSweep::new(store.clone()));
+                assert_eq!(std::fs::read(&upload).unwrap(), bytes, "kept as it was");
+            } else {
+                assert!(
+                    matches!(
+                        status,
+                        Some(steno_host::main_window::RecordingStatus::DeletesOn(_))
+                    ),
+                    "{fixture}: {status:?}"
+                );
+            }
+        }
     }
 
     /// A record of the damage that does not parse says nothing about any
