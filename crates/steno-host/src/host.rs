@@ -1441,14 +1441,19 @@ impl Host {
     /// Marks the iPhone section busy and publishes it; `false` while Try
     /// again or Pair again already runs.
     fn begin_phones_busy(&self) -> bool {
-        let began = {
+        self.change_phones(PhonesSettingsViewModel::begin_busy)
+    }
+
+    /// `change` on the iPhone section, then publishes the section alone.
+    fn change_phones<T>(&self, change: impl FnOnce(&mut PhonesSettingsViewModel) -> T) -> T {
+        let changed = {
             let mut inner = self.lock();
-            let began = inner.phones.begin_busy();
+            let changed = change(&mut inner.phones);
             inner.publisher.schedule(BridgeTopic::SettingsPhone);
-            began
+            changed
         };
         self.publish();
-        began
+        changed
     }
 
     /// Try again's or Pair again's outcome through `finish`, and what it
@@ -2413,12 +2418,7 @@ impl BridgeHost for Host {
             return Ok(ConfirmReply { confirmed: false });
         }
         if !self.confirm(&pair_again_prompt(self.shared.config.platform)) {
-            {
-                let mut inner = self.lock();
-                inner.phones.cancel_busy();
-                inner.publisher.schedule(BridgeTopic::SettingsPhone);
-            }
-            self.publish();
+            self.change_phones(PhonesSettingsViewModel::cancel_busy);
             return Ok(ConfirmReply { confirmed: false });
         }
         let outcome = handover.pair_again();

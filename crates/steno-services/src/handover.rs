@@ -906,7 +906,7 @@ mod tests {
 
     use super::*;
     use crate::swift_import::WaitReason;
-    use crate::testing::warnings;
+    use crate::testing::{RefusingRecord, warnings};
 
     #[test]
     fn the_port_is_the_environment_s_else_the_stored_one_else_the_platform_s() {
@@ -1146,26 +1146,6 @@ mod tests {
         }
     }
 
-    /// A fingerprint record over the app's file that refuses every write
-    /// while `refuse` is set.
-    struct Record {
-        file: FingerprintFile,
-        refuse: std::sync::atomic::AtomicBool,
-    }
-
-    impl FingerprintRecord for Record {
-        fn recorded(&self) -> BoundaryResult<Option<String>> {
-            self.file.recorded()
-        }
-
-        fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
-            if self.refuse.load(Ordering::SeqCst) {
-                return Err("No space left on device".into());
-            }
-            self.file.record(fingerprint)
-        }
-    }
-
     /// The import's marker: logs every write into the keychain's log, and
     /// fails while `fail` is set.
     #[derive(Default)]
@@ -1193,7 +1173,7 @@ mod tests {
         dir: tempfile::TempDir,
         store: Arc<Store>,
         keychain: Arc<Keychain>,
-        record: Arc<Record>,
+        record: Arc<RefusingRecord>,
         marker: Arc<Marker>,
         identity: HandoverIdentity,
         listens: Arc<AtomicUsize>,
@@ -1205,8 +1185,8 @@ mod tests {
             let store = Arc::new(Store::in_memory().unwrap());
             crate::testing::pair_a_phone(&store);
             let keychain = Arc::new(Keychain::default());
-            let record = Arc::new(Record {
-                file: FingerprintFile::in_support_directory(dir.path()),
+            let record = Arc::new(RefusingRecord {
+                file: Arc::new(FingerprintFile::in_support_directory(dir.path())),
                 refuse: std::sync::atomic::AtomicBool::new(false),
             });
             let identity = HandoverIdentity::mint("Steno on a test", chrono::Utc::now()).unwrap();

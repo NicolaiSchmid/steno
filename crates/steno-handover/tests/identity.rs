@@ -157,14 +157,17 @@ impl SecretStore for MemorySecrets {
     }
 }
 
-/// A fingerprint record in memory that refuses writes while its flag is
+/// A fingerprint record in memory that refuses writes while `refuse` is
 /// set.
 #[derive(Default)]
-struct MemoryRecord(Mutex<Option<String>>, AtomicBool);
+struct MemoryRecord {
+    value: Mutex<Option<String>>,
+    refuse: AtomicBool,
+}
 
 impl MemoryRecord {
     fn get(&self) -> Option<String> {
-        self.0.lock().unwrap().clone()
+        self.value.lock().unwrap().clone()
     }
 }
 
@@ -174,10 +177,10 @@ impl FingerprintRecord for MemoryRecord {
     }
 
     fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
-        if self.1.load(Ordering::SeqCst) {
+        if self.refuse.load(Ordering::SeqCst) {
             return Err("No space left on device".into());
         }
-        *self.0.lock().unwrap() = Some(fingerprint.to_owned());
+        *self.value.lock().unwrap() = Some(fingerprint.to_owned());
         Ok(())
     }
 }
@@ -557,10 +560,10 @@ async fn a_pair_again_stopped_before_the_record_waits_as_replaced_and_finishes_n
     let places = Places::new();
     let old = places.load("x").await.unwrap();
     places.pair_a_phone();
-    places.record.1.store(true, Ordering::SeqCst);
+    places.record.refuse.store(true, Ordering::SeqCst);
     let error = places.mint_anew("y").await.unwrap_err();
     assert!(matches!(error, IdentityError::Record(_)), "{error}");
-    places.record.1.store(false, Ordering::SeqCst);
+    places.record.refuse.store(false, Ordering::SeqCst);
     let (stored, recorded, phones) = places.places();
     assert_ne!(stored, Some(old.to_pem().unwrap()), "the new identity");
     assert_eq!(

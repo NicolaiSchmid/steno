@@ -1,8 +1,9 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
-//! old, a paired phone, the waits that fail a test instead of hanging it,
-//! and [`warnings`], what a call logs at `warn` and above.
+//! old, a paired phone, a fingerprint record that refuses writes, the
+//! waits that fail a test instead of hanging it, and [`warnings`], what a
+//! call logs at `warn` and above.
 //!
 //! A test that writes models gives the app an explicit models directory in
 //! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
@@ -253,6 +254,26 @@ pub fn an_hour_later() -> crate::recovery::LiveRecordingCheck {
         now: Arc::new(|| std::time::SystemTime::now() + Duration::from_secs(3_600)),
         wait: Arc::new(|_| panic!("an old master is not waited for")),
         ..crate::recovery::LiveRecordingCheck::default()
+    }
+}
+
+/// A fingerprint record over the app's file that refuses every write
+/// while `refuse` is set, as a full disk does.
+pub struct RefusingRecord {
+    pub file: Arc<crate::handover::FingerprintFile>,
+    pub refuse: std::sync::atomic::AtomicBool,
+}
+
+impl steno_handover::FingerprintRecord for RefusingRecord {
+    fn recorded(&self) -> steno_core::BoundaryResult<Option<String>> {
+        self.file.recorded()
+    }
+
+    fn record(&self, fingerprint: &str) -> steno_core::BoundaryResult<()> {
+        if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("No space left on device".into());
+        }
+        self.file.record(fingerprint)
     }
 }
 

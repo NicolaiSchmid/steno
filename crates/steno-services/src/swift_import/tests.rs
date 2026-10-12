@@ -725,26 +725,6 @@ fn a_refused_replace_counts_as_denied_and_try_again_repeats_only_the_store() {
     }
 }
 
-/// A fingerprint record that refuses every write while `refuse` is set,
-/// over the app's file.
-struct RefusingRecord {
-    file: Arc<crate::handover::FingerprintFile>,
-    refuse: std::sync::atomic::AtomicBool,
-}
-
-impl FingerprintRecord for RefusingRecord {
-    fn recorded(&self) -> BoundaryResult<Option<String>> {
-        self.file.recorded()
-    }
-
-    fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
-        if self.refuse.load(Ordering::SeqCst) {
-            return Err("No space left on device".into());
-        }
-        self.file.record(fingerprint)
-    }
-}
-
 /// The handover's own load, as the listener does it, over `secrets` and
 /// `record` with no phone paired.
 fn load_identity(
@@ -780,7 +760,7 @@ fn a_fingerprint_not_recorded_after_the_store_is_surfaced_and_try_again_records_
         ..FakeKeychain::swift_app()
     });
     let preferences = preferences(&dir);
-    let record = Arc::new(RefusingRecord {
+    let record = Arc::new(crate::testing::RefusingRecord {
         file: file.clone(),
         refuse: std::sync::atomic::AtomicBool::new(true),
     });
