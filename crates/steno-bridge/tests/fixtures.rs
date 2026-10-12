@@ -2,7 +2,7 @@
 //! type and re-encodes byte for byte. The mapping from file name to type
 //! mirrors `BridgeSamples.fixtures` in `Sources/StenoBridge/BridgeSamples.swift`,
 //! followed by the fixtures the Rust bridge alone owns (the import step,
-//! a summary skipped for a withheld API key);
+//! a summary skipped for a withheld API key, phone handover waiting);
 //! `contract.ts` is checked for every string enum the crate spells, top level
 //! and nested. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 
@@ -126,6 +126,7 @@ const FIXTURES: &[(&str, Reencode)] = &[
         "meeting.detail.keyWithheld",
         reencode::<MeetingDetailSnapshot>,
     ),
+    ("settings.iphone.waiting", reencode::<PhoneSettingsSnapshot>),
 ];
 
 fn index() -> Vec<String> {
@@ -392,6 +393,14 @@ fn contract_ts_nested_enums_match() {
             "state: z.enum(["
         ]),
         raw(PhoneListenerState::ALL)
+    );
+    assert_eq!(
+        nested(&[
+            "export const phoneSettingsSnapshot = z",
+            "waiting: z",
+            "reason: z.enum(["
+        ]),
+        raw(PhoneWaitingReason::ALL)
     );
 }
 

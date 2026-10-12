@@ -456,6 +456,36 @@ pub struct PhoneReceipt {
     pub total_bytes: Option<i64>,
 }
 
+string_enum! {
+    /// Why phone handover is off and waits for the user (stable plan S6):
+    /// Steno never makes a new pairing over the one the paired phones
+    /// know. Rust only.
+    pub enum PhoneWaitingReason {
+        /// The previous version's pairing did not come over: macOS refused
+        /// its export, the export failed, or the step was put off.
+        ImportDenied = "importDenied",
+        /// This computer's pairing could not be read: a refused prompt, a
+        /// locked keyring.
+        Unreadable = "unreadable",
+        /// The pairing the phones know is no longer stored, though a phone
+        /// is paired or its fingerprint is recorded.
+        Missing = "missing",
+        /// Another pairing is stored than the one the phones know.
+        Replaced = "replaced",
+    }
+}
+
+/// Phone handover waits: the section offers Try again and Pair again
+/// instead of a new pairing. Rust only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhoneWaiting {
+    pub reason: PhoneWaitingReason,
+    /// What happened and what to do, in the section's words.
+    pub message: String,
+    /// Try again or Pair again is under way; a keychain prompt may be up.
+    pub busy: bool,
+}
+
 /// Swift: `PhoneSettingsSnapshot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -468,6 +498,11 @@ pub struct PhoneSettingsSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing: Option<PhonePairing>,
     pub receipts: Vec<PhoneReceipt>,
+    /// Set while phone handover waits for Try again or Pair again. The
+    /// Rust host sets it; the Swift app has no such field and never sends
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<PhoneWaiting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -5,8 +5,20 @@
 //! Swift polled the paired devices every two seconds while a code was
 //! shown; the blocking host refreshes on [`PhonesSettingsViewModel::refresh_after_pairing`],
 //! which the shell calls on its timer and the tests call directly.
+//!
+//! Rust only: while the handover waits ([`Handover::waiting`]), the
+//! section offers Try again and Pair again instead of a pairing. Both may
+//! wait on a keychain prompt, so the host runs them in three steps, as the
+//! onboarding's permission requests: [`PhonesSettingsViewModel::begin_busy`]
+//! under its lock, the call with the lock released, then
+//! [`PhonesSettingsViewModel::finish_try_again`] or
+//! [`PhonesSettingsViewModel::finish_pair_again`].
+//!
+//! [`Handover::waiting`]: crate::services::Handover::waiting
 
 use chrono::{DateTime, Utc};
+use steno_bridge::PhoneWaitingReason;
+use steno_core::protocols::BoundaryResult;
 use steno_core::{HandoverReceipt, HandoverStateKind, PairedDevice};
 use uuid::Uuid;
 
@@ -21,8 +33,17 @@ pub struct PhonesSettingsViewModel {
     pub pairing: Option<PairingCode>,
     /// The pairing code as a PNG, base64; the page draws it.
     pub qr_png_base64: Option<String>,
+    /// Why the handover waits, as of the last refresh.
+    pub waiting: Option<PhoneWaitingReason>,
+    /// Try again or Pair again is under way.
+    pub busy: bool,
     pub errors: SectionError,
 }
+
+/// The section's line when Try again left the handover waiting.
+pub const TRY_AGAIN_FAILED: &str = "Your phones still can't send recordings.";
+/// The section's line when Pair again did not finish.
+pub const PAIR_AGAIN_FAILED: &str = "Steno could not make a new pairing.";
 
 impl PhonesSettingsViewModel {
     #[must_use]
@@ -70,13 +91,41 @@ impl PhonesSettingsViewModel {
         active
     }
 
-    /// The listener state and the receipts as the service has them now:
-    /// what the two observations delivered.
+    /// The listener state, the receipts and why the handover waits, as the
+    /// service has them now: what the observations delivered.
     pub fn refresh(&mut self, services: &Services) {
         if let Some(handover) = &services.handover {
             self.listener = handover.state();
             self.receipts = handover.receipts();
+            self.waiting = handover.waiting();
         }
+    }
+
+    /// Try again or Pair again is about to run with the host's lock
+    /// released; `false` while one is already under way, which the host
+    /// then leaves to itself.
+    pub fn begin_busy(&mut self) -> bool {
+        !std::mem::replace(&mut self.busy, true)
+    }
+
+    /// Try again's outcome: the line says when the handover still waits.
+    pub fn finish_try_again(&mut self, outcome: BoundaryResult<()>, services: &Services) {
+        self.finish(outcome, TRY_AGAIN_FAILED, services);
+    }
+
+    /// Pair again's outcome: the phones it removed leave the list.
+    pub fn finish_pair_again(&mut self, outcome: BoundaryResult<()>, services: &Services) {
+        self.finish(outcome, PAIR_AGAIN_FAILED, services);
+    }
+
+    fn finish(&mut self, outcome: BoundaryResult<()>, failed: &str, services: &Services) {
+        self.busy = false;
+        match outcome {
+            Ok(()) => self.errors.clear(),
+            Err(error) => self.errors.fail(failed, error),
+        }
+        self.load(services);
+        self.refresh(services);
     }
 
     pub fn load(&mut self, services: &Services) {

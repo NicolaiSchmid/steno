@@ -73,6 +73,7 @@ fixtures![
     "reply.chosenPath",
     "onboarding.import",
     "meeting.detail.keyWithheld",
+    "settings.iphone.waiting",
 ];
 
 /// The contract's topics (`bridgeTopics` in `contract.ts`). The other
@@ -104,6 +105,7 @@ const REPLY_ALIASES: &[(&str, &[&str])] = &[
             "meetings.delete",
             "meeting.deleteRecordingNow",
             "meeting.setKeepAudio",
+            "settings.iphone.pairAgain",
         ],
     ),
     (
@@ -204,6 +206,7 @@ mod tests {
             "onboarding.setup",
             "onboarding.import",
             "meeting.detail.keyWithheld",
+            "settings.iphone.waiting",
         ] {
             assert!(fixture(key).is_some(), "{key} is recorded");
             assert!(

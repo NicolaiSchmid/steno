@@ -86,6 +86,7 @@ const REPLY_ALIASES: Record<string, readonly string[]> = {
 		"meetings.delete",
 		"meeting.deleteRecordingNow",
 		"meeting.setKeepAudio",
+		"settings.iphone.pairAgain",
 	],
 	"reply.chosenPath": [
 		"settings.recording.chooseFolder",
@@ -159,6 +160,7 @@ export const scenarios = [
 	"export-on",
 	"pairing",
 	"phone-unavailable",
+	"phone-waiting",
 	// Onboarding
 	"onboarding-unknown",
 	"onboarding-denied",
@@ -385,7 +387,7 @@ export function applyScenario(
 	// `recording.live`, `meeting.detail.damagedAudio`,
 	// `meeting.detail.keptIncomplete`, `settings.summaries.codex`,
 	// `settings.summaries.fileKey`, `settings.iphone.pairing`,
-	// `onboarding.setup`, `onboarding.import` and
+	// `settings.iphone.waiting`, `onboarding.setup`, `onboarding.import` and
 	// `meeting.detail.keyWithheld` are fixtures, not topics; the page never
 	// sees them by those names.
 	delete result["recording.live"];
@@ -394,6 +396,7 @@ export function applyScenario(
 	delete result["settings.summaries.codex"];
 	delete result["settings.summaries.fileKey"];
 	delete result["settings.iphone.pairing"];
+	delete result["settings.iphone.waiting"];
 	delete result["onboarding.setup"];
 	delete result["onboarding.import"];
 	delete result["meeting.detail.keyWithheld"];
@@ -537,7 +540,9 @@ function applyOnboardingScenario(
  * `codex` (ChatGPT confirmed, from `settings.summaries.codex`), `codex-consent`
  * (ChatGPT chosen, not yet confirmed), `export-on` (a vault chosen and saved),
  * `pairing` (a code open and a transfer arriving, from
- * `settings.iphone.pairing`), `phone-unavailable` (no handover service).
+ * `settings.iphone.pairing`), `phone-unavailable` (no handover service),
+ * `phone-waiting` (phone handover waits for Try again or Pair again, from
+ * `settings.iphone.waiting`).
  */
 function applySettingsScenario(
 	result: FixtureMap,
@@ -681,6 +686,13 @@ function applySettingsScenario(
 				},
 			} satisfies PhoneSettingsSnapshot;
 		}
+	}
+
+	const waiting = snapshots["settings.iphone.waiting"] as
+		| PhoneSettingsSnapshot
+		| undefined;
+	if (scenario === "phone-waiting" && waiting) {
+		result["settings.iphone"] = waiting;
 	}
 
 	if (scenario === "phone-unavailable" && phone) {

@@ -14,9 +14,9 @@ use common::*;
 use serde_json::{Value, json};
 use steno_bridge::{
     AssetIdParams, BridgeErrorCode, BridgeHost, BridgeTopic, DeviceIdParams, ExportUpdateParams,
-    PermissionKind, PermissionKindParams, PermissionState, Platform, RecordingRetention,
-    RetentionMode, SetAutomaticUpdatesParams, SetBoolParams, SetRetentionParams, SetStringParams,
-    SetTemplateParams, SummariesUpdateParams,
+    PermissionKind, PermissionKindParams, PermissionState, PhoneWaitingReason, Platform,
+    RecordingRetention, RetentionMode, SetAutomaticUpdatesParams, SetBoolParams,
+    SetRetentionParams, SetStringParams, SetTemplateParams, SummariesUpdateParams,
 };
 use steno_core::paths::file_url;
 use steno_core::protocols::{BoundaryResult, SecretKey, SecretStore};
@@ -2141,6 +2141,145 @@ fn a_commit_without_an_edit_saves_nothing_when_unknown_fields_are_stored() {
         harness.snapshot(BridgeTopic::SettingsExport)["saved"],
         false
     );
+}
+
+/// Rust only (stable plan S6): while phone handover waits, the iPhone
+/// section says why in plain words, the sidebar says the phones wait, and
+/// Try again runs with the section busy (published before the call, as a
+/// keychain prompt may be up) and the host's lock released. A Try again
+/// that still waits says so with the reason in the details; one that reads
+/// the identity ends the wait.
+#[test]
+fn phones_waiting_try_again_until_the_pairing_reads() {
+    let harness = Harness::builder()
+        .with_handover("steno-mac-7f3a", 52_431)
+        .seed(|_, fakes| {
+            let handover = fakes.handover.as_ref().unwrap();
+            handover.pair(paired_phone());
+            *handover.waiting.lock().unwrap() = Some(PhoneWaitingReason::Unreadable);
+            *handover.try_again_failure.lock().unwrap() = Some("the keychain is locked".to_owned());
+        })
+        .build();
+    let handover = harness.fakes.handover.clone().unwrap();
+    let phone = harness.snapshot(BridgeTopic::SettingsPhone);
+    assert_eq!(
+        phone["waiting"],
+        json!({
+            "reason": "unreadable",
+            "message": "Steno could not read this Mac's phone pairing. Choose Try again and allow access when macOS asks.",
+            "busy": false,
+        })
+    );
+    assert_eq!(phone["subtitle"], "Phones waiting");
+    assert_eq!(phone["devices"][0]["name"], "Nicolai's iPhone");
+
+    harness.sink.clear();
+    harness.host.settings_phone_try_again().unwrap();
+    let published = harness.sink.all(BridgeTopic::SettingsPhone);
+    assert_eq!(
+        published[0]["waiting"]["busy"], true,
+        "busy before the call"
+    );
+    let phone = published.last().unwrap();
+    assert_eq!(phone["waiting"]["busy"], false);
+    assert_eq!(phone["error"], "Your phones still can't send recordings.");
+    assert_eq!(phone["errorDetails"], "the keychain is locked");
+    assert_eq!(*handover.tries.lock().unwrap(), 1);
+
+    *handover.try_again_failure.lock().unwrap() = None;
+    harness.host.settings_phone_try_again().unwrap();
+    let phone = harness.snapshot(BridgeTopic::SettingsPhone);
+    assert!(phone.get("waiting").is_none(), "{phone}");
+    assert!(phone.get("error").is_none(), "{phone}");
+    assert_eq!(phone["subtitle"], "1 iPhone paired");
+    assert_eq!(*handover.tries.lock().unwrap(), 2);
+}
+
+/// The waiting reasons in the words of each platform, none of them a
+/// developer's.
+#[test]
+fn the_waiting_reasons_are_plain_sentences() {
+    use steno_host::settings::snapshots::waiting_message;
+    for reason in PhoneWaitingReason::ALL {
+        for platform in Platform::ALL {
+            let message = waiting_message(*reason, *platform);
+            for word in [
+                "identity",
+                "secret",
+                "fingerprint",
+                "keyring entry",
+                "listener",
+            ] {
+                assert!(!message.contains(word), "{reason} on {platform}: {message}");
+            }
+            let computer = if *platform == Platform::Macos {
+                "Mac"
+            } else {
+                "computer"
+            };
+            assert!(
+                message.contains(computer),
+                "{reason} on {platform}: {message}"
+            );
+        }
+    }
+    assert_eq!(
+        waiting_message(PhoneWaitingReason::Missing, Platform::Linux),
+        "This computer's phone pairing is no longer saved. Choose Pair again to start over."
+    );
+}
+
+/// Pair again asks first, with the warning that every phone must pair
+/// again, while the section shows itself busy; a No changes nothing, a
+/// Yes removes the phones and ends the wait. A Pair again that fails says
+/// so.
+#[test]
+fn phones_waiting_pair_again_after_the_warning() {
+    let answer = Arc::new(Mutex::new(false));
+    let answered = answer.clone();
+    let harness = Harness::builder()
+        .with_handover("steno-mac-7f3a", 52_431)
+        .confirm_with(move |host, prompt| {
+            assert_eq!(
+                *prompt,
+                steno_host::host::pair_again_prompt(Platform::Macos)
+            );
+            assert!(prompt.message.contains("Each phone must scan a new code"));
+            let phone = host.snapshot(BridgeTopic::SettingsPhone).unwrap();
+            assert_eq!(phone["waiting"]["busy"], true, "busy while asked");
+            *answered.lock().unwrap()
+        })
+        .seed(|_, fakes| {
+            let handover = fakes.handover.as_ref().unwrap();
+            handover.pair(paired_phone());
+            *handover.waiting.lock().unwrap() = Some(PhoneWaitingReason::Missing);
+        })
+        .build();
+    let handover = harness.fakes.handover.clone().unwrap();
+
+    let reply = harness.host.settings_phone_pair_again().unwrap();
+    assert!(!reply.confirmed);
+    assert_eq!(*handover.pairings_again.lock().unwrap(), 0);
+    let phone = harness.snapshot(BridgeTopic::SettingsPhone);
+    assert_eq!(phone["waiting"]["busy"], false);
+    assert_eq!(phone["devices"].as_array().unwrap().len(), 1);
+
+    *answer.lock().unwrap() = true;
+    *handover.pair_again_failure.lock().unwrap() = Some("the keychain refused the write".into());
+    assert!(harness.host.settings_phone_pair_again().unwrap().confirmed);
+    let phone = harness.snapshot(BridgeTopic::SettingsPhone);
+    assert_eq!(phone["error"], "Steno could not make a new pairing.");
+    assert_eq!(phone["errorDetails"], "the keychain refused the write");
+    assert_eq!(phone["waiting"]["reason"], "missing");
+
+    *handover.pair_again_failure.lock().unwrap() = None;
+    assert!(harness.host.settings_phone_pair_again().unwrap().confirmed);
+    assert_eq!(*handover.pairings_again.lock().unwrap(), 2);
+    let phone = harness.snapshot(BridgeTopic::SettingsPhone);
+    assert!(phone.get("waiting").is_none(), "{phone}");
+    assert!(phone.get("error").is_none(), "{phone}");
+    assert_eq!(phone["devices"], json!([]));
+    assert_eq!(phone["subtitle"], "No iPhone paired");
 }
 
 /// Swift: `testPhonesPairingListsDevicesAndRevokes`, `testPhonesWithoutAHandoverServiceIsUnavailable`.

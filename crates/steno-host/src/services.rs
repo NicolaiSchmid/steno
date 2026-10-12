@@ -43,7 +43,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use steno_bridge::{BridgeWindow, CaptureMode, PermissionKind, PermissionState, RecordingState};
+use steno_bridge::{
+    BridgeWindow, CaptureMode, PermissionKind, PermissionState, PhoneWaitingReason, RecordingState,
+};
 use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, HandoverReceipt, ObsidianSettings, PairedDevice, Settings};
 use uuid::Uuid;
@@ -508,8 +510,9 @@ pub struct PairingCode {
 }
 
 /// The Mac side of the phone handover (WP7). The fake counts starts and
-/// stops, records every revoke and answers with the devices, receipts and
-/// pairing code a test set. Swift: `HandoverService` in
+/// stops, records every revoke, answers with the devices, receipts and
+/// pairing code a test set, and waits with the reason a test set until
+/// Try again or Pair again. Swift: `HandoverService` in
 /// `Sources/StenoHandover/HandoverService.swift`.
 pub trait Handover: Send + Sync {
     fn state(&self) -> ListenerState;
@@ -523,6 +526,23 @@ pub trait Handover: Send + Sync {
     fn revoke(&self, device_id: Uuid) -> BoundaryResult<()>;
     /// Every receipt the listener knows, any state.
     fn receipts(&self) -> Vec<HandoverReceipt>;
+    /// Why the listener is off and waits for [`Self::try_again`] or
+    /// [`Self::pair_again`]: the identity the paired phones know could not
+    /// be read or brought over, and none is minted over it (stable plan
+    /// S6). `None` when it does not wait. Rust only.
+    fn waiting(&self) -> Option<PhoneWaitingReason>;
+    /// Try again: reads the identity again (on the Mac, while the Swift
+    /// app's identity has not come over, the import's export and its
+    /// prompt), without a restart; the listener comes up when the read
+    /// succeeds, and starts when a phone is paired. May wait on a keychain
+    /// prompt, so the host calls it with its lock released. Rust only.
+    fn try_again(&self) -> BoundaryResult<()>;
+    /// Pair again: removes every paired phone and the identity they know,
+    /// and makes a new one; every phone must pair again. On the Mac the
+    /// import's `swift-import-done` marker is written first, and a marker
+    /// that cannot be written stops it. May wait on a keychain prompt, as
+    /// [`Self::try_again`]. Rust only.
+    fn pair_again(&self) -> BoundaryResult<()>;
 }
 
 /// Draws a QR code as a PNG, base64 (`steno_services::qr` implements it).
@@ -698,8 +718,9 @@ pub struct Services {
     pub speech_models: Arc<dyn SpeechModels>,
     pub llm: Arc<dyn LlmService>,
     pub export_validator: Arc<dyn ExportValidator>,
-    /// `None` when the handover identity could not be created; the Phones
-    /// settings say so.
+    /// `None` when the handover could not be built at launch; the Phones
+    /// settings say so. One whose identity cannot be read is there and
+    /// waits ([`Handover::waiting`]).
     pub handover: Option<Arc<dyn Handover>>,
     pub qr: Arc<dyn QrEncoder>,
     pub audio_devices: Arc<dyn AudioDevices>,

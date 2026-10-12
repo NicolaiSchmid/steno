@@ -98,6 +98,16 @@ string_enum! {
         SettingsPhoneBeginPairing = "settings.iphone.beginPairing",
         SettingsPhoneCancelPairing = "settings.iphone.cancelPairing",
         SettingsPhoneRevoke = "settings.iphone.revoke",
+        /// Try again while phone handover waits
+        /// ([`PhoneSettingsSnapshot::waiting`](crate::PhoneSettingsSnapshot::waiting)):
+        /// reads this computer's pairing again, and on the Mac, while the
+        /// previous version's pairing has not come over, asks macOS for it
+        /// again. Rust only: the Swift app never waits.
+        SettingsPhoneTryAgain = "settings.iphone.tryAgain",
+        /// Pair again while phone handover waits: after the host's warning
+        /// that every phone must pair again, removes the paired phones and
+        /// makes a new pairing. Replies `ConfirmReply`. Rust only.
+        SettingsPhonePairAgain = "settings.iphone.pairAgain",
 
         OnboardingRequest = "onboarding.request",
         OnboardingSkip = "onboarding.skip",

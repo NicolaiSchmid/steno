@@ -26,14 +26,15 @@
 //!   (`handover-identity.json`, [`crate::handover::FingerprintFile`]) so
 //!   the handover's guard accepts it. A denied or failed export or store
 //!   never mints an identity and never replaces one: the handover waits
-//!   ([`HandoverGate`]) and the step offers Try again.
+//!   ([`HandoverGate`]), and the step and Settings' iPhone section offer
+//!   Try again and, in Settings, Pair again.
 //!
 //! | Part | Items |
 //! |------|-------|
 //! | Launch half | [`launch`], [`launch_on_this_mac`], [`LaunchContext`] with [`SkipReason`], [`Launch`], [`LaunchKey`], [`PendingImport`] |
 //! | The graph | [`GraphImport`] (the gated secret store and the step), [`ImportGate`], [`HandoverGate`] with [`WaitReason`], [`key_denied_secrets`] |
 //! | The step | [`ImportStep`], [`DENIED_EXPORT`], [`FAILED_EXPORT`] |
-//! | Sources (`sources.rs`) | [`SwiftDefaults`], [`SwiftKeychain`], [`ApiKeyItem`], [`KeychainRefusal`]; on the Mac `DefaultsCommand` and `LoginKeychain` |
+//! | Sources (`sources.rs`) | [`SwiftDefaults`], [`SwiftKeychain`] with [`ImportMarker`], [`ApiKeyItem`], [`KeychainRefusal`]; on the Mac `DefaultsCommand` and `LoginKeychain`, and [`marker_on_this_mac`] |
 //! | Identity (`identity.rs`) | [`decode_pkcs12`], [`store_imported_identity`], [`ImportedIdentityError`] |
 //! | Flags in `preferences.json` | [`IMPORT_RAN_KEY`], [`KEY_READ_KEY`], [`KEY_DENIED_KEY`]; Sparkle's two flags are copied into the update schedule's [`AUTOMATIC_CHECKS_KEY`](crate::updates::AUTOMATIC_CHECKS_KEY) and [`AUTOMATIC_DOWNLOAD_KEY`](crate::updates::AUTOMATIC_DOWNLOAD_KEY) |
 //! | In the keychain | [`IMPORT_DONE_ENTRY`], the marker Pair again keeps |
@@ -64,6 +65,8 @@
 //! | Run: identity stored | | Ready | the identity and its fingerprint, then the marker, then `IMPORT_RAN` |
 //! | Run: export or store denied or failed | | Waiting (Try again) | nothing |
 //! | Run: identity stored, its fingerprint not recorded | | Waiting (Try again repeats the store) | the identity; no marker, no `IMPORT_RAN` |
+//! | Settings' Try again while Waiting | | as a run | as a run |
+//! | Settings' Pair again while Waiting | | Ready | the marker, then the new identity and its fingerprint, then `IMPORT_RAN`; the paired phones go |
 //! | Not now, or the window closed | withheld (open when no key item) | Waiting | nothing: the step returns at the next launch |
 //! | A key saved in Settings | open | | the key; `KEY_DENIED` cleared |
 //! | Later launch with `KEY_DENIED` | withheld until a key is saved | | nothing |
@@ -73,10 +76,12 @@
 //! reloaded pipeline. Once the marker or `IMPORT_RAN` exists the import
 //! never touches `handover-identity` again: a `preferences.json` set aside
 //! cannot bring the Swift identity back over one stored since. Pair
-//! again (Settings, a later change) must keep the marker, and must write
-//! it ([`SwiftKeychain::mark_import_done`]) before it stores a new
-//! identity: the step only logs a marker it could not write, which leaves
-//! `IMPORT_RAN` as the one guard. The import is skipped
+//! again (Settings' iPhone section, [`ImportStep`]'s
+//! [`WaitingImport::pair_again`] and `crate::handover::IdentitySource::pair_again`)
+//! keeps the marker, and writes it ([`ImportMarker::mark_import_done`])
+//! before it stores a new identity, stopping when it cannot: the step only
+//! logs a marker it could not write, which leaves `IMPORT_RAN` as the one
+//! guard. The import is skipped
 //! altogether under `STENO_SMOKE_SECONDS` and whenever `HOME` is not the
 //! account's home directory ([`LaunchContext`]), so a smoke run or a test
 //! with a scratch `HOME` never touches the user's keychain or preferences.
@@ -96,7 +101,7 @@ use steno_host::services::{Preferences as _, SwiftImport, SwiftImportStage, Swif
 use tokio::sync::watch;
 
 pub use identity::{ImportedIdentityError, decode_pkcs12, store_imported_identity};
-pub use sources::{ApiKeyItem, KeychainRefusal, SwiftDefaults, SwiftKeychain};
+pub use sources::{ApiKeyItem, ImportMarker, KeychainRefusal, SwiftDefaults, SwiftKeychain};
 #[cfg(target_os = "macos")]
 pub use sources::{DefaultsCommand, LoginKeychain};
 
@@ -386,6 +391,26 @@ pub fn launch_on_this_mac(
     }
 }
 
+/// Where Pair again writes the import's marker on this Mac
+/// ([`crate::AppOptions::import_marker`]): the login keychain, unless the
+/// import is skipped here ([`LaunchContext::skip_reason`]: a smoke run, a
+/// scratch `HOME`), and always `None` off the Mac.
+#[must_use]
+pub fn marker_on_this_mac(smoke_variable: &str) -> Option<Arc<dyn ImportMarker>> {
+    #[cfg(target_os = "macos")]
+    {
+        LaunchContext::current(smoke_variable)
+            .skip_reason()
+            .is_none()
+            .then(|| Arc::new(LoginKeychain::default()) as Arc<dyn ImportMarker>)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = smoke_variable;
+        None
+    }
+}
+
 /// Copies [`COPIED`] from the Swift domain, each only where
 /// `preferences.json` has no value of its own yet.
 fn copy_defaults(
@@ -438,6 +463,15 @@ impl HandoverGate {
 pub enum WaitReason {
     /// The export of the Swift identity was denied, failed or skipped.
     ImportDenied,
+}
+
+/// The iPhone section's reason for the gate's.
+impl From<WaitReason> for steno_bridge::PhoneWaitingReason {
+    fn from(reason: WaitReason) -> Self {
+        match reason {
+            WaitReason::ImportDenied => steno_bridge::PhoneWaitingReason::ImportDenied,
+        }
+    }
 }
 
 /// What the step lets through to the API key reads. Its `Debug` leaves
@@ -1014,6 +1048,48 @@ impl SwiftImport for ImportStep {
         self.status()
     }
 }
+
+/// Settings' iPhone section drives the step while the handover waits
+/// for it (`crate::handover::GatedHandover`).
+impl crate::handover::WaitingImport for ImportStep {
+    fn run_again(&self) -> Result<(), String> {
+        let status = self.run();
+        if status.stage == SwiftImportStage::Done {
+            return Ok(());
+        }
+        Err(status.error.unwrap_or_else(|| FAILED_EXPORT.to_owned()))
+    }
+
+    /// Ends a waiting import with a new identity, under the run's lock so
+    /// no export can store the Swift identity over it: the marker first,
+    /// as a later launch would otherwise bring the Swift identity back over
+    /// the new one (the step's own write only logs a failure, so here one
+    /// stops Pair again before anything goes), then `mint`, then
+    /// `IMPORT_RAN` and the gate opens. What the step left unread stays
+    /// so for this launch, as after Not now.
+    fn pair_again(&self, mint: &dyn Fn() -> Result<(), String>) -> Result<(), String> {
+        let Some(_running) = self.one_at_a_time() else {
+            return Err(STEP_UNDER_WAY.to_owned());
+        };
+        self.keychain.mark_import_done().map_err(|error| {
+            tracing::warn!(%error, "the import's marker was not written, so Pair again stopped");
+            crate::handover::marker_not_written(&error)
+        })?;
+        mint()?;
+        {
+            let mut state = self.state();
+            state.stage = SwiftImportStage::Done;
+            state.error = None;
+            state.bundle = None;
+        }
+        self.preferences.set_flag(IMPORT_RAN_KEY, true);
+        self.gate.set_handover(HandoverGate::Ready);
+        Ok(())
+    }
+}
+
+/// What Pair again answers while the step runs, or once it is over.
+const STEP_UNDER_WAY: &str = "Steno is still bringing over this Mac's phone pairing.";
 
 #[cfg(test)]
 mod tests;

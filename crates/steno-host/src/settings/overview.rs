@@ -122,7 +122,7 @@ pub fn refresh(
         .handover
         .as_ref()
         .map(|handover| handover.paired_devices().map_or(0, |devices| devices.len()));
-    subtitles(
+    let mut result = subtitles(
         platform,
         settings.as_ref(),
         recording_permissions(platform).all(granted),
@@ -130,5 +130,18 @@ pub fn refresh(
         paired_count,
         &services.updater.last_outcome(),
         version,
-    )
+    );
+    // Rust only: the Swift app's handover never waited.
+    if services
+        .handover
+        .as_ref()
+        .is_some_and(|handover| handover.waiting().is_some())
+    {
+        result.insert(SettingsSection::Phone, PHONES_WAITING.to_owned());
+    }
+    result
 }
+
+/// The iPhone section's subtitle while phone handover waits for Try again
+/// or Pair again. Rust only.
+pub const PHONES_WAITING: &str = "Phones waiting";

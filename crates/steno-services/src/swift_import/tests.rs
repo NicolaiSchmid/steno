@@ -103,6 +103,8 @@ struct FakeKeychain {
     marker: Mutex<Result<bool, String>>,
     /// The export's refusal; `None` exports the test identity.
     export_refusal: Mutex<Option<KeychainRefusal>>,
+    /// The marker write's failure; `None` writes it.
+    mark_refusal: Mutex<Option<String>>,
     /// The certificate each export was asked for.
     exported: Mutex<Vec<Vec<u8>>>,
     calls: Mutex<Vec<&'static str>>,
@@ -120,6 +122,7 @@ impl FakeKeychain {
             key: Ok(Some("sk-swift".to_owned())),
             marker: Mutex::new(Ok(false)),
             export_refusal: Mutex::new(None),
+            mark_refusal: Mutex::new(None),
             exported: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             on_call: Mutex::new(None),
@@ -177,6 +180,17 @@ fn user_canceled() -> KeychainRefusal {
     }
 }
 
+impl ImportMarker for FakeKeychain {
+    fn mark_import_done(&self) -> Result<(), String> {
+        self.record("mark done");
+        if let Some(refusal) = self.mark_refusal.lock().unwrap().clone() {
+            return Err(refusal);
+        }
+        *self.marker.lock().unwrap() = Ok(true);
+        Ok(())
+    }
+}
+
 impl SwiftKeychain for FakeKeychain {
     fn swift_certificate(&self) -> Result<Option<Vec<u8>>, String> {
         self.record("certificate");
@@ -199,12 +213,6 @@ impl SwiftKeychain for FakeKeychain {
     fn import_done(&self) -> Result<bool, String> {
         self.record("marker");
         self.marker.lock().unwrap().clone()
-    }
-
-    fn mark_import_done(&self) -> Result<(), String> {
-        self.record("mark done");
-        *self.marker.lock().unwrap() = Ok(true);
-        Ok(())
     }
 
     fn read_api_key(&self) -> Result<Option<String>, KeychainRefusal> {
@@ -734,6 +742,10 @@ impl FingerprintRecord for RefusingRecord {
             return Err("No space left on device".into());
         }
         self.file.record(fingerprint)
+    }
+
+    fn forget(&self) -> BoundaryResult<()> {
+        self.file.forget()
     }
 }
 
@@ -1335,10 +1347,13 @@ async fn a_swift_identity_that_replaced_a_desktop_id_one_is_the_one_the_listener
 
 /// A paired phone proves that an identity existed: with `preferences.json`
 /// gone, the Swift certificate gone before the step and the stored
-/// identity missing or unreadable, the gate opens but no listener is built
-/// and no identity is minted.
+/// identity missing or unreadable, the gate opens but the listener it
+/// brings waits, saying why, and no identity is minted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
+    use steno_bridge::PhoneWaitingReason;
+    use steno_host::services::Handover as _;
+
     for unreadable in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let paths = steno_core::StenoPaths::new(dir.path().join("support"));
@@ -1362,24 +1377,139 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
             "nothing left to import"
         );
         let gated = app.gated_handover.clone().unwrap();
-        let mut failure = gated.failure();
-        let mut follow = tokio::spawn(gated.clone().follow(|| panic!("no listener opens")));
-        // A listener that opens panics inside `follow`: the test fails on
-        // the ended task instead of waiting for a failure that never comes.
-        tokio::select! {
-            failed = failure.wait_for(Option::is_some) => {
-                failed.unwrap();
-            }
-            ended = &mut follow => panic!("follow ended: {ended:?}"),
-        }
+        gated.clone().follow(|| {}).await;
         assert!(gated.service().is_none(), "unreadable: {unreadable}");
-        assert!(!follow.is_finished(), "follow waits for the next ready");
-        follow.abort();
+        assert_eq!(
+            gated.waiting(),
+            Some(if unreadable {
+                PhoneWaitingReason::Unreadable
+            } else {
+                PhoneWaitingReason::Missing
+            })
+        );
         let secrets = std::fs::read(&secrets_path).unwrap_or_default();
         assert!(
             !String::from_utf8_lossy(&secrets).contains(HandoverIdentity::SECRET_KEY),
             "no identity minted (unreadable: {unreadable})"
         );
+        app.shutdown();
+    }
+}
+
+/// Settings' Pair again while the import waits: the marker first, then
+/// the mint, under the run's lock; then the import is over (`IMPORT_RAN`,
+/// the gate ready, the step done) and no later run exports the Swift
+/// identity over the new one. The marker stays.
+#[test]
+fn pair_again_ends_a_waiting_import_with_the_marker_written_first() {
+    use crate::handover::WaitingImport as _;
+
+    let step = step(FakeKeychain::swift_app(), None);
+    step.keychain.deny_export();
+    assert_eq!(step.import.run().stage, SwiftImportStage::Waiting);
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let marked = order.clone();
+    step.keychain.on_call(move |call| {
+        if call == "mark done" {
+            marked.lock().unwrap().push("marker");
+        }
+    });
+    let minted = order.clone();
+    step.import
+        .pair_again(&|| {
+            minted.lock().unwrap().push("mint");
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(*order.lock().unwrap(), ["marker", "mint"]);
+    assert_eq!(*step.keychain.marker.lock().unwrap(), Ok(true), "kept");
+    assert!(step.preferences.flag(IMPORT_RAN_KEY));
+    assert_eq!(step.graph.gate.handover(), HandoverGate::Ready);
+    assert_eq!(step.import.status().stage, SwiftImportStage::Done);
+    step.keychain.allow_export();
+    assert_eq!(step.import.run().stage, SwiftImportStage::Done);
+    assert_eq!(
+        step.keychain.count("export"),
+        1,
+        "no export after Pair again"
+    );
+}
+
+/// A marker that cannot be written stops Pair again before the mint: the
+/// import still waits, with Try again.
+#[test]
+fn a_marker_that_cannot_be_written_stops_the_import_s_pair_again() {
+    use crate::handover::WaitingImport as _;
+
+    let step = step(FakeKeychain::swift_app(), None);
+    step.keychain.deny_export();
+    step.import.run();
+    *step.keychain.mark_refusal.lock().unwrap() = Some("errSecInteractionNotAllowed".to_owned());
+    let error = step
+        .import
+        .pair_again(&|| panic!("nothing is minted"))
+        .unwrap_err();
+    assert!(error.contains("errSecInteractionNotAllowed"), "{error}");
+    assert!(!step.preferences.flag(IMPORT_RAN_KEY));
+    assert_eq!(
+        step.graph.gate.handover(),
+        HandoverGate::Waiting(WaitReason::ImportDenied)
+    );
+    assert_eq!(step.import.status().stage, SwiftImportStage::Waiting);
+}
+
+/// The graph after a denied export, a phone paired with the Swift
+/// identity: Settings' iPhone section says the pairing did not come over.
+/// Try again repeats the export without a restart and the listener comes
+/// up on the Swift identity; Pair again instead mints a new one after the
+/// marker, removes the phone, and the listener comes up on the new one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_try_again_or_pair_again_ends_a_denied_export() {
+    use steno_bridge::PhoneWaitingReason;
+    use steno_host::services::Handover as _;
+
+    const SWIFT_MAC_ID: &str = "FCF0D2A1-D2CE-48F7-BAFF-E17FD2E9C814";
+    for pair_again in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+        let keychain = Arc::new(FakeKeychain::swift_app());
+        keychain.deny_export();
+        let app = build_over(paths, keychain.clone());
+        crate::testing::pair_a_phone(&app.store);
+        let step = app.services.swift_import.clone().unwrap();
+        let status = tokio::task::spawn_blocking(move || step.run())
+            .await
+            .unwrap();
+        assert_eq!(status.stage, SwiftImportStage::Waiting);
+        let gated = app.gated_handover.clone().unwrap();
+        assert_eq!(gated.waiting(), Some(PhoneWaitingReason::ImportDenied));
+        let follow = tokio::spawn(gated.clone().follow(|| {}));
+
+        let answer = if pair_again {
+            tokio::task::block_in_place(|| gated.pair_again())
+        } else {
+            keychain.allow_export();
+            tokio::task::block_in_place(|| gated.try_again())
+        };
+        answer.unwrap();
+        follow.await.unwrap();
+        assert_eq!(gated.waiting(), None);
+        assert!(app.services.preferences.flag(IMPORT_RAN_KEY));
+        assert_eq!(*keychain.marker.lock().unwrap(), Ok(true));
+        let phones = app.store.paired_devices().unwrap().len();
+        if pair_again {
+            assert_ne!(gated.mac_id(), SWIFT_MAC_ID);
+            assert_ne!(gated.mac_id(), "");
+            assert_eq!(phones, 0, "every phone pairs again");
+            assert_eq!(keychain.count("export"), 1, "no second export");
+        } else {
+            assert_eq!(gated.mac_id(), SWIFT_MAC_ID);
+            assert_eq!(phones, 1);
+            assert!(matches!(
+                gated.state(),
+                steno_host::services::ListenerState::Listening(_)
+            ));
+        }
         app.shutdown();
     }
 }
@@ -1476,6 +1606,7 @@ fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
         update_source: None,
         detection: None,
         installed_bundle: false,
+        import_marker: None,
     }
 }
 

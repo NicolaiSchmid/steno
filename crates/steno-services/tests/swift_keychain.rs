@@ -27,8 +27,8 @@ use security_framework::os::macos::keychain::{CreateOptions, SecKeychain};
 use steno_handover::identity::hex;
 use steno_macos::keychain::fixture;
 use steno_services::swift_import::{
-    ApiKeyItem, LoginKeychain, SWIFT_API_KEY_LABEL, SWIFT_IDENTITY_LABEL, SwiftKeychain,
-    decode_pkcs12,
+    ApiKeyItem, ImportMarker, LoginKeychain, SWIFT_API_KEY_LABEL, SWIFT_IDENTITY_LABEL,
+    SwiftKeychain, decode_pkcs12,
 };
 
 /// `HandoverIdentity.fingerprint` of `test-identity.der`, as

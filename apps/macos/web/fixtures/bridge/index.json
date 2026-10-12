@@ -52,5 +52,6 @@
   "reply.confirm",
   "reply.chosenPath",
   "onboarding.import",
-  "meeting.detail.keyWithheld"
+  "meeting.detail.keyWithheld",
+  "settings.iphone.waiting"
 ]

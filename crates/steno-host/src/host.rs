@@ -398,6 +398,22 @@ pub fn process_again_prompt() -> ConfirmDestructiveParams {
     }
 }
 
+/// The warning before Pair again (`settings.iphone.pairAgain`), in the
+/// words of `platform`. Rust only.
+#[must_use]
+pub fn pair_again_prompt(platform: Platform) -> ConfirmDestructiveParams {
+    ConfirmDestructiveParams {
+        title: "Pair every phone again?".to_owned(),
+        message: platform
+            .mac_or(
+                "Steno makes a new pairing for this Mac and removes the phones paired with it. Each phone must scan a new code before it can send recordings again.",
+                "Steno makes a new pairing for this computer and removes the phones paired with it. Each phone must scan a new code before it can send recordings again.",
+            )
+            .to_owned(),
+        confirm_title: "Pair again".to_owned(),
+    }
+}
+
 /// The preferences flag Swift's `AppController` set on its first launch on
 /// the Mac; here it counts the first launch on Linux and Windows.
 pub const LOGIN_ITEM_REGISTERED_KEY: &str = "steno.loginItemRegistered";
@@ -673,6 +689,7 @@ impl Host {
                 &inner.phones,
                 &self.shared.services,
                 inner.subtitle(SettingsSection::Phone),
+                self.shared.config.platform,
             )),
             BridgeTopic::Onboarding => to_value(onboarding::snapshot(&inner.onboarding)),
         };
@@ -1419,6 +1436,43 @@ impl Host {
         };
         self.publish();
         outcome
+    }
+
+    /// Marks the iPhone section busy and publishes it; `false` while Try
+    /// again or Pair again already runs.
+    fn begin_phones_busy(&self) -> bool {
+        let began = {
+            let mut inner = self.lock();
+            let began = inner.phones.begin_busy();
+            inner.publisher.schedule(BridgeTopic::SettingsPhone);
+            began
+        };
+        self.publish();
+        began
+    }
+
+    /// Try again's or Pair again's outcome through `finish`, and what it
+    /// may have changed: the sidebar's subtitle, the main window's phone
+    /// card, and the import step, which Try again may have run (unless the
+    /// onboarding window runs it now and publishes its own outcome).
+    fn finish_phones_busy(&self, finish: impl FnOnce(&mut PhonesSettingsViewModel, &Services)) {
+        let services = &self.shared.services;
+        let import = {
+            let mut inner = self.lock();
+            finish(&mut inner.phones, services);
+            inner.publisher.schedule(BridgeTopic::SettingsPhone);
+            self.refresh_subtitles(&mut inner);
+            inner.app.phone = Self::phone_card(services);
+            inner.publisher.schedule(BridgeTopic::App);
+            services
+                .swift_import
+                .clone()
+                .filter(|_| inner.onboarding.import.is_some() && !inner.onboarding.importing)
+        };
+        self.publish();
+        if let Some(import) = import {
+            self.finish_swift_import(import.status(), false);
+        }
     }
 
     /// The import's outcome on the step, and everything it may have
@@ -2322,6 +2376,43 @@ impl BridgeHost for Host {
             inner.phones.revoke(params.device_id, &self.shared.services);
         });
         Ok(())
+    }
+
+    /// Three steps, as [`Self::onboarding_import`]: the page sees `busy`
+    /// while a keychain prompt may be up, the handover reads its identity
+    /// again with the lock released (on the Mac, while the import waits,
+    /// the import's export and its prompt), then the outcome. A second Try
+    /// again or a Pair again while one runs does nothing.
+    fn settings_phone_try_again(&self) -> Outcome<()> {
+        let Some(handover) = self.shared.services.handover.clone() else {
+            return Ok(());
+        };
+        if !self.begin_phones_busy() {
+            return Ok(());
+        }
+        let outcome = handover.try_again();
+        self.finish_phones_busy(|phones, services| phones.finish_try_again(outcome, services));
+        Ok(())
+    }
+
+    /// The warning first, the shell's destructive prompt ([`pair_again_prompt`]),
+    /// shown while the section is busy so no Try again starts meanwhile;
+    /// then as [`Self::settings_phone_try_again`]. The reply says whether
+    /// the user went ahead.
+    fn settings_phone_pair_again(&self) -> Outcome<ConfirmReply> {
+        let Some(handover) = self.shared.services.handover.clone() else {
+            return Ok(ConfirmReply { confirmed: false });
+        };
+        if !self.begin_phones_busy() {
+            return Ok(ConfirmReply { confirmed: false });
+        }
+        if !self.confirm(&pair_again_prompt(self.shared.config.platform)) {
+            self.finish_phones_busy(|phones, _| phones.busy = false);
+            return Ok(ConfirmReply { confirmed: false });
+        }
+        let outcome = handover.pair_again();
+        self.finish_phones_busy(|phones, services| phones.finish_pair_again(outcome, services));
+        Ok(ConfirmReply { confirmed: true })
     }
 
     // onboarding

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	type MeetingDetailSnapshot,
 	type MeetingsListSnapshot,
+	type PhoneSettingsSnapshot,
 	type RecordingSnapshot,
 	topicSchemas,
 } from "./contract";
@@ -37,6 +38,7 @@ describe("scenarios", () => {
 			"meetings.delete",
 			"meeting.deleteRecordingNow",
 			"meeting.setKeepAudio",
+			"settings.iphone.pairAgain",
 		]);
 		expect(replyMethods("speakers.options.reply")).toEqual([
 			"speakers.options",
@@ -46,6 +48,7 @@ describe("scenarios", () => {
 		expect(replies["ui.confirmDestructive"]).toEqual({ confirmed: true });
 		expect(replies["meetings.delete"]).toEqual({ confirmed: true });
 		expect(replies["meeting.setKeepAudio"]).toEqual({ confirmed: true });
+		expect(replies["settings.iphone.pairAgain"]).toEqual({ confirmed: true });
 		expect(replies["settings.export.chooseVault"]).toBeDefined();
 	});
 
@@ -150,6 +153,19 @@ describe("scenarios", () => {
 		expect(detail.summaryStatus.title).toBe("Summary skipped");
 		expect(detail.canRerunSummary).toBe(false);
 		expect(result["meeting.detail.keyWithheld"]).toBeUndefined();
+	});
+
+	it("shows phone handover waiting for Try again or Pair again", async () => {
+		const result = applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams("scenario=phone-waiting"),
+		);
+		const phone = topicSchemas["settings.iphone"].parse(
+			result["settings.iphone"],
+		) as PhoneSettingsSnapshot;
+		expect(phone.waiting?.reason).toBe("importDenied");
+		expect(phone.subtitle).toBe("Phones waiting");
+		expect(result["settings.iphone.waiting"]).toBeUndefined();
 	});
 
 	it("selects the failed meeting with a failed detail", async () => {

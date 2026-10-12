@@ -4,12 +4,12 @@
 use steno_bridge::{
     ExportSettingsSnapshot, GeneralAcknowledgement, GeneralAcknowledgementGroup, GeneralLoginItem,
     GeneralSettingsSnapshot, GeneralTemplate, GeneralUpdates, GeneralUpdatesOutcome, PhoneDevice,
-    PhoneListener, PhoneListenerState, PhonePairing, PhoneReceipt, PhoneSettingsSnapshot, Platform,
-    RecordingDevice, RecordingFolderUsage, RecordingPermission, RecordingRetention,
-    RecordingSettingsSnapshot, SummariesCodex, SummariesCodexModel, SummariesCodexSignIn,
-    SummariesKeyStore, SummariesPreset, SummariesSettingsSnapshot, SummariesTestResult,
-    TranscriptionAsset, TranscriptionAssetState, TranscriptionEngine,
-    TranscriptionSettingsSnapshot,
+    PhoneListener, PhoneListenerState, PhonePairing, PhoneReceipt, PhoneSettingsSnapshot,
+    PhoneWaiting, PhoneWaitingReason, Platform, RecordingDevice, RecordingFolderUsage,
+    RecordingPermission, RecordingRetention, RecordingSettingsSnapshot, SummariesCodex,
+    SummariesCodexModel, SummariesCodexSignIn, SummariesKeyStore, SummariesPreset,
+    SummariesSettingsSnapshot, SummariesTestResult, TranscriptionAsset, TranscriptionAssetState,
+    TranscriptionEngine, TranscriptionSettingsSnapshot,
 };
 use steno_core::{HandoverReceipt, SecretPlace, SummaryTemplate};
 
@@ -382,11 +382,41 @@ pub fn export(obsidian: &ObsidianSettingsViewModel, subtitle: &str) -> ExportSet
     }
 }
 
+/// What the iPhone section says while phone handover waits for `reason`,
+/// in the words of `platform`. Rust only.
+#[must_use]
+pub fn waiting_message(reason: PhoneWaitingReason, platform: Platform) -> String {
+    let computer = platform.mac_or("Mac", "computer");
+    match reason {
+        PhoneWaitingReason::ImportDenied => format!(
+            "Steno could not bring over this {computer}'s phone pairing from the previous \
+             version. Choose Try again and allow access when macOS asks."
+        ),
+        PhoneWaitingReason::Unreadable => platform
+            .mac_or(
+                "Steno could not read this Mac's phone pairing. Choose Try again and allow \
+                 access when macOS asks.",
+                "Steno could not read this computer's phone pairing. If your system asks you \
+                 to unlock your keyring, unlock it, then choose Try again.",
+            )
+            .to_owned(),
+        PhoneWaitingReason::Missing => format!(
+            "This {computer}'s phone pairing is no longer saved. Choose Pair again to start \
+             over."
+        ),
+        PhoneWaitingReason::Replaced => format!(
+            "Steno found a different phone pairing on this {computer} than the one your phones \
+             know. Choose Try again if you put the old one back, or Pair again to start over."
+        ),
+    }
+}
+
 #[must_use]
 pub fn phone(
     phones: &PhonesSettingsViewModel,
     services: &Services,
     subtitle: &str,
+    platform: Platform,
 ) -> PhoneSettingsSnapshot {
     let listener = if PhonesSettingsViewModel::is_available(services) {
         match &phones.listener {
@@ -445,6 +475,11 @@ pub fn phone(
                 total_bytes: Some(receipt.byte_count),
             })
             .collect(),
+        waiting: phones.waiting.map(|reason| PhoneWaiting {
+            reason,
+            message: waiting_message(reason, platform),
+            busy: phones.busy,
+        }),
         error: phones.errors.error.clone(),
         error_details: phones.errors.details.clone(),
     }
