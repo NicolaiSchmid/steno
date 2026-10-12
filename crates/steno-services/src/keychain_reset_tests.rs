@@ -271,8 +271,8 @@ impl Paired {
     fn kept(&self, launched: &Launched) {
         let store = &launched.app.store;
         assert_eq!(
-            std::fs::read(self.record_path()).unwrap(),
-            self.record,
+            std::fs::read(self.record_path()).ok().as_ref(),
+            Some(&self.record),
             "the record, byte for byte"
         );
         assert_eq!(
@@ -291,6 +291,8 @@ impl Paired {
     }
 }
 
+/// One launch of the graph and its host, with Pair again's prompt; shuts
+/// the app down when dropped.
 struct Launched {
     app: App,
     host: Host,
@@ -387,11 +389,19 @@ async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
     let mac_id = uuid_string(minted.mac_id());
     let fingerprint = hex(&minted.fingerprint());
     assert_ne!(fingerprint, paired.fingerprint, "a new identity");
-    assert_eq!(paired.recorded(), Some(fingerprint), "the new fingerprint");
+    assert_eq!(
+        paired.recorded().as_ref(),
+        Some(&fingerprint),
+        "the new fingerprint"
+    );
     let store = &launched.app.store;
     assert_eq!(store.paired_devices().unwrap(), [], "no paired phone");
     for (token, _) in &paired.tokens {
-        assert_eq!(store.paired_device_for_token_hash(token).unwrap(), None);
+        assert_eq!(
+            store.paired_device_for_token_hash(token).unwrap(),
+            None,
+            "no phone for its token"
+        );
     }
     let handover = launched.handover();
     assert_eq!(handover.mac_id(), mac_id, "the new identity");
@@ -401,7 +411,14 @@ async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
     assert_eq!(phone["devices"], json!([]), "{phone}");
     drop(launched);
 
-    paired.launch().loaded(&mac_id);
+    let again = paired.launch();
+    again.loaded(&mac_id);
+    assert_eq!(paired.recorded(), Some(fingerprint), "the new fingerprint");
+    assert_eq!(
+        again.app.store.paired_devices().unwrap(),
+        [],
+        "no paired phone"
+    );
 }
 
 /// The store holds another identity than the one whose fingerprint is
@@ -427,6 +444,8 @@ async fn another_identity_in_the_keychain_waits_until_the_known_one_is_back() {
     paired
         .waits_untouched(&launched, "replaced", Some(&other))
         .await;
+    let phone = launched.phone();
+    assert_eq!(phone["error"], TRY_AGAIN_FAILED, "{phone}");
     assert!(!launched.pair_again(), "the user said no");
     paired
         .waits_untouched(&launched, "replaced", Some(&other))
