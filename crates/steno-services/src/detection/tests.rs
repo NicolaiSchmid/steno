@@ -664,7 +664,7 @@ async fn a_prompt_never_starts_a_second_recording() {
     // Each call returns at once, unless it starts a recording after all.
     let controller = harness.controller.clone();
     on_own_thread(HANG_GUARD, "Record returned", move || {
-        controller.record(None)
+        controller.record(None);
     });
     let recorder = capture.recorder.clone();
     on_own_thread(HANG_GUARD, "the call's start returned", move || {
