@@ -41,7 +41,6 @@ use steno_core::json::parse_uuid;
 use tauri::{AppHandle, LogicalSize, Manager, WebviewWindow};
 
 use crate::{
-    host::Host,
     panel_geometry::same_size,
     panels::{self, Panel, PromptRequest},
     windows::{self, BridgeWindow, RequestField, Spec},
@@ -289,7 +288,7 @@ pub fn arm(app: &AppHandle) {
         section: None,
         meeting_id: parse_uuid(SMOKE_MEETING),
     };
-    if let Err(error) = windows::open_requested(app, &app.state::<Host>(), &meeting) {
+    if let Err(error) = windows::open_requested(app, &meeting) {
         stderr_line!("[steno-desktop] smoke: asking main for a meeting failed: {error}");
     }
     // Both panels at once, under Settings, which the one rule never does
@@ -441,7 +440,7 @@ fn check_settings_reopens(app: &AppHandle) -> Result<(), String> {
         section: Some(section),
         meeting_id: None,
     };
-    windows::open_requested(app, &app.state::<Host>(), &params)
+    windows::open_requested(app, &params)
         .map_err(|error| format!("opening Settings again: {error}"))?;
     // A page mounts within a second or two; a debug build on a busy
     // machine may need longer.

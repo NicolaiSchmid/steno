@@ -3,7 +3,10 @@
 //! `{ method, params }` and gets the result or a `BridgeError` with the
 //! contract's error codes (`Sources/StenoBridge`, `envelope.error.json`).
 //! Window and URL methods are the shell's own; everything else goes to the
-//! host.
+//! host, on Tauri's blocking pool ([`host_command`]): a host call can wait
+//! for seconds (the store behind another process's write lock, a stop), and
+//! on a command worker it would hold that worker, so a few such calls would
+//! leave the page's other commands unanswered.
 //!
 //! Swift: `BridgeRequestParams.swift`, `WindowRequests.swift`.
 
@@ -20,7 +23,7 @@ use tauri::{AppHandle, Emitter, EventTarget, Manager, State, Url, WebviewWindow}
 
 use crate::{
     actions, autostart, dialogs,
-    host::Host,
+    host::{ShellHost, call_blocking},
     panels::{self, Panel},
     permissions,
     recording::{RecorderState, RecordingState},
@@ -218,7 +221,6 @@ pub fn close_target(caller: &str, request: &WindowParams) -> Result<BridgeWindow
 pub async fn bridge_call(
     app: AppHandle,
     window: WebviewWindow,
-    host: State<'_, Host>,
     smoke: State<'_, Smoke>,
     method: String,
     params: Option<Value>,
@@ -227,17 +229,11 @@ pub async fn bridge_call(
     match method.as_str() {
         "page.ready" => {
             smoke.note_ready(window.label());
-            host.page_ready(&window)?;
-            // What was asked of the window before its page could hear it
-            // (a deep link at launch) goes out after the first snapshots.
-            if let Some(owed) = app.state::<windows::Pages>().ready(window.label()) {
-                host.publish_request(&window, owed.field.as_str(), &owed.value)?;
-            }
-            Ok(Value::Null)
+            host_command(app, window, method, params).await
         }
         "window.open" => {
             let request: WindowParams = parse(&method, params)?;
-            windows::open_requested(&app, &host, &request)?;
+            windows::open_requested(&app, &request)?;
             Ok(Value::Null)
         }
         "window.close" => {
@@ -269,12 +265,6 @@ pub async fn bridge_call(
             }
             Ok(Value::Null)
         }
-        // The host hears of it too, so its General snapshot follows.
-        "settings.general.setLaunchAtLogin" => {
-            let request: SetBoolParams = parse(&method, params)?;
-            actions::set_launch_at_login(&app, &window, request.value)?;
-            Ok(Value::Null)
-        }
         "updates.check" => {
             actions::check_for_updates(&app);
             Ok(Value::Null)
@@ -283,38 +273,41 @@ pub async fn bridge_call(
             Some(chooser) => {
                 let chosen = dialogs::choose_folder(&window, chooser).await?;
                 if let Some(path) = &chosen {
-                    host.call(&window, &method, dialogs::chosen_path_reply(Some(path)))?;
+                    let reply = dialogs::chosen_path_reply(Some(path));
+                    host_command(app, window, method, reply).await?;
                 }
                 Ok(dialogs::chosen_path_reply(chosen.as_deref()))
             }
-            None => off_the_worker_if_long(&method, || host.call(&window, &method, params)),
+            None => host_command(app, window, method, params).await,
         },
     }
 }
 
-/// Runs `call`, the host's answer to `method`, in `block_in_place` when the
-/// method blocks for long ([`blocks_for_long`]): the async worker hands its
-/// other tasks on while the call blocks.
-pub fn off_the_worker_if_long<T>(method: &str, call: impl FnOnce() -> T) -> T {
-    if blocks_for_long(method) {
-        tokio::task::block_in_place(call)
-    } else {
-        call()
-    }
-}
-
-/// The host methods that block for long: a permission request waits for
-/// the user's answer to the system prompt, and the Mac's system audio test
-/// listens for up to 30 seconds. `bridge_call` runs them in
-/// `block_in_place`, so the async worker it runs on hands its other tasks
-/// to the rest of the pool instead of holding them up.
-pub fn blocks_for_long(method: &str) -> bool {
-    matches!(
-        method,
-        "onboarding.request"
-            | "settings.recording.requestPermission"
-            | "settings.general.requestCalendar"
-    )
+/// What `bridge_call` hands the host, on Tauri's blocking pool
+/// ([`call_blocking`]), so the command worker is free while the host
+/// works: `page.ready`, `settings.general.setLaunchAtLogin` (the login item
+/// first, then the host hears of it, `actions::set_launch_at_login`), and
+/// every method the shell does not answer itself. Among them are the
+/// permission requests (`onboarding.request`,
+/// `settings.recording.requestPermission`,
+/// `settings.general.requestCalendar`), which wait for the user's answer
+/// to the system prompt, or for the Mac's system audio test, up to 30 s.
+pub async fn host_command<H: ShellHost>(
+    host: H,
+    window: H::Window,
+    method: String,
+    params: Value,
+) -> Result<Value, BridgeError> {
+    call_blocking(host, move |host| match method.as_str() {
+        "page.ready" => host.page_ready(&window).map(|()| Value::Null),
+        "settings.general.setLaunchAtLogin" => {
+            let request: SetBoolParams = parse(&method, params)?;
+            actions::set_launch_at_login(host, &window, request.value)?;
+            Ok(Value::Null)
+        }
+        _ => host.call(&window, &method, params),
+    })
+    .await
 }
 
 /// The panels' own command, beside the bridge: the page reports its
@@ -384,43 +377,106 @@ mod tests {
         parse("window.open", serde_json::from_str(json).unwrap())
     }
 
-    /// The three permission requests, and nothing else, leave the async
-    /// worker while they wait.
+    /// While one command's host call is held (a Stop whose save waits on
+    /// the store), another command on the same one-worker runtime answers:
+    /// the held call waits on the blocking pool, not on the worker the
+    /// commands run on. Then the held one answers too. A login item switch
+    /// from Settings goes the same way.
     #[test]
-    fn the_permission_requests_block_for_long() {
+    fn a_held_host_call_leaves_the_command_workers_free() {
+        use std::time::Duration;
+
+        use crate::host::gated::GatedHost;
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let host = GatedHost::holding("recording.toggle");
+        let _opens = host.opens_on_drop();
+        let (sender, answers) = std::sync::mpsc::channel();
+        let command = |method: &'static str, params: Value| {
+            let (host, sender) = (host.clone(), sender.clone());
+            runtime.spawn(async move {
+                let answer = host_command(host, "main", method.to_owned(), params).await;
+                sender.send((method, answer)).unwrap();
+            });
+        };
+        command("recording.toggle", Value::Null);
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the Stop reached the host"
+        );
+        command("meetings.select", serde_json::json!({ "meetingId": "m-1" }));
+        command(
+            "settings.general.setLaunchAtLogin",
+            serde_json::json!({ "value": true }),
+        );
+        let mut answered: Vec<_> = (0..2)
+            .map(|_| answers.recv_timeout(Duration::from_secs(1)).unwrap())
+            .collect();
+        answered.sort_by_key(|(method, _)| *method);
+        assert_eq!(
+            answered,
+            [
+                ("meetings.select", Ok(Value::from("meetings.select"))),
+                ("settings.general.setLaunchAtLogin", Ok(Value::Null)),
+            ],
+            "the other commands answer while the Stop is held"
+        );
+        assert_eq!(host.switched(), [true]);
+        assert!(answers.try_recv().is_err(), "the Stop is still held");
+        host.open();
+        assert_eq!(
+            answers.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ("recording.toggle", Ok(Value::from("recording.toggle")))
+        );
+        runtime.shutdown_background();
+    }
+
+    /// Each permission request runs where it may block: on the blocking
+    /// pool, not on the async worker its command runs on. Blocking on
+    /// another runtime there, as a request waiting for the user stands in
+    /// for, panics on a bare worker.
+    #[test]
+    fn a_permission_request_leaves_the_async_worker() {
+        use crate::host::gated::GatedHost;
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
         for method in [
             "onboarding.request",
             "settings.recording.requestPermission",
             "settings.general.requestCalendar",
         ] {
-            assert!(blocks_for_long(method), "{method}");
             assert!(
                 method.parse::<steno_bridge::BridgeMethod>().is_ok(),
                 "{method} is a bridge method"
             );
-        }
-        for method in ["onboarding.skip", "recording.start", "page.ready"] {
-            assert!(!blocks_for_long(method), "{method}");
-        }
-    }
-
-    /// Each permission request runs where the worker may block: only
-    /// inside `block_in_place` may a worker thread block on another
-    /// runtime, which panics on a bare worker.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn a_permission_request_leaves_the_async_worker() {
-        for method in [
-            "onboarding.request",
-            "settings.recording.requestPermission",
-            "settings.general.requestCalendar",
-        ] {
-            let other = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap();
-            off_the_worker_if_long(method, || other.block_on(async {}));
+            let other = std::sync::Arc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap(),
+            );
+            let blocks = std::sync::Arc::clone(&other);
+            let host = GatedHost::holding(method).before_hold(move || blocks.block_on(async {}));
+            host.open();
+            let answer = runtime.block_on(runtime.spawn(host_command(
+                host.clone(),
+                "main",
+                method.to_owned(),
+                Value::Null,
+            )));
+            assert_eq!(answer.unwrap(), Ok(Value::from(method)), "{method}");
             // A runtime is dropped outside an async context.
-            std::thread::spawn(move || drop(other)).join().unwrap();
+            drop(host);
+            drop(other);
         }
+        runtime.shutdown_background();
     }
 
     #[test]

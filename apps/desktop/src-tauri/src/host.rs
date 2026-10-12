@@ -22,6 +22,17 @@
 //! shell shows itself before it calls the host (`dialogs.rs`), so the
 //! host's `choose_folder` callback answers with the folder the call
 //! carries (`ChosenFolder`).
+//!
+//! Every call into the host can wait: on the store, for up to its 5 s busy
+//! timeout while another process holds the write lock, on a native prompt,
+//! on the recorder's stop. So none runs on the main thread, which `main`
+//! marks (`steno_host::mark_ui_thread`), nor on a Tauri command worker:
+//! each goes through [`call_blocking`], over a [`ShellHost`], and
+//! [`Host::call`], [`Host::page_ready`], [`Host::publish_request`] and
+//! [`Host::onboarding_window_closed`] fail a debug build on the marked
+//! thread (`steno_host::assert_off_ui_thread`). The launch is the
+//! exemption: it runs during setup, before the event loop (`steno_host`'s
+//! `Threads` section).
 #![cfg_attr(
     feature = "fixture-host",
     allow(clippy::unused_self, clippy::unnecessary_wraps)
@@ -32,8 +43,109 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::bridge::BridgeError;
 
+/// The host as the shell reaches it off the main thread and the command
+/// workers: the app, through its managed [`Host`], or a test's fake. Every
+/// method blocks, so each runs inside [`call_blocking`].
+pub trait ShellHost: Clone + Send + Sync + 'static {
+    /// The window a call answers for.
+    type Window: Clone + Send + Sync + 'static;
+
+    /// The page has mounted ([`Host::page_ready`]), and the request it was
+    /// owed goes out after its first snapshots (`windows::Pages`).
+    fn page_ready(&self, window: &Self::Window) -> Result<(), BridgeError>;
+
+    /// A command the host answers ([`Host::call`]).
+    fn call(
+        &self,
+        window: &Self::Window,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, BridgeError>;
+
+    /// Switches the login item in the system (`autostart::set_enabled`).
+    fn switch_login_item(&self, value: bool) -> Result<(), BridgeError>;
+
+    /// The tray's check mark follows the system's login item, on the main
+    /// thread (`tray::note_login_item`): posted there, never waited for.
+    fn note_login_item(&self);
+}
+
+impl ShellHost for AppHandle {
+    type Window = WebviewWindow;
+
+    fn page_ready(&self, window: &WebviewWindow) -> Result<(), BridgeError> {
+        let host = host(self);
+        host.page_ready(window)?;
+        // What was asked of the window before its page could hear it (a
+        // deep link at launch) goes out after the first snapshots.
+        if let Some(owed) = self.state::<crate::windows::Pages>().ready(window.label()) {
+            host.publish_request(window, owed.field.as_str(), &owed.value)?;
+        }
+        Ok(())
+    }
+
+    fn call(
+        &self,
+        window: &WebviewWindow,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, BridgeError> {
+        host(self).call(window, method, params)
+    }
+
+    fn switch_login_item(&self, value: bool) -> Result<(), BridgeError> {
+        crate::autostart::set_enabled(self, value)
+    }
+
+    fn note_login_item(&self) {
+        let app = self.clone();
+        if let Err(error) = self.run_on_main_thread(move || crate::tray::note_login_item(&app)) {
+            tracing::debug!(%error, "the tray's check mark not moved: the run loop has ended");
+        }
+    }
+}
+
+/// Runs `body` with `host` on Tauri's blocking pool and resolves to what it
+/// returned, so the caller's thread, a command worker or the main thread,
+/// never waits on the host. A panic in `body` resumes in the awaiting
+/// task; a pool that is already gone (the app is quitting) answers
+/// `failed`.
+pub async fn call_blocking<H, T>(
+    host: H,
+    body: impl FnOnce(&H) -> Result<T, BridgeError> + Send + 'static,
+) -> Result<T, BridgeError>
+where
+    H: Send + 'static,
+    T: Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(move || body(&host)).await {
+        Ok(outcome) => outcome,
+        Err(tauri::Error::JoinError(error)) if error.is_panic() => {
+            std::panic::resume_unwind(error.into_panic())
+        }
+        Err(error) => Err(crate::bridge::failed(error)),
+    }
+}
+
+/// Runs `body` with `host` on Tauri's blocking pool and returns at once,
+/// for a caller on the main thread that has no one to answer: a failure is
+/// logged as `what` from the thread the call ran on.
+pub fn call_in_background<H>(
+    host: H,
+    what: &'static str,
+    body: impl FnOnce(&H) -> Result<(), BridgeError> + Send + 'static,
+) where
+    H: Send + 'static,
+{
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = call_blocking(host, body).await {
+            stderr_line!("[steno-desktop] {what}: {error}");
+        }
+    });
+}
+
 #[cfg(not(feature = "fixture-host"))]
-mod real {
+pub(crate) mod real {
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -730,8 +842,9 @@ impl Host {
 
     /// The onboarding window is gone, closed by the user or by Finish:
     /// the host counts the pages as seen, as the Swift window's
-    /// `onDisappear` did.
+    /// `onDisappear` did. It reads the store, so not on the main thread.
     pub fn onboarding_window_closed(&self) {
+        steno_host::assert_off_ui_thread("the onboarding window's close");
         #[cfg(not(feature = "fixture-host"))]
         self.inner.host.onboarding_window_closed();
     }
@@ -777,6 +890,7 @@ impl Host {
 
     /// The page has mounted: publish every topic it may show.
     pub fn page_ready(&self, window: &WebviewWindow) -> Result<(), BridgeError> {
+        steno_host::assert_off_ui_thread("page.ready");
         #[cfg(not(feature = "fixture-host"))]
         {
             let _ = window;
@@ -798,6 +912,7 @@ impl Host {
         method: &str,
         params: Value,
     ) -> Result<Value, BridgeError> {
+        steno_host::assert_off_ui_thread(method);
         #[cfg(not(feature = "fixture-host"))]
         {
             self.inner.call(window, method, params)
@@ -825,6 +940,7 @@ impl Host {
         field: &str,
         value: &str,
     ) -> Result<(), BridgeError> {
+        steno_host::assert_off_ui_thread("a window request");
         #[cfg(not(feature = "fixture-host"))]
         {
             let _ = window;
@@ -873,5 +989,150 @@ mod refusal_tests {
         assert!(
             !ShellHostError::SupportDirectory(std::io::Error::other("full")).is_database_held()
         );
+    }
+}
+
+/// A [`ShellHost`] for the tests, whose calls of one method wait at a gate.
+#[cfg(test)]
+pub mod gated {
+    use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+    use std::time::Duration;
+
+    use serde_json::Value;
+
+    use super::ShellHost;
+    use crate::bridge::BridgeError;
+
+    /// A host whose calls of `held` wait at a gate until it opens; every
+    /// other call answers at once. It notes each answered call, each
+    /// switch of the login item and each check mark it was asked to move.
+    /// `before_hold` runs inside a held call before it waits, as the host
+    /// publishes `Stopping` before the stop's save.
+    #[derive(Clone)]
+    pub struct GatedHost {
+        held: &'static str,
+        before_hold: Option<Arc<dyn Fn() + Send + Sync>>,
+        state: Arc<(Mutex<State>, Condvar)>,
+    }
+
+    #[derive(Default)]
+    struct State {
+        open: bool,
+        waiting: usize,
+        answered: Vec<String>,
+        switched: Vec<bool>,
+        notes: usize,
+    }
+
+    /// Opens the gate when dropped, so a failed test never leaves a call
+    /// waiting.
+    pub struct Opens(GatedHost);
+
+    impl Drop for Opens {
+        fn drop(&mut self) {
+            self.0.open();
+        }
+    }
+
+    impl GatedHost {
+        pub fn holding(held: &'static str) -> Self {
+            GatedHost {
+                held,
+                before_hold: None,
+                state: Arc::default(),
+            }
+        }
+
+        pub fn before_hold(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
+            self.before_hold = Some(Arc::new(hook));
+            self
+        }
+
+        fn state(&self) -> MutexGuard<'_, State> {
+            self.state.0.lock().unwrap()
+        }
+
+        /// The guard that opens the gate at the end of the test.
+        pub fn opens_on_drop(&self) -> Opens {
+            Opens(self.clone())
+        }
+
+        pub fn open(&self) {
+            self.state().open = true;
+            self.state.1.notify_all();
+        }
+
+        /// Waits up to `patience` for `reached`; whether it was.
+        fn wait_for(&self, patience: Duration, reached: impl Fn(&State) -> bool) -> bool {
+            let (state, _) = self
+                .state
+                .1
+                .wait_timeout_while(self.state(), patience, |state| !reached(state))
+                .unwrap();
+            reached(&state)
+        }
+
+        /// Whether a held call reached the gate within `patience`.
+        pub fn wait_held(&self, patience: Duration) -> bool {
+            self.wait_for(patience, |state| state.waiting > 0)
+        }
+
+        /// Whether `method` answered within `patience`.
+        pub fn wait_answered(&self, method: &str, patience: Duration) -> bool {
+            self.wait_for(patience, |state| state.answered.iter().any(|m| m == method))
+        }
+
+        pub fn answered(&self) -> Vec<String> {
+            self.state().answered.clone()
+        }
+
+        pub fn switched(&self) -> Vec<bool> {
+            self.state().switched.clone()
+        }
+
+        pub fn notes(&self) -> usize {
+            self.state().notes
+        }
+    }
+
+    impl ShellHost for GatedHost {
+        type Window = &'static str;
+
+        fn page_ready(&self, window: &&'static str) -> Result<(), BridgeError> {
+            self.call(window, "page.ready", Value::Null).map(drop)
+        }
+
+        fn call(
+            &self,
+            _window: &&'static str,
+            method: &str,
+            _params: Value,
+        ) -> Result<Value, BridgeError> {
+            if method == self.held {
+                if let Some(hook) = &self.before_hold {
+                    hook();
+                }
+                let mut state = self.state();
+                state.waiting += 1;
+                self.state.1.notify_all();
+                while !state.open {
+                    state = self.state.1.wait(state).unwrap();
+                }
+                state.waiting -= 1;
+            }
+            self.state().answered.push(method.to_owned());
+            self.state.1.notify_all();
+            Ok(Value::String(method.to_owned()))
+        }
+
+        fn switch_login_item(&self, value: bool) -> Result<(), BridgeError> {
+            self.state().switched.push(value);
+            Ok(())
+        }
+
+        fn note_login_item(&self) {
+            self.state().notes += 1;
+            self.state.1.notify_all();
+        }
     }
 }

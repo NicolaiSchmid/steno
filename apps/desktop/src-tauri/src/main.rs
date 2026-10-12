@@ -148,6 +148,10 @@ fn main() {
             .build()
             .expect("a tokio runtime"),
     ));
+    // The thread the event loop runs on: a host call here fails a debug
+    // build (`host.rs`), since it would freeze every window and the tray
+    // for as long as it waits.
+    steno_host::mark_ui_thread();
     let mut builder = tauri::Builder::default();
     // First, so a second instance exits before it builds anything; it
     // hands its arguments (a `steno:` link among them) to this one and
@@ -575,11 +579,15 @@ fn save_before_end(app: &tauri::AppHandle) {
 }
 
 /// The onboarding window closed, kept or destroyed: the host counts its
-/// pages as seen (`Host::onboarding_window_closed`), and a smoke run counts
+/// pages as seen (`Host::onboarding_window_closed`), off the main thread
+/// since that reloads onboarding from the store, and a smoke run counts
 /// the close.
 fn onboarding_closed(app: &tauri::AppHandle) {
     app.state::<smoke::Smoke>().note_onboarding_closed();
-    host::host(app).onboarding_window_closed();
+    host::call_in_background(app.clone(), "the onboarding window's close", |app| {
+        host::host(app).onboarding_window_closed();
+        Ok(())
+    });
 }
 
 /// What every exit runs once (`ExitGate`): the host's shutdown

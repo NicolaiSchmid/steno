@@ -34,8 +34,7 @@ use tauri::{
 
 use crate::{
     bridge::{BridgeError, failed},
-    host::Host,
-    navigation,
+    host, navigation,
 };
 
 /// One window as the Swift app sizes it, in logical points. Its label is
@@ -156,11 +155,7 @@ pub fn open(
 /// Settings window reads the section from its route.
 ///
 /// Swift: `WindowRequests.swift`.
-pub fn open_requested(
-    app: &AppHandle,
-    host: &Host,
-    params: &WindowParams,
-) -> Result<(), BridgeError> {
+pub fn open_requested(app: &AppHandle, params: &WindowParams) -> Result<(), BridgeError> {
     let pages = app.state::<Pages>();
     // A kept window opens as a new one, its section in the route.
     let existed = app.get_webview_window(params.window.as_str()).is_some()
@@ -175,7 +170,7 @@ pub fn open_requested(
         BridgeWindow::Main => {
             let window = open(app, BridgeWindow::Main, None, None).map_err(failed)?;
             if let Some(meeting_id) = params.meeting_id {
-                request(host, &pages, &window, Request::meeting(&meeting_id))?;
+                request(app, &pages, &window, Request::meeting(&meeting_id));
             }
         }
         BridgeWindow::Settings => {
@@ -184,7 +179,7 @@ pub fn open_requested(
             let window =
                 open(app, BridgeWindow::Settings, query.as_deref(), None).map_err(failed)?;
             if let (true, Some(section)) = (existed, section) {
-                request(host, &pages, &window, Request::section(section))?;
+                request(app, &pages, &window, Request::section(section));
             }
         }
     }
@@ -283,16 +278,16 @@ impl Pages {
 }
 
 /// Publishes `request` to `window` when its page listens, else owes it
-/// to the page for its `page.ready`.
-pub fn request(
-    host: &Host,
-    pages: &Pages,
-    window: &WebviewWindow,
-    request: Request,
-) -> Result<(), BridgeError> {
-    match pages.publish_or_owe(window.label(), request) {
-        Some(now) => host.publish_request(window, now.field.as_str(), &now.value),
-        None => Ok(()),
+/// to the page for its `page.ready`. The publish runs on Tauri's blocking
+/// pool and is not waited for (`host::call_in_background`): it selects
+/// the meeting, which reads the store, and the caller is a command worker
+/// or, for a deep link, the main thread.
+pub fn request(app: &AppHandle, pages: &Pages, window: &WebviewWindow, request: Request) {
+    if let Some(now) = pages.publish_or_owe(window.label(), request) {
+        let window = window.clone();
+        host::call_in_background(app.clone(), "a window request", move |app| {
+            host::host(app).publish_request(&window, now.field.as_str(), &now.value)
+        });
     }
 }
 
