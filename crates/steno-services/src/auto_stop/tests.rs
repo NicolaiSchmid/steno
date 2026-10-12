@@ -1229,7 +1229,7 @@ fn recording_whose_second_rebuild_waits(
     (recording, waiting, open)
 }
 
-/// The notice thread reads the session before it takes the outage's lock:
+/// The notice thread reads the session with the outage's lock released:
 /// a rebuild's start holds the session's lock for seconds, and the
 /// status, the microphone's activity and the countdown's end, which take
 /// the outage's lock, do not wait for it. Here the thread handles a
@@ -1281,8 +1281,9 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
 /// rebuild's start (a call on Windows runs on the microphone's clock, and
 /// a start there takes up to 10 s): a release's countdown that runs out
 /// meanwhile is not shown, ends nothing, and a fresh one takes its place
-/// (S2). Elsewhere a call's change reads nothing, and the test pins the
-/// same outcome. Here the second stall's rebuild waits at a gate.
+/// (S2 in `.plans/2026-10-07-stable-promotion.md`). Elsewhere a call's
+/// change reads nothing, and the test pins the same outcome. Here the
+/// second stall's rebuild waits at a gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call() {
     let (recording, waiting, open) =
