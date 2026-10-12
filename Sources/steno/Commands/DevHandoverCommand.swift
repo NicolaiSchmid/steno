@@ -94,12 +94,15 @@ struct DevHandover: AsyncParsableCommand {
       source.cancel()
     }
 
-    /// The login-keychain identity in the product; where there is no
-    /// keychain (the Linux container) a fresh one, minted in memory and
-    /// forgotten on exit, for the plaintext loopback listener.
+    /// The login-keychain identity under its own label, so it never takes
+    /// the place of the app's (the app's guard would refuse it as another
+    /// identity); where there is no keychain (the Linux container) a fresh
+    /// one, minted in memory and forgotten on exit, for the plaintext
+    /// loopback listener.
     static func identity(name: String) throws -> HandoverIdentity {
       #if canImport(Security)
-        return try IdentityKeychain.loadOrCreate(commonName: "Steno on \(name)")
+        return try IdentityKeychain.loadOrCreate(
+          label: "Steno dev handover identity", commonName: "Steno on \(name)")
       #else
         return HandoverIdentity(
           certificateDER: try MintedIdentity.mint(commonName: "Steno on \(name)").certificateDER)
