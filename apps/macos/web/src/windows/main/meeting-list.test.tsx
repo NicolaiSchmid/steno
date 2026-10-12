@@ -223,6 +223,26 @@ describe("MeetingList rows", () => {
 		).toBe("Download the speech models in Settings.");
 	});
 
+	it("says what a meeting waits for when another app holds the library", async () => {
+		const list = await fixtureList();
+		const row = list.groups[0]?.meetings[0];
+		if (!row) {
+			throw new Error("fixture has no meeting");
+		}
+		const waiting = {
+			meetingID: row.id,
+			stage: "storeBusy",
+			title: "Waiting for another app to finish with Steno's library",
+			fraction: 0,
+		};
+		// Queued, or still `processing` when the store kept the mark.
+		for (const state of ["queued", "processing"] as const) {
+			expect(
+				rowPreview({ ...row, state, preview: undefined }, waiting, false),
+			).toBe("Waiting for another app to finish with Steno's library.");
+		}
+	});
+
 	it("leads with the source and ends line 1 with the start time once ready", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<MeetingList />, harness);
