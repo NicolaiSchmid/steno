@@ -842,20 +842,20 @@ still has to draw the window side. `[ ]` is not ported yet.
   Swift's `RecordingController.observe` did (`CaptureResult::failure` carries the
   failure to Stop too, and a Stop or a quit that met a failed write or close says the
   recording may be incomplete); and the free space is read every 5 s on the volumes of
-  the recordings folder and of the database, the one with less room counting
-  (`DiskWatch`; `fs4::statvfs` on Linux and Windows, on the Mac
-  `NSURLVolumeAvailableCapacityForImportantUsageKey` through `steno-macos`'s
-  `volume`, the stable plan's D10): a warning under 30 minutes of recording left, no
-  start below 512 MiB free and a stop that saves before the disk fills (Rust only).
-  A volume that reports no size or more free than its size counts as unreadable and
-  never stops a recording. The Mac's reading counts APFS's purgeable space (tens of
-  GB with local Time Machine snapshots); should it fail, the Mac falls back to
-  `statvfs`, which leaves that space out, so that reading only warns, never refusing
-  a start or stopping a recording, and its minutes count to a full disk: a meeting
-  not recorded is lost. A failed write then ends the recording and Steno tries to
-  save it, but a disk that is truly full can fail the save too (the meeting marked
-  failed without its asset row, or left `recording`); the files stay, and P3's
-  salvage at launch (#233) and P17's asset row recover them.
+  the recordings folder and of the database, the smaller counting (`DiskWatch`,
+  `fs4::statvfs`): a warning under 30 minutes of recording left, no start below
+  512 MiB free and a stop that saves before the disk fills, on every platform (Rust
+  only). A volume that reports no size or more free than its size counts as
+  unreadable and never stops a recording. On the Mac the reading is the larger of
+  `statvfs` and `NSURLVolumeAvailableCapacityForImportantUsageKey` (through
+  `steno-macos`'s `volume`, the stable plan's D10), which counts APFS's purgeable
+  space (tens of GB with local Time Machine snapshots) but is 0 on every volume
+  CacheDelete does not manage (an external drive, a disk image, `/nix`), so there
+  `statvfs` decides; a failed read of it leaves `statvfs` against the floor. The
+  reading is held to `statvfs` plus 384 MiB, so a `statvfs` below 128 MiB refuses a
+  start and stops the recording whatever macOS says it can purge: CacheDelete purges
+  asynchronously and a write never waits for it. The disk-image check is an ignored
+  test, `a_recording_into_a_disk_image_starts`, run on a Mac.
 - A start or a stop that panics leaves the recorder idle with an error (a start that
   panics after its meeting began also fails the meeting and removes its folder), and a
   capture start that panics leaves the session `Failed`, its backend stopped (the
