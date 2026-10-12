@@ -177,8 +177,9 @@ docker run --rm --cpus=2 --memory=4g -v "$PWD":/src:ro \
 ## Push to the AUR
 
 The AUR repository holds the files `makepkg` needs, flat at its root:
-`PKGBUILD`, `.SRCINFO`, `.gitignore`, every local file in `source=` and
-`keys/pgp/`, the release key. Not this README.
+`PKGBUILD`, `.SRCINFO`, `.gitignore`, every local file in `source=`, the
+install script `install=` names (`steno-desktop.install`) and `keys/pgp/`,
+the release key. Not this README.
 
 **The first push is by hand** (Nicolai, at gate G3, with a release that
 contains #227 and #261), from an AUR account with an SSH key added under
@@ -187,7 +188,7 @@ contains #227 and #261), from an AUR account with an SSH key added under
 ```sh
 git clone ssh://aur@aur.archlinux.org/steno-desktop-bin.git /tmp/aur-steno
 cd <checkout>/packaging/aur
-cp -r PKGBUILD .SRCINFO .gitignore keys $(sed -n 's/^\tsource = \([^:]*\)$/\1/p' .SRCINFO) /tmp/aur-steno/
+cp -r PKGBUILD .SRCINFO .gitignore keys $(sed -n 's/^\t\(source\|install\|changelog\) = \([^:]*\)$/\2/p' .SRCINFO) /tmp/aur-steno/
 cd /tmp/aur-steno
 git add -A
 git commit -m "steno-desktop-bin 0.11.0-1"
