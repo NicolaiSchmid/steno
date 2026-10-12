@@ -1,8 +1,8 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
-//! old, the waits that fail a test instead of hanging it, and
-//! [`warnings`], what a call logs at `warn` and above.
+//! old, a paired phone, the waits that fail a test instead of hanging it,
+//! and [`warnings`], what a call logs at `warn` and above.
 //!
 //! A test that writes models gives the app an explicit models directory in
 //! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
@@ -229,12 +229,15 @@ pub fn app_over_fakes(
         services,
         updates: None,
         handover: None,
+        gated_handover: None,
+        import_gate: None,
         recorder,
         detection: None,
         models_directory: root.join("models"),
         zone,
         runtime: tokio::runtime::Handle::current(),
         version: "0.0.0".to_owned(),
+        installed_bundle: false,
         startup_warnings: Vec::new(),
         live_recording_check: crate::recovery::LiveRecordingCheck::default(),
         launch_work: std::sync::Mutex::default(),
@@ -251,6 +254,21 @@ pub fn an_hour_later() -> crate::recovery::LiveRecordingCheck {
         wait: Arc::new(|_| panic!("an old master is not waited for")),
         ..crate::recovery::LiveRecordingCheck::default()
     }
+}
+
+/// Saves a paired phone in `store`, the evidence that an identity existed.
+pub fn pair_a_phone(store: &Store) {
+    store
+        .save_paired_device(
+            &steno_core::PairedDevice {
+                id: uuid::Uuid::new_v4(),
+                name: "Phone".to_owned(),
+                paired_at: chrono::Utc::now(),
+                last_seen_at: None,
+            },
+            &[1; 32],
+        )
+        .unwrap();
 }
 
 /// Waits until `done` holds, failing the test with `what` after

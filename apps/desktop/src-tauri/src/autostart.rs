@@ -1,8 +1,8 @@
-//! Launch at login over `tauri-plugin-autostart`: a Launch Agent on macOS,
-//! the `autostart` desktop entry on Linux, the Run registry key on Windows.
-//! The Swift app registers itself with `SMAppService`, whose
-//! `requiresApproval` state has no Launch Agent counterpart and never
-//! occurs here. The status is the host's `LoginItemStatus`, and
+//! Launch at login: on macOS `SMAppService.mainApp`, as the Swift app
+//! registers (`main_app`, which also removes the Launch Agent a build under
+//! the earlier identifier left behind); on Linux and Windows over
+//! `tauri-plugin-autostart`, the `autostart` desktop entry and the Run
+//! registry key. The status is the host's `LoginItemStatus`, and
 //! `ShellLoginItem` is the host's `LoginItem` over this module (`WP6b`), so
 //! the General section reads and switches the real registration.
 //!
@@ -33,9 +33,12 @@
 //!
 //! Swift: `LoginItemController.swift`, `LoginItemStatus` in `AppProtocols.swift`.
 
+mod main_app;
+
 use steno_core::protocols::BoundaryResult;
 pub use steno_host::services::LoginItemStatus;
 use tauri::AppHandle;
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use crate::bridge::{BridgeError, failed};
@@ -45,6 +48,7 @@ use crate::stop_timeout;
 
 /// The status from the plugin's answer; a registration the plugin could
 /// not read is `NotFound`, its reason logged.
+#[cfg(not(target_os = "macos"))]
 pub fn status_from_plugin(result: Result<bool, impl std::fmt::Display>) -> LoginItemStatus {
     match result {
         Ok(true) => LoginItemStatus::Enabled,
@@ -56,8 +60,9 @@ pub fn status_from_plugin(result: Result<bool, impl std::fmt::Display>) -> Login
     }
 }
 
-/// The plugin, configured as the Swift app behaves: a Launch Agent (no
-/// `AppleScript` prompt), no launch arguments.
+/// The plugin, with no launch arguments. It runs on Linux and Windows
+/// only, so its macOS launcher is never used.
+#[cfg(not(target_os = "macos"))]
 pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None)
 }
@@ -69,22 +74,27 @@ pub fn status(app: &AppHandle) -> LoginItemStatus {
     let mark = off_at_exit().filter(|_| cfg!(target_os = "linux"));
     with_off_at_exit(
         status_unless_managed(packaged::login_item_is_managed(), || {
-            app.autolaunch().is_enabled()
+            #[cfg(target_os = "macos")]
+            {
+                let _ = app;
+                main_app::MainApp::status(&main_app::SystemMainApp)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                status_from_plugin(app.autolaunch().is_enabled())
+            }
         }),
         mark.as_deref(),
     )
 }
 
-/// `Managed` when `managed`, without asking the plugin; else the
-/// plugin's answer (`status_from_plugin`).
-fn status_unless_managed<E: std::fmt::Display>(
-    managed: bool,
-    plugin: impl FnOnce() -> Result<bool, E>,
-) -> LoginItemStatus {
+/// `Managed` when `managed`, without asking the system; else `read`'s
+/// answer.
+fn status_unless_managed(managed: bool, read: impl FnOnce() -> LoginItemStatus) -> LoginItemStatus {
     if managed {
         return LoginItemStatus::Managed;
     }
-    status_from_plugin(plugin())
+    read()
 }
 
 /// Whether the tray's item may switch the login item: not one the system
@@ -111,7 +121,12 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
                 |login_item| stop_timeout::sync(login_item, marks_directory().as_deref()),
             )
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            let _ = app;
+            main_app::set_enabled(&main_app::SystemMainApp, enabled).map_err(failed)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let result = if enabled {
                 enable(app)
@@ -137,6 +152,7 @@ fn change_unless_managed(
 
 /// Writes the login item: on Linux outside an `AppImage` the entry that
 /// names a stable path (`packaged::write_entry`), elsewhere the plugin's.
+#[cfg(not(target_os = "macos"))]
 fn enable(app: &AppHandle) -> Result<(), tauri_plugin_autostart::Error> {
     #[cfg(target_os = "linux")]
     if writes_own_entry(tauri::Manager::env(app).appimage.as_deref()) {
@@ -296,6 +312,41 @@ fn with_off_at_exit(status: LoginItemStatus, mark: Option<&std::path::Path>) -> 
         }
         status => status,
     }
+}
+
+/// At launch, on macOS, once the database is open and before the host's
+/// first-launch registration: the Launch Agent a build under the earlier
+/// identifier left behind goes (`main_app::remove_earlier_agent`), also
+/// while the system manages the login item. Nothing goes in a smoke run, a
+/// `fixture-host` build or a run from outside an installed app bundle,
+/// such as a plain binary under `target/` or one from the mounted disk image
+/// (`main_app::removes_earlier_agent`), which would remove the agent an
+/// installed Steno still starts. Linux's `remove_earlier_entry` does the
+/// same for its autostart entry, but only while the system manages the
+/// login item.
+#[cfg(target_os = "macos")]
+pub fn remove_earlier_agent() {
+    let exe = std::env::current_exe().ok();
+    if !main_app::removes_earlier_agent(main_app::smoke_run(), exe.as_deref()) {
+        return;
+    }
+    main_app::log(&main_app::remove_earlier_agent(
+        &main_app::UserLaunchAgents::of_home(),
+        std::process::id(),
+    ));
+}
+
+/// Whether this app runs from an installed app bundle
+/// (`main_app::installed_bundle`), which the shell passes to the host
+/// (`HostConfig::installed_bundle`): on the Mac a plain binary under
+/// `target/`, a run from the mounted disk image or one translocated by
+/// Gatekeeper registers no login item at its first launch and leaves that
+/// launch to the installed copy; a bundle built under `target/` counts as
+/// installed.
+/// Off the Mac the host does not read it.
+#[cfg(not(feature = "fixture-host"))]
+pub fn installed_bundle() -> bool {
+    std::env::current_exe().is_ok_and(|exe| main_app::installed_bundle(&exe))
 }
 
 /// An update's relaunch is about to exit (`updater`): the next process
@@ -553,6 +604,35 @@ impl steno_host::services::LoginItem for ShellLoginItem {
 mod tests {
     use super::*;
 
+    /// macOS registers with `SMAppService` only: `tauri-plugin-autostart`
+    /// is a dependency only off macOS, so its Launch Agent cannot come
+    /// back there, and `main.rs` registers its plugin only off macOS.
+    #[test]
+    fn the_autostart_plugin_is_neither_built_nor_registered_on_macos() {
+        let manifest = include_str!("../Cargo.toml");
+        let mut table = "";
+        let mut tables = Vec::new();
+        for line in manifest.lines() {
+            if line.starts_with('[') {
+                table = line;
+            } else if line.starts_with("tauri-plugin-autostart") {
+                tables.push(table);
+            }
+        }
+        assert_eq!(
+            tables,
+            ["[target.'cfg(not(target_os = \"macos\"))'.dependencies]"]
+        );
+
+        // Without the carriage returns a Windows checkout may add.
+        let main = include_str!("main.rs").replace("\r\n", "\n");
+        assert_eq!(main.matches("autostart::plugin()").count(), 1);
+        assert!(main.contains(
+            "    #[cfg(not(target_os = \"macos\"))]\n    {\n        builder = builder.plugin(autostart::plugin());\n    }\n"
+        ));
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_status_reads_the_plugins_answer() {
         assert_eq!(
@@ -575,11 +655,11 @@ mod tests {
     /// asked nor changed, and the tray's item cannot switch it.
     #[test]
     fn a_managed_login_item_asks_and_changes_nothing() {
-        let asked = || -> Result<bool, String> { panic!("the plugin was asked") };
+        let asked = || -> LoginItemStatus { panic!("the system was asked") };
         assert_eq!(status_unless_managed(true, asked), LoginItemStatus::Managed);
         assert_eq!(
-            status_unless_managed(false, || Ok::<bool, String>(true)),
-            LoginItemStatus::Enabled
+            status_unless_managed(false, || LoginItemStatus::RequiresApproval),
+            LoginItemStatus::RequiresApproval
         );
         let changed = || -> Result<(), BridgeError> { panic!("the plugin changed it") };
         assert!(change_unless_managed(true, changed).is_ok());

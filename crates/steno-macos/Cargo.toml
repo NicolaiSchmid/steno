@@ -1,0 +1,25 @@
+[package]
+name = "steno-macos"
+description = "Safe wrappers over the Mac frameworks that have no safe binding: the keychain's PKCS#12 export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# The keychain test's fixture calls (`keychain::fixture`): the SEC1 key
+# import and the relabelling Swift's `IdentityKeychain.store` makes, and a
+# throwaway keychain's deletion. Test targets only.
+testing = []
+
+# Every item is macOS only; the other platforms build an empty crate.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation.workspace = true
+security-framework.workspace = true
+security-framework-sys.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
