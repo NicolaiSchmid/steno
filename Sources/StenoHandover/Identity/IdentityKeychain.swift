@@ -156,10 +156,16 @@
     /// The items labelled `defaultLabel`, with `stagingLabel` for a new
     /// identity, as the guard's keychain (`HandoverIdentityGuard`).
     public struct Store: HandoverIdentityKeychain {
-      let keychain = LabelledIdentityKeychain(
-        items: Items(), label: defaultLabel, stagingLabel: stagingLabel)
+      let keychain: any HandoverIdentityKeychain
 
-      public init() {}
+      public init() {
+        self.init(
+          keychain: LabelledIdentityKeychain(
+            items: Items(), label: defaultLabel, stagingLabel: stagingLabel))
+      }
+
+      /// Over `keychain` in place of the login keychain's items.
+      init(keychain: any HandoverIdentityKeychain) { self.keychain = keychain }
 
       public func load(preferring recorded: String?) throws -> HandoverIdentity? {
         try keychain.load(preferring: recorded)

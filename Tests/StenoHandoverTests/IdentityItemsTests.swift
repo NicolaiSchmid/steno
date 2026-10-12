@@ -339,6 +339,23 @@ import Testing
     #expect(try mac.record.recorded() == hex(other))
     #expect(try await mac.store.pairedDevices().count == 1)
   }
+
+  #if canImport(Security)
+    /// The product's keychain hands the record on: of two identities under
+    /// the label it loads the recorded one, and with nothing recorded it
+    /// asks.
+    @Test func theProductsKeychainLoadsTheRecordedOne() throws {
+      let items = FakeItems(next: other)
+      for identity in [known, third] { items.add(identity, label: Self.label) }
+      let store = IdentityKeychain.Store(
+        keychain: LabelledIdentityKeychain(
+          items: items, label: Self.label, stagingLabel: Self.staging))
+      for identity in [known, third] {
+        #expect(try store.load(preferring: hex(identity)).map(hex) == hex(identity))
+      }
+      #expect(throws: IdentityUnavailability.replaced) { try store.load(preferring: nil) }
+    }
+  #endif
 }
 
 private func hex(_ identity: HandoverIdentity) -> String { ContentHash.hex(identity.fingerprint) }
