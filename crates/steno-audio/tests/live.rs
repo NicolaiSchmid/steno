@@ -366,3 +366,58 @@ fn a_rebuilt_call_capture_keeps_its_silent_output() {
     assert_ran_from_the_start(&first);
     assert_ran_from_the_start(&second);
 }
+
+/// The session over the live backend, a call with nothing playing: a
+/// stall's rebuild restarts the capture, the restarted stream delivers
+/// within the session's wait for a first frame (`STALL_TIMEOUT`), so the
+/// restart counts as run, and no further restart follows while it records.
+/// Nothing may play during the run.
+#[test]
+#[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
+fn a_silent_call_restart_counts_as_run() {
+    use steno_audio::{
+        CaptureConfiguration, CaptureMode, CaptureNotice, CaptureSession, DeviceChangeReason,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_owned();
+    let (resumed_after, rest, result) =
+        within(Duration::from_secs(40), "a session's rebuild", move || {
+            let session =
+                CaptureSession::new(CaptureConfiguration::new(CaptureMode::Call, &path)).unwrap();
+            let notices = session.notices();
+            session.start(uuid::Uuid::new_v4()).unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+            let changed = Instant::now();
+            session.device_changed(DeviceChangeReason::DeliveryStalled);
+            let mut resumed_after = None;
+            let mut rest = Vec::new();
+            while let Ok(notice) = notices.recv_timeout(Duration::from_secs(10)) {
+                match notice {
+                    CaptureNotice::DeviceChanged(DeviceChangeReason::DeliveryStalled)
+                        if resumed_after.is_none() => {}
+                    CaptureNotice::DeviceResumed {
+                        attempt: 1,
+                        gap_seconds,
+                    } if resumed_after.is_none() => {
+                        resumed_after = Some((changed.elapsed(), gap_seconds));
+                    }
+                    other => rest.push(other),
+                }
+            }
+            (resumed_after, rest, session.stop().unwrap())
+        });
+    let (after, gap) = resumed_after.expect("the restart resumed");
+    println!(
+        "restart resumed {:.3} s after the change, gap {gap:.3} s; then {rest:?}; duration {:.2} s, {} changes",
+        after.as_secs_f64(),
+        result.statistics.duration,
+        result.statistics.device_changes
+    );
+    assert!(
+        after < CaptureSession::STALL_TIMEOUT,
+        "within the wait for a first frame"
+    );
+    assert!(rest.is_empty(), "no further restart: {rest:?}");
+    assert_eq!(result.statistics.device_changes, 1);
+}

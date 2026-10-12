@@ -8,6 +8,11 @@
 //! counts it as dropped for every lane and returns `false`), then one
 //! `write`/`write_mixed`/`write_silence` per lane, then `end_callback()`.
 //! Nothing in that path allocates or locks.
+//!
+//! `begin_callback` also advances [`LaneFrameSink::frames_offered`], the
+//! count the session's stall watchdog samples from its own thread (one
+//! relaxed store per callback, refused callbacks included: a device that
+//! delivers into full rings is not stalled). Rust only.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -32,6 +37,9 @@ pub struct LaneFrameSink {
     /// Producer-only scratch for the callback in flight. An atomic only so
     /// the sink is `Sync`; the single producer is the one writer.
     pending_frames: AtomicUsize,
+    /// Frames of every callback begun, refused ones included; written by
+    /// the single producer, read by the session's watchdog.
+    frames_offered: AtomicUsize,
 }
 
 impl std::fmt::Debug for LaneFrameSink {
@@ -71,6 +79,7 @@ impl LaneFrameSink {
             device_change_reported: AtomicBool::new(false),
             device_change_handler: on_device_change,
             pending_frames: AtomicUsize::new(0),
+            frames_offered: AtomicUsize::new(0),
         }
     }
 
@@ -92,6 +101,10 @@ impl LaneFrameSink {
     /// returns `false`.
     #[inline(always)]
     pub fn begin_callback(&self, frames: usize) -> bool {
+        // A load and a store, not a read-modify-write: there is one producer.
+        let offered = self.frames_offered.load(Ordering::Relaxed);
+        self.frames_offered
+            .store(offered.wrapping_add(frames), Ordering::Relaxed);
         if !self.rings.reserve(frames) {
             return false;
         }
@@ -156,6 +169,14 @@ impl LaneFrameSink {
     }
 
     // Backend (any thread)
+
+    /// Frames of every callback begun so far, refused ones included; only
+    /// whether it moved means anything. What the session's stall watchdog
+    /// samples. Rust only.
+    #[must_use]
+    pub fn frames_offered(&self) -> usize {
+        self.frames_offered.load(Ordering::Relaxed)
+    }
 
     /// The backend's listener calls this once it has resolved what changed;
     /// the first call runs the handler, later calls are ignored until

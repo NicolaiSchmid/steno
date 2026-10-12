@@ -1,7 +1,8 @@
 //! Capture: the backend seam, the session state machine over it, the
 //! stream layout, the device-change comparison, the two-stream plan
-//! (`split_streams`) and the live backends (Core Audio, PipeWire,
-//! WASAPI). Swift: `Sources/StenoAudio/Capture/`.
+//! (`split_streams`), the live backends (Core Audio, PipeWire, WASAPI)
+//! and how loud their starts log while restarts go on (`start_log`).
+//! Swift: `Sources/StenoAudio/Capture/`.
 
 pub mod backend;
 pub mod configuration;
@@ -11,6 +12,7 @@ pub mod nominal_rate;
 pub mod session;
 pub mod snapshot;
 pub mod split_streams;
+pub(crate) mod start_log;
 
 pub use backend::{CaptureBackend, CaptureInput, CaptureStream};
 pub use configuration::{

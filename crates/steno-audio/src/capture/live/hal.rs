@@ -51,6 +51,7 @@ use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
 
 use crate::capture::CaptureError;
 use crate::capture::configuration::four_char_code;
+use crate::capture::start_log::start_log;
 
 pub type Id = AudioObjectID;
 pub type OSStatus = i32;
@@ -664,7 +665,10 @@ impl IoProc {
             });
         }
         if output_only && let Err(error) = input_stream_usage_off(device, proc_id) {
-            tracing::warn!("the input streams stay on for an output-only IOProc ({error})");
+            start_log!(
+                warn,
+                "the input streams stay on for an output-only IOProc ({error})"
+            );
         }
         // SAFETY: the proc id was just created on this device.
         let status = unsafe { AudioDeviceStart(device, proc_id) };
