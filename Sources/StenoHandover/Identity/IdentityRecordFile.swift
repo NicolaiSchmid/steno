@@ -13,7 +13,8 @@ import StenoCore
 /// durably. Outside the keychain, which may be the thing that lost the
 /// identity, and outside the settings. Its own file, never the Rust app's
 /// `handover-identity.json`: a desktop build that once minted its own
-/// identity records that one there, and this app's phones know this app's.
+/// identity recorded that one there, which is not the identity this app's
+/// phones know. Written with the Rust app's bytes (serde's pretty JSON).
 /// Rust: `FingerprintFile` in `crates/steno-services/src/handover.rs`.
 public struct IdentityRecordFile: Sendable {
   /// The key the fingerprint is filed under.
@@ -24,11 +25,22 @@ public struct IdentityRecordFile: Sendable {
     url = supportDirectory.appendingPathComponent("swift-handover-identity.json")
   }
 
+  /// A record that exists but cannot be read or parsed. Its description is
+  /// the menu bar's reason; `underlying` says why.
+  public struct Unreadable: Error, CustomStringConvertible {
+    public let underlying: any Error
+    public var description: String { "this Mac's record of its phone pairing could not be read" }
+  }
+
   /// The recorded fingerprint, nil when the file does not exist. A file
-  /// that does not parse is an error, never "nothing recorded".
+  /// that does not parse is `Unreadable`, never "nothing recorded".
   public func recorded() throws -> String? {
     guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-    return try JSONDecoder().decode([String: String].self, from: Data(contentsOf: url))[Self.key]
+    do {
+      return try JSONDecoder().decode([String: String].self, from: Data(contentsOf: url))[Self.key]
+    } catch {
+      throw Unreadable(underlying: error)
+    }
   }
 
   /// Records `fingerprint` over whatever was recorded: a temporary file
@@ -36,11 +48,11 @@ public struct IdentityRecordFile: Sendable {
   public func record(_ fingerprint: String) throws {
     let folder = url.deletingLastPathComponent()
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    // Lowercase hex needs no escaping.
+    let bytes = Data("{\n  \"\(Self.key)\": \"\(fingerprint)\"\n}".utf8)
     let temporary = folder.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
     do {
-      try encoder.encode([Self.key: fingerprint]).write(to: temporary)
+      try bytes.write(to: temporary)
       try RecordingIntake.Syncs.fullSync(temporary)
       guard rename(temporary.path, url.path) == 0 else {
         throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
@@ -50,12 +62,5 @@ public struct IdentityRecordFile: Sendable {
       throw error
     }
     try? RecordingIntake.Syncs.fullSync(folder)
-  }
-
-  /// Forgets the record; a missing file is not an error.
-  public func forget() throws {
-    guard FileManager.default.fileExists(atPath: url.path) else { return }
-    try FileManager.default.removeItem(at: url)
-    try? RecordingIntake.Syncs.fullSync(url.deletingLastPathComponent())
   }
 }

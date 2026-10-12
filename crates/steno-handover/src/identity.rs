@@ -411,7 +411,8 @@ pub trait FingerprintRecord: Send + Sync {
 }
 
 /// Why the identity is unavailable rather than minted. Swift:
-/// `IdentityUnavailability` in `Identity/IdentityGuard.swift`.
+/// `IdentityUnavailability` in
+/// `Sources/StenoHandover/Identity/IdentityGuard.swift`.
 #[derive(Debug, Error)]
 pub enum Unavailability {
     /// The secret store's read failed (a locked keyring, a keyring still

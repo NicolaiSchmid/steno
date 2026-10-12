@@ -23,8 +23,13 @@
   ///   Only certificate and key queries honour the label, so every lookup
   ///   here goes through the certificate and `SecIdentityCreateWithCertificate`.
   public enum IdentityKeychain {
-    /// The label the app and the CLI use.
+    /// The label of the app's identity, the one the Rust app's import reads.
     public static let defaultLabel = "Steno handover identity"
+    /// The label a new identity is stored under until it takes
+    /// `defaultLabel` (`Store.stage`, `Store.promote`). A leftover is
+    /// harmless: `load(label: defaultLabel)` and the Rust app's import match
+    /// the label exactly, and the next stage deletes it first.
+    public static let stagingLabel = "Steno handover identity (new)"
 
     public static func store(_ identity: MintedIdentity, label: String) throws {
       guard let certificate = SecCertificateCreateWithData(nil, identity.certificateDER as CFData)
@@ -49,12 +54,7 @@
         // The importer names the key after nothing; the label and tag make
         // it recognisable in Keychain Access and deletable by label.
         if let key = (imported as? [AnyObject])?.first, CFGetTypeID(key) == SecKeyGetTypeID() {
-          let update = SecItemUpdate(
-            [kSecClass: kSecClassKey, kSecValueRef: key] as CFDictionary,
-            [kSecAttrLabel: label, kSecAttrApplicationTag: Data(label.utf8)] as CFDictionary)
-          guard update == errSecSuccess else {
-            throw IdentityError.security("SecItemUpdate(key)", update)
-          }
+          try setLabel(label, on: unsafeDowncast(key, to: SecKey.self))
         }
       case errSecDuplicateItem:
         break
@@ -81,12 +81,35 @@
       guard let stored = try storedCertificate(matchingDER: identity.certificateDER) else {
         throw IdentityError.malformed("the certificate was added but cannot be found again")
       }
-      let relabel = SecItemUpdate(
-        [kSecClass: kSecClassCertificate, kSecValueRef: stored] as CFDictionary,
-        [kSecAttrLabel: label] as CFDictionary)
-      guard relabel == errSecSuccess else {
-        throw IdentityError.security("SecItemUpdate(certificate)", relabel)
+      try setLabel(label, on: stored)
+    }
+
+    /// Stores `identity` under `label` alone: whatever `label` held is
+    /// deleted first, and the stored identity is read back.
+    public static func stage(_ identity: MintedIdentity, label: String) throws -> HandoverIdentity {
+      try delete(label: label)
+      try store(identity, label: label)
+      guard let staged = try load(label: label) else { throw IdentityError.notFound(label: label) }
+      return try HandoverIdentity(secIdentity: staged)
+    }
+
+    /// Gives the identity under `staging` the label `label`: what `label`
+    /// holds is deleted, then the staged certificate and its key are
+    /// relabelled. The certificate goes first: with only it relabelled,
+    /// `load(label:)` already finds the identity, because the key is found
+    /// by its hash, not its label. Throws before anything is deleted when
+    /// nothing complete is staged, so `label` is never emptied for nothing.
+    public static func promote(from staging: String, to label: String) throws {
+      guard let certificate = try storedCertificate(labelled: staging) else {
+        throw IdentityError.notFound(label: staging)
       }
+      guard let key = privateKey(of: certificate) else {
+        throw IdentityError.malformed(
+          "the certificate labelled \"\(staging)\" has no private key in the keychain")
+      }
+      try delete(label: label)
+      try setLabel(label, on: certificate)
+      try setLabel(label, on: key)
     }
 
     /// The identity whose certificate is labelled `label`, or nil when no
@@ -133,12 +156,7 @@
     /// would survive its key and make every later `load` throw.
     public static func delete(label: String) throws {
       for certificate in try storedCertificates(labelled: label) {
-        var identity: SecIdentity?
-        guard SecIdentityCreateWithCertificate(nil, certificate, &identity) == errSecSuccess,
-          let identity
-        else { continue }
-        var key: SecKey?
-        guard SecIdentityCopyPrivateKey(identity, &key) == errSecSuccess, let key else { continue }
+        guard let key = privateKey(of: certificate) else { continue }
         let status = SecItemDelete([kSecClass: kSecClassKey, kSecValueRef: key] as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
           throw IdentityError.security("SecItemDelete(key)", status)
@@ -154,9 +172,12 @@
       }
     }
 
-    /// The app and CLI entry point: the stored identity, or a fresh one
-    /// minted with `commonName` and stored under `label`. Other identities
-    /// in the keychain do not count as ours (#88).
+    /// The CLI's entry point (`steno dev handover serve`, under its own
+    /// label): the stored identity, or a fresh one minted with `commonName`
+    /// and stored under `label`, with no guard. Other identities in the
+    /// keychain do not count as ours (#88). The app goes through
+    /// `HandoverIdentityGuard`, which never mints over a record or a paired
+    /// phone.
     public static func loadOrCreate(
       label: String = defaultLabel, commonName: String
     ) throws -> HandoverIdentity {
@@ -170,25 +191,60 @@
       return try HandoverIdentity(secIdentity: created)
     }
 
-    /// The items labelled `defaultLabel` as the guard's store
-    /// (`HandoverIdentityGuard`).
-    public struct Store: HandoverIdentityStore {
+    /// The items labelled `defaultLabel`, with `stagingLabel` for a new
+    /// identity, as the guard's keychain (`HandoverIdentityGuard`).
+    public struct Store: HandoverIdentityKeychain {
       public init() {}
 
       public func load() throws -> HandoverIdentity? {
         try IdentityKeychain.load(label: defaultLabel).map(HandoverIdentity.init(secIdentity:))
       }
 
-      public func store(_ identity: MintedIdentity) throws {
-        try IdentityKeychain.store(identity, label: defaultLabel)
+      public func staged() throws -> HandoverIdentity? {
+        try IdentityKeychain.load(label: stagingLabel).map(HandoverIdentity.init(secIdentity:))
       }
 
-      public func delete() throws {
-        try IdentityKeychain.delete(label: defaultLabel)
+      public func stage(_ identity: MintedIdentity) throws -> HandoverIdentity {
+        try IdentityKeychain.stage(identity, label: stagingLabel)
+      }
+
+      public func promote() throws {
+        try IdentityKeychain.promote(from: stagingLabel, to: defaultLabel)
       }
     }
 
     // MARK: - Lookups
+
+    /// The private key the keychain pairs with `certificate`, found by its
+    /// hash; nil when it holds none.
+    private static func privateKey(of certificate: SecCertificate) -> SecKey? {
+      var identity: SecIdentity?
+      guard SecIdentityCreateWithCertificate(nil, certificate, &identity) == errSecSuccess,
+        let identity
+      else { return nil }
+      var key: SecKey?
+      guard SecIdentityCopyPrivateKey(identity, &key) == errSecSuccess else { return nil }
+      return key
+    }
+
+    /// Labels and tags `key` with `label`.
+    private static func setLabel(_ label: String, on key: SecKey) throws {
+      let status = SecItemUpdate(
+        [kSecClass: kSecClassKey, kSecValueRef: key] as CFDictionary,
+        [kSecAttrLabel: label, kSecAttrApplicationTag: Data(label.utf8)] as CFDictionary)
+      guard status == errSecSuccess else {
+        throw IdentityError.security("SecItemUpdate(key)", status)
+      }
+    }
+
+    private static func setLabel(_ label: String, on certificate: SecCertificate) throws {
+      let status = SecItemUpdate(
+        [kSecClass: kSecClassCertificate, kSecValueRef: certificate] as CFDictionary,
+        [kSecAttrLabel: label] as CFDictionary)
+      guard status == errSecSuccess else {
+        throw IdentityError.security("SecItemUpdate(certificate)", status)
+      }
+    }
 
     /// The default file keychain (the login keychain in the product).
     /// `SecKeychainCopyDefault` is deprecated with no replacement for the

@@ -2,15 +2,20 @@ import Foundation
 import StenoCore
 
 /// Where the guard keeps the identity: the login keychain in the product
-/// (`IdentityKeychain.Store`), a fake in tests.
-public protocol HandoverIdentityStore: Sendable {
-  /// The stored identity, nil when none is stored; throws when the store
-  /// cannot be read.
+/// (`IdentityKeychain.Store`), a fake in tests. A new identity is staged
+/// beside the current one and takes its place last, so a refused write
+/// changes nothing.
+public protocol HandoverIdentityKeychain: Sendable {
+  /// The current identity, nil when none is stored; throws when the
+  /// keychain cannot be read.
   func load() throws -> HandoverIdentity?
-  func store(_ identity: MintedIdentity) throws
-  /// Removes every stored item of the identity; nothing stored is not an
-  /// error.
-  func delete() throws
+  /// The staged identity, nil when none is staged.
+  func staged() throws -> HandoverIdentity?
+  /// Stages `identity` beside the current one, replacing whatever was
+  /// staged, and returns it as read back.
+  func stage(_ identity: MintedIdentity) throws -> HandoverIdentity
+  /// Makes the staged identity the current one, deleting the current one.
+  func promote() throws
 }
 
 /// Why the identity is unavailable rather than minted.
@@ -26,9 +31,9 @@ public enum IdentityUnavailability: Error, CustomStringConvertible, Equatable, S
 
   public var description: String {
     switch self {
-    case .unreadable(let reason): "the keychain could not be read (\(reason))"
+    case .unreadable(let reason): "this Mac's phone pairing could not be read (\(reason))"
     case .missing: "the pairing your phones know is no longer in this Mac's keychain"
-    case .replaced: "the keychain holds another pairing than the one your phones know"
+    case .replaced: "this Mac's keychain holds a different pairing from the one your phones know"
     }
   }
 }
@@ -39,43 +44,54 @@ public enum IdentityUnavailability: Error, CustomStringConvertible, Equatable, S
 /// Rust: `HandoverIdentity::load_or_create` and `HandoverIdentity::pair_again`
 /// in `crates/steno-handover/src/identity.rs`.
 public struct HandoverIdentityGuard: Sendable {
-  public let keychain: any HandoverIdentityStore
-  public let record: IdentityRecordFile
-  public let store: MeetingStore
+  let keychain: any HandoverIdentityKeychain
+  let record: IdentityRecordFile
+  let store: MeetingStore
 
-  public init(keychain: any HandoverIdentityStore, record: IdentityRecordFile, store: MeetingStore)
-  {
+  public init(
+    keychain: any HandoverIdentityKeychain, record: IdentityRecordFile, store: MeetingStore
+  ) {
     self.keychain = keychain
     self.record = record
     self.store = store
   }
 
-  /// The stored identity; an identity without a record has its fingerprint
-  /// recorded. Throws `IdentityUnavailability` when the keychain cannot be
-  /// read, holds no identity while a fingerprint is recorded or a phone is
-  /// paired, or holds one whose fingerprint is not the recorded one. Only
-  /// with no record, no identity and no paired phone is one minted, stored
-  /// and recorded.
+  /// The current identity; an identity without a record has its
+  /// fingerprint recorded. Throws `IdentityUnavailability` when the
+  /// keychain cannot be read, holds no identity while a fingerprint is
+  /// recorded or a phone is paired, or holds one whose fingerprint is not
+  /// the recorded one. A staged identity is a mint or a Pair Again cut
+  /// short: when it is the recorded one it becomes the current one, and
+  /// with no record, no identity and no paired phone it is installed. Only
+  /// then, with nothing staged, is a new identity minted, staged and
+  /// installed.
   public func loadOrCreate(commonName: String) async throws -> HandoverIdentity {
     let recorded = try record.recorded()
-    let stored: HandoverIdentity?
+    let current: HandoverIdentity?
     do {
-      stored = try keychain.load()
+      current = try keychain.load()
     } catch {
       throw IdentityUnavailability.unreadable(String(describing: error))
     }
-    if let stored {
-      let fingerprint = ContentHash.hex(stored.fingerprint)
+    if let current {
+      let fingerprint = ContentHash.hex(current.fingerprint)
       guard let recorded else {
         try record.record(fingerprint)
-        return stored
+        return current
       }
-      guard recorded == fingerprint else { throw IdentityUnavailability.replaced }
-      return stored
+      if recorded == fingerprint { return current }
     }
+    // A staged item that cannot be read is no identity to finish with; the
+    // next stage deletes it.
+    let staged = try? keychain.staged()
+    if let staged, recorded == ContentHash.hex(staged.fingerprint) {
+      try keychain.promote()
+      return staged
+    }
+    if current != nil { throw IdentityUnavailability.replaced }
     if recorded != nil { throw IdentityUnavailability.missing }
     if !(try await store.pairedDevices()).isEmpty { throw IdentityUnavailability.missing }
-    return try mint(commonName: commonName)
+    return try install(staged ?? keychain.stage(try MintedIdentity.mint(commonName: commonName)))
   }
 
   /// `loadOrCreate(commonName:)`, and when the identity is missing or
@@ -94,24 +110,36 @@ public struct HandoverIdentityGuard: Sendable {
   }
 
   /// Pair again, the user's choice when the identity the phones know is
-  /// gone: every paired phone is removed, the record forgotten and the
-  /// keychain's items deleted, then a new identity is minted, stored and
-  /// recorded. Every phone must pair again.
+  /// gone: a new identity is staged in the keychain, every paired phone is
+  /// removed, the record names the new identity, and the staged identity
+  /// becomes the current one. Every phone must pair again.
+  ///
+  /// The keychain write comes first, so a refused one changes nothing. A
+  /// run cut short at any step leaves a launch that asks again or finishes
+  /// the pairing, never one that mints:
+  /// - after the stage, or partway through the phones: the current
+  ///   identity and the record are as they were, so the launch is missing
+  ///   or replaced again; the staged identity is not the recorded one, so
+  ///   it is ignored, and the next stage replaces it;
+  /// - after the phones, before the record: the same, with no phone left;
+  ///   with no record either (phones paired without one), the launch
+  ///   installs the staged identity instead of minting;
+  /// - after the record, before the promote: the staged identity is the
+  ///   recorded one, so the launch promotes it.
+  ///
+  /// The record is replaced in one rename, so it is never forgotten first.
   public func pairAgain(commonName: String) async throws -> HandoverIdentity {
+    let staged = try keychain.stage(try MintedIdentity.mint(commonName: commonName))
     for device in try await store.pairedDevices() {
       try await store.delete(deviceID: device.id)
     }
-    try record.forget()
-    try keychain.delete()
-    return try mint(commonName: commonName)
+    return try install(staged)
   }
 
-  private func mint(commonName: String) throws -> HandoverIdentity {
-    try keychain.store(try MintedIdentity.mint(commonName: commonName))
-    guard let stored = try keychain.load() else {
-      throw IdentityError.malformed("the new identity was stored but cannot be read back")
-    }
-    try record.record(ContentHash.hex(stored.fingerprint))
-    return stored
+  /// Records the staged identity, then makes it the current one.
+  private func install(_ staged: HandoverIdentity) throws -> HandoverIdentity {
+    try record.record(ContentHash.hex(staged.fingerprint))
+    try keychain.promote()
+    return staged
   }
 }

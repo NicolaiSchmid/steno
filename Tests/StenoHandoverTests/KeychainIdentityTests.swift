@@ -50,6 +50,37 @@ import X509
       #expect(try IdentityKeychain.load(label: label) == nil)
     }
 
+    /// Pair Again's keychain steps under unique labels: a stage beside the
+    /// current identity leaves it loading, a second stage replaces the
+    /// first, and the promote deletes the current one and moves the staged
+    /// certificate and key to its label.
+    @Test(.enabled(if: enabled, "set STENO_KEYCHAIN_TESTS=1 to run the login keychain round trip"))
+    func stageAndPromoteUnderUniqueLabels() throws {
+      let label = "Steno test identity \(UUID().uuidString)"
+      let staging = "\(label) (new)"
+      defer {
+        try? IdentityKeychain.delete(label: label)
+        try? IdentityKeychain.delete(label: staging)
+      }
+      let current = try MintedIdentity.mint(commonName: "Steno on Test Mac")
+      try IdentityKeychain.store(current, label: label)
+
+      _ = try IdentityKeychain.stage(try MintedIdentity.mint(commonName: "first"), label: staging)
+      let next = try MintedIdentity.mint(commonName: "Steno on Test Mac")
+      let staged = try IdentityKeychain.stage(next, label: staging)
+      #expect(staged.fingerprint == next.fingerprint, "the second stage replaces the first")
+      let loaded = try #require(try IdentityKeychain.load(label: label))
+      #expect(try HandoverIdentity(secIdentity: loaded).fingerprint == current.fingerprint)
+
+      try IdentityKeychain.promote(from: staging, to: label)
+      #expect(try IdentityKeychain.load(label: staging) == nil)
+      let promoted = try #require(try IdentityKeychain.load(label: label))
+      #expect(try HandoverIdentity(secIdentity: promoted).fingerprint == next.fingerprint)
+      #expect(throws: IdentityError.self) { try IdentityKeychain.promote(from: staging, to: label) }
+      #expect(
+        try IdentityKeychain.load(label: label) != nil, "a promote of nothing deletes nothing")
+    }
+
     /// The #88 trap: a keychain that holds other identities (MDM ones on a
     /// managed Mac) but none of ours. `kSecClassIdentity` queries ignore the
     /// label there, so `load` must still say nil and `loadOrCreate` must mint.
