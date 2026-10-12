@@ -2,8 +2,9 @@
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
 //! old, a paired phone, the waits that fail a test instead of hanging it
-//! ([`PATIENCE`], and [`HANG_GUARD`] for a recording's start and stop),
-//! and [`warnings`], what a call logs at `warn` and above.
+//! ([`PATIENCE`] for the tests' own fakes and gates, [`HANG_GUARD`] for
+//! real capture work), and [`warnings`], what a call logs at `warn` and
+//! above.
 //!
 //! A test that writes models gives the app an explicit models directory in
 //! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
@@ -25,15 +26,22 @@ use steno_speech::SpeechRuntime;
 use crate::pipeline::{BuiltEngine, BuiltPipeline, CurrentPipeline, MakeDependencies};
 use crate::recorder::MakeCaptureSession;
 
-/// How long a test waits for background work before it fails.
+/// How long a test waits for work its own fakes, gates and manual clock
+/// drive, or for a moment of the synthetic capture's audio, before it
+/// fails. That work takes milliseconds, so this bound only turns a hang
+/// into a failure; for real capture work see [`HANG_GUARD`].
 pub const PATIENCE: Duration = Duration::from_secs(5);
 
-/// How long a test lets a recording's start or its stop and save run
-/// over the synthetic capture before it fails as hung. That work is real
-/// (the capture's threads, the files, the store), and a loaded runner
-/// stretches it past [`PATIENCE`]; the test waits for the call to return
-/// or for the recorder to go idle, and no verdict rests on how long that
-/// took.
+/// How long a test waits for real work over the synthetic capture before
+/// it fails as hung: a recording's start, its stop and save, a quit, a
+/// device change's rebuild or a restart, a recording that ends on its
+/// own. That work runs the capture's threads, the files and the store,
+/// and a loaded runner stretches it past [`PATIENCE`]. A call that does
+/// that work only when the behaviour under test is broken (a refused
+/// start accepted after all) takes this bound too, so the break fails on
+/// its assertion. No verdict rests on how long the work took: a test
+/// about how often something happens counts it, and a product patience a
+/// test passes in takes this bound unless the patience is what it checks.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// A fresh store; the directory lives as long as the guard.
@@ -189,7 +197,8 @@ pub fn synthetic_recorder_over(make_session: MakeCaptureSession) -> SyntheticRec
 
 impl SyntheticRecorder {
     /// Starts a recording in `mode` for `call_app` on a thread of its own,
-    /// as the host calls it, and returns once the start did.
+    /// as the host calls it, and returns once the start returned, refused
+    /// or not, failing the test as hung after [`HANG_GUARD`].
     pub fn start(&self, mode: steno_bridge::CaptureMode, call_app: Option<&str>) {
         let (recorder, call_app) = (self.recorder.clone(), call_app.map(str::to_owned));
         on_own_thread(HANG_GUARD, "the start returned", move || {
@@ -198,14 +207,15 @@ impl SyntheticRecorder {
     }
 
     /// Stops the recording on a thread of its own, as the host calls it,
-    /// and returns once the stop saved it.
+    /// and returns once the stop saved it, failing the test as hung after
+    /// [`HANG_GUARD`].
     pub fn stop(&self) {
         let recorder = self.recorder.clone();
         on_own_thread(HANG_GUARD, "the stop returned", move || recorder.stop());
     }
 
     /// Waits until the recorder is idle again: a stop it began on its own
-    /// (a grace that ran out, a quit) saved the recording.
+    /// (a grace that ran out, say) saved the recording.
     pub async fn idle(&self, what: &str) {
         eventually_within(HANG_GUARD, what, || {
             self.recorder.status().state == steno_bridge::RecordingState::Idle

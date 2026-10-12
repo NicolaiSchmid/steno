@@ -2357,19 +2357,23 @@ mod tests {
         }
     }
 
-    async fn start(recorder: &Arc<CaptureRecorder>) {
+    /// Starts an in-person recording on a thread of its own, failing the
+    /// test as hung after [`HANG_GUARD`], and checks that it records. It
+    /// blocks a worker of the test's two-worker runtime meanwhile, as
+    /// [`quit`] does.
+    fn start(recorder: &Arc<CaptureRecorder>) {
         let starting = recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::InPerson, None))
-            .await
-            .unwrap();
+        on_own_thread(HANG_GUARD, "the start returned", move || {
+            starting.start(CaptureMode::InPerson, None);
+        });
         assert_eq!(recorder.status().state, RecordingState::Recording);
     }
 
-    async fn stop(recorder: &Arc<CaptureRecorder>) {
+    /// Stops the recording on a thread of its own and returns once the
+    /// stop saved it, failing the test as hung after [`HANG_GUARD`].
+    fn stop(recorder: &Arc<CaptureRecorder>) {
         let stopping = recorder.clone();
-        tokio::task::spawn_blocking(move || stopping.stop())
-            .await
-            .unwrap();
+        on_own_thread(HANG_GUARD, "the stop returned", move || stopping.stop());
     }
 
     /// Quits on a thread of its own, failing the test rather than hanging
@@ -2381,8 +2385,8 @@ mod tests {
         });
     }
 
-    /// The harness's recorder after a start on a thread of its own, which
-    /// may refuse it.
+    /// The harness's recorder's status after a start on a thread of its
+    /// own, which may refuse it.
     fn status_after_a_start(harness: &Harness) -> RecorderStatus {
         let starter = harness.recorder.clone();
         on_own_thread(HANG_GUARD, "the start returned", move || {
@@ -2415,7 +2419,7 @@ mod tests {
     /// diarizer, which `warm_up` loads after the speech engine; whether
     /// the speech engine was loaded too.
     async fn warmed_the_engine(harness: &Harness) -> bool {
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         eventually("the diarizer was loaded while recording", || {
             harness.diarizer.preparations.count() > 0
         })
@@ -2430,7 +2434,7 @@ mod tests {
     async fn a_recording_start_warms_the_pipeline_up_when_the_models_are_installed() {
         let harness = harness(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]);
         assert_eq!(warmed_the_engine(&harness).await, cfg!(target_os = "macos"));
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// With Parakeet in the speech sidecar (here chosen on every
@@ -2444,18 +2448,18 @@ mod tests {
             platform_rule(crate::speech::testing::sidecar_chosen()),
         );
         assert!(!warmed_the_engine(&harness).await);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_never_warms_up_models_that_would_download() {
         let harness = harness(&[ModelAsset::OfflineDiarizer]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(harness.engine.preparations.count(), 0);
         assert_eq!(harness.diarizer.preparations.count(), 0);
         // Processing the recording loads them, as it always did.
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// The warm-up follows the engine a reload built: the Mac's rule on
@@ -2474,7 +2478,7 @@ mod tests {
         );
         harness.save_engine("parakeet-v3").unwrap();
         assert!(warmed_the_engine(&harness).await);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// After a failed reload the pipeline keeps the engine it was built
@@ -2495,7 +2499,7 @@ mod tests {
         sidecar.failing_reloads.store(true, Ordering::SeqCst);
         assert!(sidecar.save_engine("parakeet-v3").is_err());
         assert!(!warmed_the_engine(&sidecar).await);
-        stop(&sidecar.recorder).await;
+        stop(&sidecar.recorder);
 
         let in_process = harness_over(
             models_with(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]),
@@ -2505,7 +2509,7 @@ mod tests {
         in_process.failing_reloads.store(true, Ordering::SeqCst);
         assert!(in_process.save_engine("parakeet-ultra").is_err());
         assert!(warmed_the_engine(&in_process).await);
-        stop(&in_process.recorder).await;
+        stop(&in_process.recorder);
     }
 
     /// A microphone input for the warning tests: `None` names none.
@@ -2572,9 +2576,9 @@ mod tests {
             }
         }));
         let warning = || harness.recorder.status().warning;
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         assert_eq!(warning(), None, "the chosen microphone records");
-        eventually("the rebuild's fallback is named", || {
+        eventually_within(HANG_GUARD, "the rebuild's fallback is named", || {
             warning().as_deref()
                 == Some(
                     "Recording from Built-in Audio. The microphone chosen in Settings is not \
@@ -2585,7 +2589,7 @@ mod tests {
         harness.recorder.clear_messages();
         assert_eq!(warning(), None, "dismissed");
         let held = Arc::downgrade(&harness.recorder.inner().active.as_ref().unwrap().fallback);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert_eq!(warning(), None, "nothing left after the stop");
         assert_eq!(held.strong_count(), 0, "the notice thread was joined");
     }
@@ -2597,22 +2601,22 @@ mod tests {
     async fn a_recording_that_starts_on_the_fallback_microphone_warns_at_once() {
         let harness = harness_on_inputs(input(Some("Built-in Audio"), true), input(None, true));
         let warning = || harness.recorder.status().warning;
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         assert_eq!(
             warning().as_deref(),
             Some(
                 "Recording from Built-in Audio. The microphone chosen in Settings is not available."
             )
         );
-        eventually("the unnamed fallback reads as the default", || {
-            warning().as_deref()
-                == Some(
-                    "Recording from the system default microphone. The microphone chosen in \
-                     Settings is not available.",
-                )
-        })
+        let unnamed = "Recording from the system default microphone. The microphone chosen in \
+                       Settings is not available.";
+        eventually_within(
+            HANG_GUARD,
+            "the unnamed fallback reads as the default",
+            || warning().as_deref() == Some(unnamed),
+        )
         .await;
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert_eq!(
             warning().as_deref(),
             Some(
@@ -2632,10 +2636,13 @@ mod tests {
             input(Some("USB Microphone"), false),
         );
         let warning = || harness.recorder.status().warning;
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         assert!(warning().is_some(), "on the fallback at the start");
-        eventually("back on the chosen microphone", || warning().is_none()).await;
-        stop(&harness.recorder).await;
+        eventually_within(HANG_GUARD, "back on the chosen microphone", || {
+            warning().is_none()
+        })
+        .await;
+        stop(&harness.recorder);
         assert_eq!(
             warning().as_deref(),
             Some(
@@ -2658,7 +2665,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert_eq!(
             harness.recorder.status().warning.as_deref(),
             Some(
@@ -2717,7 +2724,7 @@ mod tests {
         holds: Duration,
     ) -> u64 {
         let status = || harness.recorder.status();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         eventually("a level from the tone", || {
             status().levels.is_some_and(|levels| levels.mic > 0.1)
         })
@@ -2734,7 +2741,7 @@ mod tests {
             assert_eq!(status().warning.as_deref(), Some(warning), "it stands");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         let note = status().warning.unwrap_or_default();
         assert!(note.starts_with("About "), "only the missing audio: {note}");
         let seconds = seconds_missing(&note, stalled);
@@ -2858,7 +2865,7 @@ mod tests {
             .unwrap();
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
         until_the_warning(&harness, warning, STILL_TRYING_WITHIN).await;
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         seconds_missing(
             &harness.recorder.status().warning.unwrap_or_default(),
             cfg!(windows).then_some(USB_MICROPHONE),
@@ -3015,7 +3022,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quitting_stops_and_saves_the_recording_with_the_quit_reason() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         quit(&harness.recorder);
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
@@ -3034,7 +3041,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quitting_during_a_stop_waits_for_its_save() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
         let stopper = harness.recorder.clone();
@@ -3220,7 +3227,7 @@ mod tests {
         assert_eq!(*source.told.lock().unwrap(), ["User canceled."]);
         assert_eq!(source.relaunches.load(Ordering::SeqCst), 0);
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         quit(&harness.recorder);
         assert_eq!(harness.store.all_meetings().unwrap().len(), 1);
     }
@@ -3237,7 +3244,7 @@ mod tests {
             status_after_a_start(&harness).state,
             RecordingState::Recording
         );
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert_eq!(harness.recorder.status().error, None);
         let meetings = harness.store.all_meetings().unwrap();
         assert_eq!(meetings.len(), 1);
@@ -3261,7 +3268,7 @@ mod tests {
             recorder: Some(harness.recorder.clone()),
             ..WaitingSource::default()
         });
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let offer = offer_after_a_check(&harness, source.clone()).await;
         tokio::time::sleep(crate::updates::IDLE_POLL * 2).await;
         assert_eq!(
@@ -3271,7 +3278,7 @@ mod tests {
         assert_eq!(*source.steps.lock().unwrap(), Vec::<String>::new());
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
 
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         tokio::time::timeout(PATIENCE + crate::updates::IDLE_POLL * 2, offer)
             .await
             .expect("the install ran once the meeting was processed")
@@ -3433,14 +3440,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_quit_through_the_exit_gate_exits_after_the_recording_is_saved() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let gate = crate::app::ExitGate::default();
         let (exited, exit_seen) = std::sync::mpsc::channel();
         let quitting = harness.recorder.clone();
         let (store, at_exit) = (harness.store.clone(), harness.recorder.clone());
         let held = gate.exit_requested(
-            crate::app::SHUTDOWN_PATIENCE,
+            HANG_GUARD,
             move || quitting.stop_for_quit(),
             move || {
                 let meeting = store.meeting(meeting_id).unwrap().unwrap();
@@ -3449,12 +3456,11 @@ mod tests {
             },
         );
         assert!(!held, "the exit waits for the save");
-        let (state, meeting, saved) = tokio::task::spawn_blocking(move || {
-            exit_seen.recv_timeout(std::time::Duration::from_secs(20))
-        })
-        .await
-        .unwrap()
-        .expect("exited after the save");
+        let (state, meeting, saved) =
+            tokio::task::spawn_blocking(move || exit_seen.recv_timeout(HANG_GUARD))
+                .await
+                .unwrap()
+                .expect("exited after the save");
         assert_eq!(state, RecordingState::Idle);
         assert!(saved, "the asset was written before the exit");
         assert_eq!(meeting.end_reason, Some(RecordingEndReason::Quit));
@@ -3487,7 +3493,7 @@ mod tests {
             "whisperkit-large-v3-turbo",
             platform_rule(SpeechSettings::default()),
         );
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(harness.engine.preparations.count(), 0);
         assert_eq!(harness.diarizer.preparations.count(), 0);
@@ -3496,7 +3502,7 @@ mod tests {
             before,
             "nothing was downloaded"
         );
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// The synthetic capture, its writer thread dying (a panic) at its
@@ -3546,7 +3552,7 @@ mod tests {
             .store
             .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
             .unwrap();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let hold =
             steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
@@ -3588,7 +3594,7 @@ mod tests {
             .store
             .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
             .unwrap();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let hold =
             steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
@@ -3617,7 +3623,7 @@ mod tests {
             .store
             .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
             .unwrap();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let hold =
             steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
@@ -3671,10 +3677,10 @@ mod tests {
         ];
         for (change, deleted) in changes.into_iter().zip([false, true]) {
             let harness = harness(&[]);
-            start(&harness.recorder).await;
+            start(&harness.recorder);
             let meeting_id = harness.recorder.status().meeting_id.unwrap();
             change(&harness.store, meeting_id);
-            stop(&harness.recorder).await;
+            stop(&harness.recorder);
             assert_eq!(
                 harness.recorder.status().error.as_deref(),
                 Some(MEETING_NOT_STORED)
@@ -3711,10 +3717,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_saved_stop_keeps_its_folder_for_the_next_launch_to_forget() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let support = harness.dir.path().join("support");
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
         assert!(
             crate::audio_folders::recorded(&support)
@@ -3739,9 +3745,9 @@ mod tests {
     async fn a_power_loss_after_a_saved_stop_leaves_the_master_to_the_next_launch() {
         let harness = harness(&[]);
         harness.store.checkpoint_durably().unwrap();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
         harness.recorder.pipeline.current().wait_until_idle().await;
 
@@ -3769,10 +3775,10 @@ mod tests {
             platform_rule(SpeechSettings::default()),
             dying_capture(20, died.clone()),
         );
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         eventually("the writer died", || died.load(Ordering::SeqCst)).await;
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
 
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Idle);
@@ -3817,7 +3823,7 @@ mod tests {
                 platform_rule(SpeechSettings::default()),
                 dying_capture(20, died.clone()),
             );
-            start(&harness.recorder).await;
+            start(&harness.recorder);
             let meeting_id = harness.recorder.status().meeting_id.unwrap();
             eventually("the writer died", || died.load(Ordering::SeqCst)).await;
             let audio = harness.dir.path().join("audio");
@@ -3832,7 +3838,7 @@ mod tests {
                 }
             })
             .await;
-            stop(&harness.recorder).await;
+            stop(&harness.recorder);
             assert_kept(&harness, meeting_id, &audio);
         }
     }
@@ -4052,9 +4058,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let harness = harness(&[]);
         harness.store.checkpoint_durably().unwrap();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         harness.recorder.pipeline.current().wait_until_idle().await;
         let support = harness.dir.path().join("support");
 
@@ -4223,14 +4229,14 @@ mod tests {
             })
         });
         let recorder = &harness.recorder;
-        start(recorder).await;
+        start(recorder);
         let meeting_id = recorder.status().meeting_id.unwrap();
         let finished = backend.clone();
         tokio::task::spawn_blocking(move || finished.wait_until_finished())
             .await
             .unwrap();
         go.send(()).unwrap();
-        stop(recorder).await;
+        stop(recorder);
         let text = log.text();
         assert!(
             text.lines()
@@ -4286,7 +4292,7 @@ mod tests {
             }
             Ok(session)
         }));
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let meeting = ended_on_its_own(&harness, meeting_id).await;
         assert_eq!(
@@ -4342,7 +4348,7 @@ mod tests {
     async fn ends_as_a_lost_device(device: fn(SyntheticOptions) -> SyntheticOptions) {
         let harness = harness(&[]);
         harness.capture_with(failing_capture(None, device));
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let meeting = ended_on_its_own(&harness, meeting_id).await;
         assert_eq!(
@@ -4364,7 +4370,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_that_panics_leaves_the_recorder_idle_with_an_error() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         eventually("frames reached the files", || {
             harness.recorder.status().levels.is_some()
@@ -4400,8 +4406,8 @@ mod tests {
             crate::audio_folders::recorded(&support).unwrap()[&meeting_id],
             audio_folder
         );
-        start(&harness.recorder).await;
-        stop(&harness.recorder).await;
+        start(&harness.recorder);
+        stop(&harness.recorder);
     }
 
     /// A start that panics part way (here the host's change hook, on the
@@ -4427,8 +4433,8 @@ mod tests {
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Idle);
         assert_eq!(status.error.as_deref(), Some(START_PANICKED));
-        start(&harness.recorder).await;
-        stop(&harness.recorder).await;
+        start(&harness.recorder);
+        stop(&harness.recorder);
     }
 
     /// A start that panics once its meeting is begun and its writer made
@@ -4469,8 +4475,8 @@ mod tests {
         let support = harness.dir.path().join("support");
         assert!(crate::audio_folders::recorded(&support).unwrap().is_empty());
         harness.capture_with(synthetic_capture());
-        start(&harness.recorder).await;
-        stop(&harness.recorder).await;
+        start(&harness.recorder);
+        stop(&harness.recorder);
     }
 
     /// A device that disappeared cut the recording short whoever stopped
@@ -4564,7 +4570,7 @@ mod tests {
         harness
             .free
             .store(DiskWatch::STOP_BELOW_BYTES + ten_minutes, Ordering::SeqCst);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         assert_eq!(
             harness.recorder.status().warning.as_deref(),
@@ -4588,7 +4594,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_disk_warning_appears_once_the_room_runs_low_while_recording() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         assert_eq!(harness.recorder.status().warning, None);
         harness.free.store(
             DiskWatch::STOP_BELOW_BYTES + 60 * (48_000 * 4 + 16_000 * 2),
@@ -4607,7 +4613,7 @@ mod tests {
             harness.recorder.status().warning.is_none()
         })
         .await;
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// A dismissed disk warning stays away while the room left is what it
@@ -4634,7 +4640,7 @@ mod tests {
             })
             .await;
         };
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         assert_eq!(warning(), Some(low_space_warning(10)));
         harness.recorder.clear_messages();
         ticks().await;
@@ -4652,7 +4658,7 @@ mod tests {
             warning() == Some(low_space_warning(10))
         })
         .await;
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// The disk's warning and the fallback microphone's show side by side.
@@ -4666,7 +4672,7 @@ mod tests {
             DiskWatch::STOP_BELOW_BYTES + 60 * (48_000 * 4 + 16_000 * 2),
             Ordering::SeqCst,
         );
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         assert_eq!(
             harness.recorder.status().warning,
             Some(format!(
@@ -4675,7 +4681,7 @@ mod tests {
                 low_space_warning(1)
             ))
         );
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// A free space that cannot be read never stops a recording.
@@ -4690,13 +4696,13 @@ mod tests {
                 Err(std::io::Error::other("statvfs failed"))
             })
         });
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         eventually("the space was read while recording", || {
             reads.load(Ordering::SeqCst) > 2
         })
         .await;
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert_eq!(harness.recorder.status().error, None);
     }
 
@@ -4724,7 +4730,7 @@ mod tests {
                     Ok(reported)
                 })
             });
-            start(&harness.recorder).await;
+            start(&harness.recorder);
             eventually("the space was read while recording", || {
                 reads.load(Ordering::SeqCst) > 2
             })
@@ -4732,7 +4738,7 @@ mod tests {
             let status = harness.recorder.status();
             assert_eq!(status.state, RecordingState::Recording);
             assert_eq!(status.warning, None);
-            stop(&harness.recorder).await;
+            stop(&harness.recorder);
             assert_eq!(harness.recorder.status().error, None);
         }
     }
@@ -4947,11 +4953,7 @@ mod tests {
                     ))
                 })
             });
-            let starting = harness.recorder.clone();
-            tokio::task::spawn_blocking(move || starting.start(CaptureMode::InPerson, None))
-                .await
-                .unwrap();
-            let status = harness.recorder.status();
+            let status = status_after_a_start(&harness);
             assert_eq!(status.state, RecordingState::Idle, "{important:?}");
             assert_eq!(
                 status.error,
@@ -4960,7 +4962,7 @@ mod tests {
             assert_eq!(harness.store.meetings(10, 0).unwrap(), []);
 
             statvfs.store(5 * GB, Ordering::SeqCst);
-            start(&harness.recorder).await;
+            start(&harness.recorder);
             let meeting_id = harness.recorder.status().meeting_id.unwrap();
             statvfs.store(low, Ordering::SeqCst);
             let meeting = ended_on_its_own(&harness, meeting_id).await;
@@ -5067,9 +5069,9 @@ mod tests {
             let mut settings = harness.store.settings().unwrap();
             settings.audio_folder = file_url(&volume.join("Audio"), true);
             harness.store.save_settings(&settings).unwrap();
-            start(&harness.recorder).await;
+            start(&harness.recorder);
             let meeting_id = harness.recorder.status().meeting_id.unwrap();
-            stop(&harness.recorder).await;
+            stop(&harness.recorder);
             assert_eq!(harness.recorder.status().error, None, "{file_system}");
             assert!(harness.store.asset(meeting_id).unwrap().is_some());
         }
@@ -5080,7 +5082,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_disk_warning_during_a_stop_does_not_show() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
         let stopper = harness.recorder.clone();

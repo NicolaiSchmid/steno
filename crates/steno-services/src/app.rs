@@ -2218,10 +2218,10 @@ mod tests {
         host
     }
 
-    /// Calls `method` through `host` on a thread of its own, failing the
-    /// test unless it returns success, and unless it returns at all within
-    /// [`HANG_GUARD`]: a recording's start and stop through the host are
-    /// the capture's real work.
+    /// Calls `method` through `host` on a thread of its own and asserts
+    /// that it succeeded, failing the test as hung after [`HANG_GUARD`]: a
+    /// recording's start and stop through the host are the capture's real
+    /// work.
     fn call(host: &Host, method: steno_bridge::BridgeMethod, params: Option<serde_json::Value>) {
         let dispatcher = steno_bridge::Dispatcher::new(host.clone());
         let reply = on_own_thread(HANG_GUARD, &format!("{method} returned"), move || {
