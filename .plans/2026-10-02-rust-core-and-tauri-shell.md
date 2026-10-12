@@ -1096,10 +1096,12 @@ still has to draw the window side. `[ ]` is not ported yet.
   record of the Swift import's store), after setting it aside
   (`files::set_aside`, kept as `handover-identity.json.corrupt-<time>`). A rollback to the Swift app leaves the file alone; a lost record is
   rewritten from the identity found while the paired phones, which the Swift app keeps,
-  hold the guard. Swift keeps its own identity in the Keychain and has no guard.
+  hold the guard. Swift keeps its own identity in the Keychain and has no guard
+  until #284, which records its fingerprint in its own `swift-handover-identity.json`.
   The Mac's Create New Keychain case (the store empty, or holding another
   identity, at the next launch; Try again and Pair again) is tested end to end
-  in `steno-services`' `keychain_reset_tests`.
+  in `steno-services`' `keychain_reset_tests`, over the secrets file, the
+  Keychain's stand-in.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
@@ -3485,7 +3487,7 @@ PR off `main`.
 | S7, release mechanics: `v*` tags release the Tauri app as "Steno <version>", the build number (the commit count, above the `appcast` branch's) in `CFBundleVersion`, `check-bundle.sh --signed --handoff`, the signed Sparkle handoff item on tag runs, a stable release as "latest" with `appcast.xml`, the cask and AUR bumps and the flake lines, the `handoff` job behind the `appcast` environment, the 0.11.0 release notes, `release.yml` removed (S7 of `.plans/2026-10-07-stable-promotion.md`; `desktop-release.yml`, `apps/desktop/scripts`) | `ci/desktop-stable-release` | #274 | open |
 | Phone handover waits instead of minting over the identity the paired phones know (a refused or locked read, a missing or replaced identity, the Swift import's export not through): Settings > iPhone says why, Try again reads it again (behind the import's gate, the export) without a restart, and Pair again, after the warning that every phone must pair again, writes the `swift-import-done` marker first and then mints (a Pair again that stopped is finished at the next launch); the gated handover's closed latch keeps a listener built after the shutdown from starting; P30's re-export through a summary re-run after the key is saved (S6 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-services`, `steno-host`, `steno-bridge`, web) | `feat/handover-waiting` | #281 | open |
 | S3, calendar and permissions: the event under way at a recording's start (or the next within fifteen minutes, Swift's `CalendarMatch.pick`) names it and its attendees, read on a thread of its own over EventKit on the Mac (`steno_macos::calendar`, `steno_services::calendar`) and never holding a start up, a later answer going to the store's rule; the host's `Permissions` over the shell's (`permissions::ShellPermissions`: the microphone and calendar status and prompts) with the Mac's system audio probe (`steno_audio::capture::permission`, `steno_services::permissions`); `unknown` missing on the Mac only (`permission_is_missing`), so a missing grant opens onboarding on its permissions page whatever `steno.onboardingCompleted` says, and off the Mac an `unknown` row says when the system decides (S3 of `.plans/2026-10-07-stable-promotion.md`; `steno-core`, `steno-macos`, `steno-audio`, `steno-host`, `steno-services`, desktop shell, web) | `feat/rust-calendar-permissions` | #288 | open |
-| P35's macOS test: a keychain that comes back empty (Create New Keychain after a password reset) or holding another identity makes the handover wait, mint nothing and keep the record and the paired phones, end to end through the graph and Settings' iPhone section, with Try again and Pair again (stable plan P35; `steno-services`) | `fix/handover-keychain-reset` | #282 | open |
+| P35's test of a reset Mac keychain, over the secrets file standing in for the Keychain: a keychain that comes back empty (Create New Keychain after a password reset) or holding another identity makes the handover wait, mint nothing and keep the record and the paired phones, end to end through the graph and Settings' iPhone section, with Try again and Pair again (stable plan P35; `steno-services`) | `fix/handover-keychain-reset` | #282 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
