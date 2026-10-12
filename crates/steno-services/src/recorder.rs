@@ -21,13 +21,15 @@
 //! `<error>`" and kept the device-loss warning beside it; here the one
 //! error line also says the recording is saved. The watcher also keeps an
 //! eye on the free space on the volumes of the recordings folder and of
-//! the database, the smaller of the two: a recording warns when about half
-//! an hour is left and, on Linux and Windows, does not start without room
-//! and stops and is saved before the disk fills; on the Mac a low reading
-//! only warns (why on `DiskWatch::STOP_BELOW_BYTES`). A volume that
-//! reports no size, or more space free than it holds (some network and
-//! FUSE file systems), counts as unreadable and never warns, stops or
-//! refuses a recording. Rust only: Swift had no disk check.
+//! the database, the one with less room counting: a recording warns when
+//! about half an hour is left, does not start without room, and stops and
+//! is saved before the disk fills. On the Mac the reading is the space
+//! macOS frees for important use (`steno_macos::volume`); should that
+//! read fail, `statvfs`, which leaves out the space APFS would purge, only
+//! warns (why on `DiskWatch::STOP_BELOW_BYTES`). A volume that reports no
+//! size, or more space free than it holds (some network and FUSE file
+//! systems), counts as unreadable and never warns, stops or refuses a
+//! recording. Rust only: Swift had no disk check.
 //!
 //! The session's notices are followed too: while its restarts go on past
 //! `CaptureSession::RESTART_ATTEMPTS`, until audio arrives again, the
@@ -82,6 +84,12 @@ pub(crate) struct Volume {
     pub(crate) available: u64,
     /// The whole volume.
     pub(crate) total: u64,
+    /// Whether `available` below [`DiskWatch::STOP_BELOW_BYTES`] refuses a
+    /// start and stops a recording; when not, it only warns, and the
+    /// minutes left count to a full disk. Off only for the Mac's `statvfs`
+    /// fallback ([`DiskWatch::system`]; why on
+    /// [`DiskWatch::STOP_BELOW_BYTES`]).
+    pub(crate) stops: bool,
 }
 
 /// What the volume that holds a path reports; the product asks the file
@@ -98,72 +106,62 @@ pub(crate) struct DiskWatch {
     /// The database's folder, whose volume is read beside the recordings
     /// folder's: the save writes there too.
     pub(crate) database_folder: Option<PathBuf>,
-    /// Whether a reading below [`Self::STOP_BELOW_BYTES`] refuses a start
-    /// and stops a recording; when not, it only warns, and the minutes
-    /// left count to a full disk. Off on the Mac only ([`Self::system`];
-    /// why on [`Self::STOP_BELOW_BYTES`]).
-    pub(crate) stops: bool,
 }
 
 impl DiskWatch {
     /// Below this a recording does not start, and one in progress stops and
     /// is saved: room for the database, the processing and the system, so
-    /// the save itself never meets a full disk. Linux and Windows only: on
-    /// the Mac `statvfs` leaves out the space APFS would purge for the user
-    /// (tens of GB with local Time Machine snapshots), so a reading below
-    /// it there only warns ([`Self::stops`]); a recording refused or cut on
-    /// a disk that had room would lose the meeting. Nothing keeps the save
-    /// its room there yet: a failed write still ends the recording and
-    /// Steno tries to save it, but a disk that is truly full can fail the
-    /// save too, and the files stay for the recovery at the next launch.
-    /// The Mac gets the floor once the `steno-macos` crate reads
-    /// `NSURLVolumeAvailableCapacityForImportantUsageKey`, which counts
-    /// that space (reading it takes `unsafe`, which belongs there).
+    /// the save itself never meets a full disk. On the Mac the reading
+    /// counts the space APFS would purge for the user (tens of GB with
+    /// local Time Machine snapshots), as
+    /// `NSURLVolumeAvailableCapacityForImportantUsageKey` reports it.
+    /// `statvfs` leaves that space out, so when the Mac falls back to it a
+    /// reading below the floor only warns ([`Volume::stops`]): a recording
+    /// refused or cut on a disk that had room would lose the meeting. Then
+    /// a failed write still ends the recording and Steno tries to save it,
+    /// but a disk that is truly full can fail the save too, and the files
+    /// stay for the recovery at the next launch.
     pub(crate) const STOP_BELOW_BYTES: u64 = 512 * 1024 * 1024;
     /// The recording time left above [`Self::STOP_BELOW_BYTES`] below which
     /// a recording warns.
     pub(crate) const WARN_BELOW: Duration = Duration::from_secs(30 * 60);
 
-    /// The file system's free space (`statvfs`, `GetDiskFreeSpaceExW`),
-    /// read every five seconds, on the volumes of the recordings folder and
-    /// of `database_folder`; the floor stops recordings everywhere but on
-    /// the Mac (see [`Self::STOP_BELOW_BYTES`]).
+    /// The system's free space, read every five seconds, on the volumes of
+    /// the recordings folder and of `database_folder`: on the Mac the space
+    /// free for important use (`steno_macos::volume::capacity`), or
+    /// `statvfs` when that read fails, whose floor only warns; elsewhere
+    /// `statvfs` and `GetDiskFreeSpaceExW`. The floor stops recordings on
+    /// every reading but that fallback (see [`Self::STOP_BELOW_BYTES`]).
     #[must_use]
     pub(crate) fn system(database_folder: Option<&Path>) -> Self {
         Self {
-            free_space: Arc::new(|path| {
-                fs4::statvfs(path).map(|stats| Volume {
-                    available: stats.available_space(),
-                    total: stats.total_space(),
-                })
-            }),
+            free_space: Arc::new(system_volume),
             interval: Duration::from_secs(5),
             database_folder: database_folder.map(Path::to_path_buf),
-            stops: !cfg!(target_os = "macos"),
         }
     }
 
-    /// The bytes free for a recording into `audio_folder`: the smaller of
-    /// what its volume and the database folder's report, each asked of its
-    /// nearest folder that exists (the recordings folder may not exist
-    /// before the first recording). A volume that cannot be read, reports
-    /// no size or more free than its size is left out; `None` when none is
-    /// left, which never stops a recording.
-    fn free_for(&self, audio_folder: &Path) -> Option<u64> {
+    /// The room for a recording into `audio_folder` that writes
+    /// `bytes_per_second`: the less of what its volume and the database
+    /// folder's leave ([`Room::minutes`]), each asked of its nearest folder
+    /// that exists (the recordings folder may not exist before the first
+    /// recording). A volume that cannot be read, reports no size or more
+    /// free than its size is left out; `None` when none is left, which
+    /// never stops a recording.
+    fn room_for(&self, audio_folder: &Path, bytes_per_second: u64) -> Option<Room> {
         std::iter::once(audio_folder)
             .chain(self.database_folder.as_deref())
-            .filter_map(|folder| self.available(folder))
-            .min()
+            .filter_map(|folder| self.volume(folder))
+            .map(|volume| Room::of(volume.available, bytes_per_second, volume.stops))
+            .min_by_key(|room| room.minutes())
     }
 
-    /// The bytes free on the volume of `folder`, when it reports a size
-    /// that holds them.
-    fn available(&self, folder: &Path) -> Option<u64> {
+    /// The volume of `folder`, when it reports a size that holds its free
+    /// space.
+    fn volume(&self, folder: &Path) -> Option<Volume> {
         let existing = folder.ancestors().find(|path| path.exists())?;
         match (self.free_space)(existing) {
-            Ok(volume) if volume.total > 0 && volume.available <= volume.total => {
-                Some(volume.available)
-            }
+            Ok(volume) if volume.total > 0 && volume.available <= volume.total => Some(volume),
             Ok(volume) => {
                 tracing::debug!(?volume, "the volume reports no usable size");
                 None
@@ -176,17 +174,69 @@ impl DiskWatch {
     }
 }
 
+/// The volume that holds `path` as the system reports it
+/// ([`DiskWatch::system`]).
+#[cfg(target_os = "macos")]
+fn system_volume(path: &Path) -> std::io::Result<Volume> {
+    let important = steno_macos::volume::capacity(path).map(|capacity| Volume {
+        available: capacity.available_for_important_usage,
+        total: capacity.total,
+        stops: true,
+    });
+    or_warning_only(important, || statvfs(path))
+}
+
+/// The volume that holds `path` as the system reports it
+/// ([`DiskWatch::system`]).
+#[cfg(not(target_os = "macos"))]
+fn system_volume(path: &Path) -> std::io::Result<Volume> {
+    statvfs(path)
+}
+
+/// `statvfs` (`GetDiskFreeSpaceExW` on Windows) of the volume that holds
+/// `path`, whose floor stops a recording.
+fn statvfs(path: &Path) -> std::io::Result<Volume> {
+    fs4::statvfs(path).map(|stats| Volume {
+        available: stats.available_space(),
+        total: stats.total_space(),
+        stops: true,
+    })
+}
+
+/// `reading`, or when it failed the `fallback`'s, whose floor only warns:
+/// the Mac's `statvfs` leaves out the space APFS would purge.
+#[cfg(any(target_os = "macos", test))]
+fn or_warning_only(
+    reading: std::io::Result<Volume>,
+    fallback: impl FnOnce() -> std::io::Result<Volume>,
+) -> std::io::Result<Volume> {
+    reading.or_else(|error| {
+        tracing::debug!(%error, "the space free for important use could not be read");
+        fallback().map(|volume| Volume {
+            stops: false,
+            ..volume
+        })
+    })
+}
+
 /// What a recording does about the space left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Room {
     Enough,
-    /// A warning ([`low_space_warning`]) with the minutes of recording
-    /// left, at least one.
-    Low {
-        minutes: u64,
-    },
+    /// A warning ([`low_space_warning`]).
+    Low(Low),
     /// Too little to go on.
     Full,
+}
+
+/// A room that runs low.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Low {
+    /// The minutes of recording left, at least one.
+    minutes: u64,
+    /// Whether the floor stops the recording once they run out
+    /// ([`Volume::stops`]).
+    stops: bool,
 }
 
 impl Room {
@@ -206,8 +256,19 @@ impl Room {
             (Some(spare), true) => spare,
             (_, false) => free,
         };
-        Room::Low {
+        Room::Low(Low {
             minutes: (left / rate / 60).max(1),
+            stops,
+        })
+    }
+
+    /// The minutes of recording the room leaves, to find the lesser of
+    /// two: none when full, all when enough.
+    fn minutes(self) -> u64 {
+        match self {
+            Room::Full => 0,
+            Room::Low(low) => low.minutes,
+            Room::Enough => u64::MAX,
         }
     }
 }
@@ -379,8 +440,8 @@ const RECOVERED_AFTER_A_FAILURE: &str =
     "Recording stopped because of an error; the audio up to that point was kept.";
 
 /// The warning of a recording with `minutes` left; a recording the floor
-/// `stops` ([`DiskWatch::stops`]) is promised the stop, one it does not
-/// (the Mac's) is asked for room instead.
+/// `stops` ([`Low::stops`]) is promised the stop, one it does not (on the
+/// Mac's `statvfs` fallback) is asked for room instead.
 fn low_space_warning(minutes: u64, stops: bool) -> String {
     let unit = if minutes == 1 { "minute" } else { "minutes" };
     let then = if stops {
@@ -430,10 +491,8 @@ struct Active {
 
 /// The disk watch's warning of one recording ([`low_space_warning`]).
 struct DiskWarning {
-    /// Whether the floor stops this recording ([`DiskWatch::stops`]).
-    stops: bool,
-    /// The minutes left at the latest reading; `None` with room.
-    minutes: Option<u64>,
+    /// The room left at the latest reading; `None` with room.
+    low: Option<Low>,
     /// The minutes left when the user dismissed the warning
     /// (`clear_messages`): it shows again only once fewer are left. A
     /// reading with room forgets it, so a later low room warns afresh; a
@@ -444,24 +503,25 @@ struct DiskWarning {
 impl DiskWarning {
     /// The warning the status shows, if any.
     fn shown(&self) -> Option<String> {
-        let minutes = self
-            .minutes
-            .filter(|minutes| self.dismissed.is_none_or(|dismissed| *minutes < dismissed))?;
-        Some(low_space_warning(minutes, self.stops))
+        let low = self.low.filter(|low| {
+            self.dismissed
+                .is_none_or(|dismissed| low.minutes < dismissed)
+        })?;
+        Some(low_space_warning(low.minutes, low.stops))
     }
 
-    /// After a reading that leaves `minutes`, `None` with room.
-    fn set(&mut self, minutes: Option<u64>) {
-        if minutes.is_none() {
+    /// After a reading that leaves `low`, `None` with room.
+    fn set(&mut self, low: Option<Low>) {
+        if low.is_none() {
             self.dismissed = None;
         }
-        self.minutes = minutes;
+        self.low = low;
     }
 
     /// The user dismissed the messages; a warning not shown stays as it was.
     fn dismiss(&mut self) {
         if self.shown().is_some() {
-            self.dismissed = self.minutes;
+            self.dismissed = self.low.map(|low| low.minutes);
         }
     }
 }
@@ -1209,9 +1269,7 @@ impl CaptureRecorder {
         let (configuration, audio_folder) = self.configuration(mode)?;
         let disk = self.disk();
         let rate = bytes_per_second(&configuration);
-        let room = disk
-            .free_for(&audio_folder)
-            .map_or(Room::Enough, |free| Room::of(free, rate, disk.stops));
+        let room = disk.room_for(&audio_folder, rate).unwrap_or(Room::Enough);
         if room == Room::Full {
             return Err(refused("no room", NO_ROOM_TO_START));
         }
@@ -1291,9 +1349,8 @@ impl CaptureRecorder {
                 recording_since,
                 notice_thread,
                 disk_warning: DiskWarning {
-                    stops: disk.stops,
-                    minutes: match room {
-                        Room::Low { minutes } => Some(minutes),
+                    low: match room {
+                        Room::Low(low) => Some(low),
                         Room::Enough | Room::Full => None,
                     },
                     dismissed: None,
@@ -1352,12 +1409,12 @@ impl CaptureRecorder {
                         recorder.stop_recording(meeting_id, RecordingEndReason::Failed, None);
                         return;
                     }
-                    let Some(free) = disk.free_for(folder) else {
+                    let Some(room) = disk.room_for(folder, rate) else {
                         continue;
                     };
-                    match Room::of(free, rate, disk.stops) {
+                    match room {
                         Room::Enough => recorder.warn(meeting_id, None),
-                        Room::Low { minutes } => recorder.warn(meeting_id, Some(minutes)),
+                        Room::Low(low) => recorder.warn(meeting_id, Some(low)),
                         Room::Full => {
                             recorder.stop_recording(
                                 meeting_id,
@@ -1405,10 +1462,10 @@ impl CaptureRecorder {
         }
     }
 
-    /// Notes the disk watch's reading of `minutes` left while the recording
+    /// Notes the disk watch's reading of a `low` room while the recording
     /// of `meeting_id` runs, `None` with room ([`Active::disk_warning`]);
     /// not once it is stopping, whose outcome sets the messages.
-    fn warn(&self, meeting_id: Uuid, minutes: Option<u64>) {
+    fn warn(&self, meeting_id: Uuid, low: Option<Low>) {
         let mut inner = self.inner();
         if inner.status.state != RecordingState::Recording {
             return;
@@ -1421,7 +1478,7 @@ impl CaptureRecorder {
             return;
         };
         let before = active.disk_warning.shown();
-        active.disk_warning.set(minutes);
+        active.disk_warning.set(low);
         if active.disk_warning.shown() == before {
             return;
         }
@@ -2150,8 +2207,7 @@ mod tests {
     }
 
     /// A disk watch over `free_space`, read every 20 ms, on the recordings
-    /// folder's volume alone, whose floor stops recordings as off the Mac,
-    /// on every platform.
+    /// folder's volume alone.
     fn disk_with(
         free_space: impl Fn(&Path) -> std::io::Result<Volume> + Send + Sync + 'static,
     ) -> DiskWatch {
@@ -2159,15 +2215,17 @@ mod tests {
             free_space: Arc::new(free_space),
             interval: Duration::from_millis(20),
             database_folder: None,
-            stops: true,
         }
     }
 
-    /// A volume of the largest size with `available` bytes free.
+    /// A volume of the largest size with `available` bytes free, whose
+    /// floor stops recordings, as the system's readings but the Mac's
+    /// `statvfs` fallback do on every platform.
     fn volume(available: u64) -> Volume {
         Volume {
             available,
             total: u64::MAX,
+            stops: true,
         }
     }
 
@@ -4613,12 +4671,12 @@ mod tests {
     async fn a_volume_that_reports_no_size_lets_the_recording_run() {
         for reported in [
             Volume {
-                available: 0,
                 total: 0,
+                ..volume(0)
             },
             Volume {
-                available: 2,
                 total: 1,
+                ..volume(2)
             },
         ] {
             let harness = harness(&[]);
@@ -4643,14 +4701,20 @@ mod tests {
         }
     }
 
-    /// The free space is the smaller of the recordings folder's volume and
-    /// the database folder's; one that cannot be read is left out, and with
-    /// neither readable there is no number.
+    /// The room is the lesser of what the recordings folder's volume and
+    /// the database folder's leave; one that cannot be read is left out,
+    /// and with neither readable there is no room to tell. Each volume's
+    /// own reading says whether its floor stops: one below the floor that
+    /// only warns (the Mac's `statvfs` fallback) leaves its minutes to a
+    /// full disk, and does not hide the other's floor.
     #[test]
-    fn the_free_space_is_the_smaller_of_the_two_volumes() {
+    fn the_room_is_the_lesser_of_the_two_volumes() {
         let audio = tempfile::tempdir().unwrap();
         let database = tempfile::tempdir().unwrap();
-        let watch = |audio_free: Option<u64>, database_free: Option<u64>| {
+        let rate = 224_000;
+        let minutes = |minutes: u64| DiskWatch::STOP_BELOW_BYTES + minutes * 60 * rate;
+        let low = |minutes: u64, stops: bool| Some(Room::Low(Low { minutes, stops }));
+        let watch = |audio_free: Option<Volume>, database_free: Option<Volume>| {
             let audio_path = audio.path().to_path_buf();
             let mut watch = disk_with(move |path| {
                 let free = if path == audio_path {
@@ -4658,24 +4722,54 @@ mod tests {
                 } else {
                     database_free
                 };
-                free.map(volume)
-                    .ok_or_else(|| std::io::Error::other("statvfs failed"))
+                free.ok_or_else(|| std::io::Error::other("statvfs failed"))
             });
             watch.database_folder = Some(database.path().to_path_buf());
             watch
         };
+        let at = |minutes_left: u64| Some(volume(minutes(minutes_left)));
+        let warning_only = |free: u64| {
+            Some(Volume {
+                stops: false,
+                ..volume(free)
+            })
+        };
         // The recordings folder does not exist yet: its parent is asked.
         let recordings = audio.path().join("Audio");
-        assert_eq!(watch(Some(10), Some(20)).free_for(audio.path()), Some(10));
-        assert_eq!(watch(Some(30), Some(20)).free_for(audio.path()), Some(20));
-        assert_eq!(watch(Some(30), Some(20)).free_for(&recordings), Some(20));
-        assert_eq!(watch(None, Some(20)).free_for(audio.path()), Some(20));
-        assert_eq!(watch(Some(30), None).free_for(audio.path()), Some(30));
-        assert_eq!(watch(None, None).free_for(audio.path()), None);
+        let room = |watch: DiskWatch| watch.room_for(audio.path(), rate);
+        assert_eq!(room(watch(at(10), at(20))), low(10, true));
+        assert_eq!(room(watch(at(30), at(20))), low(20, true));
+        assert_eq!(
+            watch(at(30), at(20)).room_for(&recordings, rate),
+            low(20, true)
+        );
+        assert_eq!(room(watch(None, at(20))), low(20, true));
+        assert_eq!(room(watch(at(25), None)), low(25, true));
+        assert_eq!(room(watch(at(40), at(30))), Some(Room::Enough));
+        assert_eq!(room(watch(None, None)), None);
+
+        let half_the_floor = DiskWatch::STOP_BELOW_BYTES / 2;
+        // 256 MiB at 224 000 bytes a second, to a full disk.
+        assert_eq!(
+            room(watch(warning_only(half_the_floor), at(20))),
+            low(19, false)
+        );
+        assert_eq!(
+            room(watch(
+                warning_only(half_the_floor),
+                Some(volume(half_the_floor + 1))
+            )),
+            Some(Room::Full)
+        );
+        assert_eq!(
+            room(watch(Some(volume(half_the_floor)), warning_only(0))),
+            Some(Room::Full)
+        );
     }
 
     /// Where the floor stops a recording, the minutes count to it and
-    /// below it there is no room; where it does not (the Mac), the warning
+    /// below it there is no room; where it does not (the Mac's `statvfs`
+    /// fallback), the warning
     /// comes at the same point, the minutes count to a full disk, and the
     /// room never runs out.
     #[test]
@@ -4685,24 +4779,17 @@ mod tests {
         assert_eq!(Room::of(0, rate, true), Room::Full);
         assert_eq!(Room::of(floor - 1, rate, true), Room::Full);
         assert_eq!(Room::of(floor + 30 * 60 * rate, rate, true), Room::Enough);
-        assert_eq!(
-            Room::of(floor + 29 * 60 * rate, rate, true),
-            Room::Low { minutes: 29 }
-        );
-        assert_eq!(Room::of(floor, rate, true), Room::Low { minutes: 1 });
+        let low = |minutes: u64, stops: bool| Room::Low(Low { minutes, stops });
+        assert_eq!(Room::of(floor + 29 * 60 * rate, rate, true), low(29, true));
+        assert_eq!(Room::of(floor, rate, true), low(1, true));
 
         assert_eq!(Room::of(floor + 30 * 60 * rate, rate, false), Room::Enough);
         assert_eq!(
             Room::of(floor + 29 * 60 * rate, rate, false),
-            Room::Low {
-                minutes: 29 + floor / rate / 60
-            }
+            low(29 + floor / rate / 60, false)
         );
-        assert_eq!(
-            Room::of(30 * 60 * rate, rate, false),
-            Room::Low { minutes: 30 }
-        );
-        assert_eq!(Room::of(0, rate, false), Room::Low { minutes: 1 });
+        assert_eq!(Room::of(30 * 60 * rate, rate, false), low(30, false));
+        assert_eq!(Room::of(0, rate, false), low(1, false));
     }
 
     /// The warning promises the stop only where the floor stops the
@@ -4721,30 +4808,56 @@ mod tests {
         );
     }
 
-    /// The system's disk watch stops recordings at the floor everywhere
-    /// but on the Mac, whose `statvfs` leaves out purgeable space.
+    /// The system's reading of a folder's volume stops recordings at the
+    /// floor on every platform: on the Mac it is the space free for
+    /// important use, which counts what APFS would purge.
     #[test]
-    fn the_system_disk_watch_stops_at_the_floor_only_off_the_mac() {
-        assert_eq!(DiskWatch::system(None).stops, !cfg!(target_os = "macos"));
+    fn the_system_reading_stops_at_the_floor_on_every_platform() {
+        let folder = tempfile::tempdir().unwrap();
+        let volume = (DiskWatch::system(None).free_space)(folder.path()).unwrap();
+        assert!(volume.stops, "{volume:?}");
+        assert!(volume.total > 0, "{volume:?}");
+        assert!(volume.available <= volume.total, "{volume:?}");
     }
 
-    /// Under the Mac's policy a reading below the floor neither refuses
-    /// the start nor stops the recording: it starts with a warning that
-    /// promises no stop, records on through many readings, and a Stop
-    /// saves it as usual.
+    /// The Mac's `statvfs` fallback, read only when the space free for
+    /// important use cannot be, only warns; a reading that works is kept
+    /// as it is, and with both failing the volume is unreadable.
+    #[test]
+    fn the_statvfs_fallback_only_warns() {
+        let failed = || Err(std::io::Error::other("no capacity"));
+        let important = volume(DiskWatch::STOP_BELOW_BYTES / 2);
+        assert_eq!(
+            or_warning_only(Ok(important), || unreachable!("read only on a failure")).unwrap(),
+            important
+        );
+        assert_eq!(
+            or_warning_only(failed(), || Ok(volume(7))).unwrap(),
+            Volume {
+                stops: false,
+                ..volume(7)
+            }
+        );
+        assert!(or_warning_only(failed(), failed).is_err());
+    }
+
+    /// A reading below the floor that only warns (the Mac's `statvfs`
+    /// fallback) neither refuses the start nor stops the recording: it
+    /// starts with a warning that promises no stop, records on through
+    /// many readings, and a Stop saves it as usual.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn under_the_mac_s_policy_a_reading_below_the_floor_only_warns() {
+    async fn a_reading_below_the_floor_that_only_warns_lets_the_recording_run() {
         let harness = harness(&[]);
         let reads = Arc::new(AtomicUsize::new(0));
         harness.recorder.watch_disk_with({
             let reads = reads.clone();
-            DiskWatch {
-                stops: false,
-                ..disk_with(move |_| {
-                    reads.fetch_add(1, Ordering::SeqCst);
-                    Ok(volume(DiskWatch::STOP_BELOW_BYTES / 2))
+            disk_with(move |_| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                Ok(Volume {
+                    stops: false,
+                    ..volume(DiskWatch::STOP_BELOW_BYTES / 2)
                 })
-            }
+            })
         });
         start(&harness.recorder).await;
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
@@ -4781,7 +4894,13 @@ mod tests {
         let stopper = harness.recorder.clone();
         let stopping = std::thread::spawn(move || stopper.stop());
         stop_seen.recv_timeout(PATIENCE).expect("the stop began");
-        harness.recorder.warn(meeting_id, Some(5));
+        harness.recorder.warn(
+            meeting_id,
+            Some(Low {
+                minutes: 5,
+                stops: true,
+            }),
+        );
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Stopping);
         assert_eq!(status.warning, None);
