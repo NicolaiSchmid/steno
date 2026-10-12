@@ -2301,6 +2301,209 @@ async fn a_meeting_under_a_withheld_key_stays_raw_and_its_summary_runs_later_wit
     server.stop();
 }
 
+/// A meeting processed behind a pending import whose key is withheld,
+/// with an endpoint at `server` and the vault under `dir`: ready without a
+/// summary and exported into the vault. The graph's secrets, through which
+/// a test saves the key, and the folder note the export wrote.
+struct ExportedWithoutAKey {
+    store: Arc<steno_core::Store>,
+    paths: steno_core::StenoPaths,
+    graph: GraphImport,
+    secrets: crate::app::GraphSecrets,
+    meeting: steno_core::Meeting,
+    folder: PathBuf,
+    stem: String,
+}
+
+impl ExportedWithoutAKey {
+    async fn new(dir: &tempfile::TempDir, server: &steno_llm::testing::StubChatServer) -> Self {
+        use steno_core::{AudioRetention, DeliveryStatus, MeetingState};
+
+        let store = Arc::new(steno_core::Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let mut settings = store.settings().unwrap();
+        summaries_from_endpoint(&mut settings, server.base_url().as_str());
+        settings.obsidian = Some(steno_core::ObsidianSettings {
+            vault_path: vault.to_string_lossy().into_owned(),
+            people_folder: None,
+            include_audio: false,
+            task_tag: None,
+            extra: serde_json::Map::new(),
+        });
+        store.save_settings(&settings).unwrap();
+        let (graph, secrets) = wired(
+            dir.path(),
+            FakeKeychain::swift_app(),
+            Arc::new(InMemorySecretStore::new()),
+        );
+        assert!(graph.gate.key_withheld());
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = MeetingState::Recording;
+        meeting.summary = None;
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            &dir.path().join("recordings"),
+            meeting.id,
+            AudioRetention::KeepForever,
+        )
+        .unwrap();
+        let exported = ExportedWithoutAKey {
+            store,
+            paths,
+            graph,
+            secrets,
+            meeting,
+            folder: PathBuf::new(),
+            stem: String::new(),
+        };
+        let pipeline = exported.pipeline();
+        pipeline.enqueue(&exported.meeting, &asset).unwrap();
+        pipeline.wait_until_idle().await;
+        let stored = exported
+            .store
+            .meeting(exported.meeting.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, MeetingState::Ready, "{:?}", stored.state);
+        assert!(stored.summary.is_none());
+        let delivery = exported.delivery();
+        assert_eq!(delivery.status, DeliveryStatus::Delivered);
+        let folder = vault.join(&delivery.receipt.unwrap().folder);
+        let stem = folder.file_name().unwrap().to_string_lossy().into_owned();
+        ExportedWithoutAKey {
+            meeting: stored,
+            folder,
+            stem,
+            ..exported
+        }
+    }
+
+    /// The pipeline the graph builds now, on core's fakes for the rest.
+    fn pipeline(&self) -> steno_pipeline::ProcessingPipeline {
+        let built = built_over(&self.store, &self.paths, &self.secrets).dependencies;
+        steno_pipeline::ProcessingPipeline::new(
+            crate::testing::fake_dependencies(&self.store, "fake-engine")
+                .with_llm(built.cleaner, built.summarizer),
+        )
+    }
+
+    fn delivery(&self) -> steno_core::Delivery {
+        self.store.deliveries(self.meeting.id).unwrap().remove(0)
+    }
+
+    fn note(&self) -> PathBuf {
+        self.folder.join(format!("{}.md", self.stem))
+    }
+
+    /// The copies Steno wrote beside the note, by name.
+    fn copies(&self) -> Vec<String> {
+        let prefix = format!("{} (Steno ", self.stem);
+        let mut copies: Vec<String> = std::fs::read_dir(&self.folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&prefix))
+            .collect();
+        copies.sort();
+        copies
+    }
+}
+
+/// P30 (D13) behind the withheld key: a meeting processed while the key
+/// was withheld is exported without a summary. Once a key is saved, the
+/// summary runs again and the re-run exports the note again, through the
+/// pipeline's delivery and the Obsidian folder. A note the user edited in
+/// the vault since Steno wrote it stays byte for byte as the user left it:
+/// the new version, with the summary, goes beside it as
+/// `<name> (Steno <date>).md` and the delivery warns. Export again then
+/// rewrites that copy rather than add one. An unedited note is replaced in
+/// place, with no copy and no warning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_summary_run_after_the_key_is_saved_keeps_an_edited_note_and_writes_beside_it() {
+    use steno_llm::testing::{Scripts, StubChatServer};
+
+    for edited in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = StubChatServer::start().await.unwrap();
+        let summary = std::fs::read_to_string(
+            repository().join("Tests/Fixtures/llm/responses/e2e-summary.json"),
+        )
+        .unwrap();
+        server.respond(Arc::new(move |_| Some(Scripts.text(&summary))));
+        let exported = ExportedWithoutAKey::new(&dir, &server).await;
+        let note = exported.note();
+        let first = std::fs::read(&note).unwrap();
+        let mine = [first.as_slice(), b"\nMy own notes.\n"].concat();
+        if edited {
+            std::fs::write(&note, &mine).unwrap();
+        }
+
+        exported
+            .graph
+            .secrets
+            .set_secret(&SecretKey::llm_api_key(), Some("sk-saved"))
+            .await
+            .unwrap();
+        // Dated in the destination's zone, the machine's: the day before
+        // and after the run, so a run over midnight finds its copy too.
+        let today = || chrono::Local::now().format("%Y-%m-%d").to_string();
+        let before = today();
+        exported
+            .pipeline()
+            .rerun_summary(exported.meeting.id, &exported.meeting.template_id)
+            .await
+            .unwrap();
+        let after = today();
+        let stored = exported
+            .store
+            .meeting(exported.meeting.id)
+            .unwrap()
+            .unwrap();
+        assert!(stored.summary.is_some(), "the summary ran again");
+        let delivery = exported.delivery();
+        assert_eq!(delivery.status, steno_core::DeliveryStatus::Delivered);
+        let warnings = delivery.receipt.unwrap().warnings;
+        if !edited {
+            assert_ne!(
+                std::fs::read(&note).unwrap(),
+                first,
+                "replaced, with the summary"
+            );
+            assert_eq!(exported.copies(), Vec::<String>::new());
+            assert_eq!(warnings, Vec::<String>::new());
+            server.stop();
+            continue;
+        }
+        assert_eq!(std::fs::read(&note).unwrap(), mine, "the edited note stays");
+        let copy = exported.copies();
+        assert_eq!(copy.len(), 1, "{copy:?}");
+        let stem = &exported.stem;
+        assert!(
+            [&before, &after]
+                .iter()
+                .any(|day| copy[0] == format!("{stem} (Steno {day}).md")),
+            "{copy:?}"
+        );
+        let beside = std::fs::read(exported.folder.join(&copy[0])).unwrap();
+        assert_ne!(beside, first, "the copy has the summary");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with(&format!("Kept your changes to {stem}.md")),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains(&copy[0]), "{warnings:?}");
+
+        exported
+            .pipeline()
+            .redeliver(exported.meeting.id)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&note).unwrap(), mine);
+        assert_eq!(exported.copies(), copy, "Export again rewrites the copy");
+        server.stop();
+    }
+}
+
 /// The pipeline the M1 test builds: core's fakes, with a cleaner that
 /// fails as a server refuses a request without a key (a 401) whenever the
 /// gated store answered none when it was built.
