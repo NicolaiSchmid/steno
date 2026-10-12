@@ -933,17 +933,23 @@ async fn a_restarted_audio_service_ends_no_call(released_before: bool) {
     recording.sleepers(1);
     assert_still_recording(&recording);
     assert_eq!(recording.armed(), None, "still none shown");
+    // The fresh countdown on a clock of its own, at the same time, so
+    // each clock's sleepers are its own countdown's.
+    let resumed = Arc::new(ManualClock::new());
+    resumed.advance(Duration::from_secs(60));
+    recording.recorder.count_down_on(resumed.clone());
     go.send(()).unwrap();
     // Audio is back (`Delivering`): a fresh grace from now.
     eventually("a fresh countdown once audio is back", || {
         recording.armed() == Some((Some("Zen".to_owned()), 90.0))
     })
     .await;
-    recording.sleepers(1);
-    recording.clock.advance(Duration::from_secs(89));
+    recording.sleepers(0);
+    assert!(resumed.wait_for_sleepers(1), "the fresh countdown sleeps");
+    resumed.advance(Duration::from_secs(89));
     assert_eq!(recording.recorder.status().state, RecordingState::Recording);
-    recording.sleepers(1);
-    recording.clock.advance(Duration::from_secs(1));
+    assert!(resumed.wait_for_sleepers(1));
+    resumed.advance(Duration::from_secs(1));
     eventually("the fresh grace stopped the recording", || {
         recording.recorder.status().state == RecordingState::Idle
     })
@@ -1105,15 +1111,21 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
     recording.sleepers(1);
     let changed = seen.recv_timeout(PATIENCE).expect("the device changed");
     assert_eq!(changed.armed, None, "not shown while it recovers");
-    // The first recovery is a minute in on the countdown's clock.
+    // The first recovery is a minute in on the countdown's clock. The
+    // fresh countdown on a clock of its own, at the same time, so each
+    // clock's sleepers are its own countdown's.
     recording.clock.advance(Duration::from_secs(60));
+    let resumed = Arc::new(ManualClock::new());
+    resumed.advance(Duration::from_secs(60));
+    recording.recorder.count_down_on(resumed.clone());
     go.send(()).unwrap();
     eventually("the resume put a fresh grace in its place", || {
         recording.armed() == Some((Some("Zen".to_owned()), 90.0))
     })
     .await;
-    recording.sleepers(1);
-    recording.clock.advance(Duration::from_secs(60));
+    recording.sleepers(0);
+    assert!(resumed.wait_for_sleepers(1), "the fresh countdown sleeps");
+    resumed.advance(Duration::from_secs(60));
     // The three later recoveries, a second apart on the wall clock.
     eventually_within(
         Duration::from_secs(20),
@@ -1127,11 +1139,11 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
         Some((Some("Zen".to_owned()), 30.0)),
         "no later resume replaced it"
     );
-    recording.sleepers(1);
-    recording.clock.advance(Duration::from_secs(29));
+    assert!(resumed.wait_for_sleepers(1));
+    resumed.advance(Duration::from_secs(29));
     assert_eq!(recording.recorder.status().state, RecordingState::Recording);
-    recording.sleepers(1);
-    recording.clock.advance(Duration::from_secs(1));
+    assert!(resumed.wait_for_sleepers(1));
+    resumed.advance(Duration::from_secs(1));
     eventually("the fresh grace stopped the recording", || {
         recording.recorder.status().state == RecordingState::Idle
     })
