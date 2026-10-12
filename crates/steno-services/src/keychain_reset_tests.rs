@@ -25,7 +25,7 @@ use steno_handover::{FingerprintRecord as _, HandoverIdentity};
 use steno_host::host::Host;
 use steno_host::services::{Handover as _, ListenerState};
 
-use crate::handover::FingerprintFile;
+use crate::handover::{FingerprintFile, ListenerHandover};
 use crate::secrets::FileSecretStore;
 use crate::swift_import::ImportMarker;
 use crate::{App, AppOptions, build};
@@ -34,6 +34,12 @@ use crate::{App, AppOptions, build};
 /// it mints; counts the writes.
 #[derive(Default)]
 struct Marker(AtomicUsize);
+
+impl Marker {
+    fn writes(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 impl ImportMarker for Marker {
     fn mark_import_done(&self) -> Result<(), String> {
@@ -75,7 +81,7 @@ impl Paired {
             confirm,
         };
         let first = build(paired.options()).unwrap();
-        let handover = first.handover.clone().unwrap();
+        let handover = first.handover.as_deref().unwrap();
         assert!(handover.listener().is_some(), "minted at the first launch");
         paired.mac_id = handover.mac_id();
         crate::testing::pair_a_phone(&first.store);
@@ -100,19 +106,8 @@ impl Paired {
 
     fn options(&self) -> AppOptions {
         AppOptions {
-            paths: steno_core::StenoPaths::new(self.support()),
-            database_path: None,
-            keyring: false,
-            opener: Arc::new(steno_host::fakes::FakeOpener::default()),
-            login_item: None,
-            update_source: None,
-            runtime: tokio::runtime::Handle::current(),
-            version: "0.0.0".to_owned(),
-            make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
-            detection: None,
-            lock_patience: std::time::Duration::ZERO,
-            installed_bundle: false,
             import_marker: Some(self.marker.clone()),
+            ..crate::testing::options_under(&self.support())
         }
     }
 
@@ -163,12 +158,11 @@ impl Paired {
     }
 
     /// The handover waits for `reason` and mints nothing: the store holds
-    /// `stored` (none, or the identity found there), the record file is
-    /// the one the phone's pairing left byte for byte, the phone is still
-    /// paired, no listener is built (so nothing listens), and no marker
-    /// was written.
+    /// `stored` (none, or the identity found there), no listener is built
+    /// (so nothing listens), and the record, the phone and the marker are
+    /// as [`Self::kept`] says.
     async fn waits_untouched(&self, launched: &Launched, reason: &str, stored: Option<&str>) {
-        let handover = launched.app.handover.clone().unwrap();
+        let handover = launched.handover();
         assert!(handover.listener().is_none(), "nothing listens");
         assert!(matches!(handover.state(), ListenerState::Failed(_)));
         assert_eq!(handover.mac_id(), "");
@@ -176,15 +170,14 @@ impl Paired {
         assert_eq!(phone["waiting"]["reason"], reason, "{phone}");
         assert_eq!(phone["devices"].as_array().unwrap().len(), 1, "{phone}");
         assert_eq!(self.stored().await.as_deref(), stored, "nothing minted");
-        assert_eq!(std::fs::read(self.record_path()).unwrap(), self.record);
-        assert_eq!(launched.app.store.paired_devices().unwrap(), self.phones);
-        assert_eq!(self.marker.0.load(Ordering::SeqCst), 0, "no marker");
+        self.kept(launched);
     }
 
     /// The listener is back on the identity the phone paired with, started
-    /// for the paired phone, which is kept, and the record is the same.
+    /// for the paired phone, and the record, the phone and the marker are
+    /// as [`Self::kept`] says.
     async fn listens_on_the_known_identity(&self, launched: &Launched) {
-        let handover = launched.app.handover.clone().unwrap();
+        let handover = launched.handover();
         assert!(
             matches!(handover.state(), ListenerState::Listening(_)),
             "{:?}",
@@ -198,9 +191,15 @@ impl Paired {
         let phone = launched.phone();
         assert_eq!(phone["waiting"], Value::Null, "{phone}");
         assert_eq!(self.stored().await.as_deref(), Some(self.pem.as_str()));
+        self.kept(launched);
+    }
+
+    /// The record file is the one the phone's pairing left, byte for byte,
+    /// the phone is still paired, and no marker was written.
+    fn kept(&self, launched: &Launched) {
         assert_eq!(std::fs::read(self.record_path()).unwrap(), self.record);
         assert_eq!(launched.app.store.paired_devices().unwrap(), self.phones);
-        assert_eq!(self.marker.0.load(Ordering::SeqCst), 0, "no marker");
+        assert_eq!(self.marker.writes(), 0, "no marker");
     }
 }
 
@@ -210,6 +209,10 @@ struct Launched {
 }
 
 impl Launched {
+    fn handover(&self) -> &ListenerHandover {
+        self.app.handover.as_deref().unwrap()
+    }
+
     fn phone(&self) -> Value {
         tokio::task::block_in_place(|| self.host.snapshot(BridgeTopic::SettingsPhone).unwrap())
     }
@@ -265,8 +268,8 @@ async fn an_emptied_keychain_waits_until_the_identity_is_back() {
 /// the import's marker first, then a new identity in the store with its
 /// fingerprint recorded over the old one. The paired phones are removed,
 /// as each must pair again (`HandoverIdentity::pair_again`), and the
-/// listener comes up on the new identity, stopped until a phone pairs. The next launch loads
-/// that identity and waits for nothing.
+/// listener comes up on the new identity, stopped until a phone pairs.
+/// The next launch loads that identity and waits for nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
     let paired = Paired::new().await;
@@ -276,17 +279,15 @@ async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
 
     paired.confirm.store(true, Ordering::SeqCst);
     assert!(launched.pair_again());
-    assert_eq!(paired.marker.0.load(Ordering::SeqCst), 1, "the marker");
+    assert_eq!(paired.marker.writes(), 1, "the marker");
     let minted = HandoverIdentity::from_pem(&paired.stored().await.unwrap()).unwrap();
+    let mac_id = steno_core::json::uuid_string(minted.mac_id());
     let fingerprint = hex(&minted.fingerprint());
     assert_ne!(fingerprint, paired.fingerprint, "a new identity");
     assert_eq!(paired.recorded(), Some(fingerprint));
     assert_eq!(launched.app.store.paired_devices().unwrap(), []);
-    let handover = launched.app.handover.clone().unwrap();
-    assert_eq!(
-        handover.mac_id(),
-        steno_core::json::uuid_string(minted.mac_id())
-    );
+    let handover = launched.handover();
+    assert_eq!(handover.mac_id(), mac_id);
     assert_eq!(handover.state(), ListenerState::Stopped, "no phone paired");
     let phone = launched.phone();
     assert_eq!(phone["waiting"], Value::Null, "{phone}");
@@ -294,13 +295,10 @@ async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
     drop(launched);
 
     let again = paired.launch();
-    let handover = again.app.handover.clone().unwrap();
+    let handover = again.handover();
     assert!(handover.listener().is_some());
     assert_eq!(handover.waiting(), None);
-    assert_eq!(
-        handover.mac_id(),
-        steno_core::json::uuid_string(minted.mac_id())
-    );
+    assert_eq!(handover.mac_id(), mac_id);
 }
 
 /// The store holds another identity than the one whose fingerprint is
