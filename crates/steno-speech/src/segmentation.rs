@@ -395,5 +395,19 @@ mod tests {
         assert!((pieces[0].end - 0.08).abs() < 1e-9);
         assert!((pieces[1].start - 0.72).abs() < 1e-9);
         assert!((pieces[1].end - 0.88).abs() < 1e-9);
+        // A window on the frame grid keeps the frame's time bit for bit.
+        assert_eq!(pieces[1].start, 9.0 * FRAME_SECONDS);
+        // Off the grid the phase moves the start, but never before 0.
+        let phased = |frame, phase| Token {
+            id: 0,
+            frame,
+            phase,
+            confidence: 0.5,
+            duration: 1,
+        };
+        let pieces = timed_pieces(&[phased(0, 1_000), phased(10, 640)], &vocab);
+        assert_eq!(pieces[0].start, 0.0);
+        assert!((pieces[0].end - 0.08).abs() < 1e-9);
+        assert!((pieces[1].start - 0.76).abs() < 1e-9);
     }
 }
