@@ -715,10 +715,14 @@ Every package is written in parallel except where a dependency is named:
       pairing, with Try again, which repeats the export and its prompt. Only
       when the user chooses Pair again there, which says that every phone must
       pair again, is a new identity minted: Pair again writes the import's
-      `swift-import-done` marker first, then mints a new identity and writes it
-      to the secret store, then removes the paired phones, then records the new
-      fingerprint (`HandoverIdentity::mint_anew`), so a refused write changes
-      nothing and a stop after the write waits as replaced instead of minting.
+      `swift-import-done` marker first, then notes the new identity's
+      fingerprint, writes the identity to the secret store, removes the paired
+      phones and records the fingerprint, which drops the note
+      (`HandoverIdentity::mint_anew`). A refused write changes nothing; a Pair
+      again that stopped after the write is finished by the next launch or Try
+      again without a new mint, whether or not a fingerprint was recorded
+      before, and a saved pairing that is neither the old nor the new one waits
+      as replaced.
       That waiting state in Settings, with both bridge methods
       (`settings.iphone.tryAgain`, `settings.iphone.pairAgain`), its fixture
       and a test that a refused read mints nothing, came with
