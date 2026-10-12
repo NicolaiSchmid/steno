@@ -73,6 +73,18 @@ impl StoreRetry {
         first: Duration::from_secs(15),
         longest: Duration::from_secs(4 * 60),
     };
+
+    /// The wait before the next try, given the wait before the last one
+    /// and how long ago that try ended; `first` before the first try, or
+    /// after a quiet spell longer than `longest`.
+    fn next_wait(self, last: Option<(Duration, Duration)>) -> Duration {
+        match last {
+            Some((wait, since)) if since <= self.longest => {
+                wait.saturating_mul(2).min(self.longest)
+            }
+            _ => self.first,
+        }
+    }
 }
 
 /// The pipeline [`CurrentPipeline`] holds, with the engine it was built
@@ -324,13 +336,11 @@ fn lock(current: &Mutex<Current>) -> std::sync::MutexGuard<'_, Current> {
 /// wait out the store's busy timeout. Ends once the [`CurrentPipeline`] is
 /// gone or quits.
 async fn retry_the_store(current: Weak<Mutex<Current>>, waits: ModelWaits, retry: StoreRetry) {
-    let mut wait = retry.first;
-    let mut tried_at = None::<tokio::time::Instant>;
+    // The wait before the last try, and when that try ended.
+    let mut last = None::<(Duration, tokio::time::Instant)>;
     loop {
         waits.until_store_retry().await;
-        if tried_at.is_some_and(|at| at.elapsed() > retry.longest) {
-            wait = retry.first;
-        }
+        let wait = retry.next_wait(last.map(|(wait, at)| (wait, at.elapsed())));
         tokio::time::sleep(wait).await;
         let Some(pipeline) = current
             .upgrade()
@@ -356,8 +366,7 @@ async fn retry_the_store(current: Weak<Mutex<Current>>, waits: ModelWaits, retry
                 tracing::warn!(%error, "the retry of the meetings waiting for the database stopped");
             }
         }
-        tried_at = Some(tokio::time::Instant::now());
-        wait = wait.saturating_mul(2).min(retry.longest);
+        last = Some((wait, tokio::time::Instant::now()));
     }
 }
 
@@ -2310,7 +2319,9 @@ mod tests {
 
         current.resume_waiting();
         assert_eq!(current.model_waits.waiting(), Vec::<Uuid>::new());
-        // The retries meet the lock at the same write while it is held.
+        // The resume met the lock before the meeting ran. The retry's
+        // first try mostly comes after the lock is let go below; one that
+        // comes before meets the lock and tries again.
         assert_eq!(meeting_state(&store, later.id), MeetingState::Queued);
         drop(lock);
         eventually("the retry processed the meeting", || {
@@ -2364,5 +2375,24 @@ mod tests {
         );
         assert_eq!(service.pipeline.model_waits.waiting_for_store(), [meeting]);
         assert_eq!(meeting_state(&store, meeting), MeetingState::Queued);
+    }
+
+    /// The store's retry waits `first` before its first try, twice as
+    /// long before each next one up to `longest`, and `first` again after
+    /// a quiet spell longer than `longest`.
+    #[test]
+    fn the_store_retry_doubles_its_wait_and_starts_over_after_a_quiet_spell() {
+        let retry = StoreRetry::APP;
+        let secs = Duration::from_secs;
+        assert_eq!(retry.next_wait(None), secs(15));
+        assert_eq!(retry.next_wait(Some((secs(15), secs(1)))), secs(30));
+        assert_eq!(retry.next_wait(Some((secs(120), secs(1)))), secs(240));
+        assert_eq!(retry.next_wait(Some((secs(240), secs(1)))), secs(240));
+        assert_eq!(
+            retry.next_wait(Some((secs(60), secs(240)))),
+            secs(120),
+            "a spell as long as the longest wait is not quiet"
+        );
+        assert_eq!(retry.next_wait(Some((secs(240), secs(241)))), secs(15));
     }
 }
