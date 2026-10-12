@@ -1197,18 +1197,17 @@ Each lands before `0.11.0-rc.1`.
     recorder's layout (the `ftyp` brands #246's priming checks, no `moov`
     among the first 16 top-level boxes, before an `mdat` or after it or
     after a box of another type, whatever the size field's width), the
-    decoder reads its packets with the phone's
-    settings and trims `AVAudioRecorder`'s 2 112 samples of priming. Where
-    the packets start is found, not assumed: past the zeros (or an `mdat`
-    header, should iOS leave one, then past the zeros in its body if the
-    packets do not start right after it), where eight packets parse in a
-    row. It reads to the end of the file, dropping a last packet the kill
-    cut off; bytes that are not a packet end it there (logged), and a
-    salvage that reads less than half of the bytes after the start fails,
-    as a file with more than half of its packets damaged does (A12). A
-    packet that parses but does not decode becomes silence (A12). Any other
-    file without a `moov` fails as before, with its recording kept. The
-    file is never written.
+    decoder reads its packets with the phone's settings and trims
+    `AVAudioRecorder`'s 2 112 samples of priming. Where the packets start
+    is found, not assumed: past the zeros (or an `mdat` header, should iOS
+    leave one, then past the zeros in its body if the packets do not start
+    right after it), where eight packets parse in a row. It reads to the
+    end of the file, dropping a last packet the kill cut off; bytes that
+    are not a packet end it there (logged), and a salvage that reads less
+    than half of the bytes after the start fails, as a file with more than
+    half of its packets damaged does (A12). A packet that parses but does
+    not decode becomes silence (A12). Any other file without a `moov`
+    fails as before, with its recording kept. The file is never written.
   - **The rate.** 44.1 and 48 kHz share their band tables, so the packets'
     bits cannot tell the two apart (a 48 kHz stream would decode 8.8 %
     slow, unflagged). The evidence is the phone's fixed preset instead: the
@@ -1230,10 +1229,10 @@ Each lands before `0.11.0-rc.1`.
     the meeting is Ready with the detail's `audioWarning` "The phone
     recording was cut off unexpectedly, and its end may be missing." (plus
     A12's sentence when packets became silence; no bridge field changes).
-    The salvage reads up to where the recording was cut off or could not be
-    read, so the sentence holds for both stops. `DamagedAudio::may_be_damaged`
-    answers yes, so #241's retention leaves the recording unstamped and the
-    detail reads kept incomplete.
+    The salvage reads up to where the recording was cut off or could not
+    be read, so the sentence holds for both stops.
+    `DamagedAudio::may_be_damaged` answers yes, so #241's retention leaves
+    the recording unstamped and the detail reads kept incomplete.
   - **Not measured: iOS.** The phone's own files may differ (another
     reserve, an `mdat` header); the salvage looks for the packets rather
     than assuming the offset, but a different layout may still fail.
@@ -1248,31 +1247,34 @@ Each lands before `0.11.0-rc.1`.
     the meeting's folder) is what the salvage needs to read; send its first
     64 KB.
   - Tests: three fixtures made on Forge (`Tests/Fixtures/README.md`): the
-    killed `AVAudioFile` file decodes as its finished twin, sample for sample,
-    up to the kill; `AVAudioRecorder`'s killed file decodes to its 126 packets
-    of silence; every packet of the finished fixtures splits where `stsz`
-    says; other brands, a `moov` in the reserve, no `ftyp`, an `ftyp` alone
-    and a reserve alone stay failed, as does a `moov` after an `mdat` (next to
-    it, after a `free` box, after a 64-bit `mdat`, or after a `uuid` box
-    before the `mdat`, which the box walk alone also refuses), none of them
-    written to; a file on which symphonia's probe panics in a debug build (a
-    64-bit box size of 2^64 - 1) fails, the panic caught, with the file kept; packets of a channel pair or of two channels stay failed; a file cut
-    mid-packet decodes up to the cut; a reserve of 0, 1 000 or 70 000 bytes, a
-    longer `ftyp`, an `mdat` header (of size 0 or a 64-bit size) or a
-    placeholder `mdat` before the zeros decodes the same; a finished file
-    whose `moov` is gone reads from its `mdat`; the packets 24 times over (198
-    KB, past three reads of the file) decode to the last one; bytes
-    overwritten from packet 40 end the salvage there, from packet 8 fail it;
-    overwritten from about 45 % of the packets' bytes the salvage fails, from
-    about 55 % or with exactly half overwritten it reads; a test pins the
-    preset's rate and channels; a packet that parses but does not decode
-    becomes silence and is counted. Packet tests build every syntax branch by
-    hand (short windows and their groups, escapes, pulses, TNS, noise and
-    intensity bands, fill and data elements, and each invalid case).
-    `steno-services` processes the killed fixture to a Ready meeting with the
-    recording untouched, and the same file with another brand to a failed one,
-    its recording untouched too; under "delete after processing" the salvaged
-    recording stays unstamped through the sweep and its detail reads kept
+    killed `AVAudioFile` file decodes as its finished twin, sample for
+    sample, up to the kill; `AVAudioRecorder`'s killed file decodes to its
+    126 packets of silence; every packet of the finished fixtures splits
+    where `stsz` says; other brands, a `moov` in the reserve, no `ftyp`,
+    an `ftyp` alone and a reserve alone stay failed, as does a `moov`
+    after an `mdat` (next to it, after a `free` box, after a 64-bit
+    `mdat`, or after a `uuid` box before the `mdat`, which the box walk
+    alone also refuses), none of them written to; a file on which
+    symphonia's probe panics in a debug build (a 64-bit box size of
+    2^64 - 1) fails, the panic caught and no crash log written, with the
+    file kept; packets of a channel pair or of two channels stay failed; a
+    file cut mid-packet decodes up to the cut; a reserve of 0, 1 000 or
+    70 000 bytes, a longer `ftyp`, an `mdat` header (of size 0 or a 64-bit
+    size) or a placeholder `mdat` before the zeros decodes the same; a
+    finished file whose `moov` is gone reads from its `mdat`; the packets
+    24 times over (198 KB, past three reads of the file) decode to the
+    last one; bytes overwritten from packet 40 end the salvage there, from
+    packet 8 fail it; overwritten from about 45 % of the packets' bytes
+    the salvage fails, from about 55 % or with exactly half overwritten it
+    reads; a test pins the preset's rate and channels; a packet that
+    parses but does not decode becomes silence and is counted. Packet
+    tests build every syntax branch by hand (short windows and their
+    groups, escapes, pulses, TNS, noise and intensity bands, fill and data
+    elements, and each invalid case). `steno-services` processes the
+    killed fixture to a Ready meeting with the recording untouched, and
+    the same file with another brand to a failed one, its recording
+    untouched too; under "delete after processing" the salvaged recording
+    stays unstamped through the sweep and its detail reads kept
     incomplete, while its finished twin is stamped.
   - Owner: audio. It blocks stable (D3).
 
