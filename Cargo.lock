@@ -5457,8 +5457,10 @@ name = "steno-macos"
 version = "0.1.0-rc.3"
 dependencies = [
  "core-foundation 0.10.1",
+ "objc2-foundation",
  "security-framework 3.7.0",
  "security-framework-sys",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
