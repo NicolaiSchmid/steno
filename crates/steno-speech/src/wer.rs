@@ -160,6 +160,10 @@ pub struct TimingAgreement {
     pub within_100ms: usize,
     /// Mean absolute start difference over matched words, in seconds.
     pub mean_abs_seconds: f64,
+    /// Mean signed start difference over matched words, the hypothesis's
+    /// start minus the reference's, in seconds: positive when the
+    /// hypothesis starts later.
+    pub mean_offset_seconds: f64,
 }
 
 impl TimingAgreement {
@@ -191,10 +195,11 @@ pub fn timing_agreement(reference: &[TimedText], hypothesis: &[TimedText]) -> Ti
     let reference_keys: Vec<&str> = reference.iter().map(|(key, _)| key.as_str()).collect();
     let hypothesis_keys: Vec<&str> = hypothesis.iter().map(|(key, _)| key.as_str()).collect();
     let mut agreement = TimingAgreement::default();
-    let mut total_abs = 0.0;
+    let (mut total_abs, mut total_offset) = (0.0, 0.0);
     for edit in align(&reference_keys, &hypothesis_keys) {
         let Edit::Match(i, j) = edit else { continue };
-        let delta = (reference[i].1 - hypothesis[j].1).abs();
+        let offset = hypothesis[j].1 - reference[i].1;
+        let delta = offset.abs();
         agreement.matched += 1;
         if delta <= 0.010 + 1e-9 {
             agreement.within_10ms += 1;
@@ -203,9 +208,11 @@ pub fn timing_agreement(reference: &[TimedText], hypothesis: &[TimedText]) -> Ti
             agreement.within_100ms += 1;
         }
         total_abs += delta;
+        total_offset += offset;
     }
     if agreement.matched > 0 {
         agreement.mean_abs_seconds = total_abs / agreement.matched as f64;
+        agreement.mean_offset_seconds = total_offset / agreement.matched as f64;
     }
     agreement
 }
@@ -294,6 +301,16 @@ mod tests {
         assert_eq!(agreement.within_10ms, 1);
         assert_eq!(agreement.within_100ms, 3);
         assert!((agreement.mean_abs_seconds - 0.025).abs() < 1e-9);
+        assert!((agreement.mean_offset_seconds - 0.025).abs() < 1e-9);
+        // An early start counts against a late one in the signed mean.
+        let early = timing_agreement(
+            &reference[..2],
+            &[timed("hallo", 0.03), timed("welt", 0.47)],
+        );
+        assert!((early.mean_abs_seconds - 0.03).abs() < 1e-9);
+        assert!(early.mean_offset_seconds.abs() < 1e-9);
+        let ahead = timing_agreement(&reference[..1], &[timed("hallo", -0.02)]);
+        assert!((ahead.mean_offset_seconds + 0.02).abs() < 1e-9);
         assert!((agreement.fraction_within_10ms() - 1.0 / 3.0).abs() < 1e-12);
         assert_eq!(timing_agreement(&[], &[]).fraction_within_10ms(), 1.0);
     }

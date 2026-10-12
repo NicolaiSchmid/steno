@@ -105,6 +105,27 @@ impl Report {
         self.mean(|file| file.errors.rate())
     }
 
+    /// Mean signed word-start offset of the Rust words from the Swift
+    /// words, in seconds, over every matched word of the corpus: positive
+    /// when Rust starts later. The parity test gates it.
+    #[must_use]
+    pub fn mean_start_offset_seconds(&self) -> f64 {
+        let matched: usize = self.files.iter().map(|file| file.timing.matched).sum();
+        if matched == 0 {
+            return 0.0;
+        }
+        // Word counts are far below 2^52.
+        #[allow(clippy::cast_precision_loss)]
+        let sum: f64 = self
+            .files
+            .iter()
+            .map(|file| file.timing.mean_offset_seconds * file.timing.matched as f64)
+            .sum();
+        #[allow(clippy::cast_precision_loss)]
+        let matched = matched as f64;
+        sum / matched
+    }
+
     /// Mean RTFx over the files.
     #[must_use]
     pub fn mean_rtfx(&self) -> f64 {
@@ -133,16 +154,16 @@ impl fmt::Display for Report {
         writeln!(f)?;
         writeln!(
             f,
-            "| File | Audio s | Wall s | RTFx | Chunks | Windows | Tokens | Recoveries accepted/tried | Swift words | Rust words | Edits | WER vs Swift | Starts within 10 ms |"
+            "| File | Audio s | Wall s | RTFx | Chunks | Windows | Tokens | Recoveries accepted/tried | Swift words | Rust words | Edits | WER vs Swift | Starts within 10 ms | Mean start offset |"
         )?;
         writeln!(
             f,
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
         )?;
         for file in &self.files {
             writeln!(
                 f,
-                "| {} | {:.2} | {:.2} | {:.0} | {} | {} | {} | {}/{} | {} | {} | {} | {:.2} % | {}/{} ({:.1} %) |",
+                "| {} | {:.2} | {:.2} | {:.0} | {} | {} | {} | {}/{} | {} | {} | {} | {:.2} % | {}/{} ({:.1} %) | {:+.1} ms |",
                 file.name,
                 file.audio_seconds,
                 file.wall_seconds,
@@ -159,17 +180,19 @@ impl fmt::Display for Report {
                 file.timing.within_10ms,
                 file.timing.matched,
                 file.timing.fraction_within_10ms() * 100.0,
+                file.timing.mean_offset_seconds * 1000.0,
             )?;
         }
         writeln!(
             f,
-            "| mean / all | | | {:.0} | | | | | {} | {} | {} | {:.2} % (mean of files {:.2} %) | |",
+            "| mean / all | | | {:.0} | | | | | {} | {} | {} | {:.2} % (mean of files {:.2} %) | | {:+.1} ms |",
             self.mean_rtfx(),
             self.total.reference_words,
             self.total.hypothesis_words,
             self.total.edits(),
             self.total.rate() * 100.0,
             self.mean_file_wer() * 100.0,
+            self.mean_start_offset_seconds() * 1000.0,
         )
     }
 }
