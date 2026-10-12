@@ -134,7 +134,7 @@ impl DiskWatch {
     #[must_use]
     pub(crate) fn system(database_folder: Option<&Path>) -> Self {
         Self {
-            free_space: Arc::new(system_volume),
+            free_space: system_volume(),
             interval: Duration::from_secs(5),
             database_folder: database_folder.map(Path::to_path_buf),
         }
@@ -173,29 +173,66 @@ impl DiskWatch {
     }
 }
 
-/// The volume that holds `path` as the system reports it
+/// The volume that holds a path as the system reports it
 /// ([`DiskWatch::system`]): `statvfs`, an error when that read fails, and
-/// the space free for important use beside it ([`mac_volume`]), left out,
-/// with a `warn` line, when that read fails: the reading drops to
+/// the space free for important use beside it ([`mac_volume`]), left out
+/// when that read fails ([`important_use`]): the reading drops to
 /// `statvfs`, which can stop a recording. Each read asks macOS afresh on a
 /// new `NSURL` (a reused one caches its values; see
 /// `steno_macos::volume`), so the reading follows the writes.
 #[cfg(target_os = "macos")]
-fn system_volume(path: &Path) -> std::io::Result<Volume> {
-    let statvfs = statvfs(path)?;
-    let important = steno_macos::volume::available_for_important_usage(path)
-        .inspect_err(|error| {
-            tracing::warn!(%error, "the space free for important use could not be read");
-        })
-        .ok();
-    Ok(mac_volume(statvfs, important))
+fn system_volume() -> FreeSpace {
+    let failing = Mutex::default();
+    Arc::new(move |path| {
+        let statvfs = statvfs(path)?;
+        let important = important_use(
+            path,
+            steno_macos::volume::available_for_important_usage,
+            &failing,
+        );
+        Ok(mac_volume(statvfs, important))
+    })
 }
 
-/// The volume that holds `path` as the system reports it
+/// The volume that holds a path as the system reports it
 /// ([`DiskWatch::system`]).
 #[cfg(not(target_os = "macos"))]
-fn system_volume(path: &Path) -> std::io::Result<Volume> {
-    statvfs(path)
+fn system_volume() -> FreeSpace {
+    Arc::new(statvfs)
+}
+
+/// The space free for important use on the volume of `path` as `read`
+/// reports it, `None` when the read fails. The first failure of a streak
+/// on a folder logs a `warn` line with the error's kind alone (the error's
+/// text names the folder), every failure the full error at `debug`; a
+/// read that succeeds ends the streak. `failing` holds the folders whose
+/// last read failed.
+#[cfg(any(target_os = "macos", test))]
+fn important_use(
+    path: &Path,
+    read: impl FnOnce(&Path) -> std::io::Result<u64>,
+    failing: &Mutex<std::collections::HashSet<PathBuf>>,
+) -> Option<u64> {
+    let result = read(path);
+    let mut failing = failing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match result {
+        Ok(bytes) => {
+            failing.remove(path);
+            Some(bytes)
+        }
+        Err(error) => {
+            if failing.insert(path.to_path_buf()) {
+                tracing::warn!(
+                    kind = ?error.kind(),
+                    "the space free for important use could not be read"
+                );
+            }
+            tracing::debug!(%error, "the space free for important use could not be read");
+            None
+        }
+    }
 }
 
 /// `statvfs` (`GetDiskFreeSpaceExW` on Windows) of the volume that holds
@@ -4778,28 +4815,72 @@ mod tests {
     /// `statvfs` and no more than `statvfs` plus the gap between the floor
     /// and the hard floor, and above `statvfs` by up to that gap where
     /// important use reads more (a boot volume with purgeable space), give
-    /// or take what other processes write between the reads.
+    /// or take what other processes write between the reads. Up to five
+    /// tries, the first whose `statvfs` reads before and after the reading
+    /// moved by no more than that tolerance deciding: a busy disk can move
+    /// further between two reads.
     #[test]
     fn the_system_reading_of_a_folder_s_volume_is_within_its_size() {
         let folder = tempfile::tempdir().unwrap();
-        let volume = (DiskWatch::system(None).free_space)(folder.path()).unwrap();
+        let watch = DiskWatch::system(None);
+        let volume = (watch.free_space)(folder.path()).unwrap();
         assert!(volume.total > 0, "{volume:?}");
         assert!(volume.available <= volume.total, "{volume:?}");
         #[cfg(target_os = "macos")]
         {
-            let statvfs = statvfs(folder.path()).unwrap().available;
-            let important =
-                steno_macos::volume::available_for_important_usage(folder.path()).unwrap();
             let gap = DiskWatch::STOP_BELOW_BYTES - DiskWatch::HARD_FLOOR_BYTES;
             let slack = 128 * MIB;
-            let numbers = format!(
-                "the reading {}, statvfs {statvfs}, important use {important}",
-                volume.available
-            );
-            let purgeable = important.saturating_sub(statvfs).min(gap);
-            assert!(volume.available + slack >= statvfs + purgeable, "{numbers}");
-            assert!(volume.available <= statvfs + gap + slack, "{numbers}");
+            let mut tries = Vec::new();
+            let held = (0..5).any(|_| {
+                let before = statvfs(folder.path()).unwrap().available;
+                let reading = (watch.free_space)(folder.path()).unwrap().available;
+                let important =
+                    steno_macos::volume::available_for_important_usage(folder.path()).unwrap();
+                let after = statvfs(folder.path()).unwrap().available;
+                let (low, high) = (before.min(after), before.max(after));
+                tries.push(format!(
+                    "the reading {reading}, statvfs {before} then {after}, important use {important}"
+                ));
+                let purgeable = important.saturating_sub(high).min(gap);
+                high - low <= slack
+                    && reading + slack >= low + purgeable
+                    && reading <= high + gap + slack
+            });
+            assert!(held, "{tries:#?}");
         }
+    }
+
+    /// A read of the space free for important use that keeps failing warns
+    /// once per streak on each folder, with the error's kind and not its
+    /// text, which names the folder; a read that succeeds ends the streak.
+    #[test]
+    fn a_failing_important_use_read_warns_once_per_streak_without_the_folder() {
+        let failing = Mutex::default();
+        let folder = Path::new("/Users/someone/Recordings");
+        let other = Path::new("/Volumes/External");
+        let fails = |path: &Path| {
+            std::io::Result::<u64>::Err(std::io::Error::other(format!(
+                "the volume of {} could not be read",
+                path.display()
+            )))
+        };
+        let (readings, logged) = crate::testing::warnings(|| {
+            [
+                important_use(folder, fails, &failing),
+                important_use(folder, fails, &failing),
+                important_use(folder, |_| Ok(7), &failing),
+                important_use(folder, fails, &failing),
+            ]
+        });
+        assert_eq!(readings, [None, None, Some(7), None]);
+        assert_eq!(logged.matches("could not be read").count(), 2, "{logged}");
+        assert!(logged.contains("kind=Other"), "{logged}");
+        assert!(!logged.contains("someone"), "{logged}");
+
+        let (reading, logged) = crate::testing::warnings(|| important_use(other, fails, &failing));
+        assert_eq!(reading, None);
+        assert_eq!(logged.matches("could not be read").count(), 1, "{logged}");
+        assert!(!logged.contains("External"), "{logged}");
     }
 
     const MIB: u64 = 1024 * 1024;
