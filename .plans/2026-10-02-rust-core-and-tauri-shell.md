@@ -219,11 +219,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   of #163), settled by A2 of `.plans/2026-10-07-stable-promotion.md`: the CoreML backend
   runs the shared pipeline. `Backend` in `crates/steno-speech-coreml/src/backend.rs`
   implements `SpeechBackend` over the four models, and `CoreMlParakeetEngine` runs
-  `steno_speech::Transcriber` over four of them at once (`Transcriber::with_workers`,
+  `steno_speech::Transcriber` over four of them at once (`Transcriber::with_more_workers`,
   FluidAudio's `parallelChunkConcurrency`), with `AdaptiveEnergyVad` (Silero runs on ONNX
-  Runtime, which the Mac app keeps out of its process) and three chunker settings of its
+  Runtime, which the Mac app keeps out of its process) and two chunker settings of its
   own (`pipeline_config` in `crates/steno-speech-coreml/src/engine.rs`: the 15 s clamp
-  and no long-pause skip). One decode loop
+  and no long-pause skip; the detector and the workers are set where the engine builds
+  its `Transcriber`, not in `pipeline_config`). One decode loop
   (`decode_window`), one merge (`merge_all`), one chunker (`layout`), one segmentation.
   Numbers are mean WER on FLEURS German `cat/` through the CoreML backend on Forge (load
   2 to 18), from `scripts/coreml-parity-forge.sh`, the variants through
@@ -274,8 +275,11 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   - [x] Chunking: the VAD layout, under the CoreML engine's 15 s window. With the energy
     detector, skipping long pauses cost words at chunk starts after them (at 1.5 s
     overlap 5.86 % against 5.09 % without the skip, 5.13 % with 1 s of padding instead
-    of 0.25 s; at 2 s 5.9 % against 4.87 %), so the CoreML engine skips none, which also
-    decodes a quiet stretch the detector takes for silence. Its detector follows the
+    of 0.25 s; at 2 s 5.9 % against 4.87 %), so the CoreML engine skips none. It still
+    decodes nothing before the first chunk (0.25 s before the first speech the detector
+    finds), after the last (0.25 s after the last speech) or in the rest of a pause that a
+    chunk's start moves past, so quiet speech the detector takes for silence there is lost;
+    decoding those stretches in extra windows is open (#263). Its detector follows the
     recording's level (`AdaptiveEnergyVad`; the fixed 0.01 RMS detector 5.2 % at the
     shipped settings, 6.77 % with the skip at 1.5 s; no detector 5.53 % there). Shorter
     cut windows did worse (at 1.5 s overlap: 13 s plus or minus 2 s 6.20 % with the

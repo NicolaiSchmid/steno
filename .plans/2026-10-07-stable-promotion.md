@@ -445,7 +445,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | ID | Package | Owner |
 |---|---|---|
 | A1 | A streamed decoder and mixdown: CAF and WAV decoded and mixed in bounded chunks, so a two-hour two-channel master never sits in memory whole | audio (#228) |
-| A2 | The CoreML backend on the shared chunker, merge and decoder settings | audio |
+| A2 | The CoreML backend on the shared chunker, merge and decoder settings | audio (#263) |
 | A3 | The diarizer on `ModelStore` (#229), and its inference in the speech sidecar's child on every platform, so a crash in ONNX Runtime ends the child, not the app (invariant 4) | audio (#229, #266) |
 | A4 | PipeWire: `stop()` bounded, the own output and the default move settled (#214); `start`'s first cycle and the latencies measured on Nicolai's hardware | audio (#214) |
 | A5 | One speech engine per reload | #218, merged |
@@ -924,8 +924,10 @@ Each lands before `0.11.0-rc.1`.
   two-hour two-lane recording.
 - **A2 CoreML on the shared chunker** (#263). The CoreML backend moves onto the shared
   chunker, merge and decoder settings, settling the unticked WP4 integration
-  notes. Parity: FLEURS and the Swift fixtures hold within today's tolerance.
-  FLEURS, which has references, is the accuracy gate (Nicolai, 2026-10-12).
+  notes. FLEURS, which has references, is the accuracy gate (Nicolai,
+  2026-10-12): FLEURS German `cat/` through CoreML at or below 5.0 % mean WER,
+  a hard limit (`scripts/coreml-parity-forge.sh` prints PASS or FAIL against it
+  and exits 1 above it). The Swift corpus tracks drift, with a limit of 10 %.
   Measured with A13 (#279) in: FLEURS German `cat/` through CoreML 4.87 % mean
   WER, from 5.46 % (the ONNX engine 4.88 %). The parity test against the Swift
   transcripts of the calibration corpus tracks drift from the old Swift output:
