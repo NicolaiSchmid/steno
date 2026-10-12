@@ -108,6 +108,11 @@ impl PhonesSettingsViewModel {
         !std::mem::replace(&mut self.busy, true)
     }
 
+    /// The user did not confirm Pair again: nothing ran.
+    pub fn cancel_busy(&mut self) {
+        self.busy = false;
+    }
+
     /// Try again's outcome: the line says when the handover still waits.
     pub fn finish_try_again(&mut self, outcome: BoundaryResult<()>, services: &Services) {
         self.finish(outcome, TRY_AGAIN_FAILED, services);

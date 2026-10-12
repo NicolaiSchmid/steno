@@ -73,7 +73,7 @@ describe("PhoneSection", () => {
 			"Your phones can't send recordings right now.",
 		);
 		expect(waiting).toHaveTextContent(
-			"Steno could not bring over this Mac's phone pairing from the previous version. Choose Try again and allow access when macOS asks.",
+			"Steno could not bring over this Mac's phone pairing from the previous version. Choose Try again, then Always Allow when macOS asks.",
 		);
 		expect(screen.getByTestId("pair-again-row")).toHaveTextContent(
 			"Every phone must pair again.",
@@ -110,10 +110,39 @@ describe("PhoneSection", () => {
 		});
 		renderWithBridge(<PhoneSection />, harness);
 		expect(screen.getByTestId("try-again")).toBeDisabled();
-		expect(screen.getByTestId("try-again")).toHaveTextContent("Trying…");
+		expect(screen.getByTestId("try-again")).toHaveTextContent("Try again");
 		expect(screen.getByTestId("pair-again")).toBeDisabled();
 		expect(screen.queryByTestId("listener-failed")).not.toBeInTheDocument();
 	});
+
+	it.each(["importDenied", "unreadable", "missing", "replaced"] as const)(
+		"offers Try again and Pair again while it waits: %s",
+		async (reason) => {
+			const waiting = (await loadFixtureSnapshots())[
+				"settings.iphone.waiting"
+			] as PhoneSettingsSnapshot;
+			const harness = await createBridgeHarness("", {
+				"settings.iphone": {
+					...waiting,
+					listener: { state: "failed", failure: "The keychain is locked." },
+					waiting: { reason, message: "Steno waits.", busy: false },
+				} satisfies PhoneSettingsSnapshot,
+			});
+			renderWithBridge(<PhoneSection />, harness);
+			expect(screen.getByTestId("try-again")).toBeEnabled();
+			expect(screen.getByTestId("pair-again")).toBeEnabled();
+			// Pair again leads only when the pairing is gone.
+			const primary = reason === "missing" ? "pair-again" : "try-again";
+			const other = reason === "missing" ? "try-again" : "pair-again";
+			expect(screen.getByTestId(primary)).toHaveClass("bg-primary");
+			expect(screen.getByTestId(other)).not.toHaveClass("bg-primary");
+			expect(screen.queryByTestId("begin-pairing")).not.toBeInTheDocument();
+			expect(
+				screen.queryByTestId(`revoke-${PHONE_ID}`),
+			).not.toBeInTheDocument();
+			expect(screen.queryByTestId("listener-failed")).not.toBeInTheDocument();
+		},
+	);
 
 	it("shows the listener's failure with its details", async () => {
 		const user = userEvent.setup();

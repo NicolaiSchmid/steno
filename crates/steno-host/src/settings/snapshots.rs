@@ -388,18 +388,25 @@ pub fn export(obsidian: &ObsidianSettingsViewModel, subtitle: &str) -> ExportSet
 pub fn waiting_message(reason: PhoneWaitingReason, platform: Platform) -> String {
     let computer = platform.mac_or("Mac", "computer");
     match reason {
-        PhoneWaitingReason::ImportDenied => format!(
-            "Steno could not bring over this {computer}'s phone pairing from the previous \
-             version. Choose Try again and allow access when macOS asks."
-        ),
-        PhoneWaitingReason::Unreadable => platform
-            .mac_or(
-                "Steno could not read this Mac's phone pairing. Choose Try again and allow \
-                 access when macOS asks.",
-                "Steno could not read this computer's phone pairing. If your system asks you \
-                 to unlock your keyring, unlock it, then choose Try again.",
-            )
+        // Only the Mac brings a pairing over from the Swift app.
+        PhoneWaitingReason::ImportDenied => "Steno could not bring over this Mac's phone \
+             pairing from the previous version. Choose Try again, then Always Allow when macOS \
+             asks."
             .to_owned(),
+        PhoneWaitingReason::Unreadable => match platform {
+            Platform::Macos => {
+                "Steno could not read this Mac's phone pairing. Choose Try again, then Always \
+                 Allow when macOS asks."
+            }
+            Platform::Linux => {
+                "Steno could not read this computer's phone pairing. If your system asks you \
+                 to unlock your keyring, unlock it, then choose Try again."
+            }
+            Platform::Windows => {
+                "Steno could not read this computer's phone pairing. Choose Try again."
+            }
+        }
+        .to_owned(),
         PhoneWaitingReason::Missing => format!(
             "This {computer}'s phone pairing is no longer saved. Choose Pair again to start \
              over."

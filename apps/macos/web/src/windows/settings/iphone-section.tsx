@@ -64,7 +64,9 @@ function PairingCard({
 /**
  * Phone handover waits: the host's sentence on what happened, Try again,
  * and Pair again with what it costs. The host asks before Pair again goes
- * ahead; both are off while one of them runs.
+ * ahead; both are off while one of them runs. When the pairing is gone,
+ * Pair again is the way on, so it is the primary action, as the host's
+ * sentence says.
  */
 function WaitingCard({
 	waiting,
@@ -73,6 +75,7 @@ function WaitingCard({
 }) {
 	const client = useBridge();
 	const { words } = usePlatform();
+	const startOver = waiting.reason === "missing";
 	return (
 		<div className="flex flex-col gap-3" data-testid="phone-waiting">
 			<Callout
@@ -89,13 +92,13 @@ function WaitingCard({
 							disabled={waiting.busy}
 							onClick={() => send(client, "settings.iphone.tryAgain")}
 							size="sm"
-							variant="primary"
+							variant={startOver ? "outline" : "primary"}
 						>
-							{waiting.busy ? "Trying…" : "Try again"}
+							Try again
 						</Button>
 					}
 					description={`Steno reads this ${words.computer}'s phone pairing again. Your phones keep their pairing.`}
-					label="Try again"
+					label="Keep your pairing"
 				/>
 				<FormRow
 					control={
@@ -104,7 +107,7 @@ function WaitingCard({
 							disabled={waiting.busy}
 							onClick={() => send(client, "settings.iphone.pairAgain")}
 							size="sm"
-							variant="outline"
+							variant={startOver ? "primary" : "outline"}
 						>
 							Pair again…
 						</Button>

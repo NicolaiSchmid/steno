@@ -17,7 +17,7 @@
   "subtitle" : "Phones waiting",
   "waiting" : {
     "busy" : false,
-    "message" : "Steno could not bring over this Mac's phone pairing from the previous version. Choose Try again and allow access when macOS asks.",
+    "message" : "Steno could not bring over this Mac's phone pairing from the previous version. Choose Try again, then Always Allow when macOS asks.",
     "reason" : "importDenied"
   }
 }

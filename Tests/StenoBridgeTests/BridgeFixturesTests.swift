@@ -24,8 +24,8 @@ import Testing
   /// listed at the end of `index.json`: the import step of the Tauri app,
   /// which the Swift app never shows, a summary skipped while the import
   /// withheld the API key, which the Swift app never skips, and phone
-  /// handover waiting for Try again or Pair again, which the Swift app's
-  /// never does.
+  /// handover waiting for Try again or Pair again, which the Swift app
+  /// never shows.
   static let rustOnly = [
     "onboarding.import", "meeting.detail.keyWithheld", "settings.iphone.waiting",
   ]

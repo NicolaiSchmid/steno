@@ -2166,7 +2166,7 @@ fn phones_waiting_try_again_until_the_pairing_reads() {
         phone["waiting"],
         json!({
             "reason": "unreadable",
-            "message": "Steno could not read this Mac's phone pairing. Choose Try again and allow access when macOS asks.",
+            "message": "Steno could not read this Mac's phone pairing. Choose Try again, then Always Allow when macOS asks.",
             "busy": false,
         })
     );
@@ -2212,13 +2212,20 @@ fn the_waiting_reasons_are_plain_sentences() {
             ] {
                 assert!(!message.contains(word), "{reason} on {platform}: {message}");
             }
-            let computer = if *platform == Platform::Macos {
-                "Mac"
-            } else {
-                "computer"
-            };
+            // Only the Mac brings a pairing over from the previous version.
+            let computer =
+                if *platform == Platform::Macos || *reason == PhoneWaitingReason::ImportDenied {
+                    "Mac"
+                } else {
+                    "computer"
+                };
             assert!(
                 message.contains(computer),
+                "{reason} on {platform}: {message}"
+            );
+            assert_eq!(
+                message.contains("keyring"),
+                *platform == Platform::Linux && *reason == PhoneWaitingReason::Unreadable,
                 "{reason} on {platform}: {message}"
             );
         }
@@ -2237,9 +2244,12 @@ fn the_waiting_reasons_are_plain_sentences() {
 fn phones_waiting_pair_again_after_the_warning() {
     let answer = Arc::new(Mutex::new(false));
     let answered = answer.clone();
+    let asks = Arc::new(Mutex::new(0));
+    let asked = asks.clone();
     let harness = Harness::builder()
         .with_handover("steno-mac-7f3a", 52_431)
         .confirm_with(move |host, prompt| {
+            *asked.lock().unwrap() += 1;
             assert_eq!(
                 *prompt,
                 steno_host::host::pair_again_prompt(Platform::Macos)
@@ -2280,6 +2290,16 @@ fn phones_waiting_pair_again_after_the_warning() {
     assert!(phone.get("error").is_none(), "{phone}");
     assert_eq!(phone["devices"], json!([]));
     assert_eq!(phone["subtitle"], "No iPhone paired");
+
+    // A page from before the wait ended asks nothing and runs nothing.
+    assert_eq!(*asks.lock().unwrap(), 3);
+    assert!(!harness.host.settings_phone_pair_again().unwrap().confirmed);
+    assert_eq!(
+        *asks.lock().unwrap(),
+        3,
+        "no question once it no longer waits"
+    );
+    assert_eq!(*handover.pairings_again.lock().unwrap(), 2);
 }
 
 /// Swift: `testPhonesPairingListsDevicesAndRevokes`, `testPhonesWithoutAHandoverServiceIsUnavailable`.

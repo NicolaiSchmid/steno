@@ -2397,17 +2397,28 @@ impl BridgeHost for Host {
 
     /// The warning first, the shell's destructive prompt ([`pair_again_prompt`]),
     /// shown while the section is busy so no Try again starts meanwhile;
-    /// then as [`Self::settings_phone_try_again`]. The reply says whether
-    /// the user went ahead.
+    /// then as [`Self::settings_phone_try_again`]. Nothing is asked once
+    /// the handover no longer waits (a page from before Try again or the
+    /// unlock ended the wait): the section is refreshed instead. The reply
+    /// says whether the user went ahead.
     fn settings_phone_pair_again(&self) -> Outcome<ConfirmReply> {
         let Some(handover) = self.shared.services.handover.clone() else {
             return Ok(ConfirmReply { confirmed: false });
         };
+        if handover.waiting().is_none() {
+            self.phones_changed();
+            return Ok(ConfirmReply { confirmed: false });
+        }
         if !self.begin_phones_busy() {
             return Ok(ConfirmReply { confirmed: false });
         }
         if !self.confirm(&pair_again_prompt(self.shared.config.platform)) {
-            self.finish_phones_busy(|phones, _| phones.busy = false);
+            {
+                let mut inner = self.lock();
+                inner.phones.cancel_busy();
+                inner.publisher.schedule(BridgeTopic::SettingsPhone);
+            }
+            self.publish();
             return Ok(ConfirmReply { confirmed: false });
         }
         let outcome = handover.pair_again();
