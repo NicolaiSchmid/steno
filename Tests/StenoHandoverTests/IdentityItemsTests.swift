@@ -43,29 +43,23 @@ import Testing
       writes.append(name)
     }
 
-    static func hex(_ identity: HandoverIdentity) -> String {
-      ContentHash.hex(identity.fingerprint)
-    }
-
     func identity(labelled label: String) throws -> HandoverIdentity? {
       guard let item = certificateItems.first(where: { $0.label == label }) else { return nil }
-      guard privateKey(of: Self.hex(item.identity)) != nil else {
+      guard privateKey(of: hex(item.identity)) != nil else {
         throw IdentityError.malformed(
           "the certificate labelled \"\(label)\" has no private key in the keychain")
       }
       return item.identity
     }
 
-    func certificate(labelled label: String) -> String? {
-      certificateItems.first { $0.label == label }.map { Self.hex($0.identity) }
-    }
+    func certificate(labelled label: String) -> String? { certificates(labelled: label).first }
 
     func certificates(labelled label: String) -> [String] {
-      certificateItems.filter { $0.label == label }.map { Self.hex($0.identity) }
+      certificateItems.filter { $0.label == label }.map { hex($0.identity) }
     }
 
     func privateKey(of certificate: String) -> String? {
-      keyItems.contains { Self.hex($0.identity) == certificate } ? certificate : nil
+      keyItems.contains { hex($0.identity) == certificate } ? certificate : nil
     }
 
     func store(_: MintedIdentity, label: String) throws {
@@ -76,14 +70,14 @@ import Testing
     }
 
     func setLabel(_ label: String, onCertificate certificate: String) throws {
-      guard let index = certificateItems.firstIndex(where: { Self.hex($0.identity) == certificate })
+      guard let index = certificateItems.firstIndex(where: { hex($0.identity) == certificate })
       else { throw IdentityError.notFound(label: label) }
       try write("label the certificate \(label)")
       certificateItems[index].label = label
     }
 
     func setLabel(_ label: String, onKey key: String) throws {
-      guard let index = keyItems.firstIndex(where: { Self.hex($0.identity) == key }) else {
+      guard let index = keyItems.firstIndex(where: { hex($0.identity) == key }) else {
         throw IdentityError.notFound(label: label)
       }
       try write("label the key \(label)")
@@ -97,7 +91,7 @@ import Testing
 
     func deleteKey(_ key: String) throws {
       try write("delete a key found through its certificate")
-      keyItems.removeAll { Self.hex($0.identity) == key }
+      keyItems.removeAll { hex($0.identity) == key }
     }
 
     func deleteKeys(labelled label: String) throws {
@@ -122,8 +116,6 @@ import Testing
   }
 
   deinit { try? FileManager.default.removeItem(at: directory) }
-
-  func hex(_ identity: HandoverIdentity) -> String { ContentHash.hex(identity.fingerprint) }
 
   /// One Mac before Pair Again: the record names `previous`, a phone is
   /// paired, and the keychain holds `known` as the current identity
@@ -234,3 +226,5 @@ import Testing
     }
   }
 }
+
+private func hex(_ identity: HandoverIdentity) -> String { ContentHash.hex(identity.fingerprint) }
