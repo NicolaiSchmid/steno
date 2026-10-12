@@ -294,6 +294,28 @@ P39 then P40. If PR 1 is ready before #278 merges, PR 1 carries the plan, and
   `crates/steno-host/src/lib.rs:23-26`, and the host's `# Threads` section.
 - **Tests:** checks 5, 7 and 12 below, with gated fakes.
 
+**As built.** The code had more host calls on those threads than the list
+above, and PR 1 moves them too:
+
+- `window.open`'s window request, from `bridge_call` and from a deep link on
+  the main thread (`windows::request`, `windows.rs:286-297`), selects the
+  meeting, and so reads the store. Its publish now runs in the background
+  (`host::call_in_background`) after the window opens.
+- The onboarding window's close (`main.rs:580-583`) reloads onboarding from
+  the store on the main thread. It also runs in the background now.
+- The event follower's retention sweep (`run_sweep`, `app.rs:1218`) writes the
+  store. It runs inside the follower's blocking call.
+
+The seam is `host::ShellHost`, implemented for `AppHandle` and for the tests'
+gated fake. `host::call_blocking` is awaited by `bridge::host_command`, and
+`host::call_in_background` starts it for callers that have no one to answer
+(the tray, a window request, the onboarding close). The assert is
+`steno_host::assert_off_ui_thread`. It sits in the shell's `Host::call`,
+`page_ready`, `publish_request` and `onboarding_window_closed`. The
+`Stopping…` check is `the_tray_reads_stopping_while_the_stop_still_runs`,
+through the real `WindowSink` and a stand-in main thread. The smoke reads the
+save from the store's row, not the log: no log line marks a save.
+
 ### WP2: the store's readers and the facade (PR 2, after #278)
 
 - **The store** (`crates/steno-core/src/store/mod.rs`), as decision 2 says:
@@ -375,7 +397,7 @@ is the exception, a guard for an order that is right today.
 | 4 | Stop and save | `a_stop_under_a_held_lock_shows_stopping_at_once_and_saves_once_the_lock_goes` (`Stopping` within 100 ms, `queued` within 1 s of the release), and `a_stop_saves_while_every_runtime_worker_is_blocked`, which pins decision 4 | `crates/steno-services/src/recorder.rs` tests | 2 |
 | 5 | UI Stop button and command workers | `a_held_host_call_leaves_the_command_workers_free`: while a gated fake's call is held, another command on the same one-worker runtime answers | `apps/desktop/src-tauri/src/bridge.rs` tests | 1 |
 | 6 | The UI's commands answer | `a_command_answers_while_a_write_waits`: `meetings.select` and a Settings read answer live during a pipeline write's wait (WP2), and during another window's settings save (WP3) | `locked_store_tests.rs` | 2, 3 |
-| 7 | Tray and menu Record, Stop and Launch at login on the main thread | `the_trays_record_returns_before_the_stop_ends` and `the_trays_launch_at_login_returns_before_the_host_answers` (gated fakes); `Host::call`'s debug assert on the marked thread; and the measured smoke `apps/desktop/scripts/locked-store-linux.sh` | `actions.rs` tests, `crates/steno-host` tests (the assert), the script | 1 |
+| 7 | Tray and menu Record, Stop and Launch at login on the main thread | `the_trays_record_returns_before_the_stop_ends`, `the_trays_launch_at_login_returns_before_the_host_answers` and `the_tray_reads_stopping_while_the_stop_still_runs` (gated fakes); `a_host_call_on_the_marked_ui_thread_asserts`, the debug assert in the shell's `Host::call`; and the measured smoke `apps/desktop/scripts/locked-store-linux.sh` (about 26 s on atlas), in `rust-ci.yml`'s Linux job as "Desktop stop under a locked store" | `actions.rs` tests, `crates/steno-host/src/ui_thread.rs` (the assert), the script | 1 |
 | 8 | Start under the lock | `a_start_under_a_held_lock_is_refused_and_the_ui_stays_live`: after about 5 s the start is refused with "Steno could not create the meeting.", no capture opened, and checks 1 and 6 hold meanwhile | `recorder.rs` tests | 2 |
 | 9 | A host write of the user's own | `a_settings_save_under_a_held_lock_leaves_the_view_models_free`: the save waits and then reports the busy error, while the list, the levels and another command stay live; the same for a delete, whose checkpoint waits | `locked_store_tests.rs` | 3 |
 | 10 | Detection's settings poll | `a_read_does_not_wait_behind_a_write_that_waits_on_another_connection` (the store), and `the_detection_poll_reads_the_settings_while_a_write_waits` | `crates/steno-core/src/store/mod.rs` tests, `crates/steno-services/src/detection/tests.rs` | 2 |
@@ -393,13 +415,15 @@ holds the lock for 8 s from `python3`'s `sqlite3`, and stops through the
 tray's menu (`tray-watcher-linux.py click <bus name> <path> "Stop recording"`).
 The page's Ctrl+Shift+R would go through `bridge_call` instead, and off the
 Mac the tray has no shortcut. It passes when the menu's row reads "Stopping…"
-within 1 s of the click, the log shows the save within 2 s of the release, and
-`require_saved` holds.
+within 1 s of the click, the meeting is `queued` within 2 s of the release (the
+store's row: no log line marks a save), and `require_saved` holds.
 
-- **Measured first.** It joins `rust-ci.yml`'s Linux hosted job, beside
-  `close-without-tray-linux.sh`, only if it takes 2 minutes or less there.
-- **Otherwise it stays local,** run before PR 1 merges and again before rc.1,
-  with
+- **Measured.** A whole run, the headless PipeWire's start included, took
+  25.9 s on atlas (a debug build; the row read "Stopping…" 0.23 s after the
+  click, and the meeting was queued 0.11 s after the release). That is under
+  2 minutes, so it joins `rust-ci.yml`'s Linux hosted job, beside
+  `close-without-tray-linux.sh`, as "Desktop stop under a locked store".
+  It runs by hand with
   `scripts/pipewire-headless.sh apps/desktop/scripts/locked-store-linux.sh target/debug/steno-desktop`.
 
 Not changed, and covered by the tests that already exist: the quit save on its

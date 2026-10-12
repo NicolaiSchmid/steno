@@ -1475,15 +1475,15 @@ The table above names each package and its owner. Their tests:
   saves within 1 s of the lock's release; a start is refused after the
   timeout; a read never waits for a write; the handover's admit leaves its
   worker free; #278's `store_waits` pass on one worker; a host write, a
-  reload, a level update, a flush and a command at once never deadlock.
+  reload, a level update, a flush and a command at once never deadlock; a
+  stop during a slow reload finishes its files at once; a kill between the
+  delete's steps never loses or brings back a recording.
   Where: `crates/steno-services/src/locked_store_tests.rs`, the recorder,
-  auto-stop, detection and app tests, the store's tests, `store_waits.rs`,
-  the shell's `bridge.rs` and `actions.rs` tests, and the smoke
-  `apps/desktop/scripts/locked-store-linux.sh`, which stops through the
-  tray's menu. The smoke is measured first: it joins `rust-ci.yml`'s Linux
-  hosted job only if it takes 2 minutes or less, and otherwise runs locally
-  with `scripts/pipewire-headless.sh apps/desktop/scripts/locked-store-linux.sh
-  target/debug/steno-desktop`.
+  auto-stop, detection and app tests, the kill tests, the store's tests,
+  `store_waits.rs`, the shell's `bridge.rs` and `actions.rs` tests, and the
+  smoke `apps/desktop/scripts/locked-store-linux.sh`, which stops through the
+  tray's menu. The smoke took 26 s on atlas, under the 2 minutes, so it runs
+  in `rust-ci.yml`'s Linux hosted job ("Desktop stop under a locked store").
 
 ### X: the Linux targets (D6)
 
