@@ -3548,34 +3548,33 @@ mod tests {
     }
 
     /// What the busy handler of one quit test ([`count_tries`]) shares
-    /// with the test: how many commit tries found the database held, and
-    /// whether the try in progress may end.
+    /// with the test, in a static of the test's own, as SQLite takes a
+    /// plain function for its busy handler: how many commit tries found
+    /// the database held, and whether the try in progress may end.
     struct BusyTries {
         tries: AtomicUsize,
         open: AtomicBool,
     }
 
-    /// One [`BusyTries`] for each quit test, as SQLite takes a plain
-    /// function for its busy handler.
-    static BUSY: [BusyTries; 3] = [const {
-        BusyTries {
-            tries: AtomicUsize::new(0),
-            open: AtomicBool::new(false),
+    impl BusyTries {
+        const fn new() -> Self {
+            Self {
+                tries: AtomicUsize::new(0),
+                open: AtomicBool::new(false),
+            }
         }
-    }; 3];
 
-    /// The quit tests' slots in [`BUSY`].
-    const EXIT: usize = 0;
-    const UNDER_WAY: usize = 1;
-    const DURING_THE_TRY: usize = 2;
+        fn tries(&self) -> usize {
+            self.tries.load(Ordering::SeqCst)
+        }
+    }
 
-    /// The busy handler of quit test `TEST`, in place of the store's busy
-    /// timeout. SQLite calls it with `waits` 0 when a try first finds the
-    /// database held, so it counts the commit's tries, and it keeps
+    /// A quit test's busy handler over its `busy`, in place of the store's
+    /// busy timeout. SQLite calls it with `waits` 0 when a try first finds
+    /// the database held, so it counts the commit's tries, and it keeps
     /// the try in progress waiting until the test opens it (or for
     /// [`HANG_GUARD`]), as a long busy timeout would.
-    fn count_tries<const TEST: usize>(waits: i32) -> bool {
-        let busy = &BUSY[TEST];
+    fn count_tries(busy: &BusyTries, waits: i32) -> bool {
         if waits == 0 {
             busy.tries.fetch_add(1, Ordering::SeqCst);
         }
@@ -3600,20 +3599,14 @@ mod tests {
         steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"))
     }
 
-    /// Quits on a thread of its own while the busy commit waits in quit
-    /// test `test`'s [`count_tries`], lets the try in progress end once the
-    /// quit is in, and returns once quitting did, failing the test as hung
-    /// after [`HANG_GUARD`].
-    async fn quit_while_busy(recorder: &Arc<CaptureRecorder>, test: usize) {
+    /// [`quit`]s while the busy commit waits in [`count_tries`] over
+    /// `busy`, and lets the try in progress end once the quit is in.
+    async fn quit_while_busy(recorder: &Arc<CaptureRecorder>, busy: &BusyTries) {
         let quitting = recorder.clone();
-        let (returned, quit) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            quitting.stop_for_quit();
-            let _ = returned.send(());
-        });
+        let quitter = std::thread::spawn(move || quit(&quitting));
         eventually("the quit came", || recorder.inner().quitting).await;
-        BUSY[test].open.store(true, Ordering::SeqCst);
-        quit.recv_timeout(HANG_GUARD).expect("quitting returned");
+        busy.open.store(true, Ordering::SeqCst);
+        quitter.join().unwrap();
     }
 
     /// A stop for the app's exit tries its commit once: with the database
@@ -3623,6 +3616,7 @@ mod tests {
     /// next launch, its folder still recorded.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_for_the_exit_tries_its_commit_once() {
+        static BUSY: BusyTries = BusyTries::new();
         let harness = harness_over(
             models_with(&[]),
             "parakeet-v3",
@@ -3630,10 +3624,10 @@ mod tests {
         );
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let hold = held_with_counted_tries(&harness, count_tries::<EXIT>);
-        quit_while_busy(&harness.recorder, EXIT).await;
+        let hold = held_with_counted_tries(&harness, |waits| count_tries(&BUSY, waits));
+        quit_while_busy(&harness.recorder, &BUSY).await;
         drop(hold);
-        assert_eq!(BUSY[EXIT].tries.load(Ordering::SeqCst), 1, "one try");
+        assert_eq!(BUSY.tries(), 1, "one try");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
@@ -3661,18 +3655,19 @@ mod tests {
     /// timeout once more, and the meeting is kept for the next launch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_under_way_when_the_app_quits_tries_its_commit_no_more() {
+        static BUSY: BusyTries = BusyTries::new();
         let harness = harness(&[]);
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let hold = held_with_counted_tries(&harness, count_tries::<UNDER_WAY>);
+        let hold = held_with_counted_tries(&harness, |waits| count_tries(&BUSY, waits));
         let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
         let stopper = harness.recorder.clone();
         let manual = std::thread::spawn(move || stopper.stop());
         stop_seen.recv_timeout(PATIENCE).expect("the stop began");
-        quit_while_busy(&harness.recorder, UNDER_WAY).await;
+        quit_while_busy(&harness.recorder, &BUSY).await;
         drop(hold);
         manual.join().unwrap();
-        assert_eq!(BUSY[UNDER_WAY].tries.load(Ordering::SeqCst), 1, "one try");
+        assert_eq!(BUSY.tries(), 1, "one try");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
@@ -3682,21 +3677,21 @@ mod tests {
     /// more, and the meeting is kept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_quit_during_the_stop_s_first_try_tries_no_more() {
+        static BUSY: BusyTries = BusyTries::new();
         let harness = harness(&[]);
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let hold = held_with_counted_tries(&harness, count_tries::<DURING_THE_TRY>);
+        let hold = held_with_counted_tries(&harness, |waits| count_tries(&BUSY, waits));
         let stopper = harness.recorder.clone();
         let manual = std::thread::spawn(move || stopper.stop());
-        let tries = &BUSY[DURING_THE_TRY].tries;
         eventually_within(HANG_GUARD, "the stop's first try waits", || {
-            tries.load(Ordering::SeqCst) == 1
+            BUSY.tries() == 1
         })
         .await;
-        quit_while_busy(&harness.recorder, DURING_THE_TRY).await;
+        quit_while_busy(&harness.recorder, &BUSY).await;
         drop(hold);
         manual.join().unwrap();
-        assert_eq!(tries.load(Ordering::SeqCst), 1, "one try");
+        assert_eq!(BUSY.tries(), 1, "one try");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 

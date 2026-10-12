@@ -32,16 +32,15 @@ use crate::recorder::MakeCaptureSession;
 /// into a failure; for real capture work see [`HANG_GUARD`].
 pub const PATIENCE: Duration = Duration::from_secs(5);
 
-/// How long a test waits for real work over the synthetic capture before
-/// it fails as hung: a recording's start, its stop and save, a quit, a
-/// device change's rebuild or a restart, a recording that ends on its
-/// own. That work runs the capture's threads, the files and the store,
-/// and a loaded runner stretches it past [`PATIENCE`]. A call that does
-/// that work only when the behaviour under test is broken (a refused
-/// start accepted after all) takes this bound too, so the break fails on
-/// its assertion. No verdict rests on how long the work took: a test
-/// about how often something happens counts it, and a product patience a
-/// test passes in takes this bound unless the patience is what it checks.
+/// How long a test waits for real work over the synthetic capture (a
+/// start, a stop and save, a quit, a rebuild or restart, a recording that
+/// ends on its own) before it fails as hung; a loaded runner stretches
+/// that work past [`PATIENCE`]. A call that does the work only when the
+/// behaviour under test is broken (a refused start accepted after all)
+/// takes this bound too, so the break fails on its assertion. No verdict
+/// rests on how long the work took: a test about how often something
+/// happens counts it, and a product patience a test passes in takes this
+/// bound unless that patience is what it checks.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// A fresh store; the directory lives as long as the guard.
