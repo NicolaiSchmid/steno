@@ -36,12 +36,12 @@
 //! | The step | [`ImportStep`], [`DENIED_EXPORT`], [`FAILED_EXPORT`] |
 //! | Sources (`sources.rs`) | [`SwiftDefaults`], [`SwiftKeychain`] with [`ImportMarker`], [`ApiKeyItem`], [`KeychainRefusal`]; on the Mac `DefaultsCommand` and `LoginKeychain`, and [`marker_on_this_mac`] |
 //! | Identity (`identity.rs`) | [`decode_pkcs12`], [`store_imported_identity`], [`ImportedIdentityError`] |
-//! | Flags in `preferences.json` | [`IMPORT_RAN_KEY`], [`KEY_READ_KEY`], [`KEY_DENIED_KEY`]; Sparkle's two flags are copied into the update schedule's [`AUTOMATIC_CHECKS_KEY`](crate::updates::AUTOMATIC_CHECKS_KEY) and [`AUTOMATIC_DOWNLOAD_KEY`](crate::updates::AUTOMATIC_DOWNLOAD_KEY) |
+//! | Flags in `preferences.json` | [`IMPORT_RAN_KEY`], [`KEY_READ_KEY`], [`KEY_DENIED_KEY`]; Sparkle's two flags are copied into the update schedule's [`AUTOMATIC_CHECKS_KEY`] and [`AUTOMATIC_DOWNLOAD_KEY`] |
 //! | In the keychain | [`IMPORT_DONE_ENTRY`], the marker Pair again keeps |
 //! | The Swift app's names | [`SWIFT_DEFAULTS_DOMAIN`], [`SWIFT_IDENTITY_LABEL`], [`SWIFT_API_KEY_LABEL`] |
 //!
 //! The whole state machine, one row per event. The key gate is what the
-//! graph's API key reads answer ([`KeyGate`]): *closed* is no key item,
+//! graph's API key reads answer (`KeyGate`): *closed* is no key item,
 //! so every read answers no key and the passes run keyless, until the
 //! step ran or was skipped, which opens it; *withheld* answers no key, and for an endpoint
 //! that needs the key the pipeline runs no LLM pass, neither the cleanup
@@ -77,7 +77,8 @@
 //! never touches `handover-identity` again: a `preferences.json` set aside
 //! cannot bring the Swift identity back over one stored since. Pair
 //! again (Settings' iPhone section, [`ImportStep`]'s
-//! [`WaitingImport::pair_again`] and `crate::handover::IdentitySource::pair_again`)
+//! [`WaitingImport::pair_again`](crate::handover::WaitingImport::pair_again)
+//! and [`IdentitySource::pair_again`](crate::handover::IdentitySource::pair_again))
 //! keeps the marker, and writes it ([`ImportMarker::mark_import_done`])
 //! before it stores a new identity, stopping when it cannot: the step only
 //! logs a marker it could not write, which leaves `IMPORT_RAN` as the one
@@ -545,7 +546,7 @@ impl ImportGate {
         let _ = gate.wait_for(|gate| *gate != HandoverGate::Pending).await;
     }
 
-    /// Whether the API key is withheld now ([`KeyGate`]'s withheld state),
+    /// Whether the API key is withheld now (`KeyGate`'s withheld state),
     /// whatever the endpoint; [`Self::withholds_summaries`] is what the
     /// graph asks.
     #[must_use]
