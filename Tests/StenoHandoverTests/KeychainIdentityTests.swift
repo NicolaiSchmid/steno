@@ -81,6 +81,24 @@ import X509
         try IdentityKeychain.load(label: label) != nil, "a promote of nothing deletes nothing")
     }
 
+    /// A certificate left without its key, as a delete that took the keys
+    /// first could leave it, makes `load` throw, and the next delete of its
+    /// label removes it.
+    @Test(.enabled(if: enabled, "set STENO_KEYCHAIN_TESTS=1 to run the login keychain round trip"))
+    func aCertificateWithoutItsKeyIsDeleted() throws {
+      let label = "Steno test identity \(UUID().uuidString)"
+      defer { try? IdentityKeychain.delete(label: label) }
+      try IdentityKeychain.store(
+        try MintedIdentity.mint(commonName: "Steno on Test Mac"), label: label)
+      let items = IdentityKeychain.Items()
+      let certificate = try #require(try items.certificate(labelled: label))
+      try items.deleteKey(try #require(items.privateKey(of: certificate)))
+      #expect(throws: IdentityError.self) { try IdentityKeychain.load(label: label) }
+
+      try IdentityKeychain.delete(label: label)
+      #expect(try IdentityKeychain.load(label: label) == nil)
+    }
+
     /// The #88 trap: a keychain that holds other identities (MDM ones on a
     /// managed Mac) but none of ours. `kSecClassIdentity` queries ignore the
     /// label there, so `load` must still say nil and `loadOrCreate` must mint.

@@ -28,7 +28,10 @@
     /// The label a new identity is stored under until it takes
     /// `defaultLabel` (`Store.stage`, `Store.promote`). A leftover is
     /// harmless: `load(label: defaultLabel)` and the Rust app's import match
-    /// the label exactly, and the next stage deletes it first.
+    /// the label exactly. It is cleared only by the next stage (a Pair Again
+    /// or a first mint), never at launch: after a promote cut short between
+    /// its two relabels, the current identity's key still carries this
+    /// label.
     public static let stagingLabel = "Steno handover identity (new)"
 
     public static func store(_ identity: MintedIdentity, label: String) throws {
@@ -84,30 +87,14 @@
       try setLabel(label, on: stored)
     }
 
-    /// Stores `identity` under `label` alone: whatever `label` held is
-    /// deleted first, and the stored identity is read back.
+    /// `IdentityItems.stage(_:label:)` in the login keychain.
     public static func stage(_ identity: MintedIdentity, label: String) throws -> HandoverIdentity {
-      try delete(label: label)
-      return try storeAndReadBack(identity, label: label)
+      try Items().stage(identity, label: label)
     }
 
-    /// Gives the identity under `staging` the label `label`: what `label`
-    /// holds is deleted, then the staged certificate and its key are
-    /// relabelled. The certificate goes first: with only it relabelled,
-    /// `load(label:)` already finds the identity, because the key is found
-    /// by its hash, not its label. Throws before anything is deleted when
-    /// nothing complete is staged, so `label` is never emptied for nothing.
+    /// `IdentityItems.promote(from:to:)` in the login keychain.
     public static func promote(from staging: String, to label: String) throws {
-      guard let certificate = try storedCertificate(labelled: staging) else {
-        throw IdentityError.notFound(label: staging)
-      }
-      guard let key = privateKey(of: certificate) else {
-        throw IdentityError.malformed(
-          "the certificate labelled \"\(staging)\" has no private key in the keychain")
-      }
-      try delete(label: label)
-      try setLabel(label, on: certificate)
-      try setLabel(label, on: key)
+      try Items().promote(from: staging, to: label)
     }
 
     /// The identity whose certificate is labelled `label`, or nil when no
@@ -126,7 +113,7 @@
         if status == errSecItemNotFound {
           throw IdentityError.malformed(
             "the certificate labelled \"\(label)\" has no private key in the keychain; "
-              + "delete it in Keychain Access to mint a new identity")
+              + "delete it in Keychain Access, then open Steno again")
         }
         throw IdentityError.security("SecIdentityCreateWithCertificate", status)
       }
@@ -145,29 +132,9 @@
       return identity
     }
 
-    /// Removes the certificate(s) and the key(s) stored under `label`.
-    /// Missing items are not an error. Keys are found through their
-    /// certificates first (a key query by label only finds keys this type
-    /// labelled itself), then whatever still carries the label goes. The
-    /// file keychain deletes one item per `SecItemDelete` unless the query
-    /// says `kSecMatchLimitAll`; without it a second labelled certificate
-    /// would survive its key and make every later `load` throw.
+    /// `IdentityItems.delete(label:)` in the login keychain.
     public static func delete(label: String) throws {
-      for certificate in try storedCertificates(labelled: label) {
-        guard let key = privateKey(of: certificate) else { continue }
-        let status = SecItemDelete([kSecClass: kSecClassKey, kSecValueRef: key] as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-          throw IdentityError.security("SecItemDelete(key)", status)
-        }
-      }
-      for itemClass in [kSecClassCertificate, kSecClassKey] {
-        let status = SecItemDelete(
-          [kSecClass: itemClass, kSecAttrLabel: label, kSecMatchLimit: kSecMatchLimitAll]
-            as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-          throw IdentityError.security("SecItemDelete", status)
-        }
-      }
+      try Items().delete(label: label)
     }
 
     /// The CLI's entry point (`steno dev handover serve`, under its own
@@ -180,35 +147,85 @@
       label: String = defaultLabel, commonName: String
     ) throws -> HandoverIdentity {
       if let existing = try handoverIdentity(label: label) { return existing }
-      return try storeAndReadBack(try MintedIdentity.mint(commonName: commonName), label: label)
-    }
-
-    /// Stores `identity` under `label` and reads it back.
-    private static func storeAndReadBack(
-      _ identity: MintedIdentity, label: String
-    ) throws -> HandoverIdentity {
-      try store(identity, label: label)
-      guard let stored = try handoverIdentity(label: label) else {
-        throw IdentityError.notFound(label: label)
-      }
-      return stored
+      return try Items().storeAndReadBack(
+        try MintedIdentity.mint(commonName: commonName), label: label)
     }
 
     /// The items labelled `defaultLabel`, with `stagingLabel` for a new
     /// identity, as the guard's keychain (`HandoverIdentityGuard`).
     public struct Store: HandoverIdentityKeychain {
+      let keychain = LabelledIdentityKeychain(
+        items: Items(), label: defaultLabel, stagingLabel: stagingLabel)
+
       public init() {}
 
-      public func load() throws -> HandoverIdentity? { try handoverIdentity(label: defaultLabel) }
+      public func load() throws -> HandoverIdentity? { try keychain.load() }
 
-      public func staged() throws -> HandoverIdentity? { try handoverIdentity(label: stagingLabel) }
+      public func staged() throws -> HandoverIdentity? { try keychain.staged() }
 
       public func stage(_ identity: MintedIdentity) throws -> HandoverIdentity {
-        try IdentityKeychain.stage(identity, label: stagingLabel)
+        try keychain.stage(identity)
       }
 
-      public func promote() throws {
-        try IdentityKeychain.promote(from: stagingLabel, to: defaultLabel)
+      public func promote() throws { try keychain.promote() }
+    }
+
+    /// The login keychain's certificate and key items, through the lookups
+    /// and writes of this type.
+    struct Items: IdentityItems {
+      func identity(labelled label: String) throws -> HandoverIdentity? {
+        try handoverIdentity(label: label)
+      }
+
+      func certificate(labelled label: String) throws -> SecCertificate? {
+        try storedCertificate(labelled: label)
+      }
+
+      func certificates(labelled label: String) throws -> [SecCertificate] {
+        try storedCertificates(labelled: label)
+      }
+
+      func privateKey(of certificate: SecCertificate) -> SecKey? {
+        IdentityKeychain.privateKey(of: certificate)
+      }
+
+      func store(_ identity: MintedIdentity, label: String) throws {
+        try IdentityKeychain.store(identity, label: label)
+      }
+
+      func setLabel(_ label: String, onCertificate certificate: SecCertificate) throws {
+        try IdentityKeychain.setLabel(label, on: certificate)
+      }
+
+      func setLabel(_ label: String, onKey key: SecKey) throws {
+        try IdentityKeychain.setLabel(label, on: key)
+      }
+
+      /// The file keychain deletes one item per `SecItemDelete` unless the
+      /// query says `kSecMatchLimitAll`; without it a second labelled
+      /// certificate would survive the delete.
+      func deleteCertificates(labelled label: String) throws {
+        try deleteAll(kSecClassCertificate, labelled: label)
+      }
+
+      func deleteKey(_ key: SecKey) throws {
+        let status = SecItemDelete([kSecClass: kSecClassKey, kSecValueRef: key] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+          throw IdentityError.security("SecItemDelete(key)", status)
+        }
+      }
+
+      func deleteKeys(labelled label: String) throws {
+        try deleteAll(kSecClassKey, labelled: label)
+      }
+
+      private func deleteAll(_ itemClass: CFString, labelled label: String) throws {
+        let status = SecItemDelete(
+          [kSecClass: itemClass, kSecAttrLabel: label, kSecMatchLimit: kSecMatchLimitAll]
+            as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+          throw IdentityError.security("SecItemDelete", status)
+        }
       }
     }
 
