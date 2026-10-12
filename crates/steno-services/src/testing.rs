@@ -26,16 +26,17 @@ use steno_speech::SpeechRuntime;
 use crate::pipeline::{BuiltEngine, BuiltPipeline, CurrentPipeline, MakeDependencies};
 use crate::recorder::MakeCaptureSession;
 
-/// How long a test waits for work its own fakes, gates and manual clock
-/// drive, or for a moment of the synthetic capture's audio, before it
-/// fails. That work takes milliseconds, so this bound only turns a hang
+/// How long a test waits for work driven by its own fakes, gates and
+/// manual clock, or for the synthetic capture's first audio once it
+/// records (a level, frames in the files), before it fails. That work takes milliseconds, so this bound only turns a hang
 /// into a failure; for real capture work see [`HANG_GUARD`].
 pub const PATIENCE: Duration = Duration::from_secs(5);
 
-/// How long a test waits for real work over the synthetic capture (a
-/// start, a stop and save, a quit, a rebuild or restart, a recording that
-/// ends on its own) before it fails as hung; a loaded runner stretches
-/// that work past [`PATIENCE`]. A call that does the work only when the
+/// How long a test waits for real work over the synthetic capture before
+/// it fails as hung: a start, a stop and save, a quit, a rebuild or
+/// restart, a recording that ends on its own. A loaded runner stretches
+/// that work past [`PATIENCE`]. A gate the test opens only after such work
+/// takes this bound too. A call that does the work only when the
 /// behaviour under test is broken (a refused start accepted after all)
 /// takes this bound too, so the break fails on its assertion. No verdict
 /// rests on how long the work took: a test about how often something

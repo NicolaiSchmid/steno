@@ -790,11 +790,17 @@ async fn a_device_change_rearms_the_countdown_at_its_resume() {
         .recv_timeout(HANG_GUARD)
         .expect("the device changed");
     assert_eq!(armed_then, None, "not shown while the capture recovers");
-    while rebuilt
-        .recv_timeout(HANG_GUARD)
-        .expect("the capture resumed")
-        != Some(90.0)
-    {}
+    // The notices before the resume read None, so the first armed one is
+    // the resume's.
+    let armed = loop {
+        if let Some(armed) = rebuilt
+            .recv_timeout(HANG_GUARD)
+            .expect("the capture resumed")
+        {
+            break armed;
+        }
+    };
+    assert_eq!(armed, 90.0, "a fresh grace at the resume");
     let recording = std::mem::ManuallyDrop::into_inner(recording);
     assert_eq!(
         recording.armed(),
@@ -1238,7 +1244,7 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
     let once = AtomicBool::new(false);
     recording.recorder.on_change(Arc::new(move || {
         if on_the_notice_thread() && !once.swap(true, Ordering::SeqCst) {
-            let _ = gone.lock().unwrap().recv_timeout(PATIENCE);
+            let _ = gone.lock().unwrap().recv_timeout(HANG_GUARD);
         }
     }));
     recording.start(CaptureMode::Call, None);
