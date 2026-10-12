@@ -286,16 +286,9 @@ impl<B: SpeechBackend> Transcriber<B> {
             }
         });
         // Workers take chunks in order and finish every chunk they take,
-        // so without an error every slot is filled.
-        let mut windows = Vec::with_capacity(chunks.len());
-        for slot in slots {
-            match slot {
-                Some(Ok(tokens)) => windows.push(tokens),
-                Some(Err(error)) => return Err(error),
-                None => {}
-            }
-        }
-        Ok(windows)
+        // so the filled slots come first, and without an error every slot
+        // is filled; the collect stops at the earliest error.
+        slots.into_iter().flatten().collect()
     }
 }
 
