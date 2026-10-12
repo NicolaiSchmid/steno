@@ -48,8 +48,10 @@ pub struct Token { pub id: usize, pub frame: usize, pub confidence: f32, pub dur
 impl From<steno_speech::Token> for Token {
     fn from(t: steno_speech::Token) -> Self { Token { id: t.id as usize, frame: t.frame, confidence: t.confidence, duration: t.duration } }
 }
+// The old merge and repair knew no phase, so their tokens time from the
+// frame; the text the variants score does not depend on it.
 impl From<Token> for steno_speech::Token {
-    fn from(t: Token) -> Self { steno_speech::Token { id: t.id as u32, frame: t.frame, confidence: t.confidence, duration: t.duration } }
+    fn from(t: Token) -> Self { steno_speech::Token { id: t.id as u32, frame: t.frame, phase: 0, confidence: t.confidence, duration: t.duration } }
 }
 
 pub(crate) fn is_swift_whitespace(c: char) -> bool {
