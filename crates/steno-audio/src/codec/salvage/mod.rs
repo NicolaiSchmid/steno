@@ -180,14 +180,13 @@ impl SalvagedPackets {
                 return Ok(None);
             }
         };
-        let bytes = self.buffer[self.at..self.at + length].to_vec();
-        self.at += length;
         let packet = Packet::new_from_boxed_slice(
             TRACK_ID,
             self.packets * PACKET_FRAMES,
             PACKET_FRAMES,
-            bytes.into_boxed_slice(),
+            Box::from(&self.buffer[self.at..self.at + length]),
         );
+        self.at += length;
         self.packets += 1;
         self.read += length as u64;
         Ok(Some(packet))
@@ -236,18 +235,8 @@ impl SalvagedPackets {
     /// Whether every byte from the current one to the end of the file is
     /// zero.
     fn zeros_to_end(&mut self) -> std::io::Result<bool> {
-        let mut offset = self.buffer_offset + self.at as u64;
-        let mut block = vec![0u8; READ_BLOCK];
-        self.file.seek(SeekFrom::Start(offset))?;
-        while offset < self.end {
-            let length = usize::try_from((self.end - offset).min(READ_BLOCK as u64)).unwrap_or(0);
-            self.file.read_exact(&mut block[..length])?;
-            if block[..length].iter().any(|&b| b != 0) {
-                return Ok(false);
-            }
-            offset += length as u64;
-        }
-        Ok(true)
+        let offset = self.buffer_offset + self.at as u64;
+        Ok(first_non_zero(&mut self.file, offset, self.end)?.is_none())
     }
 }
 
@@ -257,15 +246,11 @@ impl SalvagedPackets {
 /// reserve. `None` when the `ftyp` is not the recorder's or a `moov` is
 /// there.
 fn packet_region(file: &mut File, end: u64) -> std::io::Result<Option<Region>> {
-    let mut header = [0u8; 16];
     if end < 8 {
         return Ok(None);
     }
-    read_at(file, 0, &mut header[..8])?;
-    let ftyp_size = u64::from(u32::from_be_bytes([
-        header[0], header[1], header[2], header[3],
-    ]));
-    if &header[4..8] != b"ftyp" || !(16..=256).contains(&ftyp_size) || ftyp_size > end {
+    let (ftyp_size, kind) = box_header(file, 0)?;
+    if &kind != b"ftyp" || !(16..=256).contains(&ftyp_size) || ftyp_size > end {
         return Ok(None);
     }
     let mut ftyp = vec![0u8; usize::try_from(ftyp_size - 8).unwrap_or(0)];
@@ -279,21 +264,17 @@ fn packet_region(file: &mut File, end: u64) -> std::io::Result<Option<Region>> {
         if at + 8 > end {
             return Ok(Some(Region::Reserve(at)));
         }
-        read_at(file, at, &mut header[..8])?;
-        let size = u64::from(u32::from_be_bytes([
-            header[0], header[1], header[2], header[3],
-        ]));
-        let kind = &header[4..8];
-        match kind {
+        let (size, kind) = box_header(file, at)?;
+        match &kind {
             b"moov" => return Ok(None),
             b"mdat" => {
                 let body = if size == 1 { at + 16 } else { at + 8 };
                 // A sized `mdat` may have a `moov` after it.
-                if size >= 8 && at.saturating_add(size).saturating_add(8) <= end {
-                    read_at(file, at + size, &mut header[..8])?;
-                    if &header[4..8] == b"moov" {
-                        return Ok(None);
-                    }
+                if size >= 8
+                    && at.saturating_add(size).saturating_add(8) <= end
+                    && &box_header(file, at + size)?.1 == b"moov"
+                {
+                    return Ok(None);
                 }
                 return Ok(Some(Region::Mdat(body.min(end))));
             }
@@ -325,19 +306,9 @@ fn first_packet(file: &mut File, region: Region, end: u64) -> std::io::Result<Op
         }
         Region::Reserve(at) => at,
     };
-    let mut block = vec![0u8; READ_BLOCK];
-    let mut offset = reserve;
     let limit = end.min(reserve.saturating_add(MAX_RESERVE));
-    let first = loop {
-        if offset >= limit {
-            return Ok(None);
-        }
-        let length = usize::try_from((limit - offset).min(READ_BLOCK as u64)).unwrap_or(0);
-        read_at(file, offset, &mut block[..length])?;
-        if let Some(i) = block[..length].iter().position(|&b| b != 0) {
-            break offset + i as u64;
-        }
-        offset += length as u64;
+    let Some(first) = first_non_zero(file, reserve, limit)? else {
+        return Ok(None);
     };
     for back in [1, 0, 2, 3] {
         let Some(start) = first.checked_sub(back).filter(|&start| start >= reserve) else {
@@ -372,6 +343,33 @@ fn packets_parse_from(file: &mut File, start: u64, end: u64) -> std::io::Result<
         }
     }
     Ok(true)
+}
+
+/// The offset of the first byte from `from` to `limit` that is not zero,
+/// `None` when they all are.
+fn first_non_zero(file: &mut File, from: u64, limit: u64) -> std::io::Result<Option<u64>> {
+    let mut block = vec![0u8; READ_BLOCK];
+    let mut offset = from;
+    while offset < limit {
+        let length = usize::try_from((limit - offset).min(READ_BLOCK as u64)).unwrap_or(0);
+        read_at(file, offset, &mut block[..length])?;
+        if let Some(i) = block[..length].iter().position(|&b| b != 0) {
+            return Ok(Some(offset + i as u64));
+        }
+        offset += length as u64;
+    }
+    Ok(None)
+}
+
+/// The size and the type of the box whose header is at `offset`.
+fn box_header(file: &mut File, offset: u64) -> std::io::Result<(u64, [u8; 4])> {
+    let mut header = [0u8; 8];
+    read_at(file, offset, &mut header)?;
+    let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+    Ok((
+        u64::from(size),
+        [header[4], header[5], header[6], header[7]],
+    ))
 }
 
 fn read_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
