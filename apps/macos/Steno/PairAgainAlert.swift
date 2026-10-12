@@ -13,6 +13,12 @@ enum PairAgainAlert {
     let cancel: String
     /// The warning: Pair Again is destructive and Cancel the default.
     let destructive: Bool
+
+    /// Pair Again's key: Return on the question, none on the warning.
+    var confirmKey: String { destructive ? "" : "\r" }
+    /// The cancel button's key: Escape on the question, Return on the
+    /// warning (and Escape, through `ask()`'s monitor).
+    var cancelKey: String { destructive ? "\r" : "\u{1b}" }
   }
 
   static let question = Prompt(
@@ -54,20 +60,14 @@ enum PairAgainAlert {
   }
 
   /// The alert for `prompt`: Pair Again first, the cancel button second.
-  /// The question's Return confirms and Escape cancels; on the warning
-  /// Return cancels (and Escape, through `ask()`'s monitor).
-  static func alert(for prompt: Prompt) -> NSAlert {
+  private static func alert(for prompt: Prompt) -> NSAlert {
     let alert = NSAlert()
     alert.messageText = prompt.message
     alert.informativeText = prompt.information
     let pairAgain = alert.addButton(withTitle: "Pair Again")
-    let cancel = alert.addButton(withTitle: prompt.cancel)
-    cancel.keyEquivalent = "\u{1b}"
-    if prompt.destructive {
-      pairAgain.hasDestructiveAction = true
-      pairAgain.keyEquivalent = ""
-      cancel.keyEquivalent = "\r"
-    }
+    pairAgain.hasDestructiveAction = prompt.destructive
+    pairAgain.keyEquivalent = prompt.confirmKey
+    alert.addButton(withTitle: prompt.cancel).keyEquivalent = prompt.cancelKey
     return alert
   }
 }

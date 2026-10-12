@@ -1,4 +1,3 @@
-import AppKit
 import XCTest
 
 /// The launch's Pair Again question: nothing pairs again unless the
@@ -35,15 +34,14 @@ final class PairAgainAlertTests: XCTestCase {
   }
 
   /// Return confirms the question, but cancels the destructive warning.
+  /// (The keys, not an `NSAlert`: a second `NSApplication` would crash the
+  /// test host.)
   func testTheWarningsDefaultButtonIsCancel() {
-    let question = PairAgainAlert.alert(for: PairAgainAlert.question).buttons
-    XCTAssertEqual(question.map(\.title), ["Pair Again", "Not Now"])
-    XCTAssertEqual(question.map(\.keyEquivalent), ["\r", "\u{1b}"])
-    XCTAssertFalse(question[0].hasDestructiveAction)
-
-    let warning = PairAgainAlert.alert(for: PairAgainAlert.warning).buttons
-    XCTAssertEqual(warning.map(\.title), ["Pair Again", "Cancel"])
-    XCTAssertEqual(warning.map(\.keyEquivalent), ["", "\r"])
-    XCTAssertTrue(warning[0].hasDestructiveAction)
+    XCTAssertEqual(PairAgainAlert.question.confirmKey, "\r")
+    XCTAssertEqual(PairAgainAlert.question.cancelKey, "\u{1b}")
+    XCTAssertEqual(PairAgainAlert.warning.confirmKey, "")
+    XCTAssertEqual(PairAgainAlert.warning.cancelKey, "\r")
+    XCTAssertEqual(PairAgainAlert.question.cancel, "Not Now")
+    XCTAssertEqual(PairAgainAlert.warning.cancel, "Cancel")
   }
 }

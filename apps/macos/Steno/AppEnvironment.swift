@@ -278,7 +278,7 @@ final class AppEnvironment {
       ) {
         try await identityGuard.loadOrPairAgain(
           commonName: "Steno on \(HandoverConfiguration.defaultServiceName())",
-          askToPairAgain: PairAgainAlert.ask)
+          askToPairAgain: { @MainActor in PairAgainAlert.ask() })
       }
     } catch {
       environment.startupWarnings.append("Phone handover is unavailable: \(error)")
