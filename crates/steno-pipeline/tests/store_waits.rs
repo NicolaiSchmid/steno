@@ -102,35 +102,59 @@ impl TranscriptCleaner for HeldCleaner {
     }
 }
 
-/// The store's busy error, as SQLite reports a lock another connection
-/// held past the busy timeout.
-fn busy() -> StoreError {
+/// The store's error for SQLite's result `code`.
+fn sqlite_error(code: std::ffi::c_int, message: &str) -> StoreError {
     StoreError::Sqlite(rusqlite::Error::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-        Some("database is locked".to_owned()),
+        rusqlite::ffi::Error::new(code),
+        Some(message.to_owned()),
     ))
 }
 
-/// A speaker memory over the store whose first match meets the store
-/// locked: boxed, as `StoreSpeakerMemory` returns it.
-#[derive(Default)]
-struct LockedOnce {
-    refused: AtomicBool,
+/// The store's busy error, as SQLite reports a lock another connection
+/// held past the busy timeout.
+fn busy() -> StoreError {
+    sqlite_error(rusqlite::ffi::SQLITE_BUSY, "database is locked")
+}
+
+/// The store's error for a full disk: not the lock.
+fn full() -> StoreError {
+    sqlite_error(rusqlite::ffi::SQLITE_FULL, "database or disk is full")
+}
+
+/// A speaker memory over the store whose first match meets `error`:
+/// boxed, as `StoreSpeakerMemory` returns it.
+struct FailsOnce {
+    error: fn() -> StoreError,
+    failed: AtomicBool,
     inner: InMemorySpeakerMemory,
 }
 
 #[async_trait]
-impl SpeakerMemory for LockedOnce {
+impl SpeakerMemory for FailsOnce {
     async fn candidates(
         &self,
         embedding: &Embedding,
         limit: usize,
     ) -> BoundaryResult<Vec<SpeakerMatch>> {
-        if !self.refused.swap(true, Ordering::SeqCst) {
-            let boxed: BoxError = Box::new(busy());
+        if !self.failed.swap(true, Ordering::SeqCst) {
+            let boxed: BoxError = Box::new((self.error)());
             return Err(boxed);
         }
         self.inner.candidates(embedding, limit).await
+    }
+}
+
+/// The dependencies with a [`FailsOnce`] speaker memory over `error`.
+fn memory_failing_once(
+    error: fn() -> StoreError,
+) -> impl FnOnce(PipelineDependencies) -> PipelineDependencies {
+    move |mut dependencies| {
+        dependencies.speaker_memory = Arc::new(FailsOnce {
+            error,
+            failed: AtomicBool::new(false),
+            inner: InMemorySpeakerMemory::default(),
+        });
+        dependencies
     }
 }
 
@@ -354,10 +378,10 @@ async fn a_run_the_store_stops_after_the_merge_keeps_its_transcript_and_its_audi
 /// the run waits for the store, and the retry matches them.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_speaker_match_the_store_refuses_waits_instead_of_dropping_the_match() {
-    let world = world(Arc::new(FakeSpeechEngine::default()), |mut dependencies| {
-        dependencies.speaker_memory = Arc::new(LockedOnce::default());
-        dependencies
-    });
+    let world = world(
+        Arc::new(FakeSpeechEngine::default()),
+        memory_failing_once(busy),
+    );
     let pipeline = &world.pipeline;
     let meeting = world.enqueue_call(0);
     world.until_waiting_for_store(meeting).await;
@@ -519,10 +543,11 @@ async fn a_launch_resume_the_store_refuses_runs_again_on_the_store_retry() {
 /// before, and the meeting runs to `ready`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_store_error_that_is_not_the_lock_does_not_wait_for_the_store() {
-    let world = world(Arc::new(FakeSpeechEngine::default()), |mut dependencies| {
-        dependencies.speaker_memory = Arc::new(FullOnce::default());
-        dependencies
-    });
+    assert!(!full().is_busy());
+    let world = world(
+        Arc::new(FakeSpeechEngine::default()),
+        memory_failing_once(full),
+    );
     let pipeline = &world.pipeline;
     let meeting = world.enqueue_call(0);
     pipeline.wait_until_idle().await;
@@ -531,34 +556,6 @@ async fn a_store_error_that_is_not_the_lock_does_not_wait_for_the_store() {
         pipeline.dependencies().model_waits.waiting_for_store(),
         Vec::<Uuid>::new()
     );
-}
-
-/// A speaker memory over the store whose first match meets a full disk:
-/// boxed, as `StoreSpeakerMemory` returns it.
-#[derive(Default)]
-struct FullOnce {
-    refused: AtomicBool,
-    inner: InMemorySpeakerMemory,
-}
-
-#[async_trait]
-impl SpeakerMemory for FullOnce {
-    async fn candidates(
-        &self,
-        embedding: &Embedding,
-        limit: usize,
-    ) -> BoundaryResult<Vec<SpeakerMatch>> {
-        if !self.refused.swap(true, Ordering::SeqCst) {
-            let full = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
-                Some("database or disk is full".to_owned()),
-            ));
-            assert!(!full.is_busy());
-            let boxed: BoxError = Box::new(full);
-            return Err(boxed);
-        }
-        self.inner.candidates(embedding, limit).await
-    }
 }
 
 /// A retry the lock refuses again (at its write that fails a meeting
@@ -642,10 +639,10 @@ async fn a_retry_the_lock_refuses_keeps_its_meetings_and_another_failure_leaves_
 /// the store is left `queued` for the next launch, as a launch leaves it.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owed_launch_resume_puts_back_the_held_meeting_that_waits_for_the_store() {
-    let world = world(Arc::new(FakeSpeechEngine::default()), |mut dependencies| {
-        dependencies.speaker_memory = Arc::new(LockedOnce::default());
-        dependencies
-    });
+    let world = world(
+        Arc::new(FakeSpeechEngine::default()),
+        memory_failing_once(busy),
+    );
     let pipeline = &world.pipeline;
     let waits = pipeline.dependencies().model_waits.clone();
     let parked = world.enqueue_call(2);
@@ -832,10 +829,7 @@ async fn a_quit_while_a_run_waits_on_the_lock_leaves_the_meeting_for_the_next_la
 async fn a_models_install_under_the_lock_leaves_both_meetings_waiting_for_the_store() {
     let engine = Arc::new(Uninstalled::default());
     engine.installed.store(true, Ordering::SeqCst);
-    let world = world(engine.clone(), |mut dependencies| {
-        dependencies.speaker_memory = Arc::new(LockedOnce::default());
-        dependencies
-    });
+    let world = world(engine.clone(), memory_failing_once(busy));
     let pipeline = &world.pipeline;
     let waits = pipeline.dependencies().model_waits.clone();
     let parked = world.enqueue_call(0);
@@ -882,10 +876,10 @@ async fn a_models_install_under_the_lock_leaves_both_meetings_waiting_for_the_st
 /// meeting stays `queued`, unfailed, and the next launch processes it.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_update_hold_during_a_store_wait_runs_nothing_and_the_relaunch_processes_it() {
-    let world = world(Arc::new(FakeSpeechEngine::default()), |mut dependencies| {
-        dependencies.speaker_memory = Arc::new(LockedOnce::default());
-        dependencies
-    });
+    let world = world(
+        Arc::new(FakeSpeechEngine::default()),
+        memory_failing_once(busy),
+    );
     let pipeline = &world.pipeline;
     let meeting = world.enqueue_call(0);
     world.until_waiting_for_store(meeting).await;
@@ -921,10 +915,10 @@ async fn an_update_hold_during_a_store_wait_runs_nothing_and_the_relaunch_proces
 /// retry started under the hold goes on to `ready`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_retry_under_an_update_hold_runs_once_the_hold_is_given_up() {
-    let world = world(Arc::new(FakeSpeechEngine::default()), |mut dependencies| {
-        dependencies.speaker_memory = Arc::new(LockedOnce::default());
-        dependencies
-    });
+    let world = world(
+        Arc::new(FakeSpeechEngine::default()),
+        memory_failing_once(busy),
+    );
     let pipeline = &world.pipeline;
     let meeting = world.enqueue_call(0);
     world.until_waiting_for_store(meeting).await;
