@@ -254,14 +254,7 @@ impl Paired {
     /// [`Self::kept`] says.
     async fn relaunch_loads_the_known_identity(&self) {
         let again = self.launch();
-        let handover = again.handover();
-        assert!(handover.listener().is_some(), "loaded at the launch");
-        assert_eq!(handover.waiting(), None, "waits for nothing");
-        assert_eq!(
-            handover.mac_id(),
-            self.mac_id,
-            "the identity the phones know"
-        );
+        again.loaded(&self.mac_id);
         let phone = again.phone();
         assert_eq!(phone["waiting"], Value::Null, "{phone}");
         assert_eq!(
@@ -307,6 +300,14 @@ struct Launched {
 impl Launched {
     fn handover(&self) -> &ListenerHandover {
         self.app.handover.as_deref().unwrap()
+    }
+
+    /// The launch loaded the identity `mac_id` names and waits for nothing.
+    fn loaded(&self, mac_id: &str) {
+        let handover = self.handover();
+        assert!(handover.listener().is_some(), "loaded at the launch");
+        assert_eq!(handover.waiting(), None, "waits for nothing");
+        assert_eq!(handover.mac_id(), mac_id, "the identity loaded");
     }
 
     fn phone(&self) -> Value {
@@ -400,11 +401,7 @@ async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
     assert_eq!(phone["devices"], json!([]), "{phone}");
     drop(launched);
 
-    let again = paired.launch();
-    let handover = again.handover();
-    assert!(handover.listener().is_some(), "loaded at the launch");
-    assert_eq!(handover.waiting(), None, "waits for nothing");
-    assert_eq!(handover.mac_id(), mac_id, "the new identity");
+    paired.launch().loaded(&mac_id);
 }
 
 /// The store holds another identity than the one whose fingerprint is
