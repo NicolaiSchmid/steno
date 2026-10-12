@@ -143,35 +143,24 @@ pub fn damaged_audio_warning(damage: AudioDamage, source: MeetingSource) -> Opti
     if damage.is_none() {
         return None;
     }
-    let recording = match source {
-        MeetingSource::Phone => "the phone recording",
-        MeetingSource::MacCall | MeetingSource::MacInPerson => "the recording",
+    let (recording, the_recording) = match source {
+        MeetingSource::Phone => ("the phone recording", "The phone recording"),
+        MeetingSource::MacCall | MeetingSource::MacInPerson => ("the recording", "The recording"),
     };
-    let silence = (damage.parts > 0).then(|| silence_length(damage.seconds));
-    Some(match (damage.salvaged, silence) {
-        (false, silence) => format!(
-            "{} of {recording} could not be read and was replaced by silence.",
-            silence.unwrap_or_default()
-        ),
-        (true, None) => format!(
-            "{} was cut off unexpectedly and could only be read up to that point.",
-            capitalized(recording)
-        ),
-        (true, Some(silence)) => format!(
-            "{} was cut off unexpectedly and could only be read up to that point. {silence} of it \
-             could not be read and was replaced by silence.",
-            capitalized(recording)
-        ),
+    let replaced = |of: &str| {
+        format!(
+            "{} of {of} could not be read and was replaced by silence.",
+            silence_length(damage.seconds)
+        )
+    };
+    let cut_off = format!(
+        "{the_recording} was cut off unexpectedly and could only be read up to that point."
+    );
+    Some(match (damage.salvaged, damage.parts > 0) {
+        (false, _) => replaced(recording),
+        (true, false) => cut_off,
+        (true, true) => format!("{cut_off} {}", replaced("it")),
     })
-}
-
-/// `text` with its first letter upper-cased.
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
 }
 
 /// `seconds` of silence in words, rounded: tenths of a second below a
