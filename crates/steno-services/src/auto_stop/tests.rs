@@ -14,8 +14,8 @@ use steno_host::services::Recorder as _;
 
 use super::*;
 use crate::testing::{
-    PATIENCE, SyntheticRecorder, eventually, eventually_within, on_own_thread, synthetic_recorder,
-    synthetic_recorder_over,
+    HANG_GUARD, PATIENCE, SyntheticRecorder, eventually, eventually_within, on_own_thread,
+    synthetic_recorder, synthetic_recorder_over,
 };
 
 /// One step of a [`CallWatch`] script.
@@ -420,16 +420,8 @@ fn recording_over(capture: SyntheticRecorder) -> Recording {
 
 impl Recording {
     fn start(&self, mode: CaptureMode, call_app: Option<&str>) {
-        let (recorder, call_app) = (self.recorder.clone(), call_app.map(str::to_owned));
-        on_own_thread(PATIENCE, "the start returned", move || {
-            recorder.start(mode, call_app.as_deref());
-        });
+        self.capture.start(mode, call_app);
         assert_eq!(self.recorder.status().state, RecordingState::Recording);
-    }
-
-    fn stop(&self) {
-        let recorder = self.recorder.clone();
-        on_own_thread(PATIENCE, "the stop returned", move || recorder.stop());
     }
 
     fn opened(&self, app: Option<&str>) {
@@ -533,10 +525,7 @@ async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
     let while_stopping = recording.watch_stopping();
     recording.sleepers(1);
     recording.clock.advance(Duration::from_secs(1));
-    eventually("the grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording.idle("the grace stopped the recording").await;
     let status = recording.recorder.status();
     assert_eq!(status.auto_stop, None);
     assert_eq!(status.error, None);
@@ -581,10 +570,7 @@ async fn an_unnamed_app_ends_the_call_with_the_bare_reason() {
     assert_eq!(recording.armed(), Some((None, 90.0)));
     recording.sleepers(1);
     recording.clock.advance(AUTO_STOP_GRACE);
-    eventually("the grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording.idle("the grace stopped the recording").await;
     assert_eq!(
         recording.meetings()[0].end_reason,
         Some(RecordingEndReason::CallEnded { app_name: None })
@@ -674,7 +660,7 @@ async fn a_stop_while_armed_keeps_its_own_reason_and_withdraws_the_countdown() {
         let while_stopping = recording.watch_stopping();
         if quit {
             let recorder = recording.recorder.clone();
-            on_own_thread(PATIENCE, "the quit returned", move || {
+            on_own_thread(HANG_GUARD, "the quit returned", move || {
                 recorder.stop_for_quit();
             });
         } else {
@@ -813,10 +799,9 @@ async fn a_device_change_rearms_the_countdown_at_its_resume() {
     assert_eq!(recording.recorder.status().state, RecordingState::Recording);
     assert!(resumed.wait_for_sleepers(1));
     resumed.advance(Duration::from_secs(1));
-    eventually("the fresh grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording
+        .idle("the fresh grace stopped the recording")
+        .await;
     assert_eq!(
         recording.meetings()[0].end_reason,
         Some(RecordingEndReason::CallEnded {
@@ -1369,10 +1354,9 @@ async fn audio_back_arms_a_fresh_countdown_once_the_call_app_let_go() {
     assert_eq!(recording.recorder.status().state, RecordingState::Recording);
     assert!(resumed.wait_for_sleepers(1));
     resumed.advance(Duration::from_secs(1));
-    eventually("the fresh grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording
+        .idle("the fresh grace stopped the recording")
+        .await;
     assert_eq!(
         recording.meetings()[0].end_reason,
         Some(RecordingEndReason::CallEnded {

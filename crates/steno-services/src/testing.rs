@@ -1,7 +1,8 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
-//! old, a paired phone, the waits that fail a test instead of hanging it,
+//! old, a paired phone, the waits that fail a test instead of hanging it
+//! ([`PATIENCE`], and [`HANG_GUARD`] for a recording's start and stop),
 //! and [`warnings`], what a call logs at `warn` and above.
 //!
 //! A test that writes models gives the app an explicit models directory in
@@ -25,6 +26,14 @@ use crate::recorder::MakeCaptureSession;
 
 /// How long a test waits for background work before it fails.
 pub const PATIENCE: Duration = Duration::from_secs(5);
+
+/// How long a test lets a recording's start or its stop and save run
+/// over the synthetic capture before it fails as hung. That work is real
+/// (the capture's threads, the files, the store), and a loaded runner
+/// stretches it past [`PATIENCE`]; the test waits for the call to return
+/// or for the recorder to go idle, and no verdict rests on how long that
+/// took.
+pub const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// A fresh store; the directory lives as long as the guard.
 pub fn temp_store() -> (tempfile::TempDir, Arc<Store>) {
@@ -177,13 +186,43 @@ pub fn synthetic_recorder_over(make_session: MakeCaptureSession) -> SyntheticRec
     }
 }
 
-impl Drop for SyntheticRecorder {
-    fn drop(&mut self) {
+impl SyntheticRecorder {
+    /// Starts a recording in `mode` for `call_app` on a thread of its own,
+    /// as the host calls it, and returns once the start did.
+    pub fn start(&self, mode: steno_bridge::CaptureMode, call_app: Option<&str>) {
         use steno_host::services::Recorder as _;
 
+        let (recorder, call_app) = (self.recorder.clone(), call_app.map(str::to_owned));
+        on_own_thread(HANG_GUARD, "the start returned", move || {
+            recorder.start(mode, call_app.as_deref());
+        });
+    }
+
+    /// Stops the recording on a thread of its own, as the host calls it,
+    /// and returns once the stop saved it.
+    pub fn stop(&self) {
+        use steno_host::services::Recorder as _;
+
+        let recorder = self.recorder.clone();
+        on_own_thread(HANG_GUARD, "the stop returned", move || recorder.stop());
+    }
+
+    /// Waits until the recorder is idle again: a stop it began on its own
+    /// (a grace that ran out, a quit) saved the recording.
+    pub async fn idle(&self, what: &str) {
+        use steno_host::services::Recorder as _;
+
+        eventually_within(HANG_GUARD, what, || {
+            self.recorder.status().state == steno_bridge::RecordingState::Idle
+        })
+        .await;
+    }
+}
+
+impl Drop for SyntheticRecorder {
+    fn drop(&mut self) {
         if self.recorder.is_busy() {
-            let recorder = self.recorder.clone();
-            on_own_thread(PATIENCE, "the stop returned", move || recorder.stop());
+            self.stop();
         }
         let pipeline = self.pipeline.current();
         tokio::task::block_in_place(|| {

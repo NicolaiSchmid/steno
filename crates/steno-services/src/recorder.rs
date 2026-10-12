@@ -2083,7 +2083,7 @@ mod tests {
     use crate::app::BuildError;
     use crate::pipeline::{BuiltEngine, BuiltPipeline, MakeDependencies};
     use crate::testing::{
-        PATIENCE, eventually, eventually_within, fake_dependencies, on_own_thread,
+        HANG_GUARD, PATIENCE, eventually, eventually_within, fake_dependencies, on_own_thread,
         synthetic_capture, temp_store,
     };
     use steno_audio::testing::synthetic::SyntheticOptions;
@@ -2376,7 +2376,7 @@ mod tests {
     /// it when quitting never returns.
     fn quit(recorder: &Arc<CaptureRecorder>) {
         let quitting = recorder.clone();
-        on_own_thread(PATIENCE, "quitting returned", move || {
+        on_own_thread(HANG_GUARD, "quitting returned", move || {
             quitting.stop_for_quit();
         });
     }
@@ -3088,7 +3088,7 @@ mod tests {
         let harness = harness(&[]);
         quit(&harness.recorder);
         let starter = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the start returned", move || {
+        on_own_thread(HANG_GUARD, "the start returned", move || {
             starter.start(CaptureMode::InPerson, None);
         });
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
@@ -3104,7 +3104,7 @@ mod tests {
         let harness = harness(&[]);
         let hold = harness.recorder.hold_starts();
         let starter = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the start returned", move || {
+        on_own_thread(HANG_GUARD, "the start returned", move || {
             starter.start(CaptureMode::InPerson, None);
         });
         let status = harness.recorder.status();
@@ -3115,7 +3115,7 @@ mod tests {
         drop(hold);
         assert_eq!(harness.recorder.status().error, None);
         let starter = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the start returned", move || {
+        on_own_thread(HANG_GUARD, "the start returned", move || {
             starter.start(CaptureMode::InPerson, None);
         });
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
@@ -3203,7 +3203,7 @@ mod tests {
     /// The harness's recorder after a start on a thread of its own.
     fn status_after_a_start(harness: &Harness) -> RecorderStatus {
         let starter = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the start returned", move || {
+        on_own_thread(HANG_GUARD, "the start returned", move || {
             starter.start(CaptureMode::InPerson, None);
         });
         harness.recorder.status()
@@ -3400,7 +3400,7 @@ mod tests {
                 })
             })
             .collect();
-        on_own_thread(PATIENCE, "every start returned", move || {
+        on_own_thread(HANG_GUARD, "every start returned", move || {
             for starter in starters {
                 starter.join().unwrap();
             }
@@ -3419,7 +3419,7 @@ mod tests {
     async fn a_toggle_starts_a_call_and_the_next_one_stops_it() {
         let harness = harness(&[]);
         let toggling = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the first toggle returned", move || {
+        on_own_thread(HANG_GUARD, "the first toggle returned", move || {
             toggling.toggle();
         });
         let status = harness.recorder.status();
@@ -3427,7 +3427,7 @@ mod tests {
         assert_eq!(status.mode, Some(CaptureMode::Call));
         let meeting_id = status.meeting_id.unwrap();
         let toggling = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the second toggle returned", move || {
+        on_own_thread(HANG_GUARD, "the second toggle returned", move || {
             toggling.toggle();
         });
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
@@ -4248,17 +4248,14 @@ mod tests {
         );
     }
 
-    /// How long [`ended_on_its_own`] waits. An ending takes its own time
-    /// before the save (a lost device's restarts back off for about two
-    /// seconds, a failed write waits for the watcher's tick), which a
-    /// loaded Windows runner stretched past [`PATIENCE`]; a recorder that
-    /// never ends still fails the test.
-    const ENDING_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
-
     /// Waits until the recorder is idle again after a recording that ended
-    /// on its own, and returns the saved meeting.
+    /// on its own, and returns the saved meeting. An ending takes its own
+    /// time before the save (a lost device's restarts back off for about
+    /// two seconds, a failed write waits for the watcher's tick), so only
+    /// [`HANG_GUARD`] bounds it: a recorder that never ends still fails
+    /// the test.
     async fn ended_on_its_own(harness: &Harness, meeting_id: Uuid) -> steno_core::Meeting {
-        eventually_within(ENDING_PATIENCE, "the recording ended on its own", || {
+        eventually_within(HANG_GUARD, "the recording ended on its own", || {
             harness.recorder.status().state == RecordingState::Idle
         })
         .await;
