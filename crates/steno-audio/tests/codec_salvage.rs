@@ -621,9 +621,23 @@ fn a_packet_the_decoder_refuses_becomes_silence_in_a_salvage() {
 /// offset unchecked, so a `free` box whose 64-bit size is 2^64 - 1 after
 /// the `ftyp` overflows in a debug build (and is an error in a release
 /// one). With the phone's brands the salvage then refuses it too, as with
-/// another major brand. Neither file is written to.
+/// another major brand. Neither file is written to. With the app's
+/// crash-log hook installed, the caught panics write no crash log and the
+/// one already in the folder stays.
 #[test]
 fn a_file_the_probe_panics_on_fails_and_is_kept() {
+    thread_local! {
+        static PANICS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    let support = tempfile::tempdir().unwrap();
+    let earlier = support.path().join("crash-2026-10-01T12-00-00.000Z.log");
+    std::fs::write(&earlier, "an earlier crash").unwrap();
+    steno_core::crash_log::install_crash_log_hook(support.path().to_path_buf(), None);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        PANICS.with(|count| count.set(count.get() + 1));
+        previous(panic);
+    }));
     let directory = tempfile::tempdir().unwrap();
     let bytes = killed();
     let huge = [
@@ -644,6 +658,17 @@ fn a_file_the_probe_panics_on_fails_and_is_kept() {
         );
         assert_eq!(std::fs::read(&path).unwrap(), variant, "{name}");
     }
+    // The default hook again, for the assertions below and the other tests.
+    drop(std::panic::take_hook());
+    // A release build's probe returns an error for these sizes instead.
+    if cfg!(debug_assertions) {
+        assert_eq!(PANICS.with(std::cell::Cell::get), 2, "the probe panicked");
+    }
+    let logs: Vec<_> = std::fs::read_dir(support.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(logs, [earlier], "no crash log for a caught panic");
 }
 
 /// The phone's settings, as the decode is built from them.
