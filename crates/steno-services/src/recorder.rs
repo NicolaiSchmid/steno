@@ -4770,13 +4770,33 @@ mod tests {
     }
 
     /// The system's reading of a folder's volume reports a size that holds
-    /// its free space, which the floor then counts on every platform.
+    /// its free space, which the floor then counts on every platform. On
+    /// the Mac it counts the space free for important use: no less than
+    /// `statvfs` and no more than `statvfs` plus the gap between the floor
+    /// and the hard floor, and above `statvfs` by up to that gap where
+    /// important use reads more (a boot volume with purgeable space), give
+    /// or take what other processes write between the reads.
     #[test]
     fn the_system_reading_of_a_folder_s_volume_is_within_its_size() {
         let folder = tempfile::tempdir().unwrap();
         let volume = (DiskWatch::system(None).free_space)(folder.path()).unwrap();
         assert!(volume.total > 0, "{volume:?}");
         assert!(volume.available <= volume.total, "{volume:?}");
+        #[cfg(target_os = "macos")]
+        {
+            let statvfs = statvfs(folder.path()).unwrap().available;
+            let important =
+                steno_macos::volume::available_for_important_usage(folder.path()).unwrap();
+            let gap = DiskWatch::STOP_BELOW_BYTES - DiskWatch::HARD_FLOOR_BYTES;
+            let slack = 128 * MIB;
+            let numbers = format!(
+                "the reading {}, statvfs {statvfs}, important use {important}",
+                volume.available
+            );
+            let purgeable = important.saturating_sub(statvfs).min(gap);
+            assert!(volume.available + slack >= statvfs + purgeable, "{numbers}");
+            assert!(volume.available <= statvfs + gap + slack, "{numbers}");
+        }
     }
 
     const MIB: u64 = 1024 * 1024;
@@ -4813,8 +4833,9 @@ mod tests {
 
     /// Below the hard floor on `statvfs` the Mac's reading has no room,
     /// whatever the space free for important use says: macOS may not have
-    /// purged in time. With that read failed `statvfs` meets the floor
-    /// itself.
+    /// purged in time. Above it the minutes count to the hard floor: a call
+    /// at 200 MiB of `statvfs` has 2 left, with 50 GB to purge. With that
+    /// read failed `statvfs` meets the floor itself.
     #[test]
     fn the_mac_has_no_room_below_the_hard_floor_whatever_important_use_says() {
         let rate = 448_000;
@@ -4825,6 +4846,7 @@ mod tests {
         assert_eq!(room(100 * MIB, Some(5 * GB)), Room::Full);
         assert_eq!(room(hard_floor - 1, Some(u64::MAX)), Room::Full);
         assert_eq!(room(hard_floor, Some(5 * GB)), Room::Low { minutes: 1 });
+        assert_eq!(room(200 * MIB, Some(50 * GB)), Room::Low { minutes: 2 });
         assert_eq!(room(floor - 1, None), Room::Full);
         assert_eq!(room(floor - 1, Some(0)), Room::Full);
         assert_eq!(room(floor, None), Room::Low { minutes: 1 });
