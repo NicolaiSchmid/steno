@@ -24,14 +24,15 @@ pub struct ProgressEntry {
     pub progress: Option<ProcessingProgress>,
     /// When `progress` landed, or when the entry was created.
     pub since: DateTime<Utc>,
-    /// What the last run was set aside for, the meeting waiting in the
-    /// queue until the next run's first event; `None` otherwise. Rust only.
+    /// What the last run was set aside for, the meeting waiting `queued`
+    /// (or left `processing` by the store) until the next run's first
+    /// event; `None` otherwise. Rust only.
     pub parked: Option<Parked>,
 }
 
-/// Why a queued meeting's last run was set aside. Rust only: the Swift
-/// pipeline downloaded the models inside the run and failed it on a busy
-/// store.
+/// Why the last run of a meeting `queued` (or left `processing` by the
+/// store) was set aside. Rust only: the Swift pipeline downloaded the
+/// models inside the run and failed it on a busy store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parked {
     /// A model is not installed ([`MeetingEvent::ModelsMissing`]).
@@ -75,7 +76,7 @@ impl ProgressEntry {
     /// The title of a meeting whose run met the store locked by another
     /// process (the other app, another program).
     pub const STORE_BUSY_TITLE: &'static str =
-        "Waiting for another app to finish with Steno's library";
+        "Waiting for another app to finish with Steno's data";
 
     /// The bridge stage of such a meeting, beside `modelsMissing`; the page
     /// drops "starts when the current meeting finishes" for it too.

@@ -223,7 +223,7 @@ describe("MeetingList rows", () => {
 		).toBe("Download the speech models in Settings.");
 	});
 
-	it("says what a meeting waits for when another app holds the library", async () => {
+	it("says what a meeting waits for when another app holds Steno's data", async () => {
 		const list = await fixtureList();
 		const row = list.groups[0]?.meetings[0];
 		if (!row) {
@@ -232,14 +232,14 @@ describe("MeetingList rows", () => {
 		const waiting = {
 			meetingID: row.id,
 			stage: "storeBusy",
-			title: "Waiting for another app to finish with Steno's library",
+			title: "Waiting for another app to finish with Steno's data",
 			fraction: 0,
 		};
 		// Queued, or still `processing` when the store kept the mark.
 		for (const state of ["queued", "processing"] as const) {
 			expect(
 				rowPreview({ ...row, state, preview: undefined }, waiting, false),
-			).toBe("Waiting for another app to finish with Steno's library.");
+			).toBe("Waiting for another app to finish with Steno's data.");
 		}
 	});
 

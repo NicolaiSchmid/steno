@@ -2256,7 +2256,7 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         ),
         (
             Refusal::StoreBusy,
-            "Waiting for another app to finish with Steno's library.",
+            "Waiting for another app to finish with Steno's data.",
         ),
         (
             Refusal::NotOffered,
@@ -2743,7 +2743,7 @@ fn a_meeting_the_store_kept_waiting_says_what_it_waits_for() {
     assert_eq!(entry(&harness)["stage"], "storeBusy");
     assert_eq!(
         entry(&harness)["title"],
-        "Waiting for another app to finish with Steno's library"
+        "Waiting for another app to finish with Steno's data"
     );
     harness.host.store_changed();
     assert_eq!(

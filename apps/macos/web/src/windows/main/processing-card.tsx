@@ -16,7 +16,7 @@ export interface ProcessingCardProps {
 /** The progress stage of a queued meeting whose run waits for a model download. */
 export const MODELS_MISSING_STAGE = "modelsMissing";
 
-/** The progress stage of a queued meeting whose run waits for another app to let go of the library. */
+/** The progress stage of a queued meeting whose run waits for another app to let go of Steno's data. */
 export const STORE_BUSY_STAGE = "storeBusy";
 
 /** Whether the entry's run was set aside, its title saying what it waits for. */
@@ -30,7 +30,8 @@ export function isParked(entry: ProgressEntry): boolean {
  * Where the pipeline is with this meeting while it is queued or processing:
  * the stage, the time left, a bar, and the privacy line. Before the first
  * progress event the bar is indeterminate and the title says so; a meeting
- * that waits for a model download, or for the library, says so instead.
+ * that waits for a model download, or for another app to finish with
+ * Steno's data, says so instead.
  */
 export function ProcessingCard({ state, entry }: ProcessingCardProps) {
 	const { words } = usePlatform();

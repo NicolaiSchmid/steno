@@ -46,14 +46,14 @@ describe("ProcessingCard", () => {
 		).not.toBeInTheDocument();
 	});
 
-	it("says what a meeting waits for when another app holds the library", async () => {
+	it("says what a meeting waits for when another app holds Steno's data", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(
 			<ProcessingCard
 				entry={{
 					meetingID: MEETING,
 					stage: STORE_BUSY_STAGE,
-					title: "Waiting for another app to finish with Steno's library",
+					title: "Waiting for another app to finish with Steno's data",
 					fraction: 0,
 				}}
 				state="queued"
@@ -61,7 +61,7 @@ describe("ProcessingCard", () => {
 			harness,
 		);
 		expect(screen.getByTestId("processing-stage")).toHaveTextContent(
-			"Waiting for another app to finish with Steno's library",
+			"Waiting for another app to finish with Steno's data",
 		);
 		expect(
 			screen.queryByTestId("processing-remaining"),
