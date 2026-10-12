@@ -148,12 +148,35 @@ The writes under the lock today:
 `rerun_summary` and `redeliver` only claim and spawn (`pipeline.rs:278-290`).
 The Swift import already runs with the lock released (`host.rs:2450-2460`).
 
-**The recorder hook publishes first.** `recorder_changed` schedules
-`recording` and today calls `store_changed` before it publishes
-(`host.rs:842-853`). The stop calls the hook at `recorder.rs:1489`, before
-`session.stop()` at 1502. So it publishes the `recording` topic first, then
-reloads the list. A stop's `Stopping` reaches the page and the tray before any
-list work. There is no reload mutex for it to wait on.
+**The recorder hook never waits behind a reload.** The stop calls the hook
+(`self.notify()`) at `recorder.rs:1489`, before `session.stop()` finishes the
+files at 1502. Today the hook is not safe there:
+
+- `recorder_changed` takes the view-model lock to schedule `recording`
+  (`host.rs:842-853`), and a reload in flight holds that lock across its
+  reads (`store_changed`, `host.rs:809-831`);
+- `publish` takes the publishing mutex, then the view models
+  (`host.rs:688-717`), so a publish waiting on a reload also holds up the
+  next one;
+- when the state or the meeting moved, the hook runs `store_changed` itself,
+  on the stop's thread, before it returns.
+
+So a stop can wait behind a reload before its files finish. Readers make that
+wait short, not zero: a reload still waits for a free reader. In WP2 the hook
+changes:
+
+- It builds the `recording` snapshot from the recorder's status alone (the
+  topic reads nothing else, `host.rs:617-618`) and emits it under a lock of its
+  own, never the view-model lock or the publishing mutex. The status carries
+  a sequence number, so an older `recording` snapshot is never emitted after
+  a newer one. Levels stay on the 20 Hz throttle.
+- When the state or the meeting moved, it hands the list reload to a reload
+  thread the host owns, and returns. A request that arrives while a reload
+  runs marks one more reload. The hook never runs the reload on the caller's
+  thread, and never waits for one in flight.
+
+A stop's `Stopping` reaches the page and the tray before any list work, and
+the files finish without waiting for a reload (check 16).
 
 **The lock order**, from first taken to last:
 
@@ -166,6 +189,8 @@ list work. There is no reload mutex for it to wait on.
    - the secret store's read in `reload_sections` (the secret store must not
      call back into the host);
    - a reader's checkout;
+   - the recorder hook's own `recording` lock (WP2), which takes only the
+     recorder's status lock and the sink slot inside it;
    - the sink slot.
 
 The store's writer mutex is taken only with none of 2 to 4 held. Code holding
@@ -274,6 +299,11 @@ P39 then P40. If PR 1 is ready before #278 merges, PR 1 carries the plan, and
 - **The store** (`crates/steno-core/src/store/mod.rs`), as decision 2 says:
   - the readers, with `READERS = 2`, the wait for a free one, and `query_only`
     (also around `read` on the in-memory store);
+  - the recorder hook (`crates/steno-host/src/host.rs`, `recorder_changed`):
+    the `recording` snapshot from the recorder's status under a lock of its
+    own, and the list reload on the host's reload thread, as decision 3 says.
+    It is in WP2 because the readers are what make a reload wait on
+    something other than a write;
   - the checkpoint over the writer and every reader;
   - the nesting `debug_assert!`;
   - `Store::off_the_workers` behind the `tokio` feature;
@@ -304,7 +334,7 @@ P39 then P40. If PR 1 is ready before #278 merges, PR 1 carries the plan, and
   (`clippy::all` with `-D warnings`), so a std guard held across the facade's
   await fails the build.
 - **Tests:** checks 1, 2 and 6 (a pipeline write that waits), and checks 3, 4,
-  8, 10, 11, 13 and 15.
+  8, 10, 11, 13, 15 and 16.
 
 ### WP3: the host's writes leave the view-model lock (PR 3, before rc.1)
 
@@ -313,11 +343,20 @@ P39 then P40. If PR 1 is ready before #278 merges, PR 1 carries the plan, and
   `crates/steno-host/src/host.rs`, `settings/mod.rs`, `settings/audio.rs`,
   `settings/phones.rs`, `main_window/detail.rs`, `main_window/list.rs` and
   `speakers.rs`.
-- **The recorder hook.** `recorder_changed` publishes before it reloads.
+- **The writes and the recorder's files.** `Recorder::forget_recording` and
+  `restore_recording` leave the view-model lock in the same order they run in
+  today. The delete forgets the folder entry first (the file operation; when
+  it fails, `checkpoint_durably` makes the rows durable instead,
+  `recorder.rs:1895-1906`). Then the delete commits, and then the files go
+  (`list.rs:264-300`). A delete that left the rows restores the entry (or,
+  failing, checkpoints durably, `recorder.rs:1913-1920`). The publish comes
+  last. A kill between any two of these steps never loses a recording and
+  never brings a deleted one back (check 17).
 - **The assert and the docs.** The "view models held" flag and its
   `debug_assert!` in the store's three write paths. The new lock order goes
   into the host's `# Threads` section.
-- **Tests:** checks 1, 2 and 6 (a host write that waits), and checks 9 and 14.
+- **Tests:** checks 1, 2 and 6 (a host write that waits), and checks 9, 14
+  and 17.
 
 ## Acceptance
 
@@ -325,7 +364,8 @@ Each check that needs the lock holds another connection's write transaction
 (`WriteLockHold`, from #278) for 7 s. Each one runs on a runtime with one
 worker, so a wait on that worker shows as a missed deadline. "Live" means the
 observed thing happens within 200 ms during the hold. Every check fails without
-its WP: on `main`, or, for check 13, on #278's head with one worker.
+its WP: on `main`, or, for check 13, on #278's head with one worker. Check 17
+is the exception, a guard for an order that is right today.
 
 | # | Delay from the audit | Check | Where | WP |
 |---|---|---|---|---|
@@ -344,6 +384,8 @@ its WP: on `main`, or, for check 13, on #278's head with one worker.
 | 13 | Pipeline runs on the workers | every `store_waits` test passes on one worker, including the quit during a run's wait | `store_waits.rs` | 2 |
 | 14 | Deadlocks in the new lock order | `host_writes_reloads_levels_flushes_and_commands_at_once_never_deadlock`: under `WriteLockHold`, a host write, a `store_changed`, a level update, a flush and a command run at once, and all finish within 5 s of the release; the "view models held" assert fires on a write planted under the lock | `locked_store_tests.rs`, `crates/steno-core/src/store/mod.rs` tests | 3 |
 | 15 | The readers' own rules | `a_write_through_read_fails_on_both_stores` (file and in-memory, `query_only`); `a_store_call_inside_a_store_closure_asserts`; `the_checkpoint_waits_for_reads_in_flight_and_holds_off_new_ones` | `crates/steno-core/src/store/mod.rs` tests | 2 |
+| 16 | The stop's hook behind a slow reload | `a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files`: a reload is held in flight with every reader busy (a held reader), then the recorder stops; `Stopping` reaches the sink within 100 ms, and the session's files finish while the reload is still held | `crates/steno-services/src/recorder.rs` tests | 2 |
+| 17 | The delete's files and rows off the lock | `a_kill_after_the_entry_is_forgotten_keeps_the_meeting`, `a_kill_after_the_delete_commits_never_brings_the_meeting_back` and `a_kill_before_a_kept_meetings_entry_is_restored_keeps_it`: a child process deletes through the host, is killed at a gate between two steps, and the next launch lists the meeting with its recording, or does not list it and adopts no master, exactly once. A guard, not a fix: it passes on `main` and fails on a WP3 that reorders the steps | `crates/steno-services/src/kill_tests.rs` | 3 |
 
 **Check 7's smoke** runs on the `xvfb-recording-linux.sh` harness, with the
 stand-in tray host that `close-without-tray-linux.sh:142-189` uses. It records,
