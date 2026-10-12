@@ -2278,7 +2278,10 @@ fn phones_waiting_pair_again_after_the_warning() {
     *handover.pair_again_failure.lock().unwrap() = Some("the keychain refused the write".into());
     assert!(harness.host.settings_phone_pair_again().unwrap().confirmed);
     let phone = harness.snapshot(BridgeTopic::SettingsPhone);
-    assert_eq!(phone["error"], "Steno could not make a new pairing.");
+    assert_eq!(
+        phone["error"],
+        "Steno could not finish the new pairing. Choose Pair again."
+    );
     assert_eq!(phone["errorDetails"], "the keychain refused the write");
     assert_eq!(phone["waiting"]["reason"], "missing");
 

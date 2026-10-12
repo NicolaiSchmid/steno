@@ -97,7 +97,7 @@ function WaitingCard({
 							Try again
 						</Button>
 					}
-					description={`Steno reads this ${words.computer}'s phone pairing again. Your phones keep their pairing.`}
+					description={`Steno reads this ${words.computer}'s phone pairing again.`}
 					label="Keep your pairing"
 				/>
 				<FormRow
