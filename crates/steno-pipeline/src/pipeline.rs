@@ -632,6 +632,14 @@ impl SharedSpeechEngine {
         WeakSpeechEngine(Arc::downgrade(&self.0))
     }
 
+    /// How many jobs claim the engine now, between their warm-up and their
+    /// last lane: what a test waits on to know a job has claimed it.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn claims(&self) -> usize {
+        *self.claim_count()
+    }
+
     /// The number of claims, under their lock.
     fn claim_count(&self) -> MutexGuard<'_, usize> {
         self.0

@@ -1409,6 +1409,21 @@ async fn the_diarizer_warm_up_waits_for_a_release() {
     assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
 }
 
+/// Waits until `count` jobs claim `pipeline`'s speech engine. A job
+/// claims it in the same poll that takes it to its warm-up, and drops it in
+/// the same poll that takes it to its release, so a job counted (or no
+/// longer counted) here goes on to the lock a warm-up holds. A signal, not
+/// a time: a loaded runner can take any time to get there.
+async fn until_claims(pipeline: &ProcessingPipeline, count: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while pipeline.dependencies().speech_engine.claims() != count {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{count} jobs never claimed the engine"));
+}
+
 /// [`GatedEngine`] whose second `prepare` also waits, until `open` is
 /// notified: the first is the first job's warm-up.
 struct SecondPrepareHeld {
@@ -1480,10 +1495,10 @@ async fn a_job_claimed_while_a_finisher_waits_on_a_warm_up_keeps_the_engine_load
         .expect("the warm-up holds the lock");
     // The first job's lanes end; it waits on the lock to release.
     gated.open.notify_one();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    until_claims(&pipeline, 0).await;
     // The second job claims the engine and waits on the lock to warm up.
     let second = enqueue_call(&world, &pipeline);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    until_claims(&pipeline, 1).await;
     assert_eq!(gated.log(), ["prepare"]);
 
     engine.open.notify_one();
@@ -1525,7 +1540,7 @@ async fn a_finisher_that_sees_another_claim_does_not_wait_on_a_warm_up() {
         .expect("the warm-up holds the lock");
     // The second job claims the engine and waits on the lock to warm up.
     let second = enqueue_call(&world, &pipeline);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    until_claims(&pipeline, 2).await;
     // The first job's lanes end; it finishes under the held lock.
     gated.open.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
