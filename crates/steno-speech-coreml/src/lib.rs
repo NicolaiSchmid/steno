@@ -84,7 +84,11 @@ pub struct Token {
 }
 
 /// The shared loop's token, its `u32` id widened to the `usize` this
-/// crate's vocabulary indexes by.
+/// crate's vocabulary indexes by. Its phase is always 0 here and is
+/// dropped: every window this crate decodes starts on the frame grid
+/// (`chunking`'s starts and fills and the repair's windows are whole
+/// frames, and `decode_frames` leaves the phase at 0), so a frame's time
+/// is exact.
 impl From<steno_speech::Token> for Token {
     fn from(token: steno_speech::Token) -> Self {
         Token {

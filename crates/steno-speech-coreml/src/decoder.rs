@@ -139,6 +139,7 @@ pub fn decode_window<M: TdtModel<Error = SpeechError> + ?Sized>(
                 tokens.push(steno_speech::Token {
                     id: decision.token,
                     frame: spec.frame_offset + final_t.min(effective_len - 1),
+                    phase: 0,
                     confidence: confidence(decision.probability),
                     duration,
                 });

@@ -22,13 +22,17 @@ pub fn merge_all(windows: &[Vec<Token>], overlap_seconds: f64, vocab: &Vocab) ->
     merged
 }
 
+/// Raises a token that starts before the one ahead of it to that one's
+/// frame and phase. The frames come out as a running maximum of frames
+/// alone would make them; the phase only orders tokens on the same frame
+/// from windows that started at different points inside it.
 fn enforce_monotonic(tokens: &mut [Token]) {
-    let mut max = 0;
+    let mut max = (0, 0);
     for token in tokens {
-        if token.frame < max {
-            token.frame = max;
+        if (token.frame, token.phase) < max {
+            (token.frame, token.phase) = max;
         }
-        max = token.frame;
+        max = (token.frame, token.phase);
     }
 }
 
@@ -199,6 +203,7 @@ mod tests {
         Token {
             id,
             frame,
+            phase: 0,
             confidence: 1.0,
             duration: 1,
         }
@@ -415,5 +420,27 @@ mod tests {
         let right = vec![token(1, 12), token(2, 11)];
         let merged = merge_all(&[left, right], 1.5, &vocab());
         assert!(merged.windows(2).all(|w| w[0].frame <= w[1].frame));
+    }
+
+    #[test]
+    fn starts_never_run_backwards_inside_a_frame_after_a_merge() {
+        // The left window started 900 samples into its first frame, the
+        // right 100 samples into its: the right's next token on frame 12
+        // would start 800 samples before the left's last one.
+        let phased = |id, frame, phase| Token {
+            phase,
+            ..token(id, frame)
+        };
+        let left = vec![phased(0, 10, 900), phased(1, 12, 900)];
+        let right = vec![phased(1, 12, 100), phased(2, 12, 100), phased(3, 14, 100)];
+        let merged = merge_all(&[left, right], 1.5, &vocab());
+        assert_eq!(
+            merged
+                .iter()
+                .map(|t| (t.id, t.frame, t.phase))
+                .collect::<Vec<_>>(),
+            [(0, 10, 900), (1, 12, 900), (2, 12, 900), (3, 14, 100)]
+        );
+        assert!(merged.windows(2).all(|w| w[0].sample() <= w[1].sample()));
     }
 }
