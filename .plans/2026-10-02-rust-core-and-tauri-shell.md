@@ -2817,12 +2817,25 @@ touch and admission lines; each fix is ported to Swift before cutover.
 
 ### Shell
 
-- Launch at login is a Launch Agent through `tauri-plugin-autostart`, where the Swift
-  app registers with `SMAppService`; the `requiresApproval` state never occurs on the
-  Rust side. On macOS the cutover moves the Rust app onto `SMAppService.mainApp` too,
-  so the approval copy stays reachable; with the new identifier the app registers
-  itself, and the Swift entry is handled as `.plans/2026-10-07-stable-promotion.md`
-  (D4, S6) says.
+- Launch at login on macOS is `SMAppService.mainApp`, as in the Swift app, through
+  `smappservice-rs` (`autostart/main_app.rs`), so `requiresApproval` occurs and the
+  approval copy is reachable; Linux and Windows keep `tauri-plugin-autostart`. Under
+  the new identifier, `com.nicolaischmid.steno.desktop`, each launch first removes the
+  Launch Agent a build under `uno.schmid.steno.desktop` left behind
+  (`~/Library/LaunchAgents/Steno.plist`), but only when it runs from an installed app
+  bundle (not a plain binary under `target/`, a mounted disk image under `/Volumes/`
+  or an `AppTranslocation` copy; a bundle built under `target/` counts as installed)
+  and is not a `fixture-host` build. Then the host's
+  first-launch registration (`Host::register_login_item_on_first_launch`, one path on
+  every platform) registers the main app once, at the first launch with the stored
+  `launch_at_login` setting on, counted under `steno.mainAppRegistered` on the Mac
+  (`steno.loginItemRegistered`, which the earlier build set for its agent, counts only
+  off the Mac). On the Mac a `NotFound` status, which a binary run outside a bundle
+  reads, is not counted, and a run from outside an installed bundle
+  (`HostConfig::installed_bundle`, set by the shell) neither registers nor counts; a
+  failed registration logs a warning and tries again next launch; after that only
+  General's switch registers or removes it. The Swift entry is left to macOS, and R3 of
+  `.plans/2026-10-07-stable-promotion.md` finds out what it does (D4, S6).
 - Packaged installs (stable plan X5, Rust only): `STENO_DISTRIBUTION=aur` or `=nix`
   (the environment first, then the value the build was given;
   `steno_services::updates::updates_are_managed`) turns the update check off, and
@@ -3334,7 +3347,7 @@ PR off `main`.
 | On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | merged |
 | Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | merged |
 | On Windows the credential store keeps the API key and the handover identity on this computer (`CRED_PERSIST_LOCAL_MACHINE`) instead of with the roaming profile, and moves the `keyring` crate's roaming credentials there on their first read, keeping the stored blob under `CRED_PRESERVE_CREDENTIAL_BLOB` (`steno-services`) | `fix/windows-credential-persist` | #262 | merged |
-| A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
+| A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | merged |
 | Stable plan A9: the AAC priming trimmed from the edit list, the gapless tag or, in the phone recorder's layout alone, AVFoundation's default; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | merged |
 | S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | merged |
 | The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | merged |
@@ -3350,6 +3363,7 @@ PR off `main`.
 | An app started inside another program's service (a Hyprland key binding without `uwsm-app`) moves at launch into a scope of its own with 20 s to save, an AppImage's mount servers into scopes of their own wherever the app runs, and the desktop README says what saves at each session end under Hyprland (X1 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-session-end` | #272 | merged |
 | Stable plan X3: every tray action is in the tray's menu, a click doing nothing the menu does not, and on Linux a follower of the status notifier watcher on the session bus (its owner and `IsStatusNotifierHostRegistered`, at launch and at every change) decides the close: with no host, as on GNOME without the AppIndicator extension, closing the main window quits through Quit's path and saves a recording first, which `close-without-tray-linux.sh` checks in CI (`apps/desktop`) | `fix/desktop-linux-tray` | #275 | merged |
 | The handover behind a firewall: TCP 23820 on Linux (`HandoverConfiguration::LINUX_PORT`), set otherwise by `STENO_HANDOVER_PORT` or the setting `handoverPort` (a stored port that is not one ignored with a warning), a taken port giving way to one the system chooses with a warning, a start during a stop waiting for it, so a restart keeps the port; the AUR package's `ufw` profile `Steno`; the NixOS module's `programs.steno.openFirewall` and `handoverPort` (X4 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-core`, `steno-services`, `packaging/aur/`, `nix/`) | `fix/desktop-handover-firewall` | #276 | merged |
+| S6, the identifier half: `com.nicolaischmid.steno.desktop` on every platform, the Swift `SUPublicEDKey` in `Info.plist` (checked in the built bundle), `panel-anchor.json` in the support directory and read once from the earlier identifier's config directory, and the macOS login item on `SMAppService.mainApp`, which removes the earlier build's Launch Agent at each launch and registers itself once, at the first launch with `launch_at_login` on (`steno.mainAppRegistered`; S6 of `.plans/2026-10-07-stable-promotion.md`; desktop shell) | `feat/desktop-identifier` | #268 | merged |
 | WP9b import of the Swift app's preferences, API key and handover identity on the Mac's first launch after the update, behind an onboarding step; `steno-macos` for the PKCS#12 export (S6 of `.plans/2026-10-07-stable-promotion.md`) | `feat/swift-import` | #236 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,

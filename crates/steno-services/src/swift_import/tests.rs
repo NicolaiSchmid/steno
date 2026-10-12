@@ -1475,6 +1475,7 @@ fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
         lock_patience: std::time::Duration::ZERO,
         update_source: None,
         detection: None,
+        installed_bundle: false,
     }
 }
 
