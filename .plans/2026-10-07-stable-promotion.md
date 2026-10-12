@@ -447,7 +447,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; the call-mode start is A10's, whose step 2 runs the tone check on the Mac | audio (#246) |
 | A10 | Call mode without an output client: the tap includes Steno, and the capture starts a silent output IOProc of its own on the aggregate's clock master, so with nothing playing the first callback comes within 100 ms of `start` returning and 200 ms of the call to `start`; no in-app playback while recording, enforced by `Playback` | audio |
 | A12 | An undecodable AAC packet becomes silence of its length, counted and shown on the meeting | audio (#264) |
-| A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio |
+| A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -1098,7 +1098,7 @@ Each lands before `0.11.0-rc.1`.
   frame (`range.start / 1280`), and the VAD layout's chunks almost never
   start on a frame boundary, so every word of a chunk came out early by
   the samples the chunk lay past that boundary: 0 to 80 ms, 38 ms on
-  average. Found by A2 (#263).
+  average. Found by A2 (#263); fixed by #279.
   - `steno_speech::decode_window` takes the window's first sample. Token
     frames stay on the recording's grid, which the merge and the recovery
     count in, so no decision changes; each token carries the samples its
