@@ -1,9 +1,10 @@
 name: Desktop release
 
 # Builds the Tauri shell's installer bundles on the three platforms, signs
-# what can be signed, and on a `desktop-v*` tag publishes them with the
-# updater manifests. WP9 of .plans/2026-10-02-rust-core-and-tauri-shell.md;
-# apps/desktop/README.md (Release) describes the whole flow.
+# what can be signed, and on a `v*` tag publishes them with the updater
+# manifests: the Steno release (stable plan D1, "Release mechanics" in
+# .plans/2026-10-07-stable-promotion.md). apps/desktop/README.md (Release)
+# describes the whole flow.
 #
 #   macOS    `.app` and `.dmg`, Apple silicon. The Tauri bundler signs with
 #            the Developer ID certificate from a throwaway keychain
@@ -20,9 +21,14 @@ name: Desktop release
 # Every updater artifact gets a `.sig` from TAURI_SIGNING_PRIVATE_KEY, the
 # private half of `plugins.updater.pubkey` in tauri.conf.json (no password).
 #
-# A `desktop-v<version>` tag (the `[workspace.package]` version) builds all
-# three platforms and publishes; a manual run builds the platforms it is
-# given and publishes nothing.
+# A `v<version>` tag (the `[workspace.package]` version) builds all three
+# platforms and publishes; a manual run builds the platforms it is given
+# and publishes nothing. The build number, CFBundleVersion on the Mac, is
+# the commit count, above every build on the `appcast` branch (Sparkle
+# orders by it alone), and `check-bundle.sh --signed --handoff` holds the
+# `.app` to what the Swift app's last update needs. A tag run also signs
+# the Sparkle handoff item (handoff-item.sh, the `sparkle-item` artifact).
+# The old `desktop-v*` tags stay; nothing builds them again.
 #
 # `assets` then gathers every bundle into one directory (release-assets.sh),
 # checks the updater signatures, writes `latest.json`, and checksums and
@@ -40,17 +46,22 @@ name: Desktop release
 #
 # Publishing writes one GitHub release per tag with those assets, then
 # updates the rolling `desktop-beta` and `desktop-stable` lanes that
-# `updater.rs` reads (updater-lanes.sh decides which). Every release here
-# is a pre-release and never "latest": until the Mac cutover
-# (.plans/2026-10-04-mac-cutover.md) the "latest release" belongs to the
-# Swift app.
+# `updater.rs` reads (updater-lanes.sh decides which). A version with a
+# hyphen is a pre-release and never "latest". A stable version is "latest",
+# carries the `appcast` branch's feed as `appcast.xml` (the feed of the
+# first Swift release, which reads `releases/latest`), bumps the Homebrew
+# cask and the AUR package once their secrets exist, and puts the Nix flake
+# lines in the summary. Then the `handoff` job, behind the `appcast`
+# environment's required reviewer, puts the handoff item on the `appcast`
+# branch, once: it runs again only for the version named by the repository
+# variable HANDOFF_ITEM_REPLACE.
 #
 # `cargo deny check` (deny.toml) must pass before any bundle builds. The
 # bundles carry the real host; the opt-in `fixture-host` feature stays out.
 
 on:
   push:
-    tags: ['desktop-v*']
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       platforms:
@@ -80,8 +91,13 @@ jobs:
       platforms: ${{ steps.plan.outputs.platforms }}
       version: ${{ steps.version.outputs.version }}
       wix_version: ${{ steps.version.outputs.wix_version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      build: ${{ steps.version.outputs.build }}
     steps:
+      # The whole history: the build number is the commit count.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # The assets job's secrets, named here so a missing one fails before
       # any bundle is built; each bundle job checks its own. Only whether
@@ -97,15 +113,35 @@ jobs:
           set -euo pipefail
           version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
           test -n "$version" || { echo "::error::no version under [workspace.package] in Cargo.toml"; exit 1; }
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "desktop-v$version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not name the workspace version $version; tag desktop-v$version or bump [workspace.package] first"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not name the workspace version $version; tag v$version or bump [workspace.package] first"
             exit 1
           fi
           # Before any build: a version WiX cannot take fails here.
           wix_version="$(apps/desktop/scripts/wix-version.sh "$version")"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "wix_version=$wix_version" >> "$GITHUB_OUTPUT"
-          echo "version=$version wix_version=$wix_version"
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+          build="$(git rev-list --count HEAD)"
+          {
+            echo "version=$version"
+            echo "wix_version=$wix_version"
+            echo "prerelease=$prerelease"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=$version wix_version=$wix_version prerelease=$prerelease build=$build"
+
+      # Sparkle offers an item only above the running build, so the build
+      # number must be above every build the `appcast` branch holds (read
+      # only here; the `handoff` job writes it). Each tag sits on its own
+      # version-bump commit, so no two tags share a count.
+      - name: Build number against the appcast branch
+        env:
+          BUILD: ${{ steps.version.outputs.build }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin refs/heads/appcast
+          git show FETCH_HEAD:appcast.xml > "$RUNNER_TEMP/appcast.xml"
+          python3 apps/desktop/scripts/handoff-appcast.py check-build "$RUNNER_TEMP/appcast.xml" "$BUILD"
       - id: plan
         env:
           PLATFORMS: ${{ inputs.platforms || 'linux,windows,macos' }}
@@ -136,13 +172,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
-      # macOS only (signing-keychain.sh). Outside the workspace and named
-      # apart from the Swift release's, which may share the runner.
+      # macOS only (signing-keychain.sh). Outside the workspace, so no
+      # checkout or cache step can pick it up.
       KEYCHAIN_PATH: ${{ github.workspace }}/../steno-desktop-release.keychain-db
     steps:
+      # The whole history on macOS, whose build number is the commit count.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ matrix.name == 'macos' && '0' || '1' }}
 
       # Before any tool is installed or built: name every missing secret.
+      # Of the Sparkle key, only whether it is set reaches this step; the
+      # Handoff item step is the only one that sees it.
       - name: Check secrets
         shell: bash
         env:
@@ -152,11 +193,12 @@ jobs:
           ASC_KEY_ID: ${{ matrix.name == 'macos' && secrets.ASC_KEY_ID || '' }}
           ASC_ISSUER_ID: ${{ matrix.name == 'macos' && secrets.ASC_ISSUER_ID || '' }}
           ASC_PRIVATE_KEY: ${{ matrix.name == 'macos' && secrets.ASC_PRIVATE_KEY || '' }}
+          SPARKLE_PRIVATE_KEY: ${{ matrix.name == 'macos' && secrets.SPARKLE_PRIVATE_KEY != '' && 'set' || '' }}
         run: |
           set -euo pipefail
           names=(TAURI_SIGNING_PRIVATE_KEY)
           if [ "${{ matrix.name }}" = macos ]; then
-            names+=(MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY)
+            names+=(MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY SPARKLE_PRIVATE_KEY)
           fi
           apps/desktop/scripts/require-secrets.sh "${names[@]}"
 
@@ -233,18 +275,26 @@ jobs:
       # script or proc macro sees one; Bundle packages it with the same
       # configuration. tauri.release.conf.json adds the sidecar; on Windows
       # tauri.release.windows.conf.json adds the DirectML.dll it loads, and
-      # the plan's MSI version goes in as `bundle.windows.wix.version`.
+      # the plan's MSI version goes in as `bundle.windows.wix.version`; on
+      # macOS the plan's build number goes in as `bundle.macOS.bundleVersion`
+      # (CFBundleVersion), counted again here from the same commit.
       - name: Build
         shell: bash
         working-directory: apps/desktop/src-tauri
         env:
           WIX_VERSION: ${{ needs.plan.outputs.wix_version }}
+          BUILD: ${{ needs.plan.outputs.build }}
         run: |
           set -euo pipefail
           configs=(--config tauri.release.conf.json)
           if [ "${{ matrix.name }}" = windows ]; then
             configs+=(--config tauri.release.windows.conf.json
               --config "{\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$WIX_VERSION\"}}}}")
+          fi
+          if [ "${{ matrix.name }}" = macos ]; then
+            count="$(git rev-list --count HEAD)"
+            [ "$count" = "$BUILD" ] || { echo "::error::this checkout counts $count commits, plan counted $BUILD"; exit 1; }
+            configs+=(--config "{\"bundle\":{\"macOS\":{\"bundleVersion\":\"$BUILD\"}}}")
           fi
           configs+=(--config '{"build":{"beforeBuildCommand":null}}')
           printf '%s\n' "${configs[@]}" > "$RUNNER_TEMP/tauri-configs"
@@ -288,6 +338,7 @@ jobs:
           while IFS= read -r config; do configs+=("$config"); done < "$RUNNER_TEMP/tauri-configs"
           pnpm dlx @tauri-apps/cli@2.12.1 bundle --ci --bundles "${{ matrix.bundles }}" "${configs[@]}"
 
+      # The image's path stays in STENO_DMG for the Handoff item step.
       - name: Notarise the disk image
         if: matrix.name == 'macos'
         env:
@@ -298,20 +349,49 @@ jobs:
           dmgs=("${STENO_TARGET_DIR:-target}"/release/bundle/dmg/*.dmg)
           [[ ${#dmgs[@]} -eq 1 && -f "${dmgs[0]}" ]] || { echo "::error::expected one .dmg, found ${dmgs[*]}"; exit 1; }
           apps/desktop/scripts/notarize-dmg.sh "${dmgs[0]}"
+          echo "STENO_DMG=${dmgs[0]}" >> "$GITHUB_ENV"
 
-      # Also fails when either binary still holds a remapped prefix.
+      # Also fails when either binary still holds a remapped prefix. On
+      # macOS also what the Swift app's last update needs (--handoff).
       - name: Check the bundles
         shell: bash
         env:
           STENO_HOST_PATHS: |
             ${{ github.workspace }}
             ${{ env.STENO_CARGO_HOME }}
+          BUILD: ${{ needs.plan.outputs.build }}
         run: |
           set -euo pipefail
           signed=()
-          if [ "${{ matrix.name }}" = macos ]; then signed=(--signed); fi
+          if [ "${{ matrix.name }}" = macos ]; then signed=(--signed --handoff "$BUILD"); fi
           apps/desktop/scripts/check-bundle.sh "${signed[@]}" \
             "${STENO_TARGET_DIR:-target}/release/bundle" "${{ matrix.bundles }}"
+
+      # Tag runs only, after the image is notarised and stapled: the EdDSA
+      # signature covers its bytes. The one step that sees the Sparkle key.
+      # A candidate's item is never published; the first one is what the
+      # handoff rehearsal (R2) installs from a local feed.
+      - name: Handoff item
+        if: matrix.name == 'macos' && github.event_name == 'push' && github.ref_type == 'tag'
+        shell: bash
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          BUILD: ${{ needs.plan.outputs.build }}
+        run: |
+          set -euo pipefail
+          apps/desktop/scripts/handoff-item.sh "$VERSION" "$BUILD" "$STENO_DMG" sparkle-item
+          cat sparkle-item/appcast.xml
+
+      # Its own artifact, outside the steno-desktop-* pattern `assets`
+      # gathers, so the item never becomes a release asset by itself.
+      - name: Upload the handoff item
+        if: matrix.name == 'macos' && github.event_name == 'push' && github.ref_type == 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sparkle-item
+          path: sparkle-item/appcast.xml
+          if-no-files-found: error
 
       # A self-hosted runner keeps its target directory outside the
       # workspace; the upload step reads from the workspace.
@@ -404,7 +484,7 @@ jobs:
           set -euo pipefail
           # shellcheck disable=SC2086 # one argument per platform
           apps/desktop/scripts/updater-manifest.sh "$VERSION" \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/desktop-v$VERSION" assets $PLATFORMS \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION" assets $PLATFORMS \
             > assets/latest.json
           cat assets/latest.json
 
@@ -426,7 +506,7 @@ jobs:
       - name: Release notes
         run: |
           set -euo pipefail
-          apps/desktop/scripts/release-notes.sh "$VERSION" "desktop-v$VERSION" assets \
+          apps/desktop/scripts/release-notes.sh "$VERSION" "v$VERSION" assets \
             apps/desktop/release-signing-key.asc >> "$GITHUB_STEP_SUMMARY"
 
       # Kept a few days, so a failed publish can be re-run
@@ -470,12 +550,18 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # contents for the release, the lanes and the AUR bump's branch;
+    # pull-requests for the AUR bump's pull request.
     permissions:
       contents: write
+      pull-requests: write
+    outputs:
+      handoff_item: ${{ steps.appcast.outputs.handoff_item }}
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
       VERSION: ${{ needs.plan.outputs.version }}
+      PRERELEASE: ${{ needs.plan.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
 
@@ -484,8 +570,26 @@ jobs:
           name: desktop-release-assets
           path: assets
 
+      # A stable release carries the `appcast` branch's feed as its
+      # `appcast.xml`: the first Swift release reads the feed through
+      # `releases/latest`. Whether the branch already has the handoff item
+      # (an item without a channel) decides whether `handoff` runs.
+      - name: Appcast from the branch
+        id: appcast
+        if: needs.plan.outputs.prerelease == 'false'
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin refs/heads/appcast
+          mkdir -p "$RUNNER_TEMP/feed"
+          git show FETCH_HEAD:appcast.xml > "$RUNNER_TEMP/feed/appcast.xml"
+          handoff_item="$(python3 apps/desktop/scripts/handoff-appcast.py has-handoff-item "$RUNNER_TEMP/feed/appcast.xml")"
+          echo "handoff_item=$handoff_item" >> "$GITHUB_OUTPUT"
+          echo "the appcast branch has the handoff item: $handoff_item"
+
       # The notes say how to check a download against the signatures the
-      # assets job made (release-notes.sh).
+      # assets job made (release-notes.sh). A candidate stays a pre-release
+      # and never "latest"; a stable release becomes "latest" with its
+      # appcast.xml already uploaded, so `releases/latest` never lacks it.
       - name: Publish the release
         run: |
           set -euo pipefail
@@ -496,10 +600,15 @@ jobs:
             echo "release $TAG exists; replacing assets"
           else
             gh release create "$TAG" --draft --prerelease --latest=false \
-              --verify-tag --title "Steno desktop $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+              --verify-tag --title "Steno $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
           fi
           gh release upload "$TAG" assets/* --clobber
-          gh release edit "$TAG" --draft=false --prerelease --latest=false --notes-file "$RUNNER_TEMP/notes.md"
+          if [ "$PRERELEASE" = true ]; then
+            gh release edit "$TAG" --draft=false --prerelease --latest=false --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release upload "$TAG" "$RUNNER_TEMP/feed/appcast.xml" --clobber
+            gh release edit "$TAG" --draft=false --prerelease=false --latest --notes-file "$RUNNER_TEMP/notes.md"
+          fi
           gh release view "$TAG" --json url --jq .url
 
       # After the release is public, so the manifest's URLs resolve. Each
@@ -529,7 +638,7 @@ jobs:
           moving="$(apps/desktop/scripts/updater-lanes.sh "$VERSION" "$beta" "$stable")"
           [ -n "$moving" ] || { echo "no lane moves to $VERSION"; exit 0; }
           while IFS= read -r lane; do
-            notes="The updater manifest of the ${lane#desktop-} lane: Steno desktop $VERSION ($TAG). Installed desktop apps read latest.json from here; the installers are on $TAG."
+            notes="The updater manifest of the ${lane#desktop-} lane: Steno $VERSION ($TAG). Installed desktop apps read latest.json from here; the installers are on $TAG."
             if gh release view "$lane" >/dev/null 2>&1; then
               gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$lane" -f sha="$GITHUB_SHA" -F force=true >/dev/null
               gh release edit "$lane" --notes "$notes" --prerelease --latest=false
@@ -540,3 +649,177 @@ jobs:
             gh release upload "$lane" assets/latest.json --clobber
             echo "$lane serves $VERSION"
           done <<< "$moving"
+
+      # Stable releases only (D7): Casks/steno.rb in NicolaiSchmid/homebrew-tap
+      # follows the release just published. Without HOMEBREW_TAP_TOKEN the
+      # script prints a notice and exits 0; the first stable bump is a tap
+      # commit by hand. A failed push is a warning on a release that
+      # already stands.
+      - name: Bump the Homebrew cask
+        if: needs.plan.outputs.prerelease == 'false'
+        continue-on-error: true
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: apps/macos/scripts/bump-homebrew-cask.sh "$VERSION" "assets/Steno_${VERSION}_aarch64.dmg"
+
+      # Stable releases only: the AUR package `steno-desktop-bin` follows
+      # (aur-bump.sh), and a pull request carries the same bump into
+      # packaging/aur. Without AUR_SSH_PRIVATE_KEY a notice; the first push
+      # is by hand. A failure is a warning on a release that already stands.
+      - name: Push the AUR bump
+        if: needs.plan.outputs.prerelease == 'false'
+        continue-on-error: true
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "::notice::AUR_SSH_PRIVATE_KEY is not set; steno-desktop-bin on the AUR stays where it is (packaging/aur/README.md, Push to the AUR)."
+            exit 0
+          fi
+          apps/desktop/scripts/aur-bump.sh "$VERSION" assets
+          branch="chore/aur-$VERSION"
+          # A re-run of publish: the AUR has the bump (aur-bump.sh says so)
+          # and the branch is pushed, so neither is pushed again. The pull
+          # request is opened unless the earlier run opened it (it may have
+          # failed between the push and the pull request).
+          if git ls-remote --quiet --exit-code --heads origin "$branch" >/dev/null; then
+            pulls="$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=${GITHUB_REPOSITORY%%/*}:$branch&state=all" --jq length)"
+            if [ "$pulls" != 0 ]; then
+              echo "::notice::$branch and its pull request exist already, from an earlier run; nothing new"
+              exit 0
+            fi
+            echo "::notice::$branch exists already, from an earlier run, without a pull request; opening it"
+          else
+            git switch --quiet -c "$branch"
+            git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
+            git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit --quiet -m "chore(desktop): steno-desktop-bin $VERSION-1, as pushed to the AUR"
+            git push --quiet origin "HEAD:refs/heads/$branch"
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/pulls" -f title="chore(desktop): steno-desktop-bin $VERSION-1" \
+            -f head="$branch" -f base=main \
+            -f body="The AUR bump the release workflow pushed for $TAG (apps/desktop/scripts/aur-bump.sh), so packaging/aur follows the AUR." \
+            --jq .html_url
+
+      # Stable releases only: the two lines flake.nix's `release` attrset
+      # needs, for a bump pull request by hand.
+      - name: Nix flake lines in the summary
+        if: needs.plan.outputs.prerelease == 'false'
+        run: |
+          set -euo pipefail
+          dmg="assets/Steno_${VERSION}_aarch64.dmg"
+          test -f "$dmg"
+          sri="sha256-$(openssl dgst -sha256 -binary "$dmg" | base64)"
+          {
+            echo "## Nix flake bump"
+            echo
+            echo "Paste into the \`release\` attrset at the top of \`flake.nix\`:"
+            echo
+            echo '```nix'
+            echo "version = \"$VERSION\";"
+            echo "hash = \"$sri\";"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "version=$VERSION hash=$sri"
+
+  # The Sparkle handoff (stable plan D8): the handoff item goes on the
+  # `appcast` branch, which every Swift build since v0.9.0-rc.2 reads, and
+  # the branch's feed becomes the release's appcast.xml for v0.9.0-rc.1.
+  # Stable tags only, behind the `appcast` environment, whose required
+  # reviewer approves after the stable build's rehearsal (R7). Skipped
+  # without asking once the branch has its item, unless the repository
+  # variable HANDOFF_ITEM_REPLACE names this version: a release that fixes
+  # the handoff itself.
+  handoff:
+    name: handoff
+    needs: [plan, publish]
+    if: >-
+      needs.plan.outputs.prerelease == 'false' &&
+      (needs.publish.outputs.handoff_item == 'false' || vars.HANDOFF_ITEM_REPLACE == needs.plan.outputs.version)
+    environment: appcast
+    concurrency:
+      group: desktop-handoff
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # actions: read is what the environments API asks of the token (GET
+    # .../environments/<name>, the "Actions" repository permission);
+    # contents for the branch and the release.
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      BUILD: ${{ needs.plan.outputs.build }}
+    steps:
+      # GitHub creates an environment the first time a job names it, with no
+      # protection rules, and then runs the job without asking. So before
+      # anything else the job stops unless `appcast` has a required
+      # reviewer: no item reaches the branch without the approval after R7.
+      - name: The appcast environment has a required reviewer
+        run: |
+          set -euo pipefail
+          reviewed="$(gh api "repos/$GITHUB_REPOSITORY/environments/appcast" --jq '[.protection_rules[].type] | index("required_reviewers") != null')"
+          if [ "$reviewed" != true ]; then
+            echo "::error::the appcast environment has no required reviewer, so this job ran unapproved and wrote nothing. Set the environment up (apps/desktop/README.md, Cutting a release, step 0), then re-run handoff"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sparkle-item
+          path: sparkle-item
+
+      # The approval's time: Sparkle counts the rollout's groups from the
+      # item's pubDate, and the job starts when the reviewer approves. A
+      # re-run after the item reached the branch keeps the branch's item,
+      # and so its date, and only uploads the feed again. Otherwise the
+      # branch is checked again as it is now, since an approval can come
+      # days after `publish` looked. A higher build there (an older
+      # release approved after a newer one) stops the job. Another
+      # release's handoff item there (D8: one item) means this release
+      # writes none, but still uploads the branch's feed: this release may
+      # be `latest` now, and `releases/latest` must carry the item.
+      - name: Date the item
+        id: date
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          HANDOFF_ITEM_REPLACE: ${{ vars.HANDOFF_ITEM_REPLACE }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin refs/heads/appcast
+          git show FETCH_HEAD:appcast.xml > "$RUNNER_TEMP/branch.xml"
+          write=false
+          if [ "$(python3 apps/desktop/scripts/handoff-appcast.py has-build "$RUNNER_TEMP/branch.xml" "$BUILD")" = true ]; then
+            echo "::notice::build $BUILD is on the appcast branch already; its item and date stay"
+          else
+            python3 apps/desktop/scripts/handoff-appcast.py check-build "$RUNNER_TEMP/branch.xml" "$BUILD"
+            handoff_item="$(python3 apps/desktop/scripts/handoff-appcast.py has-handoff-item "$RUNNER_TEMP/branch.xml")"
+            if [ "$handoff_item" != false ] && [ "$HANDOFF_ITEM_REPLACE" != "$VERSION" ]; then
+              echo "::warning::the appcast branch has another release's handoff item since publish looked; this release writes none and only uploads the branch's feed as its appcast.xml"
+            else
+              python3 apps/desktop/scripts/handoff-appcast.py stamp-pubdate sparkle-item/appcast.xml "$(date +%s)"
+              write=true
+            fi
+          fi
+          echo "write=$write" >> "$GITHUB_OUTPUT"
+
+      - name: Put the item on the appcast branch
+        if: steps.date.outputs.write == 'true'
+        env:
+          STENO_RELEASE_APPCAST: ${{ github.workspace }}/sparkle-item/appcast.xml
+        run: apps/macos/scripts/publish-appcast.sh "$TAG" false
+
+      - name: The branch's feed as the release's appcast.xml
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin refs/heads/appcast
+          mkdir -p "$RUNNER_TEMP/feed"
+          git show FETCH_HEAD:appcast.xml > "$RUNNER_TEMP/feed/appcast.xml"
+          gh release upload "$TAG" "$RUNNER_TEMP/feed/appcast.xml" --clobber
+          echo "the release's appcast.xml is the branch's feed, $(grep -c '<item>' "$RUNNER_TEMP/feed/appcast.xml") items"

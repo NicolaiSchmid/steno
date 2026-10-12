@@ -7,27 +7,31 @@
     self,
     nixpkgs,
   }: let
-    # Bump both lines on every release. `release.yml` prints them in the
-    # job summary of the tag run, so a bump is copy-paste from there.
+    # Bump both lines on every stable release. The `publish` job of
+    # desktop-release.yml prints them in the summary of the tag's run, so
+    # a bump is copy-paste from there. The Mac output fetches the Tauri
+    # app's disk image, which stable releases carry from v0.11.0 on; until
+    # the first bump these lines still name the last Swift release, whose
+    # image has another name, so the Mac package does not build.
     release = {
       version = "0.10.0-rc.2";
       hash = "sha256-Z65JPd8+TWpcDNq4k8ctds/HVtqNzTNWrs9F3wZOssQ=";
     };
 
-    # The Mac app is a signed, notarised Apple Silicon bundle: the Mac
-    # output unpacks the release and builds nothing.
+    # The Mac app is the Tauri app's signed, notarised Apple Silicon
+    # bundle: the Mac output unpacks the release and builds nothing.
     system = "aarch64-darwin";
     pkgs = nixpkgs.legacyPackages.${system};
     lib = pkgs.lib;
 
-    bundleId = "uno.schmid.steno.mac";
+    bundleId = "com.nicolaischmid.steno.desktop";
 
     steno = pkgs.stdenvNoCC.mkDerivation {
       pname = "steno";
       inherit (release) version;
 
       src = pkgs.fetchurl {
-        url = "https://github.com/NicolaiSchmid/steno/releases/download/v${release.version}/Steno-${release.version}.dmg";
+        url = "https://github.com/NicolaiSchmid/steno/releases/download/v${release.version}/Steno_${release.version}_aarch64.dmg";
         inherit (release) hash;
       };
 
@@ -49,25 +53,23 @@
         runHook postInstall
       '';
 
-      # Sparkle stays in the bundle (removing it would invalidate the
-      # signature) but cannot replace an app inside the read-only Nix store.
-      # The note tells a Nix user how to turn scheduled checks off; bumping
-      # `release` above and rebuilding is the update path.
+      # The in-app updater stays in the bundle (changing the bundle would
+      # invalidate the signature) but cannot replace an app inside the
+      # read-only Nix store. The note tells a Nix user how to turn the daily
+      # check off; bumping `release` above and rebuilding is the update path.
       postInstall = ''
         mkdir -p $out/share/doc/steno
         cat > $out/share/doc/steno/UPDATES.md <<EOF
         # Updating a Nix-installed Steno
 
-        This Steno.app runs from the read-only Nix store, so Sparkle's
-        "Check for Updates…" can download a new version but cannot install
-        it. Update by bumping \`release.version\` and \`release.hash\` in
-        flake.nix (or by updating the flake input that pins this repository)
-        and rebuilding.
+        This Steno.app runs from the read-only Nix store, so its updater
+        can download a new version but cannot install it. Update by bumping
+        \`release.version\` and \`release.hash\` in flake.nix (or by
+        updating the flake input that pins this repository) and rebuilding.
 
-        To stop the scheduled daily check from offering updates it cannot
-        apply:
-
-            defaults write ${bundleId} SUEnableAutomaticChecks -bool NO
+        To stop the daily check from offering updates it cannot apply, turn
+        off "Check for updates automatically" in Steno's Settings, under
+        General.
 
         Homebrew users (\`brew install nicolaischmid/tap/steno\`) keep the
         in-app updater.
@@ -115,7 +117,7 @@
           expected = bundleId;
         } ''
           test -f "$app/Contents/Info.plist"
-          test -x "$app/Contents/MacOS/Steno"
+          test -x "$app/Contents/MacOS/steno-desktop"
           test -d "$app/Contents/_CodeSignature"
           python3 - "$app/Contents/Info.plist" "$expected" <<'PY'
           import plistlib, sys

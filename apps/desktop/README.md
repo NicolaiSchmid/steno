@@ -1362,19 +1362,30 @@ user units, the session variables and the firewall's ports, in one with
 ## Release
 
 `.github/workflows/desktop-release.yml` builds the six bundles on the three
-platforms. A pushed `desktop-v<version>` tag builds all of them and
-publishes; the version must be the one under `[workspace.package]` in
+platforms, and it is the Steno release: a pushed `v<version>` tag builds all
+of them and publishes (D1 of `.plans/2026-10-07-stable-promotion.md`; the
+Swift app's `release.yml` is gone, and the earlier `desktop-v*` tags stay as
+they are). The version must be the one under `[workspace.package]` in
 `Cargo.toml`, which Tauri stamps into the bundles, or the run fails before
 it builds. So does a version the MSI cannot carry: WiX takes numbers only,
 so `scripts/wix-version.sh` accepts `X.Y.Z` and `X.Y.Z-<label>.<N>` alone.
+A hyphen makes a candidate (`0.11.0-rc.1`): a pre-release on the beta lane.
+A version without one is a stable release: "latest", the stable lane, the
+Homebrew cask and the AUR package, and the Sparkle handoff (see Publishing,
+on a tag).
+
+The build number is the commit count (`git rev-list --count HEAD`). It is
+the Mac bundle's `CFBundleVersion`, and Sparkle orders the Swift app's
+updates by it alone, so `plan` fails before any build when it is not above
+every `sparkle:version` on the `appcast` branch
+(`scripts/handoff-appcast.py check-build`). Each tag sits on its own
+version-bump commit, so no two tags share a count.
+
 A manual run builds, signs and notarises the platforms it is given and
 keeps the bundles as workflow artifacts. It checksums and OpenPGP-signs
 them as a tag would, but keeps none of the `.asc` files, only
 `SHA256SUMS` and the log of what verified (see Checksums and OpenPGP
-signatures). It publishes nothing.
-The `desktop-v` prefix keeps these tags apart from the Swift
-app's `v*` (`release.yml`) and the mobile build tags `ios-fp-*`
-(`mobile-cd.yml`).
+signatures). It signs no handoff item and publishes nothing.
 `cargo deny check` (`deny.toml`: the licence allow list, the MPL-2.0
 crates by name, advisories, sources) runs first and stops the run on any
 finding.
@@ -1387,21 +1398,45 @@ finding.
    `gh workflow run desktop-release.yml --ref <branch> -f platforms=linux,windows,macos`.
    Its `desktop-release-checksums` artifact proves the checksums and
    signatures (see Checksums and OpenPGP signatures), and the run's
-   summary holds the notes.
+   summary holds the notes. Before the first stable tag, also:
+   - Create the GitHub environment `appcast` (Settings > Environments)
+     with a required reviewer, "Prevent self-review" off and the
+     deployment tag rule `v*`. The `handoff` job stops without the
+     reviewer. Check it:
+     `gh api repos/NicolaiSchmid/steno/environments/appcast --jq '[.protection_rules[].type]'`
+     must list `required_reviewers` and `branch_policy`.
+   - Under Settings > Actions > General, allow GitHub Actions to create
+     and approve pull requests, which the AUR bump's pull request needs.
 1. On `main`, set `[workspace.package] version` in `Cargo.toml`, run
    `cargo check` so `Cargo.lock` follows (CI builds with `--locked`), and
-   merge both. A hyphen (`0.2.0-rc.1`) means the beta lane only.
-2. Tag the merge commit:
-   `git tag desktop-v<version> <merge commit> && git push origin desktop-v<version>`.
+   merge both. A hyphen (`0.11.0-rc.1`) means the beta lane only. Wait
+   until Rust CI is green on that merge commit on all three platforms.
+2. Tag the merge commit, never one that another tag names:
+   `git tag v<version> <merge commit> && git push origin v<version>`.
    Push one tag at a time and wait for its publish: GitHub keeps one
    waiting job per concurrency group, so a third tag cancels the second's
-   waiting publish. Until the macOS job is done, start no Swift release
-   and no other desktop run with macOS (see Signing).
+   waiting publish. Until the macOS job is done, start no other desktop
+   run with macOS (see Signing).
 3. Watch the Desktop release run. `publish` runs only when all three
    platforms bundled.
 4. Check what the lanes serve:
    `curl -fsSL https://github.com/NicolaiSchmid/steno/releases/download/desktop-beta/latest.json | jq .version`
-   (and `desktop-stable` for a release).
+   (and `desktop-stable` for a stable release).
+5. A stable release only: the `handoff` job waits for the `appcast`
+   environment's reviewer, the first time and when
+   `HANDOFF_ITEM_REPLACE` names the version (see The handoff item). Approve
+   it only after the stable build's rehearsal (R7 in the stable plan) has
+   passed. If R7 fails, reject it to leave the Swift app's users where
+   they are, then follow the stable plan's Rollback: run
+   `gh release edit v<version> --prerelease`, and when the bundle is at
+   fault put both lanes back (A bad release). If a newer stable release
+   is published while an earlier handoff waits, reject the earlier and
+   approve only the newest: the handoff item is
+   written once, and an earlier release approved after a newer one wrote
+   fails (see When a run fails, handoff).
+6. A stable release only, without waiting for the approval: open the
+   flake bump pull request with the two lines in the run's summary (Nix
+   flake bump).
 
 ### When a run fails
 
@@ -1410,10 +1445,12 @@ jobs: a full re-run rebuilds and replaces the release's assets while the
 lanes still serve the old `latest.json`, whose signatures do not match the
 new assets until **Update lanes** finishes.
 
-- **plan**: the tag does not name the workspace version, or the MSI
-  cannot carry the version. Delete the tag
-  (`git push origin :refs/tags/desktop-v<version>` and
-  `git tag -d desktop-v<version>`), fix the version on `main`, tag again.
+- **plan**: the tag does not name the workspace version, the MSI
+  cannot carry the version, or the build number is not above the
+  `appcast` branch's highest. Delete the tag
+  (`git push origin :refs/tags/v<version>` and
+  `git tag -d v<version>`), fix the version on `main` (a new version-bump
+  commit also raises the count), tag again.
 - **Check secrets**: add the secret it names (see the table below).
 - **Signing keychain and notarisation key**: the `.p12` or its password is
   wrong, or the certificate is not a Developer ID Application one; the
@@ -1426,7 +1463,17 @@ new assets until **Update lanes** finishes.
   the step output. A notarisation failure in **Bundle** is the bundler's
   error in that step's output.
 - **Check the bundles**: the `::error::` names the file or the check that
-  failed.
+  failed. On macOS that includes `--handoff`: a bundle id or
+  `SUPublicEDKey` other than the pinned ones, a `CFBundleVersion` other
+  than `plan`'s build, or a designated requirement
+  without team `KQB68F43PW`. Fix the configuration on `main`, delete the
+  tag and tag again.
+- **Handoff item** (macOS, tag runs only): the Sparkle tarball's checksum,
+  `generate_appcast`, the item's check or the dry-run merge failed.
+  "carries no `sparkle:edSignature`" means `SPARKLE_PRIVATE_KEY` is not the
+  secret half of the Swift app's `SUPublicEDKey`; fix the secret and re-run
+  the failed jobs. "already published as" or a build not above the
+  branch's means the tag needs a new version-bump commit.
 - **Gather the assets** (in `assets`): an artifact holds a file its
   platform does not build or whose name has a character other than
   A-Z a-z 0-9 . _ + -, two files share a name, or a platform's artifact is
@@ -1463,6 +1510,37 @@ new assets until **Update lanes** finishes.
   An existing release is reused and its assets replaced; the lanes move as
   on the first run. GitHub allows re-runs for 30 days; after that, delete
   the tag and tag again.
+- **Bump the Homebrew cask**, **Push the AUR bump** (warnings, the release
+  stands): the tap or the AUR refused the push, or the AUR bump found the
+  PKGBUILD in another form than it rewrites (`scripts/aur-bump.sh` names
+  it). Bump by hand as `packaging/aur/README.md` and the tap say. On a
+  re-run of `publish`, the AUR step finds `chore/aur-<version>` from the
+  first run and pushes nothing again. It asks GitHub for the branch's pull
+  request: when the first run opened one, a notice says so and opens no
+  second; when the first run failed before opening it, it opens it now.
+  Neither needs anything.
+- **handoff**: "the appcast environment has no required reviewer" means
+  GitHub ran the job unapproved and nothing was written; set the
+  environment up (Cutting a release, step 0) and re-run it. Two releases'
+  handoffs that waited at once end in one of two ways:
+  - An earlier release approved after a newer one wrote: "build ... is not
+    above build ..." (`check-build`). Leave it failed, or reject it if it
+    waits again; the newer release's item is on the branch and in its
+    `appcast.xml`. Setting `HANDOFF_ITEM_REPLACE` does not help, since the
+    build check fails first.
+  - A newer release approved after an earlier one wrote: a warning, "has
+    another release's handoff item since publish looked". The job writes
+    no second item and uploads the branch's feed, with the earlier item,
+    as this release's `appcast.xml`, so `releases/latest` keeps carrying
+    it. Nothing to do. Only a release that fixes the handoff item itself
+    sets `HANDOFF_ITEM_REPLACE` to its version and re-runs the job.
+
+  Otherwise `publish-appcast.sh` could not push to the `appcast` branch,
+  or the upload of `appcast.xml` failed. Re-run the job (it asks for the
+  approval again). It reads the same `sparkle-item` artifact; if the push
+  had failed, it dates the item at the new approval, and if the branch
+  already has the build, it keeps the branch's item and date and only
+  uploads the feed.
 
 ### A bad release
 
@@ -1471,14 +1549,15 @@ back. To stop the spread, put the last good version each lane served back
 on it by hand. On `desktop-beta` that is the version before the bad one:
 
 ```sh
-gh release download desktop-v<last good> -p latest.json --clobber
+gh release download v<last good> -p latest.json --clobber
 gh release upload desktop-beta latest.json --clobber
 ```
 
 A bad release (no hyphen) moved `desktop-stable` too. That lane gets the
 previous *release*'s manifest, never an rc's, which would offer the rc to
-every stable user: the same two commands with `desktop-v<previous
-release>` and `desktop-stable`. Never re-run the bad tag's publish: its
+every stable user: the same two commands with `v<previous
+release>` and `desktop-stable`. Releases up to `0.1.0-rc.3` are tagged
+`desktop-v<version>`. Never re-run the bad tag's publish: its
 **Update lanes** moves the lanes back to it. Then fix forward with a higher
 version, whose tag moves the lanes as usual.
 
@@ -1487,17 +1566,26 @@ version, whose tag moves the lanes as usual.
 | Secret | Used by | What it is |
 |---|---|---|
 | `TAURI_SIGNING_PRIVATE_KEY` | every platform's Bundle | The private half of `plugins.updater.pubkey`, empty password; signs every updater artifact |
-| `MACOS_CERTIFICATE_P12_BASE64` | macOS signing keychain | The Developer ID Application certificate and key as a base64 `.p12` (shared with `release.yml`) |
+| `MACOS_CERTIFICATE_P12_BASE64` | macOS signing keychain | The Developer ID Application certificate and key as a base64 `.p12`, the one the Swift app was signed with |
 | `MACOS_CERTIFICATE_PASSWORD` | macOS signing keychain | The `.p12`'s password |
 | `ASC_KEY_ID` | macOS Bundle, `notarize-dmg.sh` | The App Store Connect API key's id |
 | `ASC_ISSUER_ID` | macOS Bundle, `notarize-dmg.sh` | The key's issuer id |
 | `ASC_PRIVATE_KEY` | macOS Bundle, `notarize-dmg.sh` | The key itself, the `.p8` contents |
 | `LINUX_GPG_PRIVATE_KEY` | `plan`'s Check secrets, `assets`' Checksums and signatures | The armored OpenPGP secret key of `release-signing-key.asc`, passphrase-protected |
 | `LINUX_GPG_PASSPHRASE` | `plan`'s Check secrets, `assets`' Checksums and signatures | Its passphrase |
+| `SPARKLE_PRIVATE_KEY` | macOS Check secrets (whether it is set), Handoff item | The Swift app's EdDSA key, from `generate_keys -x`: the secret half of `SUPublicEDKey`. Signs the handoff item; only the Handoff item step sees it |
+| `HOMEBREW_TAP_TOKEN` | `publish`'s Bump the Homebrew cask (optional) | A fine-grained token with Contents read and write on `NicolaiSchmid/homebrew-tap`. Set after the first stable cask bump by hand; without it the step prints a notice |
+| `AUR_SSH_PRIVATE_KEY` | `publish`'s Push the AUR bump (optional) | The SSH key of the AUR account that owns `steno-desktop-bin`. Set after the first AUR push by hand; without it the step prints a notice |
+
+The `handoff` job runs in the GitHub environment `appcast`, whose required
+reviewer approves it. The repository variable `HANDOFF_ITEM_REPLACE`, set
+to a version before its tag is pushed, lets `handoff` run for that version
+although the branch already has a handoff item: only for a release that
+fixes the handoff itself.
 
 `scripts/require-secrets.sh` names every missing one before anything is
 built: the `plan` job checks the two OpenPGP secrets, each bundle job its
-own.
+own. The two optional ones are not checked.
 
 Installed apps verify updates only with the `pubkey` they were built with.
 To rotate the updater key, publish one release (no hyphen, and at or
@@ -1555,13 +1643,13 @@ The release binary is built first with no secret in the environment
 (`tauri build --no-bundle`), so no dependency's build script sees one;
 `tauri bundle` then signs and packages it with the keys. On macOS the job
 imports the Developer ID certificate into a throwaway keychain
-(`scripts/signing-keychain.sh`, the Swift release's approach) and hands
+(`scripts/signing-keychain.sh`, the approach the Swift release took) and hands
 its identity to the bundler; at the end it takes only that keychain off
-the search list. Run only one signing job on the self-hosted Mac at a
-time (no concurrency group spans the two workflows): two throwaway
-keychains would hold the same Developer ID identity, and a `codesign` by
-name (the Swift app's `make-dmg.sh` and Xcode export) then fails as
-ambiguous. The bundler signs the sidecar, the app binary and the bundle
+the search list. Run only one macOS job on the self-hosted Mac at a time
+(the concurrency group is per ref, so a manual run and a tag run can
+overlap): two throwaway keychains would hold the same Developer ID
+identity, and a `codesign` by name, as the Swift app's `make-dmg.sh` and
+Xcode export did, then fails as ambiguous. The bundler signs the sidecar, the app binary and the bundle
 under the hardened runtime with `Entitlements.plist` (one file for every
 item, so the sidecar carries the two entitlements without using them),
 then notarises and staples the `.app` with the App Store Connect key
@@ -1569,7 +1657,8 @@ before it builds the image and the updater archive from it, and
 `scripts/notarize-dmg.sh` notarises and staples the image.
 `check-bundle.sh --signed` checks the Developer ID authority, the runtime
 flag, the timestamp and the team on all three items, the entitlements,
-the ticket and Gatekeeper's verdict. The Linux bundles have no signature
+the ticket and Gatekeeper's verdict; `--handoff <build>` adds what the
+Swift app's last update needs (see The handoff item). The Linux bundles have no signature
 of their own format (no signed apt repository, no AppImage-embedded
 signature); a detached OpenPGP signature beside each covers them instead
 (below). Windows installers are not code-signed yet, since there is no
@@ -1598,7 +1687,7 @@ one directory and run these commands there. The release notes give the
 where `curl` is missing:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/NicolaiSchmid/steno/desktop-v<version>/apps/desktop/release-signing-key.asc
+curl -fsSLO https://raw.githubusercontent.com/NicolaiSchmid/steno/v<version>/apps/desktop/release-signing-key.asc
 gpg --import release-signing-key.asc
 gpg --verify SHA256SUMS.asc SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
@@ -1673,11 +1762,60 @@ the release commit. Each lane only moves forward: the stable lane takes a
 release (no hyphen), the beta lane every version, each only when the
 version is at or above the one the lane serves (`scripts/updater-lanes.sh`,
 SemVer precedence). A rerun of a tag moves the same lanes again; an older
-tag or a hotfix on an older line leaves a lane where it is. Every desktop
-release is a GitHub pre-release and never "latest": until the Mac cutover
-(`.plans/2026-10-04-mac-cutover.md`) the "latest release" that the
-repository README, the site and the Homebrew cask point at is the Swift
-app's.
+tag or a hotfix on an older line leaves a lane where it is. A candidate is
+a GitHub pre-release and never "latest". A stable release is "latest", the
+only kind that is, and the lane releases themselves stay pre-releases. For a
+stable release `publish` also:
+
+- uploads the `appcast` branch's `appcast.xml` as the release's
+  `appcast.xml` before it makes the release public, so
+  `releases/latest/download/appcast.xml`, the feed of `v0.9.0-rc.1`,
+  never lacks it;
+- outputs whether the branch already has the handoff item (an item
+  without a channel), which decides whether `handoff` runs;
+- bumps `Casks/steno.rb` in `NicolaiSchmid/homebrew-tap`
+  (`apps/macos/scripts/bump-homebrew-cask.sh`) once `HOMEBREW_TAP_TOKEN`
+  exists (D7: candidates never);
+- bumps and pushes the AUR package `steno-desktop-bin`
+  (`scripts/aur-bump.sh`: `pkgver`, `pkgrel` and the two release checksums
+  in `PKGBUILD` and `.SRCINFO`) once `AUR_SSH_PRIVATE_KEY` exists, and opens
+  a pull request with the same change to `packaging/aur`. A pull request the
+  workflow opens starts no checks; close and reopen it to run them;
+- writes the two lines of the flake bump (the version and the DMG's hash)
+  to the run's summary.
+
+#### The handoff item
+
+The Swift app's users reach this app through one Sparkle item without a
+channel on the `appcast` branch (D8 and "The Sparkle handoff" in the stable
+plan). On every tag run the macOS job signs one: after the image is
+notarised, `scripts/handoff-item.sh` runs `generate_appcast` from the
+Sparkle 2.10.0 tarball (its SHA-256 pinned) with `SPARKLE_PRIVATE_KEY` on
+stdin, the enclosure under `releases/download/v<version>/`, no deltas and a
+phased rollout of seven groups a day apart (`--phased-rollout-interval
+86400`). It then requires exactly that item, with its `sparkle:edSignature`
+(`handoff-appcast.py check-item`), and dry-runs the merge into the branch's
+feed. The item goes into the `sparkle-item` artifact, which `assets` does
+not gather. A candidate's item is never published; the handoff rehearsal
+installs it from a local feed.
+
+For a stable release, the `handoff` job runs once the `appcast`
+environment's reviewer approves it, and only if the branch has no handoff
+item yet or `HANDOFF_ITEM_REPLACE` names the version. It first stops
+unless the environment has a required reviewer, and at the approval checks
+the branch again, since another release's item may have reached it while
+this one waited: a higher build stops the job, and another handoff item
+means it writes none and only uploads the branch's feed. It sets the item's
+`pubDate` to the approval's time in `generate_appcast`'s form
+(`Tue, 13 Oct 2026 09:00:00 +0000`, `handoff-appcast.py stamp-pubdate`;
+Sparkle counts the rollout's groups from it and reads any other form as no
+date), puts the item on the branch
+(`apps/macos/scripts/publish-appcast.sh <tag> false`), and replaces the
+release's `appcast.xml` with the branch's new feed. Sparkle installs this
+bundle over the Swift app because the archive's signature verifies against
+the Swift app's key; `check-bundle.sh --handoff` holds the bundle to the
+rest (the pinned identifier and key, the build number, team
+`KQB68F43PW`).
 
 ## Test
 
@@ -1875,16 +2013,17 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/scripts/tray-watcher-linux.py` | The stand-in status notifier watcher with a host for that check, and its reads and clicks of the tray's menu |
 | `apps/desktop/scripts/xvfb-recording-linux.sh` | What those two share, sourced by both: the argument and tool checks, the app on an Xvfb server of its own with a recording started, the wait for its exit and the store's check |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
-| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
-| `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check, and runs the `.app` check's bundle id and Sparkle key over stub bundles (`check-bundle.test.sh`) |
-| `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh`, `release-assets.sh`, `release-signatures.sh`, `release-notes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json`, the lanes a release moves, the assets gathered from each platform's artifact, `SHA256SUMS` and the OpenPGP signatures, and the release notes (each `.sh` with a `.test.sh` is tested in Rust CI) |
+| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh`, `release-workflow.test.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `v*` tag, and the Sparkle handoff (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh`; `release-workflow.test.sh` checks the workflow against the stable plan and runs six of its steps against a stub `gh` and scratch origins |
+| `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check, and runs the `.app` check's bundle id and Sparkle key, and the `--handoff` checks, over stub bundles (`check-bundle.test.sh`) |
+| `apps/desktop/scripts/handoff-item.sh`, `handoff-appcast.py`, `aur-bump.sh` | The Sparkle handoff item, the appcast reads and the `pubDate` stamp around it, and the AUR bump of a stable release (see Publishing, on a tag); `bump-homebrew-cask.test.sh` checks the token check of `apps/macos/scripts/bump-homebrew-cask.sh` |
+| `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh`, `release-assets.sh`, `release-signatures.sh`, `release-notes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json`, the lanes a release moves, the assets gathered from each platform's artifact, `SHA256SUMS` and the OpenPGP signatures, and the release notes (Rust CI runs every `*.test.sh` here) |
 | `apps/desktop/release-signing-key.asc` | The public half of the release signing key that signs `SHA256SUMS` and the Linux bundles (see Checksums and OpenPGP signatures) |
 
 ## Not here yet
 
-The Mac cutover (the bundle id, the Sparkle handoff, the Swift app's
-removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it
-lands the desktop app installs beside the Swift app on the Mac. WP6b
+The Swift app's removal is planned in `.plans/2026-10-04-mac-cutover.md`
+(S9 of `.plans/2026-10-07-stable-promotion.md`); until a Swift install
+takes the handoff item, the desktop app installs beside it on the Mac. WP6b
 filled the host's half of the WP8 seams except four; S4 and S2 of
 `.plans/2026-10-07-stable-promotion.md` later filled the updater, the
 QR half of the fourth and the detection controller, which leaves the
