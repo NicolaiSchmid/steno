@@ -892,6 +892,110 @@ async fn a_release_while_the_audio_service_restarts_ends_no_call() {
     a_restarted_audio_service_ends_no_call(false).await;
 }
 
+/// Where a test holds a rebuild's start: the backend says when the start
+/// is waiting, and goes on once the test opens it.
+struct Gate {
+    entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    open: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+/// The synthetic backend whose second restart waits at `gate`, so that
+/// rebuild's start holds the session's lock until the test opens it.
+struct GatedRestart {
+    synthetic: steno_audio::testing::SyntheticCaptureBackend,
+    starts: std::sync::atomic::AtomicUsize,
+    gate: Arc<Gate>,
+}
+
+impl steno_audio::CaptureBackend for GatedRestart {
+    fn start(
+        &self,
+        lanes: &[steno_core::AudioLane],
+        input_device_uid: Option<&str>,
+        sink: Arc<steno_audio::LaneFrameSink>,
+    ) -> Result<steno_audio::CaptureStream, steno_audio::CaptureError> {
+        if self.starts.fetch_add(1, Ordering::SeqCst) == 2 {
+            let _ = self.gate.entered.lock().unwrap().send(());
+            let _ = self.gate.open.lock().unwrap().recv_timeout(PATIENCE);
+        }
+        self.synthetic.start(lanes, input_device_uid, sink)
+    }
+
+    fn stop(&self) {
+        self.synthetic.stop();
+    }
+}
+
+/// The notice thread reads the session before it takes the outage's lock:
+/// a rebuild's start holds the session's lock for seconds, and the
+/// status, the microphone's activity and the countdown's end, which take
+/// the outage's lock, do not wait for it. Here the thread handles a
+/// resume while the next rebuild's start waits at a gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
+    let (entered, waiting) = std::sync::mpsc::channel();
+    let (open, opened) = std::sync::mpsc::channel();
+    let gate = Arc::new(Gate {
+        entered: std::sync::Mutex::new(entered),
+        open: std::sync::Mutex::new(opened),
+    });
+    let gated = gate.clone();
+    let recording = recording_over(synthetic_recorder_over(Arc::new(move |configuration| {
+        let options = crate::testing::synthetic_tone(&configuration)
+            .change_device_after(1.0)
+            .changes(2);
+        let backend = GatedRestart {
+            synthetic: steno_audio::testing::SyntheticCaptureBackend::new(options),
+            starts: std::sync::atomic::AtomicUsize::new(0),
+            gate: gated.clone(),
+        };
+        steno_audio::CaptureSession::with_backend(
+            configuration,
+            Arc::new(backend),
+            None,
+            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+            Arc::new(steno_audio::SystemClock::new()),
+        )
+        .map_err(|error| error.to_string())
+    })));
+    // The first change's notice waits until the second rebuild's start
+    // holds the session, so the thread reads the session for the first
+    // resume while that start runs.
+    let (go, gone) = std::sync::mpsc::channel::<()>();
+    let gone = std::sync::Mutex::new(gone);
+    let once = AtomicBool::new(false);
+    recording.recorder.on_change(Arc::new(move || {
+        if on_the_notice_thread() && !once.swap(true, Ordering::SeqCst) {
+            let _ = gone.lock().unwrap().recv_timeout(PATIENCE);
+        }
+    }));
+    recording.start(CaptureMode::Call, None);
+    recording.opened(Some("Zen"));
+    recording.released();
+    waiting
+        .recv_timeout(PATIENCE)
+        .expect("the second rebuild's start waits");
+    go.send(()).unwrap();
+    let recorder = recording.recorder.clone();
+    on_own_thread(
+        PATIENCE,
+        "the status returned while a start ran",
+        move || {
+            let until = std::time::Instant::now() + Duration::from_millis(300);
+            while std::time::Instant::now() < until {
+                assert_eq!(recorder.status().state, RecordingState::Recording);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        },
+    );
+    open.send(()).unwrap();
+    recording.stop();
+    assert_eq!(
+        recording.meetings()[0].end_reason,
+        Some(RecordingEndReason::Manual)
+    );
+}
+
 /// Audio back after the capture recovered arms a fresh countdown when the
 /// call app let go and holds no microphone, since the detector does not
 /// report that release again; the earlier countdown is withdrawn, and the

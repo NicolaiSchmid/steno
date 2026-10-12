@@ -746,11 +746,13 @@ fn forward_levels(
 /// `fallback`, since a rebuild may record another one; and the end of a
 /// recovery ([`Outage::recovering`]) resumes `recorder`'s auto-stop, with
 /// the outage's lock released, since the recorder takes its own lock and
-/// then the outage's. It holds `session` and `recorder` weakly, so
-/// dropping the session ends the notices and the thread, and the
-/// recorder, which holds the thread's handle, makes no cycle; a stop joins
-/// the thread without the recorder's lock. None when it could not be
-/// spawned, and the warnings stay as the start left them.
+/// then the outage's. It reads the session before it takes the outage's
+/// lock, so nothing that waits for that lock waits on a rebuild's start.
+/// It holds `session` and `recorder` weakly, so dropping the session ends
+/// the notices and the thread, and the recorder, which holds the thread's
+/// handle, makes no cycle; a stop joins the thread without the recorder's
+/// lock. None when it could not be spawned, and the warnings stay as the
+/// start left them.
 fn follow_the_notices(
     notices: Receiver<CaptureNotice>,
     mode: CaptureMode,
@@ -767,27 +769,36 @@ fn follow_the_notices(
                 let Some(session) = session.upgrade() else {
                     return;
                 };
+                // The session first, with no lock held: a rebuild's start
+                // holds the session's lock for seconds, and the status, the
+                // microphone's activity and the auto-stop's countdown take
+                // the outage's lock.
+                let stalled = match notice {
+                    // The stream is still the replaced one until the resume.
+                    CaptureNotice::DeviceChanged(reason) => Some(
+                        (reason == DeviceChangeReason::DeliveryStalled
+                            && microphone_is_the_master(mode))
+                        .then(|| device_name(session.stream().as_ref())),
+                    ),
+                    _ => None,
+                };
+                let resumed_on = matches!(notice, CaptureNotice::DeviceResumed { .. })
+                    .then(|| fallback_input(session.stream().as_ref()));
+                drop(session);
                 let mut outage = outage
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let back = outage.follow(&notice);
-                match notice {
-                    // The stream is still the replaced one until the resume.
-                    CaptureNotice::DeviceChanged(reason) => {
-                        outage.stalled = (reason == DeviceChangeReason::DeliveryStalled
-                            && microphone_is_the_master(mode))
-                        .then(|| device_name(session.stream().as_ref()));
-                    }
-                    CaptureNotice::DeviceResumed { .. } => {
-                        fallback
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .set(fallback_input(session.stream().as_ref()));
-                    }
-                    CaptureNotice::StillRestarting { .. } | CaptureNotice::Delivering => {}
+                if let Some(stalled) = stalled {
+                    outage.stalled = stalled;
                 }
                 drop(outage);
-                drop(session);
+                if let Some(input) = resumed_on {
+                    fallback
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .set(input);
+                }
                 if back && let Some(recorder) = recorder.upgrade() {
                     recorder.resume_auto_stop();
                 }
