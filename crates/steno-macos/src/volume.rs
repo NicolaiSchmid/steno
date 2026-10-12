@@ -2,8 +2,11 @@
 //! file the user asked for can take, the space APFS frees on demand
 //! (local Time Machine snapshots, purgeable caches) included. `statvfs`
 //! leaves that space out, tens of GB on a Mac with local snapshots, so
-//! the recorder's disk floor reads this instead. Rust only: the Swift app
-//! had no disk check.
+//! the recorder's disk floor reads this beside `statvfs`, the larger
+//! counting. The value comes from `CacheDelete`, which manages only some
+//! volumes; on the others (an external drive, a disk image, `/nix`) it is
+//! 0 however much is free, a real answer, not a full disk. Rust only: the
+//! Swift app had no disk check.
 //!
 //! Every call is safe in `objc2-foundation` but for the two resource key
 //! constants, which are `extern` statics.
@@ -13,8 +16,9 @@ use std::io;
 use std::path::Path;
 
 use objc2_foundation::{
-    NSArray, NSError, NSNumber, NSURL, NSURLResourceKey,
-    NSURLVolumeAvailableCapacityForImportantUsageKey, NSURLVolumeTotalCapacityKey,
+    NSArray, NSError, NSFileNoSuchFileError, NSFileReadNoSuchFileError, NSNumber, NSURL,
+    NSURLResourceKey, NSURLVolumeAvailableCapacityForImportantUsageKey,
+    NSURLVolumeTotalCapacityKey,
 };
 
 /// What the volume that holds a path reports, in bytes.
@@ -22,7 +26,8 @@ use objc2_foundation::{
 pub struct Capacity {
     /// Free for important use
     /// (`NSURLVolumeAvailableCapacityForImportantUsageKey`), the space
-    /// macOS would purge for it included.
+    /// macOS would purge for it included; 0 on a volume `CacheDelete` does
+    /// not manage, whatever is free there (see the module doc).
     pub available_for_important_usage: u64,
     /// The whole volume (`NSURLVolumeTotalCapacityKey`).
     pub total: u64,
@@ -30,7 +35,9 @@ pub struct Capacity {
 
 /// The capacity of the volume that holds `path`, which must exist. A path
 /// that does not, or a volume that reports either value not at all or as
-/// something other than a count of bytes, is an error, never 0.
+/// something other than a count of bytes, is an error. An important-use
+/// reading of 0 is a value the volume reports, not an error: a caller
+/// reads `statvfs` beside it (see the module doc).
 pub fn capacity(path: &Path) -> io::Result<Capacity> {
     let url = NSURL::from_file_path(path).ok_or_else(|| {
         io::Error::new(
@@ -69,9 +76,7 @@ pub fn capacity(path: &Path) -> io::Result<Capacity> {
 /// `error` from reading the resource values of `path`, as an I/O error:
 /// `NotFound` for Foundation's no-such-file codes.
 fn ns_error(path: &Path, error: &NSError) -> io::Error {
-    /// `NSFileNoSuchFileError` and `NSFileReadNoSuchFileError`.
-    const NO_SUCH_FILE: [isize; 2] = [4, 260];
-    let kind = if NO_SUCH_FILE.contains(&error.code()) {
+    let kind = if [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(&error.code()) {
         io::ErrorKind::NotFound
     } else {
         io::ErrorKind::Other
