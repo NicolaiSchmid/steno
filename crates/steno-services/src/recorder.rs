@@ -212,13 +212,11 @@ fn statvfs(path: &Path) -> std::io::Result<Volume> {
 /// the hard floor, and the minutes left count to whichever comes first.
 #[cfg(any(target_os = "macos", test))]
 fn mac_volume(statvfs: Volume, important: Option<u64>) -> Volume {
-    let purgeable_counted = important.unwrap_or(0).max(statvfs.available);
+    let ceiling = statvfs
+        .available
+        .saturating_add(DiskWatch::STOP_BELOW_BYTES - DiskWatch::HARD_FLOOR_BYTES);
     Volume {
-        available: purgeable_counted.min(
-            statvfs
-                .available
-                .saturating_add(DiskWatch::STOP_BELOW_BYTES - DiskWatch::HARD_FLOOR_BYTES),
-        ),
+        available: important.unwrap_or(0).clamp(statvfs.available, ceiling),
         ..statvfs
     }
 }
@@ -4866,31 +4864,28 @@ mod tests {
             let image = folder.path().join("probe.dmg");
             let mount_point = folder.path().join("volume");
             std::fs::create_dir(&mount_point).unwrap();
-            let hdiutil = |args: &[&std::ffi::OsStr]| {
-                let status = std::process::Command::new("hdiutil")
-                    .args(args)
+            let run = |command: &mut std::process::Command| {
+                let status = command
                     .stdout(std::process::Stdio::null())
                     .status()
                     .unwrap();
-                assert!(status.success(), "hdiutil {args:?}: {status}");
+                assert!(status.success(), "{command:?}: {status}");
             };
-            hdiutil(&[
-                "create".as_ref(),
-                "-size".as_ref(),
-                "1g".as_ref(),
-                "-fs".as_ref(),
-                file_system.as_ref(),
-                "-volname".as_ref(),
-                "StenoProbe".as_ref(),
-                image.as_os_str(),
-            ]);
-            hdiutil(&[
-                "attach".as_ref(),
-                "-nobrowse".as_ref(),
-                "-mountpoint".as_ref(),
-                mount_point.as_os_str(),
-                image.as_os_str(),
-            ]);
+            run(std::process::Command::new("hdiutil")
+                .args([
+                    "create",
+                    "-size",
+                    "1g",
+                    "-fs",
+                    file_system,
+                    "-volname",
+                    "StenoProbe",
+                ])
+                .arg(&image));
+            run(std::process::Command::new("hdiutil")
+                .args(["attach", "-nobrowse", "-mountpoint"])
+                .arg(&mount_point)
+                .arg(&image));
             Self {
                 _folder: folder,
                 mount_point,
