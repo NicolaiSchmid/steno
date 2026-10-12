@@ -894,7 +894,7 @@ fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
     assert_eq!(ready.status, 2, "{}", ready.stderr);
     assert!(
         ready.stderr.contains(&format!(
-            "Meeting {meeting_id} is ready; pass --allow-ready to process it again."
+            "Meeting {meeting_id} is ready and complete; pass --allow-ready to process it again."
         )),
         "{}",
         ready.stderr
@@ -907,7 +907,7 @@ fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
     assert_eq!(swept.status, 2, "{}", swept.stderr);
     assert!(
         swept.stderr.contains(&format!(
-            "Meeting {meeting_id} is ready; pass --allow-ready to process it again."
+            "Meeting {meeting_id} is ready and complete; pass --allow-ready to process it again."
         )),
         "{}",
         swept.stderr

@@ -922,8 +922,10 @@ impl Diarization {
     /// segments no stored speaker covers, under the label after the
     /// highest stored "Speaker N" in `taken` (read lower-cased, as the
     /// summary's label map `SpeakerLabels` compares labels), so it never
-    /// shares a name with a stored speaker nor reuses one merged away:
-    /// "Speaker 1" when nothing is stored. A mic lane is diarized
+    /// shares a name with a stored speaker and is never at or below the
+    /// highest stored label: "Speaker 1" when nothing is stored. A label
+    /// merged away above every stored one (the user merged "Speaker 3"
+    /// into "Speaker 1" and "Speaker 2" is left) can come back. A mic lane is diarized
     /// only when it is the room (a call whose tap carried no conversation),
     /// so it becomes the room speaker too and the other party's words never
     /// go to "me". The speaker has no embedding, so confirming it teaches

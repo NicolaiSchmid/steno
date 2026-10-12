@@ -5839,9 +5839,10 @@ async fn the_room_row_beside_stored_speakers_takes_the_next_free_label() {
     );
 }
 
-/// A label merged away is not reused: the room row takes the label after
-/// the highest stored one, so a kept summary that still names the merged
-/// voice never points at the room's speech.
+/// A label merged away below the highest stored one is not reused: the
+/// room row takes the label after the highest stored one, never at or
+/// below it, so a kept summary that still names the merged voice never
+/// points at the room's speech.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_room_label_skips_every_stored_label() {
     let (world, meeting, _asset, first) = a_diarized_call_with_new_speech(false).await;

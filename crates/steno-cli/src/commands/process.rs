@@ -333,7 +333,7 @@ fn reprocess_failure(error: ReprocessError) -> Failure {
             uuid_string(meeting_id)
         )),
         ReprocessError::NotOffered(id) => Failure::runtime(format!(
-            "Meeting {} is ready; pass --allow-ready to process it again.",
+            "Meeting {} is ready and complete; pass --allow-ready to process it again.",
             uuid_string(id)
         )),
         ReprocessError::NoAsset(id) => Failure::runtime(format!(
@@ -467,7 +467,7 @@ mod tests {
             (
                 ReprocessError::NotOffered(id),
                 Failure::runtime(format!(
-                    "Meeting {s} is ready; pass --allow-ready to process it again."
+                    "Meeting {s} is ready and complete; pass --allow-ready to process it again."
                 )),
             ),
             (
