@@ -115,7 +115,7 @@ git_quiet clone --quiet "$scratch/aur.git" "$scratch/aur-after"
 [[ "$(git -C "$scratch/aur-after" log -1 --format=%s)" == 'steno-desktop-bin 0.11.1-1' ]] \
   || fail "the AUR commit is '$(git -C "$scratch/aur-after" log -1 --format=%s)'"
 files="$(git -C "$scratch/aur-after" ls-files | LC_ALL=C sort | tr '\n' ' ')"
-[[ "$files" == ".SRCINFO .gitignore LICENSE PKGBUILD keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc speexdsp-COPYING steno-desktop.sh " ]] \
+[[ "$files" == ".SRCINFO .gitignore LICENSE PKGBUILD keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc speexdsp-COPYING steno-desktop.install steno-desktop.sh ufw-steno-desktop " ]] \
   || fail "the AUR holds $files"
 cmp -s "$aur/PKGBUILD" "$scratch/aur-after/PKGBUILD" || fail "the AUR's PKGBUILD is not the bumped one"
 

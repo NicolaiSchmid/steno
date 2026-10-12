@@ -18,7 +18,8 @@
 #   form above (a third release source, the 0.1.0 pin's drop-in copies that
 #   Bump step 3 deletes) or a rewrite did not take.
 # - The push: a clone of the AUR repository, its files replaced by
-#   PKGBUILD, .SRCINFO, .gitignore, keys/ and every local source, one
+#   PKGBUILD, .SRCINFO, .gitignore, keys/, every local source and the
+#   install script (and a changelog, if named), one
 #   commit `steno-desktop-bin <version>-1`, pushed to `master`.
 #
 # Environment: AUR_SSH_PRIVATE_KEY, the AUR account's SSH key. AUR_URL
@@ -112,10 +113,15 @@ if [[ -z "$url" ]]; then
 fi
 git clone --quiet "$url" "$work/aur" 2>/dev/null || die "could not clone the AUR repository"
 git -C "$work/aur" rm -rq --ignore-unmatch . >/dev/null
+# The local sources, and the install script and changelog the package
+# names outside source= (makepkg needs them beside the PKGBUILD).
 locals=()
 while IFS= read -r source; do
   [[ "$source" == *://* ]] || locals+=("$source")
 done <<< "$sources"
+while IFS= read -r file; do
+  locals+=("$file")
+done < <(sed -n 's/^\t\(install\|changelog\) = //p' "$aur/.SRCINFO")
 (cd "$aur" && cp -R PKGBUILD .SRCINFO .gitignore keys "${locals[@]}" "$work/aur/")
 git -C "$work/aur" add -A
 if git -C "$work/aur" diff --cached --quiet; then
