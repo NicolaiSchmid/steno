@@ -711,11 +711,12 @@ Every package is written in parallel except where a dependency is named:
       when the user chooses Pair again there, which says that every phone must
       pair again, is a new identity minted: Pair again removes the paired phones
       and the recorded fingerprint, then mints through `HandoverIdentity::store`.
-      That waiting state in Settings, with both bridge methods, its fixtures
-      and a test that a refused read mints nothing, is the follow-up
-      `feat/handover-waiting`; until it lands, Try again is on the onboarding
-      step. Then the pipeline starts, and the listener once the identity is in
-      place: the meetings the Swift app left queued or interrupted are resumed
+      That waiting state in Settings, with both bridge methods
+      (`settings.iphone.tryAgain`, `settings.iphone.pairAgain`), its fixture
+      and a test that a refused read mints nothing, came with
+      `feat/handover-waiting` (#281); until then Try again was on the
+      onboarding step alone. Then the pipeline starts, and the listener once
+      the identity is in place: the meetings the Swift app left queued or interrupted are resumed
       and recovered only once the step ran or was skipped, on the pipeline
       reloaded with what it read. Not now leaves both unread for that launch
       (handover waits), writes no flag, and the step returns at the next
