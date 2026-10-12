@@ -785,8 +785,10 @@ fn forward_levels(
 /// `fallback`, since a rebuild may record another one; and the end of a
 /// recovery ([`Outage::recovering`]) resumes `recorder`'s auto-stop, with
 /// the outage's lock released, since the recorder takes its own lock and
-/// then the outage's. It reads the session before it takes the outage's
-/// lock, so nothing that waits for that lock waits on a rebuild's start.
+/// then the outage's. It reads the session with the outage's lock
+/// released, so nothing that waits for that lock waits on a rebuild's
+/// start; a device change begins the recovery before that read, so a
+/// countdown that runs out while it waits ends nothing.
 /// It holds `session` and `recorder` weakly, so dropping the session ends
 /// the notices and the thread, and the recorder, which holds the thread's
 /// handle, makes no cycle; a stop joins the thread without the recorder's
@@ -804,11 +806,22 @@ fn follow_the_notices(
     std::thread::Builder::new()
         .name("steno-notices".into())
         .spawn(move || {
+            let lock_outage = || {
+                outage
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            };
             while let Ok(notice) = notices.recv() {
                 let Some(session) = session.upgrade() else {
                     return;
                 };
-                // The session first, with no lock held: a rebuild's start
+                // A device change begins the recovery before the session is
+                // read: that read may wait behind a rebuild's start, and a
+                // countdown that runs out meanwhile ends nothing (S2).
+                if matches!(notice, CaptureNotice::DeviceChanged(_)) {
+                    lock_outage().follow(&notice);
+                }
+                // Then the session, with no lock held: a rebuild's start
                 // holds the session's lock for seconds, and the status, the
                 // microphone's activity and the auto-stop's countdown take
                 // the outage's lock.
@@ -824,13 +837,15 @@ fn follow_the_notices(
                 let resumed_on = matches!(notice, CaptureNotice::DeviceResumed { .. })
                     .then(|| fallback_input(session.stream().as_ref()));
                 drop(session);
-                let mut outage = outage
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let back = outage.follow(&notice);
-                if let Some(stalled) = stalled {
-                    outage.stalled = stalled;
-                }
+                let mut outage = lock_outage();
+                let back = match stalled {
+                    // A device change, followed above.
+                    Some(stalled) => {
+                        outage.stalled = stalled;
+                        false
+                    }
+                    None => outage.follow(&notice),
+                };
                 drop(outage);
                 if let Some(input) = resumed_on {
                     fallback
@@ -2639,12 +2654,13 @@ mod tests {
 
     /// Records over `harness` until `warning` shows, within `patience`,
     /// and checks the meter reads silence then and the warning stands for
-    /// `holds` more; stops, checks the note after the stop ends with
-    /// `cause` and returns the seconds it says are missing.
+    /// `holds` more; stops, checks the note after the stop names the
+    /// `stalled` device, or none, and returns the seconds it says are
+    /// missing.
     async fn until_still_trying(
         harness: &Harness,
         warning: &str,
-        cause: &str,
+        stalled: Option<&str>,
         patience: Duration,
         holds: Duration,
     ) -> u64 {
@@ -2668,21 +2684,34 @@ mod tests {
         }
         stop(&harness.recorder).await;
         let note = status().warning.unwrap_or_default();
-        let seconds: u64 = note
-            .strip_prefix("About ")
-            .and_then(|rest| rest.split(' ').next())
-            .and_then(|seconds| seconds.parse().ok())
-            .unwrap_or_else(|| panic!("the note: {note}"));
-        assert_eq!(
-            note,
-            format!("About {seconds} seconds of the recording are missing{cause}")
-        );
+        assert!(note.starts_with("About "), "only the missing audio: {note}");
+        let seconds = seconds_missing(&note, stalled);
         // Before the harness waits for the pipeline's runs, so none starts
         // after that wait and writes into the folder it removed.
         eventually("the pipeline picked the saved meeting up", || {
             harness.engine.transcriptions.count() > 0
         })
         .await;
+        seconds
+    }
+
+    /// The seconds the note after a stop says are missing, checking that
+    /// it ends with [`missing_audio_note`]'s note for them and the
+    /// `stalled` device, or none: "About 1 second" as well as the plural.
+    fn seconds_missing(note: &str, stalled: Option<&str>) -> u64 {
+        let missing = note.find("About ").map_or("", |start| &note[start..]);
+        let seconds: u64 = missing
+            .strip_prefix("About ")
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|seconds| seconds.parse().ok())
+            .unwrap_or_else(|| panic!("the note: {note}"));
+        // A gap that rounds to `seconds`, past the note's 1 s floor.
+        let gap = Duration::from_secs(seconds).as_secs_f64() + 0.25;
+        assert_eq!(
+            Some(missing),
+            missing_audio_note(gap, stalled).as_deref(),
+            "{note}"
+        );
         seconds
     }
 
@@ -2707,7 +2736,7 @@ mod tests {
     /// the stall's 2 s, and four restarts that wait 2 s each for a frame.
     const STILL_TRYING_WITHIN: Duration = Duration::from_secs(30);
     const STILL_TRYING_ON_USB: &str = "No audio from USB Microphone. Still trying.";
-    const FROM_USB: &str = ": no audio arrived from USB Microphone.";
+    const USB_MICROPHONE: &str = "USB Microphone";
 
     /// A device that stops delivering and whose restarts keep failing (a
     /// graph that does not run): once they pass `RESTART_ATTEMPTS` the
@@ -2726,7 +2755,7 @@ mod tests {
         let seconds = until_still_trying(
             &harness,
             STILL_TRYING_ON_USB,
-            FROM_USB,
+            Some(USB_MICROPHONE),
             STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
@@ -2749,7 +2778,7 @@ mod tests {
         let seconds = until_still_trying(
             &harness,
             STILL_TRYING_ON_USB,
-            FROM_USB,
+            Some(USB_MICROPHONE),
             STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
@@ -2778,9 +2807,10 @@ mod tests {
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
         until_the_warning(&harness, warning, STILL_TRYING_WITHIN).await;
         stop(&harness.recorder).await;
-        let note = harness.recorder.status().warning.unwrap_or_default();
-        assert!(note.contains("of the recording are missing"), "{note}");
-        assert_eq!(note.contains("USB Microphone"), cfg!(windows), "{note}");
+        seconds_missing(
+            &harness.recorder.status().warning.unwrap_or_default(),
+            cfg!(windows).then_some(USB_MICROPHONE),
+        );
         eventually("the pipeline picked the saved meeting up", || {
             harness.engine.transcriptions.count() > 0
         })
@@ -2800,7 +2830,7 @@ mod tests {
         let seconds = until_still_trying(
             &harness,
             "No audio is arriving. Still trying.",
-            ".",
+            None,
             STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
