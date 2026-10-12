@@ -170,25 +170,21 @@
       return try HandoverIdentity(secIdentity: created)
     }
 
-    /// The certificate and key items labelled `label` (`defaultLabel` in the
-    /// product) as the guard's store (`HandoverIdentityGuard`).
+    /// The items labelled `defaultLabel` as the guard's store
+    /// (`HandoverIdentityGuard`).
     public struct Store: HandoverIdentityStore {
-      public let label: String
-
-      public init(label: String = IdentityKeychain.defaultLabel) {
-        self.label = label
-      }
+      public init() {}
 
       public func load() throws -> HandoverIdentity? {
-        try IdentityKeychain.load(label: label).map { try HandoverIdentity(secIdentity: $0) }
+        try IdentityKeychain.load(label: defaultLabel).map(HandoverIdentity.init(secIdentity:))
       }
 
       public func store(_ identity: MintedIdentity) throws {
-        try IdentityKeychain.store(identity, label: label)
+        try IdentityKeychain.store(identity, label: defaultLabel)
       }
 
       public func delete() throws {
-        try IdentityKeychain.delete(label: label)
+        try IdentityKeychain.delete(label: defaultLabel)
       }
     }
 

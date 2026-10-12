@@ -66,12 +66,11 @@ public struct HandoverIdentityGuard: Sendable {
     }
     if let stored {
       let fingerprint = ContentHash.hex(stored.fingerprint)
-      switch recorded {
-      case .some(let recorded) where recorded != fingerprint:
-        throw IdentityUnavailability.replaced
-      case .some: break
-      case .none: try record.record(fingerprint)
+      guard let recorded else {
+        try record.record(fingerprint)
+        return stored
       }
+      guard recorded == fingerprint else { throw IdentityUnavailability.replaced }
       return stored
     }
     if recorded != nil { throw IdentityUnavailability.missing }
