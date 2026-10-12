@@ -51,9 +51,21 @@
 //!
 //! # Threads
 //!
-//! The crate doc says which thread the shell calls from. Locks are taken in
-//! one order: the publishing mutex, then the view models, then the sink
-//! slot. The dialogs (`confirm`, `choose_folder`) are called with no lock
+//! The crate doc says which thread the shell calls from: its blocking pool,
+//! for every command, page load, deep link, tray action and the onboarding
+//! window's close, and never the thread it marks with
+//! [`mark_ui_thread`](crate::mark_ui_thread). The services' event follower
+//! and their two-second poll ([`Host::apply_meeting_event`],
+//! [`Host::store_changed`], [`Host::refresh_pairing`]) call from their
+//! runtime's blocking pool, so a reload that waits never holds a runtime
+//! worker. One exemption: the launch (`steno_services::App::launch`, with
+//! [`Host::should_open_onboarding`] before it) runs on the shell's main
+//! thread during setup, before the event loop runs, and reloads once
+//! ([`Host::store_changed`]); it is not a shell entry point, so the mark
+//! does not assert there.
+//!
+//! Locks are taken in one order: the publishing mutex, then the view
+//! models, then the sink slot. The dialogs (`confirm`, `choose_folder`) are called with no lock
 //! held, on the command's thread. The services are called with the
 //! view-model lock held, so they must not call back into the host (the
 //! `services` module doc has the rule), except for the calls that run with
@@ -1044,9 +1056,9 @@ impl Host {
     pub fn onboarding_window_closed(&self) {
         OnboardingViewModel::mark_completed(&self.shared.services);
         // Closing the window over the import step skips it: phone
-        // handover waits, and the step returns at the next launch. This
-        // runs on the main thread, so the skip never waits: a run whose
-        // prompt is up is left to end by itself.
+        // handover waits, and the step returns at the next launch. The
+        // skip never waits: a run whose prompt is up is left to end by
+        // itself.
         if let Some(import) = &self.shared.services.swift_import
             && import.status().stage == crate::services::SwiftImportStage::Pending
         {

@@ -23,10 +23,13 @@
 //! Hosts run blocking. Every method takes `&self` and returns when the work
 //! is done, including a method that waits on a dialog; the host uses interior
 //! mutability for its view models, which is what the Swift `@MainActor` host
-//! amounts to. The Tauri shell runs the dispatcher on a blocking thread (the
-//! command handler is `async` and awaits a `spawn_blocking`) and bounces
-//! anything that needs the UI, such as `ui.confirmDestructive` and the folder
-//! panels, to the main thread from inside the host method.
+//! amounts to. The Tauri shell runs the dispatcher on Tauri's blocking pool:
+//! the `bridge_call` command is `async` and awaits a `spawn_blocking`
+//! (`call_blocking` in `apps/desktop/src-tauri/src/host.rs`), so a call that
+//! waits holds neither a command worker nor the main thread. It shows the
+//! folder panels itself before it calls the host (`dialogs.rs`), and the
+//! destructive alert, which the host asks for from inside the method, blocks
+//! that pool thread while the dialog plugin shows it on the main thread.
 //!
 //! Events and replies are not ordered with respect to each other. A host
 //! method that publishes a snapshot and then returns sends the snapshot
