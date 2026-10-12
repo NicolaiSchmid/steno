@@ -2,12 +2,16 @@
 //! prints the text, the segments and the decode statistics; with
 //! `--range START-END` (seconds) it decodes that one window without the
 //! chunker, which is how the zero-token window of spike D is probed.
+//! With `--json DIR` it also writes each file's segments, word timings
+//! included, to `DIR/<name>.json`, the `RawSegment` array the Swift
+//! bake-off writes, so word starts can be compared across builds.
 //! `STENO_MODELS_DIR` names Steno's models directory, as for the app and
 //! the CLI: its `onnx/` holds `parakeet-tdt-0.6b-v3-fp32/` and `silero-vad/`.
 //!
 //! ```sh
 //! STENO_MODELS_DIR=/path/to/models cargo run --release -p steno-speech --example transcribe -- file.wav
 //! cargo run --release -p steno-speech --example transcribe -- --range 25-48 file.wav
+//! cargo run --release -p steno-speech --example transcribe -- --json out/ file.wav
 //! ```
 
 #![allow(
@@ -33,9 +37,10 @@ use steno_speech::{
 
 fn main() {
     let mut range: Option<(f32, f32)> = None;
+    let mut json: Option<PathBuf> = None;
     let mut files: Vec<PathBuf> = Vec::new();
     let mut args = std::env::args().skip(1);
-    let usage = "usage: transcribe [--range START-END] <wav>...";
+    let usage = "usage: transcribe [--range START-END] [--json DIR] <wav>...";
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             println!("{usage}");
@@ -45,6 +50,10 @@ fn main() {
             let value = args.next().expect("--range START-END");
             let (start, end) = value.split_once('-').expect("--range START-END");
             range = Some((start.parse().unwrap(), end.parse().unwrap()));
+        } else if arg == "--json" {
+            let dir = PathBuf::from(args.next().expect("--json DIR"));
+            std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+            json = Some(dir);
         } else {
             files.push(PathBuf::from(arg));
         }
@@ -108,5 +117,12 @@ fn main() {
             );
         }
         println!();
+        if let Some(dir) = &json {
+            let name = file.file_stem().expect("a file name").to_string_lossy();
+            let path = dir.join(format!("{name}.json"));
+            let text =
+                serde_json::to_string_pretty(&transcript.segments).expect("segments serialise");
+            std::fs::write(&path, text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        }
     }
 }

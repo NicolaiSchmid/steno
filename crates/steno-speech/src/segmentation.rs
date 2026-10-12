@@ -7,19 +7,28 @@
 
 use steno_core::{RawSegment, TimedWord};
 
-use crate::backend::FRAME_SECONDS;
+use crate::backend::{FRAME_SECONDS, SAMPLE_RATE};
 use crate::decoder::Token;
 use crate::vocab::{Vocab, starts_word, strip_boundary};
 
 /// One timed piece per token: start one frame before the emission frame
-/// (TDT emits after the frame it describes), end after the token's
-/// duration, at least one frame.
+/// (TDT emits after the frame it describes), from the window's own start
+/// (the token's phase), not the recording frame it falls in, and never
+/// before 0; end after the token's duration, at least one frame.
 #[must_use]
 pub fn timed_pieces(tokens: &[Token], vocab: &Vocab) -> Vec<TimedWord> {
     tokens
         .iter()
         .map(|token| {
-            let start = token.frame.saturating_sub(1) as f64 * FRAME_SECONDS;
+            // The phase is added to the frame's time, rather than the start
+            // computed from samples, so a window on the frame grid keeps
+            // the timings it always had, bit for bit.
+            let start = match token.frame {
+                0 => 0.0,
+                frame => {
+                    (frame - 1) as f64 * FRAME_SECONDS + token.phase as f64 / SAMPLE_RATE as f64
+                }
+            };
             let length = token.duration.max(1) as f64 * FRAME_SECONDS;
             TimedWord {
                 text: vocab.piece(token.id).to_owned(),
@@ -367,12 +376,14 @@ mod tests {
                 Token {
                     id: 0,
                     frame: 0,
+                    phase: 0,
                     confidence: 0.5,
                     duration: 0,
                 },
                 Token {
                     id: 0,
                     frame: 10,
+                    phase: 0,
                     confidence: 0.5,
                     duration: 2,
                 },
@@ -384,5 +395,19 @@ mod tests {
         assert!((pieces[0].end - 0.08).abs() < 1e-9);
         assert!((pieces[1].start - 0.72).abs() < 1e-9);
         assert!((pieces[1].end - 0.88).abs() < 1e-9);
+        // A window on the frame grid keeps the frame's time bit for bit.
+        assert_eq!(pieces[1].start, 9.0 * FRAME_SECONDS);
+        // Off the grid the phase moves the start, but never before 0.
+        let phased = |frame, phase| Token {
+            id: 0,
+            frame,
+            phase,
+            confidence: 0.5,
+            duration: 1,
+        };
+        let pieces = timed_pieces(&[phased(0, 1_000), phased(10, 640)], &vocab);
+        assert_eq!(pieces[0].start, 0.0);
+        assert!((pieces[0].end - 0.08).abs() < 1e-9);
+        assert!((pieces[1].start - 0.76).abs() < 1e-9);
     }
 }

@@ -313,7 +313,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   - [ ] Chunking. Here: `crates/steno-speech/src/chunker.rs` (`layout`, VAD pause cuts with the long-pause
     skip). There: `crates/steno-speech-coreml/src/chunking.rs` (`Layout::v3`, `silence_aligned_chunk_starts`:
     14.96 s windows at a 12.96 s stride). Resolve: the VAD layout, which invariant 4
-    names as shared; FLEURS passes with it here.
+    names as shared; FLEURS passes with it here. The VAD layout's chunks start
+    anywhere, so the shared pipeline times words from each chunk's exact start
+    (`Token::phase`, A13 of `.plans/2026-10-07-stable-promotion.md`); the CoreML
+    layout puts every window on the frame grid.
   - [ ] Opening marks. Here: `crates/steno-speech/src/segmentation.rs` (`OPENING_MARKS`: `¿`, `¡`, `'` and
     brackets begin a word after a boundary). There: `crates/steno-speech-coreml/src/segments.rs` (`words`,
     punctuation always glues). Resolve: the exception; "hola ¿qué" and "said

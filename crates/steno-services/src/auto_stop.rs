@@ -16,12 +16,18 @@
 //!
 //! A capture that recovers after a device change or a restart
 //! (coreaudiod restarting empties the detector's process list too) must
-//! not end the call it is keeping alive; the capture's recovery (#244) is
-//! to gate the countdown. `CallWatch` remembers that the call app let go,
-//! and
+//! not end the call it is keeping alive, for one grace at most. While the
+//! recorder's capture recovers (its outage's `recovering`, which says from
+//! when until when), the countdown the release armed is not shown and ends
+//! nothing: when the capture is back,
 //! [`CaptureRecorder::resume_auto_stop`](crate::recorder::CaptureRecorder::resume_auto_stop),
-//! called when the capture is back, arms a fresh countdown when the app
-//! still holds no microphone.
+//! which the capture's notice thread calls, puts a fresh countdown in its
+//! place, and one that runs out first is replaced by a fresh one at once
+//! (`CallWatch::postpone`), shown while the capture still recovers. That
+//! fresh countdown is the cap: it ends the call through the Stop path
+//! whatever the capture does, and a later resume leaves it, so a capture
+//! that keeps failing, or recovers over and over, ends the call within two
+//! graces of the release, saved. Rust only.
 //!
 //! Swift: the "Auto-stop after the call ends" part of
 //! `apps/macos/Steno/Recording/RecordingController.swift` and
@@ -61,9 +67,15 @@ struct AutoStop {
     deadline: Duration,
     cancel: Cancel,
     number: u64,
+    /// The release armed it: while the capture recovers it is not shown,
+    /// and a resume or its own end while the capture recovers puts a
+    /// fresh one in its place. The fresh one is not postponable: it ends
+    /// the call whatever the capture does. Rust only.
+    postponable: bool,
 }
 
-/// What [`CallWatch::released`] or [`CallWatch::resume`] armed: the
+/// What [`CallWatch::released`], [`CallWatch::resume`] or
+/// [`CallWatch::postpone`] armed: the
 /// recorder sleeps [`AUTO_STOP_GRACE`] on its clock unless `cancel` is
 /// raised, then calls back with `number`. Swift: the `Countdown` of
 /// `Countdown.swift`.
@@ -75,20 +87,15 @@ pub(crate) struct Countdown {
 
 /// The auto-stop policy of one recorder; see the module doc. The caller
 /// holds the recorder's lock and checks the recorder's state: `opened`
-/// counts while a recording starts or runs, `released` and `resume` only
-/// while a call records. Swift: `RecordingController`'s `autoStop` and
-/// `microphoneActivity`.
+/// counts while a recording starts or runs, `released`, `resume` and
+/// `postpone` only while a call records. Swift: `RecordingController`'s
+/// `autoStop` and `microphoneActivity`.
 #[derive(Debug, Default)]
 pub(crate) struct CallWatch {
     /// Another app held the microphone during this recording (the
     /// prompt's app at the start, or the first `opened` since); only then
     /// does a release mean a call ended.
     saw_foreign: bool,
-    /// The call app let go of the microphone and has not opened it since,
-    /// so [`Self::resume`] arms again. Rust only: the detector reports
-    /// only changes, so a release a recovering capture set aside is not
-    /// reported twice.
-    released: bool,
     /// The app the recording is attributed to: the prompt's, or the last
     /// one that opened the microphone.
     call_app: Option<String>,
@@ -112,7 +119,6 @@ impl CallWatch {
     pub(crate) fn reset(&mut self) {
         self.disarm();
         self.saw_foreign = false;
-        self.released = false;
         self.call_app = None;
     }
 
@@ -125,39 +131,57 @@ impl CallWatch {
     /// runs: a call is on, and a countdown goes.
     pub(crate) fn opened(&mut self, app_name: Option<String>) {
         self.saw_foreign = true;
-        self.released = false;
         self.call_app = app_name;
         self.disarm();
     }
 
-    /// The microphone was released while a call records: remembered, and
-    /// the countdown armed at `now` when a call was seen, none is armed
-    /// and the capture is not `recovering` (then [`Self::resume`] arms it
-    /// once the capture is back). The recorder passes `false` until the
-    /// capture reports its recovery (S2 in
-    /// `.plans/2026-10-07-stable-promotion.md`).
-    pub(crate) fn released(&mut self, now: Duration, recovering: bool) -> Option<Countdown> {
-        self.released = true;
-        if recovering || self.armed.is_some() {
+    /// The microphone was released while a call records: the countdown
+    /// armed at `now` when a call was seen and none is armed, postponable
+    /// (not shown while the capture recovers, see [`Self::status`]).
+    pub(crate) fn released(&mut self, now: Duration) -> Option<Countdown> {
+        if self.armed.is_some() {
             return None;
         }
-        self.arm(now)
+        self.arm(now, true)
     }
 
-    /// The capture is back after recovering: when the call app let go and
-    /// has not opened the microphone since, a fresh countdown is armed at
-    /// `now`, in place of one armed before (which may have run out while
-    /// the capture recovered); else nothing.
+    /// The capture is back after recovering: the countdown the release
+    /// armed (which may have run out while the capture recovered) is
+    /// replaced by a fresh one at `now`; one that replaced it already
+    /// stays, as does no countdown (the app holds the microphone, or Keep
+    /// recording).
     pub(crate) fn resume(&mut self, now: Duration) -> Option<Countdown> {
-        if !self.released {
+        if !self.armed.as_ref().is_some_and(|armed| armed.postponable) {
             return None;
         }
         self.disarm();
-        self.arm(now)
+        self.arm(now, false)
+    }
+
+    /// The countdown `number` ran out at `now`: while the capture is
+    /// `recovering`, the countdown the release armed is replaced by a
+    /// fresh one, which ends the call whatever the capture does (the cap
+    /// on the wait); else nothing, and [`Self::elapsed`] says whether it
+    /// ends the call.
+    pub(crate) fn postpone(
+        &mut self,
+        number: u64,
+        now: Duration,
+        recovering: bool,
+    ) -> Option<Countdown> {
+        let postponable = self
+            .armed
+            .as_ref()
+            .is_some_and(|armed| armed.number == number && armed.postponable);
+        if !(recovering && postponable) {
+            return None;
+        }
+        self.disarm();
+        self.arm(now, false)
     }
 
     /// Arms the countdown at `now`, when a call was seen.
-    fn arm(&mut self, now: Duration) -> Option<Countdown> {
+    fn arm(&mut self, now: Duration, postponable: bool) -> Option<Countdown> {
         if !self.saw_foreign {
             return None;
         }
@@ -168,6 +192,7 @@ impl CallWatch {
             deadline: now + AUTO_STOP_GRACE,
             cancel: cancel.clone(),
             number: self.arms,
+            postponable,
         });
         Some(Countdown {
             number: self.arms,
@@ -199,13 +224,19 @@ impl CallWatch {
     }
 
     /// The armed countdown as the status shows it at `now`: the whole
-    /// seconds left, rounded up as Swift's one-second ticks counted.
-    pub(crate) fn status(&self, now: Duration) -> Option<AutoStopStatus> {
-        self.armed.as_ref().map(|armed| AutoStopStatus {
-            app_name: armed.app_name.clone(),
-            remaining_seconds: armed.deadline.saturating_sub(now).as_secs_f64().ceil(),
-            total_seconds: AUTO_STOP_GRACE.as_secs_f64(),
-        })
+    /// seconds left, rounded up as Swift's one-second ticks counted. None
+    /// for the countdown the release armed while the capture is
+    /// `recovering`, which ends nothing then (no "Stops in 0:00" while it
+    /// waits).
+    pub(crate) fn status(&self, now: Duration, recovering: bool) -> Option<AutoStopStatus> {
+        self.armed
+            .as_ref()
+            .filter(|armed| !(recovering && armed.postponable))
+            .map(|armed| AutoStopStatus {
+                app_name: armed.app_name.clone(),
+                remaining_seconds: armed.deadline.saturating_sub(now).as_secs_f64().ceil(),
+                total_seconds: AUTO_STOP_GRACE.as_secs_f64(),
+            })
     }
 
     fn disarm(&mut self) {
