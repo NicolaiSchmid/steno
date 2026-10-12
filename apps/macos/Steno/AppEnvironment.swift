@@ -213,12 +213,7 @@ final class AppEnvironment {
   /// One `EKEventStore` for the calendar service and the permission check.
   private static let eventStore = EKEventStore()
 
-  /// `askToPairAgain` answers when the handover identity the paired phones
-  /// know is missing or replaced (`PairAgainAlert.ask` in the product).
-  static func live(
-    updater: any UpdaterControlling,
-    askToPairAgain: @MainActor () async -> Bool = PairAgainAlert.ask
-  ) async throws -> AppEnvironment {
+  static func live(updater: any UpdaterControlling) async throws -> AppEnvironment {
     let paths = try StenoPaths.default()
     // One bus: the store posts `deleted` on it, the pipeline `progress`,
     // `speakersNeedReview` and `retentionApplied`; the app subscribes once.
@@ -283,7 +278,7 @@ final class AppEnvironment {
       ) {
         try await identityGuard.loadOrPairAgain(
           commonName: "Steno on \(HandoverConfiguration.defaultServiceName())",
-          askToPairAgain: askToPairAgain)
+          askToPairAgain: PairAgainAlert.ask)
       }
     } catch {
       environment.startupWarnings.append("Phone handover is unavailable: \(error)")
