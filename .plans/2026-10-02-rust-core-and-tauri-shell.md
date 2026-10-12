@@ -1098,10 +1098,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   rewritten from the identity found while the paired phones, which the Swift app keeps,
   hold the guard. Swift keeps its own identity in the Keychain and has no guard
   until #284, which records its fingerprint in its own `swift-handover-identity.json`.
-  The Mac's Create New Keychain case (the store empty, or holding another
-  identity, at the next launch; Try again and Pair again) is tested end to end
-  in `steno-services`' `keychain_reset_tests`, over the secrets file, the
-  Keychain's stand-in.
+  A keychain that comes back empty (the Mac's Create New Keychain) or holding
+  another identity, at the next launch, with Try again and Pair again, is
+  tested end to end in `steno-services`' `keychain_reset_tests`, over the
+  secrets file, the Keychain's stand-in.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
