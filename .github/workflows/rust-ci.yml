@@ -36,8 +36,7 @@ name: Rust CI
 # the tray's menu while another process holds the store's write lock and
 # requires the tray to read Stopping at once and the recording saved once
 # the lock goes (apps/desktop/scripts/locked-store-linux.sh), and bundles a
-# `.deb` with
-# the speech sidecar
+# `.deb` with the speech sidecar
 # (apps/desktop/scripts/check-bundle.sh finds it beside the app) so a
 # packaging regression (the bundle config, the icons, the plists, the
 # release profile, the sidecar) fails here and not in desktop-release.yml.

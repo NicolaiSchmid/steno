@@ -83,6 +83,11 @@ within() {
   python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) - float(sys.argv[2]) <= float(sys.argv[3]) else 1)' "$@"
 }
 
+# $1 - $2, in seconds to two places.
+elapsed() {
+  python3 -c 'import sys; print(round(float(sys.argv[1]) - float(sys.argv[2]), 2))' "$@"
+}
+
 python3 "$scripts/tray-watcher-linux.py" serve >"$work/watcher.log" 2>&1 &
 watcher=$!
 await_line "tray-watcher: ready" "$work/watcher.log" \
@@ -130,7 +135,7 @@ while within "$(now)" "$clicked" "$stopping_within"; do
 done
 [[ -n "$stopping" ]] \
   || fail "the tray's Record row read \"$row\" $stopping_within s after the click, not Stopping…"
-echo "$name: the tray read Stopping… $(python3 -c 'import sys; print(round(float(sys.argv[1]) - float(sys.argv[2]), 2))' "$stopping" "$clicked") s after the click"
+echo "$name: the tray read Stopping… $(elapsed "$stopping" "$clicked") s after the click"
 grep -q '^recording ' <<<"$(meetings "$store")" \
   || fail "the meeting was saved under the held lock: $(meetings "$store")"
 
@@ -147,6 +152,6 @@ while within "$(now)" "$released" "$saved_within"; do
 done
 [[ -n "$queued" ]] \
   || fail "the meeting was not queued $saved_within s after the lock's release: $(meetings "$store")"
-echo "$name: the meeting was queued $(python3 -c 'import sys; print(round(float(sys.argv[1]) - float(sys.argv[2]), 2))' "$queued" "$released") s after the lock's release"
+echo "$name: the meeting was queued $(elapsed "$queued" "$released") s after the lock's release"
 require_saved
 echo "$name: ok, the tray answered while the stop waited for the lock, and the recording was saved"
