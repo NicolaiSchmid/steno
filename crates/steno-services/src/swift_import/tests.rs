@@ -2460,6 +2460,10 @@ impl ExportedWithoutAKey {
 async fn a_summary_run_after_the_key_is_saved_keeps_an_edited_note_and_writes_beside_it() {
     use steno_llm::testing::{Scripts, StubChatServer};
 
+    /// A bullet of the e2e summary fixture, which only a note with the
+    /// summary holds.
+    const SUMMARY_LINE: &str = "Die zwölf Testsegmente wurden der Reihe nach besprochen.";
+    let has_summary = |bytes: &[u8]| String::from_utf8_lossy(bytes).contains(SUMMARY_LINE);
     for edited in [true, false] {
         let dir = tempfile::tempdir().unwrap();
         let server = StubChatServer::start().await.unwrap();
@@ -2471,6 +2475,7 @@ async fn a_summary_run_after_the_key_is_saved_keeps_an_edited_note_and_writes_be
         let exported = ExportedWithoutAKey::new(&dir, &server).await;
         let note = exported.note();
         let first = std::fs::read(&note).unwrap();
+        assert!(!has_summary(&first), "exported without the summary");
         let mine = [first.as_slice(), b"\nMy own notes.\n"].concat();
         if edited {
             std::fs::write(&note, &mine).unwrap();
@@ -2502,9 +2507,8 @@ async fn a_summary_run_after_the_key_is_saved_keeps_an_edited_note_and_writes_be
         assert_eq!(delivery.status, steno_core::DeliveryStatus::Delivered);
         let warnings = delivery.receipt.unwrap().warnings;
         if !edited {
-            assert_ne!(
-                std::fs::read(&note).unwrap(),
-                first,
+            assert!(
+                has_summary(&std::fs::read(&note).unwrap()),
                 "replaced, with the summary"
             );
             assert_eq!(exported.copies(), Vec::<String>::new());
@@ -2523,7 +2527,7 @@ async fn a_summary_run_after_the_key_is_saved_keeps_an_edited_note_and_writes_be
             "{copy:?}"
         );
         let beside = std::fs::read(exported.folder.join(&copy[0])).unwrap();
-        assert_ne!(beside, first, "the copy has the summary");
+        assert!(has_summary(&beside), "the copy has the summary");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].starts_with(&format!("Kept your changes to {stem}.md")),
