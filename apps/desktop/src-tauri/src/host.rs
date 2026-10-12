@@ -1082,6 +1082,12 @@ pub mod gated {
             self.wait_for(patience, |state| state.answered.iter().any(|m| m == method))
         }
 
+        /// Whether the check mark was asked to move `times` times within
+        /// `patience`.
+        pub fn wait_noted(&self, times: usize, patience: Duration) -> bool {
+            self.wait_for(patience, |state| state.notes == times)
+        }
+
         pub fn answered(&self) -> Vec<String> {
             self.state().answered.clone()
         }

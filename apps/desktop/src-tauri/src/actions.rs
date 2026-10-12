@@ -289,13 +289,10 @@ mod tests {
         );
         host.open();
         assert!(host.wait_answered(method, Duration::from_secs(5)));
-        for _ in 0..100 {
-            if host.notes() == 1 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(host.notes(), 1, "the check mark follows the system");
+        assert!(
+            host.wait_noted(1, Duration::from_secs(1)),
+            "the check mark follows the system"
+        );
     }
 
     /// The tray's Stop, on a stand-in main thread: the host publishes
