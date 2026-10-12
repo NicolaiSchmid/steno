@@ -20,7 +20,9 @@
 //! Swift: `FluidAudio`'s `TdtDecoderV3`, ported in
 //! `spikes/coreml-rs/src/decoder.rs`.
 
-use crate::backend::{DecoderState, DecoderStep, EncoderOutput, JointDecision, SpeechBackend};
+use crate::backend::{
+    DecoderState, DecoderStep, EncoderOutput, FRAME_SAMPLES, JointDecision, SpeechBackend,
+};
 use crate::error::SpeechError;
 
 /// One emitted token: a `SentencePiece` piece with its frame.
@@ -30,11 +32,25 @@ pub struct Token {
     /// The encoder frame (80 ms) the token was emitted at, counted from the
     /// start of the recording.
     pub frame: usize,
+    /// Samples the window started past a frame boundary of the recording,
+    /// so the token's frame begins at sample `frame * FRAME_SAMPLES + phase`
+    /// ([`Token::sample`]). Below [`FRAME_SAMPLES`]; 0 on the grid. The
+    /// timings add it and the merge's monotonic pass orders by (frame,
+    /// phase); the merge's matching and the recovery count whole frames.
+    pub phase: usize,
     /// The joint's probability for the piece ([`confidence`]).
     pub confidence: f32,
     /// The TDT duration in frames: the model's prediction, or the frames
     /// the loop advanced under [`TokenDuration::Advanced`].
     pub duration: usize,
+}
+
+impl Token {
+    /// The recording's sample where the token's frame begins.
+    #[must_use]
+    pub fn sample(&self) -> usize {
+        self.frame * FRAME_SAMPLES + self.phase
+    }
 }
 
 /// When the loop stops a window for emitting too many tokens.
@@ -159,7 +175,8 @@ pub struct Decoded {
 
 /// Decodes the first `frames` encoder frames of `model`'s window with a
 /// fresh prediction-network state; token frames are offset by
-/// `frame_offset`, the window's first frame in the recording.
+/// `frame_offset`, the window's first frame in the recording, and their
+/// phase is 0, as on the grid; [`decode_window`] sets it.
 pub fn decode_frames<M: TdtModel + ?Sized>(
     model: &mut M,
     frames: usize,
@@ -207,6 +224,7 @@ pub fn decode_frames<M: TdtModel + ?Sized>(
         tokens.push(Token {
             id: decision.token,
             frame: frame_offset + frame,
+            phase: 0,
             confidence: confidence(decision.probability),
             duration: match config.token_duration {
                 TokenDuration::Predicted => duration,
@@ -274,15 +292,17 @@ impl<B: SpeechBackend + ?Sized> TdtModel for BackendWindow<'_, B> {
     }
 }
 
-/// Decodes `encoder` with a fresh prediction-network state; token frames
-/// are offset by `frame_offset`, the window's first frame in the recording.
-/// A window abandoned at the token budget is logged as a warning; it
-/// reports the tokens kept, which under [`TokenBudget::PerWindow`] is the
-/// budget itself.
+/// Decodes `encoder` with a fresh prediction-network state. `start_sample`
+/// is the window's first sample in the recording: token frames count from
+/// the frame it falls in, and the samples it lies past that frame's start
+/// are each token's [`Token::phase`], so a window off the frame grid times
+/// its tokens from where it really starts. A window abandoned at the token
+/// budget is logged as a warning; it reports the tokens kept, which under
+/// [`TokenBudget::PerWindow`] is the budget itself.
 pub fn decode_window<B: SpeechBackend + ?Sized>(
     backend: &mut B,
     encoder: &EncoderOutput,
-    frame_offset: usize,
+    start_sample: usize,
     config: &DecoderConfig,
     stats: &mut DecodeStats,
 ) -> Result<Vec<Token>, SpeechError> {
@@ -297,19 +317,23 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
     let mut window = BackendWindow {
         backend,
         encoder,
-        // Replaced by `start` before the first joint.
+        // Replaced by `TdtModel::start` before the first joint.
         step: DecoderStep {
             projection: Vec::new(),
             state: DecoderState::zeros(0, 0),
         },
     };
     let runaways = stats.runaways;
-    let tokens = decode_frames(&mut window, frames, frame_offset, config, stats)?.tokens;
+    let (frame_offset, phase) = (start_sample / FRAME_SAMPLES, start_sample % FRAME_SAMPLES);
+    let mut tokens = decode_frames(&mut window, frames, frame_offset, config, stats)?.tokens;
+    for token in &mut tokens {
+        token.phase = phase;
+    }
     if stats.runaways > runaways {
         tracing::warn!(
             frames,
             tokens = tokens.len(),
-            frame_offset,
+            start_sample,
             "runaway decode: window abandoned at the token budget, its tail is lost"
         );
     }
@@ -433,12 +457,14 @@ mod tests {
     fn blanks_advance_by_their_duration_and_tokens_stay_on_zero_durations() {
         // Frame 0: blank, skip 2. Frame 2: token 1 dur 0, token 2 dur 1.
         // Frame 3: blank dur 0 (forced to 1). Frame 4: token 3 dur 3 -> 7 > len.
+        // The window starts 7 samples into the recording's frame 100.
         let mut backend = ScriptedBackend::new(&[(9, 2), (1, 0), (2, 1), (9, 0), (3, 3)]);
         let mut stats = DecodeStats::default();
+        let start = 100 * FRAME_SAMPLES + 7;
         let tokens = decode_window(
             &mut backend,
             &encoder(6),
-            100,
+            start,
             &DecoderConfig::default(),
             &mut stats,
         )
@@ -446,10 +472,12 @@ mod tests {
         assert_eq!(
             tokens
                 .iter()
-                .map(|t| (t.id, t.frame, t.duration))
+                .map(|t| (t.id, t.frame, t.phase, t.duration))
                 .collect::<Vec<_>>(),
-            vec![(1, 102, 0), (2, 102, 1), (3, 104, 3)]
+            vec![(1, 102, 7, 0), (2, 102, 7, 1), (3, 104, 7, 3)]
         );
+        // Each frame begins where the window's own frame does.
+        assert_eq!(tokens[2].sample(), start + 4 * FRAME_SAMPLES);
         // SOS priming, then one feed per token.
         assert_eq!(backend.fed, vec![9, 1, 2, 3]);
         // Priming starts from zeros of `layers * hidden`; each feed takes
