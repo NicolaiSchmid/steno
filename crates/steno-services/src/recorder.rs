@@ -26,11 +26,12 @@
 //! before the disk fills, on every platform. On the Mac the reading is the
 //! larger of `statvfs` and the space macOS frees for important use
 //! (`steno_macos::volume`), which counts what APFS would purge, held to
-//! `statvfs`'s own hard floor (why on `DiskWatch::HARD_FLOOR_BYTES`); a
-//! failed read of the second leaves `statvfs` alone. A volume that reports
-//! no size, or more space free than it holds (some network and FUSE file
-//! systems), counts as unreadable and never warns, stops or refuses a
-//! recording. Rust only: Swift had no disk check.
+//! `statvfs` plus 384 MiB, so below 128 MiB of `statvfs` there is no room
+//! (`DiskWatch::HARD_FLOOR_BYTES`); a failed read of the second leaves
+//! `statvfs` alone. A volume that reports no size, or more space free than
+//! it holds (some network and FUSE file systems), counts as unreadable and
+//! never warns, stops or refuses a recording. Rust only: Swift had no disk
+//! check.
 //!
 //! The session's notices are followed too: while its restarts go on past
 //! `CaptureSession::RESTART_ATTEMPTS`, until audio arrives again, the
@@ -107,16 +108,18 @@ impl DiskWatch {
     /// Below this a recording does not start, and one in progress stops and
     /// is saved: room for the database, the processing and the system, so
     /// the save itself never meets a full disk. On the Mac the reading
-    /// also counts some of the space APFS would purge for the user (tens of
-    /// GB with local Time Machine snapshots), which `statvfs` leaves out,
-    /// down to a hard floor on `statvfs` (`mac_volume`).
+    /// also counts the space APFS would purge for the user (tens of GB
+    /// with local Time Machine snapshots), which `statvfs` leaves out, held
+    /// to `statvfs` plus 384 MiB, so below 128 MiB of `statvfs` there is no
+    /// room ([`Self::HARD_FLOOR_BYTES`], `mac_volume`).
     pub(crate) const STOP_BELOW_BYTES: u64 = 512 * 1024 * 1024;
     /// Below this `statvfs` reading the Mac does not start a recording and
     /// stops one in progress, whatever space macOS says it frees for
     /// important use: `CacheDelete` purges that space asynchronously and a
     /// write never waits for it, so a write can meet a full disk while the
-    /// purgeable space is still counted. What is left keeps the save its
-    /// room, and about five minutes of a call's writing for a purge.
+    /// purgeable space is still counted. The purge's window is the 384 MiB
+    /// gap up to [`Self::STOP_BELOW_BYTES`], about 15 minutes of a call's
+    /// writing; what is left keeps the save its room.
     #[cfg(any(target_os = "macos", test))]
     pub(crate) const HARD_FLOOR_BYTES: u64 = 128 * 1024 * 1024;
     /// The recording time left above [`Self::STOP_BELOW_BYTES`] below which
@@ -4959,11 +4962,12 @@ mod tests {
     }
 
     /// A recording into an external volume starts: on a 1 GB APFS or HFS+
-    /// disk image as the recordings and the database folder, which macOS
-    /// reports 0 bytes free for important use on (`CacheDelete` does not
-    /// manage it), the disk watch reads about `statvfs`'s free space and
-    /// the start is not refused. Ignored: it attaches disk images with
-    /// `hdiutil` (no admin rights needed). On a Mac:
+    /// disk image as the recordings folder and the disk watch's database
+    /// folder, which macOS reports 0 bytes free for important use on
+    /// (`CacheDelete` does not manage it), the disk watch reads about
+    /// `statvfs`'s free space and the start is not refused. Ignored: it
+    /// attaches disk images with `hdiutil` (no admin rights needed). On a
+    /// Mac, run
     /// `cargo test -p steno-services --lib -- --ignored --nocapture
     /// a_recording_into_a_disk_image_starts`.
     #[cfg(target_os = "macos")]
