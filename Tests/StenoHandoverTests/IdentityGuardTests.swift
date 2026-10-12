@@ -34,7 +34,7 @@ import Testing
       self.next = next
     }
 
-    func load() throws -> HandoverIdentity? {
+    func load(preferring _: String?) throws -> HandoverIdentity? {
       if let readError { throw readError }
       return identity
     }
@@ -334,6 +334,28 @@ import Testing
     #expect(keychain.stages == 0 && keychain.promotes == 1)
     #expect(hex(try #require(keychain.identity)) == hex(other))
     #expect(try identityGuard.record.recorded() == hex(other))
+  }
+
+  /// With a paired phone instead (Pair Again on an upgrade with no record
+  /// yet, cut short after the stage or among the phones), the phones still
+  /// pin the identity the keychain lost: the launch asks and leaves the
+  /// staged identity as it is, and Pair Again stages over it.
+  @Test func aStagedIdentityWithNoRecordAndAPairedPhoneAsks() async throws {
+    let keychain = FakeKeychain(nil, next: known)
+    keychain.stagedIdentity = other
+    let identityGuard = try await identityGuard(keychain, phones: 2)
+    await #expect(throws: IdentityUnavailability.missing) {
+      try await identityGuard.loadOrCreate(commonName: "A")
+    }
+    #expect(keychain.stages == 0 && keychain.promotes == 0 && keychain.identity == nil)
+    #expect(keychain.stagedIdentity.map(hex) == hex(other))
+    #expect(try identityGuard.record.recorded() == nil)
+    #expect(try await store.pairedDevices().count == 2)
+
+    #expect(hex(try await identityGuard.loadOrPairAgain(commonName: "A") { true }) == hex(known))
+    #expect(keychain.stages == 1 && keychain.promotes == 1)
+    #expect(try identityGuard.record.recorded() == hex(known))
+    #expect(try await store.pairedDevices().isEmpty)
   }
 
   /// Cut short after the record, before the promote: the staged identity

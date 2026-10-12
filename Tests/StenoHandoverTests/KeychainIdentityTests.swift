@@ -82,6 +82,33 @@ import X509
         try IdentityKeychain.load(label: label) != nil, "a promote of nothing deletes nothing")
     }
 
+    /// Two identities under one label, as an old login keychain added back
+    /// beside the new one leaves them: the lookup takes the preferred one in
+    /// either order, the first without a preference, and the delete of the
+    /// label removes both.
+    @Test(.enabled(if: enabled, "set STENO_KEYCHAIN_TESTS=1 to run the login keychain round trip"))
+    func ofTwoIdentitiesUnderOneLabelThePreferredOneLoads() throws {
+      let label = "Steno test identity \(UUID().uuidString)"
+      defer { try? IdentityKeychain.delete(label: label) }
+      let minted = [
+        try MintedIdentity.mint(commonName: "Steno on Test Mac"),
+        try MintedIdentity.mint(commonName: "Steno on Test Mac"),
+      ]
+      for identity in minted { try IdentityKeychain.store(identity, label: label) }
+      let items = IdentityKeychain.Items()
+      #expect(try items.certificates(labelled: label).count == 2)
+      for identity in minted {
+        let preferred = ContentHash.hex(identity.fingerprint)
+        let loaded = try #require(try items.identity(labelled: label, preferring: preferred))
+        #expect(ContentHash.hex(loaded.fingerprint) == preferred)
+      }
+      #expect(try items.identity(labelled: label) != nil)
+
+      try IdentityKeychain.delete(label: label)
+      #expect(try items.certificates(labelled: label).isEmpty)
+      #expect(try IdentityKeychain.load(label: label) == nil)
+    }
+
     /// A certificate left without its key, as a delete that took the keys
     /// first could leave it, makes `load` throw, and the next delete of its
     /// label removes it.

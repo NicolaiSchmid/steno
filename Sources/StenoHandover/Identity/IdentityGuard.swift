@@ -7,8 +7,10 @@ import StenoCore
 /// changes nothing.
 public protocol HandoverIdentityKeychain: Sendable {
   /// The current identity, nil when none is stored; throws when the
-  /// keychain cannot be read.
-  func load() throws -> HandoverIdentity?
+  /// keychain cannot be read. Of several under its label (one per keychain
+  /// in the search list, an old login keychain added back), the one whose
+  /// fingerprint is `recorded`, else the keychain's first.
+  func load(preferring recorded: String?) throws -> HandoverIdentity?
   /// The staged identity, nil when none is staged; throws when it cannot
   /// be read.
   func staged() throws -> HandoverIdentity?
@@ -71,7 +73,7 @@ public struct HandoverIdentityGuard: Sendable {
     let recorded = try record.recorded()
     let current: HandoverIdentity?
     do {
-      current = try keychain.load()
+      current = try keychain.load(preferring: recorded)
     } catch {
       throw IdentityUnavailability.unreadable(String(describing: error))
     }

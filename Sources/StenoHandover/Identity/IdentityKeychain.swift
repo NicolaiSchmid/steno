@@ -2,6 +2,7 @@
   import Crypto
   import Foundation
   import Security
+  import StenoCore
 
   /// Stores the minted identity in the file-based login keychain as a
   /// certificate item and a key item, and reads it back as a `SecIdentity`.
@@ -88,15 +89,24 @@
     }
 
     /// The identity whose certificate is labelled `label`, or nil when no
-    /// certificate carries that label. Never an identity that is not ours:
-    /// the certificate is looked up by label (which certificate queries
-    /// honour), its label is checked again on the returned attributes, and
-    /// the identity built from it must hand back the same certificate.
-    /// A labelled certificate without its private key is an error, not nil,
-    /// so a half-deleted identity is reported instead of silently replaced
-    /// (which would re-pair every phone).
+    /// certificate carries that label; of several (one per keychain in the
+    /// search list), the first. Never an identity that is not ours: the
+    /// certificate is looked up by label (which certificate queries honour),
+    /// its label is checked again on the returned attributes, and the
+    /// identity built from it must hand back the same certificate. A
+    /// labelled certificate without its private key is an error, not nil, so
+    /// a half-deleted identity is reported instead of silently replaced
+    /// (which would re-pair every phone). The guard's `Store` prefers the
+    /// recorded one of several (`IdentityItems.identity(labelled:preferring:)`).
     public static func load(label: String) throws -> SecIdentity? {
-      guard let certificate = try storedCertificate(labelled: label) else { return nil }
+      try Items().certificate(labelled: label).map { try secIdentity(of: $0, labelled: label) }
+    }
+
+    /// The identity the keychain pairs with `certificate`, which is
+    /// labelled `label`, checked to hand back the same certificate.
+    private static func secIdentity(of certificate: SecCertificate, labelled label: String)
+      throws -> SecIdentity
+    {
       var identity: SecIdentity?
       let status = SecIdentityCreateWithCertificate(nil, certificate, &identity)
       guard status == errSecSuccess, let identity else {
@@ -136,8 +146,9 @@
     public static func loadOrCreate(
       label: String = defaultLabel, commonName: String
     ) throws -> HandoverIdentity {
-      if let existing = try handoverIdentity(label: label) { return existing }
-      return try Items().storeAndReadBack(
+      let items = Items()
+      if let existing = try items.identity(labelled: label) { return existing }
+      return try items.storeAndReadBack(
         try MintedIdentity.mint(commonName: commonName), label: label)
     }
 
@@ -149,7 +160,9 @@
 
       public init() {}
 
-      public func load() throws -> HandoverIdentity? { try keychain.load() }
+      public func load(preferring recorded: String?) throws -> HandoverIdentity? {
+        try keychain.load(preferring: recorded)
+      }
 
       public func staged() throws -> HandoverIdentity? { try keychain.staged() }
 
@@ -163,16 +176,19 @@
     /// The login keychain's certificate and key items, through the lookups
     /// and writes of this type.
     struct Items: IdentityItems {
-      func identity(labelled label: String) throws -> HandoverIdentity? {
-        try handoverIdentity(label: label)
-      }
-
-      func certificate(labelled label: String) throws -> SecCertificate? {
-        try storedCertificate(labelled: label)
-      }
-
       func certificates(labelled label: String) throws -> [SecCertificate] {
         try storedCertificates(labelled: label)
+      }
+
+      func fingerprint(of certificate: SecCertificate) -> String {
+        ContentHash.hex(
+          HandoverIdentity.fingerprint(ofDER: SecCertificateCopyData(certificate) as Data))
+      }
+
+      func identity(of certificate: SecCertificate, labelled label: String) throws
+        -> HandoverIdentity
+      {
+        try HandoverIdentity(secIdentity: secIdentity(of: certificate, labelled: label))
       }
 
       func privateKey(of certificate: SecCertificate) -> SecKey? {
@@ -221,11 +237,6 @@
 
     // MARK: - Lookups
 
-    /// `load(label:)` as a `HandoverIdentity`.
-    private static func handoverIdentity(label: String) throws -> HandoverIdentity? {
-      try load(label: label).map(HandoverIdentity.init(secIdentity:))
-    }
-
     /// The private key the keychain pairs with `certificate`, found by its
     /// hash; nil when it holds none.
     private static func privateKey(of certificate: SecCertificate) -> SecKey? {
@@ -269,40 +280,10 @@
       return keychain
     }
 
-    /// One certificate labelled `label`, with the label verified on the
-    /// returned attributes.
-    private static func storedCertificate(labelled label: String) throws -> SecCertificate? {
-      var result: CFTypeRef?
-      let status = SecItemCopyMatching(
-        [
-          kSecClass: kSecClassCertificate,
-          kSecAttrLabel: label,
-          kSecReturnRef: true,
-          kSecReturnAttributes: true,
-          kSecMatchLimit: kSecMatchLimitOne,
-        ] as CFDictionary, &result)
-      switch status {
-      case errSecSuccess:
-        guard let attributes = result as? [CFString: Any],
-          let reference = attributes[kSecValueRef] as CFTypeRef?,
-          CFGetTypeID(reference) == SecCertificateGetTypeID()
-        else {
-          throw IdentityError.malformed("keychain returned something other than a certificate")
-        }
-        guard attributes[kSecAttrLabel] as? String == label else {
-          throw IdentityError.malformed(
-            "keychain returned a certificate labelled "
-              + "\"\(attributes[kSecAttrLabel] as? String ?? "")\" for \"\(label)\"")
-        }
-        return unsafeDowncast(reference, to: SecCertificate.self)
-      case errSecItemNotFound:
-        return nil
-      default:
-        throw IdentityError.security("SecItemCopyMatching(certificate)", status)
-      }
-    }
-
-    /// Every certificate labelled `label`.
+    /// Every certificate labelled `label`, in the keychain's order across
+    /// the search list, with the label verified on each one's returned
+    /// attributes: a certificate under another label is an error, never
+    /// ours.
     private static func storedCertificates(labelled label: String) throws -> [SecCertificate] {
       var result: CFTypeRef?
       let status = SecItemCopyMatching(
@@ -310,13 +291,27 @@
           kSecClass: kSecClassCertificate,
           kSecAttrLabel: label,
           kSecReturnRef: true,
+          kSecReturnAttributes: true,
           kSecMatchLimit: kSecMatchLimitAll,
         ] as CFDictionary, &result)
       switch status {
       case errSecSuccess:
-        return ((result as? [AnyObject]) ?? [])
-          .filter { CFGetTypeID($0) == SecCertificateGetTypeID() }
-          .map { unsafeDowncast($0, to: SecCertificate.self) }
+        guard let matches = result as? [[CFString: Any]] else {
+          throw IdentityError.malformed("keychain returned something other than certificates")
+        }
+        return try matches.map { attributes in
+          guard let reference = attributes[kSecValueRef] as CFTypeRef?,
+            CFGetTypeID(reference) == SecCertificateGetTypeID()
+          else {
+            throw IdentityError.malformed("keychain returned something other than a certificate")
+          }
+          guard attributes[kSecAttrLabel] as? String == label else {
+            throw IdentityError.malformed(
+              "keychain returned a certificate labelled "
+                + "\"\(attributes[kSecAttrLabel] as? String ?? "")\" for \"\(label)\"")
+          }
+          return unsafeDowncast(reference, to: SecCertificate.self)
+        }
       case errSecItemNotFound:
         return []
       default:

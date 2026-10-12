@@ -10,14 +10,15 @@ protocol IdentityItems: Sendable {
   associatedtype Certificate
   associatedtype Key
 
-  /// The identity whose certificate is labelled `label`, nil when no
-  /// certificate carries the label; throws for a labelled certificate
-  /// without its private key.
-  func identity(labelled label: String) throws -> HandoverIdentity?
-  /// One certificate labelled `label`, nil when none is.
-  func certificate(labelled label: String) throws -> Certificate?
-  /// Every certificate labelled `label`.
+  /// Every certificate labelled `label`, in the keychain's order: one per
+  /// keychain in the search list that holds it (an old login keychain
+  /// added back in Keychain Access beside the new one).
   func certificates(labelled label: String) throws -> [Certificate]
+  /// `certificate`'s fingerprint, in lowercase hex as the record holds it.
+  func fingerprint(of certificate: Certificate) -> String
+  /// The identity of `certificate`, which is labelled `label`; throws when
+  /// the keychain holds no private key for it.
+  func identity(of certificate: Certificate, labelled label: String) throws -> HandoverIdentity
   /// The private key the keychain pairs with `certificate`, nil when it
   /// holds none.
   func privateKey(of certificate: Certificate) -> Key?
@@ -33,6 +34,27 @@ protocol IdentityItems: Sendable {
 }
 
 extension IdentityItems {
+  /// The certificate labelled `label` whose fingerprint is `preferred`,
+  /// else the keychain's first; nil when none carries the label.
+  func certificate(labelled label: String, preferring preferred: String? = nil) throws
+    -> Certificate?
+  {
+    let labelled = try certificates(labelled: label)
+    return labelled.first { fingerprint(of: $0) == preferred } ?? labelled.first
+  }
+
+  /// The identity whose certificate is `certificate(labelled:preferring:)`,
+  /// nil when no certificate carries the label; throws for that certificate
+  /// without its private key, so a half-deleted identity is reported
+  /// instead of silently replaced.
+  func identity(labelled label: String, preferring preferred: String? = nil) throws
+    -> HandoverIdentity?
+  {
+    try certificate(labelled: label, preferring: preferred).map {
+      try identity(of: $0, labelled: label)
+    }
+  }
+
   /// Removes the certificates and the keys stored under `label`. Missing
   /// items are not an error. The keys are found through their certificates
   /// (a key query by label only finds keys this module labelled), then
@@ -92,7 +114,9 @@ struct LabelledIdentityKeychain<Items: IdentityItems>: HandoverIdentityKeychain 
   let label: String
   let stagingLabel: String
 
-  func load() throws -> HandoverIdentity? { try items.identity(labelled: label) }
+  func load(preferring recorded: String?) throws -> HandoverIdentity? {
+    try items.identity(labelled: label, preferring: recorded)
+  }
 
   func staged() throws -> HandoverIdentity? { try items.identity(labelled: stagingLabel) }
 
