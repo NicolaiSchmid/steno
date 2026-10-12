@@ -1,8 +1,11 @@
 //! The pipeline above the tensors, in order: VAD regions, the pause-aligned
-//! layout, one decode per chunk with the empty-decode recovery, the LCS
-//! merge, pieces to words to segments, and the language tag. A chunk is a
-//! range the layout chose; a window is the range actually decoded, the
-//! chunk itself or, after a recovery, the chunk with more audio around it.
+//! layout, one decode per chunk with the empty-decode recovery (and, when
+//! [`ChunkerConfig::decode_gaps`] is on, one per extra window over the audio
+//! no chunk covers), the LCS merge of the chunks, the extra windows put in
+//! between them (`splice_gaps`), pieces to words to segments, and the
+//! language tag. A chunk is a range the layout chose; a window is the range
+//! actually decoded: the chunk itself or, after a recovery, the chunk with
+//! more audio around it, or an extra window.
 //! Generic over [`SpeechBackend`]: the ONNX and the `CoreML` engines run
 //! it, and a fake backend drives it in tests.
 //! Swift: `Sources/StenoSpeech/Engines/ParakeetEngine.swift` and
@@ -14,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use steno_core::{LanguageTag, RawSegment, TimedWord};
 
 use crate::backend::{FRAME_SAMPLES, SAMPLE_RATE, SpeechBackend, sample_count};
-use crate::chunker::{Chunk, ChunkerConfig, layout};
+use crate::chunker::{Chunk, ChunkerConfig, gap_windows, layout};
 use crate::decoder::{DecodeStats, DecoderConfig, Token, decode_window};
 use crate::error::SpeechError;
 use crate::language::LanguageTagger;
@@ -67,6 +70,9 @@ pub struct Transcript {
     pub words: Vec<TimedWord>,
     pub tokens: Vec<Token>,
     pub chunks: Vec<Chunk>,
+    /// The extra windows over the audio no chunk covers
+    /// ([`ChunkerConfig::decode_gaps`]); empty when that is off.
+    pub gaps: Vec<Range<usize>>,
     pub speech: Vec<Range<usize>>,
     pub stats: DecodeStats,
 }
@@ -89,11 +95,11 @@ fn join_words(words: &[TimedWord]) -> String {
 
 /// One backend or more, the vocabulary, a detector and the configuration;
 /// owns everything it needs, so it can move to a blocking thread. With
-/// more than one backend ([`Transcriber::with_more_workers`]) the chunks
+/// more than one backend ([`Transcriber::with_more_workers`]) the windows
 /// decode in parallel, one backend per thread; the merge sees them in
 /// order, so the transcript does not depend on the number of workers.
 pub struct Transcriber<B: SpeechBackend> {
-    /// The first decodes every chunk when it is alone and the probes of
+    /// The first decodes every window when it is alone and the probes of
     /// [`Transcriber::decode_range`].
     workers: Vec<B>,
     vocab: Vocab,
@@ -120,7 +126,7 @@ impl<B: SpeechBackend> Transcriber<B> {
         }
     }
 
-    /// Adds backends that decode chunks in parallel with the first, one
+    /// Adds backends that decode windows in parallel with the first, one
     /// thread each, so `more` backends make `more + 1` workers; `CoreML`
     /// runs four, as `FluidAudio` does (`parallelChunkConcurrency`). ONNX
     /// Runtime spreads one call over its own threads, so the ONNX engine
@@ -137,7 +143,7 @@ impl<B: SpeechBackend> Transcriber<B> {
         &self.workers[0]
     }
 
-    /// How many chunks decode at once.
+    /// How many windows decode at once.
     #[must_use]
     pub fn worker_count(&self) -> usize {
         self.workers.len()
@@ -162,11 +168,17 @@ impl<B: SpeechBackend> Transcriber<B> {
     ) -> Result<Transcript, SpeechError> {
         let speech = self.vad.speech_regions(samples)?;
         let chunks = layout(samples, &speech, &self.config.chunker);
+        let gaps = gap_windows(samples, &chunks, &self.config.chunker);
         let mut stats = DecodeStats::default();
-        let windows = self.decode_chunks(samples, &chunks, &speech, &mut stats)?;
-        let tokens = merge_all(
-            &windows,
-            f64::from(self.config.chunker.overlap_seconds),
+        let jobs = jobs(&chunks, &gaps);
+        let mut windows = self.decode_windows(samples, &jobs, &speech, &mut stats)?;
+        let overlap = self.config.chunker.overlap_seconds;
+        let extra = windows.split_off(chunks.len());
+        let tokens = splice_gaps(
+            merge_all(&windows, f64::from(overlap), &self.vocab),
+            &gaps,
+            &extra,
+            overlap,
             &self.vocab,
         );
         let words = TokenAggregator.words(&timed_pieces(&tokens, &self.vocab));
@@ -178,6 +190,7 @@ impl<B: SpeechBackend> Transcriber<B> {
             words,
             tokens,
             chunks,
+            gaps,
             speech,
             stats,
         })
@@ -221,35 +234,34 @@ impl<B: SpeechBackend> Transcriber<B> {
             .recover(samples, range, original, stats)
     }
 
-    /// Every chunk's tokens, in chunk order: on the one backend in turn,
-    /// or on every backend at once, each taking the next chunk as it
-    /// finishes one. After an error or a panic no worker starts another
-    /// chunk, and the error of the earliest chunk is returned (a panic is
-    /// re-raised).
-    fn decode_chunks(
+    /// Every job's tokens, in job order: on the one backend in turn, or on
+    /// every backend at once, each taking the next job as it finishes one.
+    /// After an error or a panic no worker starts another job, and the
+    /// error of the earliest job is returned (a panic is re-raised).
+    fn decode_windows(
         &mut self,
         samples: &[f32],
-        chunks: &[Chunk],
+        jobs: &[Job],
         speech: &[Range<usize>],
         stats: &mut DecodeStats,
     ) -> Result<Vec<Vec<Token>>, SpeechError> {
-        if self.workers.len() == 1 || chunks.len() <= 1 {
+        if self.workers.len() == 1 || jobs.len() <= 1 {
             let mut decoder = self.chunk_decoder(0);
-            return chunks
+            return jobs
                 .iter()
-                .map(|chunk| decoder.decode_chunk(samples, &chunk.range, speech, stats))
+                .map(|job| decoder.decode_job(samples, job, speech, stats))
                 .collect();
         }
         let (vocab, config) = (&self.vocab, &self.config);
         let next = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
         let mut slots: Vec<Option<Result<Vec<Token>, SpeechError>>> =
-            chunks.iter().map(|_| None).collect();
+            jobs.iter().map(|_| None).collect();
         std::thread::scope(|scope| {
             let handles: Vec<_> = self
                 .workers
                 .iter_mut()
-                .take(chunks.len())
+                .take(jobs.len())
                 .map(|backend| {
                     let (next, failed) = (&next, &failed);
                     scope.spawn(move || {
@@ -264,11 +276,10 @@ impl<B: SpeechBackend> Transcriber<B> {
                         let mut done = Vec::new();
                         while !failed.load(Ordering::Relaxed) {
                             let index = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(chunk) = chunks.get(index) else {
+                            let Some(job) = jobs.get(index) else {
                                 break;
                             };
-                            let tokens =
-                                decoder.decode_chunk(samples, &chunk.range, speech, &mut stats);
+                            let tokens = decoder.decode_job(samples, job, speech, &mut stats);
                             if tokens.is_err() {
                                 failed.store(true, Ordering::Relaxed);
                             }
@@ -289,15 +300,15 @@ impl<B: SpeechBackend> Transcriber<B> {
                 }
             }
         });
-        // Workers take chunks in order and finish every chunk they take,
-        // so the filled slots come first, and without an error every slot
-        // is filled; the collect stops at the earliest error.
+        // Workers take jobs in order and finish every job they take, so
+        // the filled slots come first, and without an error every slot is
+        // filled; the collect stops at the earliest error.
         debug_assert!(
             slots
                 .iter()
                 .skip_while(|slot| slot.is_some())
                 .all(Option::is_none),
-            "a decoded chunk follows one that was not decoded"
+            "a decoded job follows one that was not decoded"
         );
         slots.into_iter().flatten().collect()
     }
@@ -314,6 +325,80 @@ impl Drop for StopOnPanic<'_> {
     }
 }
 
+/// One decode: a chunk of the layout, retried with more audio when it
+/// looks empty, or an extra window over audio no chunk covers, decoded as
+/// it is (the detector found no speech there to judge it by).
+#[derive(Debug, Clone, PartialEq)]
+struct Job {
+    range: Range<usize>,
+    recover: bool,
+}
+
+/// The chunks in order, then the extra windows in order.
+fn jobs(chunks: &[Chunk], gaps: &[Range<usize>]) -> Vec<Job> {
+    let chunks = chunks.iter().map(|chunk| Job {
+        range: chunk.range.clone(),
+        recover: true,
+    });
+    let gaps = gaps.iter().map(|range| Job {
+        range: range.clone(),
+        recover: false,
+    });
+    chunks.chain(gaps).collect()
+}
+
+/// Puts the tokens of the extra windows (`gaps`, decoded as `extra`) into
+/// the merged chunk tokens by time. The chunks' tokens are never changed
+/// or dropped: the windows of one stretch merge with each other, then go
+/// in between the chunk tokens either side, and a window token falls away
+/// where it would not: one at or after the next chunk token, one that
+/// repeats the chunk token either side within the merge's match tolerance,
+/// and a word's rest at the stretch's start, which belongs to the chunk's
+/// last word.
+fn splice_gaps(
+    mut tokens: Vec<Token>,
+    gaps: &[Range<usize>],
+    extra: &[Vec<Token>],
+    overlap_seconds: f32,
+    vocab: &Vocab,
+) -> Vec<Token> {
+    // The merge's match tolerance (`merge_windows`).
+    let tolerance = sample_count((overlap_seconds / 2.0).max(0.5));
+    let mut start = 0;
+    while start < gaps.len() {
+        // The windows of one stretch overlap each other; those of two
+        // stretches never do, a chunk lies between them.
+        let mut end = start + 1;
+        while end < gaps.len() && gaps[end].start < gaps[end - 1].end {
+            end += 1;
+        }
+        let mut stretch = merge_all(&extra[start..end], f64::from(overlap_seconds), vocab);
+        let at = tokens.partition_point(|t| t.sample() < gaps[start].start);
+        if let Some(next) = tokens.get(at) {
+            stretch.retain(|t| t.sample() < next.sample());
+            while stretch
+                .last()
+                .is_some_and(|t| t.id == next.id && next.sample() - t.sample() < tolerance)
+            {
+                stretch.pop();
+            }
+        }
+        if let Some(previous) = at.checked_sub(1).map(|i| tokens[i]) {
+            let skip = stretch
+                .iter()
+                .take_while(|t| {
+                    !starts_word(vocab.piece(t.id))
+                        || (t.id == previous.id && t.sample() - previous.sample() < tolerance)
+                })
+                .count();
+            stretch.drain(..skip);
+        }
+        tokens.splice(at..at, stretch);
+        start = end;
+    }
+    tokens
+}
+
 /// One backend's view of a transcription: decodes a chunk and, when it
 /// looks empty, retries it with more audio around it.
 struct ChunkDecoder<'a, B: ?Sized> {
@@ -323,6 +408,20 @@ struct ChunkDecoder<'a, B: ?Sized> {
 }
 
 impl<B: SpeechBackend + ?Sized> ChunkDecoder<'_, B> {
+    fn decode_job(
+        &mut self,
+        samples: &[f32],
+        job: &Job,
+        speech: &[Range<usize>],
+        stats: &mut DecodeStats,
+    ) -> Result<Vec<Token>, SpeechError> {
+        if job.recover {
+            self.decode_chunk(samples, &job.range, speech, stats)
+        } else {
+            self.decode_range(samples, job.range.clone(), stats)
+        }
+    }
+
     /// The chunk's tokens, recovered when the first decode looks empty.
     fn decode_chunk(
         &mut self,
@@ -932,6 +1031,115 @@ mod tests {
             t.render(&merge_all(&windows, 1.5, t.vocab())),
             "w1 w5 w5 w3"
         );
+    }
+
+    /// Quiet words (pieces 1 to 3, under the detector's 0.01) in the
+    /// lead-in, in a 13 s pause and in the tail, around loud words (11 to
+    /// 16); the chunks skip the pause as a long one.
+    fn quiet_stretches(decode_gaps: bool) -> (Transcriber<FrameTokenBackend>, Vec<f32>) {
+        quiet_stretches_with(decode_gaps, &[])
+    }
+
+    /// [`quiet_stretches`] with more quiet words, `(piece, seconds)`.
+    fn quiet_stretches_with(
+        decode_gaps: bool,
+        more: &[(u32, f32)],
+    ) -> (Transcriber<FrameTokenBackend>, Vec<f32>) {
+        let config = PipelineConfig {
+            chunker: ChunkerConfig {
+                decode_gaps,
+                ..ChunkerConfig::default()
+            },
+            ..PipelineConfig::default()
+        };
+        let mut samples = vec![0.0f32; 36 * SAMPLE_RATE];
+        for (piece, at) in [
+            (1, 0.5),
+            (11, 3.0),
+            (12, 5.0),
+            (13, 7.0),
+            (2, 14.0),
+            (14, 21.0),
+            (15, 23.0),
+            (16, 25.0),
+            (3, 33.0),
+        ]
+        .into_iter()
+        .chain(more.iter().copied())
+        {
+            let frame = sample_count(at) / FRAME_SAMPLES;
+            overlay(&mut samples, &audio(36.0, frame, &[piece; 6]));
+        }
+        let mut t = transcriber(config, 0);
+        t.vad = Box::new(EnergyVad {
+            rms_threshold: 0.01,
+            config: VadConfig {
+                pad_seconds: 0.0,
+                min_speech_seconds: 0.05,
+                ..VadConfig::default()
+            },
+        });
+        (t, samples)
+    }
+
+    #[test]
+    fn extra_windows_decode_the_lead_in_the_skipped_pauses_and_the_tail() {
+        let (mut t, samples) = quiet_stretches(false);
+        let skipped = t.transcribe(&samples, None).unwrap();
+        assert_eq!(skipped.text(), "w11 w12 w13 w14 w15 w16");
+        assert!(skipped.gaps.is_empty());
+        let (mut t, samples) = quiet_stretches(true);
+        let transcript = t.transcribe(&samples, None).unwrap();
+        assert_eq!(transcript.chunks, skipped.chunks);
+        assert_eq!(transcript.text(), "w1 w11 w12 w13 w2 w14 w15 w16 w3");
+        assert_eq!(transcript.gaps.len(), 3, "{:?}", transcript.gaps);
+        assert_eq!(
+            transcript.stats.windows,
+            skipped.stats.windows + transcript.gaps.len()
+        );
+        assert!(
+            transcript
+                .words
+                .windows(2)
+                .all(|w| w[0].start <= w[1].start)
+        );
+        // Silence in the extra windows adds nothing.
+        let mut silent = samples;
+        for (at, seconds) in [(0.3, 1.0), (13.8, 1.0), (32.8, 1.0)] {
+            silent[sample_count(at)..sample_count(at + seconds)].fill(0.0);
+        }
+        let (mut t, _) = quiet_stretches(true);
+        assert_eq!(t.transcribe(&silent, None).unwrap().text(), skipped.text());
+    }
+
+    #[test]
+    fn an_extra_window_never_replaces_or_repeats_a_chunks_word() {
+        // Quiet word 4 runs across the first chunk's end at 7.69 s and word
+        // 5 across the second chunk's start at 20.71 s. The chunk and the
+        // window each hear the word, the window at its own first frame or
+        // the chunk at its; the chunk's stays, the window's falls away.
+        let more = [(4, 7.52), (5, 20.56)];
+        let (mut t, samples) = quiet_stretches_with(false, &more);
+        let chunked = t.transcribe(&samples, None).unwrap();
+        assert_eq!(chunked.text(), "w11 w12 w13 w4 w5 w14 w15 w16");
+        let (mut t, samples) = quiet_stretches_with(true, &more);
+        let transcript = t.transcribe(&samples, None).unwrap();
+        assert_eq!(transcript.chunks, chunked.chunks);
+        assert_eq!(transcript.text(), "w1 w11 w12 w13 w4 w2 w5 w14 w15 w16 w3");
+        // Every chunk token is there, unchanged and in order.
+        let mut rest = transcript.tokens.iter();
+        assert!(
+            chunked.tokens.iter().all(|token| rest.any(|t| t == token)),
+            "{:?}",
+            transcript.tokens
+        );
+        // The windows heard the two words too.
+        let mut stats = DecodeStats::default();
+        for (gap, piece) in [(1, 4), (1, 5)] {
+            let window = transcript.gaps[gap].clone();
+            let tokens = t.decode_range(&samples, window, &mut stats).unwrap();
+            assert!(tokens.iter().any(|t| t.id == piece), "{tokens:?}");
+        }
     }
 
     #[test]

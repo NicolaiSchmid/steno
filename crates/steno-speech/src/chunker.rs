@@ -9,6 +9,12 @@
 //! E), not the position table's 800 s cap; for `CoreML` the models' fixed
 //! 15 s window.
 //!
+//! The chunks leave out the audio before the first speech, after the last,
+//! inside skipped pauses and in the rest of a pause a chunk's start moves
+//! past. With [`ChunkerConfig::decode_gaps`] on, [`gap_windows`] covers
+//! each such stretch of [`MIN_GAP_SECONDS`] or more with extra windows; the
+//! chunks stay where [`layout`] put them.
+//!
 //! The search and the cuts are ported from
 //! `spikes/onnx-speech/src/chunker.rs`; the long-pause rule is not. The
 //! spike laid out the tail before looking for long pauses and ignored those
@@ -62,14 +68,18 @@ pub struct ChunkerConfig {
     pub overlap_seconds: f32,
     /// A pause this long ends the chunk and is not decoded.
     pub long_pause_seconds: f32,
-    /// The longest chunk: the memory clamp, or the models' fixed 15 s
-    /// window (`CoreML`).
+    /// The longest chunk or window: the memory clamp, or the models' fixed
+    /// 15 s window (`CoreML`).
     pub max_seconds: f32,
     /// Silence kept around speech at a chunk's edges.
     pub pad_seconds: f32,
     /// No cut inside speech falls closer than this to the chunk's start; a
     /// long pause or the end of speech may end a chunk sooner.
     pub min_chunk_seconds: f32,
+    /// Also decode the stretches no chunk covers, of [`MIN_GAP_SECONDS`]
+    /// or more, in the extra windows of [`gap_windows`]. Off by default:
+    /// the ONNX engine skips that audio.
+    pub decode_gaps: bool,
 }
 
 /// The defaults are the spike D harness values
@@ -79,7 +89,7 @@ pub struct ChunkerConfig {
 /// 1's 1 to 2 s, and scored better than 1.5 s on FLEURS German on both
 /// backends (A2 in `.plans/2026-10-07-stable-promotion.md`);
 /// `min_chunk_seconds` is new here and keeps a cut in speech from landing
-/// right after a chunk's start.
+/// right after a chunk's start; `decode_gaps` is off.
 impl Default for ChunkerConfig {
     fn default() -> Self {
         ChunkerConfig {
@@ -90,6 +100,7 @@ impl Default for ChunkerConfig {
             max_seconds: 60.0,
             pad_seconds: 0.25,
             min_chunk_seconds: 2.0,
+            decode_gaps: false,
         }
     }
 }
@@ -225,6 +236,64 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
         previous_end = end;
     }
     chunks
+}
+
+/// Stretches the chunks leave out that are shorter than this are not
+/// decoded: on FLEURS German `cat/` the extra windows over such stretches
+/// (0.25 to 2.3 s) inserted words, eight, all wrong, and recovered none,
+/// and on the calibration corpus they inserted words the Swift transcripts
+/// do not have (A2 in `.plans/2026-10-07-stable-promotion.md`).
+pub const MIN_GAP_SECONDS: f32 = 2.5;
+
+/// The extra windows over the audio no chunk covers, in order, when
+/// [`ChunkerConfig::decode_gaps`] is on; none when it is off. A stretch
+/// the chunks leave out (the lead-in before the first chunk, a gap between
+/// two chunks, the tail after the last, or the whole recording when there
+/// is no chunk) is decoded when it is at least [`MIN_GAP_SECONDS`] long,
+/// in windows that stay inside it: no window reaches into a chunk. A
+/// stretch longer than `max_seconds` is split into windows of equal
+/// length that share `overlap_seconds` with each other. Shorter stretches
+/// are not decoded, the uncovered edge of a longer pause included, and
+/// neither is a window of digital silence (every sample zero), which holds
+/// no sound to decode: on the calibration corpus two windows in three.
+#[must_use]
+pub fn gap_windows(audio: &[f32], chunks: &[Chunk], config: &ChunkerConfig) -> Vec<Range<usize>> {
+    let mut windows = Vec::new();
+    if !config.decode_gaps {
+        return windows;
+    }
+    let total = audio.len();
+    let max = sample_count(config.max_seconds).max(1);
+    let overlap = sample_count(config.overlap_seconds).min(max - 1);
+    let shortest = sample_count(MIN_GAP_SECONDS);
+    let mut stretches = Vec::new();
+    let mut covered = 0;
+    for chunk in chunks {
+        if chunk.range.start > covered {
+            stretches.push(covered..chunk.range.start);
+        }
+        covered = covered.max(chunk.range.end);
+    }
+    if total > covered {
+        stretches.push(covered..total);
+    }
+    for stretch in stretches.into_iter().filter(|s| s.len() >= shortest) {
+        split(stretch, max, overlap, &mut windows);
+    }
+    windows.retain(|window| audio[window.clone()].iter().any(|&x| x != 0.0));
+    windows
+}
+
+/// Splits `range` into the fewest windows of at most `max` samples that
+/// share `overlap` with the next, all of one length (to a sample).
+fn split(range: Range<usize>, max: usize, overlap: usize, out: &mut Vec<Range<usize>>) {
+    let stride = range.len().saturating_sub(overlap);
+    let count = stride.div_ceil(max - overlap).max(1);
+    for i in 0..count {
+        let start = range.start + i * stride / count;
+        let end = range.start + (i + 1) * stride / count + overlap;
+        out.push(start..end.min(range.end));
+    }
 }
 
 #[cfg(test)]
@@ -537,6 +606,7 @@ mod tests {
             max_seconds: 66.4,
             pad_seconds: 0.95,
             min_chunk_seconds: 0.04,
+            decode_gaps: false,
         };
         let chunks = layout(&audio(33.0, &speech), &speech, &config);
         assert!(ends_advance(&chunks), "{chunks:?}");
@@ -551,5 +621,151 @@ mod tests {
         assert_eq!(chunks.len(), 2, "{chunks:?}");
         assert!(ends_advance(&chunks), "{chunks:?}");
         assert!(covers(&chunks, &speech));
+    }
+
+    fn chunk(range: Range<usize>) -> Chunk {
+        Chunk {
+            range,
+            cut: Cut::Pause,
+        }
+    }
+
+    /// `len` samples of a faint sound, nowhere digital silence.
+    fn sound(len: usize) -> Vec<f32> {
+        vec![1e-6; len]
+    }
+
+    fn gaps_on(max_seconds: f32) -> ChunkerConfig {
+        ChunkerConfig {
+            max_seconds,
+            decode_gaps: true,
+            ..ChunkerConfig::default()
+        }
+    }
+
+    #[test]
+    fn extra_windows_cover_the_stretches_the_chunks_leave_out_and_no_more() {
+        let chunks = [chunk(s(3.0)..s(10.0)), chunk(s(20.0)..s(30.0))];
+        assert!(gap_windows(&sound(s(40.0)), &chunks, &ChunkerConfig::default()).is_empty());
+        assert_eq!(
+            gap_windows(&sound(s(40.0)), &chunks, &gaps_on(15.0)),
+            [0..s(3.0), s(10.0)..s(20.0), s(30.0)..s(40.0)]
+        );
+        // Chunks that touch or overlap leave nothing out.
+        let touching = [chunk(0..s(10.0)), chunk(s(10.0)..s(20.0))];
+        assert!(gap_windows(&sound(s(20.0)), &touching, &gaps_on(15.0)).is_empty());
+        // Stretches under MIN_GAP_SECONDS are left out: the 2.49 s lead-in,
+        // the 1 s gap and the 2 s tail; the 2.5 s gap is decoded.
+        let short = [
+            chunk(s(2.49)..s(6.0)),
+            chunk(s(7.0)..s(9.0)),
+            chunk(s(11.5)..s(14.0)),
+        ];
+        assert_eq!(
+            gap_windows(&sound(s(16.0)), &short, &gaps_on(15.0)),
+            [s(9.0)..s(11.5)]
+        );
+        assert!(gap_windows(&sound(s(2.0)), &[], &gaps_on(15.0)).is_empty());
+        // A window of digital silence is left out; one zero sample short
+        // of it is not.
+        let mut audio = sound(s(40.0));
+        audio[s(10.0)..s(20.0)].fill(0.0);
+        audio[s(30.0)..s(40.0) - 1].fill(0.0);
+        assert_eq!(
+            gap_windows(&audio, &chunks, &gaps_on(15.0)),
+            [0..s(3.0), s(30.0)..s(40.0)]
+        );
+    }
+
+    #[test]
+    fn a_stretch_longer_than_a_window_is_split_with_the_overlap() {
+        // 35 s from 5 to 40 s: three windows of 13 s sharing 2 s.
+        let chunks = [chunk(0..s(5.0)), chunk(s(40.0)..s(45.0))];
+        let windows = gap_windows(&sound(s(45.0)), &chunks, &gaps_on(15.0));
+        assert_eq!(windows.len(), 3, "{windows:?}");
+        assert_eq!(windows[0].start, s(5.0));
+        assert_eq!(windows[2].end, s(40.0));
+        for pair in windows.windows(2) {
+            assert_eq!(pair[0].end - pair[1].start, s(2.0), "{windows:?}");
+        }
+        let lengths: Vec<usize> = windows.iter().map(ExactSizeIterator::len).collect();
+        assert!(
+            lengths.iter().all(|&n| n <= s(15.0) && n + 1 >= lengths[0]),
+            "{lengths:?}"
+        );
+        // Without a chunk the whole recording is one stretch.
+        let all = gap_windows(&sound(s(100.0)), &[], &gaps_on(15.0));
+        assert_eq!(all.first().map(|w| w.start), Some(0));
+        assert_eq!(all.last().map(|w| w.end), Some(s(100.0)));
+        assert_eq!(all.len(), 8, "{all:?}");
+    }
+
+    #[test]
+    fn with_extra_windows_only_short_stretches_are_left_out() {
+        // Random speech under the CoreML settings and others: every
+        // stretch neither the chunks nor the extra windows cover is under
+        // MIN_GAP_SECONDS, no window reaches into a chunk or past the
+        // clamp, and the windows come in order.
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut below = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for case in 0..300 {
+            let total = s(5.0) + below(s(240.0));
+            let mut speech = Vec::new();
+            let mut at = below(s(20.0));
+            while at < total {
+                let end = (at + s(0.2) + below(s(15.0))).min(total);
+                speech.push(at..end);
+                at = end + s(0.1) + below(s(if case % 3 == 0 { 40.0 } else { 6.0 }));
+            }
+            let config = ChunkerConfig {
+                max_seconds: [15.0, 60.0][case % 2],
+                long_pause_seconds: [f32::INFINITY, 3.0][(case / 2) % 2],
+                decode_gaps: true,
+                ..ChunkerConfig::default()
+            };
+            // Faint sound outside the speech, so no window is digital
+            // silence.
+            let mut samples = vec![1e-6f32; total];
+            for region in &speech {
+                samples[region.clone()].fill(0.5);
+            }
+            let chunks = layout(&samples, &speech, &config);
+            let windows = gap_windows(&samples, &chunks, &config);
+            let max = sample_count(config.max_seconds);
+            assert!(
+                windows.iter().all(|w| w.len() <= max && w.end <= total),
+                "case {case}"
+            );
+            assert!(
+                windows.windows(2).all(|w| w[0].start < w[1].start),
+                "case {case}"
+            );
+            assert!(
+                windows.iter().all(|w| chunks
+                    .iter()
+                    .all(|c| w.end <= c.range.start || c.range.end <= w.start)),
+                "case {case}: a window reaches into a chunk"
+            );
+            let mut ranges: Vec<&Range<usize>> =
+                chunks.iter().map(|c| &c.range).chain(&windows).collect();
+            ranges.sort_by_key(|r| r.start);
+            let mut covered = 0;
+            for range in ranges {
+                assert!(
+                    range.start.saturating_sub(covered) < sample_count(MIN_GAP_SECONDS),
+                    "case {case}: {chunks:?} {windows:?}"
+                );
+                covered = covered.max(range.end);
+            }
+            assert!(
+                total - covered < sample_count(MIN_GAP_SECONDS),
+                "case {case}"
+            );
+        }
     }
 }

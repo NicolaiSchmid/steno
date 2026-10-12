@@ -32,20 +32,31 @@ pub const ENGINE_ID: &str = PARAKEET_V3_ID;
 /// Chunks decoded at once (`ASRConfig.parallelChunkConcurrency`).
 pub const WORKERS: usize = 4;
 
-/// The shared pipeline's defaults with two chunker settings of the
+/// The shared pipeline's defaults with three chunker settings of the
 /// engine's own, measured on FLEURS German `cat/` (A2 in
 /// `.plans/2026-10-07-stable-promotion.md`):
 ///
 /// - the clamp is the models' 15 s window;
 /// - no pause is long enough to be skipped: with the energy detector a
 ///   chunk that began just before speech after a long pause lost words
-///   (5.86 % mean WER against 5.09 % without the skip).
+///   (5.86 % mean WER against 5.09 % without the skip);
+/// - the audio the chunks leave out is decoded too, in extra windows
+///   ([`steno_speech::chunker::gap_windows`]): the chunks still start
+///   0.25 s before the first speech the detector finds, a chunk that
+///   starts inside a pause still moves to 0.25 s before the speech after
+///   it, and the last chunk still ends 0.25 s after the last speech, and
+///   each stretch those leave out is decoded in windows of at most 15 s
+///   that stay inside it; their words go in between the chunks' and never
+///   replace one ([`steno_speech::pipeline`]). Quiet speech the detector
+///   takes for silence there is kept.
 ///
-/// What is not decoded: the audio before the first chunk, which starts
-/// 0.25 s before the first speech the detector finds; the audio after the
-/// last, which ends 0.25 s after the last speech; and, where a chunk would
-/// start inside a pause, the pause up to 0.25 s before the speech after
-/// it. Quiet speech the detector takes for silence there is lost.
+/// The limit: a stretch shorter than
+/// [`MIN_GAP_SECONDS`](steno_speech::chunker::MIN_GAP_SECONDS) (2.5 s) is
+/// not decoded, and that includes the part of a longer pause a chunk
+/// leaves out at its edge, because windows that short insert words. Quiet
+/// speech the detector misses there is lost. Laying the chunks out over
+/// all of that audio instead moved every later cut and cost more on
+/// FLEURS than it recovered.
 #[must_use]
 pub fn pipeline_config() -> PipelineConfig {
     // 240,000 samples is exactly 15 s, so the clamp is the window.
@@ -55,6 +66,7 @@ pub fn pipeline_config() -> PipelineConfig {
         chunker: ChunkerConfig {
             max_seconds,
             long_pause_seconds: f32::INFINITY,
+            decode_gaps: true,
             ..ChunkerConfig::default()
         },
         ..PipelineConfig::default()
@@ -258,17 +270,19 @@ mod tests {
     }
 
     #[test]
-    fn the_engine_skips_no_pause_and_chunks_to_the_models_window() {
+    fn the_engine_decodes_every_sample_in_windows_of_the_models_size() {
         let config = pipeline_config();
         assert_eq!(
             steno_speech::sample_count(config.chunker.max_seconds),
             MAX_WINDOW_SAMPLES
         );
+        assert!(config.chunker.decode_gaps);
         assert_eq!(config.chunker.long_pause_seconds, f32::INFINITY);
         let rest = PipelineConfig {
             chunker: ChunkerConfig {
                 max_seconds: config.chunker.max_seconds,
                 long_pause_seconds: f32::INFINITY,
+                decode_gaps: true,
                 ..ChunkerConfig::default()
             },
             ..PipelineConfig::default()
