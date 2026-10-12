@@ -79,8 +79,8 @@
 //!   atom"), and the Swift app loses the recording. Such a file, in the
 //!   recorder's layout only, is read packet by packet from the packets' own
 //!   bits with the phone's fixed settings, less [`priming::APPLE_PRIMING`],
-//!   up to where it was cut off ([`salvage`]); a damaged packet in it
-//!   becomes silence as above. The decode says so
+//!   up to where it was cut off or could not be read ([`salvage`]); a
+//!   damaged packet in it becomes silence as above. The decode says so
 //!   ([`AudioDamage::salvaged`]), so the meeting's detail warns and the
 //!   retention rule keeps the recording. Any other file without a `moov`
 //!   fails as before.
@@ -861,7 +861,8 @@ impl SymphoniaFrames {
             tracing::warn!(
                 packets = packets.packets(),
                 stopped = ?packets.stopped(),
-                "the recording without an index was read up to where it was cut off"
+                "the recording without an index was read up to where it was cut off or could not \
+                 be read"
             );
         }
         stream.spec.filter(|spec| spec.audible()).ok_or_else(|| {

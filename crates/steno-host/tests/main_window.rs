@@ -775,7 +775,7 @@ fn the_detail_warns_about_a_recording_replaced_in_parts_by_silence() {
             0,
             0.0,
             true,
-            "The phone recording was cut off unexpectedly and could only be read up to that point.",
+            "The phone recording was cut off unexpectedly, and its end may be missing.",
         ),
     ] {
         harness.fakes.pipeline.damaged_audio.lock().unwrap().insert(

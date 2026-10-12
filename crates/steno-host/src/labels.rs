@@ -131,7 +131,8 @@ pub fn end_reason_sentence(reason: &RecordingEndReason) -> Option<String> {
 
 /// The detail's warning when the decoder replaced parts of the recording
 /// by silence, or read a recording that had no index up to where it was
-/// cut off (a phone recording whose recorder was killed); `None` for a
+/// cut off or could not be read (a phone recording whose recorder was
+/// killed), so its end may be missing; `None` for a
 /// recording that decoded clean. Names the phone's recording, the only one
 /// that can hold damaged packets (AAC) or lack its index, and says how
 /// long the silence lasts rather than how many packets it replaced,
@@ -153,9 +154,7 @@ pub fn damaged_audio_warning(damage: AudioDamage, source: MeetingSource) -> Opti
             silence_length(damage.seconds)
         )
     };
-    let cut_off = format!(
-        "{the_recording} was cut off unexpectedly and could only be read up to that point."
-    );
+    let cut_off = format!("{the_recording} was cut off unexpectedly, and its end may be missing.");
     Some(match (damage.salvaged, damage.parts > 0) {
         (false, _) => replaced(recording),
         (true, false) => cut_off,
@@ -306,9 +305,7 @@ mod tests {
         };
         assert_eq!(
             damaged_audio_warning(salvaged, MeetingSource::Phone).as_deref(),
-            Some(
-                "The phone recording was cut off unexpectedly and could only be read up to that point."
-            )
+            Some("The phone recording was cut off unexpectedly, and its end may be missing.")
         );
         assert_eq!(
             damaged_audio_warning(
@@ -320,13 +317,13 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "The phone recording was cut off unexpectedly and could only be read up to that \
-                 point. About 0.1 seconds of it could not be read and was replaced by silence."
+                "The phone recording was cut off unexpectedly, and its end may be missing. About 0.1 \
+                 seconds of it could not be read and was replaced by silence."
             )
         );
         assert_eq!(
             damaged_audio_warning(salvaged, MeetingSource::MacCall).as_deref(),
-            Some("The recording was cut off unexpectedly and could only be read up to that point.")
+            Some("The recording was cut off unexpectedly, and its end may be missing.")
         );
         assert_eq!(
             damaged_audio_warning(AudioDamage::default(), MeetingSource::Phone),

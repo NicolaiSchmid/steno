@@ -32,7 +32,8 @@ pub struct AudioDamage {
     pub seconds: f64,
     /// Whether the recording had no index and was read without one: a
     /// phone recording whose recorder was killed mid-recording, read up to
-    /// where it was cut off (`steno_audio::codec::salvage`). Left out of
+    /// where it was cut off or could not be read
+    /// (`steno_audio::codec::salvage`). Left out of
     /// the JSON when false, so a record from before it reads the same.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub salvaged: bool,

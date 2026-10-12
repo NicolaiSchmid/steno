@@ -188,7 +188,7 @@ impl SalvagedPackets {
                         packets = self.packets,
                         why,
                         "a salvaged recording holds bytes that are not a packet; it is read up to \
-                         them"
+                         where they start"
                     );
                     self.stopped = Some(Stop::Unreadable(offset));
                 }
