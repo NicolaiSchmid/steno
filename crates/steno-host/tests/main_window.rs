@@ -2410,6 +2410,42 @@ fn process_again_words_a_gone_recording_for_the_platform() {
     );
 }
 
+/// A ready meeting whose recording may be damaged (the pipeline's record
+/// of parts replaced by silence) is kept incomplete and offered "Process
+/// again", every lane transcribed or not; "Delete recording now" still
+/// applies the user's rule to it. Rust only.
+#[test]
+fn a_damaged_recording_reads_kept_incomplete_and_can_still_be_deleted_now() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            unstamped(store, AudioRetention::DeleteAfterProcessing);
+        })
+        .build();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["retention"]["kind"], "keptWhileProcessing");
+    assert_eq!(detail["canProcessAgain"], false);
+
+    harness.fakes.pipeline.damaged_audio.lock().unwrap().insert(
+        uuid(MEETING),
+        steno_core::AudioDamage {
+            parts: 3,
+            seconds: 0.07,
+        },
+    );
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["retention"]["kind"], "keptIncomplete");
+    assert_eq!(detail["canProcessAgain"], true);
+
+    let reply = harness.host.meeting_delete_recording_now().unwrap();
+    assert!(reply.confirmed);
+    assert_eq!(
+        *harness.fakes.pipeline.retention.lock().unwrap(),
+        [(uuid(MEETING), AudioRetention::DeleteAfterProcessing)]
+    );
+}
+
 /// A run refused for a missing model leaves the meeting queued; its
 /// progress entry then says what to do (stage `modelsMissing`), until the
 /// next run's first event. Rust only.

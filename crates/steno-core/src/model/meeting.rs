@@ -294,22 +294,26 @@ impl Meeting {
     /// recording is on disk: the one rule the meeting detail's button, the
     /// host's guard, the pipeline's `process_again` and `steno process
     /// --meeting` read. A failed meeting, and a ready one whose results
-    /// could still need its recording ([`results_need_the_audio`] over its
-    /// stored `speakers`, `segments` and `asset`), the rule that keeps the
-    /// recording and that the detail's `keptIncomplete` line names
-    /// "Process again" for. Rust only: the Swift app refuses "Process
-    /// again".
+    /// could still need its recording: [`results_need_the_audio`] over its
+    /// stored `speakers`, `segments` and `asset`, or `audio_may_be_damaged`
+    /// (the pipeline's damaged-audio record says parts of the recording
+    /// were replaced by silence, or cannot be read). That is the rule that
+    /// keeps the recording and that the detail's `keptIncomplete` line
+    /// names "Process again" for. Rust only: the Swift app refuses
+    /// "Process again".
     #[must_use]
     pub fn offers_process_again(
         &self,
         speakers: &[Speaker],
         segments: &[TranscriptSegment],
         asset: Option<&AudioAsset>,
+        audio_may_be_damaged: bool,
     ) -> bool {
         self.state.is_failed()
             || (self.state == MeetingState::Ready
-                && asset
-                    .is_some_and(|asset| results_need_the_audio(self, speakers, segments, asset)))
+                && asset.is_some_and(|asset| {
+                    audio_may_be_damaged || results_need_the_audio(self, speakers, segments, asset)
+                }))
     }
 }
 

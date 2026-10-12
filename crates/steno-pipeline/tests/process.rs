@@ -183,6 +183,9 @@ fn world_with(
 #[derive(Default)]
 struct WavDecoder {
     decodes: Mutex<Vec<AudioLane>>,
+    /// What each decode reports it replaced by silence, as a damaged AAC
+    /// decode does; none by default.
+    damage: Mutex<steno_core::AudioDamage>,
 }
 
 fn read_wav(path: &Path) -> std::io::Result<Vec<f32>> {
@@ -205,7 +208,9 @@ impl steno_core::AudioDecoder for WavDecoder {
         self.decodes.lock().unwrap().push(lane);
         let url = asset.sidecars_16k.get(&lane).unwrap_or(&asset.url);
         let path = file_url_path(url).ok_or("not a file URL")?;
-        Ok(steno_core::AudioBuffer16k::new(read_wav(&path)?))
+        let mut buffer = steno_core::AudioBuffer16k::new(read_wav(&path)?);
+        buffer.damage = *self.damage.lock().unwrap();
+        Ok(buffer)
     }
 
     fn mixdown_format(&self) -> AudioFormat {
@@ -5409,6 +5414,100 @@ async fn a_summary_rerun_of_a_diarizer_fallback_keeps_the_recording() {
         DeliveryStatus::Delivered
     );
     assert_eq!(expires_at(&world, &asset), None);
+}
+
+/// A recording whose decode replaced parts by silence (#264) counts as
+/// incomplete for the automatic retention, whatever its rows: the run, a
+/// re-export, a summary re-run and the launch's re-export (a new pipeline
+/// that reads the damage back from the file the run synced) all leave it
+/// unstamped, and "Process again" is offered for it. The user's own rule
+/// ("Delete recording now") is stamped as chosen.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_recording_stays_unstamped_through_every_automatic_stamp() {
+    let world = world(
+        true,
+        Some(|vault| FakeDestination {
+            fail_until: 1,
+            ..FakeDestination::new(vault)
+        }),
+        AudioRetention::DeleteAfterProcessing,
+    );
+    let damaged = || Arc::new(steno_pipeline::DamagedAudio::in_directory(world.dir.path()));
+    let pipeline = ProcessingPipeline::new(
+        world
+            .pipeline
+            .dependencies()
+            .clone()
+            .with_damaged_audio(damaged()),
+    );
+    *world.decoder.damage.lock().unwrap() = steno_core::AudioDamage {
+        parts: 3,
+        seconds: 0.07,
+    };
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(
+        &world.audio,
+        meeting.id,
+        AudioRetention::DeleteAfterProcessing,
+    );
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+    let stored = world.store.export(meeting.id).unwrap();
+    assert_eq!(stored.meeting.state, MeetingState::Ready);
+    assert!(
+        !has_room_row(&world, meeting.id),
+        "the diarizer worked: only the damage keeps it"
+    );
+    assert!(!steno_core::results_need_the_audio(
+        &stored.meeting,
+        &stored.speakers,
+        &stored.segments,
+        &asset,
+    ));
+    assert_eq!(expires_at(&world, &asset), None, "after the run");
+    assert_eq!(damaged().parts(meeting.id), 3, "synced before the stamp");
+
+    let launch = ProcessingPipeline::new(
+        launch_at(
+            &world,
+            world.now + Duration::days(2),
+            FakeDestination::new(&world.vault),
+        )
+        .dependencies()
+        .clone()
+        .with_damaged_audio(damaged()),
+    );
+    let retries = export_retries(&world);
+    assert_eq!(launch.redeliver_unfinished(&retries).unwrap(), [meeting.id]);
+    launch.wait_until_idle().await;
+    assert_eq!(
+        world.store.deliveries(meeting.id).unwrap()[0].status,
+        DeliveryStatus::Delivered
+    );
+    assert_eq!(
+        expires_at(&world, &asset),
+        None,
+        "after the launch's re-export"
+    );
+    pipeline.redeliver(meeting.id).await.unwrap();
+    assert_eq!(expires_at(&world, &asset), None, "after a re-export");
+    pipeline.rerun_summary(meeting.id, "default").await.unwrap();
+    assert_eq!(expires_at(&world, &asset), None, "after a summary re-run");
+
+    pipeline.process_again(meeting.id).unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert_eq!(expires_at(&world, &asset), None, "after Process again");
+
+    pipeline
+        .apply_retention(meeting.id, AudioRetention::DeleteAfterProcessing)
+        .await
+        .unwrap();
+    assert_eq!(
+        expires_at(&world, &asset),
+        Some(world.now),
+        "the user's rule is stamped as chosen"
+    );
 }
 
 /// A run that fails after `persist` marked the meeting ready is delivered

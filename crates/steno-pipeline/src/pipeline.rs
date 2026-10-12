@@ -195,8 +195,8 @@ pub enum ReprocessError {
     #[error("meeting {0} waits for the speech models to be installed")]
     WaitingForModels(Uuid),
     /// The meeting is finished, but [`process_again`] does not offer it
-    /// ([`Meeting::offers_process_again`]): it is ready, and its results do
-    /// not need the recording.
+    /// ([`Meeting::offers_process_again`]): it is ready, its results do
+    /// not need the recording, and the recording is not damaged.
     ///
     /// [`process_again`]: ProcessingPipeline::process_again
     #[error("meeting {0} is not offered to be processed again")]
@@ -1281,14 +1281,20 @@ impl ProcessingPipeline {
     /// [`reprocess`](Self::reprocess), refused with
     /// [`ReprocessError::NotOffered`] unless the meeting it reads
     /// [offers it](Meeting::offers_process_again) over its stored speakers,
-    /// segments and asset, so a caller's stale view of a meeting that has
+    /// segments and asset and its [damage](DamagedAudio::may_be_damaged),
+    /// so a caller's stale view of a meeting that has
     /// since become ready and complete cannot run it again. Rust only.
     pub fn process_again(&self, meeting_id: Uuid) -> std::result::Result<(), ReprocessError> {
         self.reprocess_if(meeting_id, |meeting, asset| {
             let store = self.store();
             let speakers = attributing(PipelineStage::Decode, store.speakers(meeting.id))?;
             let segments = attributing(PipelineStage::Decode, store.segments(meeting.id))?;
-            Ok(meeting.offers_process_again(&speakers, &segments, asset))
+            let damaged = self
+                .inner
+                .dependencies
+                .damaged_audio
+                .may_be_damaged(meeting.id);
+            Ok(meeting.offers_process_again(&speakers, &segments, asset, damaged))
         })
     }
 
@@ -3164,7 +3170,9 @@ impl ProcessingPipeline {
     }
 
     /// [`steno_core::results_need_the_audio`] over the meeting's rows as
-    /// stored.
+    /// stored, or the recording [may be damaged](DamagedAudio::may_be_damaged):
+    /// parts of it were replaced by silence, which decode recorded and
+    /// synced before this stamp, or the damage record cannot be read.
     fn stored_results_need_the_audio(&self, asset: &AudioAsset) -> Result<bool> {
         let store = self.store();
         let meeting_id = asset.meeting_id;
@@ -3172,6 +3180,14 @@ impl ProcessingPipeline {
         else {
             return Ok(false);
         };
+        if self
+            .inner
+            .dependencies
+            .damaged_audio
+            .may_be_damaged(meeting_id)
+        {
+            return Ok(true);
+        }
         let speakers = attributing(PipelineStage::Retention, store.speakers(meeting_id))?;
         let segments = attributing(PipelineStage::Retention, store.segments(meeting_id))?;
         Ok(steno_core::results_need_the_audio(

@@ -8,7 +8,8 @@
 //! `steno process --meeting <id>` processes a stored meeting again from its
 //! recording, and reports as above: a meeting the app offers "Process
 //! again" for (a failed one, or a ready one whose results may be
-//! incomplete), through the pipeline's `process_again`, or
+//! incomplete or whose recording may be damaged), through the pipeline's
+//! `process_again`, or
 //! with `--allow-ready` a ready one too, through `reprocess` (see
 //! `--allow-ready` for what that replaces). Rust only: Swift's CLI had no
 //! such flag.
@@ -56,7 +57,7 @@ pub struct Process {
     pub input: Option<PathBuf>,
     /// Process a stored meeting again from its recording, instead of a new
     /// one from <INPUT>: a failed meeting, or a ready one whose speakers or
-    /// transcript may be incomplete.
+    /// transcript may be incomplete or whose recording may be damaged.
     #[arg(
         long,
         value_name = "ID",

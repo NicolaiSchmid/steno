@@ -935,7 +935,8 @@ fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
 /// `steno process --meeting` writes what the decoder replaced by silence
 /// into `damaged-audio.json` beside the database, where the app reads it:
 /// a phone meeting whose recording becomes the fixture with three
-/// undecodable packets is marked with them after the run.
+/// undecodable packets is marked with them after the run, and is then
+/// offered to be processed again without `--allow-ready`.
 #[test]
 fn process_meeting_writes_the_damage_beside_the_database() {
     let home = tempfile::tempdir().unwrap();
@@ -989,6 +990,21 @@ fn process_meeting_writes_the_damage_beside_the_database() {
         home,
     );
     assert_eq!(again.status, 0, "{}", again.stderr);
+    assert_eq!(marks().parts(id), 3);
+
+    // A ready meeting whose recording may be damaged is offered "Process
+    // again" without --allow-ready, as the app offers it.
+    let offered = steno(
+        &[
+            "process",
+            "--meeting",
+            &meeting_id,
+            "--db",
+            db.to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(offered.status, 0, "{}", offered.stderr);
     assert_eq!(marks().parts(id), 3);
 }
 

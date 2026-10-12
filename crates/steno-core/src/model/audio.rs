@@ -323,8 +323,9 @@ mod tests {
 
     /// A failed meeting is offered "Process again" whatever its rows; a
     /// ready one only while its results need the audio (here the diarizer
-    /// fallback's room row) and its asset is on record; an unfinished one
-    /// never ([`Meeting::offers_process_again`]).
+    /// fallback's room row) or its recording may be damaged, and its asset
+    /// is on record; an unfinished one never, damaged or not
+    /// ([`Meeting::offers_process_again`]).
     #[test]
     fn a_failed_meeting_and_a_ready_one_kept_incomplete_offer_process_again() {
         let mut meeting = crate::testing::sample_data::meeting();
@@ -342,19 +343,20 @@ mod tests {
         ] {
             meeting.state = state;
             assert!(
-                !meeting.offers_process_again(&room, &both, Some(&asset)),
+                !meeting.offers_process_again(&room, &both, Some(&asset), true),
                 "{:?}",
                 meeting.state
             );
         }
         meeting.state = MeetingState::Ready;
-        assert!(!meeting.offers_process_again(&[], &both, Some(&asset)));
-        assert!(meeting.offers_process_again(&room, &both, Some(&asset)));
-        assert!(!meeting.offers_process_again(&room, &both, None));
+        assert!(!meeting.offers_process_again(&[], &both, Some(&asset), false));
+        assert!(meeting.offers_process_again(&room, &both, Some(&asset), false));
+        assert!(meeting.offers_process_again(&[], &both, Some(&asset), true));
+        assert!(!meeting.offers_process_again(&room, &both, None, true));
         meeting.state = MeetingState::Failed {
             reason: "decode: unreadable".to_owned(),
         };
-        assert!(meeting.offers_process_again(&[], &both, None));
+        assert!(meeting.offers_process_again(&[], &both, None, false));
     }
 
     #[test]

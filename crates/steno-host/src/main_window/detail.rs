@@ -32,8 +32,9 @@ pub enum RecordingStatus {
     KeptProcessingFailed,
     /// A finite rule, no stamp, meeting ready and delivered, but its
     /// speakers or transcript may be incomplete
-    /// ([`steno_core::results_need_the_audio`]), so the automatic retention
-    /// keeps the recording. Rust only.
+    /// ([`steno_core::results_need_the_audio`]) or its recording may be
+    /// damaged ([`MeetingDetailViewModel::audio_may_be_damaged`]), so the
+    /// automatic retention keeps the recording. Rust only.
     KeptIncomplete,
     /// A finite rule, no stamp, meeting still on its way to the retention stage.
     KeptWhileProcessing,
@@ -194,8 +195,9 @@ impl MeetingDetailViewModel {
     }
 
     /// "Process again": the meeting is one it is offered for
-    /// ([`Meeting::offers_process_again`] over the export's rows: failed,
-    /// or ready and kept incomplete), its recording is on disk, and the API
+    /// ([`Meeting::offers_process_again`] over the export's rows and
+    /// [`audio_may_be_damaged`](Self::audio_may_be_damaged): failed, or
+    /// ready and kept incomplete), its recording is on disk, and the API
     /// key is not withheld ([`key_withheld`](Self::key_withheld)).
     /// The snapshot's `canProcessAgain`, and the guard of
     /// [`process_again`](Self::process_again), so the button and the action
@@ -214,6 +216,7 @@ impl MeetingDetailViewModel {
                 &export.speakers,
                 &export.segments,
                 export.audio.as_ref(),
+                self.audio_may_be_damaged,
             )
         });
         if !offered {
@@ -369,12 +372,14 @@ impl MeetingDetailViewModel {
             MeetingStateKind::Ready => {
                 if !all_delivered(&self.deliveries) {
                     RecordingStatus::KeptUntilExportSucceeds
-                } else if results_need_the_audio(
-                    &export.meeting,
-                    &export.speakers,
-                    &export.segments,
-                    asset,
-                ) {
+                } else if self.audio_may_be_damaged
+                    || results_need_the_audio(
+                        &export.meeting,
+                        &export.speakers,
+                        &export.segments,
+                        asset,
+                    )
+                {
                     RecordingStatus::KeptIncomplete
                 } else {
                     RecordingStatus::KeptWhileProcessing
