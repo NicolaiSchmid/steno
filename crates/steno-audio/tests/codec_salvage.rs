@@ -368,7 +368,7 @@ fn the_packets_are_found_wherever_the_reserve_ends() {
         ]
         .concat()
     };
-    let mut longer_ftyp = [&bytes[..28], b"iso2", &bytes[28..PACKETS_AT], packets].concat();
+    let mut longer_ftyp = [ftyp, b"iso2", &bytes[28..]].concat();
     longer_ftyp[..4].copy_from_slice(&32u32.to_be_bytes());
     for (name, variant) in [
         ("short", with_reserve(1_000)),
