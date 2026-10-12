@@ -202,8 +202,8 @@ mod tests {
     }
 
     /// A salvaged recording (no index, read up to where it was cut off or
-    /// could not be read) counts as damaged with no part lost, so the retention rule keeps it,
-    /// also after a restart.
+    /// could not be read) counts as damaged with no part lost, so the
+    /// retention rule keeps it, also after a restart.
     #[test]
     fn a_salvaged_recording_may_be_damaged_with_no_part_lost() {
         let dir = tempfile::tempdir().unwrap();

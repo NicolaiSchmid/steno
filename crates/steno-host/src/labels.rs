@@ -132,11 +132,11 @@ pub fn end_reason_sentence(reason: &RecordingEndReason) -> Option<String> {
 /// The detail's warning when the decoder replaced parts of the recording
 /// by silence, or read a recording that had no index up to where it was
 /// cut off or could not be read (a phone recording whose recorder was
-/// killed), so its end may be missing; `None` for a
-/// recording that decoded clean. Names the phone's recording, the only one
-/// that can hold damaged packets (AAC) or lack its index, and says how
-/// long the silence lasts rather than how many packets it replaced,
-/// rounded to tenths of a second, seconds or minutes. Rust only:
+/// killed), so its end may be missing; `None` for a recording that decoded
+/// clean. Names the phone's recording, the only one that can hold damaged
+/// packets (AAC) or lack its index, and says how long the silence lasts
+/// rather than how many packets it replaced, rounded to tenths of a
+/// second, seconds or minutes. Rust only:
 /// `AVFoundation` conceals damaged packets and says nothing, and cannot
 /// read a recording without its index.
 #[must_use]
