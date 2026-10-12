@@ -5,7 +5,7 @@
 # installer lays it out, and the sidecar is started from there: it greets
 # with its `ready` frame and exits when its stdin ends.
 #
-#   apps/desktop/scripts/check-bundle.sh [--signed] <bundle dir> <types>
+#   apps/desktop/scripts/check-bundle.sh [--signed [--handoff <build>]] <bundle dir> <types>
 #
 # <types> is the comma-separated list Tauri's `--bundles` takes:
 #
@@ -18,10 +18,22 @@
 #             byte for byte apps/desktop/src-tauri/linux/hyprland-steno.lua
 #   appimage  appimage/*.AppImage, unpacked with --appimage-extract, into
 #             usr/bin/
-#   app       macos/*.app, into Contents/MacOS/. With --signed, also the
-#             Developer ID signature, hardened runtime, timestamp and team
-#             of the app, its executable and the sidecar, the two
-#             entitlements, the stapled ticket and Gatekeeper's verdict
+#   app       macos/*.app, into Contents/MacOS/; also the bundle id and
+#             the Swift app's SUPublicEDKey, as tauri.conf.json and
+#             Info.plist give them, in the merged Info.plist. With
+#             --signed, also the Developer ID signature, hardened
+#             runtime, timestamp and team of the app, its executable and
+#             the sidecar, the two entitlements, the stapled ticket and
+#             Gatekeeper's verdict. With --handoff <build> (after
+#             --signed), also what the Swift app's last Sparkle update
+#             needs of this bundle (stable plan, "The workflow after S7"):
+#             CFBundleIdentifier com.nicolaischmid.steno.desktop and the
+#             Swift app's SUPublicEDKey, pinned here rather than read from
+#             the configuration, CFBundleVersion <build>, a designated
+#             requirement that names team KQB68F43PW, and `codesign
+#             --verify --deep --strict`. check-bundle.test.sh runs the
+#             unsigned and the handoff checks over stub bundles, with
+#             `codesign`, `plutil`, `xcrun` and `spctl` stubbed
 #   dmg       nothing of its own: the image holds the .app checked above
 #   msi       msi/*.msi, unpacked by an administrative install; the install
 #             directory also holds DirectML.dll and the Visual C++ runtime
@@ -38,15 +50,29 @@
 set -euo pipefail
 
 signed=false
+handoff=""
 if [[ "${1:-}" == "--signed" ]]; then
   signed=true
   shift
+fi
+if [[ "${1:-}" == "--handoff" ]]; then
+  handoff="${2:-}"
+  shift 2 || true
+  [[ "$signed" == true ]] || { echo "::error::--handoff checks a signed bundle; pass --signed first" >&2; exit 1; }
+  [[ "$handoff" =~ ^[1-9][0-9]*$ ]] || { echo "::error::--handoff takes the build number, got '$handoff'" >&2; exit 1; }
 fi
 bundle="${1:?bundle directory, e.g. target/release/bundle}"
 types="${2:?bundle types, e.g. deb,appimage}"
 sidecar_name=steno-speech-sidecar
 linux="$(cd "$(dirname "${BASH_SOURCE[0]}")/../src-tauri/linux" && pwd)"
 hyprland_rules=usr/share/steno-desktop/hyprland-steno.lua
+# What the handoff pins (stable plan D5 and "The Sparkle handoff"): the
+# identifier the Swift app's last update installs, the key every Swift
+# build verifies that update with (SUPublicEDKey in apps/macos/project.yml),
+# and the Developer ID team.
+handoff_identifier=com.nicolaischmid.steno.desktop
+handoff_key='RxaX7phoHvb7M0P4yaOC7zngDo+lqlOE6Iq89UtOuQI='
+handoff_team=KQB68F43PW
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
@@ -163,14 +189,39 @@ release_signature() {
   sed -n 's/^TeamIdentifier=//p' <<< "$details"
 }
 
+# plist_value <file> <key>: the value under the top-level <key> of a plist
+# or a JSON file. plutil rather than PlistBuddy, since it also reads
+# tauri.conf.json; its `raw` form has been there since macOS 12, and
+# check-bundle.test.sh stubs it off macOS.
+plist_value() {
+  plutil -extract "$2" raw -o - "$1"
+}
+
+# info_is <Info.plist> <key> <expected>: the plist holds <expected>, not
+# empty, under <key>.
+info_is() {
+  local got
+  got="$(plist_value "$1" "$2" 2>/dev/null || true)"
+  [[ -n "$3" && "$got" == "$3" ]] || die "$1 holds $2 '$got', expected '$3'"
+  echo "ok: $1 holds $2 $got"
+}
+
 check_app() {
-  local app executable team item item_team entitlements count
+  local app executable team item item_team entitlements count src_tauri
   app="$(one "$bundle/macos/*.app")"
-  executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+  executable="$(plist_value "$app/Contents/Info.plist" CFBundleExecutable)"
   side_by_side "$app/Contents/MacOS" "$executable" "$sidecar_name"
+  # The identifier, and the Swift app's Sparkle key, without which the
+  # Swift app's last update cannot install this bundle (stable plan S6).
+  src_tauri="$(cd "$(dirname "${BASH_SOURCE[0]}")/../src-tauri" && pwd)"
+  info_is "$app/Contents/Info.plist" CFBundleIdentifier \
+    "$(plist_value "$src_tauri/tauri.conf.json" identifier)"
+  info_is "$app/Contents/Info.plist" SUPublicEDKey \
+    "$(plist_value "$src_tauri/Info.plist" SUPublicEDKey)"
   [[ "$signed" == true ]] || return 0
 
-  codesign --verify --deep --strict --verbose=2 "$app"
+  codesign --verify --deep --strict --verbose=2 "$app" \
+    || die "codesign --verify --deep --strict fails on $app"
   team="$(release_signature "$app")"
   [[ -n "$team" ]] || die "no TeamIdentifier on $app"
   for item in "$app/Contents/MacOS/$executable" "$app/Contents/MacOS/$sidecar_name"; do
@@ -185,6 +236,22 @@ check_app() {
   xcrun stapler validate "$app"
   spctl --assess --type execute --verbose=2 "$app"
   echo "ok: $app is signed by team $team, notarised and stapled"
+  [[ -z "$handoff" ]] || check_handoff "$app"
+}
+
+# check_handoff <app>: the bundle the Swift app's last Sparkle update may
+# install. Sparkle verifies the archive's EdDSA signature against the
+# running Swift app's key, then only needs the new bundle to keep a public
+# key, to carry a higher build number and to have a valid code signature.
+check_handoff() {
+  local app="$1" requirement
+  info_is "$app/Contents/Info.plist" CFBundleIdentifier "$handoff_identifier"
+  info_is "$app/Contents/Info.plist" SUPublicEDKey "$handoff_key"
+  info_is "$app/Contents/Info.plist" CFBundleVersion "$handoff"
+  requirement="$(codesign -d -r- "$app" 2>&1)" || die "codesign -d -r- failed on $app: $requirement"
+  grep -Eq "^designated => .*certificate leaf\[subject\.OU\] = \"?$handoff_team\"?( |\$)" <<< "$requirement" \
+    || die "the designated requirement of $app does not name team $handoff_team: $requirement"
+  echo "ok: $app is the handoff bundle, build $handoff, team $handoff_team"
 }
 
 # windows_wait <program> <argument...>: runs a Windows program through

@@ -143,7 +143,7 @@ async fn a_child_that_dies_while_it_diarizes_fails_that_stage_and_the_next_job_d
         let asset = steno_pipeline::fixtures::two_lane_call(
             &audio,
             meeting.id,
-            AudioRetention::KeepForever,
+            AudioRetention::DeleteAfterProcessing,
         )
         .unwrap();
         pipeline.enqueue(&meeting, &asset).unwrap();
@@ -160,9 +160,126 @@ async fn a_child_that_dies_while_it_diarizes_fails_that_stage_and_the_next_job_d
             .iter()
             .any(|speaker| speaker.embedding.is_some() && speaker.sample_clip_range.is_some());
         assert_eq!(diarized, job == 2, "job {job}: {speakers:?}");
+        // The crash's fallback stores the room speaker, which keeps the
+        // recording unstamped; the job that diarizes is stamped.
+        let room = speakers
+            .iter()
+            .any(|speaker| speaker.id == steno_core::room_speaker_id(meeting.id));
+        assert_eq!(room, job == 1, "job {job}: {speakers:?}");
+        let stamp = store.asset(meeting.id).unwrap().unwrap().expires_at;
+        assert_eq!(stamp.is_none(), job == 1, "job {job}: {stamp:?}");
         // One child to transcribe, one to diarize.
         assert_eq!(engine.spawns(), 2 * job);
         assert_eq!(engine.pid(), None, "no child outlives the job");
     }
     assert!(marker.exists(), "the first diarizing child aborted");
+}
+
+/// A diarizer that fails as `SidecarDiarizer` does when the speech
+/// sidecar's child dies, overruns the deadline or the memory ceiling
+/// while it diarizes: the real error type, boxed as the boundary boxes it.
+struct FailingInTheSidecar(SidecarFailure);
+
+/// One way the child fails, made fresh for each job.
+type SidecarFailure = fn() -> steno_speech::SidecarError;
+
+#[steno_core::async_trait]
+impl steno_core::Diarizer for FailingInTheSidecar {
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        Ok(())
+    }
+
+    async fn diarize(
+        &self,
+        _audio: &steno_core::AudioBuffer16k,
+    ) -> steno_core::protocols::BoundaryResult<steno_core::DiarizationResult> {
+        Err(Box::new(steno_diarize::DiarizeError::Sidecar(
+            steno_speech::SpeechError::Sidecar((self.0)()),
+        )))
+    }
+}
+
+/// Each way the speech sidecar's child fails while it diarizes (#266: a
+/// crash, which a systemd-oomd kill is too, the deadline, the 6 GiB
+/// ceiling) reaches the diarizer fallback behind the app's model gate:
+/// the job ends `ready`, the room speaker is stored, the recording stays
+/// unstamped under "delete after processing", and the meeting detail says
+/// it is kept because the results may be incomplete.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_sidecar_diarize_failure_keeps_the_recording_incomplete() {
+    let failures: [(&str, SidecarFailure); 4] = [
+        ("crash", || steno_speech::SidecarError::Crashed {
+            status: "signal: 6 (SIGABRT)".to_owned(),
+            stderr: String::new(),
+        }),
+        ("oomd kill", || steno_speech::SidecarError::Crashed {
+            status: "signal: 9 (SIGKILL)".to_owned(),
+            stderr: String::new(),
+        }),
+        ("deadline", || steno_speech::SidecarError::Timeout {
+            after: std::time::Duration::from_secs(600),
+        }),
+        ("ceiling", || steno_speech::SidecarError::MemoryCeiling {
+            rss_bytes: 7 << 30,
+            ceiling_bytes: 6 << 30,
+        }),
+    ];
+    for (name, failure) in failures {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let audio = dir.path().join("audio");
+        let mut settings = store.settings().unwrap();
+        settings.audio_folder = file_url(&audio, true);
+        settings.default_retention = AudioRetention::DeleteAfterProcessing;
+        store.save_settings(&settings).unwrap();
+        let diarizer = Arc::new(steno_services::model_gate::GatedDiarizer::new(
+            Arc::new(FailingInTheSidecar(failure)),
+            Arc::new(|| true),
+        ));
+        let pipeline = ProcessingPipeline::new(PipelineDependencies::new(
+            Arc::new(SymphoniaAudioCodec::new()),
+            Arc::new(steno_core::testing::FakeSpeechEngine::default()),
+            diarizer,
+            Arc::new(InMemorySpeakerMemory::new(Vec::new())),
+            Arc::new(steno_adapters::DeliveryCoordinator::new(store.clone())),
+            store.clone(),
+            MeetingEventBus::new(),
+        ));
+        let mut meeting = sample_data::meeting();
+        meeting.id = uuid::Uuid::new_v4();
+        meeting.duration = 6.0;
+        meeting.state = MeetingState::Recording;
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            &audio,
+            meeting.id,
+            AudioRetention::DeleteAfterProcessing,
+        )
+        .unwrap();
+        pipeline.enqueue(&meeting, &asset).unwrap();
+        pipeline.wait_until_idle().await;
+
+        let export = store.export(meeting.id).unwrap();
+        assert_eq!(export.meeting.state, MeetingState::Ready, "{name}");
+        let room = steno_core::room_speaker_id(meeting.id);
+        assert!(
+            export.speakers.iter().any(|speaker| speaker.id == room),
+            "{name}: the room speaker is stored: {:?}",
+            export.speakers
+        );
+        assert_eq!(
+            store.asset(meeting.id).unwrap().unwrap().expires_at,
+            None,
+            "{name}: kept"
+        );
+        let files = steno_host::fakes::FakeFileSystem::default();
+        files.create(steno_core::paths::file_url_path(&asset.url).unwrap());
+        let mut detail =
+            steno_host::main_window::MeetingDetailViewModel::new(meeting.id, Some(&settings));
+        detail.reload(&store, &files, &steno_host::fakes::FakePipeline::default());
+        assert_eq!(
+            detail.recording_status(),
+            Some(steno_host::main_window::RecordingStatus::KeptIncomplete),
+            "{name}"
+        );
+    }
 }

@@ -26,6 +26,7 @@ fixtures![
     "meetings.list",
     "meeting.detail",
     "meeting.detail.damagedAudio",
+    "meeting.detail.keptIncomplete",
     "settings.general",
     "settings.recording",
     "settings.transcription",
@@ -70,6 +71,8 @@ fixtures![
     "params.ui.confirmDestructive",
     "reply.confirm",
     "reply.chosenPath",
+    "onboarding.import",
+    "meeting.detail.keyWithheld",
 ];
 
 /// The contract's topics (`bridgeTopics` in `contract.ts`). The other
@@ -194,10 +197,13 @@ mod tests {
         for key in [
             "recording.live",
             "meeting.detail.damagedAudio",
+            "meeting.detail.keptIncomplete",
             "settings.summaries.codex",
             "settings.summaries.fileKey",
             "settings.iphone.pairing",
             "onboarding.setup",
+            "onboarding.import",
+            "meeting.detail.keyWithheld",
         ] {
             assert!(fixture(key).is_some(), "{key} is recorded");
             assert!(

@@ -21,19 +21,29 @@
 //! endpoint. The matching private key is the `TAURI_SIGNING_PRIVATE_KEY`
 //! secret and lives nowhere in the repository.
 //!
+//! On Windows the app runs the installer under a watcher that starts the
+//! running version again when the installer does not install
+//! (`windows_setup`), in place of the plugin's install, which left Steno
+//! down after a declined consent prompt or a failed setup.
+//!
 //! Swift: `apps/macos/Steno/Services/UpdaterController.swift`,
 //! `apps/macos/Steno/Services/UpdateChannels.swift`.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use steno_services::updates::{
-    CHECK_TIMED_OUT, CHECK_TIMEOUT, MANAGED_CHECK, Question, UpdateSchedule, UpdateSource,
+    Busy, CHECK_TIMED_OUT, CHECK_TIMEOUT, Installer, MANAGED_CHECK, Question, UpdateSchedule,
+    UpdateSource,
 };
+use tauri::utils::config::BundleType;
 use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
 use tauri_plugin_updater::{Update, UpdaterExt};
+
+#[cfg(any(windows, test))]
+mod windows_setup;
 
 /// The stable lane: the rolling `desktop-stable` release, which carries the
 /// newest release's manifest.
@@ -44,8 +54,10 @@ pub const STABLE_ENDPOINT: &str =
 pub const BETA_ENDPOINT: &str =
     "https://github.com/NicolaiSchmid/steno/releases/download/desktop-beta/latest.json";
 
-/// The update alert's and the confirm's install button.
+/// The update alert's install button.
 const INSTALL: &str = "Install and Relaunch";
+/// The install button while a recording or a processing job runs.
+const INSTALL_AFTER: &str = "Install After It Ends";
 
 /// Whether a marketing version is a pre-release (`UpdateChannels.allowed`:
 /// a hyphen means the beta lane).
@@ -109,14 +121,11 @@ impl UpdateSource for ShellUpdates {
     /// the download and the install.
     async fn check(&self) -> Result<Option<String>, String> {
         let version = self.app.package_info().version.to_string();
-        let handle = self.app.clone();
         let update = self
             .app
             .updater_builder()
             .endpoints(endpoints(&version))
             .map_err(|error| error.to_string())?
-            // Windows: the installer ends the process itself.
-            .on_before_exit(move || crate::shut_down_before_exit(&handle))
             .build()
             .map_err(|error| error.to_string())?
             .check()
@@ -134,15 +143,17 @@ impl UpdateSource for ShellUpdates {
             .map_err(|error| error.to_string())
     }
 
-    /// Writes the package on a blocking thread, since the updater may wait
-    /// on a password prompt; on Windows the installer's own exit runs the
-    /// shutdown (`UpdateSource::check`).
+    /// Installs the package on a blocking thread ([`install_update`]),
+    /// since the updater may wait on a password prompt.
     async fn install(&self, version: &str, package: Vec<u8>) -> Result<(), String> {
-        let update = self.found(version)?;
-        tauri::async_runtime::spawn_blocking(move || update.install(package))
+        let (app, update) = (self.app.clone(), self.found(version)?);
+        tauri::async_runtime::spawn_blocking(move || install_update(&app, &update, &package))
             .await
             .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
+    }
+
+    fn installer(&self) -> Installer {
+        this_installer()
     }
 
     /// Runs the shutdown first (`shut_down_for_relaunch`), as Sparkle's
@@ -166,26 +177,40 @@ impl UpdateSource for ShellUpdates {
             .show_with_result(move |result| {
                 let _ = sender.send(result);
             });
-        receiver.await.is_ok_and(|result| installs(&result))
+        receiver
+            .await
+            .is_ok_and(|result| installs(&result, dialog.install))
     }
 
-    /// An install that fails after the shutdown ran (Windows: the
-    /// installer did not launch) ends the app once its message is closed:
-    /// the recorder and the pipeline start nothing after a shutdown, and
-    /// the next Quit would run none.
+    /// An install that failed after its own shutdown ran (Windows,
+    /// [`install_update`]: the watcher could not start, ended before it
+    /// ran, or said nothing in time) restarts the app at once, into the
+    /// version that runs, with the failure in the log. The recorder and the
+    /// pipelines start nothing after a shutdown, and on a scheduled install
+    /// nobody may be there to close a message. One that fails while the app
+    /// quits (a `.deb`'s pkexec ended with the session) is only logged,
+    /// since the app is ending. The next check offers the update again.
     fn tell_install_failed(&self, message: &str) {
-        let shut_down = self.app.state::<steno_services::app::ExitGate>().released();
-        let handle = self.app.clone();
+        if self.app.state::<steno_services::app::ExitGate>().released() {
+            tracing::warn!(%message, "the update failed while Steno quits");
+            steno_services::flush_logs();
+            return;
+        }
         app_dialog(
             &self.app,
             MessageDialogKind::Error,
             format!("The update could not be installed: {message}"),
         )
-        .show(move |_| {
-            if shut_down {
-                handle.exit(0);
-            }
-        });
+        .show(|_| {});
+    }
+
+    fn tell_relaunch_waits(&self, version: &str, busy: Busy) {
+        app_dialog(
+            &self.app,
+            MessageDialogKind::Info,
+            relaunch_waits_message(version, busy),
+        )
+        .show(|_| {});
     }
 
     fn announce(&self, version: &str) {
@@ -198,13 +223,150 @@ impl UpdateSource for ShellUpdates {
     }
 }
 
+/// Installs `package`, the verified download of `update`: through the
+/// plugin, except on Windows.
+#[cfg(not(windows))]
+fn install_update(_app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
+    update.install(package).map_err(|error| error.to_string())
+}
+
+/// Windows: writes the installer under the app's local data folder
+/// (`%LOCALAPPDATA%\uno.schmid.steno.desktop\update\`, which holds only
+/// the last update's), runs the shutdown, starts the watcher
+/// (`windows_setup`), waits up to [`WATCHER_START_LIMIT`] for it to say
+/// that it runs, lets go of the single-instance lock and ends the process;
+/// returns only when it failed before the shutdown. A start file the
+/// folder's removal left behind fails the install before the shutdown, so
+/// the user is told. After the shutdown, a watcher that cannot start (a
+/// job that forbids breakaway), ends before it ran (a policy that turns off
+/// the command prompt) or says nothing in time (which is ended) restarts
+/// the app, with the failure in the log. The watcher's current directory
+/// is the local data folder, not the install folder the installer
+/// replaces.
+///
+/// [`WATCHER_START_LIMIT`]: windows_setup::WATCHER_START_LIMIT
+#[cfg(windows)]
+fn install_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
+    use windows_setup::{
+        STARTED_FILE, Setup, WATCHER_START_LIMIT, empty_update_folder, system32, wait_for_start,
+        watcher_command,
+    };
+
+    let text = |error: std::io::Error| error.to_string();
+    let setup = Setup::of(package).ok_or("The update is not a Windows installer.")?;
+    let data = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?;
+    let folder = data.join("update");
+    let installer = folder.join(setup.file_name(&update.version));
+    let started = folder.join(STARTED_FILE);
+    empty_update_folder(&folder)?;
+    std::fs::write(&installer, package).map_err(text)?;
+    let relaunch = std::env::current_exe().map_err(text)?;
+    let mut watcher = watcher_command(
+        setup,
+        &installer,
+        &system32().join("msiexec.exe"),
+        &relaunch,
+        &started,
+        &data,
+    );
+    crate::shut_down_before_exit(app);
+    let ran = watcher
+        .spawn()
+        .map_err(text)
+        .and_then(|mut watcher| wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT));
+    match ran {
+        Ok(()) => {
+            // The single-instance mutex goes first: an installer that fails
+            // at once (msiexec 1618) has the watcher start this version
+            // within milliseconds, and that copy would hand itself to this
+            // ending process. `RunEvent::Exit` frees it on every other exit;
+            // `exit` skips that.
+            tauri_plugin_single_instance::destroy(app);
+            std::process::exit(0)
+        }
+        Err(message) => {
+            tracing::warn!(%message, "the update failed after the shutdown; Steno restarts");
+            steno_services::flush_logs();
+            app.restart()
+        }
+    }
+}
+
+/// [`installer_for`] this build's platform and bundle.
+fn this_installer() -> Installer {
+    installer_for(
+        cfg!(windows),
+        tauri::utils::platform::bundle_type().as_ref(),
+        bundle_is_writable,
+    )
+}
+
+/// How the updater installs on this platform (`windows` on Windows) for
+/// the bundle the binary came in (`bundle`). On Windows the install ends
+/// the process (`install_update`): the NSIS setup installs for the user
+/// alone (`bundle.windows.nsis.installMode` in `tauri.conf.json`), and the
+/// MSI for every user, after Windows' consent prompt. A `.deb` or an
+/// `.rpm` is installed through pkexec, then a zenity or kdialog password
+/// dialog, then `sudo`, each of which waits for an answer. The macOS
+/// bundle is replaced in place, after an administrator's password when the
+/// user cannot write it or its folder (`writable`, asked only then; the
+/// prompt holds the app's windows until it is answered). Anything else (an
+/// `AppImage`, or no bundle) is replaced in place.
+fn installer_for(
+    windows: bool,
+    bundle: Option<&BundleType>,
+    writable: impl FnOnce() -> bool,
+) -> Installer {
+    if windows {
+        return match bundle {
+            Some(BundleType::Msi) => Installer::EndsTheAppThenAsks,
+            _ => Installer::EndsTheApp,
+        };
+    }
+    match bundle {
+        Some(BundleType::Deb | BundleType::Rpm) => Installer::AsksForAPassword,
+        Some(BundleType::App) if !writable() => Installer::AsksForAPassword,
+        _ => Installer::InPlace,
+    }
+}
+
+/// Whether the user can write the running macOS bundle and its folder
+/// ([`bundle_is_writable_at`]).
+#[cfg(target_os = "macos")]
+fn bundle_is_writable() -> bool {
+    std::env::current_exe().is_ok_and(|executable| bundle_is_writable_at(&executable))
+}
+
+/// Whether the user can write the bundle of `executable`
+/// (`Steno.app/Contents/MacOS/steno-desktop`) and its folder, which the
+/// updater renames the bundle out of.
+#[cfg(target_os = "macos")]
+fn bundle_is_writable_at(executable: &std::path::Path) -> bool {
+    let writable =
+        |path: &std::path::Path| rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_ok();
+    let Some(bundle) = executable.ancestors().nth(3) else {
+        return false;
+    };
+    writable(bundle) && bundle.parent().is_some_and(writable)
+}
+
+/// No macOS bundle here.
+#[cfg(not(target_os = "macos"))]
+fn bundle_is_writable() -> bool {
+    true
+}
+
 /// A question's dialog: its kind, its text and its buttons, the default
 /// first (macOS and Windows press the first button on Return, and GTK
-/// focuses it).
+/// focuses it), and the label of the one that installs.
 struct Dialog {
     kind: MessageDialogKind,
     message: String,
     buttons: MessageDialogButtons,
+    install: &'static str,
 }
 
 impl Dialog {
@@ -214,22 +376,51 @@ impl Dialog {
                 kind: MessageDialogKind::Info,
                 message: format!("Steno {version} is available. Install it and relaunch?"),
                 buttons: MessageDialogButtons::OkCancelCustom(INSTALL.into(), "Later".into()),
+                install: INSTALL,
             },
-            // "Not Now" first: the confirm comes up where the alert's
-            // Install was, so a second Return or click would pass it unread.
-            Question::StopRecording => Dialog {
-                kind: MessageDialogKind::Warning,
-                message: "Installing stops and saves the recording in progress.".to_owned(),
-                buttons: MessageDialogButtons::OkCancelCustom("Not Now".into(), INSTALL.into()),
+            // Installing after it ends is the default: neither button
+            // stops the recording or the processing (stable plan P25).
+            Question::AfterItEnds(busy) => Dialog {
+                kind: MessageDialogKind::Info,
+                message: match busy {
+                    Busy::Recording => "Steno is recording. Install the update and relaunch once the recording is saved and processed?",
+                    Busy::Processing => "Steno is still processing a meeting. Install the update and relaunch once it is done?",
+                }
+                .to_owned(),
+                buttons: MessageDialogButtons::OkCancelCustom(
+                    INSTALL_AFTER.into(),
+                    "Not Now".into(),
+                ),
+                install: INSTALL_AFTER,
+            },
+            Question::InstallNow(version) => Dialog {
+                kind: MessageDialogKind::Info,
+                message: format!("Steno {version} is ready to install. Install it and relaunch now?"),
+                buttons: MessageDialogButtons::OkCancelCustom(INSTALL.into(), "Later".into()),
+                install: INSTALL,
             },
         }
     }
 }
 
-/// Whether the button pressed installs: only the install button's own
-/// label; the other button, Escape and closing the dialog do not.
-fn installs(result: &MessageDialogResult) -> bool {
-    matches!(result, MessageDialogResult::Custom(label) if label == INSTALL)
+/// What the user is told when an update installed while a recording or a
+/// processing job began: Steno relaunches once that is done.
+fn relaunch_waits_message(version: &str, busy: Busy) -> String {
+    match busy {
+        Busy::Recording => format!(
+            "Steno {version} is installed. Steno relaunches once the recording is saved and processed."
+        ),
+        Busy::Processing => {
+            format!("Steno {version} is installed. Steno relaunches once the meeting is processed.")
+        }
+    }
+}
+
+/// Whether the button pressed installs: only the label `install`, the
+/// dialog's install button; the other button, Escape and closing the
+/// dialog do not.
+fn installs(result: &MessageDialogResult, install: &str) -> bool {
+    matches!(result, MessageDialogResult::Custom(label) if label == install)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -333,25 +524,100 @@ mod tests {
         }
     }
 
-    /// The update alert's default installs, as Sparkle's does; the
-    /// confirm's default is "Not Now", so a double Return or click passes
-    /// neither dialog into an install over a recording.
+    /// The update alert's default installs, as Sparkle's does; while the
+    /// app is busy the default installs once that ends, and the other
+    /// button is "Not Now". The busy dialog names what it waits for in
+    /// plain words.
     #[test]
-    fn the_confirms_default_button_does_not_install() {
-        let first = |question| match Dialog::of(question).buttons {
-            MessageDialogButtons::OkCancelCustom(first, second) => (first, second),
-            other => panic!("{other:?}"),
+    fn the_busy_dialogs_default_installs_once_it_ends() {
+        let buttons = |question| {
+            let dialog = Dialog::of(question);
+            match dialog.buttons {
+                MessageDialogButtons::OkCancelCustom(first, second) => {
+                    (first, second, dialog.install, dialog.message)
+                }
+                other => panic!("{other:?}"),
+            }
         };
-        assert_eq!(first(Question::Install("0.12.0")).0, INSTALL);
-        let (default, other) = first(Question::StopRecording);
-        assert_eq!(default, "Not Now");
-        assert_eq!(other, INSTALL);
-        assert!(!installs(&MessageDialogResult::Custom(default)));
-        assert!(installs(&MessageDialogResult::Custom(other)));
+        let (default, _, install, _) = buttons(Question::Install("0.12.0"));
+        assert_eq!((default.as_str(), install), (INSTALL, INSTALL));
+        for (busy, named) in [
+            (Busy::Recording, "recording"),
+            (Busy::Processing, "processing"),
+        ] {
+            let (default, other, install, message) = buttons(Question::AfterItEnds(busy));
+            assert_eq!(default, INSTALL_AFTER);
+            assert_eq!(install, INSTALL_AFTER);
+            assert_eq!(other, "Not Now");
+            assert!(message.contains(named), "{message}");
+            assert!(installs(&MessageDialogResult::Custom(default), install));
+            assert!(!installs(&MessageDialogResult::Custom(other), install));
+        }
+    }
+
+    /// The relaunch that waits names the version and what it waits for.
+    #[test]
+    fn the_relaunch_that_waits_says_what_for() {
+        let recording = relaunch_waits_message("0.12.0", Busy::Recording);
+        assert!(
+            recording.starts_with("Steno 0.12.0 is installed."),
+            "{recording}"
+        );
+        assert!(recording.contains("recording is saved"), "{recording}");
+        let processing = relaunch_waits_message("0.12.0", Busy::Processing);
+        assert!(processing.contains("processed"), "{processing}");
+    }
+
+    /// Asked again before an installer that needs an administrator, the
+    /// default installs now and the other button is "Later".
+    #[test]
+    fn asked_again_the_default_installs_now() {
+        let dialog = Dialog::of(Question::InstallNow("0.12.0"));
+        assert!(dialog.message.contains("0.12.0"), "{}", dialog.message);
+        assert!(dialog.message.contains("now"), "{}", dialog.message);
+        let MessageDialogButtons::OkCancelCustom(default, other) = dialog.buttons else {
+            panic!("{:?}", dialog.buttons);
+        };
+        assert_eq!((default.as_str(), other.as_str()), (INSTALL, "Later"));
+        assert_eq!(dialog.install, INSTALL);
+    }
+
+    /// Every platform and bundle: Windows ends the app, and its MSI asks
+    /// for consent after; a `.deb` or an `.rpm` asks for a password, and so
+    /// does a macOS bundle the user cannot write; the rest is replaced in
+    /// place. Writability is asked only of the macOS bundle.
+    #[test]
+    fn the_installer_follows_the_platform_and_the_bundle() {
+        use BundleType::{App, AppImage, Deb, Dmg, Msi, Nsis, Rpm};
+        let never = || -> bool { panic!("writability asked") };
+        assert_eq!(
+            installer_for(true, Some(&Msi), never),
+            Installer::EndsTheAppThenAsks
+        );
+        for bundle in [Some(&Nsis), None] {
+            assert_eq!(installer_for(true, bundle, never), Installer::EndsTheApp);
+        }
+        for bundle in [Deb, Rpm] {
+            assert_eq!(
+                installer_for(false, Some(&bundle), never),
+                Installer::AsksForAPassword
+            );
+        }
+        for bundle in [Some(&AppImage), Some(&Dmg), None] {
+            assert_eq!(installer_for(false, bundle, never), Installer::InPlace);
+        }
+        assert_eq!(
+            installer_for(false, Some(&App), || true),
+            Installer::InPlace
+        );
+        assert_eq!(
+            installer_for(false, Some(&App), || false),
+            Installer::AsksForAPassword
+        );
     }
 
     /// Only the install button installs: Escape, closing the dialog and
-    /// any other result do not.
+    /// any other result do not, nor the other dialog's install button.
     #[test]
     fn only_the_install_button_installs() {
         for result in [
@@ -360,9 +626,58 @@ mod tests {
             MessageDialogResult::Yes,
             MessageDialogResult::No,
             MessageDialogResult::Custom("Later".into()),
+            MessageDialogResult::Custom(INSTALL_AFTER.into()),
         ] {
-            assert!(!installs(&result), "{result:?}");
+            assert!(!installs(&result, INSTALL), "{result:?}");
         }
+        assert!(!installs(
+            &MessageDialogResult::Custom(INSTALL.into()),
+            INSTALL_AFTER
+        ));
+    }
+
+    /// This build's installer: a test binary comes in no bundle, so Windows
+    /// ends the app and every other platform replaces it in place.
+    #[test]
+    fn an_unbundled_build_installs_as_its_platform_does() {
+        let expected = if cfg!(windows) {
+            Installer::EndsTheApp
+        } else {
+            Installer::InPlace
+        };
+        assert_eq!(this_installer(), expected);
+    }
+
+    /// A bundle the user cannot write, or one in a folder the user cannot
+    /// write, asks for a password; one the user can write does not. Skipped
+    /// as root, who can write either.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unwritable_bundle_or_folder_asks_for_a_password() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &std::path::Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let folder = tempfile::tempdir().unwrap();
+        let bundle = folder.path().join("Steno.app");
+        let executable = bundle.join("Contents/MacOS/steno-desktop");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"").unwrap();
+        assert!(bundle_is_writable_at(&executable));
+        assert!(!bundle_is_writable_at(std::path::Path::new(
+            "steno-desktop"
+        )));
+        mode(&bundle, 0o555);
+        if std::fs::write(bundle.join("probe"), b"").is_ok() {
+            mode(&bundle, 0o755);
+            eprintln!("skipped: root writes a read-only folder");
+            return;
+        }
+        assert!(!bundle_is_writable_at(&executable), "bundle read-only");
+        mode(&bundle, 0o755);
+        mode(folder.path(), 0o555);
+        assert!(!bundle_is_writable_at(&executable), "folder read-only");
+        mode(folder.path(), 0o755);
     }
 
     /// The download and the install name the update the last check found,

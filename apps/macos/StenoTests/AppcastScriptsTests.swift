@@ -2,8 +2,8 @@ import XCTest
 
 /// The rolling appcast: `merge-appcast.py` folds a release into the feed
 /// newest first with the channel applied, `publish-appcast.sh` creates and
-/// then updates the `appcast` branch on a real (bare) origin, and the
-/// release workflow runs it after the release is public.
+/// then updates the `appcast` branch on a real (bare) origin, and every
+/// Swift build reads that branch.
 final class AppcastScriptsTests: XCTestCase {
   private static var scripts: URL {
     TestSupport.appRoot.appendingPathComponent("scripts", isDirectory: true)
@@ -350,24 +350,13 @@ final class AppcastScriptsTests: XCTestCase {
       worktrees.output.split(separator: "\n").count, 1, "the early exit still removes the worktree")
   }
 
-  // MARK: release.yml
+  // MARK: project.yml
 
-  func testReleaseWorkflowPublishesTheFeedAfterTheRelease() throws {
-    let workflow = try String(
-      contentsOf: TestSupport.repositoryRoot.appendingPathComponent(
-        ".github/workflows/release.yml"),
-      encoding: .utf8)
-    let publishRelease = try XCTUnwrap(
-      workflow.range(of: "- name: Publish GitHub release")?.lowerBound)
-    let rolling = try XCTUnwrap(workflow.range(of: "publish-appcast.sh")?.lowerBound)
-    let homebrew = try XCTUnwrap(workflow.range(of: "bump-homebrew-cask.sh")?.lowerBound)
-    XCTAssertLessThan(publishRelease, rolling, "the feed announces a release that is public")
-    XCTAssertLessThan(rolling, homebrew)
-    XCTAssertTrue(workflow.contains("permissions:\n  contents: write"), "the push needs contents")
-    XCTAssertTrue(
-      workflow.contains("git tag --points-at HEAD 'v*'"),
-      "two tags on one commit share a build number; the version step refuses the second")
-
+  /// Every Swift build reads the rolling feed on the `appcast` branch. The
+  /// release workflow that wrote it is gone (stable plan S7);
+  /// desktop-release.yml's `handoff` job adds its last item, which
+  /// `apps/desktop/scripts/release-workflow.test.sh` checks.
+  func testTheFeedIsTheAppcastBranch() throws {
     let spec = try String(
       contentsOf: TestSupport.appRoot.appendingPathComponent("project.yml"), encoding: .utf8)
     XCTAssertTrue(

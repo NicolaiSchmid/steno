@@ -1,9 +1,12 @@
 import { useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
+import { ImportPage } from "./import-page";
 import { PermissionsPage } from "./permissions-page";
 import { SetupPage } from "./setup-page";
 
 /**
- * The onboarding window: two pages over the `onboarding` snapshot. Tells the
+ * The onboarding window: two pages over the `onboarding` snapshot, after
+ * the import step when the host shows it (the Mac's first launch after the
+ * update from the Swift app). Tells the
  * host the page is ready once and renders the page the host says is
  * current; the host closes the window itself once onboarding finished.
  */
@@ -18,7 +21,9 @@ export function OnboardingWindow() {
 			data-testid="onboarding-window"
 		>
 			{onboarding ? (
-				onboarding.page === "permissions" ? (
+				onboarding.page === "import" ? (
+					<ImportPage onboarding={onboarding} />
+				) : onboarding.page === "permissions" ? (
 					<PermissionsPage onboarding={onboarding} />
 				) : (
 					<SetupPage onboarding={onboarding} />

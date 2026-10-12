@@ -27,7 +27,6 @@ steno-core = { path = "../../../crates/steno-core" }
 steno-host = { path = "../../../crates/steno-host" }
 steno-services = { path = "../../../crates/steno-services" }
 tauri.workspace = true
-tauri-plugin-autostart.workspace = true
 tauri-plugin-deep-link.workspace = true
 tauri-plugin-dialog.workspace = true
 tauri-plugin-opener.workspace = true
@@ -45,11 +44,21 @@ uuid.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+# Launch at login on Linux and Windows (`autostart`); macOS registers with
+# `SMAppService` instead.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+tauri-plugin-autostart.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 gdk.workspace = true
 gio.workspace = true
-# The logout and shutdown clients (`session_end`) and the user manager's
-# reload after a stop timeout drop-in changes (`stop_timeout`).
+# The `AppImage`'s mount: `statfs` and the device number's parts, for
+# which FUSE mount `$APPDIR` and the executable are on (`appimage`).
+# Already in the lock.
+rustix.workspace = true
+# The logout and shutdown clients (`session_end`), the user manager's
+# reload after a stop timeout drop-in changes (`stop_timeout`) and the
+# app's own scopes (`own_scope`).
 zbus.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -60,10 +69,18 @@ objc2-av-foundation.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 block2.workspace = true
+# Whether the user can write the bundle (`bundle_is_writable` in
+# `updater.rs`), with `access(2)` and no `unsafe`.
+rustix.workspace = true
+# The login item (`autostart`).
+smappservice-rs.workspace = true
 
 [dev-dependencies]
-# The temporary Nix layout and autostart entries of `packaged`'s tests.
+# The temporary Nix layout and autostart entries of `packaged`'s tests, and
+# the fake `/proc` of `appimage`'s.
 tempfile.workspace = true
+# The warnings the scope and mount server tests read.
+tracing-subscriber.workspace = true
 
 # The work packages named here are in .plans/2026-10-02-rust-core-and-tauri-shell.md.
 [features]

@@ -6,6 +6,7 @@
   "meetings.list",
   "meeting.detail",
   "meeting.detail.damagedAudio",
+  "meeting.detail.keptIncomplete",
   "settings.general",
   "settings.recording",
   "settings.transcription",
@@ -49,5 +50,7 @@
   "params.window",
   "params.ui.confirmDestructive",
   "reply.confirm",
-  "reply.chosenPath"
+  "reply.chosenPath",
+  "onboarding.import",
+  "meeting.detail.keyWithheld"
 ]

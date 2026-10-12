@@ -172,6 +172,24 @@ describe("MeetingDetail", () => {
 		expect(screen.getByTestId("process-again")).toBeEnabled();
 	});
 
+	it("says a summary was skipped because the API key is not available yet", async () => {
+		const withheld = (await loadFixtureSnapshots())[
+			"meeting.detail.keyWithheld"
+		] as MeetingDetailSnapshot;
+		const harness = await createBridgeHarness("", {
+			"meeting.detail": withheld,
+		});
+		renderWithBridge(<MeetingDetail />, harness);
+		const status = await screen.findByTestId("summary-status");
+		expect(status).toHaveTextContent("Summary skipped");
+		expect(status).toHaveTextContent(
+			"Steno can't use your API key yet, so this meeting has no summary.",
+		);
+		expect(
+			within(status).getByTestId("summary-status-action"),
+		).toHaveTextContent("Set up summaries");
+	});
+
 	it("keeps Re-run summary for when the host allows it", async () => {
 		const detail = await fixtureDetail();
 		const harness = await createBridgeHarness("", {
@@ -218,6 +236,24 @@ describe("MeetingDetail", () => {
 			),
 		);
 		expect(toggle).toHaveAttribute("aria-checked", "true");
+	});
+
+	it("says why an incomplete meeting keeps its recording and offers Process again and the delete", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness("scenario=kept-incomplete");
+		renderWithBridge(<MeetingDetail initialMenuOpen />, harness);
+		expect(
+			within(screen.getByTestId("retention-row")).getByText(
+				"Recording kept because the speakers or the transcript may be incomplete. Process again, or delete the recording.",
+			),
+		).toBeInTheDocument();
+		await user.click(await screen.findByTestId("delete-recording"));
+		expect(
+			callsTo(harness.transport, "meeting.deleteRecordingNow"),
+		).toHaveLength(1);
+		expect(screen.getByTestId("process-again")).toBeEnabled();
+		await user.click(screen.getByTestId("process-again"));
+		expect(callsTo(harness.transport, "meeting.processAgain")).toHaveLength(1);
 	});
 
 	it("follows the host's keep flag and hides the switch when told to", async () => {

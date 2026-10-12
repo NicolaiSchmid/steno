@@ -147,7 +147,8 @@ Forge and atlas.
   minted its own that way.
 - **The handover listens on a port the system picks** (`port: 0`) and advertises
   through its own mDNS responder (`mdns-sd`). A firewall that blocks incoming TCP
-  hides it from the phone; `ufw` admits mDNS by default.
+  hides it from the phone; `ufw` admits mDNS by default. From X4 (#276) the
+  port is TCP 23820 on Linux.
 - **"Process again" is new, and only in the Rust app.** "Try again" re-runs only
   the summary and is off without a transcript; P9's "Process again" runs a
   failed meeting from the start with its recording, from the button and from
@@ -167,8 +168,11 @@ Forge and atlas.
     holds on every systemd desktop that runs XDG autostart through it;
   - `app.slice` is under systemd-oomd with `kill`, and the app and its speech
     sidecar share one cgroup, so a memory-pressure kill takes the recording;
-  - an app started outside a `uwsm` scope sits in Hyprland's own unit, stopped
-    with it after at most 10 s;
+  - an app started outside a `uwsm` scope sits in Hyprland's own unit, whose stop
+    sends SIGTERM to the app with Hyprland and a second one once Hyprland has
+    exited, which ends the app unsaved, and `SIGKILL` 10 s in (measured with a
+    stand-in for the unit, #272); from #272 the app moves into a scope of its own
+    at launch;
   - Hyprland's portal serves no Inhibit and no session monitor;
   - the bar is a Quickshell shell, whose tray is an SNI host behind a hover
     drawer; with `libayatana-appindicator` a left click on Steno's icon probably
@@ -397,12 +401,12 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P6 | The recording in progress: systemd-oomd kills the app's cgroup with its sidecar. The sidecar moves into its own transient scope on Linux: right after the spawn the app asks the user manager over the user bus for `app-steno\x2dspeech\x2dsidecar-<pid>.scope`, in the app's slice and `PartOf` the app's unit, and waits about 2 s for the sidecar to be in it, so oomd takes the sidecar's cgroup first and the job fails as after any crash of the sidecar; a start the manager has not carried out by then is called off, and a sidecar that joined just before stays in its scope; an app outside a user unit, a missing bus or a refusal leaves the sidecar in the app's cgroup, and a manager that answers after the wait leaves it there or moves it later. Speaker diarization runs in the sidecar too (A3, #266), so the app's cgroup is a candidate only under pressure that lasts after the sidecar is gone | Linux desktop (#260) |
 | P7 | Every note: a people folder typed as `./People` or `.` in the Swift Settings makes each Rust delivery fail. `./People` becomes `People`; `.` becomes no people folder, as Swift wrote it | pipeline, store and export (`wp-pse-*`) |
 | P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221. At #221's first move, a key only `secrets.json` holds is copied; where both hold one, the file's API key wins and the Secret Service keeps its own `handover-identity`; after the move's mark, the Secret Service wins for every key | audio (with #221) |
-| P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess` (landed, #228), a `meeting.processAgain` bridge method and its button (`fix/pipeline-process-again`), shown while the detail's `canProcessAgain` holds (`Meeting::offers_process_again` and the master on disk; a ready meeting kept incomplete joins with P14); the Swift app refuses it; and `steno process --meeting <id>` (with `input` optional and exclusive of `--meeting`, a ready meeting only with `--allow-ready`; the same branch); a meeting refused for missing models stays queued and resumes once they install (S1's queue, #237) | pipeline, store and export (`wp-pse-*`) |
+| P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess` (landed, #228), a `meeting.processAgain` bridge method and its button (`fix/pipeline-process-again`), shown while the detail's `canProcessAgain` holds (`Meeting::offers_process_again` and the master on disk; a ready meeting kept incomplete joins with P14, #241); the Swift app refuses it; and `steno process --meeting <id>` (with `input` optional and exclusive of `--meeting`, a ready meeting only with `--allow-ready`; the same branch); a meeting refused for missing models stays queued and resumes once they install (S1's queue, #237) | pipeline, store and export (`wp-pse-*`) |
 | P10 | A meeting's whole result: a diarizer or speaker-match failure fails the meeting. It merges without diarization instead | pipeline, store and export (`wp-pse-*`) |
 | P11 | Speaker names confirmed while the meeting processes: the cleanup updates text by id, and `replace_transcript` keeps Confirmed assignments (calibration WP4) | pipeline, store and export (`wp-pse-*`) |
 | P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | pipeline, store and export (`wp-pse-*`) |
 | P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a guard on resume attempts stops the loop | pipeline, store and export (`wp-pse-*`) (the panic wrap); audio (the crash-loop guard, #228) |
-| P14 | Audio deleted by the retention sweep before its stamp is durable: the stamp commits durably first, and a meeting with no segments that is over 30 s long gets no stamp | pipeline, store and export (`wp-pse-*`) |
+| P14 | Audio deleted by the retention sweep before its stamp is durable: every stamp and every keep commits durably, and the automatic retention leaves a meeting unstamped while its speakers include the room fallback, or a recorded lane has no segment in a meeting over 30 s or with no duration, or its recording may be damaged (#264's `damaged-audio.json`) (#241) | pipeline, store and export (`wp-pse-*`) |
 | P15 | Anything two processes write at once: one exclusive lock beside the database for the app's lifetime (#225). A second app instance that the single-instance guard does not hand over is refused with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run without migrating, and refuse beside an older app. On the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs in the same login session (`NSRunningApplication`); a Swift app started after the Rust app is not kept out, and its launch fails every `recording` row, the one the Rust app is still recording among them, so that recording's stop cannot save it and its folder stays on disk unlisted (a known limit, accepted because the handoff runs one app at a time) | capture and recovery (`wp-cap-*`, #225) |
 | P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
 | P17 | A local recording's folder: a save that fails leaves the meeting `recording` with its folder on disk, and the next launch's recovery (P3) rebuilds the asset row from the master and queues the meeting, so the folder is not orphaned (#233); a panic in the session's rebuild ends the recording saved, as a lost device (#230) | capture and recovery (`wp-cap-*`) |
@@ -413,7 +417,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`). #244: the session reports a stream that delivered nothing for 2 s and rebuilds it, its gap filled from the last frame, on every platform except a Windows capture of the system lane alone (endpoint loopback is silent while nothing plays), a stream that delivers nothing from its start included: a Mac call capture runs from its start on its silent output (A10, #251), and one whose silent output did not start, which delivers only while another app plays, is restarted on the backoff below until something plays; playback that begins during a wait between two restarts is lost until the next start (up to 4 s plus one start, once per change from quiet to playback). Its restarts keep a chosen microphone: the output's clock stalls it, so neither a restart that delivered nothing nor a stall soon after a resume gives the microphone up for the default. A restart of `coreaudiod`, and a lost connection to the PipeWire daemon (killed or restarted), are reported as the audio service restarting. Restarts that fail on a graph that does not run, that start but deliver nothing within 2 s, or that follow a stall or a service restart go on until one runs, with no limit, backing off 250 ms, 500 ms, 1 s, 2 s, then every 4 s: once the devices are back, the 4 s cap costs the starts in flight (one deadline per device tried: 3.5 s each on Linux, 7.5 s for a thread that does not answer, a chosen microphone and then the default; up to 10 s on Windows), the wait and the first frame, filled with silence up to the 10 s `MAXIMUM_GAP`; past it the master falls short of wall time and the note after the stop counts it. A restart whose stream delivered before its start returned ends its gap at the clock reading before the start, so the master may run short by the start's connect time; no audio is lost. A stream that resumes and stalls again within 10 s, or before it delivered anything, continues the same restarts' count and backoff, and the log says so when the first restart fails and then about once a minute, across the resumes, the lines each start and stop would log (the Mac's silent output and first callback lines included) at `debug` meanwhile. A stream whose stall comes 10 s or more after each resume begins new restarts each time: its stall logs at `debug` while an earlier warning line stands unanswered, and it never brings the warning up when none stands; the note after the stop counts what it lost. The warning "No audio from <device>. Still trying." names the microphone only when its stall began the rebuild and its clock drives the capture (in person, and on Windows), else "No audio is arriving. Still trying." (a Mac call with nothing playing gets this one); it stands until the stream has delivered for 10 s, so it does not go and come back with each resume, and a note after the stop says when about a second or more is missing, clock drift left out. While the capture recovers, from a device change until it is back, the call auto-stop waits, for one grace at most, and it then arms afresh (S2), since a restart of the audio service also empties the call detector's process list | capture and recovery (`wp-cap-*`, #244) |
 | P23 | Audio the relay dropped: a warning at stop and a log line; no stored count, since a column would need a migration | capture and recovery (`wp-cap-*`) |
 | P24 | A transcript cut short by a sidecar shorter than its master: the sidecar's duration is checked against the master's | audio (#228) |
-| P25 | A recording or a processing run stopped by an update: updates wait while either runs | Linux desktop |
+| P25 | A recording or a processing run stopped by an update: updates wait while either runs. Every install holds the app's install gate (`IdleGate`), which gives its hold only while no recording starts, runs or is saved, no processing job, summary re-run or re-export runs or is claimed, and the app is not shutting down. Recording always wins: while an installer that returns runs (a `.deb`'s password prompt may wait for good), Record works, a job claimed meanwhile (a phone recording's) waits `queued` for a minute at most, and the relaunch waits for a recording or a job started meanwhile, telling the user so; the hold refuses Record only through the shutdown and the relaunch, and on Windows from the install, which ends the app. An installer that asks an administrator (a `.deb`, an `.rpm`, a macOS bundle the user cannot write, and the MSI, whose consent prompt comes after the app has ended, so Steno is down until the prompt is answered) runs only right after a yes given while the app is idle; a yes given while busy, or one whose download took over 30 s, asks once more when it is idle. On Windows the app runs neither installer itself: it writes the verified installer, shuts down and leaves a hidden `cmd.exe` that starts it, waits and starts the version that ran again when it did not install (`msiexec` not 0, 1641 or 3010; the NSIS setup not 0), so a declined consent prompt, a failed MSI or an aborted setup leaves Steno down for seconds. If the `cmd.exe` cannot start, ends before it runs (a policy that turns off the command prompt ends it at once) or says nothing for 10 seconds, Steno restarts at once and the error goes to the log. Steno lets go of its single-instance lock just before it ends, so an old version started again at once (`msiexec` exits at once while another install runs) comes up rather than handing over to the ending Steno. An install that fails while Steno quits restarts nothing. A summary re-run or re-export claimed in those seconds is not kept, and the user asks again. The user's yes while busy asks whether to install after it ends, "Install After It Ends" (the default) or "Not Now", and waits; a recording started during the download is waited for, never stopped, and a newer version found meanwhile keeps the yes. Automatic downloads wait for an idle app and no install under way; the flag is read again after the download, turning it off frees the kept package, and the schedule never runs an installer that asks an administrator, which it announces instead (#270). Not part of the gate, by design: the launch's recovery of interrupted recordings, which survives a relaunch as it survives a kill (P3), and a phone upload before its intake claims the run, which the phone keeps until `complete` (P2) | Linux desktop (#270, every platform) |
 | P26 | A person page: a case-only rename of a person loses the page on a case-insensitive disk | pipeline, store and export (`wp-pse-*`) |
 | P27 | Notes written at once to one vault: deliveries are serialised per vault | pipeline, store and export (`wp-pse-*`) |
 | P28 | A note never written: a delivery left Pending is resumed at launch. Amended 2026-10-08 under D3: a Failed delivery is retried at launch too, at most once a day (by its `lastAttemptAt`); after three launch retries in a row that did not deliver every row the launch stops retrying it and the meeting's export line says "Export to <destination> keeps failing: <reason>" until Export again resets the count. The count lives in `export-retries.json` in the support directory, which the Swift app ignores, so no migration | pipeline, store and export (`wp-pse-*`) |
@@ -448,10 +452,10 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 
 | ID | What | Targets |
 |---|---|---|
-| X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` | Omarchy, NixOS with Hyprland |
+| X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` (#272: an app started inside another program's service of the user manager, as a key binding without `uwsm-app` leaves it in `wayland-wm@hyprland.desktop.service`, whose stop ended it unsaved 0.26 s in, moves at launch into `app-steno\x2ddesktop-<pid>.scope` in `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and `After=graphical-session.target`; at login the start waits for the target and is never called off, and a session that ends before then leaves the app in the compositor's unit; from an AppImage every mount server, found by its FUSE connection and keepalive pipe however the image was started, moves into a scope of its own in `app.slice` wherever it runs (a launcher's unit too, where GNOME leaves it), also when the app stays, and stays beside the app in a login's `session-<n>.scope`; each move is written to the journal and a failure logged at `warn`. In a systemd 255 container with uwsm 0.26.4's slice and shutdown target and a stand-in compositor's unit, every case saved `queued`; the README's Hyprland section has the table. logind's delay is #220's, tested against a fake logind) | Omarchy, NixOS with Hyprland; the AppImage on every systemd desktop |
 | X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) (#267: a list naming `x11` or `*`, or a lone `*`, counts as unset, any other value still wins; the titles on Linux only, macOS and Windows keep "Steno"; the rules are `apps/desktop/src-tauri/linux/hyprland-steno.lua`, one `hl.window_rule` on class `[Ss]teno-desktop` and title `Steno (bubble\|prompt)` that also turns off focus on hover, the border, shadow and blur, checked by Hyprland 0.56.2's `--verify-config`; the `.deb` installs it as `/usr/share/steno-desktop/hyprland-steno.lua` (`check-bundle.sh` checks it), and so does the AUR package that repackages it (#265) from the next release, loaded with `dofile`; the Linux smoke finds both panels by their titles) | Omarchy, NixOS with Hyprland |
-| X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves | all |
-| X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port | Omarchy, NixOS |
+| X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves (#275: the menu holds every action once, which a test checks, and a click does nothing the menu does not; a thread follows `org.kde.StatusNotifierWatcher` on the session bus, its owner and its `IsStatusNotifierHostRegistered`, at launch and at every change of either, so a watcher with no host counts as none and a host that goes turns the next close into a quit where the watcher says so (Waybar, GNOME's extension; KDE's watcher always says a host registered, so on Plasma the name alone decides, as before); with no host the close quits through Quit's path, which stops and saves a recording first and logs the quit and the shutdown's duration; a watcher that says it lacks the property counts as a host, a failed reading as none, read again 10 s later, three times at most before the next change, and one that serves no watcher object yet as none until the next change, when the tray library registers again; a recording's bubble covers a main window hidden when the host went, and starting Steno again brings it forward; `close-without-tray-linux.sh` proves it in CI on a bus with no watcher, requiring the follower's `no tray host shows the tray icon`, and beside a stand-in host, where the tray's menu holds every action, the close hides the window and the menu's Quit saves; macOS and Windows keep their tray and close as before) | all |
+| X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port (#276: TCP 23820 on Linux, `HandoverConfiguration::LINUX_PORT`, unassigned by IANA, below Linux's ephemeral range of 32768 to 60999 so no outgoing connection takes it, and in neither nmap's port list nor Wikipedia's list of TCP and UDP port numbers (LocalSend's 53317, Syncthing's 22000 and 21027, Synergy's 24800 and the game servers lie elsewhere); macOS and Windows keep a port the system chooses, as Swift did. `STENO_HANDOVER_PORT` wins over the setting `handoverPort`, which Settings does not show and no bridge field carries, and either wins over the default; `0` lets the system choose; a stored `handoverPort` that is not a port is ignored with a warning. A port that cannot be bound gives way to one the system chooses with a `warn` line, "port 23820 is not available (...)", and the Bonjour record carries the port bound; a start during a stop waits for it, so a restart keeps the port. The phone resolves the record before every connection and the QR code carries no port, so the phone needs no change. The AUR package installs the `ufw` profile `Steno` (TCP 23820 only, as `ufw`'s `before.rules` admit mDNS) as `/etc/ufw/applications.d/steno-desktop`, in `backup=`; `check-aur.sh` compares its port with `LINUX_PORT` and reads it with `ufw app info Steno`; the package's install script prints `sudo ufw allow Steno`, and its removal `sudo ufw delete allow Steno`. The NixOS module's `programs.steno.openFirewall`, on by default, opens `programs.steno.handoverPort` (23820) and UDP 5353 for Steno's own mDNS responder, and the module sets `STENO_HANDOVER_PORT` on `steno.service` and in the session; `nix/checks.nix` holds the default to `LINUX_PORT`; the module refuses ports 1 to 1023) | Omarchy, NixOS |
 | X5 | Packaged installs: `STENO_DISTRIBUTION=aur` or `=nix`, read at build time (Nix) or from the environment (the AUR wrapper), turns the in-app updater off and Settings says updates come from the package manager; the autostart entry names a stable path (`/usr/bin/steno-desktop`, or the Nix profile's), never `current_exe()` or a store path; with `STENO_LOGIN_ITEM=managed`, which the NixOS module sets, the app leaves launch at login to the system (#261: the environment wins over the build's value; the path is `$APPIMAGE`, else `STENO_EXEC_PATH` from a wrapper whose binary lies elsewhere, as X6's, else the first of `/usr/bin`, `/usr/local/bin` and the Nix profiles that resolves into the running binary's directory, else no entry, and turning Launch at login on fails with "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager." and is not saved; managed, the app touches no entry except one an earlier build wrote, whose `Exec` starts a program in `/nix/store` or names a profile path: it goes at launch, or, when the app runs as the autostart unit made from it, after the save at Steno's first exit, so a reload never leaves the recorder in a unit no logout stops) | Omarchy, NixOS |
 | X6 | The AUR package `steno-desktop-bin` | Omarchy |
 | X7 | The flake's Linux package and NixOS module | NixOS |
@@ -603,16 +607,22 @@ Every package is written in parallel except where a dependency is named:
     install off, with the package kept and the version raised again. A
     refused Record shows only in the main window (S2 carries the prompt's
     part). P25's `InstallHold` takes the same recorder start hold rather
-    than building a second one. Automatic
-    downloads wait for P25's gate: the schedule downloads by itself only
-    while `InstallGate::is_idle_now` says idle and installs only with the
-    gate's hold from `InstallGate::try_hold`; the stand-in
-    `NeverIdle` is never idle, so it downloads nothing, and P25's gate turns
-    automatic downloads on. P25 also re-reads the automatic-downloads flag when
-    a download ends and before the install: a switch turned off during the
-    transfer finds nothing kept yet, so today the same tick would still keep
-    and install the package. `updates_are_managed` is X5's switch. The QR code
-    is the `qrcode` crate's, level M, as a greyscale PNG.
+    than building a second one. P25 (#270) changed the rest: the install
+    waits for the recording and is never put off by one; an installer that
+    returns no longer holds Record off, so a `.deb`'s password prompt never
+    keeps Record refused, and the refusal now says "Steno is relaunching to
+    finish installing an update. You can record again in a moment.", since
+    the hold lasts only through the shutdown and the relaunch (on Windows,
+    from the install). Automatic downloads wait for P25's gate: the
+    schedule downloads by itself only while `InstallGate::is_idle_now` says
+    idle and installs only with the gate's hold from
+    `InstallGate::try_hold`; the stand-in `NeverIdle` was never idle, so it
+    downloaded nothing, and P25's gate (#270) turns automatic downloads on.
+    P25 also re-reads the automatic-downloads flag when a download ends,
+    and turning it off frees the kept package, so a switch turned off
+    during the transfer keeps and installs nothing. `updates_are_managed`
+    is X5's switch. The QR code is the `qrcode` crate's, level M, as a
+    greyscale PNG.
 - **S5 Handover on a changing network** (`fix/handover-republish`).
   - Re-register the Bonjour record when the interfaces change, on every
     platform.
@@ -642,13 +652,26 @@ Every package is written in parallel except where a dependency is named:
     identifier paragraph follows. The PR creates `steno-macos`, makes the
     `AGENTS.md` change (D10), and adds `security-framework`, `plist` and the
     PKCS#12 crate to `[workspace.dependencies]`.
-  - **The import, in two halves** (macOS only, in `steno-services`). It sets
-    `steno.swiftImportRan` in `preferences.json` once both halves are done (or
-    the second is skipped), and never runs again. Its sources (the defaults domain and the keychain) are
+  - **The import, in two halves** (macOS only, in `steno-services`;
+    `feat/swift-import`, #236). It sets `steno.swiftImportRan` in
+    `preferences.json` once the identity is in place (or there was no Swift
+    certificate), and never runs again. Right after it stores the identity,
+    and before that flag, it adds its own keychain entry `swift-import-done`
+    under the service `uno.schmid.steno.mac` (an item of this app's own, found
+    by an attribute query, so neither prompts). Once that entry or the flag
+    exists the import never touches `handover-identity` again, so a
+    `preferences.json` set aside cannot bring the Swift identity back over
+    one Pair again stored; Pair again keeps the entry. Without either, the
+    first run's replace of a desktop-id identity still applies. A crash
+    between the identity and the entry leaves a rerun that stores the same
+    Swift identity again. A lookup of the entry that fails is not a first
+    run: the import replaces nothing and waits with Try again until a lookup
+    answers. Its sources (the defaults domain and the keychain) are
     traits. It is skipped under `STENO_SMOKE_SECONDS` and whenever `HOME` is not
     the account's home.
-    - **At launch,** first in the shell's `setup`, before `Host::real` builds the
-      graph: while `preferences.json` holds no onboarding flag, read the Swift
+    - **At launch,** in `build_with_import` (the shell's entry point), once the
+      database's lock is held and before the graph reads a preference or a
+      secret: while `preferences.json` holds no onboarding flag, read the Swift
       domain explicitly (`/usr/bin/defaults export uno.schmid.steno.mac -`,
       parsed with the `plist` crate); copy `steno.onboardingCompleted` (not
       `steno.loginItemRegistered`, so the new identifier registers itself);
@@ -657,7 +680,8 @@ Every package is written in parallel except where a dependency is named:
       opens at its default place). Whatever `preferences.json` holds, remove the
       Launch Agent a desktop-id build left behind, before the shell registers with
       `SMAppService`. If the keychain holds a Swift handover certificate (found by
-      label, which does not prompt) and the import has not run, the graph is
+      label, which does not prompt), or the lookup fails, and the import has
+      not run, the graph is
       built with the import pending: `steno-services` reads no API key and starts
       no handover listener until the second half ends. A key alone does not make
       the import pending, since a desktop-id build files its key under the same
@@ -667,7 +691,9 @@ Every package is written in parallel except where a dependency is named:
       pending (without a Swift certificate there is no step, and the second half
       counts as done): the step says that
       macOS will ask for the login password once for each item it finds (at most
-      twice) so the new Steno can read
+      three times: the API key, the identity's export, and a `handover-identity`
+      entry a desktop-id build left, which the store replaces; attribute queries
+      that do not prompt find them) so the new Steno can read
       what the old one stored, and that the user should choose Always Allow.
       Then it reads the API key through `keyring` (one prompt; the item stays as
       it is, shared with the Swift app, which still reads it after a rollback),
@@ -676,18 +702,36 @@ Every package is written in parallel except where a dependency is named:
       `SecItemExport` as PKCS#12 through `steno-macos` (one prompt), decoded by a
       PKCS#12 crate (for example `p12-keystore`, which reads Apple's legacy
       encryption; `cargo deny` must allow it) into the PEM entry
-      `handover-identity`, replacing a desktop-id identity. A denied read leaves
-      the key empty, and Settings asks for it. A denied or failed export never
+      `handover-identity`, replacing a desktop-id identity, through
+      `HandoverIdentity::store`, which records its fingerprint over the
+      desktop-id one so #221's guard accepts it. A fingerprint not recorded
+      after the secret was written is a failed store: Try again, and no
+      `swift-import-done` marker. A denied read leaves
+      the key empty, and Settings asks for it; no later launch asks the keychain
+      for it until a key is saved. A denied or failed export never
       mints an identity (D3): the handover listener stays off, and Settings'
       iPhone section says that Steno could not bring over this Mac's phone
       pairing, with Try again, which repeats the export and its prompt. Only
       when the user chooses Pair again there, which says that every phone must
       pair again, is a new identity minted: Pair again removes the paired phones
       and the recorded fingerprint, then mints through `HandoverIdentity::store`.
-      S6 adds both as bridge methods, a waiting state for the listener with its
-      fixtures, and a test that a refused read mints nothing. Then the pipeline starts, and the
-      listener once the identity is in place. Skipping the step counts as a
-      denied read and a denied export. The same rule holds outside the import:
+      That waiting state in Settings, with both bridge methods, its fixtures
+      and a test that a refused read mints nothing, is the follow-up
+      `feat/handover-waiting`; until it lands, Try again is on the onboarding
+      step. Then the pipeline starts, and the listener once the identity is in
+      place: the meetings the Swift app left queued or interrupted are resumed
+      and recovered only once the step ran or was skipped, on the pipeline
+      reloaded with what it read. Not now leaves both unread for that launch
+      (handover waits), writes no flag, and the step returns at the next
+      launch. While the key stays unread or refused, the pipeline runs as
+      without a summaries service for an endpoint that needs the key
+      (ChatGPT summaries keep running): the cleanup is skipped too, so the
+      transcript stays raw, meetings complete without a summary, and the
+      meeting detail says that Steno can't use the API key yet; the summary
+      can be run again once a key is saved, and Process again on a failed
+      meeting waits for the key too. Pair again must keep the
+      `swift-import-done` marker and write it before it mints, since the
+      step only logs a marker it could not write. The same rule holds outside the import:
       when an existing `handover-identity` cannot be read (a denied prompt, a
       locked keychain), `handover_listener` waits with Try again and never mints
       over it; it mints only where #221's guard allows (no identity, no recorded
@@ -1129,14 +1173,17 @@ The table above names each package and its owner. Their tests:
     deletes them. `check-aur.sh` compares each copy with `linux/`'s and
     requires both drop-ins with `TimeoutStopSec=20s`. X2's Hyprland rules
     come in the `.deb` from the first release that contains #267; rc.3's
-    lacks them. No install script: Arch's
-    `30-systemd-daemon-reload-user.hook` reloads the user managers. X4's
-    `ufw` profile is a `TODO` line in `package()`, so X6 lands before X4 and
-    gains it in X4's PR. An autostart entry a candidate without X5 wrote
-    survives the upgrade and bypasses the wrapper; Omarchy step 1 rewrites
-    it. `depends` adds what namcap finds linked (`cairo`, `gdk-pixbuf2`,
-    `glibc`, `hicolor-icon-theme`, `libgcc`, `libpipewire`, `libstdc++`).
-    The release key is also committed as
+    lacks them. The install script only prints `sudo ufw allow Steno` after an
+    install or an upgrade, and its removal `sudo ufw delete allow Steno`;
+    Arch's `30-systemd-daemon-reload-user.hook` reloads the user managers.
+    X4's `ufw` profile came in X4's PR (#276): `ufw-steno-desktop`, installed
+    as `/etc/ufw/applications.d/steno-desktop` and kept on upgrade
+    (`backup=`); `check-aur.sh` checks its port against `LINUX_PORT` and that
+    `ufw app info Steno` reads it. An autostart entry a candidate without X5
+    wrote survives the upgrade and bypasses the wrapper; Omarchy step 1
+    rewrites it. `depends` adds what namcap finds linked (`cairo`,
+    `gdk-pixbuf2`, `glibc`, `hicolor-icon-theme`, `libgcc`, `libpipewire`,
+    `libstdc++`). The release key is also committed as
     `packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`;
     publishing it to keyserver.ubuntu.com, which yay and paru query for a
     missing `validpgpkeys` key, is **Nicolai**'s. The repository gains a root
@@ -1194,10 +1241,13 @@ The table above names each package and its owner. Their tests:
     none of Plasma 6, `services.passSecretService`, `programs.ssh.startAgent`
     and `programs.gnupg.agent.enableSSHSupport` is on: its gcr SSH agent
     conflicts with `startAgent`, and takes `SSH_AUTH_SOCK` from gpg-agent's.
-    X4's firewall port is not in the module; X4 adds it. P5's drop-ins arrive
-    through the `.deb`'s `files` map (#227). Without the module, the
-    autostart entry names the profile's path by X5's rule (#261), so the
-    wrapper sets no `STENO_EXEC_PATH`. ONNX Runtime is nixpkgs' 1.27.1 against the
+    X4 (#276) added the firewall: `programs.steno.openFirewall`, on by
+    default, opens `programs.steno.handoverPort` (23820) and UDP 5353, and
+    the module sets `STENO_HANDOVER_PORT` to that port and refuses a
+    `handoverPort` from 1 to 1023. P5's drop-ins arrive through the `.deb`'s
+    `files` map (#227). Without the module, the autostart entry names the
+    profile's path by X5's rule (#261), so the wrapper sets no
+    `STENO_EXEC_PATH`. ONNX Runtime is nixpkgs' 1.27.1 against the
     1.28.0 build `ort` downloads, at FLEURS 4.9 % with both. Nix CI
     (`nix-ci.yml`) runs on a pull request that touches the flake, the web UI's
     dependencies, a Cargo manifest, the lockfile, a build script, the Tauri
@@ -1313,7 +1363,8 @@ an install needs a newer build installed by hand (Rollback).
     - the Linux known issues: the KDE Plasma logout until Plasma calls the
       portal monitor, the whole default sink as the system lane, the WebKitGTK
       descriptor leak on very long sessions, no tray on GNOME without the
-      AppIndicator extension, and a Steno started outside `uwsm` on Hyprland.
+      AppIndicator extension (closing the main window then quits Steno and
+      saves a recording), and a Steno started outside `uwsm` on Hyprland.
   - The Windows and OpenPGP paragraphs stay.
 
 ### Lanes and "latest"
@@ -1540,9 +1591,16 @@ except case e.
      again (P9) runs it; record a second call.
 
   Pass when:
-  - the app relaunches as `com.nicolaischmid.steno.desktop`, and launch at login starts
-    it once; `~/Library/LaunchAgents` holds no Steno plist, and with launch at
-    login off a login starts nothing;
+  - the app relaunches as `com.nicolaischmid.steno.desktop` (one a login started may
+    quit instead; open it once), and launch at login starts it once;
+    `~/Library/LaunchAgents` holds no Steno plist, and with launch at login off
+    a login starts nothing;
+  - on the Mac, an earlier build's agent switched off under "Allow in the
+    Background" while the setting stayed on opens Steno at login again after
+    the update, as expected: the agent's file goes, the first launch registers
+    the main app, and turning the setting off in General removes it;
+  - on the Mac, the main app removed under Login Items after that first launch
+    is not added back at the next launch, and General shows the switch off;
   - the panel opens where it was moved (the anchor read from the old
     directory);
   - on the Mac, no import step appears; onboarding opens on its permissions page
@@ -1683,10 +1741,12 @@ except case e.
 - **Dogfood** (**Nicolai**, his own account). After R1 to R6 pass:
   1. Re-pair the phone with his daily install.
   2. Check whether his account holds a desktop-id identity
-     (`security find-generic-password -s uno.schmid.steno.mac -a handover-identity`)
-     and whether `~/Library/Application Support/Steno/preferences.json` holds
-     `steno.swiftImportRan`. If the latter does, the dogfood does not test the
-     import, and R3 is its only proof. No desktop-id install in this account is
+     (`security find-generic-password -s uno.schmid.steno.mac -a handover-identity`),
+     whether `~/Library/Application Support/Steno/preferences.json` holds
+     `steno.swiftImportRan`, and whether the import's own entry exists
+     (`security find-generic-password -s uno.schmid.steno.mac -a swift-import-done`).
+     If either of the latter does, the dogfood does not test the import, and
+     R3 is its only proof. No desktop-id install in this account is
      updated before the dogfood.
   3. His daily install takes the candidate through the local feed, as in R3, and
      the `SUFeedURL` default is deleted afterwards.
@@ -1769,7 +1829,8 @@ interrupted" after one. On the GNOME machine,
      `sha256sum --check`.
   2. Onboarding shows no permission as missing; Settings downloads the speech
      model with progress; Settings > Recording lists the input devices (A7).
-  3. The phone, paired in step 0, uploads a recording.
+  3. The phone, paired in step 0, uploads a recording; `ss -ltn 'sport =
+     :23820'` lists Steno's listener (X4).
   4. Join a Google Meet call in Firefox: the detection prompt appears (A8);
      record it, with the floating panel on top; stop; the meeting has a
      microphone lane and a system lane, and is transcribed, diarized and
@@ -1788,25 +1849,56 @@ interrupted" after one. On the GNOME machine,
      meeting is recovered with `failed` as `endReason` and processes (P3).
   7. Quit the `.deb`'s Steno; the AppImage starts (`pgrep -a steno-desktop`
      shows only its path) and finds the same meetings.
+  8. **GNOME, AppImage.** Note `uname -r`. Quit Steno, note the time, start
+     the release's AppImage from the app grid, through a desktop entry with
+     `Exec=<path to the AppImage>` (or the one an AppImage integration tool
+     wrote), and start a recording. While it records, `journalctl --user
+     --since '<launch time>' | grep 'mount server'` prints one line, "moved
+     the AppImage's mount server <pid> into a scope of its own,
+     app-steno\x2ddesktop\x2dimage-<pid>.scope, which the session's end does
+     not stop", and no warning, and `systemctl --user list-units 'app-steno*'`
+     lists that scope. Then log out with the system menu, log back in and
+     check the meeting.
+  9. **GNOME, the tray (X3).** With the AppIndicator extension on (on by
+     default on Ubuntu; on Debian install
+     `gnome-shell-extension-appindicator`, log out and in, then
+     `gnome-extensions enable <id>`, the id from `gnome-extensions list |
+     grep -i appindicator`, or turn it on in the Extensions app): the icon
+     is in the top bar, a left click and a right click each open the menu,
+     and every entry works; closing the main window hides it, and Open
+     Steno brings it back. Then turn the extension off (`gnome-extensions
+     disable <id>`) while Steno runs: `journalctl --user -b 0 --since
+     '<disable time>' | grep -i steno` shows `no tray host shows the tray
+     icon`. Start a recording and close the main window: Steno quits
+     within 10 s, `q` shows the meeting with its full length and `quit`
+     as `endReason`, and `journalctl --user -b 0 --since '<close time>' |
+     grep -i steno` shows `the main window closed with no tray` before
+     `the shutdown ended`. Turn the extension on again and start Steno:
+     the journal shows `a tray host shows the tray icon`.
 - **Omarchy** (Omarchy 4, Arch with Hyprland on Wayland).
   1. Before step 0: import the release key from a checkout (`gpg --import
      packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`), so
      the PKGBUILD verifies each `.deb`'s signature; add the README's Lua window
      rules to `~/.config/hypr/` and reload Hyprland. In step 0, `sudo ufw allow
-     Steno` runs right after the install and before the pairing, and the
-     upgrade runs while the previous candidate, started at login, records;
-     then stop the recording: the meeting processes. When the previous
+     Steno` runs right after the install and before the pairing, and the upgrade
+     runs while the previous candidate, started at login, records; then stop the
+     recording: the meeting processes. When the previous candidate predates X4,
+     its package has no profile and it listens on a port from Linux's ephemeral
+     range: step 0 runs `sudo ufw allow 32768:60999/tcp` instead, the upgrade is
+     followed by `sudo ufw allow Steno`, and once the new version runs (`ss`
+     lists 23820) `sudo ufw delete allow 32768:60999/tcp`. When the previous
      candidate predates X5, the autostart entry its first launch wrote names
      `/usr/lib/steno-desktop/steno-desktop` and survives the upgrade: right
      after step 0, quit Steno, start it from the Omarchy launcher and turn
-     Launch at login off and on, so step 7 finds `/usr/bin/steno-desktop`.
-     From `v0.11.0` on, step 0 installs with `yay -S steno-desktop-bin`, which
+     Launch at login off and on, so step 7 finds `/usr/bin/steno-desktop`. From
+     `v0.11.0` on, step 0 installs with `yay -S steno-desktop-bin`, which
      verifies with the imported key (and imports it itself once it is on
      keyserver.ubuntu.com).
   2. Start Steno from the Omarchy launcher. `cat /proc/$(pidof -s
      steno-desktop)/cgroup` names an `app-…scope` (not Hyprland's unit). The
      tray icon is in the bar's drawer; a right click opens the menu, and every
-     entry works (X3). While a meeting processes, the sidecar's cgroup is a
+     entry works; closing the main window hides it, and Open Steno brings it
+     back (X3). While a meeting processes, the sidecar's cgroup is a
      scope of its own (P6).
   3. Start a recording: `hyprctl clients -j | jq '.[]|select(.class |
      test("steno-desktop"; "i"))|{title,xwayland,floating,pinned}'` shows "Steno
@@ -1821,11 +1913,27 @@ interrupted" after one. On the GNOME machine,
      `llm-api-key` and `handover-identity`; `~/.local/share/Steno/secrets.json`
      holds only `"movedToSecretService": true`; Chromium's saved passwords still
      open (P8).
-  5. The phone uploads a recording through the firewall (X4).
+  5. The phone uploads a recording through the firewall (X4): `sudo ufw
+     status` lists `Steno` as `ALLOW` and no wider rule, `ss -ltn 'sport =
+     :23820'` lists Steno's listener, and `journalctl --user -b | grep
+     'is not available'` prints nothing.
   6. Steps 4 to 6 of the GNOME gate, with the call in Chromium and the logout
      through the system menu, which is `uwsm stop`. Also `hyprctl dispatch exit`
      while recording: after logging back in, the meeting is saved with `quit` as
-     `endReason` (X1).
+     `endReason` (X1). Then the same logout with Steno started by a key binding
+     without `uwsm-app` (`bind = SUPER SHIFT, S, exec, steno-desktop`), noting
+     the launch time: `cat /proc/$(pidof -s steno-desktop)/cgroup` ends in
+     `app-steno\x2ddesktop-<pid>.scope`, `journalctl --user --since '<launch
+     time>' | grep 'moved into a scope of its own'` names
+     `wayland-wm@hyprland.desktop.service`, and the meeting is saved the same
+     way (#272). Then the same with `exec-once = steno-desktop` in
+     `hyprland.conf`, after logging out and in, with the login time as the
+     launch time. Then quit Steno, note the time, run the release's AppImage
+     with `uwsm-app -- <path>` and start a recording. While it records,
+     `journalctl --user --since '<launch time>' | grep 'mount server'` prints
+     one line, "moved the AppImage's mount server <pid> ...", and no warning,
+     and `systemctl --user list-units 'app-steno*'` lists that scope. Then log
+     out: the meeting is saved the same way.
   7. In the Steno that a login started, Settings says updates come from the
      package manager (X5), and `~/.config/autostart/steno-desktop.desktop`'s
      `Exec` names `/usr/bin/steno-desktop`.
@@ -1845,8 +1953,16 @@ interrupted" after one. On the GNOME machine,
      (`github:NicolaiSchmid/steno/v0.11.0-rc.<N-1>`), with
      `steno.nixosModules.default` in the system's modules and
      `programs.steno.enable = true`.
-  2. Steps 2 to 4 and 6 of the GNOME gate, with the phone through the firewall
-     the module opens (by hand until X4). Under the module, step 5's cgroup check, run
+  2. Steps 2 to 4, 6 and 9 of the GNOME gate, with the phone through the
+     firewall the module opens (X4; when step 0's candidate predates X4,
+     step 0 opens `networking.firewall.allowedTCPPortRanges = [{ from =
+     32768; to = 60999; }]` and `allowedUDPPorts = [5353]` by hand, keeps
+     them through the upgrade's switch, and removes them with a later
+     switch once `ss -ltn 'sport = :23820'` lists the new version), and
+     step 9's extension from `gnomeExtensions.appindicator` in
+     `environment.systemPackages`, turned on in GNOME's Extensions app.
+     `systemctl --user show steno.service -p Environment` names
+     `STENO_HANDOVER_PORT=23820`. Under the module, step 5's cgroup check, run
      as `cg`, prints one line, ending in `steno.service`, and
      `systemctl --user show steno.service -p TimeoutStopUSec` is 20 s.
   3. Open Settings and choose a folder: the file chooser opens (the wrapper's
@@ -1903,7 +2019,32 @@ interrupted" after one. On the GNOME machine,
 
 **The Windows gate** (before the site lists Windows): a Windows machine runs the
 `--ignored` WASAPI tests, one real call, a logoff during a recording of at least
-an hour that saves it (P5), and a `kill` that P3 recovers.
+an hour that saves it (P5), and a `kill` that P3 recovers. It also installs an
+update from each Windows installer (P25), from a build one version behind the
+candidate:
+1. With the MSI install: Check for Updates, Install and Relaunch, then decline
+   the consent prompt (or press Cancel in the MSI's window). The prompt comes
+   up in front. Steno is back in the tray within 10 s on the old version, and
+   its log shows the shutdown.
+2. Again, accepting the prompt: the new version starts by itself.
+3. With the NSIS install: the update installs and the new version starts. Then,
+   from the old version again, ending `Steno-<version>-setup.exe` in Task
+   Manager while it runs brings the old version back within 10 s.
+4. No `cmd.exe` window flashes up in any of these, and none is left in Task
+   Manager once Steno is back.
+5. With "Prevent access to the command prompt" on (`DisableCMD=1` under
+   `HKCU\Software\Policies\Microsoft\Windows\System`), Install and Relaunch
+   brings the old version back within 15 s, and its log says the installer's
+   watcher ended before it ran. Turn the policy off again after the step.
+6. With the MSI install, while the consent prompt is up, start Steno from the
+   Start menu and start a recording, then accept the prompt: the installer
+   closes Steno, the recording is saved, and the new version starts.
+7. With the MSI install, while the consent prompt is up, start Steno from the
+   Start menu, then decline the prompt: one Steno runs afterwards, on the old
+   version.
+8. With the MSI install, choose Install and Relaunch while another MSI package
+   is installing (its progress bar moving), so `msiexec` exits at once with
+   1618: Steno is back on the old version within 10 s.
 
 ## Order of operations and gates
 
@@ -2010,6 +2151,16 @@ is offered.
 **An install of `desktop-v0.1.0-rc.*`** that meets a v5 database exits at launch
 and cannot update itself; the release notes say to install the current build by
 hand. The database is untouched (R6).
+
+**Retention during a rollback.** P14's guard is Rust only. Swift's `redeliver`
+and `resummarize` call `stampDeferredRetention` once every delivery succeeded, so
+an Export again, a speaker rename or a summary re-run in the Swift app stamps a
+meeting the Rust app kept unstamped (a diarizer fallback, an empty lane, a
+damaged recording), and Swift's sweep can then delete its recording. Swift does
+not read `damaged-audio.json`, so it stamps a damaged recording like any other.
+Swift shows the room speaker the Rust app stores as an ordinary speaker. Swift is
+not changed for this. The stamps that rc builds before #241 wrote on fallback meetings also
+still expire, in either app: nothing clears them.
 
 **The database.** Migrations only add (Tags and versions), v5 lands before the
 first candidate, every migration until S9 is mirrored in `Migrations.swift`, and

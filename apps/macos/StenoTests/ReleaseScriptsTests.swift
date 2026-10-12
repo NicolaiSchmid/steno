@@ -2,9 +2,10 @@ import XCTest
 
 /// The release scripts' guards, run under `/bin/bash` (3.2 on macOS, the
 /// shell GitHub Actions uses for `run:` steps on the macOS runners), plus
-/// the reviewer traps the plan names: the secrets check stays the first
-/// step of `release.yml` and the `codesign` grep stays in
-/// `build-release.sh`.
+/// the reviewer trap the plan names: the `codesign` grep stays in
+/// `build-release.sh`. The Swift release workflow is gone (stable plan
+/// S7); desktop-release.yml calls the scripts it still needs, and
+/// `apps/desktop/scripts/release-workflow.test.sh` checks that workflow.
 final class ReleaseScriptsTests: XCTestCase {
   private static var scripts: URL {
     TestSupport.appRoot.appendingPathComponent("scripts", isDirectory: true)
@@ -138,67 +139,7 @@ final class ReleaseScriptsTests: XCTestCase {
     XCTAssertTrue(result.output.contains("usage:"), result.output)
   }
 
-  // MARK: release.yml and build-release.sh (reviewer traps)
-
-  func testReleaseWorkflowRunsTheGuardBeforeAnyToolOrBuild() throws {
-    let workflow = try String(
-      contentsOf: TestSupport.repositoryRoot.appendingPathComponent(
-        ".github/workflows/release.yml"),
-      encoding: .utf8)
-    let guardIndex = try XCTUnwrap(
-      workflow.range(of: "run: apps/macos/scripts/check-release-secrets.sh")?.lowerBound,
-      "release.yml runs the secrets guard")
-    for later in [
-      "Install xcodegen", "Install gh", "setup-xcode", "build-release.sh", "make-dmg.sh",
-      "make-appcast.sh",
-    ] {
-      let index = try XCTUnwrap(workflow.range(of: later)?.lowerBound, later)
-      XCTAssertLessThan(guardIndex, index, "\(later) runs after the secrets guard")
-    }
-    let stepHeader = try XCTUnwrap(workflow.range(of: "- name: Check secrets")?.lowerBound)
-    let stepBody = workflow[stepHeader..<guardIndex]
-    for secret in [
-      "MACOS_CERTIFICATE_P12_BASE64", "MACOS_CERTIFICATE_PASSWORD", "ASC_KEY_ID", "ASC_ISSUER_ID",
-      "ASC_PRIVATE_KEY", "SPARKLE_PRIVATE_KEY",
-    ] {
-      XCTAssertTrue(stepBody.contains("secrets.\(secret)"), "the guard step maps \(secret)")
-    }
-    let dryRunEnv = "DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}"
-    let dryRun = try XCTUnwrap(
-      workflow.range(of: dryRunEnv)?.lowerBound, "the dry-run switch is defined once")
-    XCTAssertLessThan(dryRun, stepHeader, "as job-level env, ahead of the guard step")
-    XCTAssertEqual(
-      workflow.components(separatedBy: "inputs.dry_run").count - 1, 1,
-      "every conditional step reads env.DRY_RUN instead of repeating the predicate")
-    XCTAssertTrue(workflow.contains("if: env.DRY_RUN == 'true'"))
-    XCTAssertTrue(workflow.contains("if: env.DRY_RUN != 'true'"))
-  }
-
-  /// The throwaway keychain goes in front of the runner user's keychain
-  /// search list as it is, and the cleanup takes only that keychain off the
-  /// list as it is then.
-  func testReleaseWorkflowKeepsTheOtherKeychainsOnTheSearchList() throws {
-    let workflow = try String(
-      contentsOf: TestSupport.repositoryRoot.appendingPathComponent(
-        ".github/workflows/release.yml"),
-      encoding: .utf8)
-    let saved = try XCTUnwrap(
-      workflow.range(of: "list=\"$(security list-keychains -d user | ")?.lowerBound,
-      "the import step reads the current search list into a variable, so a failure stops it")
-    let cleanup = try XCTUnwrap(workflow.range(of: "- name: Remove keychain and keys")?.lowerBound)
-    XCTAssertLessThan(saved, cleanup)
-    let cleanupBody = workflow[cleanup...]
-    XCTAssertTrue(
-      cleanupBody.contains("< <(security list-keychains -d user | "),
-      "the cleanup reads the search list as it is then")
-    XCTAssertTrue(
-      cleanupBody.contains("security list-keychains -d user -s ${others[@]+\"${others[@]}\"}"),
-      "and writes back every other keychain on it")
-    XCTAssertFalse(workflow.contains("KEYCHAINS_BEFORE"), "no saved copy is put back")
-    XCTAssertFalse(
-      workflow.contains("list-keychain -d user -s login.keychain-db"),
-      "no hard-coded reset to the login keychain alone")
-  }
+  // MARK: build-release.sh (reviewer traps)
 
   func testBuildReleaseKeepsTheSignatureGuards() throws {
     let script = try String(

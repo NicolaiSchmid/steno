@@ -138,6 +138,20 @@ describe("scenarios", () => {
 		expect(detail.export.message).toContain("Failed");
 	});
 
+	it("shows a summary skipped for a withheld API key", async () => {
+		const result = applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams("scenario=summary-key-withheld"),
+		);
+		const detail = topicSchemas["meeting.detail"].parse(
+			result["meeting.detail"],
+		) as MeetingDetailSnapshot;
+		expect(detail.summaryStatus.kind).toBe("skippedUnconfigured");
+		expect(detail.summaryStatus.title).toBe("Summary skipped");
+		expect(detail.canRerunSummary).toBe(false);
+		expect(result["meeting.detail.keyWithheld"]).toBeUndefined();
+	});
+
 	it("selects the failed meeting with a failed detail", async () => {
 		const result = applyScenario(
 			await loadFixtureSnapshots(),

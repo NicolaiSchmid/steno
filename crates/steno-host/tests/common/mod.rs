@@ -125,13 +125,26 @@ pub struct HarnessBuilder {
     seed: Vec<Seed>,
     change_services: Vec<ChangeServices>,
     page_ready: bool,
-    platform: Platform,
-    updates_managed: bool,
+    config: HostConfig,
 }
 
 impl HarnessBuilder {
     pub fn with_handover(mut self, mac_id: &str, port: u16) -> Self {
         self.fakes = self.fakes.with_handover(mac_id, port);
+        self
+    }
+
+    /// Adds a pending Swift import whose step brings up `prompts` prompts.
+    pub fn with_swift_import(mut self, prompts: u8) -> Self {
+        self.fakes.swift_import = Some(Arc::new(steno_host::fakes::FakeSwiftImport::new(prompts)));
+        self
+    }
+
+    /// Adds a gate over the API key that withholds it while `withheld`.
+    pub fn with_withheld_api_key(mut self, withheld: bool) -> Self {
+        self.fakes.withheld_api_key = Some(Arc::new(steno_host::fakes::FakeWithheldApiKey {
+            withheld: std::sync::Mutex::new(withheld),
+        }));
         self
     }
 
@@ -175,13 +188,21 @@ impl HarnessBuilder {
 
     /// The host runs on `platform`; the Mac (Swift's words) by default.
     pub fn platform(mut self, platform: Platform) -> Self {
-        self.platform = platform;
+        self.config.platform = platform;
         self
     }
 
     /// A package manager delivers the updates (`HostConfig::updates_managed`).
     pub fn updates_managed(mut self) -> Self {
-        self.updates_managed = true;
+        self.config.updates_managed = true;
+        self
+    }
+
+    /// The shell runs outside an installed app bundle
+    /// (`HostConfig::installed_bundle`), as from `target/` or a mounted disk
+    /// image; inside one by default.
+    pub fn outside_installed_bundle(mut self) -> Self {
+        self.config.installed_bundle = false;
         self
     }
 
@@ -211,27 +232,18 @@ impl HarnessBuilder {
         for change in self.change_services {
             change(&mut services);
         }
-        let host = Host::new(
-            store.clone(),
-            services,
-            HostConfig {
-                version: VERSION.to_owned(),
-                zone: steno_host::labels::utc(),
-                platform: self.platform,
-                updates_managed: self.updates_managed,
-            },
-        )
-        .unwrap()
-        .with_dialogs(
-            Box::new(move |params| match &prompt {
-                Some(prompt) => {
-                    let host = prompt_slot.lock().unwrap().clone();
-                    host.is_some_and(|host| prompt(&host, params))
-                }
-                None => confirmed,
-            }),
-            Box::new(move |_| chosen.clone()),
-        );
+        let host = Host::new(store.clone(), services, self.config)
+            .unwrap()
+            .with_dialogs(
+                Box::new(move |params| match &prompt {
+                    Some(prompt) => {
+                        let host = prompt_slot.lock().unwrap().clone();
+                        host.is_some_and(|host| prompt(&host, params))
+                    }
+                    None => confirmed,
+                }),
+                Box::new(move |_| chosen.clone()),
+            );
         *prompt_host.lock().unwrap() = Some(host.clone());
         let sink = Arc::new(RecordingSink::default());
         host.attach(sink.clone());
@@ -260,8 +272,13 @@ impl Harness {
             seed: Vec::new(),
             change_services: Vec::new(),
             page_ready: true,
-            platform: Platform::Macos,
-            updates_managed: false,
+            config: HostConfig {
+                version: VERSION.to_owned(),
+                zone: steno_host::labels::utc(),
+                platform: Platform::Macos,
+                updates_managed: false,
+                installed_bundle: true,
+            },
         }
     }
 
@@ -654,6 +671,14 @@ pub fn populate_sample(store: &Store, fakes: &FakeServices) {
             None,
         ))
         .unwrap();
+}
+
+/// The sample meeting as processed without the LLM passes: no summary, no
+/// tasks, no decisions.
+pub fn drop_sample_summary(store: &Store) {
+    let mut bare = sample_meeting();
+    bare.summary = None;
+    store.replace_summary(&bare, &[], &[], &[]).unwrap();
 }
 
 /// The settings with an LM Studio endpoint configured, no vault.

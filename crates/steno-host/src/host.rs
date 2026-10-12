@@ -1,5 +1,5 @@
 //! The bridge host over the real store: one [`Host`] owns every view model
-//! of the three windows and answers all 75 methods, after
+//! of the three windows and answers all 77 methods, after
 //! `Web/{MainWindowBridge,SettingsBridge,OnboardingBridge}.swift` and the
 //! controller state of `AppController.swift` the bridges read. Commands
 //! map one to one onto the view models' methods, so no rule lives here;
@@ -130,6 +130,16 @@ pub struct HostConfig {
     /// section offers no check and says where updates come from, and
     /// `updates.check` checks nothing. Rust only.
     pub updates_managed: bool,
+    /// The shell runs from an installed app bundle: inside a `.app` (one
+    /// built under `target/` too), and neither on a mounted disk image nor
+    /// translocated by Gatekeeper. On the Mac only such a launch registers
+    /// the login item at its first launch and counts it
+    /// ([`Host::register_login_item_on_first_launch`]), so a run that
+    /// would register a path about to disappear leaves the first launch to
+    /// the installed copy. The shell decides from its own path; off the Mac
+    /// it is not read. False by default, as for the CLI and the tests. Rust
+    /// only.
+    pub installed_bundle: bool,
 }
 
 impl Default for HostConfig {
@@ -139,6 +149,7 @@ impl Default for HostConfig {
             zone: crate::labels::utc(),
             platform: Platform::CURRENT,
             updates_managed: false,
+            installed_bundle: false,
         }
     }
 }
@@ -371,8 +382,42 @@ pub fn delete_recording_prompt() -> ConfirmDestructiveParams {
     }
 }
 
-/// The preferences flag `AppController` set on its first launch.
+/// What "Process again" asks first when the meeting has a speaker the user
+/// confirmed or named ([`MeetingDetailViewModel::process_again_asks_first`]):
+/// a run whose diarizer works gives new speakers, and a name it cannot
+/// match to one of them again is cleared; the note is delivered again,
+/// beside the user's own when they edited it. Rust only: the Swift app
+/// refuses "Process again".
+pub fn process_again_prompt() -> ConfirmDestructiveParams {
+    ConfirmDestructiveParams {
+        title: "Process this meeting again?".to_owned(),
+        message: "Speaker names Steno cannot find again are cleared, and the note is written \
+                  again. If you edited it, your version stays and Steno's goes beside it."
+            .to_owned(),
+        confirm_title: "Process again".to_owned(),
+    }
+}
+
+/// The preferences flag Swift's `AppController` set on its first launch on
+/// the Mac; here it counts the first launch on Linux and Windows.
 pub const LOGIN_ITEM_REGISTERED_KEY: &str = "steno.loginItemRegistered";
+
+/// The flag that counts the first launch on the Mac, where the login item
+/// is `SMAppService.mainApp` (D4 of `.plans/2026-10-07-stable-promotion.md`).
+/// A key of its own: a desktop build under the earlier identifier set
+/// [`LOGIN_ITEM_REGISTERED_KEY`] for the Launch Agent that the shell now
+/// removes, so that flag must not stop the first registration. Rust only.
+pub const MAIN_APP_REGISTERED_KEY: &str = "steno.mainAppRegistered";
+
+/// The flag that counts the first launch on `platform`
+/// ([`Host::register_login_item_on_first_launch`]).
+#[must_use]
+pub fn first_launch_key(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Macos => MAIN_APP_REGISTERED_KEY,
+        Platform::Windows | Platform::Linux => LOGIN_ITEM_REGISTERED_KEY,
+    }
+}
 
 fn no_such_meeting() -> BridgeError {
     BridgeError::not_found("No meeting with that id is listed.")
@@ -580,6 +625,7 @@ impl Host {
             }
             BridgeTopic::MeetingDetail => {
                 self.sync_detail(inner);
+                self.follow_key_withheld(inner);
                 let playing = inner
                     .detail
                     .as_ref()
@@ -904,19 +950,36 @@ impl Host {
         )
     }
 
-    /// The first launch registers the login item when the setting says so;
-    /// a login item the system manages is left alone, and the first launch
-    /// is not counted, so a later install that leaves launch at login to the
-    /// app still registers it once. Nor is a launch counted whose
-    /// registration failed (on Linux, no launcher at a path that outlives
-    /// an upgrade), so a later launch tries again; the failure is not
-    /// shown. Swift: `AppController.registerLoginItemOnFirstLaunch`, which
-    /// counts the launch before it registers.
+    /// The first launch with the setting on registers the login item, once:
+    /// only while it reads `NotRegistered`, as in Swift, so one already
+    /// enabled or awaiting approval is left as it is and the launch counts.
+    /// The count is a preferences flag per platform ([`first_launch_key`]);
+    /// after it, only the switch in General registers or removes the login
+    /// item, so one the user removed in the system's settings stays
+    /// removed. A login item the system manages is left alone, and the
+    /// first launch is not counted, so a later install that leaves launch
+    /// at login to the app still registers it once. Nor is a launch counted
+    /// whose registration failed (on Linux, no launcher at a path that
+    /// outlives an upgrade): a warning is logged, General shows the switch
+    /// off, and a later launch tries again. On the Mac a login item the
+    /// system cannot find (`NotFound`) is not counted either: a run outside
+    /// an app bundle, such as `cargo run`, reads it, shares the installed
+    /// app's preferences, and would otherwise stop the installed app's
+    /// first registration for good. Nor, on the Mac, does a launch from
+    /// outside an installed bundle register or count anything
+    /// ([`HostConfig::installed_bundle`]). Swift:
+    /// `AppController.registerLoginItemOnFirstLaunch`, which counts the
+    /// launch before it registers.
     pub fn register_login_item_on_first_launch(&self) {
+        use crate::services::LoginItemStatus;
+        let config = &self.shared.config;
+        if config.platform == Platform::Macos && !config.installed_bundle {
+            return;
+        }
         let preferences = &self.shared.services.preferences;
-        if preferences.flag(LOGIN_ITEM_REGISTERED_KEY)
-            || self.shared.services.login_item.status() == crate::services::LoginItemStatus::Managed
-        {
+        let login_item = &self.shared.services.login_item;
+        let key = first_launch_key(config.platform);
+        if preferences.flag(key) || login_item.status() == LoginItemStatus::Managed {
             return;
         }
         let Ok(settings) = self.shared.store.settings() else {
@@ -925,14 +988,23 @@ impl Host {
         if !settings.launch_at_login {
             return;
         }
-        let registered = self.shared.services.login_item.status()
-            != crate::services::LoginItemStatus::NotRegistered
-            || self.shared.services.login_item.set_enabled(true).is_ok();
-        if registered {
-            preferences.set_flag(LOGIN_ITEM_REGISTERED_KEY, true);
+        let counted = match login_item.status() {
+            LoginItemStatus::NotRegistered => match login_item.set_enabled(true) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "the first launch could not register the login item");
+                    false
+                }
+            },
+            LoginItemStatus::NotFound => config.platform != Platform::Macos,
+            LoginItemStatus::Enabled | LoginItemStatus::RequiresApproval => true,
+            LoginItemStatus::Managed => false,
+        };
+        if counted {
+            preferences.set_flag(key, true);
         }
         let mut inner = self.lock();
-        inner.general.login_item = self.shared.services.login_item.status();
+        inner.general.login_item = login_item.status();
     }
 
     /// The onboarding window closed, by its own close button or after the
@@ -943,6 +1015,15 @@ impl Host {
     /// opened again begins on page 1, not finished.
     pub fn onboarding_window_closed(&self) {
         OnboardingViewModel::mark_completed(&self.shared.services);
+        // Closing the window over the import step skips it: phone
+        // handover waits, and the step returns at the next launch. This
+        // runs on the main thread, so the skip never waits: a run whose
+        // prompt is up is left to end by itself.
+        if let Some(import) = &self.shared.services.swift_import
+            && import.status().stage == crate::services::SwiftImportStage::Pending
+        {
+            import.skip();
+        }
         let key = self.read_key();
         {
             let mut inner = self.lock();
@@ -1091,7 +1172,32 @@ impl Host {
                 self.reload_sections(inner);
             }
         }
+        // A key saved, or the import's step over, may release a withheld
+        // key without a settings change: the detail follows it as well.
+        if self.follow_key_withheld(inner) {
+            inner.publisher.schedule(BridgeTopic::MeetingDetail);
+        }
         self.refresh_subtitles(inner);
+    }
+
+    /// Sets the open detail's `key_withheld` to whether the API key is
+    /// withheld for the stored endpoint now
+    /// ([`WithheldApiKey`](crate::services::WithheldApiKey)), as the
+    /// pipeline asks it; true when that changed it.
+    fn follow_key_withheld(&self, inner: &mut Inner) -> bool {
+        let withheld = self
+            .shared
+            .services
+            .withheld_api_key
+            .as_ref()
+            .zip(inner.app.stored_settings.as_ref())
+            .is_some_and(|(withheld, settings)| withheld.withheld(settings));
+        let Some(detail) = inner.detail.as_mut() else {
+            return false;
+        };
+        let changed = detail.key_withheld != withheld;
+        detail.key_withheld = withheld;
+        changed
     }
 
     /// Every Settings section's `load`, as `SettingsBridge.load()` ran them
@@ -1133,14 +1239,15 @@ impl Host {
     /// and Export sections show, so those reload when it did. The exit is
     /// the model's: the command that sets `finished` closes the window, as
     /// `OnboardingWindow` did on that change, after the page saw it.
-    fn onboarding_command(&self, body: impl FnOnce(&mut Inner)) {
-        let finished = {
+    /// Answers what `body` answered.
+    fn onboarding_command<R>(&self, body: impl FnOnce(&mut Inner) -> R) -> R {
+        let (answer, finished) = {
             let mut inner = self.lock();
             let was_finished = inner.onboarding.finished;
-            body(&mut inner);
+            let answer = body(&mut inner);
             inner.publisher.schedule(BridgeTopic::Onboarding);
             self.follow_settings(&mut inner, true);
-            !was_finished && inner.onboarding.finished
+            (answer, !was_finished && inner.onboarding.finished)
         };
         self.publish();
         self.run_pending_probe(BridgeWindow::Onboarding);
@@ -1150,6 +1257,7 @@ impl Host {
                 .opener
                 .close_window(BridgeWindow::Onboarding);
         }
+        answer
     }
 
     fn command(&self, topics: &[BridgeTopic], body: impl FnOnce(&mut Inner)) {
@@ -1311,6 +1419,24 @@ impl Host {
         };
         self.publish();
         outcome
+    }
+
+    /// The import's outcome on the step, and everything it may have
+    /// changed: the API key the Summaries sections read and the listener
+    /// the Phones section and the main window's phone card show.
+    fn finish_swift_import(&self, status: crate::services::SwiftImportStatus, skipped: bool) {
+        let (store, services) = (&self.shared.store, &self.shared.services);
+        self.onboarding_command(|inner| {
+            let key = self.read_key();
+            inner
+                .onboarding
+                .finish_import(status, skipped, store, services, key);
+            self.reload_sections(inner);
+            inner.phones.load(services);
+            inner.phones.refresh(services);
+            inner.app.phone = Self::phone_card(services);
+            inner.publisher.schedule(BridgeTopic::App);
+        });
     }
 
     /// Page 1 moves on by itself once every step is handled, as the Swift
@@ -1646,10 +1772,26 @@ impl BridgeHost for Host {
         self.detail_write(|detail| detail.reexport(&*self.shared.services.pipeline))
     }
 
+    /// "Process again" on the selected meeting, after
+    /// [`process_again_prompt`] when the meeting has a speaker the user
+    /// confirmed or named. A decline changes nothing: no claim, no state,
+    /// no error line. The prompt runs with the lock released; when the
+    /// selection moved while it was up, nothing is started, so a run never
+    /// starts on a meeting the user was not asked about.
     fn meeting_process_again(&self) -> Outcome<()> {
+        let (meeting_id, asks) = {
+            let inner = self.lock();
+            let detail = inner.detail.as_ref().ok_or_else(no_selection)?;
+            (detail.id, detail.process_again_asks_first())
+        };
+        if asks && !self.confirm(&process_again_prompt()) {
+            return Ok(());
+        }
         let platform = self.shared.config.platform;
         self.detail_write(|detail| {
-            detail.process_again(&*self.shared.services.pipeline, platform);
+            if detail.id == meeting_id {
+                detail.process_again(&*self.shared.services.pipeline, platform);
+            }
         })
     }
 
@@ -2297,6 +2439,37 @@ impl BridgeHost for Host {
 
     fn onboarding_finish(&self) -> Outcome<()> {
         self.onboarding_command(|inner| inner.onboarding.finish(&self.shared.services));
+        Ok(())
+    }
+
+    /// Three steps, as [`Self::onboarding_request`]: the page sees
+    /// `importing` while the keychain prompts are up, the import runs with
+    /// the lock released, then the outcome. A second Continue or Try again
+    /// while a run is under way does nothing: that run publishes the
+    /// outcome.
+    fn onboarding_import(&self) -> Outcome<()> {
+        let Some(import) = self.shared.services.swift_import.clone() else {
+            return Ok(());
+        };
+        if !self.onboarding_command(|inner| inner.onboarding.begin_import()) {
+            return Ok(());
+        }
+        let status = import.run();
+        self.finish_swift_import(status, false);
+        Ok(())
+    }
+
+    /// Not now while a run's prompts are up does nothing: that run
+    /// publishes the outcome, and its Try again stays on the step.
+    fn onboarding_skip_import(&self) -> Outcome<()> {
+        let Some(import) = self.shared.services.swift_import.clone() else {
+            return Ok(());
+        };
+        if self.lock().onboarding.importing {
+            return Ok(());
+        }
+        let status = import.skip();
+        self.finish_swift_import(status, true);
         Ok(())
     }
 
