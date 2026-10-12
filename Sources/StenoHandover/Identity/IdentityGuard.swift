@@ -9,12 +9,14 @@ public protocol HandoverIdentityKeychain: Sendable {
   /// The current identity, nil when none is stored; throws when the
   /// keychain cannot be read.
   func load() throws -> HandoverIdentity?
-  /// The staged identity, nil when none is staged.
+  /// The staged identity, nil when none is staged; throws when it cannot
+  /// be read.
   func staged() throws -> HandoverIdentity?
   /// Stages `identity` beside the current one, replacing whatever was
   /// staged, and returns it as read back.
   func stage(_ identity: MintedIdentity) throws -> HandoverIdentity
-  /// Makes the staged identity the current one, deleting the current one.
+  /// Makes the staged identity the current one, deleting the current one;
+  /// throws, deleting nothing, when nothing is staged.
   func promote() throws
 }
 
@@ -41,7 +43,7 @@ public enum IdentityUnavailability: Error, CustomStringConvertible, Equatable, S
 /// The handover identity without a silent re-pair: losing the identity
 /// makes every paired phone lose this Mac, so nothing is minted while a
 /// fingerprint is recorded (`IdentityRecordFile`) or a phone is paired.
-/// Rust: `HandoverIdentity::load_or_create` and `HandoverIdentity::pair_again`
+/// Rust: `HandoverIdentity::load_or_create` and `HandoverIdentity::mint_anew`
 /// in `crates/steno-handover/src/identity.rs`.
 public struct HandoverIdentityGuard: Sendable {
   let keychain: any HandoverIdentityKeychain
@@ -109,7 +111,7 @@ public struct HandoverIdentityGuard: Sendable {
     }
   }
 
-  /// Pair again, the user's choice when the identity the phones know is
+  /// Pair Again, the user's choice when the identity the phones know is
   /// gone: a new identity is staged in the keychain, every paired phone is
   /// removed, the record names the new identity, and the staged identity
   /// becomes the current one. Every phone must pair again.
@@ -125,9 +127,13 @@ public struct HandoverIdentityGuard: Sendable {
   ///   with no record either (phones paired without one), the launch
   ///   installs the staged identity instead of minting;
   /// - after the record, before the promote: the staged identity is the
-  ///   recorded one, so the launch promotes it.
+  ///   recorded one, so the launch promotes it;
+  /// - inside the promote: the default label holds the old identity, its
+  ///   key alone, nothing or the new certificate, so the launch loads the
+  ///   new identity or promotes it again.
   ///
-  /// The record is replaced in one rename, so it is never forgotten first.
+  /// The record is replaced in one rename, so a cut leaves the old record
+  /// or the new one.
   public func pairAgain(commonName: String) async throws -> HandoverIdentity {
     let staged = try keychain.stage(try MintedIdentity.mint(commonName: commonName))
     for device in try await store.pairedDevices() {
