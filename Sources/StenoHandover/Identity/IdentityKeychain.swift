@@ -305,10 +305,10 @@
           else {
             throw IdentityError.malformed("keychain returned something other than a certificate")
           }
-          guard attributes[kSecAttrLabel] as? String == label else {
+          let found = attributes[kSecAttrLabel] as? String
+          guard found == label else {
             throw IdentityError.malformed(
-              "keychain returned a certificate labelled "
-                + "\"\(attributes[kSecAttrLabel] as? String ?? "")\" for \"\(label)\"")
+              "keychain returned a certificate labelled \"\(found ?? "")\" for \"\(label)\"")
           }
           return unsafeDowncast(reference, to: SecCertificate.self)
         }
