@@ -13,17 +13,20 @@
 //! | [`app`] | [`AppOptions`], [`build`], [`build_with_import`], [`App`] with `host()`, `launch()`, `launch_finished()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`], [`open_store`], [`lock_database`] with [`LOCK_PATIENCE`](app::LOCK_PATIENCE), [`GraphSecrets`](app::GraphSecrets), the graph's secret store in its three layers (the platform store, `KeepsApiKey`, the import's gate) |
 //! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) with the [`BuiltEngine`](pipeline::BuiltEngine) it was built with, and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
+//! | [`auto_stop`] | The auto-stop after a call ends, the recorder's policy: the 90-second grace ([`AUTO_STOP_GRACE`](auto_stop::AUTO_STOP_GRACE)), "Keep recording" and the `callEnded` end reason, fed with [`MicrophoneActivity`](auto_stop::MicrophoneActivity) |
+//! | [`detection`] | [`DetectionController`](detection::DetectionController): the meeting detector's events into one prompt at a time through the shell's [`PromptPanel`](detection::PromptPanel), and into the recorder's auto-stop while recording |
 //! | [`audio_folders`] | Where recordings were written, beside the database: each recording's and phone upload's folder, for crash recovery and the adoption of a master with no meeting, and the known folders |
 //! | [`recovery`] | Recovery of an interrupted recording from its master on disk, at launch and after a failed stop, the launch's adoption of a master no meeting names, and [`LiveRecordingCheck`](recovery::LiveRecordingCheck), when a master counts as still written |
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels`, and [`SpeechEngines`](speech::SpeechEngines), the engines and the diarizer the pipelines share across reloads |
+//! | [`model_gate`] | The gates that keep a pipeline run from downloading a model, [`GatedSpeechEngine`](model_gate::GatedSpeechEngine) and [`GatedDiarizer`](model_gate::GatedDiarizer) over an [`InstalledCheck`](model_gate::InstalledCheck), and [`ResumingSpeechModels`](model_gate::ResumingSpeechModels): a refusal leaves the meeting queued until Settings or onboarding installs the models, or a reload or the launch finds them |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
 //! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`LOG_FILTER`], [`flush_logs`] |
-//! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, the host's `Handover` over the listener, and [`GatedHandover`](handover::GatedHandover), the one that waits for the import's gate |
+//! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, the host's `Handover` over the listener, the listener's port ([`listener_port`](handover::listener_port), [`PORT_VARIABLE`](handover::PORT_VARIABLE)), and [`GatedHandover`](handover::GatedHandover), the one that waits for the import's gate |
 //! | [`secrets`] | The platform keyring, the Secret Service on Linux and the 0600 secrets file behind `SecretStore`, and [`KeepsApiKey`](secrets::KeepsApiKey), the app's store that keeps the API key for the pipeline's rebuilds; its Windows credential store module is the one place in the crate allowed `unsafe` |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
 //! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json`, `audio-folders.json` and `update-check.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the flags in `preferences.json` |
-//! | [`updates`] | The host's `Updater`: the daily update schedule over the shell's updater, its flags, the last check time, the install gate and the packaged-install switch |
+//! | [`updates`] | The host's `Updater`: the daily update schedule over the shell's updater, its flags, the last check time, the install gate (`IdleGate`, stable plan P25) and the packaged-install switch |
 //! | [`qr`] | The host's `QrEncoder`: the pairing code as a PNG |
 //! | [`swift_import`] | The Mac's import of the Swift app's preferences, API key and handover identity, at the first launch after the update: the launch half, the onboarding step's half and the handover gate |
 //!
@@ -33,10 +36,11 @@
 //! with its reason and owner in the plan's "Pipeline and services (WP6b)"
 //! list.
 //!
-//! Off the Mac, and on the Mac when the speech settings choose it or the
-//! stored engine id has no Rust engine, Parakeet runs in the speech
-//! sidecar ([`speech::SpeechSetup::runtime`]); the diarizer's ONNX models
-//! run in this process.
+//! Off the Mac, and on the Mac when the speech settings choose it, Parakeet
+//! runs in the speech sidecar ([`speech::SpeechSetup::runtime`]); a stored
+//! engine id the Rust app does not run becomes `parakeet-v3` at launch
+//! (`Store::retire_speech_engine`). The diarizer's ONNX models run in this
+//! process.
 //!
 //! Secrets live in the platform keyring on macOS (the Keychain) and on
 //! Windows (the credential store, each credential kept on this computer,
@@ -89,12 +93,15 @@
 
 pub mod app;
 pub mod audio_folders;
+pub mod auto_stop;
+pub mod detection;
 pub mod export;
 pub mod handover;
 #[cfg(test)]
 mod kill_tests;
 pub mod llm;
 pub mod logs;
+pub mod model_gate;
 pub mod pipeline;
 pub mod platform;
 pub mod qr;

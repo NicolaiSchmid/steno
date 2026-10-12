@@ -5324,6 +5324,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-av-foundation",
  "objc2-foundation",
+ "rustix",
  "serde",
  "serde_json",
  "steno-bridge",
@@ -5343,6 +5344,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "zbus",
@@ -5366,6 +5368,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5541,6 +5544,7 @@ dependencies = [
  "tracing",
  "ureq",
  "whatlang",
+ "zbus",
 ]
 
 [[package]]
@@ -5566,9 +5570,11 @@ dependencies = [
  "memory-stats",
  "serde",
  "steno-core",
+ "steno-diarize",
  "steno-speech",
  "tempfile",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -66,8 +66,9 @@ pub enum SpeechError {
         expected: String,
         actual: String,
     },
-    /// An asset id or file name in a manifest is not one plain path
-    /// component, so joining it to the root could escape it.
+    /// An asset id in a manifest is not one plain path component, or a
+    /// file name is not plain components joined by `/`, so joining it to
+    /// the root could escape it.
     #[error("model asset {asset}: {name:?} is not a plain file or directory name")]
     InvalidName { asset: String, name: String },
     /// `tokens.txt` is not the sherpa-onnx `piece id` list in id order.
@@ -87,15 +88,17 @@ pub enum SpeechError {
     #[error("{}: {detail}", path.display())]
     Wav { path: PathBuf, detail: String },
     /// The speech sidecar failed: unless the child reported the error
-    /// itself ([`SidecarError::Remote`]), no child is left running, and the
-    /// next call starts a fresh one.
+    /// itself ([`SidecarError::reported_by_the_child`]) or nothing was sent
+    /// ([`SidecarError::NotUtf8`]), no child is left running, and the next
+    /// call starts a fresh one.
     #[error("speech sidecar: {0}")]
     Sidecar(#[from] SidecarError),
 }
 
-/// How the speech sidecar failed. Every variant but
-/// [`SidecarError::Remote`] leaves the parent without a child: the next
-/// `prepare` or `transcribe` spawns and loads again.
+/// How the speech sidecar failed. Every error but one the child reported
+/// itself ([`SidecarError::reported_by_the_child`]) or
+/// [`SidecarError::NotUtf8`] leaves the parent without a child: the next
+/// `prepare`, `transcribe` or `diarize` spawns and loads again.
 #[derive(Debug, Error)]
 pub enum SidecarError {
     /// The binary could not be started.
@@ -130,10 +133,32 @@ pub enum SidecarError {
     /// a run ONNX Runtime refused) and keeps running.
     #[error("{0}")]
     Remote(String),
-    /// The models root is not valid UTF-8, which the protocol's JSON cannot
-    /// carry; no child was started.
-    #[error("the models root {} is not valid UTF-8, which the protocol cannot carry", path.display())]
+    /// The child failed while it loaded the diarizer's models, as the
+    /// inner error says: it refused a file ONNX Runtime cannot load
+    /// ([`SidecarError::Remote`], and it keeps running), or it died, hung,
+    /// broke the protocol or overran the ceiling there and was killed (a
+    /// file that makes ONNX Runtime abort, say). Told apart from a failed
+    /// diarization, so the caller can check the files.
+    #[error("the diarizer's models did not load: {0}")]
+    DiarizerLoad(Box<SidecarError>),
+    /// A path the protocol's JSON carries (the models root, a diarizer
+    /// model file) is not valid UTF-8; nothing was sent to a child.
+    #[error("the model path {} is not valid UTF-8, which the protocol cannot carry", path.display())]
     NotUtf8 { path: PathBuf },
+}
+
+impl SidecarError {
+    /// Whether the child reported the error itself and still runs:
+    /// [`SidecarError::Remote`], also inside a
+    /// [`SidecarError::DiarizerLoad`].
+    #[must_use]
+    pub fn reported_by_the_child(&self) -> bool {
+        match self {
+            SidecarError::Remote(_) => true,
+            SidecarError::DiarizerLoad(load) => load.reported_by_the_child(),
+            _ => false,
+        }
+    }
 }
 
 impl SpeechError {

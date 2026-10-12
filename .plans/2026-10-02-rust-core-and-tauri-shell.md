@@ -63,9 +63,17 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    - the model downloads, which send nothing but the request: `steno-speech`'s
      `ModelStore` (`crates/steno-speech/src/model_store.rs`) fetches the fp32 Parakeet
      export from Hugging Face at a pinned commit and Silero VAD from a GitHub release
-     asset, and `steno-diarize`'s two models (`crates/steno-diarize/src/models.rs`)
-     from Hugging Face at a pinned commit and a GitHub release asset, or all of them
-     from the mirror the speech settings name;
+     asset, `steno-diarize`'s two models (`crates/steno-diarize/src/models.rs`)
+     from Hugging Face at a pinned commit and a GitHub release asset, and on the Mac the
+     `CoreML` Parakeet from the repository FluidAudio reads
+     (`FluidInference/parakeet-tdt-0.6b-v3-coreml` on Hugging Face) at a pinned commit,
+     or all of them from the mirror the speech settings name; in the app only Settings
+     and onboarding start a download, never a pipeline run (the app's engines are built
+     in `SpeechEngines::new` behind gates, with the sidecar's `SidecarConfig::install`
+     and the diarizer both on `steno_speech::Install::Never`, which steno-diarize
+     re-exports), while the `steno` command's
+     engines, which it builds for itself in `crates/steno-cli/src/wiring.rs`, may
+     download on first use for a command a user runs;
    - the Tauri updater, which fetches `latest.json` and the signed bundle from the
      repository's GitHub releases and sends nothing (the `desktop-stable` endpoint in
      `apps/desktop/src-tauri/tauri.conf.json`, the `desktop-beta` one in
@@ -77,16 +85,23 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
      connection.
 
    The speech sidecar gets its samples on stdin and answers on stdout, never through a
-   socket, and opens no connection (WP4c). ONNX Runtime's telemetry is off in every
+   socket, and opens no connection (WP4c); the diarizer's lanes reach it the same way.
+   On Linux the app, not the sidecar, asks the
+   systemd user manager over the user bus's Unix socket for a scope of the sidecar's
+   own, sending the sidecar's pid, the unit names and the scope's fixed settings, nothing
+   else (`crates/steno-speech/src/sidecar/scope.rs`, P6 of
+   `.plans/2026-10-07-stable-promotion.md`). ONNX Runtime's telemetry is off in every
    process that opens a session (`init_environment` in
    `crates/steno-speech/src/onnx.rs`, which `steno-diarize` calls too). Until the
    cutover the Swift app keeps its own list in `AGENTS.md`.
 4. **One speech pipeline above the tensors.** Chunker, overlap merge and the TDT decode
    loop are shared; the backends are CoreML (`objc2-core-ml`) on the Mac and ONNX
-   Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac stays
-   one process while `CoreML` runs Parakeet (the default). The diarizer's ONNX
-   inference does not run in the sidecar yet: see the open item under "Pipeline and
-   services (WP6b)".
+   Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac runs
+   Parakeet in process on `CoreML` (the default) and starts the sidecar only to
+   diarize. The diarizer's ONNX
+   inference runs in the same sidecar on every platform, the Mac included
+   (`steno_diarize::SidecarDiarizer`); `steno dev diarize-sweep` and the calibration
+   harness keep it in their own process.
 5. **No allocation and no lock on the audio thread**, proven by the counting allocator
    in `crates/steno-audio/src/testing/rt.rs` in a test build.
 6. **Scope stays the scope.** No new features in the port; a Rust behaviour that
@@ -604,8 +619,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   incomplete and "Not now" was not pressed), the deep-link requests consumed by the
   publish that carried them. Difference: `phone` is filled from the handover service
   (the Swift main window left it nil).
-- [x] `recording`: from the `Recorder` trait, at most 20 Hz; the levels and the
-  auto-stop countdown arrive with WP5's recorder.
+- [x] `recording`: from the `Recorder` trait, at most 20 Hz; the levels arrived with
+  WP5's recorder, the auto-stop countdown with S2 of
+  `.plans/2026-10-07-stable-promotion.md`.
 - [x] `progress`: one entry per queued or processing meeting, fed by
   `Host::apply_meeting_event` and the meeting list.
 - [x] `meetings.list`: filters, tag filter, FTS query, counts before the tag filter and
@@ -690,14 +706,27 @@ still has to draw the window side. `[ ]` is not ported yet.
   it holds a whole store root. Nothing writes the file and the bridge contract has no
   field for any of them, so the Settings window shows none:
   `.plans/2026-10-07-speech-settings-ui.md` proposes their place and wording.
-- [ ] Where the speech sidecar runs Parakeet v3, processing a meeting before its models
-  are downloaded starts a silent 2.6 GB download inside the pipeline, which the Settings
-  row does not show. The same holds for a stored engine other than Parakeet v3:
-  Whisper, Ultra and DE run Parakeet v3 in the sidecar, but their Settings row is their
-  own and never installs, so only processing downloads the export. Either show
-  pipeline-side downloads in the row of the engine that runs (and map those engines'
-  rows to Parakeet v3's models), or fail processing with "Download the speech model in
-  Settings" until the engine's models are installed.
+- [x] No pipeline run downloads a model (S1 of `.plans/2026-10-07-stable-promotion.md`).
+  The app's speech engines and diarizer sit behind gates
+  (`crates/steno-services/src/model_gate.rs`) that refuse a call while their models are
+  missing, and the speech sidecar's own install is off in them
+  (`SidecarConfig::install` is `steno_speech::Install::Never`). The refusal is `PipelineFailure::models_missing`
+  (`FailureKind::ModelsMissing`): the meeting stays `queued` with no failure reason on
+  its row, the `ModelsMissing` event gives its progress entry the stage
+  `modelsMissing` and the title "Download the speech models in Settings", and a
+  download from Settings or onboarding that leaves every model installed resumes the
+  meetings runs left waiting since the last resume (`ResumingSpeechModels`,
+  `ModelWaits`, `resume_waiting`), never one a pipeline a reload retired still runs; a
+  run refused while such a resume ran goes again. A reload that finds the models
+  installed resumes them too (`CurrentPipeline::resuming_when`), so models the `steno`
+  command installed are picked up at the next settings change or launch. A resume the store
+  refuses (busy) is logged, not retried. Any
+  stored engine id other than `parakeet-v3` (Whisper, Ultra and DE from the Swift app)
+  becomes `parakeet-v3` at launch (`Store::retire_speech_engine`), with a one-time
+  notice in the setup banner's place whose pending flag is `steno.speechEngineNotice`
+  in `preferences.json`, written before the database changes, and the Transcription
+  section offers Parakeet v3 alone. The `steno` command's engines still download on
+  first use. Rust only: Swift downloaded inside the run.
 - [x] One model store: the diarizer's two models are the `steno_speech::ModelAsset`
   `diarization` (`crates/steno-diarize/src/models.rs`), installed by
   `steno_speech::ModelStore` into `<models directory>/onnx/diarization/`, the folder the
@@ -707,31 +736,38 @@ still has to draw the window side. `[ ]` is not ported yet.
   `steno dev models` read the asset. Who may download is the caller's
   `steno_diarize::Install`: under `Never` a missing file is `DiarizeError::NotInstalled`
   with no request (`steno_diarize::models::installed` is the same check without a load).
-  Every diarizer is on `Allowed` for now. `steno process` stays on it, since a command
-  run in a terminal may download on first use; the app's `SpeechEngines` moves to
-  `Never` together with the pipeline's models-missing gate (S1 in
-  `.plans/2026-10-07-stable-promotion.md`), so a missing model never ends in the
-  fallback while "delete after processing" removes the audio. Under `Allowed`, a
-  download cut off while a meeting processes ends the job `ready` with the one room
-  speaker, keeps the partial, and the next run resumes it
+  The app's `SpeechEngines` builds its diarizer on `Never`, and its gate checks
+  `models::installed`: a missing or removed model, or a corrupt one the load deletes,
+  is `NotInstalled`, which the pipeline takes as `PipelineFailure::models_missing` for
+  the diarize stage, so the meeting waits with its audio instead of ending `ready`
+  with the one room speaker. `steno process` stays on `Allowed`, since a command run
+  in a terminal may download on first use. Under `Allowed`, a download cut off while a
+  meeting processes ends the job `ready` with the one room speaker, keeps the partial,
+  and the next run resumes it
   (`a_diarizer_download_cut_off_mid_job_falls_back_and_keeps_the_recording`); the
   recording's retention after such a fallback is the pipeline's. Content is checked at
-  download; a load that fails hashes the files, and one that fails its checksum is
-  deleted and reported not installed, so Settings offers Download.
+  download; a load that fails (refused, or the child dies, hangs or overruns the
+  ceiling in it) hashes the files, and one that fails its checksum is deleted and
+  reported not installed, so Settings offers Download.
 
 ### Beyond the bridge
 
 - [ ] Menu bar item: the processing queue, the five recent meetings, record and stop,
   the login item toggle, check for updates (`MenuBarViewModel`); the shell's tray, WP8.
-- [ ] Floating panels: the recording bubble and the detection prompt with its
-  60-second countdown; the shell, WP8.
+- [x] Floating panels: the recording bubble and the detection prompt with its
+  60-second countdown: the shell's panels (WP8), the prompt raised and cleared by the
+  services' `DetectionController` (S2 of `.plans/2026-10-07-stable-promotion.md`).
 - [x] Deep links: a requested meeting or Settings section rides on the next `app`
   snapshot and is consumed by that publish (`Host::request_meeting`,
   `Host::open_settings`).
-- [ ] Auto-stop after a call ends (the 90-second grace, "Keep recording", the end
-  reasons): the recorder's policy, WP5; the snapshot side is covered.
-- [ ] Meeting detection (`DetectionController`: one prompt at a time, suppressed while
-  recording or when the setting is off): WP5.
+- [x] Auto-stop after a call ends (the 90-second grace, "Keep recording", the end
+  reasons): `steno_services::auto_stop`, the capture recorder's policy, whose stop is
+  the Stop button's with the end reason `callEnded` (S2).
+- [x] Meeting detection (`DetectionController`: one prompt at a time, suppressed while
+  recording or when the setting is off): `steno_services::detection` over the detector
+  of every platform, its Record attributed to the prompt's app through the panels'
+  `recordFromPrompt` (S2). Difference: the setting is read every two seconds, where
+  Swift observed it, which also retries a detector that could not start.
 - [x] Retention sweep at launch and after `retentionApplied`, interrupted recordings
   recovered from their master at launch or, with none on disk, marked failed
   (`steno_services::recovery`), unfinished processing resumed at launch
@@ -793,9 +829,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   interval. Observation inside the Rust store, or a change hook on `Store::write`,
   removes the poll.
 - The recorder starts without the calendar lookup (title and attendees stay the
-  defaults), without the auto-stop grace after a call ends and without the meeting
-  detection prompt; the detector and the capture session exist, the policy is WP5's
-  and the panel WP8's.
+  defaults). The auto-stop grace after a call ends and the meeting detection prompt
+  came with S2 of `.plans/2026-10-07-stable-promotion.md` (`steno_services::auto_stop`,
+  `steno_services::detection`).
 - The recorder watches each recording on its own thread (the stable plan's P18 and
   P20): a session that fails on its own (a device that stayed lost, a write that
   failed, a rebuild that panicked, which ends as a lost device) is saved and queued at
@@ -881,7 +917,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   during the other's release
   (`a_job_on_another_pipeline_that_starts_during_a_release_prepares_after_it`). Jobs
   across a reload queue on the one diarizer, as jobs on one pipeline do. The sidecar
-  engine is built at its first use and kept for the run; it holds a child only while a
+  engine is built with `SpeechEngines` and kept for the run; it holds a child only while a
   job needs one and never runs two, also when a reload on the Mac goes to `CoreML` and
   back while a retired job transcribes
   (`a_reload_while_a_job_transcribes_keeps_one_sidecar_child`,
@@ -894,8 +930,9 @@ still has to draw the window side. `[ ]` is not ported yet.
 - A recording's warm-up (Swift's `warmUpPipelineIfModelsInstalled`, gated on the
   same installed check) loads the speech engine only where it runs in the app's
   process, `CoreML` on the Mac, as Swift did; with Parakeet in the speech sidecar it
-  loads the diarizer only (`ProcessingPipeline::warm_up_diarizer`), so no 2.2 GB
-  child is resident through the recording or left without a job when the save fails.
+  warms the diarizer only (`ProcessingPipeline::warm_up_diarizer`), which checks its
+  models and starts no child, so no child is resident through the recording or left
+  without a job when the save fails.
   Both the installed check and that choice follow the engine the current pipeline was
   built with (`CurrentPipeline::current_with_engine`, set by each successful build and
   reload), not the id stored now, so neither a failed reload nor an engine the Swift
@@ -905,12 +942,36 @@ still has to draw the window side. `[ ]` is not ported yet.
   `after_a_failed_reload_the_warm_up_follows_the_engine_the_pipeline_kept`). Rust
   only: Swift loaded the engine during every recording; with Parakeet in the
   sidecar, the job after a recording starts the child cold.
-- Open, against invariant 4: the ONNX diarizer (pyannote segmentation and the
-  WeSpeaker embeddings) still runs in the app's process on every platform, so a crash
-  in ONNX Runtime there ends the app. Memory is not the reason to move it (the larger
-  of its two models is 26 MB, against Parakeet's 2.6 GB export); crash isolation is.
-  Moving it needs a request of its own in the sidecar protocol; no work package has it
-  yet.
+- Closed (#266, A3 of `.plans/2026-10-07-stable-promotion.md`): the ONNX diarizer (pyannote
+  segmentation and the WeSpeaker embeddings) runs in the speech sidecar's child on
+  every platform, the Mac included, so a crash in ONNX Runtime while it diarizes ends
+  the child, not the app (`steno_diarize::SidecarDiarizer` over
+  `SidecarSpeechEngine::diarize`). One request a lane (`loadDiarizer` once per child,
+  then `diarize` with the samples on stdin, protocol version 2): the child runs the
+  whole in-process pipeline with the default configuration and answers with the
+  clusters, embeddings included, their `f32` values widened to `f64`, which
+  round-trips exactly whatever `serde_json`'s `f32` path does; per window
+  requests would have been some 5 000 round trips and four copies of the audio an hour.
+  The diarizer shares the engine's child, lock, deadline (the transcription's) and
+  memory ceiling: its models load into the child speech runs in, or into a child of its
+  own that stops after the call, so no child outlives the job that needed it; a crash,
+  hang or overrun fails that call and the diarize stage falls back as for any diarizer
+  failure, and the next call starts a new child; it never counts against `DirectML`.
+  The 6 GiB ceiling holds a diarization beside Parakeet's working set up to about
+  4.3 h of a dense group call (measured on a synthetic six-voice lane: 3.94 GB at 3 h);
+  a longer call diarized while another job holds speech overruns it, and that job
+  keeps its transcript with the fallback speakers. A child that only diarizes peaked
+  at 286 MB for 30 min. The models install in the app's process (`Install` as before:
+  `Install::Never` behind the gate in the app, `Install::Allowed` in `steno process`)
+  and a load the child refuses is checked against the manifest there; a file that
+  fails it is deleted and the call is `DiarizeError::NotInstalled`, which the app's
+  gate takes as the models-missing refusal, so the meeting waits with its audio
+  instead of falling back (`files_the_apps_diarizer_cannot_load_in_its_child_park_the_job`
+  in `crates/steno-services/tests/diarizer_models.rs`). The sidecar's clusters equal the
+  in-process pipeline's bit for bit on the two-voice fixture, once and tiled to 75 s
+  (`crates/steno-speech-sidecar/tests/diarize.rs`, model gated). `ModelDiarizer` keeps
+  the in-process path for `steno dev diarize-sweep`, the calibration harness and the
+  tests; the CoreML diarizer backend has no caller in the app and stays in process.
 - Closed (#185): a sidecar whose parent is gone exits from its heartbeat thread
   (`send` in `crates/steno-speech-sidecar/src/lib.rs`) while ONNX Runtime may still be
   inferring. On Linux and macOS it calls `libc::_exit`, so no atexit handler or C++
@@ -1236,13 +1297,13 @@ still has to draw the window side. `[ ]` is not ported yet.
 - Settings > General acknowledges the Parakeet the platform runs: "Parakeet TDT 0.6B v3
   (int8)" from the `CoreML` repository on the Mac, as Swift; "Parakeet TDT 0.6B v3
   (fp32)" from `nvidia/parakeet-tdt-0.6b-v3` elsewhere and with the Mac's sidecar
-  fallback (`SpeechModels::display_name` and `source_repo`). Open: the diarizer's
-  rows still describe the Swift app's `CoreML` diarizer (its acknowledgement and its
-  size in Settings > Transcription), while every platform runs the ONNX pyannote 3.0
-  and WeSpeaker ResNet34-LM models; the same hooks (`display_name`, `source_repo`,
-  `expected_bytes`) fix them, and the acknowledgement's licence and attribution
-  (`steno_host::speech::ModelAsset::licence`) take `steno_diarize::models`'
-  `LICENCE` and `ATTRIBUTION`.
+  fallback (`SpeechModels::display_name` and `source_repo`). The diarizer is the ONNX
+  pyannote segmentation 3.0 and WeSpeaker ResNet34-LM models on every platform: its row
+  keeps the title "Speaker recognition" and shows their 33 MB, `steno models` lists
+  them by name, and Settings > General acknowledges each with
+  its licence and attribution (MIT; CC-BY-4.0 for the VoxCeleb-trained WeSpeaker
+  model) through `SpeechModels::notices`. Only the assets the Rust app offers are
+  acknowledged (`ModelAsset::OFFERED`).
 - The phone intake syncs the copy, its meeting folder and the parent of every folder
   it created to the disk before it marks the receipt complete, in both apps: Rust
   through `steno_pipeline::files::copy_durably` and `create_dir_all_durably`, Swift
@@ -1315,8 +1376,10 @@ still has to draw the window side. `[ ]` is not ported yet.
     So a save that outlasts a session manager's or logind's wait still ends, at
     most `SHUTDOWN_PATIENCE` after it began, unless the process is killed first
     (systemd's `SIGKILL` once a stop has waited out the unit's `TimeoutStopSec`,
-    90 s unless the unit sets another, xfce4-session's `SIGKILL` 15 s after its
-    `Stop`, which the shell calls off by unregistering first, or a second SIGTERM).
+    90 s unless the unit sets another, and 5 s for the autostart unit and GNOME's
+    app scope, which the drop-ins of the next item raise to 20 s; xfce4-session's
+    `SIGKILL` 15 s after its `Stop`, which the shell calls off by unregistering
+    first; or a second SIGTERM).
     On KDE Plasma this is the save: ksmserver speaks XSMP to X11 clients, which
     GTK 3 does not, and KWin closes only native Wayland windows at a logout, not
     the shell's, which run under XWayland.
@@ -1334,6 +1397,70 @@ still has to draw the window side. `[ ]` is not ported yet.
     `apps/desktop/scripts/lost-display-linux.sh`) and headless sway with a recording
     running; a real xfce4-session 4.20.4 logout on X11 and on Wayland (labwc 0.9.7),
     and its Quit Program and Save Session under a recording on X11, in a container.
+  - An autostarted app on a desktop that runs XDG autostart through systemd (KDE
+    Plasma, uwsm sessions such as Omarchy's) is the unit
+    `app-steno\x2ddesktop@autostart.service`, which `systemd-xdg-autostart-generator`
+    writes with `TimeoutStopSec=5s`. On GNOME the app runs in
+    `app-gnome-steno\x2ddesktop-<pid>.scope`, at login and from the dash alike, and
+    gnome-session's `app-gnome-.scope.d/override.conf` gives that scope 5 s too.
+    Either way systemd's `SIGKILL` follows SIGTERM once the stop has waited out that
+    `TimeoutStopSec`, 5 s, before a save that needs `SHUTDOWN_PATIENCE` (10 s) plus
+    `EXIT_GRACE` (2 s), and Launch at login is on by default. Two drop-ins in
+    `apps/desktop/src-tauri/linux/` raise the timeout to 20 s: `[Service]` as
+    `10-steno.conf` for the unit, `[Scope]` as `zz-steno.conf` for the
+    scope, named to sort after `override.conf`. The `.deb` installs both under
+    `/usr/lib/systemd/user/`, and its `postinst` (`linux/deb-postinst.sh`) reloads
+    every running user manager, so an app autostarted before the upgrade gets them
+    too (all three checked by `check-bundle.sh`). The app writes them under
+    `~/.config/systemd/user/` whatever `XDG_CONFIG_HOME` says, the scope's at every
+    launch and the unit's while Launch at login is on, and reloads the user manager
+    after a write; the write leaves a mark (`systemd-reload-owed`) that only a
+    reload that went through clears, so a reload that failed, was skipped or was cut
+    off is asked for again at the next launch or switch, and with nothing written
+    and nothing owed there is no reload (`stop_timeout.rs`). A reload while the
+    autostart entry is gone unloads the running unit, and the session's end then
+    sends no SIGTERM, so the app, while it runs as the unit (its cgroup), never
+    reloads without the entry, the `postinst` skips a user whose entry is gone
+    unless their unit is known to be stopped (`inactive` or `failed`), and Launch
+    at login turned off while the app runs as the unit is marked and goes after the
+    exit's save (`autostart.rs`). Turned on again before the exit, it clears the
+    mark and leaves the entry unwritten, since the plugin empties an entry before it
+    rewrites it. A launch as the unit that finds no entry (an older release removed
+    it at once, then its update relaunched in the unit) puts it back with the mark,
+    and fails unless the entry is there after it. While the system manages the
+    login item (`STENO_LOGIN_ITEM=managed`), the switch writes nothing; the app that
+    runs as the unit made from an earlier build's entry, or from the user's own,
+    writes the unit's drop-in and reloads while that entry stands, and the exit that
+    removes an earlier build's entry removes the drop-in with it. The AUR and Nix
+    packages ship the files (X6 and X7 of `.plans/2026-10-07-stable-promotion.md`);
+    on Arch and NixOS every package change reloads the user managers, so only the
+    kept entry protects the unit there. Each shutdown logs its duration at `warn`.
+    Measured under a real systemd 255 user manager (desktop README, Launch at
+    login under systemd). A reboot saves inside logind's delay; on
+    Omarchy the delay is 15 s and the user manager then gets 5 s (`user@.service`),
+    which no drop-in for this unit can raise, so that path depends on the delay
+    lock. An app started inside another program's service, as a Hyprland key
+    binding without `uwsm-app` starts it in uwsm's `wayland-wm@.service`, got
+    SIGTERM with the compositor and a second one from systemd once the compositor
+    had exited, which ends it unsaved (`forced_exit`), and `SIGKILL` 10 s in. So at
+    launch, before the first window, an app whose cgroup names a service of the
+    user manager that is not Steno's own (its name does not say `steno`) and whose
+    main process is another asks for `app-steno\x2ddesktop-<pid>.scope` in
+    `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and
+    `After=graphical-session.target`, and waits up to 2 s for the move. Unlike
+    the sidecar's scope, a start still queued then (at login, behind
+    `graphical-session.target`) is never called off: the request's thread waits
+    up to 60 s more and logs the outcome; a session that ends before then leaves
+    the app in the compositor's unit. The AppImage runtime's mount server, found
+    by its FUSE connection and keepalive pipe (`appimage.rs`), moves into a scope
+    of its own in `app.slice` wherever it runs, also when the app stays; each move
+    is checked and written to stderr. In a login's `session-<n>.scope` it stays
+    beside the app with a warning. A scope, Steno's own services and an app
+    outside the user manager stay, and a failed move logs a warning
+    (`own_scope.rs`, X1 of `.plans/2026-10-07-stable-promotion.md`). Tested
+    against a fake manager on a private `dbus-daemon`, and in a container under a
+    real systemd 255 user manager with a stand-in for uwsm's units (desktop README,
+    Hyprland).
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -1352,8 +1479,9 @@ still has to draw the window side. `[ ]` is not ported yet.
     Windows' end-session timeout ends the process: about five seconds, less than
     `SHUTDOWN_PATIENCE` (WP10).
   - The updater's relaunch bypasses the exit request and runs the shutdown before it
-    relaunches; on Windows the installer's own exit runs it (`on_before_exit`), and an
-    install that fails after it ends the app once its message is closed.
+    relaunches; on Windows the install runs it before it starts the installer's watcher
+    (P25 of `.plans/2026-10-07-stable-promotion.md`), and an install that fails after it
+    restarts the app at once.
   - On Linux an exit that went through ends the process two seconds later at the latest
     (`end_within` in the shell's `main.rs`), with its code; an update's relaunch is left to
     the teardown. `tauri-plugin-single-instance` 2.5 releases its bus name in its
@@ -1379,9 +1507,10 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The host calls the recorder's commands with its lock released: the recorder reports
   each change through `Host::recorder_changed`, which takes that lock, so a failed
   start, whose permission re-read ran under it, froze the caller.
-- The shell's seams WP6b leaves open, each with the package that closes it: (1) the
-  detection prompt: no `DetectionController` is ported (WP5), so nothing calls
-  `panels::set_prompt` and `panels::dismiss_prompt` tells no one; (2) the host's
+- The shell's seams WP6b leaves open, each with the package that closes it: (1) closed
+  by S2: the services' `DetectionController` raises and clears the prompt through
+  `panels::set_prompt` (`host::ShellPromptPanel`) and hears of its X and its Record
+  (`panels::dismiss_prompt`, `panels::record_from_prompt`); (2) the host's
   `Permissions` stay the services' fake (all granted): WP8's `permissions` answers
   `unknown` off the Mac and for the Mac's system audio, and the host's onboarding
   opener counts anything but `granted` as missing, so wiring it would open onboarding
@@ -1773,6 +1902,15 @@ parity item until a plan says otherwise:
   from a file of another encoder that declares no priming (Android's
   `MPEG4Writer` primes 1 024), and the Rust decode keeps them (stable plan
   D9).
+- **A damaged packet becomes silence: Rust only.** AVFoundation conceals a
+  packet its decoder cannot read and says nothing; symphonia returns an
+  error (or panics), which stopped the whole decode. The decoder writes
+  silence of the packet's container duration in its place, goes on with a
+  fresh decoder, counts the packet (unless the priming trim takes all of
+  it) and the silence's length (`AudioBuffer16k::damage`), writes no crash
+  log for a panic it caught, and the meeting's detail says how long the
+  silence lasts; a file with more than half of its packets damaged fails
+  (stable plan A12).
 - **AAC-LC only.** AVFoundation also decoded HE-AAC; symphonia decodes
   AAC-LC alone. The iOS recorder writes AAC-LC, so nothing is lost today; a
   plan adds HE-AAC if an import needs it.
@@ -2733,12 +2871,28 @@ touch and admission lines; each fix is ported to Swift before cutover.
   backend (inside the process, so nothing it starts inherits it) when
   `WAYLAND_DISPLAY` and `DISPLAY` are set and the user set no `GDK_BACKEND`, because
   GTK 3 on Wayland cannot place a window, keep it on top or report its moves, which
-  the panels need. A user's `GDK_BACKEND=wayland`, or a session without XWayland,
-  runs natively with panels that neither float nor keep their place; a native path
-  would need the layer-shell protocol and is not planned.
+  the panels need. A `GDK_BACKEND` list that names `x11` or `*` (Omarchy's
+  `wayland,x11,*`), or a lone `*`, counts as unset (#267); a list naming neither
+  stays the user's. A user's single `GDK_BACKEND=wayland`, or a session without
+  XWayland, runs natively with panels that neither float nor keep their place; a
+  native path would need the layer-shell protocol and is later work (the stable
+  plan's "What follows"). On Linux the panels are titled "Steno bubble" and "Steno
+  prompt", where the shell's panels on macOS and Windows say "Steno" (the Swift
+  panels have no title), so Hyprland's window rules
+  (`apps/desktop/src-tauri/linux/hyprland-steno.lua`, which the `.deb` installs in
+  `/usr/share/steno-desktop/`) can float and pin the panels and keep them out of
+  the focus without touching the main window.
 - Linux shows the tray only where a status notifier host runs (KDE, most desktop
   panels, GNOME with the AppIndicator extension); elsewhere closing the main window
-  quits, where the Swift `NSStatusItem` is always in the menu bar.
+  quits and saves a recording in progress first, where the Swift `NSStatusItem` is
+  always in the menu bar. The shell follows the watcher's owner and its
+  `IsStatusNotifierHostRegistered` on the session bus for the whole run
+  (`apps/desktop/src-tauri/src/tray_host.rs`), so a host that comes or goes decides
+  the next close where the watcher says so (Waybar, GNOME's extension; KDE's watcher
+  always says a host registered, so on Plasma the name alone decides, as before); a
+  reading that fails counts as none and is read again 10 s later, three times at most
+  before the next change, and a watcher that serves no object yet counts as none
+  until the next change.
 - One process per database (Rust only; the stable plan's P15). The app takes an
   exclusive advisory lock on the database's own lock file, beside it with the extension
   `lock` (`<support>/steno.lock` for the default `steno.sqlite`), before it opens it,
@@ -2785,48 +2939,84 @@ touch and admission lines; each fix is ported to Swift before cutover.
   not answered after 60 seconds fails, so a stalled request cannot hold the next one.
   Where Sparkle showed its alert for a found update, the schedule raises the shell's
   "Install and Relaunch" dialog once per version in a run, and not while a recording
-  starts, runs or stops: the first tick after it ends raises it. A yes given once a
-  recording has started since the dialog came up asks again ("Installing stops and
-  saves the recording in progress." with "Not Now", the default, or "Install and
-  Relaunch"; the confirm comes up where the alert's Install was, so a second Return
-  would otherwise pass it unread), and "Not Now" leaves the version to be raised again
-  after the recording. The install downloads first and then holds recording starts off
-  (`Recorder::hold_starts`) from just before the updater writes the package through
-  the relaunch: a Record meanwhile, from the sidebar or the tray, is refused and says
-  "Steno is installing an update. You can record again once it relaunches, or if you
-  cancel the install."; a meeting prompt's Record, once detection raises one, goes
-  through the same `recording.start` and is refused the same way. The hold also spans
-  the updater's password prompt: a `.deb` install always asks (pkexec, then a zenity
-  or kdialog password dialog, then a terminal `sudo`), and on macOS an app folder the
-  user cannot write asks for an administrator. Cancelling every prompt fails the
-  install, which drops the hold and clears the message. A recording the user did not
-  agree to stop, such as one that started during the download, puts the install off:
-  the package is kept, the version is raised again at the first idle tick, and the
-  next yes installs without a second download. A confirm's yes may stop only the
-  recording it named; one still starting when the confirm came up is named by the
-  meeting id it has at the yes.
-  Automatic downloads wait for P25's `InstallGate` (stable plan): its stand-in
-  `NeverIdle` never gives a hold, so until P25 lands the flag downloads nothing and
-  every install waits for the user's yes; with the gate the schedule downloads by
-  itself only while `InstallGate::is_idle_now` says idle (a recording or a processing
-  job has the disk and the network to itself), keeps the package until an install
-  takes it, and installs only with the gate's hold from `try_hold`, beside the
-  recorder's start hold. Sparkle installed a download at quit. Settings' footer
-  ("installed when you relaunch Steno", `general-section.tsx`) describes Sparkle; in
-  the Rust app the dialog's yes installs once downloaded, after a second confirm when
-  a recording has started since the dialog came up, and the shared copy follows when
-  the Swift app retires (`.plans/2026-10-04-mac-cutover.md`). One install runs at a
-  time, and the install is of the version the dialog named; a yes for a version a
-  later check replaced installs nothing, since the newer one has its own dialog. The
-  schedule's launch tick waits for the keyring's answer where the Secret Service asks,
-  so its dialog does not come up beside that prompt. A packaged install
-  (`STENO_DISTRIBUTION=aur|nix`, the environment before the build's value; stable
-  plan X5, `updates_are_managed`) runs no schedule, and its checks, the tray's
-  included, fail without a request; the tray says the package manager delivers the
-  updates. A smoke run (`STENO_SMOKE_SECONDS`) and the fixture host pass no update
-  source, so they never check on their own; the tray's check there has the same 60
-  second limit and only says what it found. The network is the updater's: the same
-  lane manifests, nothing new sent.
+  starts, runs or stops: the first tick with no recording under way raises it. No
+  update stops a recording or a processing run (stable plan P25): every install holds
+  the `InstallGate`'s hold, and the app's gate (`IdleGate` over the recorder and the
+  pipelines' shared `InFlight` set) gives one only while no recording starts, runs or
+  stops (the save runs while it stops, and its processing job is claimed before the
+  recorder is idle), no processing job, summary re-run or re-export is in flight or
+  claimed, and the app is not shutting down. A yes given while the app is busy asks
+  again ("Steno is recording. Install the update and relaunch once the
+  recording is saved and processed?" or "Steno is still processing a meeting. Install
+  the update and relaunch once it is done?"), with "Install After It Ends" as the
+  default and "Not Now", which leaves the version to be raised again. After a yes the
+  install waits until the gate says idle (every two seconds), downloads, then waits
+  for the gate's hold (`UpdateSchedule::hold_once_idle`), so a recording started
+  during the download is waited for, never stopped. The hold is the recorder's start
+  hold (`Recorder::hold_starts`) and the pipelines' `JobHold`. Recording always wins:
+  an installer that returns (`Installer::InPlace`, an AppImage or a macOS bundle the
+  user can write; `Installer::AsksForAPassword`, a `.deb` or `.rpm`, which asks through
+  pkexec, then a zenity or kdialog password dialog, then a terminal `sudo`, and may
+  wait for good, or a macOS bundle the user cannot write, which asks for an
+  administrator, a prompt that holds the app's windows until it is answered) lets the
+  start hold go at once and the job hold after `JOB_HOLD_LIMIT`, one minute, so a
+  Record during the `.deb`'s password prompt records, and a job claimed meanwhile (a
+  phone recording's) waits `queued` for a minute at most. The
+  install is awaited however long the prompt waits, so a password typed after the
+  minute still installs and relaunches. Once it has installed, the relaunch takes the
+  gate's hold again, and when a recording or a job started meanwhile it tells the user
+  ("Steno 0.12.0 is installed. Steno relaunches once the recording is saved and
+  processed.") and waits for it; a yes given meanwhile (the tray's check still finds
+  the installed version) gets the same message, and an install that returns during a
+  Quit says nothing, since the app quits instead. On Windows the install ends the app,
+  and the hold is kept through the install: the NSIS setup (`Installer::EndsTheApp`)
+  installs for the user alone and waits on nothing outside Steno before the shutdown;
+  the MSI (`Installer::EndsTheAppThenAsks`) installs for every user, so Windows asks
+  for consent after the app has ended, and Steno is down until the prompt is answered.
+  The app runs neither installer itself: it writes the verified download to its local
+  data folder, runs the shutdown and leaves a hidden `cmd.exe`
+  (`updater/windows_setup.rs` in the desktop shell) that starts the installer as the
+  plugin's passive install did, waits, and starts the version that ran again unless
+  the installer installed (`msiexec` 0, 1641 or 3010; the setup 0), so a no at the
+  prompt, a failed MSI or an aborted setup brings Steno back within seconds. If the
+  `cmd.exe` cannot start, ends before it runs (a policy that turns off the command
+  prompt ends it at once) or says nothing for 10 seconds, Steno restarts at once and
+  the error goes to the log. Steno lets go of its single-instance lock just before it
+  ends, so an old version started again at once (`msiexec` exits at once while another
+  install runs) comes up rather than handing over to the ending Steno. An install that
+  fails while Steno quits restarts nothing. An installer that asks an administrator (a
+  `.deb`, an `.rpm`, an unwritable macOS bundle, the MSI) therefore runs only right
+  after a yes given while the app is idle: a yes given while it was busy, one it
+  turned busy after, or one whose download took over 30 s, asks once more when it is
+  idle ("Steno 0.12.0 is ready to install. Install it and relaunch now?"), holding
+  nothing while that dialog is up, and "Later" leaves the version to be raised again.
+  The hold is kept through the shutdown and the relaunch: a Record then, from the
+  sidebar, the tray or a meeting prompt, is refused and says "Steno is relaunching to
+  finish installing an update. You can record again in a moment."; a background run
+  claimed then stays `queued` for the relaunched app, and a summary re-run or a
+  re-export claimed then is not kept (the user asks again). Cancelling every prompt
+  fails the install, which drops the hold. A yes given while the schedule's own
+  install runs installs nothing. With automatic downloads on, the schedule downloads
+  by itself only while `InstallGate::is_idle_now` says idle and no install runs (a
+  recording or a processing job has the disk and the network to itself), keeps the
+  package until an install takes it, and installs only with the gate's hold from
+  `try_hold`, taken after the one-install guard; it does not run an installer that
+  asks an administrator, whose package it announces instead. The flag is read again
+  when the download ends, and turning it off frees the kept package, so a switch
+  turned off during the transfer keeps and installs nothing. Sparkle installed a
+  download at quit. Settings' footer now says only "Updates are checked once a day."
+  (`general-section.tsx`, the settings redesign's footnote), which holds for both
+  apps. One install runs at a time, and the install is of the version the last check
+  found: a yes carries over to a newer version a check finds while the install waits.
+  The schedule's launch tick waits for the keyring's answer where the Secret Service
+  asks, so its dialog does not come up beside that prompt. A packaged install
+  (`STENO_DISTRIBUTION=aur|nix`, the environment before the build's value; stable plan
+  X5, `updates_are_managed`) runs no schedule, and its checks, the tray's included,
+  fail without a request; the tray says the package manager delivers the updates. A
+  smoke run (`STENO_SMOKE_SECONDS`) and the fixture host pass no update source, so
+  they never check on their own; the tray's check there has the same 60 second limit
+  and only says what it found. The network is the updater's: the same lane manifests,
+  nothing new sent.
 
 ### Bridge
 
@@ -2924,12 +3114,11 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   release, and which follow it, is the blocking list of
   `.plans/2026-10-07-stable-promotion.md` (D3), which replaces the rule that all must
   be ticked before the cutover opens. The lines: the menu bar's queue and recent
-  meetings, the detection prompt, the auto-stop after a call, the calendar lookup, the permissions probe, the macOS menu
-  bar's Record and Find Meetings items, and the "Where the speech sidecar runs
-  Parakeet v3" line under "Speech" (its two items below). Several name WP5 or WP8,
-  which merged without them. The other unticked "Speech" line, `SpeechSettings`,
-  covers Rust-only settings with no Swift behaviour to match: it does not gate the
-  cutover and has its own **Unowned.** item. Where:
+  meetings, the calendar lookup, the permissions probe, the macOS menu
+  bar's Record and Find Meetings items. Several name WP5 or WP8, which merged without
+  them. The other unticked "Speech" line, `SpeechSettings`, covers Rust-only settings
+  with no Swift behaviour to match: it does not gate the cutover and has its own
+  **Unowned.** item. Where:
   the unticked lines under "Beyond the bridge" and "Speech" and the open items under
   "Pipeline and services (WP6b)" and "Shell" in the parity list. Found: #170, #172,
   #173.
@@ -2938,31 +3127,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   play). Where: the fake in `build` (`crates/steno-services/src/app.rs`), the tray
   (`apps/desktop/src-tauri/src/tray.rs`); the WP9 paragraph and seam (4) under
   "Pipeline and services (WP6b)". Found: #173, #185.
-- **WP9b.** The Rust app cannot download the Mac's CoreML Parakeet model: Settings
-  answers "This build cannot download the CoreML Parakeet v3 model", so only a Mac
-  where the Swift app installed it can transcribe, and a fresh install of the cutover
-  build (cutover test 5) has no speech model. Where: `ModelStoreSpeechModels::download`
-  in `crates/steno-services/src/speech.rs`. Found: #173.
-- **WP9b.** Whisper, Ultra and DE cannot be installed on the Rust side: a stored
-  `whisperkit-large-v3-turbo`, `parakeet-ultra` or `parakeet-de` runs Parakeet v3 in
-  the speech sidecar on every platform, the Mac included, while its Settings row
-  answers "has no Rust engine yet", so only processing installs the export, unseen.
-  Swift users who chose one of them carry it across the cutover. Where:
-  `speech_asset` and `download` in `crates/steno-services/src/speech.rs`; the "Where
-  the speech sidecar runs Parakeet v3" item under "Speech" in the parity list. Found:
-  #189.
-- **WP9b.** Processing a meeting before the speech models are installed starts a
-  silent 2.6 GB download inside the pipeline wherever the sidecar speech engine
-  (`SidecarSpeechEngine`) runs, on the Mac for Whisper, Ultra and DE: it installs its
-  models on first use, and the Settings row shows no progress. It blocks the first
-  Linux release too. Where: the "Where the speech sidecar runs Parakeet v3" item under
-  "Speech" in the parity list. Found: #189.
-- **WP9b.** Settings still describes the diarizer as the Swift app's CoreML model (its
-  acknowledgement and its size), while every platform, the Mac included, runs the ONNX
-  pyannote segmentation and WeSpeaker embedding models, whose licence notices the app
-  does not show yet. It blocks the first Linux release too. Where: `display_name`,
-  `source_repo` and `expected_bytes` in `crates/steno-services/src/speech.rs`; the
-  Settings > General item under "Pipeline and services (WP6b)". Found: #164, #183.
 - **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
   Swift defects (each ported to Swift if it ships another release, otherwise closed by
   the cutover), the fixtures the Swift side owes, and the audio choices to settle at
@@ -2982,7 +3146,9 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   display under Xvfb and headless sway, and real logouts only in xfce4-session 4.20.4
   (X11, and Wayland under labwc); GNOME's logout dialog for the inhibitor is read from
   gnome-session's source only. The writer recognises GDK's lost-display lines by GTK
-  3.24.52's wording; a GTK that rewords them falls back to the unsaved exit. Where:
+  3.24.52's wording; a GTK that rewords them falls back to the unsaved exit. The 5 s
+  stop timeout of an autostarted app under systemd, and of GNOME's app scope, is raised
+  to 20 s by drop-ins (#227, the shutdown items). Where:
   `apps/desktop/src-tauri/src/session_end.rs`,
   `apps/desktop/src-tauri/src/display_lost.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185, #203, #220.
@@ -3011,15 +3177,19 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   1.0 or 1.2 only the distribution's own package can carry the fix. Where: "A default move can go
   unreported" in the Linux list under "Audio". Found: #197, #201.
 - **First Linux release.** Meeting detection on PipeWire names a holder by its binary
-  (`application.process.binary`, else `application.name`), so WP9b's prompt needs a
-  display name for it, from the app's `.desktop` entry or `application.name`. A
+  (`application.process.binary`, else `application.name`), so the prompt says
+  "firefox opened the microphone" (`steno_services::detection::fallback_app_name`);
+  it needs a display name, from the app's `.desktop` entry or `application.name`. A
   Flatpak app's pid is its pid inside the sandbox, so two sandboxed apps can merge
   into one holder; check with a Flatpak browser on a real desktop, where
-  `pipewire.access.portal.app_id` may name the app better. `MeetingDetector::start`
-  fails while PipeWire is unreachable (its first snapshot answers the error), so the
-  services (the controller of S2 in `.plans/2026-10-07-stable-promotion.md`) must
-  retry it when PipeWire comes up after Steno (autostart at login). Where: "Meeting
+  `pipewire.access.portal.app_id` may name the app better. Where: "Meeting
   detection" in the Linux list under "Audio". Found: #222.
+- **First Windows release.** Meeting detection names a Windows holder by its
+  executable without `.exe` (`steno_services::detection::fallback_app_name`), so the
+  prompt says "Teams opened the microphone" and an auto-stop stores "Teams" as the
+  call's app; a display name (the executable's `FileDescription`) would read better.
+  Check the names on a real call with the Teams and Zoom desktop apps. Where: S2 of
+  `.plans/2026-10-07-stable-promotion.md`. Found: #271.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
   measured DirectML's speed (at least three times the CPU's on an integrated GPU), so
   `directmlOnWindows` stays off by default (`SpeechSettings` in
@@ -3061,10 +3231,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   keeps its own until then, so FLEURS and the Swift parity both hold. Where:
   `crates/steno-speech-coreml`, `crates/steno-speech`; the integration notes under WP4.
   Found: #171, #182.
-- **Unowned.** The diarizer's ONNX inference runs in the app's process on every
-  platform, against invariant 4, so a crash in ONNX Runtime there ends the app; moving
-  it needs its own request in the sidecar protocol. Where: `crates/steno-diarize`; the
-  "Open, against invariant 4" item under "Pipeline and services (WP6b)". Found: #183.
 - **Unowned.** The speech settings (`onnxSidecarOnMac`, `directmlOnWindows`,
   `modelsMirror`) live only in `speech.json`, which nothing writes, and the bridge has
   no field for them; `.plans/2026-10-07-speech-settings-ui.md` proposes where they
@@ -3078,6 +3244,25 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `crates/steno-pipeline/src/files.rs`,
   `Sources/StenoCore/Storage/RecordingIntake.swift`, `crates/steno-llm`. Found: #167,
   #185, #213.
+- **Unowned.** A busy store fails a resumed meeting. A meeting resumed after its
+  models are installed whose run then meets a store write locked for longer than the
+  5 s busy timeout ends `failed` with "database is locked", as any run on main does;
+  #237 does not change that. A resume the store refuses (busy) is logged and not
+  retried, and the meetings stay `queued` for the next install, reload or launch. The
+  likely remedy treats a busy store (`StoreError::is_busy`) as a reason to park the
+  meeting and retry it, on the waiting set #237 adds (`ModelWaits`). Who owns it is
+  still to be decided. Where: `crates/steno-pipeline/src/pipeline.rs`,
+  `crates/steno-services/src/pipeline.rs`, `crates/steno-core/src/store/mod.rs`.
+  Found: #237.
+- **Unowned.** A Pair that lands during the quit starts a listener after it:
+  `App::shutdown` stops the listener, but `ListenerHandover::close` only keeps a
+  waiting handover from receiving one, so a `start` waiting on the stop's lock binds
+  once the stop returns and runs until the process exits. It loses nothing. With the
+  fixed port, an update's relaunch that binds before the old process exits falls back
+  to a port the system chooses, which the firewall blocks until the next launch. The
+  likely remedy: `ListenerHandover::start` refuses once `close` ran. Where:
+  `crates/steno-services/src/handover.rs`, `crates/steno-services/src/app.rs`
+  (`shutdown`). Found: #276.
 
 ## Progress
 
@@ -3132,26 +3317,39 @@ PR off `main`.
 | A call's folder note names the platform it was recorded on ("Windows call", "Linux call"); the `source` key stays `mac-call` (`steno-adapters`) | `fix/adapters-platform-call-label` | #215 | merged |
 | The handover's admission, first announce and revoke refusals leave another device's files and receipt alone, and the admission leaves no file behind (`steno-handover`) | `fix/rust-handover-admit-announce` | #219 | merged |
 | No traffic light inset under a native title bar: the sidebars' spacer and onboarding's top follow the platform (`apps/macos/web/`) | `fix/web-platform-title-inset` | #217 | merged |
-| After the intake, `admit` discards every file of the recording unless another device holds its receipt, and so do a refused `complete` and a failed first save (Swift core, the counterpart of #219) | `fix/swift-handover-admit` | #212 | open |
-| The phone rebuilds its queue index from the recording files on disk and the recorder's directory, gives every recording its own file, saves nothing after a failed load, and fails a row after repeated announce 409s (`mobile/`) | `fix/mobile-queue-index-rebuild` | #223 | open |
-| A re-announce of a `complete` recording with another size or hash is answered 409, so the phone keeps its file, and the same bytes in other chunks are answered `complete` (`steno-handover`, Swift core) | `fix/handover-reannounce-hash-check` | #224 | open |
-| A first announce, one that finds no receipt in memory or the store, discards every inbox file of the recording id before it opens its own, so an old verified file is never admitted unhashed; Swift's announce answers a failed receipt read with 500 (`steno-handover`, Swift core) | `fix/handover-first-announce-discard` | #239 | open |
-| The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | open |
-| The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | open |
+| After the intake, `admit` discards every file of the recording unless another device holds its receipt, and so do a refused `complete` and a failed first save (Swift core, the counterpart of #219) | `fix/swift-handover-admit` | #212 | merged |
+| The phone rebuilds its queue index from the recording files on disk and the recorder's directory, gives every recording its own file, saves nothing after a failed load, and fails a row after repeated announce 409s (`mobile/`) | `fix/mobile-queue-index-rebuild` | #223 | merged |
+| A re-announce of a `complete` recording with another size or hash is answered 409, so the phone keeps its file, and the same bytes in other chunks are answered `complete` (`steno-handover`, Swift core) | `fix/handover-reannounce-hash-check` | #224 | merged |
+| A first announce, one that finds no receipt in memory or the store, discards every inbox file of the recording id before it opens its own, so an old verified file is never admitted unhashed; Swift's announce answers a failed receipt read with 500 (`steno-handover`, Swift core) | `fix/handover-first-announce-discard` | #239 | merged |
+| The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | merged |
+| The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | merged |
 | Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back and opens; one that does not open waits for the next rebuild), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
-| On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`, `create_new_dir_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | open |
-| Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and are admitted once, the same bytes in another split restart the partial; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | open |
-| A device that will not run at 48 kHz (a headset in the hands-free profile) is recorded at its own rate and converted to 48 kHz on the processing thread, at start and after a switch mid-call, instead of failing (`steno-audio`, Swift core) | `t3code/check-rust-audio-sample-rate` | #198 | open |
-| Settings warns under an audio folder on a network mount on Linux and macOS too (`statfs`: NFS, SMB, VM host shares and remote FUSE mounts on Linux; a mount without `MNT_LOCAL`, SMB, NFS, AFP, WebDAV and macFUSE on macOS; `steno-pipeline`) | `fix/network-folder-warning` | #245 | open |
-| The Bonjour record follows a network change on every platform, and the Mac advertises its computer name (`steno-handover`, `whoami` 2) | `fix/handover-republish` | #247 | open |
-| On Windows two writers of one path in the process rename and flush one after the other, and std's rename and the reopen for the flush are retried on a sharing or lock violation or "access denied" for about 0.9 s, so a durable replace no longer fails because of another writer's flush (`steno-pipeline`) | `fix/windows-parallel-replace` | #252 | open |
-| The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | open |
-| On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
-| Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
-| On Windows the credential store keeps the API key and the handover identity on this computer (`CRED_PERSIST_LOCAL_MACHINE`) instead of with the roaming profile, and moves the `keyring` crate's roaming credentials there on their first read, keeping the stored blob under `CRED_PRESERVE_CREDENTIAL_BLOB` (`steno-services`) | `fix/windows-credential-persist` | #262 | open |
+| On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`, `create_new_dir_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | merged |
+| Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and are admitted once, the same bytes in another split restart the partial; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | merged |
+| A device that will not run at 48 kHz (a headset in the hands-free profile) is recorded at its own rate and converted to 48 kHz on the processing thread, at start and after a switch mid-call, instead of failing (`steno-audio`, Swift core) | `t3code/check-rust-audio-sample-rate` | #198 | merged |
+| Settings warns under an audio folder on a network mount on Linux and macOS too (`statfs`: NFS, SMB, VM host shares and remote FUSE mounts on Linux; a mount without `MNT_LOCAL`, SMB, NFS, AFP, WebDAV and macFUSE on macOS; `steno-pipeline`) | `fix/network-folder-warning` | #245 | merged |
+| The Bonjour record follows a network change on every platform, and the Mac advertises its computer name (`steno-handover`, `whoami` 2) | `fix/handover-republish` | #247 | merged |
+| On Windows two writers of one path in the process rename and flush one after the other, and std's rename and the reopen for the flush are retried on a sharing or lock violation or "access denied" for about 0.9 s, so a durable replace no longer fails because of another writer's flush (`steno-pipeline`) | `fix/windows-parallel-replace` | #252 | merged |
+| The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | merged |
+| On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | merged |
+| Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | merged |
+| On Windows the credential store keeps the API key and the handover identity on this computer (`CRED_PERSIST_LOCAL_MACHINE`) instead of with the roaming profile, and moves the `keyring` crate's roaming credentials there on their first read, keeping the stored blob under `CRED_PRESERVE_CREDENTIAL_BLOB` (`steno-services`) | `fix/windows-credential-persist` | #262 | merged |
 | A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
-| Stable plan A9: the AAC priming trimmed from the edit list, the gapless tag or, in the phone recorder's layout alone, AVFoundation's default; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | open |
-| S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | open |
+| Stable plan A9: the AAC priming trimmed from the edit list, the gapless tag or, in the phone recorder's layout alone, AVFoundation's default; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | merged |
+| S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | merged |
+| The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | merged |
+| Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | merged |
+| The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | merged |
+| The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | merged |
+| An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | merged |
+| The panels under Hyprland: a `GDK_BACKEND` list keeps them on XWayland, they carry their own titles on Linux, and the Hyprland window rules ship in `apps/desktop/src-tauri/linux/hyprland-steno.lua` (X2 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-panels` | #267 | merged |
+| Stable plan X6: the AUR package `steno-desktop-bin` (`packaging/aur/`), repackaging the release `.deb` verified against the release key, the binary and the sidecar in `/usr/lib/steno-desktop/` behind a `/usr/bin` wrapper that sets `STENO_DISTRIBUTION=aur` and `STENO_EXEC_PATH`, P5's drop-ins (copies until the pinned `.deb` ships them), no install script, pinned to rc.3 until a release contains #227 and #261; checked in an Arch container by `packaging/check-aur.sh` (`aur-ci.yml`) | `feat/aur-steno-desktop-bin` | #265 | merged |
+| Tests never write placeholder models into a models directory `STENO_MODELS_DIR` names: the reload test that installed them into the app's resolved directory (and so over a developer's real models) pins its own in the settings, the CLI tests clear the variable, `steno-services`' model writers panic outside the temp directory or inside the named one, and a child-process test proves the named directory is left alone | `fix/test-models-dir-guard` | #273 | merged |
+| S2: meeting detection on every platform (`steno_services::detection`: one prompt at a time for 60 s through the shell's panel, none while recording or with detection off, its Record attributed to the prompt's app through `recordFromPrompt`, the setting read every two seconds, which retries a detector that could not start) and the auto-stop after a call (`steno_services::auto_stop`: the 90-second grace, Keep recording, the call resuming, the Stop path with `callEnded`) (`steno-services`, desktop shell, web prompt) | `feat/rust-recorder-policy` | #271 | merged |
+| No update stops a recording or a processing run: the app's install gate over the recorder and the pipelines' in-flight set, whose job hold keeps jobs claimed during the install waiting for a minute at most; Record always works while an installer that returns (a `.deb`'s password prompt) runs, and the relaunch waits for what started; the user's yes while busy installs after it ends; automatic downloads on, not for an installer that asks an administrator, which runs only right after a yes given while idle; on Windows a hidden `cmd.exe` starts the old version again when the installer does not install (P25 of `.plans/2026-10-07-stable-promotion.md`; `steno-pipeline`, `steno-services`, desktop shell) | `fix/desktop-updates-wait-for-idle` | #270 | merged |
+| An app started inside another program's service (a Hyprland key binding without `uwsm-app`) moves at launch into a scope of its own with 20 s to save, an AppImage's mount servers into scopes of their own wherever the app runs, and the desktop README says what saves at each session end under Hyprland (X1 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-hyprland-session-end` | #272 | merged |
+| Stable plan X3: every tray action is in the tray's menu, a click doing nothing the menu does not, and on Linux a follower of the status notifier watcher on the session bus (its owner and `IsStatusNotifierHostRegistered`, at launch and at every change) decides the close: with no host, as on GNOME without the AppIndicator extension, closing the main window quits through Quit's path and saves a recording first, which `close-without-tray-linux.sh` checks in CI (`apps/desktop`) | `fix/desktop-linux-tray` | #275 | merged |
+| The handover behind a firewall: TCP 23820 on Linux (`HandoverConfiguration::LINUX_PORT`), set otherwise by `STENO_HANDOVER_PORT` or the setting `handoverPort` (a stored port that is not one ignored with a warning), a taken port giving way to one the system chooses with a warning, a start during a stop waiting for it, so a restart keeps the port; the AUR package's `ufw` profile `Steno`; the NixOS module's `programs.steno.openFirewall` and `handoverPort` (X4 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-core`, `steno-services`, `packaging/aur/`, `nix/`) | `fix/desktop-handover-firewall` | #276 | merged |
 | WP9b import of the Swift app's preferences, API key and handover identity on the Mac's first launch after the update, behind an onboarding step; `steno-macos` for the PKCS#12 export (S6 of `.plans/2026-10-07-stable-promotion.md`) | `feat/swift-import` | #236 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
@@ -3254,8 +3452,9 @@ WP10b puts the speech encoder on DirectML on Windows when the speech setting
 request, on Windows only; the child answers with the provider it chose). Only the
 encoder moves: the decoder and the joiner run once per token on one frame, and
 Silero on 32 ms frames, where a round trip to the GPU costs more than the step;
-the diarizer stays on the CPU because it runs in the app's process, where
-speech-stack decision 5 keeps no GPU driver. The probe is the session itself:
+the diarizer stays on the CPU, in the sidecar since #266, as it did in the
+app's process, where speech-stack decision 5 kept no GPU driver. The probe is
+the session itself:
 DirectML in the ONNX Runtime build, a hardware DirectX 12 adapter (the device
 filter leaves out WARP), the session created, one encoder run on a second of
 silence. Any failure opens the encoder on the CPU, and a later run that fails on

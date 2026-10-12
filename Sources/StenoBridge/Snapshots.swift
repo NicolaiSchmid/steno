@@ -455,6 +455,9 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
   public var state: BridgeMeetingState
   public var failureReason: String?
   public var endReason: String?
+  /// The warning that parts of the recording could not be decoded and were
+  /// replaced by silence. Rust only: the Swift host never sends it.
+  public var audioWarning: String?
   public var tags: [String]
   public var tab: Tab
   public var retention: Retention
@@ -478,7 +481,8 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
   public init(
     id: UUID, title: String, startedAt: Date, durationSeconds: Double, language: String?,
     source: BridgeMeetingSource, state: BridgeMeetingState, failureReason: String? = nil,
-    endReason: String? = nil, tags: [String], tab: Tab, retention: Retention, speakers: [Speaker],
+    endReason: String? = nil, audioWarning: String? = nil, tags: [String], tab: Tab,
+    retention: Retention, speakers: [Speaker],
     templates: [Template], templateID: String, summaryStatus: SummaryStatus,
     summary: [SummarySection], transcript: [Turn], tasks: [Task], decisions: [String],
     notes: String, export: Export, canProcessAgain: Bool, canRerunSummary: Bool, isBusy: Bool,
@@ -493,6 +497,7 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     self.state = state
     self.failureReason = failureReason
     self.endReason = endReason
+    self.audioWarning = audioWarning
     self.tags = tags
     self.tab = tab
     self.retention = retention

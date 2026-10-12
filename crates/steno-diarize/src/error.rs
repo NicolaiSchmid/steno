@@ -33,6 +33,12 @@ pub enum DiarizeError {
     #[cfg(feature = "onnx")]
     #[error(transparent)]
     Model(steno_speech::SpeechError),
+    /// The speech sidecar failed to diarize: its child could not load the
+    /// models, died, hung or overran the memory ceiling
+    /// ([`crate::SidecarDiarizer`]).
+    #[cfg(feature = "onnx")]
+    #[error(transparent)]
+    Sidecar(steno_speech::SpeechError),
     /// A model loaded but is not the one the pipeline expects: its
     /// metadata or its declared shapes disagree with what the pipeline
     /// decodes.

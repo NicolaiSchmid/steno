@@ -29,7 +29,7 @@ fn fixture(name: &str) -> AudioBuffer16k {
 }
 
 #[test]
-#[ignore = "needs the ONNX model files (STENO_MODELS_DIR or a download)"]
+#[ignore = "needs the ONNX model files: reads, or downloads into, the models directory STENO_MODELS_DIR names, else the app's own"]
 fn two_voices_fixture_gives_two_speakers() {
     let backend = OnnxBackend::from_store(&ModelStore::from_environment(), Install::Allowed, 2)
         .expect("backend loads");
@@ -55,7 +55,7 @@ fn two_voices_fixture_gives_two_speakers() {
 }
 
 #[test]
-#[ignore = "needs the ONNX model files (STENO_MODELS_DIR or a download)"]
+#[ignore = "needs the ONNX model files: reads, or downloads into, the models directory STENO_MODELS_DIR names, else the app's own"]
 fn the_segmentation_model_reports_pyannotes_geometry() {
     let backend = OnnxBackend::from_store(&ModelStore::from_environment(), Install::Allowed, 2)
         .expect("backend loads");

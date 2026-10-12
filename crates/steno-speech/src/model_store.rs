@@ -8,7 +8,10 @@
 //! through `FluidAudio` and `WhisperKit` instead.
 //!
 //! A store's root holds one folder per asset id, `<root>/<asset id>/`;
-//! where Steno keeps it: the crate docs' Models section.
+//! where Steno keeps it: the crate docs' Models section. The ONNX models
+//! have a store at the models directory's `onnx/`
+//! ([`ModelStore::in_models_directory`]), the Mac's `CoreML` Parakeet one
+//! at its `fluidaudio/` ([`ModelStore::coreml_in_models_directory`]).
 //!
 //! # Hosts
 //!
@@ -32,6 +35,12 @@
 //! put in place by hand: [`ModelStore::ensure`] reports
 //! [`SpeechError::NotHosted`] when it is missing.
 //!
+//! The Mac's `CoreML` Parakeet ([`ModelAsset::parakeet_v3_coreml`]) comes
+//! from the repository `FluidAudio` reads, [`PARAKEET_V3_COREML_REPO`], at
+//! the commit [`PARAKEET_V3_COREML_REVISION`]: 23 files, most of them in
+//! the four `.mlmodelc` bundles, about 483 MB. Their checksums are those
+//! of the tree the Swift app installed from it.
+//!
 //! A mirror ([`ModelStore::with_mirror`], the speech setting
 //! `modelsMirror`) replaces the hosts of every asset the store installs,
 //! the speech models (Parakeet, Silero VAD) and the diarizer's, with no
@@ -40,12 +49,15 @@
 //! whole store root (`parakeet-tdt-0.6b-v3-fp32/`, `silero-vad/`,
 //! `diarization/`) served over HTTP is a mirror. The Hugging Face
 //! repository [`STENO_MODELS_REPO`] holds only the Parakeet export, so a
-//! copy of it alone is not. A mirror should answer `Range` requests (see
-//! Downloads).
+//! copy of it alone is not. The `CoreML` store takes the same mirror, so
+//! `<mirror>/parakeet-tdt-0.6b-v3/` serves the `CoreML` Parakeet. A mirror
+//! should answer `Range` requests (see Downloads).
 //!
 //! # On disk
 //!
-//! An asset's folder holds, for each file `<name>` of the manifest:
+//! An asset's folder holds, for each file `<name>` of the manifest (a name
+//! may hold `/`, for a file in a folder of the asset, whose companions
+//! below then sit in that folder too):
 //!
 //! - `<name>`: the installed file, renamed into place only once verified
 //!   and synced. Only these count.
@@ -157,6 +169,16 @@ pub const STENO_MODELS_REPO: &str = "nicolaischmid/steno-models";
 pub const PARAKEET_V3_FP32_REVISION: Option<&str> =
     Some("4a133253481bfd2cb38dc3e77c3f748199562488");
 
+/// The Hugging Face repository `FluidAudio` downloads Parakeet v3 for
+/// `CoreML` from, <https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml>,
+/// where the Swift app's copy came from.
+pub const PARAKEET_V3_COREML_REPO: &str = "FluidInference/parakeet-tdt-0.6b-v3-coreml";
+
+/// The commit of [`PARAKEET_V3_COREML_REPO`] the `CoreML` Parakeet is
+/// fetched at (2026-08-19). Its 23 files are those the Swift app installed
+/// on 2026-09-25, byte for byte (`crates/steno-speech/tests/fixtures/parakeet-v3-coreml.sha256`).
+pub const PARAKEET_V3_COREML_REVISION: &str = "7dd20fe6b1797d35f5e3307e8b1732d9a178edfe";
+
 /// One downloadable model bundle; the settings pane shows the display
 /// name, the total size and the licence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,9 +257,67 @@ impl ModelAsset {
         }
     }
 
-    /// Every asset the crate knows.
+    /// Parakeet TDT 0.6B v3 for `CoreML` as `FluidAudio` ships it, the
+    /// files the Mac's `CoreML` backend (`steno-speech-coreml`) and the
+    /// Swift app load: the four `.mlmodelc` bundles, the vocabulary under
+    /// both its names, and `config.json`, from [`PARAKEET_V3_COREML_REPO`]
+    /// at [`PARAKEET_V3_COREML_REVISION`]. Its id is the folder `FluidAudio`
+    /// gives it, so a store rooted at the models directory's `fluidaudio/`
+    /// ([`ModelStore::coreml_in_models_directory`]) installs it where the
+    /// Swift app does. The other bundles of the repository (the int4 and v2
+    /// encoders, the older joints, the `.mlpackage` sources) are not
+    /// fetched. Swift: `ModelAsset.modelFolder` and `requiredFiles` in
+    /// `Sources/StenoSpeech/Models/ModelAsset.swift`.
     #[must_use]
-    pub fn all() -> Vec<Self> {
+    pub fn parakeet_v3_coreml() -> Self {
+        let file = |name: &str, sha256: &str, size: u64| ModelFile {
+            name: name.to_owned(),
+            source: Some(ModelSource::HuggingFace {
+                repo: PARAKEET_V3_COREML_REPO.to_owned(),
+                revision: PARAKEET_V3_COREML_REVISION.to_owned(),
+                path: name.to_owned(),
+            }),
+            sha256: sha256.to_owned(),
+            size,
+        };
+        ModelAsset {
+            id: "parakeet-tdt-0.6b-v3".to_owned(),
+            display_name: "Parakeet TDT 0.6B v3 (int8)".to_owned(),
+            licence: "CC-BY-4.0".to_owned(),
+            attribution: "Parakeet TDT 0.6B v3 by NVIDIA (https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), CC-BY-4.0, converted to CoreML by FluidInference".to_owned(),
+            files: vec![
+                file("Preprocessor.mlmodelc/analytics/coremldata.bin", "c9beeb989c8d66f8be11df59bc6df277ec76cee404f6865b46243835ef562f6d", 243),
+                file("Preprocessor.mlmodelc/coremldata.bin", "dbde3f2300842c1fd51ef3ff948a0bcffe65ffd2dca10707f2509f32c1d65b1d", 486),
+                file("Preprocessor.mlmodelc/metadata.json", "2a98699e22d279dd37fa1d238aeb1c6db1df0d6fad687775324157689d8f3acf", 2_841),
+                file("Preprocessor.mlmodelc/model.mil", "4b8518a956450fec57f06c2a21bdffc26973f7f1fa6842fb38fe917f896b6b93", 28_181),
+                file("Preprocessor.mlmodelc/weights/weight.bin", "129b76e3aeafa8afa3ea76d995b964b145fe83700d579f6ff42c4c38fa0968ea", 491_072),
+                file("Encoder.mlmodelc/analytics/coremldata.bin", "42e638870d73f26b332918a3496ce36793fbb413a81cbd3d16ba01328637a105", 243),
+                file("Encoder.mlmodelc/coremldata.bin", "d48034a167a82e88fc3df64f60af963ab3983538271175b8319e7d5720a0fb86", 485),
+                file("Encoder.mlmodelc/metadata.json", "da24da9cca943fb29d7fa8e376d57fca7cb3aa08ca51b956b0b0e56813f087e9", 2_921),
+                file("Encoder.mlmodelc/model.mil", "ed7b19156ca29fa7dfd6891deb9fda4b0e8893f68597c985d135736546a43808", 959_769),
+                file("Encoder.mlmodelc/weights/weight.bin", "e2020f323703477a5b21d7c2d282c403e371afb5962e79877e3033e73ba6f421", 445_187_200),
+                file("Decoder.mlmodelc/analytics/coremldata.bin", "4238c4e81ecd0dc94bd7dfbb60f7e2cc824107c1ffe0387b8607b72833dba350", 243),
+                file("Decoder.mlmodelc/coremldata.bin", "18647af085d87bd8f3121c8a9b4d4564c1ede038dab63d295b4e745cf2d7fb99", 554),
+                file("Decoder.mlmodelc/metadata.json", "a39e93cd8371b8ded92635c7804fcd0590f0d1dd9415c6d19a0484be073077d9", 3_427),
+                file("Decoder.mlmodelc/model.mil", "ef2a0a281695398a62fde86ac269c68f73d5b578d7ed3b31f2ba91a2d1ea1f35", 13_110),
+                file("Decoder.mlmodelc/weights/weight.bin", "48adf0f0d47c406c8253d4f7fef967436a39da14f5a65e66d5a4b407be355d41", 23_604_992),
+                file("JointDecisionv3.mlmodelc/analytics/coremldata.bin", "26def4bf73dd56d29dee21c8ef97cb8969e62f6120ed1adc91e46828e2737b6c", 243),
+                file("JointDecisionv3.mlmodelc/coremldata.bin", "f5fc08b741400f0088492c9e839418b1e18522f19cba28d361dd030c5f398342", 521),
+                file("JointDecisionv3.mlmodelc/metadata.json", "d9307211b9a37e0f0ac260c7660b1571a3de25841035cfdf9b58fd40425f890f", 3_453),
+                file("JointDecisionv3.mlmodelc/model.mil", "be60732943389a047175111a83f8839f3eb39d4803adafa828a0871b2f39818d", 11_775),
+                file("JointDecisionv3.mlmodelc/weights/weight.bin", "4e0e63d840032f7f07ddb1d64446051166281e5491bf22da8a945c41f6eedb3e", 12_642_764),
+                file("config.json", "97f19ecccd0fdc730d76fb918090fa8bc64bce8ea4ad43715d5e9c2c7350db66", 475),
+                file("parakeet_v3_vocab.json", "7ec60e05f1b24480736ec0eed40900f4626bce1fa9a60fd700ec7e2a59198735", 151_122),
+                file("parakeet_vocab.json", "7ec60e05f1b24480736ec0eed40900f4626bce1fa9a60fd700ec7e2a59198735", 151_122),
+            ],
+        }
+    }
+
+    /// Every ONNX asset the crate knows: what the speech sidecar loads.
+    /// The `CoreML` Parakeet ([`Self::parakeet_v3_coreml`]) lives in its
+    /// own store and is not among them.
+    #[must_use]
+    pub fn onnx() -> Vec<Self> {
         vec![Self::silero_vad(), Self::parakeet_v3_fp32()]
     }
 
@@ -247,18 +327,22 @@ impl ModelAsset {
         self.files.iter().map(|f| f.size).sum()
     }
 
-    /// Refuses an id or a file name that is not exactly one normal path
-    /// component (`..`, an absolute path, an empty string, a slash), so
-    /// the manifest can never name a path outside the root.
+    /// Refuses an id that is not exactly one normal path component (`..`,
+    /// an absolute path, an empty string, a slash), and a file name that
+    /// is not one or more of them joined by `/` (a file inside a folder of
+    /// the asset, as in a `CoreML` bundle), so the manifest can never name
+    /// a path outside the root.
     pub fn validate(&self) -> Result<(), SpeechError> {
-        for name in
-            std::iter::once(self.id.as_str()).chain(self.files.iter().map(|f| f.name.as_str()))
-        {
-            if !is_plain_name(name) {
-                return Err(SpeechError::InvalidName {
-                    asset: self.id.clone(),
-                    name: name.to_owned(),
-                });
+        let invalid = |name: &str| SpeechError::InvalidName {
+            asset: self.id.clone(),
+            name: name.to_owned(),
+        };
+        if !is_plain_name(&self.id) {
+            return Err(invalid(&self.id));
+        }
+        for file in &self.files {
+            if !file.name.split('/').all(is_plain_name) {
+                return Err(invalid(&file.name));
             }
         }
         Ok(())
@@ -311,6 +395,21 @@ const CHUNK: u64 = 64 << 20;
 
 /// The read buffer of a download and of a hash.
 const READ_BUFFER: usize = 1 << 16;
+
+/// Whether a model's user may download it when a file is missing: the
+/// speech sidecar's ([`SidecarConfig::install`](crate::SidecarConfig::install))
+/// and `steno-diarize`'s, which re-exports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Install {
+    /// A missing file is downloaded first ([`ModelStore::ensure`]): the
+    /// `steno` command's explicit commands, `steno process` among them.
+    Allowed,
+    /// A missing file is [`SpeechError::NotInstalled`] and no request is
+    /// made ([`ModelStore::installed_directory`]): the app's pipelines,
+    /// which check for missing models before a job and never download
+    /// during one; Settings and onboarding install the models.
+    Never,
+}
 
 /// The store root, the mirror, the HTTP client, and the chunk size, body
 /// timeouts and clock the tests change.
@@ -386,11 +485,26 @@ impl ModelStore {
         }
     }
 
+    /// The folder of the models directory the `CoreML` models live in, as
+    /// the Swift app's `FluidAudio` lays them out.
+    /// Swift: `ModelAsset.frameworkRoot`
+    /// (`Sources/StenoSpeech/Models/ModelAsset.swift`).
+    pub const FLUIDAUDIO_FOLDER: &'static str = "fluidaudio";
+
     /// The store in the models directory `models_directory`:
     /// `<models directory>/onnx`.
     #[must_use]
     pub fn in_models_directory(models_directory: &Path) -> Self {
         Self::new(models_directory.join(Self::ONNX_FOLDER))
+    }
+
+    /// The store of the `CoreML` models in the models directory
+    /// `models_directory`: `<models directory>/fluidaudio`, where
+    /// [`ModelAsset::parakeet_v3_coreml`] installs into
+    /// `fluidaudio/parakeet-tdt-0.6b-v3`, the Swift app's folder.
+    #[must_use]
+    pub fn coreml_in_models_directory(models_directory: &Path) -> Self {
+        Self::new(models_directory.join(Self::FLUIDAUDIO_FOLDER))
     }
 
     /// For the `transcribe` example and the FLEURS test, which have no
@@ -545,7 +659,11 @@ impl ModelStore {
                     directory,
                 });
             };
-            self.download_with_retries(&url, file, &directory.join(&file.name), progress)?;
+            let destination = directory.join(&file.name);
+            if let Some(folder) = destination.parent() {
+                fs::create_dir_all(folder).map_err(|e| SpeechError::io(folder, e))?;
+            }
+            self.download_with_retries(&url, file, &destination, progress)?;
         }
         Ok(directory)
     }
@@ -1010,9 +1128,9 @@ impl Partial {
         limit: Duration,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<Option<Self>, SpeechError> {
-        let path = destination.with_file_name(format!("{}.partial", file.name));
+        let path = beside(destination, ".partial");
         let Some(lock) = lock_download(destination, file, &path, clock, limit, progress)? else {
-            return Self::per_call(destination, &file.name).map(Some);
+            return Self::per_call(destination).map(Some);
         };
         if is_complete(destination, file) {
             // Installed by the download this one waited for, or by another
@@ -1070,14 +1188,16 @@ impl Partial {
     /// `<name>.partial.<pid>.<call>`. A name that exists already, left by
     /// a dead process that had the same pid, is passed over for the next
     /// call number.
-    fn per_call(destination: &Path, name: &str) -> Result<Self, SpeechError> {
+    fn per_call(destination: &Path) -> Result<Self, SpeechError> {
         loop {
-            let path = destination.with_file_name(format!(
-                "{}{}.{}",
-                partial_prefix(name),
-                std::process::id(),
-                NEXT_CALL.fetch_add(1, Ordering::Relaxed)
-            ));
+            let path = beside(
+                destination,
+                &format!(
+                    ".partial.{}.{}",
+                    std::process::id(),
+                    NEXT_CALL.fetch_add(1, Ordering::Relaxed)
+                ),
+            );
             match File::options().write(true).create_new(true).open(&path) {
                 Ok(file) => return Ok(Partial::new(path, file, None)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -1197,7 +1317,7 @@ fn lock_download(
     limit: Duration,
     progress: &mut dyn FnMut(DownloadProgress<'_>),
 ) -> Result<Option<DownloadLock>, SpeechError> {
-    let path = destination.with_file_name(format!("{}.lock", file.name));
+    let path = beside(destination, ".lock");
     let mut waiting = false;
     let mut seen: Option<(u64, Instant)> = None;
     loop {
@@ -1249,6 +1369,14 @@ fn lock_download(
     }
 }
 
+/// `destination` with `suffix` after its file name, in the same folder:
+/// `<name>.lock`, `<name>.partial`, `<name>.partial.<pid>.<call>`.
+fn beside(destination: &Path, suffix: &str) -> PathBuf {
+    let mut path = destination.as_os_str().to_owned();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
 /// Opens `path` to read and write, creating it, keeping what it holds:
 /// `<name>.lock` and `<name>.partial`.
 fn open_or_create(path: &Path) -> std::io::Result<File> {
@@ -1291,8 +1419,13 @@ fn partial_pid(file_name: &str, prefix: &str) -> Option<u32> {
 /// nothing is installed. Best effort: a file that cannot be read or
 /// removed stays.
 fn remove_stale_partials(directory: &Path, name: &str) {
-    let prefix = partial_prefix(name);
-    let Ok(entries) = fs::read_dir(directory) else {
+    // A file in a folder of the asset has its partials in that folder.
+    let path = directory.join(name);
+    let (Some(folder), Some(base)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let prefix = partial_prefix(&base.to_string_lossy());
+    let Ok(entries) = fs::read_dir(folder) else {
         return;
     };
     for entry in entries.flatten() {
@@ -2417,7 +2550,7 @@ mod tests {
             )
             .unwrap();
         }
-        let mut partial = Partial::per_call(&destination, "model.onnx").unwrap();
+        let mut partial = Partial::per_call(&destination).unwrap();
         assert!(!partial.resumable);
         partial.append(b"new").unwrap();
         let path = partial.path.clone();
@@ -2572,6 +2705,14 @@ mod tests {
             sha256: digest(b"notes"),
             size: 5,
         });
+        // A file in a folder of the asset, as in a CoreML bundle: its
+        // partials sit beside it, not at the top.
+        asset.files.push(ModelFile {
+            name: "bundle/model.onnx".to_owned(),
+            source: None,
+            sha256: digest(&body),
+            size: body.len() as u64,
+        });
         let directory = store.directory(&asset);
         fs::create_dir_all(&directory).unwrap();
         let minute = Duration::from_secs(60);
@@ -2610,8 +2751,22 @@ mod tests {
             ("model.onnx.partial.x.0", b"half", now - 2 * STALE_PARTIAL),
             ("other.onnx.partial.1.0", b"half", now - 2 * STALE_PARTIAL),
         ];
-        for (name, contents, modified) in files {
-            let path = directory.join(name);
+        let bundle = directory.join("bundle");
+        fs::create_dir_all(&bundle).unwrap();
+        let nested = [
+            ("model.onnx", &body[..], now - 2 * STALE_PARTIAL),
+            (
+                &*format!("model.onnx.partial.{other}.0"),
+                b"half",
+                now - 11 * minute,
+            ),
+        ];
+        let written = files
+            .iter()
+            .map(|file| (&directory, file))
+            .chain(nested.iter().map(|file| (&bundle, file)));
+        for (folder, &(name, contents, modified)) in written {
+            let path = folder.join(name);
             fs::write(&path, contents).unwrap();
             File::options()
                 .write(true)
@@ -2626,9 +2781,15 @@ mod tests {
             .iter()
             .map(|(name, _, _)| (*name).to_owned())
             .filter(|name| *name != format!("model.onnx.partial.{other}.0"))
+            .chain(["bundle".to_owned()])
             .collect();
         expected.sort();
         assert_eq!(left, expected);
+        let in_bundle: Vec<_> = fs::read_dir(&bundle)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(in_bundle, ["model.onnx"]);
     }
 
     /// The largest file a GitHub release takes.
@@ -2639,7 +2800,7 @@ mod tests {
         // GitHub release assets cap at 2 GB a file, so a file that large
         // can only come from Hugging Face.
         let hosted = ModelAsset::parakeet_v3_fp32();
-        for asset in ModelAsset::all() {
+        for asset in ModelAsset::onnx() {
             for file in &asset.files {
                 match &file.source {
                     Some(ModelSource::Url(url)) => {
@@ -2710,6 +2871,10 @@ mod tests {
             ("", "model.onnx"),
             ("a/b", "model.onnx"),
             (".", "model.onnx"),
+            ("test-asset", "bundle/../model.onnx"),
+            ("test-asset", "bundle//model.onnx"),
+            ("test-asset", "bundle/"),
+            ("test-asset", "./model.onnx"),
         ] {
             let mut bad = asset(None, &body, &digest(&body));
             bad.id = id.to_owned();
@@ -2733,9 +2898,10 @@ mod tests {
             ));
             assert!(!store.is_installed(&bad));
         }
-        for asset in ModelAsset::all() {
+        for asset in ModelAsset::onnx() {
             asset.validate().unwrap();
         }
+        ModelAsset::parakeet_v3_coreml().validate().unwrap();
         assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
         // An invalid asset lists every file as missing, even one a join of
         // its id would find: "." resolves to the root itself.
@@ -2747,7 +2913,7 @@ mod tests {
 
     #[test]
     fn the_manifest_is_consistent_and_the_root_follows_the_support_directory() {
-        for asset in ModelAsset::all() {
+        for asset in ModelAsset::onnx() {
             assert!(!asset.files.is_empty());
             for file in &asset.files {
                 assert_eq!(file.sha256.len(), 64, "{}", file.name);
@@ -2769,6 +2935,67 @@ mod tests {
         assert_eq!(
             store.directory(&ModelAsset::silero_vad()),
             PathBuf::from("/models/silero-vad")
+        );
+    }
+
+    /// The `CoreML` Parakeet's manifest is the tree the Swift app installed
+    /// on 2026-09-25 (the fixture, `<sha256>  <size>  <path>` per file, as
+    /// listed on the Mac it was installed on), every file fetched from the
+    /// `FluidAudio` repository at the pinned commit, into the folder the
+    /// Swift app and the `CoreML` backend read.
+    #[test]
+    fn the_coreml_parakeet_is_the_tree_the_swift_app_installed_at_the_pinned_commit() {
+        let fixture = include_str!("../tests/fixtures/parakeet-v3-coreml.sha256");
+        let mut expected: Vec<(String, u64, String)> = fixture
+            .lines()
+            .map(|line| {
+                let mut fields = line.split("  ");
+                let (sha256, size, path) = (
+                    fields.next().unwrap(),
+                    fields.next().unwrap(),
+                    fields.next().unwrap(),
+                );
+                (path.to_owned(), size.parse().unwrap(), sha256.to_owned())
+            })
+            .collect();
+        expected.sort();
+        assert_eq!(expected.len(), 23);
+        let asset = ModelAsset::parakeet_v3_coreml();
+        let mut manifest: Vec<_> = asset
+            .files
+            .iter()
+            .map(|f| (f.name.clone(), f.size, f.sha256.clone()))
+            .collect();
+        manifest.sort();
+        assert_eq!(manifest, expected);
+        assert_eq!(asset.total_size(), 483_257_242);
+        assert_eq!(PARAKEET_V3_COREML_REVISION.len(), 40);
+        assert!(PARAKEET_V3_COREML_REVISION.starts_with("7dd20fe6b1"));
+        for file in &asset.files {
+            assert_eq!(
+                file.source,
+                Some(ModelSource::HuggingFace {
+                    repo: PARAKEET_V3_COREML_REPO.to_owned(),
+                    revision: PARAKEET_V3_COREML_REVISION.to_owned(),
+                    path: file.name.clone(),
+                }),
+                "{}",
+                file.name
+            );
+        }
+        assert_eq!(
+            ModelStore::new("/m")
+                .url_for(&asset, &asset.files[9])
+                .unwrap(),
+            "https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml/resolve/7dd20fe6b1797d35f5e3307e8b1732d9a178edfe/Encoder.mlmodelc/weights/weight.bin"
+        );
+        assert_eq!(
+            ModelStore::coreml_in_models_directory(Path::new("/models")).directory(&asset),
+            Path::new("/models/fluidaudio/parakeet-tdt-0.6b-v3")
+        );
+        assert!(
+            ModelAsset::onnx().iter().all(|onnx| onnx.id != asset.id),
+            "the ONNX assets stay the sidecar's"
         );
     }
 }

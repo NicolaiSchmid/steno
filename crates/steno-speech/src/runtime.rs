@@ -3,14 +3,15 @@
 //! Windows the ONNX sidecar
 //! ([`SidecarSpeechEngine`](crate::SidecarSpeechEngine)) is the only
 //! speech engine the app runs: speech inference never shares the app's
-//! process there (the diarizer's ONNX models still run in it). An uncaught
-//! C++ exception in ONNX Runtime ends the process, and ONNX Runtime works
-//! in 2 to 3 GB; in a child such an end costs one request, and the memory
-//! goes back when the child exits.
+//! process there, and the diarizer's runs in the same child on every
+//! platform. An uncaught C++ exception in ONNX Runtime ends the process,
+//! and ONNX Runtime works in 2 to 3 GB; in a child such an end costs one
+//! request, and the memory goes back when the child exits.
 //! On macOS the in-process `CoreML` engine (`steno-speech-coreml`) is the
-//! default, so the Mac stays one process; the ONNX sidecar is a fallback
-//! behind [`SpeechSettings::onnx_sidecar_on_mac`], for a Mac where the
-//! Neural Engine path fails. The in-process [`OnnxSpeechEngine`](crate::OnnxSpeechEngine)
+//! default, so the Mac runs Parakeet in process and starts the sidecar only
+//! to diarize; the ONNX sidecar is a speech fallback behind
+//! [`SpeechSettings::onnx_sidecar_on_mac`], for a Mac where the Neural
+//! Engine path fails. The in-process [`OnnxSpeechEngine`](crate::OnnxSpeechEngine)
 //! is what the sidecar hosts and what the example and the FLEURS test
 //! drive; the app never runs it on its own thread.
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
@@ -82,6 +83,15 @@ impl SpeechSettings {
     #[must_use]
     pub fn model_store(&self, models_directory: &Path) -> ModelStore {
         ModelStore::in_models_directory(models_directory).with_mirror(self.models_mirror.clone())
+    }
+
+    /// The `CoreML` store of the models directory `models_directory` (its
+    /// `fluidaudio/` folder, [`ModelStore::coreml_in_models_directory`])
+    /// with these settings' mirror.
+    #[must_use]
+    pub fn coreml_store(&self, models_directory: &Path) -> ModelStore {
+        ModelStore::coreml_in_models_directory(models_directory)
+            .with_mirror(self.models_mirror.clone())
     }
 }
 

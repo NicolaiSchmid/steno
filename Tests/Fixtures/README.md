@@ -25,8 +25,9 @@ case-insensitive by default.
 The compressed audio fixtures, read by the Rust tests through
 `CARGO_MANIFEST_DIR/../../Tests/Fixtures`, not `Fixtures.url`. The first five
 come from ffmpeg 8.1.1 (libavformat 62.12.101), which reproduces them byte for
-byte. The encoder priming the Rust tests trim (1 024 samples, from the edit
-list) depends on the encoder, so another version is a reviewed change.
+byte; the sixth is the first with three packets overwritten. The encoder
+priming the Rust tests trim (1 024 samples, from the edit list) depends on
+the encoder, so another version is a reviewed change.
 
 - `tone-440-44k1-500ms.m4a` and `.mp3`: half a second of a 440 Hz sine at 0.5,
   mono 44.1 kHz, AAC-LC and MP3 at 96 kbps:
@@ -40,6 +41,14 @@ list) depends on the encoder, so another version is a reviewed change.
   `ffmpeg -f lavfi -i "aevalsrc='if(gte(n,8820),0.5*sin(2*PI*440*(n-8820)/44100),0)|if(gte(n,11025),0.5*sin(2*PI*1000*(n-11025)/44100),0)':s=44100:d=0.5" -c:a aac -b:a 96k tone-440-1000-44k1-stereo-onset.m4a`.
 - `tone-440-44k1-500ms-mp3.mp4`: the MP3 in an MP4 container (an edit list of
   1 105 samples): `ffmpeg -i tone-440-44k1-500ms.mp3 -c:a copy -f mp4 tone-440-44k1-500ms-mp3.mp4`.
+- `tone-440-44k1-500ms-damaged.m4a`: `tone-440-44k1-500ms.m4a` with the
+  payload of three of its 23 AAC packets overwritten, for the decoder's
+  silence in place of a packet it cannot decode: packet 9 (bytes 2 593 to
+  2 905) with zeros, packet 10 (2 906 to 3 170) with `0xAA` and packet 15
+  (4 269 to 4 521) with `0x55`, which symphonia rejects as invalid data, a
+  program config element and a coupling channel element. The offsets are
+  the `mdat` payload's start (44) plus the `stsz` sizes before each packet:
+  `python3 -c "b=bytearray(open('tone-440-44k1-500ms.m4a','rb').read()); b[2593:2906]=bytes(313); b[2906:3171]=b'\xaa'*265; b[4269:4522]=b'\x55'*253; open('tone-440-44k1-500ms-damaged.m4a','wb').write(b)"`.
 - `silence-44k1-avaudiorecorder.m4a`: half a second from `AVAudioRecorder`
   (`record(forDuration: 0.5)` over SSH, where the microphone gives zeros).
 - `tone-440-44k1-onset-200ms-apple.m4a`: the onset fixture's PCM written

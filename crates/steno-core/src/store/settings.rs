@@ -2,11 +2,18 @@
 //! one-line `StenoJSON` fragment. A property missing from the table loads
 //! as its default. A row this build does not know (a newer build's or the
 //! Swift app's, which share the file until the Mac cutover) is ignored on
-//! load and kept on save.
+//! load and kept on save. A `handoverPort` row that is not a port (users
+//! type it by hand) loads as unset with a warning, and the next save
+//! removes it. Rust only.
 //! Swift: `Sources/StenoCore/Storage/SettingsStore.swift`, which still
 //! deletes and rewrites every row.
+//!
+//! Parakeet v3 ([`PARAKEET_V3_ENGINE_ID`]) is the one engine the Rust app
+//! runs; [`Store::retire_speech_engine`] moves any other stored engine id
+//! (Whisper, Parakeet Ultra and the German Parakeet the Swift app offered)
+//! to it. Rust only.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 use serde::Deserialize;
 use serde::de::{self, Deserializer, Visitor};
 use serde_json::Value;
@@ -14,6 +21,19 @@ use serde_json::Value;
 use super::{Result, Store, execute_cached, query_all};
 use crate::json;
 use crate::model::Settings;
+
+/// The one engine the Rust app runs, a Swift engine too: what
+/// [`Store::retire_speech_engine`] stores in place of any other id.
+/// Swift: `SpeechEngineID.parakeetV3`
+/// (`Sources/StenoSpeech/Engines/SpeechEngineID.swift`).
+pub const PARAKEET_V3_ENGINE_ID: &str = "parakeet-v3";
+
+/// The key [`Settings::speech_engine_id`] is stored under.
+const SPEECH_ENGINE_KEY: &str = "speechEngineID";
+
+/// The key [`Settings::handover_port`] is stored under, the one users type
+/// by hand (`apps/desktop/README.md`).
+const HANDOVER_PORT_KEY: &str = "handoverPort";
 
 /// `settings` as a JSON object. Through text, not `to_value`, so an `f32`
 /// keeps its shortest form (`0.6`) as in [`json::to_column_string`].
@@ -75,6 +95,13 @@ impl Store {
         })?;
         let mut merged = object(defaults)?;
         for (key, value) in rows {
+            if key == HANDOVER_PORT_KEY && json::from_column_str::<Option<u16>>(&value).is_err() {
+                tracing::warn!(
+                    target: "steno::store",
+                    "the stored {HANDOVER_PORT_KEY} is not a port from 0 to 65535, so it is ignored"
+                );
+                continue;
+            }
             merged.insert(key, json::from_column_str(&value)?);
         }
         Ok(serde_json::from_value(Value::Object(merged))?)
@@ -108,6 +135,43 @@ impl Store {
             Ok(())
         })
     }
+
+    /// When an engine id other than [`PARAKEET_V3_ENGINE_ID`] is stored
+    /// (an engine the Swift app offered and the Rust app does not run),
+    /// calls `before_rewrite`, then stores `parakeet-v3` in its place, in
+    /// one transaction; returns whether it did. No id, or `parakeet-v3`,
+    /// changes nothing and calls nothing. The app calls it at launch,
+    /// before anything reads the engine, and records the one-time notice
+    /// in `before_rewrite`, so a crash between the two shows the notice
+    /// once too often rather than switching the engine without a word.
+    pub fn retire_speech_engine(&self, before_rewrite: impl FnOnce()) -> Result<bool> {
+        self.write(|transaction| {
+            let stored: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM setting WHERE key = ?1",
+                    params![SPEECH_ENGINE_KEY],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(stored) = stored else {
+                return Ok(false);
+            };
+            let id: Value = json::from_column_str(&stored)?;
+            if id.as_str() == Some(PARAKEET_V3_ENGINE_ID) {
+                return Ok(false);
+            }
+            before_rewrite();
+            execute_cached(
+                transaction,
+                "UPDATE setting SET value = ?2 WHERE key = ?1",
+                params![
+                    SPEECH_ENGINE_KEY,
+                    json::to_column_string(&PARAKEET_V3_ENGINE_ID)?
+                ],
+            )?;
+            Ok(true)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +190,7 @@ mod tests {
             llm_model: Some("model".to_owned()),
             codex_model: Some("codex".to_owned()),
             codex_confirmed_at: Some(chrono::DateTime::UNIX_EPOCH),
+            handover_port: Some(23820),
             obsidian: Some(ObsidianSettings {
                 vault_path: "/vault".to_owned(),
                 people_folder: None,
@@ -139,5 +204,14 @@ mod tests {
         let mut known = known_keys().to_vec();
         known.sort_unstable();
         assert_eq!(known, serialized);
+    }
+
+    #[test]
+    fn the_handover_port_is_stored_under_the_key_the_readme_names() {
+        let settings = Settings {
+            handover_port: Some(23900),
+            ..Settings::default()
+        };
+        assert_eq!(object(&settings).unwrap()[HANDOVER_PORT_KEY], 23900);
     }
 }

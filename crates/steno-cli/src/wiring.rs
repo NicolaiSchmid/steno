@@ -63,6 +63,20 @@ impl DatabaseOptions {
         }
     }
 
+    /// The record of what the decoder replaced by silence per meeting
+    /// ([`steno_pipeline::DamagedAudio`]) beside the database, the app's
+    /// support directory by default, so a command that runs the pipeline
+    /// writes the marks the app's detail reads, and its retention rule is
+    /// to ask. The
+    /// command holds the database's lock, so the app is not running.
+    pub fn damaged_audio(&self) -> Result<Arc<steno_pipeline::DamagedAudio>, Failure> {
+        let path = self.path()?;
+        let directory = path.parent().unwrap_or_else(|| Path::new(""));
+        Ok(Arc::new(steno_pipeline::DamagedAudio::in_directory(
+            directory,
+        )))
+    }
+
     /// Opens the database for a command that writes, holding its lock
     /// (`steno_core::DatabaseLock`) until the process ends; refused while
     /// the app or another steno command holds it, so the two never process
@@ -161,7 +175,8 @@ pub const ENGINE_IDS: [&str; 4] = [
 ];
 
 /// `--engine <id>`: without it the pipeline runs the fakes; with it
-/// Parakeet v3 where the flag's help says, the ONNX diarizer and cosine
+/// Parakeet v3 where the flag's help says, the ONNX diarizer in
+/// `steno-speech-sidecar` (on the Mac too, with `CoreML` speech) and cosine
 /// speaker memory over the store. The diarizer's models, and in the speech
 /// sidecar Parakeet's, download on first use (from their hosts or the
 /// mirror); the `CoreML` Parakeet must be installed.
@@ -170,7 +185,7 @@ pub struct SpeechOptions {
     #[arg(
         long,
         value_name = "engine",
-        help = "Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs Parakeet v3 in steno-speech-sidecar, which must sit beside steno, except parakeet-v3 on the Mac, which runs on CoreML unless speech.json chooses the sidecar."
+        help = "Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs Parakeet v3 in steno-speech-sidecar, which must sit beside steno, except parakeet-v3 on the Mac, which runs on CoreML unless speech.json chooses the sidecar. The diarizer runs in steno-speech-sidecar with every engine, so on the Mac it must sit beside steno too, or every meeting gets the fallback speakers."
     )]
     pub engine: Option<String>,
 }
@@ -219,12 +234,18 @@ pub fn paths() -> Result<StenoPaths, Failure> {
 }
 
 /// The speech setup over `models_directory`, the speech settings read
-/// from the default support directory without creating it.
+/// from the default support directory without creating it. Its sidecar
+/// downloads a missing model on first use (`Install::Allowed`): a user who
+/// runs an explicit command in a terminal asked for the work and sees its
+/// output. The app's setup never does (`Install::Never`, the default), and
+/// this one is built here, not shared with it.
 pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
-    SpeechSetup::in_models_directory(
+    let mut setup = SpeechSetup::in_models_directory(
         models_directory,
         &StenoPaths::new(StenoPaths::default_support_directory()),
-    )
+    );
+    setup.sidecar.install = steno_speech::Install::Allowed;
+    setup
 }
 
 /// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
@@ -326,11 +347,13 @@ pub fn dependencies(
                 Some(directory) => standardized(directory),
                 None => steno_services::speech::models_directory(settings, &paths()?),
             });
+            // One sidecar engine for both, so they share its child.
+            let sidecar = Arc::new(steno_services::speech::sidecar_engine(&speech));
             (
                 // The flag names the engine for this run, as the Swift CLI's
                 // `makeSpeechEngine(engine, ...)` did; the stored id does not.
-                steno_services::speech::speech_engine(engine, &speech),
-                process_diarizer(&speech),
+                steno_services::speech::speech_engine_in(engine, &speech, &sidecar),
+                process_diarizer(sidecar),
                 Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
             )
         }
@@ -359,11 +382,16 @@ pub fn dependencies(
     })
 }
 
-/// The diarizer `steno process --engine` runs over `speech`. An explicit
-/// command run in a terminal, so it may download the diarizer's models on
-/// first use (`Install::Allowed`), also once the app's pipeline may not.
-fn process_diarizer(speech: &SpeechSetup) -> Arc<dyn steno_core::Diarizer> {
-    steno_services::speech::diarizer(speech, steno_diarize::Install::Allowed)
+/// The diarizer `steno process --engine` runs in the child of `sidecar`.
+/// It stays on `Install::Allowed`: a user who runs an explicit command in
+/// a terminal asked for the work and sees its output, so it may download
+/// the diarizer's models on first use. The app's pipelines never do
+/// (`Install::Never` in `steno_services::speech::SpeechEngines`), and
+/// this wiring is built here, not shared with them.
+fn process_diarizer(
+    sidecar: Arc<steno_speech::SidecarSpeechEngine>,
+) -> Arc<dyn steno_core::Diarizer> {
+    steno_services::speech::diarizer_in(sidecar, steno_diarize::Install::Allowed)
 }
 
 /// A hex SHA-256, `sha256sum`'s spelling.
@@ -382,6 +410,30 @@ pub fn sha256_hex(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The damage a command's pipeline records goes to the file beside the
+    /// database, where the app reads it.
+    #[test]
+    fn the_damage_is_recorded_beside_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = DatabaseOptions {
+            database_path: Some(dir.path().join("steno.sqlite")),
+        };
+        let meeting = Uuid::new_v4();
+        let damage = steno_core::AudioDamage {
+            parts: 2,
+            seconds: 0.05,
+        };
+        options
+            .damaged_audio()
+            .unwrap()
+            .record(meeting, damage)
+            .unwrap();
+        assert_eq!(
+            steno_pipeline::DamagedAudio::in_directory(dir.path()).damage(meeting),
+            damage
+        );
+    }
 
     /// After the Linux app's move the file has no key: none, as on the
     /// Mac; any other failure stays one.
@@ -519,6 +571,23 @@ mod tests {
         DatabaseLock::acquire(&database).expect("the read let go of the lock");
     }
 
+    /// The command's speech sidecar may download a missing model, where
+    /// the app's setup, built the same way without the CLI's switch, may
+    /// not.
+    #[test]
+    fn the_commands_sidecar_may_download_its_models() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            speech_setup(dir.path().join("models")).sidecar.install,
+            steno_speech::Install::Allowed
+        );
+        let app = SpeechSetup::in_models_directory(
+            dir.path().join("models"),
+            &StenoPaths::new(dir.path()),
+        );
+        assert_eq!(app.sidecar.install, steno_speech::Install::Never);
+    }
+
     /// `steno process` may download the diarizer's models: over an empty
     /// models directory its diarizer's `prepare` asks the mirror.
     #[tokio::test(flavor = "multi_thread")]
@@ -548,7 +617,8 @@ mod tests {
             &StenoPaths::new(dir.path()),
         );
         speech.speech_settings.models_mirror = Some(mirror);
-        assert!(process_diarizer(&speech).prepare().await.is_err());
+        let sidecar = Arc::new(steno_services::speech::sidecar_engine(&speech));
+        assert!(process_diarizer(sidecar).prepare().await.is_err());
         assert!(requests.load(Ordering::SeqCst) > 0);
     }
 

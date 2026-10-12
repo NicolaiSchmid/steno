@@ -26,10 +26,14 @@ packages=(
   pkg-config
   wget
   # The headless smoke: a virtual X server and `import` for the screenshots;
-  # the lost-display check: xdotool to start a recording.
+  # the smoke and the lost-display check: xdotool to find the panels by
+  # their titles and to start a recording.
   xvfb
   imagemagick
   xdotool
+  # The close check's stand-in tray watcher
+  # (apps/desktop/scripts/tray-watcher-linux.py).
+  python3-gi
   # steno-audio's PipeWire backend: headers and bindgen's libclang.
   libclang-dev
   libpipewire-0.3-dev
@@ -53,4 +57,4 @@ if [[ "$(id -u)" != "0" ]]; then
 fi
 
 $sudo apt-get update
-$sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+$sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"

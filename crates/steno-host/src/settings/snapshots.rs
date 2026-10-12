@@ -82,16 +82,17 @@ pub fn libraries() -> Vec<GeneralAcknowledgement> {
     .collect()
 }
 
-/// Every speech model, named by the model store that holds it, then the
-/// libraries.
+/// Every speech model the app offers ([`ModelAsset::OFFERED`]), as the
+/// model store that holds it acknowledges it, then the libraries.
 pub fn acknowledgements(models: &dyn SpeechModels) -> Vec<GeneralAcknowledgement> {
-    ModelAsset::ALL
+    ModelAsset::OFFERED
         .iter()
-        .map(|asset| GeneralAcknowledgement {
+        .flat_map(|asset| models.notices(*asset))
+        .map(|notice| GeneralAcknowledgement {
             group: GeneralAcknowledgementGroup::SpeechModels,
-            name: models.display_name(*asset).to_owned(),
-            licence: asset.licence().to_owned(),
-            source: models.source_repo(*asset).to_owned(),
+            name: notice.name,
+            licence: notice.licence,
+            source: notice.source,
         })
         .chain(libraries())
         .collect()

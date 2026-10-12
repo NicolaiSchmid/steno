@@ -70,19 +70,19 @@ describe("DetectionPrompt", () => {
 		expect(screen.getByTestId("countdown-hairline")).toBeInTheDocument();
 	});
 
-	it("Record starts a call recording through the bridge", async () => {
+	it("Record tells the shell which prompt it was, never the bridge", async () => {
 		const harness = await createBridgeHarness();
+		const shell = fakeShell();
 		renderWithBridge(
 			<DetectionPrompt
-				request={{ appName: "Zoom", seconds: 60 }}
-				shell={fakeShell()}
+				request={{ appName: "Zoom", seconds: 60, raised: 4 }}
+				shell={shell}
 			/>,
 			harness,
 		);
 		await userEvent.click(screen.getByTestId("prompt-record"));
-		expect(callsTo(harness.transport, "recording.start")).toEqual([
-			{ method: "recording.start", params: { mode: "call" } },
-		]);
+		expect(shell.calls).toEqual([["recordFromPrompt", { raised: 4 }]]);
+		expect(callsTo(harness.transport, "recording.start")).toEqual([]);
 	});
 
 	it("the X tells the shell and never the bridge", async () => {

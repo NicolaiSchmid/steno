@@ -1,10 +1,14 @@
 import { XIcon } from "lucide-react";
 import { useRef } from "react";
-import { send, useBridge } from "@/bridge/hooks";
 import { Button, RecordMark } from "@/components/ui";
 import { useCountdownSeconds } from "@/lib/use-now";
 import { CountdownHairline, PanelBar } from "./panel-bar";
-import { type PanelShell, panelShell, useReportSize } from "./panel-shell";
+import {
+	type PanelAction,
+	type PanelShell,
+	panelShell,
+	useReportSize,
+} from "./panel-shell";
 
 /**
  * The detection prompt
@@ -13,8 +17,10 @@ import { type PanelShell, panelShell, useReportSize } from "./panel-shell";
  * microphone", one line under it, one primary Record button, an X, and the
  * draining hairline along the bottom. No number: nothing is at stake when
  * the prompt closes. The shell opens the panel with the request in the
- * route and hides it when the host clears the prompt; Record starts a call
- * recording through the bridge, the X tells the shell which prompt it was.
+ * route and hides it when the host clears the prompt. Both buttons tell
+ * the shell which prompt they were: the X dismisses it, Record has the
+ * host's detection controller record the call, attributed to the app the
+ * prompt named, which `recording.start` could not carry.
  */
 
 export interface PromptRequest {
@@ -46,10 +52,16 @@ export function DetectionPrompt({
 	request: PromptRequest;
 	shell?: PanelShell;
 }) {
-	const client = useBridge();
 	const remaining = Math.max(0, useCountdownSeconds(request.seconds));
 	const bar = useRef<HTMLDivElement>(null);
 	useReportSize(bar, shell);
+	const answer = (action: PanelAction) => {
+		const params =
+			request.raised === undefined ? undefined : { raised: request.raised };
+		shell.call(action, params).catch((cause: unknown) => {
+			console.error(`panel: ${action} failed`, cause);
+		});
+	};
 
 	return (
 		<PanelBar
@@ -72,7 +84,7 @@ export function DetectionPrompt({
 				aria-label="Record with Steno"
 				className="ml-auto"
 				data-testid="prompt-record"
-				onClick={() => send(client, "recording.start", { mode: "call" })}
+				onClick={() => answer("recordFromPrompt")}
 				size="md"
 				variant="primary"
 			>
@@ -82,15 +94,7 @@ export function DetectionPrompt({
 			<Button
 				aria-label="Not now"
 				data-testid="prompt-dismiss"
-				onClick={() => {
-					const params =
-						request.raised === undefined
-							? undefined
-							: { raised: request.raised };
-					shell.call("dismissPrompt", params).catch((cause: unknown) => {
-						console.error("panel: dismissPrompt failed", cause);
-					});
-				}}
+				onClick={() => answer("dismissPrompt")}
 				size="icon-xs"
 				title="Not now"
 				variant="ghost-muted"

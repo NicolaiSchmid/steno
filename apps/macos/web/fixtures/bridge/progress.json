@@ -6,6 +6,12 @@
       "meetingID" : "00000000-0000-0000-0000-000000000002",
       "stage" : "transcribing",
       "title" : "Transcribing"
+    },
+    {
+      "fraction" : 0,
+      "meetingID" : "00000000-0000-0000-0000-000000000004",
+      "stage" : "modelsMissing",
+      "title" : "Download the speech models in Settings"
     }
   ]
 }

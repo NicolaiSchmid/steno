@@ -456,3 +456,104 @@ fn a_206_from_the_wrong_offset_or_without_a_range_is_not_appended() {
         assert_eq!(names(&f.directory()), [NAME, LOCK]);
     }
 }
+
+/// Every file under `directory`, relative and with `/`, sorted.
+fn tree(directory: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(directory).unwrap();
+                let parts: Vec<_> = relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                files.push(parts.join("/"));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// A bundle laid out in folders, as a `CoreML` `.mlmodelc` is: each file
+/// lands in its folder, with its lock and partial beside it there, from
+/// the mirror's `<asset id>/<folder>/<file>`; a cut connection on a file in
+/// a folder resumes there.
+#[test]
+fn files_in_folders_of_the_asset_install_into_those_folders() {
+    let hosted = tempfile::tempdir().unwrap();
+    let files = [
+        ("Encoder.mlmodelc/weights/weight.bin", body(300_000)),
+        ("Encoder.mlmodelc/coremldata.bin", body(500)),
+        ("vocab.json", body(40)),
+    ];
+    for (name, contents) in &files {
+        let path = hosted.path().join(ID).join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    let server = FileServer::start(
+        hosted.path(),
+        Behaviour {
+            cut_first_after: Some(100_000),
+            ..Behaviour::default()
+        },
+    );
+    let root = tempfile::tempdir().unwrap();
+    let store = ModelStore::new(root.path()).with_mirror(Some(server.base.clone()));
+    let asset = ModelAsset {
+        id: ID.to_owned(),
+        display_name: "Test".to_owned(),
+        licence: "MIT".to_owned(),
+        attribution: String::new(),
+        files: files
+            .iter()
+            .map(|(name, contents)| ModelFile {
+                name: (*name).to_owned(),
+                source: None,
+                sha256: digest(contents),
+                size: contents.len() as u64,
+            })
+            .collect(),
+    };
+    asset.validate().unwrap();
+    assert_eq!(store.missing_files(&asset).len(), 3);
+    let mut partials = Vec::new();
+    store
+        .ensure(&asset, &mut |_| {
+            partials.extend(tree(&store.directory(&asset)));
+        })
+        .unwrap();
+    store.verify(&asset).unwrap();
+    assert!(
+        partials.contains(&"Encoder.mlmodelc/weights/weight.bin.partial".to_owned()),
+        "{partials:?}"
+    );
+    let directory = store.directory(&asset);
+    for (name, contents) in &files {
+        assert_eq!(&fs::read(directory.join(name)).unwrap(), contents, "{name}");
+    }
+    assert_eq!(
+        tree(&directory),
+        [
+            "Encoder.mlmodelc/coremldata.bin",
+            "Encoder.mlmodelc/coremldata.bin.lock",
+            "Encoder.mlmodelc/weights/weight.bin",
+            "Encoder.mlmodelc/weights/weight.bin.lock",
+            "vocab.json",
+            "vocab.json.lock",
+        ]
+    );
+    let seen = server.seen();
+    let weights: Vec<_> = seen
+        .iter()
+        .filter(|s| s.path == format!("{ID}/Encoder.mlmodelc/weights/weight.bin"))
+        .collect();
+    assert_eq!(weights.len(), 2, "cut once, then resumed: {seen:?}");
+    assert!(weights[1].range.is_some(), "{seen:?}");
+}

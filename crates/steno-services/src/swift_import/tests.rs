@@ -1474,7 +1474,7 @@ fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
         make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
         lock_patience: std::time::Duration::ZERO,
         update_source: None,
-        install_gate: Arc::new(crate::updates::NeverIdle),
+        detection: None,
     }
 }
 
@@ -1502,11 +1502,15 @@ impl crate::updates::UpdateSource for NoUpdates {
     async fn install(&self, _version: &str, _package: Vec<u8>) -> Result<(), String> {
         Ok(())
     }
+    fn installer(&self) -> crate::updates::Installer {
+        crate::updates::Installer::InPlace
+    }
     async fn relaunch(&self) {}
     async fn ask(&self, _question: crate::updates::Question<'_>) -> bool {
         false
     }
     fn tell_install_failed(&self, _message: &str) {}
+    fn tell_relaunch_waits(&self, _version: &str, _busy: crate::updates::Busy) {}
     fn announce(&self, _version: &str) {}
 }
 
@@ -1989,6 +1993,9 @@ fn built_over(
         &crate::llm::codex_store(),
         &steno_pipeline::MeetingEventBus::new(),
         &tokio::runtime::Handle::current(),
+        &Arc::new(steno_pipeline::DamagedAudio::in_directory(
+            &paths.support_directory,
+        )),
     )
     .unwrap()
 }

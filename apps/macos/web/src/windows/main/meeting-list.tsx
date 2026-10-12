@@ -37,6 +37,7 @@ import {
 } from "@/lib/platform";
 import { deleteMeeting } from "./delete-meeting";
 import { firstSentence, format, formatSource } from "./format";
+import { MODELS_MISSING_STAGE } from "./processing-card";
 import { SOURCE } from "./source";
 
 export const QUERY_DEBOUNCE_MS = 200;
@@ -62,7 +63,9 @@ export function rowPreview(
 				? "Recording now."
 				: "Not saved yet. Steno will process it the next time it starts.";
 		case "queued":
-			return "Waiting to process.";
+			return progress?.stage === MODELS_MISSING_STAGE
+				? `${progress.title}.`
+				: "Waiting to process.";
 		case "processing":
 			return progress ? `${progress.title}…` : "Processing.";
 		case "failed":

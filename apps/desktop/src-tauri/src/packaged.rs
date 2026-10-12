@@ -13,8 +13,10 @@
 //!   path breaks once it is collected. It goes at launch, unless the app
 //!   runs as the unit systemd made from that entry: then it goes at the
 //!   exit, after the save ([`remove_earlier_entry_at_exit`]), since a
-//!   reload of the user manager without the entry would leave the
-//!   recorder in a unit no logout stops.
+//!   reload of the user manager without the entry unloads that unit, and
+//!   the session's end then stops the recorder without a SIGTERM. While
+//!   it runs as that unit, the unit gets its stop timeout drop-in
+//!   (`autostart::sync_at_launch`), which goes with the entry.
 //! - **The entry's path** (`linux::launcher_path`): the autostart entry
 //!   the app writes names a path that stays the same across upgrades,
 //!   never `current_exe()` (on Nix the wrapped binary inside the store):

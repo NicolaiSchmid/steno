@@ -45,7 +45,11 @@ public enum BridgeSamples {
   public static let progress = ProgressSnapshot(entries: [
     .init(
       meetingID: uuid(2), stage: "transcribing", title: "Transcribing", fraction: 0.62,
-      estimatedRemainingSeconds: 95)
+      estimatedRemainingSeconds: 95),
+    // The Rust host's entry for a run refused for missing models.
+    .init(
+      meetingID: uuid(4), stage: "modelsMissing", title: "Download the speech models in Settings",
+      fraction: 0, estimatedRemainingSeconds: nil),
   ])
 
   static let chips: [SpeakerChip] = [
@@ -172,6 +176,17 @@ public enum BridgeSamples {
       status: .notConfigured, message: "Not exported: no Obsidian vault is configured.",
       canReexport: false, canReveal: false),
     canProcessAgain: false, canRerunSummary: true, isBusy: false)
+
+  /// `meetingDetail` as a phone recording with damaged parts, about 0.07
+  /// seconds of it replaced by silence. Only the Rust host sends the
+  /// warning.
+  public static let meetingDetailDamagedAudio: MeetingDetailSnapshot = {
+    var detail = meetingDetail
+    detail.source = .phone
+    detail.audioWarning =
+      "About 0.1 seconds of the phone recording could not be read and was replaced by silence."
+    return detail
+  }()
 
   public static let settingsGeneral = GeneralSettingsSnapshot(
     subtitle: "Steno 0.10.0", version: "0.10.0", loginItem: .enabled, detectionEnabled: true,
@@ -440,6 +455,7 @@ extension BridgeSamples {
     BridgeFixture("progress", progress),
     BridgeFixture("meetings.list", meetingsList),
     BridgeFixture("meeting.detail", meetingDetail),
+    BridgeFixture("meeting.detail.damagedAudio", meetingDetailDamagedAudio),
     BridgeFixture("settings.general", settingsGeneral),
     BridgeFixture("settings.recording", settingsRecording),
     BridgeFixture("settings.transcription", settingsTranscription),

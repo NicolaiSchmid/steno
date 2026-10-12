@@ -1,9 +1,16 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
-//! old, a paired phone, and the waits that fail a test instead of hanging it.
+//! old, a paired phone, the waits that fail a test instead of hanging it,
+//! and [`warnings`], what a call logs at `warn` and above.
+//!
+//! A test that writes models gives the app an explicit models directory in
+//! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
+//! `speech::testing`'s writers panic outside the temp directory or inside
+//! the directory `STENO_MODELS_DIR` names, so no test overwrites the
+//! models a developer keeps for the real-model tests.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use steno_adapters::DeliveryCoordinator;
@@ -126,6 +133,65 @@ pub fn synthetic_tone(
     options
 }
 
+/// A capture recorder over [`synthetic_capture`] and fakes, recording
+/// into a temp audio folder, for the tests that drive it from outside
+/// (the auto-stop, the detection prompt). Dropped, it stops a recording
+/// still running and waits for the pipeline's runs, so no file of a
+/// test's processing is left behind; that needs a multi-threaded runtime.
+pub struct SyntheticRecorder {
+    _dir: tempfile::TempDir,
+    pub store: Arc<Store>,
+    pipeline: Arc<CurrentPipeline>,
+    pub recorder: Arc<crate::recorder::CaptureRecorder>,
+}
+
+/// A [`SyntheticRecorder`] on the current runtime.
+pub fn synthetic_recorder() -> SyntheticRecorder {
+    synthetic_recorder_over(synthetic_capture())
+}
+
+/// A [`SyntheticRecorder`] whose sessions `make_session` builds: one whose
+/// device changes, say.
+pub fn synthetic_recorder_over(make_session: MakeCaptureSession) -> SyntheticRecorder {
+    let (dir, store) = temp_store();
+    let mut settings = store.settings().unwrap();
+    settings.audio_folder = steno_core::paths::file_url(&dir.path().join("audio"), true);
+    store.save_settings(&settings).unwrap();
+    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
+    let pipeline = current_pipeline(fake_dependencies(&store, "fake-engine"));
+    let recorder = crate::recorder::CaptureRecorder::new(
+        store.clone(),
+        pipeline.clone(),
+        make_session,
+        fakes.permissions.clone(),
+        fakes.speech_models.clone(),
+        chrono::FixedOffset::east_opt(0).unwrap(),
+        tokio::runtime::Handle::current(),
+        dir.path().join("support"),
+    );
+    SyntheticRecorder {
+        _dir: dir,
+        store,
+        pipeline,
+        recorder,
+    }
+}
+
+impl Drop for SyntheticRecorder {
+    fn drop(&mut self) {
+        use steno_host::services::Recorder as _;
+
+        if self.recorder.is_busy() {
+            let recorder = self.recorder.clone();
+            on_own_thread(PATIENCE, "the stop returned", move || recorder.stop());
+        }
+        let pipeline = self.pipeline.current();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(pipeline.wait_until_idle());
+        });
+    }
+}
+
 /// The graph `build` assembles, over fakes, with a recorder over
 /// `make_session` that records into `root/audio`: what `App::shutdown`
 /// drives, the host's recorder, and the launch. On the current runtime.
@@ -166,6 +232,7 @@ pub fn app_over_fakes(
         gated_handover: None,
         import_gate: None,
         recorder,
+        detection: None,
         models_directory: root.join("models"),
         zone,
         runtime: tokio::runtime::Handle::current(),
@@ -259,4 +326,35 @@ pub fn write_frames(writer: &mut steno_audio::RecordingWriter, frames: usize) {
             })
             .unwrap();
     }
+}
+
+/// A `Write` into a shared buffer, for a test's log subscriber.
+#[derive(Clone, Default)]
+struct Logged(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logged {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// What `run` returns, and the warnings it logged on this thread.
+pub fn warnings<T>(run: impl FnOnce() -> T) -> (T, String) {
+    let logged = Logged::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer({
+            let logged = logged.clone();
+            move || logged.clone()
+        })
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let value = tracing::subscriber::with_default(subscriber, run);
+    let logged = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
+    (value, logged)
 }

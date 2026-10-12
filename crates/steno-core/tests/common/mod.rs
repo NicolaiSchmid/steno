@@ -1,8 +1,10 @@
-//! A sample meeting with everything the store writes for it.
+//! A sample meeting with everything the store writes for it, and
+//! [`logged`], what a call logs.
 
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use steno_core::*;
@@ -242,4 +244,29 @@ pub fn populated() -> (Store, Meeting) {
     let store = Store::in_memory().unwrap();
     let meeting = populate(&store);
     (store, meeting)
+}
+
+/// Runs `body` with a log subscriber and returns what it returned and what
+/// was logged.
+pub fn logged<T>(body: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone, Default)]
+    struct Lines(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let lines = Lines::default();
+    let writer = lines.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let value = tracing::subscriber::with_default(subscriber, body);
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    (value, text)
 }

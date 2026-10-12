@@ -4,8 +4,8 @@
 //! and ends the current request once it is over. A child that dies,
 //! hangs, overruns the ceiling or breaks the protocol during a request is
 //! killed and reaped, and the call returns [`SpeechError::Sidecar`]. One
-//! that does so between requests is replaced by the next `prepare` or
-//! `transcribe` without an error. Either way the next child loads the
+//! that does so between requests is replaced by the next `prepare`,
+//! `transcribe` or `diarize` without an error. Either way the next child loads the
 //! models again. Nothing here can take the app down with the child.
 //!
 //! After a child that crashed, hung or overran the memory ceiling during a
@@ -18,8 +18,23 @@
 //! too. `health`, which only the tests call, counts a death it finds like
 //! one during a request. `DirectML` is asked for on Windows only.
 //!
+//! The same child diarizes ([`SidecarSpeechEngine::diarize`], which
+//! `steno_diarize::SidecarDiarizer` calls): the diarizer's models load into
+//! the running child beside speech's, or into a new child when none runs,
+//! under the same lock, deadline, memory ceiling and crash handling. A
+//! child that dies or hangs while it diarizes is killed and the call fails;
+//! the next call starts a new one. A failure while the child loads the
+//! diarizer's models, refused, crashed or hung alike, is
+//! [`SidecarError::DiarizerLoad`], so the caller can check the files. The
+//! diarizer runs on the CPU, so its failures never count against
+//! `DirectML`, nor does a failure between requests that a diarization
+//! finds. A child started only to diarize, without speech's models, is
+//! stopped once the call returns, so no child outlives the job that needed
+//! it; one that holds speech's models stays for speech's release.
+//!
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
@@ -32,12 +47,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use steno_core::protocols::{BoundaryResult, async_trait};
-use steno_core::{AudioBuffer16k, LanguageTag, RawSegment, SpeechEngine};
+use steno_core::{AudioBuffer16k, LanguageTag, RawSegment, SpeakerCluster, SpeechEngine};
 
 use super::protocol::{self, FrameError, PROTOCOL_VERSION, Reply, Request};
 use crate::engine::{OnnxSpeechEngine, blocking, log_download};
 use crate::error::{SidecarError, SpeechError};
-use crate::model_store::{ModelAsset, ModelStore};
+use crate::model_store::{Install, ModelAsset, ModelStore};
 use crate::onnx::{EncoderProvider, OnnxOptions};
 
 /// The binary's file name, `steno-speech-sidecar` plus `.exe` on Windows.
@@ -72,13 +87,14 @@ pub struct SidecarConfig {
     pub startup_timeout: Duration,
     /// For [`Request::Load`]: 2.6 GB from disk and graph optimisation.
     pub load_timeout: Duration,
-    /// A transcription may take this long plus
+    /// A transcription or a diarization may take this long plus
     /// [`transcribe_timeout_ratio`](Self::transcribe_timeout_ratio) times
     /// the audio's duration.
     pub transcribe_timeout_floor: Duration,
     /// Wall-clock seconds allowed per second of audio; the CPU path ran
     /// at 18 times real time on a Ryzen 7 7700 desktop (`RTFx` 18), so 1.0
-    /// leaves a slow laptop a wide margin.
+    /// leaves a slow laptop a wide margin. The diarizer runs faster than
+    /// that, so the same deadline holds for it.
     pub transcribe_timeout_ratio: f64,
     /// For [`Request::Health`] and the wait for [`Reply::Bye`].
     pub control_timeout: Duration,
@@ -86,6 +102,10 @@ pub struct SidecarConfig {
     /// (`steno_core::crash_log`, through its environment variable); the
     /// app passes its support directory, `None` writes none.
     pub crash_log_directory: Option<PathBuf>,
+    /// Whether the engine downloads a missing model before it starts a
+    /// child: [`Install::Never`] by default; the `steno` command sets
+    /// [`Install::Allowed`].
+    pub install: Install,
 }
 
 impl SidecarConfig {
@@ -104,6 +124,7 @@ impl SidecarConfig {
             transcribe_timeout_ratio: 1.0,
             control_timeout: Duration::from_secs(5),
             crash_log_directory: None,
+            install: Install::Never,
         }
     }
 
@@ -115,12 +136,27 @@ impl SidecarConfig {
         Ok(Self::new(exe.with_file_name(SIDECAR_BINARY)))
     }
 
-    /// The deadline of a transcription of `seconds` of audio.
+    /// The deadline of a transcription or a diarization of `seconds` of
+    /// audio.
     #[must_use]
     pub fn transcribe_timeout(&self, seconds: f64) -> Duration {
         self.transcribe_timeout_floor
             + Duration::from_secs_f64((seconds * self.transcribe_timeout_ratio).max(0.0))
     }
+}
+
+/// The diarizer's two model files and its sessions' threads, for
+/// [`SidecarSpeechEngine::diarize`]: the files are installed by the
+/// parent (`steno_diarize::models`) and handed to the child as they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiarizerModels {
+    /// pyannote segmentation 3.0.
+    pub segmentation: PathBuf,
+    /// `WeSpeaker` ResNet34-LM.
+    pub embedding: PathBuf,
+    /// ONNX Runtime's threads within one operator, for both sessions; zero
+    /// lets ONNX Runtime decide.
+    pub intra_threads: usize,
 }
 
 /// What [`SidecarSpeechEngine::health`] reports.
@@ -187,6 +223,9 @@ struct SidecarProcess {
     /// Whether the last load asked for `DirectML`; until it is answered, a
     /// crash counts as the probe's.
     load_asked_directml: bool,
+    /// The diarizer's models this child loaded; `None` before
+    /// [`Request::LoadDiarizer`] succeeded.
+    diarizer: Option<DiarizerModels>,
     ceiling: u64,
     /// Set by the stdout reader once it has queued a fault:
     /// [`Event::OverCeiling`], [`Event::Closed`] or [`Event::Garbage`].
@@ -325,6 +364,9 @@ impl SidecarProcess {
                 source,
             })?;
         let pid = child.id();
+        // Before any wait on the child, so its pid names no other process.
+        #[cfg(target_os = "linux")]
+        super::scope::move_to_own_scope(pid);
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
@@ -382,6 +424,7 @@ impl SidecarProcess {
             next_id: 1,
             provider: None,
             load_asked_directml: false,
+            diarizer: None,
             ceiling,
             fault_queued,
         };
@@ -578,9 +621,10 @@ fn ended_on_directml(
 }
 
 /// The kind of a failure, in fixed words for the log: no stderr, no
-/// protocol detail, no path.
-fn failure_kind(error: &SidecarError) -> &'static str {
-    match error {
+/// protocol detail, no path. A failed diarizer load names its inner kind
+/// too ("it could not load the diarizer's models: it died").
+fn failure_kind(error: &SidecarError) -> Cow<'static, str> {
+    Cow::Borrowed(match error {
         SidecarError::Spawn { .. } => "it could not start",
         SidecarError::Pipe(_) => "a pipe to it failed",
         SidecarError::Protocol(_) => "it broke the protocol",
@@ -588,8 +632,14 @@ fn failure_kind(error: &SidecarError) -> &'static str {
         SidecarError::Timeout { .. } => "it did not answer in time",
         SidecarError::MemoryCeiling { .. } => "it passed the memory ceiling",
         SidecarError::Remote(_) => "it reported an error",
-        SidecarError::NotUtf8 { .. } => "the models root is not UTF-8",
-    }
+        SidecarError::DiarizerLoad(load) => {
+            return Cow::Owned(format!(
+                "it could not load the diarizer's models: {}",
+                failure_kind(load)
+            ));
+        }
+        SidecarError::NotUtf8 { .. } => "a model path is not UTF-8",
+    })
 }
 
 impl Drop for SidecarProcess {
@@ -618,7 +668,10 @@ impl Shared {
         self.process.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Installs the assets in this process; a no-op once they are.
+    /// Installs the assets in this process under
+    /// [`Install::Allowed`]; a no-op once they are. Under [`Install::Never`]
+    /// (the default) a missing file is [`SpeechError::NotInstalled`]
+    /// instead, and nothing is downloaded.
     /// Blocking. `prepare` calls it before it takes the lock, so a
     /// download does not hold up `health`, `release` or a transcription in
     /// a running child; [`Shared::ensure_loaded`] calls it again under the
@@ -632,7 +685,10 @@ impl Shared {
             .into());
         }
         for asset in &self.assets {
-            self.store.ensure(asset, &mut log_download)?;
+            match self.config.install {
+                Install::Allowed => self.store.ensure(asset, &mut log_download)?,
+                Install::Never => self.store.installed_directory(asset)?,
+            };
         }
         Ok(())
     }
@@ -652,18 +708,7 @@ impl Shared {
     /// no audio was sent yet, so a new child loads on the CPU within the
     /// same call. Blocking; the caller holds the lock.
     fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
-        if let Some(process) = slot.as_mut()
-            && let Some(error) = process.failed_while_idle()
-        {
-            // A death between requests does not count against `DirectML`,
-            // an overrun does (see the module docs); with no provider,
-            // `kill_unless_remote` does not count it.
-            if !matches!(error, SidecarError::MemoryCeiling { .. }) {
-                process.provider = None;
-                process.load_asked_directml = false;
-            }
-            self.kill_unless_remote(slot, error);
-        }
+        self.drop_failed(slot, true);
         if slot.as_ref().is_some_and(|p| p.provider.is_some()) {
             return Ok(());
         }
@@ -671,11 +716,27 @@ impl Shared {
         Ok(self.load(slot, self.wants_directml())?)
     }
 
-    /// Has the running child, or a new one, load the models, asking for
-    /// `DirectML` when `directml`. A child that fails is killed unless it
-    /// reported the error itself; one the probe ended is replaced, within
-    /// this call, by a child that loads on the CPU.
-    fn load(&self, slot: &mut Option<SidecarProcess>, directml: bool) -> Result<(), SidecarError> {
+    /// Kills a child that failed since its last request, so the next one
+    /// starts fresh. A death between requests does not count against
+    /// `DirectML`, an overrun does when `counts` (see the module docs); with
+    /// no provider, `kill_unless_reported_counting` does not count it.
+    fn drop_failed(&self, slot: &mut Option<SidecarProcess>, counts: bool) {
+        if let Some(process) = slot.as_mut()
+            && let Some(error) = process.failed_while_idle()
+        {
+            if !matches!(error, SidecarError::MemoryCeiling { .. }) {
+                process.provider = None;
+                process.load_asked_directml = false;
+            }
+            self.kill_unless_reported_counting(slot, error, counts);
+        }
+    }
+
+    /// The running child, or a new one when none runs.
+    fn running<'a>(
+        &self,
+        slot: &'a mut Option<SidecarProcess>,
+    ) -> Result<&'a mut SidecarProcess, SidecarError> {
         let process = if let Some(process) = slot.take() {
             process
         } else {
@@ -684,7 +745,15 @@ impl Shared {
             self.pid.store(process.pid, Ordering::SeqCst);
             process
         };
-        let process = slot.insert(process);
+        Ok(slot.insert(process))
+    }
+
+    /// Has the running child, or a new one, load the models, asking for
+    /// `DirectML` when `directml`. A child that fails is killed unless it
+    /// reported the error itself; one the probe ended is replaced, within
+    /// this call, by a child that loads on the CPU.
+    fn load(&self, slot: &mut Option<SidecarProcess>, directml: bool) -> Result<(), SidecarError> {
+        let process = self.running(slot)?;
         process.load_asked_directml = directml;
         let reply = process.request(
             |id| Request::Load {
@@ -720,7 +789,7 @@ impl Shared {
             }
             Err(error) => {
                 let probe_ended = ended_on_directml(&error, None, directml);
-                let error = self.kill_unless_remote(slot, error);
+                let error = self.kill_unless_reported(slot, error);
                 if probe_ended {
                     // `DirectML` is off now, so this load asks for the CPU
                     // and cannot come back here.
@@ -731,27 +800,40 @@ impl Shared {
         }
     }
 
-    /// Kills the child unless `error` came from the child itself, which
-    /// then still runs and answers; returns the error. The warning names
-    /// the kind of failure in fixed words; the error itself, whose crash
-    /// report holds the child's stderr (which may hold a path), goes to
-    /// debug only.
-    fn kill_unless_remote(
+    /// Kills the child unless `error` came from the child itself
+    /// ([`SidecarError::reported_by_the_child`]), which then still runs and
+    /// answers; returns the error. The warning names the kind of failure
+    /// in fixed words; the error itself, whose crash report holds the
+    /// child's stderr (which may hold a path), goes to debug only.
+    fn kill_unless_reported(
         &self,
         slot: &mut Option<SidecarProcess>,
         error: SidecarError,
     ) -> SidecarError {
-        if !matches!(error, SidecarError::Remote(_)) {
+        self.kill_unless_reported_counting(slot, error, true)
+    }
+
+    /// [`kill_unless_reported`](Self::kill_unless_reported), counting the end
+    /// against `DirectML` only when `counts` (never for the diarizer, which
+    /// runs on the CPU).
+    fn kill_unless_reported_counting(
+        &self,
+        slot: &mut Option<SidecarProcess>,
+        error: SidecarError,
+        counts: bool,
+    ) -> SidecarError {
+        if !error.reported_by_the_child() {
             if let Some(mut process) = slot.take() {
                 let status = process.kill();
                 tracing::warn!(
                     pid = process.pid,
                     ?status,
-                    reason = failure_kind(&error),
+                    reason = %failure_kind(&error),
                     "speech sidecar killed"
                 );
                 tracing::debug!(pid = process.pid, %error, "the speech sidecar's error");
-                if ended_on_directml(&error, process.provider, process.load_asked_directml)
+                if counts
+                    && ended_on_directml(&error, process.provider, process.load_asked_directml)
                     && !DIRECTML_SWITCHED_OFF.swap(true, Ordering::SeqCst)
                 {
                     tracing::info!(
@@ -762,6 +844,79 @@ impl Shared {
             self.pid.store(0, Ordering::SeqCst);
         }
         error
+    }
+
+    /// Diarizes `sample_count` samples (`payload`) in the running child or
+    /// a new one, loading the diarizer's `models` there first when it has
+    /// not; the caller holds the lock. A child that fails is killed unless
+    /// it reported the error itself, without counting against `DirectML`;
+    /// one without speech's models is stopped after the call.
+    fn diarize(
+        &self,
+        slot: &mut Option<SidecarProcess>,
+        models: DiarizerModels,
+        sample_count: u64,
+        payload: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<SpeakerCluster>, SidecarError> {
+        self.drop_failed(slot, false);
+        let result = self
+            .load_and_diarize(slot, models, sample_count, payload, timeout)
+            .map_err(|error| self.kill_unless_reported_counting(slot, error, false));
+        if let Some(process) = slot.take_if(|p| p.provider.is_none()) {
+            self.pid.store(0, Ordering::SeqCst);
+            process.shut_down(self.config.control_timeout);
+        }
+        result
+    }
+
+    fn load_and_diarize(
+        &self,
+        slot: &mut Option<SidecarProcess>,
+        models: DiarizerModels,
+        sample_count: u64,
+        payload: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<SpeakerCluster>, SidecarError> {
+        let process = self.running(slot)?;
+        if process.diarizer.as_ref() != Some(&models) {
+            process.diarizer = None;
+            let files = models.clone();
+            process
+                .request(
+                    |id| Request::LoadDiarizer {
+                        id,
+                        segmentation: files.segmentation,
+                        embedding: files.embedding,
+                        intra_threads: files.intra_threads,
+                    },
+                    Vec::new(),
+                    self.config.load_timeout,
+                    "diarizer loaded",
+                    |reply| match reply {
+                        Reply::DiarizerLoaded { .. } => Ok(()),
+                        other => Err(other),
+                    },
+                )
+                // Every failure here, a refusal, a crash, a hang, is told
+                // apart from a failed run, so the caller can check the
+                // files.
+                .map_err(|error| SidecarError::DiarizerLoad(Box::new(error)))?;
+            tracing::info!(pid = process.pid, "speech sidecar loaded the diarizer");
+            process.diarizer = Some(models);
+        }
+        process.request(
+            |id| Request::Diarize { id, sample_count },
+            payload,
+            timeout,
+            "a diarization",
+            |reply| match reply {
+                Reply::Diarization { clusters, .. } => {
+                    Ok(clusters.into_iter().map(SpeakerCluster::from).collect())
+                }
+                other => Err(other),
+            },
+        )
     }
 }
 
@@ -775,6 +930,7 @@ impl Shared {
 /// replaced on the next call. [`SpeechEngine::release`] stops the child
 /// and frees its working set; the pipeline (`steno-pipeline`) calls it
 /// once a job's lanes are transcribed and no other job needs the engine.
+/// [`diarize`](Self::diarize) runs the diarizer in the same child.
 ///
 /// ```no_run
 /// use steno_core::{AudioBuffer16k, SpeechEngine};
@@ -911,7 +1067,7 @@ impl SidecarSpeechEngine {
                     health.provider = process.provider;
                     Ok(Some(health))
                 }
-                Err(error) => Err(shared.kill_unless_remote(&mut slot, error)),
+                Err(error) => Err(shared.kill_unless_reported(&mut slot, error)),
             }
         })
         .await??)
@@ -929,6 +1085,48 @@ impl SidecarSpeechEngine {
                 .and_then(|process| process.shut_down(shared.config.control_timeout))
         })
         .await?)
+    }
+
+    /// Diarizes `audio` in the child with the diarizer's default
+    /// configuration, so a crash in ONNX Runtime ends the child, not this
+    /// process: in the running child, whose speech models stay loaded, or
+    /// in a new one, which is stopped after the call. The child loads
+    /// `models` first if it has not; it never downloads, so the caller
+    /// installs them. Empty audio is no clusters, without a child.
+    ///
+    /// # Errors
+    ///
+    /// [`SpeechError::Sidecar`]: [`SidecarError::DiarizerLoad`] when the
+    /// child failed while it loaded the models, whether it refused them and
+    /// keeps running or died or hung there and was killed (the caller may
+    /// check the files), [`SidecarError::Remote`] when the run failed in a
+    /// child that keeps running, [`SidecarError::NotUtf8`] for a model path
+    /// the protocol cannot carry (nothing is sent, the child is untouched),
+    /// any other variant when the child failed and was killed; the next
+    /// call starts a new child.
+    pub async fn diarize(
+        &self,
+        models: DiarizerModels,
+        audio: &AudioBuffer16k,
+    ) -> Result<Vec<SpeakerCluster>, SpeechError> {
+        if audio.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The `loadDiarizer` request carries the paths as JSON strings.
+        if let Some(path) = [&models.segmentation, &models.embedding]
+            .into_iter()
+            .find(|path| path.to_str().is_none())
+        {
+            return Err(SidecarError::NotUtf8 { path: path.clone() }.into());
+        }
+        let shared = Arc::clone(&self.shared);
+        let sample_count = audio.samples.len() as u64;
+        let timeout = shared.config.transcribe_timeout(audio.duration());
+        let payload = protocol::encode_samples(&audio.samples);
+        Ok(blocking(move || {
+            shared.diarize(&mut shared.lock(), models, sample_count, payload, timeout)
+        })
+        .await??)
     }
 }
 
@@ -1021,7 +1219,7 @@ impl SpeechEngine for SidecarSpeechEngine {
                     Ok(segments)
                 }
                 Err(error) => Err(SpeechError::from(
-                    shared.kill_unless_remote(&mut slot, error),
+                    shared.kill_unless_reported(&mut slot, error),
                 )),
             }
         })
@@ -1143,6 +1341,20 @@ mod tests {
         }
     }
 
+    /// A failed diarizer load's warning says what ended it, and carries no
+    /// stderr.
+    #[test]
+    fn a_failed_diarizer_load_names_its_inner_kind() {
+        let crashed = SidecarError::DiarizerLoad(Box::new(SidecarError::Crashed {
+            status: "signal: 6".to_owned(),
+            stderr: "/home/someone/models/embedding.onnx".to_owned(),
+        }));
+        assert_eq!(
+            failure_kind(&crashed),
+            "it could not load the diarizer's models: it died"
+        );
+    }
+
     #[test]
     fn only_the_fallback_notice_reaches_info_and_a_path_stays_at_debug() {
         use tracing::Level;
@@ -1176,6 +1388,126 @@ mod tests {
             matches!(
                 error.downcast_ref::<SpeechError>(),
                 Some(SpeechError::Sidecar(SidecarError::NotUtf8 { path })) if *path == root
+            ),
+            "{error}"
+        );
+        assert_eq!(engine.spawns(), 0);
+    }
+
+    /// By default (`Install::Never`, the app's pipelines), a missing model
+    /// is `NotInstalled` from `prepare` and from `transcribe`, which
+    /// restarts a child: no request reaches the host and no child starts.
+    /// Under `Install::Allowed` (the `steno` command) the engine asks the
+    /// host for it.
+    #[tokio::test]
+    async fn by_default_a_missing_model_is_refused_and_nothing_is_fetched() {
+        use crate::model_store::{ModelFile, ModelSource};
+        let dir = tempfile::tempdir().unwrap();
+        // A host that answers every request 404 and counts them.
+        let host = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = host.local_addr().unwrap();
+        let requests = Arc::new(AtomicU64::new(0));
+        std::thread::spawn({
+            let requests = Arc::clone(&requests);
+            move || {
+                for stream in host.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    let mut head = [0u8; 1024];
+                    let _ = std::io::Read::read(&mut stream, &mut head);
+                    let _ = std::io::Write::write_all(
+                        &mut stream,
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            }
+        });
+        let asset = ModelAsset {
+            id: "test-asset".to_owned(),
+            display_name: "Test".to_owned(),
+            licence: "MIT".to_owned(),
+            attribution: String::new(),
+            files: vec![ModelFile {
+                name: "model.onnx".to_owned(),
+                source: Some(ModelSource::Url(format!("http://{address}/model.onnx"))),
+                sha256: "0".repeat(64),
+                size: 4,
+            }],
+        };
+        let engine = |install: Option<Install>| {
+            let mut config = SidecarConfig::new(dir.path().join("no-such-sidecar"));
+            if let Some(install) = install {
+                config.install = install;
+            }
+            config.control_timeout = Duration::from_millis(200);
+            SidecarSpeechEngine::with_assets(
+                ModelStore::new(dir.path()),
+                config,
+                vec![asset.clone()],
+            )
+        };
+        let refusing = engine(None);
+        let not_installed = |error: steno_core::protocols::BoxError| {
+            assert!(
+                matches!(
+                    error.downcast_ref::<SpeechError>(),
+                    Some(SpeechError::NotInstalled { missing, .. }) if missing == &["model.onnx"]
+                ),
+                "{error}"
+            );
+        };
+        not_installed(refusing.prepare().await.unwrap_err());
+        not_installed(
+            refusing
+                .transcribe(&AudioBuffer16k::silence(1.0), None)
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(refusing.spawns(), 0);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "no download was asked for"
+        );
+        let error = engine(Some(Install::Allowed))
+            .prepare()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("404"), "{error}");
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "`Install::Allowed` asks the host"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_diarizer_path_the_protocol_cannot_carry_is_refused_before_any_spawn() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let embedding = dir
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"embedding-\xff.onnx"));
+        let engine = SidecarSpeechEngine::with_assets(
+            ModelStore::new(dir.path()),
+            SidecarConfig::new(dir.path().join("no-such-sidecar")),
+            Vec::new(),
+        );
+        let models = DiarizerModels {
+            segmentation: dir.path().join("segmentation.onnx"),
+            embedding: embedding.clone(),
+            intra_threads: 1,
+        };
+        let error = engine
+            .diarize(models, &AudioBuffer16k::silence(1.0))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                SpeechError::Sidecar(SidecarError::NotUtf8 { path }) if *path == embedding
             ),
             "{error}"
         );

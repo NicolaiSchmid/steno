@@ -1,14 +1,15 @@
 //! The opt-in acceptance over the real engines: the synthetic two-lane
 //! fixture through the Parakeet engine the platform runs (the speech
-//! sidecar off the Mac, `CoreML` on it) and the ONNX diarizer, the way
+//! sidecar off the Mac, `CoreML` on it) and the ONNX diarizer in the
+//! sidecar's child, the way
 //! `steno process --engine parakeet-v3` wires them (except that this
 //! diarizer may download its models), asserting the shape of the exported
 //! `meeting.json`. Set `STENO_MODEL_TESTS=1`. The ONNX models download on
 //! first run (off the Mac about 2.6 GB, nearly all of it the
 //! fp32 Parakeet export); on the Mac the `CoreML` Parakeet must already be
 //! in `STENO_MODELS_DIR` (`fluidaudio/parakeet-tdt-0.6b-v3/`).
-//! `STENO_MODELS_DIR` keeps the models between runs. Off the Mac the
-//! sidecar binary must be built in the target directory
+//! `STENO_MODELS_DIR` keeps the models between runs. The sidecar binary,
+//! which diarizes on every platform, must be built in the target directory
 //! (`cargo test --workspace` builds it, as does
 //! `cargo build -p steno-speech-sidecar`).
 //! Swift: `Tests/StenoEndToEndTests/RealModelsEndToEndTests.swift`.
@@ -53,15 +54,15 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
 
     // The app's setup, over a support directory without `speech.json`
     // (so `STENO_MODELS_MIRROR` still applies), with the sidecar binary
-    // from the target directory.
+    // from the target directory, which diarizes on every platform.
     let mut setup = SpeechSetup::in_models_directory(models.clone(), &StenoPaths::new(dir.path()));
+    setup.sidecar.program = common::sidecar_binary();
     let runtime = setup.runtime(&settings.speech_engine_id);
-    if runtime == steno_speech::SpeechRuntime::OnnxSidecar {
-        setup.sidecar.program = common::sidecar_binary();
-    }
     let speech_store = setup.model_store();
-    let engine = steno_services::speech::speech_engine(&settings.speech_engine_id, &setup);
-    let diarizer = steno_services::speech::diarizer(&setup, steno_diarize::Install::Allowed);
+    let sidecar = Arc::new(steno_services::speech::sidecar_engine(&setup));
+    let engine =
+        steno_services::speech::speech_engine_in(&settings.speech_engine_id, &setup, &sidecar);
+    let diarizer = steno_services::speech::diarizer_in(sidecar, steno_diarize::Install::Allowed);
     let vault = dir.path().join("vault");
     let destination: Arc<dyn Destination> = Arc::new(FakeDestination::new(&vault));
     let dispatcher = Arc::new(steno_adapters::DeliveryCoordinator::with_destinations(

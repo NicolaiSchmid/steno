@@ -271,8 +271,12 @@ pub trait Recorder: Send + Sync {
 pub type StartHold = Box<dyn Send>;
 
 /// The error a start refused under a [`StartHold`] leaves in the status.
-/// It promises no time: the hold can span the updater's password prompt.
-pub const INSTALLING_UPDATE: &str = "Steno is installing an update. You can record again once it relaunches, or if you cancel the install.";
+/// The update schedule keeps the hold only while Steno shuts down to
+/// relaunch, and on Windows while it starts the installer, which ends the
+/// app; never while the updater waits on a password prompt
+/// (`steno_services::updates`).
+pub const INSTALLING_UPDATE: &str =
+    "Steno is relaunching to finish installing an update. You can record again in a moment.";
 
 /// A meeting about to be deleted, as [`Recorder::left_recording`] finds it
 /// on disk.
@@ -317,6 +321,19 @@ pub trait Pipeline: Send + Sync {
     /// ([`steno_core::Meeting::offers_process_again`]) whatever the
     /// caller's view of it says. Rust only: the Swift app refuses it.
     fn process_again(&self, meeting_id: Uuid) -> Result<(), ProcessAgainRefusal>;
+    /// What of the meeting's recording its last decode could not read and
+    /// replaced by silence, which the detail warns about. The default says
+    /// none. Rust only.
+    fn damaged_audio(&self, _meeting_id: Uuid) -> steno_core::AudioDamage {
+        steno_core::AudioDamage::default()
+    }
+    /// Whether the meeting's recording may have parts its last decode
+    /// replaced by silence: it has some, or the record of them could not
+    /// be read, so nobody can say. For the retention status to keep such a
+    /// recording. The default says no. Rust only.
+    fn audio_may_be_damaged(&self, _meeting_id: Uuid) -> bool {
+        false
+    }
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()>;
     /// Rebuilds the pipeline from the stored settings and the API key.
     fn reload(&self) -> BoundaryResult<()>;
@@ -347,6 +364,10 @@ pub enum ProcessAgainRefusal {
     /// ([`WithheldApiKey`]), so the run would complete with no cleanup and
     /// no summary, and Process again would be gone once a key is saved.
     KeyWithheld,
+    /// A run left the meeting queued for missing models, and it waits for
+    /// them: the detail says what its progress card says
+    /// ([`ProgressEntry::MODELS_MISSING_TITLE`](crate::main_window::ProgressEntry::MODELS_MISSING_TITLE)).
+    ModelsMissing,
     /// The app is exiting; the next launch can process the meeting again.
     Quitting,
     /// The store failed reading the meeting or saving it queued: the
@@ -395,6 +416,19 @@ pub trait SpeechModels: Send + Sync {
         asset.source_repo()
     }
 
+    /// The acknowledgement lines of `asset`, one per model behind it with
+    /// its attribution; the default is one line of
+    /// [`Self::display_name`], [`ModelAsset::licence`] and
+    /// [`Self::source_repo`]. The services give the ONNX diarizer one line
+    /// for each of its two models, whose licences differ. Rust only.
+    fn notices(&self, asset: ModelAsset) -> Vec<ModelNotice> {
+        vec![ModelNotice {
+            name: self.display_name(asset).to_owned(),
+            licence: asset.licence().to_owned(),
+            source: self.source_repo(asset).to_owned(),
+        }]
+    }
+
     /// About how many bytes `asset`'s model takes once installed, shown
     /// before a download and when the installed size cannot be read; the
     /// default is the Swift app's measure, [`ModelAsset::approximate_bytes`].
@@ -403,6 +437,15 @@ pub trait SpeechModels: Send + Sync {
     fn expected_bytes(&self, asset: ModelAsset) -> i64 {
         asset.approximate_bytes()
     }
+}
+
+/// One line of the Acknowledgements dialog for a model: what it is and who
+/// made it, its licence, and where it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelNotice {
+    pub name: String,
+    pub licence: String,
+    pub source: String,
 }
 
 /// One entry of the Codex backend's model list. Swift: `CodexModel` in

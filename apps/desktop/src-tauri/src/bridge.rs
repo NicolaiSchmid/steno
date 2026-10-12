@@ -117,6 +117,7 @@ steno_core::string_enum! {
     pub enum PanelAction {
         Resize = "resize",
         DismissPrompt = "dismissPrompt",
+        RecordFromPrompt = "recordFromPrompt",
     }
 }
 
@@ -146,12 +147,13 @@ impl ResizeParams {
     }
 }
 
-/// `panel_call("dismissPrompt")`: the number of the prompt whose X was
-/// clicked (`raised` in its route); `null` params or no `raised` for a
-/// prompt shown unnumbered.
+/// `panel_call("dismissPrompt")` and `panel_call("recordFromPrompt")`:
+/// the number of the prompt whose X or Record was clicked (`raised` in
+/// its route); `null` params or no `raised` for a prompt shown
+/// unnumbered.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DismissParams {
+struct PromptParams {
     raised: Option<u64>,
 }
 
@@ -174,12 +176,13 @@ fn panel_params<T: for<'de> Deserialize<'de>>(
     parse(action.as_str(), params)
 }
 
-/// The X's params: none (`null`) dismisses whatever shows, as `{}` does.
-fn dismiss_params(params: Value) -> Result<DismissParams, BridgeError> {
+/// The X's and Record's params: none (`null`) names whatever shows, as
+/// `{}` does.
+fn prompt_params(action: PanelAction, params: Value) -> Result<PromptParams, BridgeError> {
     if params.is_null() {
-        Ok(DismissParams::default())
+        Ok(PromptParams::default())
     } else {
-        panel_params(PanelAction::DismissPrompt, params)
+        panel_params(action, params)
     }
 }
 
@@ -290,10 +293,12 @@ pub async fn bridge_call(
 }
 
 /// The panels' own command, beside the bridge: the page reports its
-/// measured size (`resize`) and the prompt's X dismisses the prompt
-/// (`dismissPrompt`). Only a panel window may call it; the three bridge
-/// windows get `unknownMethod`, as they would for a method they do not
-/// answer.
+/// measured size (`resize`), the prompt's X dismisses the prompt
+/// (`dismissPrompt`) and its Record records the call it announced
+/// (`recordFromPrompt`, which the detection controller attributes to the
+/// prompt's app, as no bridge method could). Only a panel window may call
+/// it; the three bridge windows get `unknownMethod`, as they would for a
+/// method they do not answer.
 ///
 /// A synchronous command: Tauri runs it on the main thread, in the order
 /// the page sent its calls, so a burst of size reports applies in order
@@ -321,8 +326,13 @@ pub fn panel_call(
             Ok(Value::Null)
         }
         PanelAction::DismissPrompt => {
-            let request = dismiss_params(params)?;
+            let request = prompt_params(PanelAction::DismissPrompt, params)?;
             panels::dismiss_prompt(&app, request.raised);
+            Ok(Value::Null)
+        }
+        PanelAction::RecordFromPrompt => {
+            let request = prompt_params(PanelAction::RecordFromPrompt, params)?;
+            panels::record_from_prompt(&app, request.raised);
             Ok(Value::Null)
         }
     }
@@ -594,44 +604,49 @@ mod tests {
     }
 
     #[test]
-    fn a_dismissal_names_its_prompt_or_none() {
-        let named: DismissParams = panel_params(
-            PanelAction::DismissPrompt,
-            serde_json::json!({ "raised": 3 }),
-        )
-        .unwrap();
-        assert_eq!(named.raised, Some(3));
-        let none: DismissParams =
-            panel_params(PanelAction::DismissPrompt, serde_json::json!({})).unwrap();
-        assert_eq!(none.raised, None);
-        // An X with no params at all (the page sends none for a prompt
-        // shown unnumbered) dismisses too; `panel_params` alone refuses it.
-        assert_eq!(dismiss_params(Value::Null).unwrap().raised, None);
-        assert_eq!(
-            dismiss_params(serde_json::json!({ "raised": 3 }))
-                .unwrap()
-                .raised,
-            Some(3)
-        );
-        for params in [
-            serde_json::json!({ "raised": -1 }),
-            serde_json::json!({ "raised": "3" }),
-            serde_json::json!({ "raised": 3, "app": "Zoom" }),
-            serde_json::json!([3]),
-        ] {
-            let error = panel_params::<DismissParams>(PanelAction::DismissPrompt, params.clone())
-                .unwrap_err();
-            assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{params}");
-            assert!(error.message.starts_with("dismissPrompt: "), "{params}");
+    fn a_dismissal_or_a_record_names_its_prompt_or_none() {
+        for action in [PanelAction::DismissPrompt, PanelAction::RecordFromPrompt] {
+            let named: PromptParams =
+                panel_params(action, serde_json::json!({ "raised": 3 })).unwrap();
+            assert_eq!(named.raised, Some(3));
+            let none: PromptParams = panel_params(action, serde_json::json!({})).unwrap();
+            assert_eq!(none.raised, None);
+            // A click with no params at all (the page sends none for a
+            // prompt shown unnumbered) counts too; `panel_params` alone
+            // refuses it.
+            assert_eq!(prompt_params(action, Value::Null).unwrap().raised, None);
+            assert_eq!(
+                prompt_params(action, serde_json::json!({ "raised": 3 }))
+                    .unwrap()
+                    .raised,
+                Some(3)
+            );
+            for params in [
+                serde_json::json!({ "raised": -1 }),
+                serde_json::json!({ "raised": "3" }),
+                serde_json::json!({ "raised": 3, "app": "Zoom" }),
+                serde_json::json!([3]),
+            ] {
+                let error = prompt_params(action, params.clone()).unwrap_err();
+                assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{params}");
+                assert!(
+                    error.message.starts_with(&format!("{}: ", action.as_str())),
+                    "{params}"
+                );
+            }
         }
     }
 
     #[test]
-    fn the_panels_answer_two_actions_and_nothing_else() {
+    fn the_panels_answer_three_actions_and_nothing_else() {
         assert_eq!(panel_action("resize").unwrap(), PanelAction::Resize);
         assert_eq!(
             panel_action("dismissPrompt").unwrap(),
             PanelAction::DismissPrompt
+        );
+        assert_eq!(
+            panel_action("recordFromPrompt").unwrap(),
+            PanelAction::RecordFromPrompt
         );
         for text in ["Resize", "close", ""] {
             let error = panel_action(text).unwrap_err();

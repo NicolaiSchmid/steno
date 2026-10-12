@@ -11,11 +11,18 @@
 //! panels hid, closing main hid it rather than destroying it, and on Linux
 //! closing Settings kept it and opening it again on a section loaded a
 //! fresh page there, and closing onboarding kept it and told the host once
-//! (`windows::Kept`); 1 otherwise; a value that is not a positive number
-//! ends the run at once with 2. Screenshots of the Xvfb root during the
-//! wait are the review evidence; the windows carry what the host's
-//! database holds (nothing on a fresh runner, synthetic data with the
-//! fixture host), the prompts name made-up apps.
+//! (`windows::Kept`), and on Linux, in a run as the autostart unit,
+//! turning Launch at login off left the entry and set the mark, and on
+//! again cleared it without rewriting the entry, or, while the system
+//! manages the login item, turning it off changed nothing
+//! (`check_login_item_waits_for_the_exit`); 1 otherwise; a value that is
+//! not a positive number ends the run at once with 2. With
+//! `STENO_SMOKE_RELAUNCH` set, the run ends as an update's relaunch does,
+//! through `main::shut_down_for_relaunch`, without the restart.
+//! Screenshots of the Xvfb root during the wait are the review evidence;
+//! the windows carry what the host's database holds (nothing on a fresh
+//! runner, synthetic data with the fixture host), the prompts name
+//! made-up apps.
 
 use std::{
     collections::HashMap,
@@ -41,6 +48,10 @@ use crate::{
 };
 
 pub const SECONDS_VARIABLE: &str = "STENO_SMOKE_SECONDS";
+
+/// Set, the run ends as an update's relaunch does (`arm`), so
+/// `smoke-linux.sh` can check what that exit keeps.
+const RELAUNCH_VARIABLE: &str = "STENO_SMOKE_RELAUNCH";
 
 /// What the run has seen so far; managed state, read by the timer thread.
 /// Counts on every run, logs only on a smoke run.
@@ -180,6 +191,13 @@ pub enum Outcome {
     /// not kept on a close, or Settings did not open again on its section;
     /// the message says which.
     WindowsFailed(String),
+    /// On Linux, as the autostart unit: turning Launch at login off
+    /// changed the entry at once, set no mark, or still read as on, or
+    /// turning it on again kept the mark or rewrote the entry, or, while
+    /// the system manages the login item, turning it off changed the login
+    /// item at all; the message says which.
+    #[cfg(target_os = "linux")]
+    LoginItemFailed(String),
 }
 
 impl Outcome {
@@ -200,6 +218,8 @@ impl Outcome {
             ),
             Outcome::PanelsFailed(problem) => format!("FAILED, panels: {problem}"),
             Outcome::WindowsFailed(problem) => format!("FAILED, windows: {problem}"),
+            #[cfg(target_os = "linux")]
+            Outcome::LoginItemFailed(problem) => format!("FAILED, Launch at login: {problem}"),
             Outcome::NoSnapshot => format!(
                 "FAILED, page.ready from main but no snapshot reached it in {seconds}s: \
                  the bridge host did not answer"
@@ -300,8 +320,16 @@ pub fn arm(app: &AppHandle) {
                     .and_then(|()| check_onboarding_is_kept(&handle))
                     .map_err(Outcome::WindowsFailed)
             });
+        #[cfg(target_os = "linux")]
+        let checks = checks.and_then(|()| {
+            check_login_item_waits_for_the_exit(&handle).map_err(Outcome::LoginItemFailed)
+        });
         let outcome = handle.state::<Smoke>().outcome(checks);
         stderr_line!("[steno-desktop] smoke: {}", outcome.message(seconds));
+        if env::var_os(RELAUNCH_VARIABLE).is_some() {
+            stderr_line!("[steno-desktop] smoke: ending as an update's relaunch");
+            crate::shut_down_for_relaunch(&handle);
+        }
         handle.exit(outcome.exit_code());
     });
 }
@@ -463,6 +491,91 @@ fn check_onboarding_is_kept(app: &AppHandle) -> Result<(), String> {
         ));
     }
     stderr_line!("[steno-desktop] smoke: closing onboarding kept it and told the host once");
+    Ok(())
+}
+
+/// On Linux, in a run as the autostart unit (`smoke-linux.sh`'s runs in
+/// that unit), turns Launch at login off as the General section does: the
+/// entry stays as it was, marked to go at the exit, and reads as off
+/// (`autostart::set_enabled`). Where the entry stands, it turns it on
+/// again, which clears the mark and leaves the entry unwritten, and then
+/// off once more. The log line says whether the entry stands, which the
+/// script checks against what the launch should have left. While the
+/// system manages the login item, turning it off must change nothing:
+/// the entry as it was, no mark, and `Managed`. Nothing to check outside
+/// the unit.
+#[cfg(target_os = "linux")]
+fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt as _;
+    if !crate::stop_timeout::runs_as_autostart_unit() {
+        return Ok(());
+    }
+    let entry = || {
+        app.autolaunch()
+            .is_enabled()
+            .map_err(|error| format!("reading the entry: {error}"))
+    };
+    let switch = |on| {
+        crate::autostart::set_enabled(app, on).map_err(|error| {
+            let on = if on { "on" } else { "off" };
+            format!("turning it {on} failed: {}", error.message)
+        })
+    };
+    let before = entry()?;
+    if crate::packaged::login_item_is_managed() {
+        switch(false)?;
+        if entry()? != before
+            || crate::autostart::marked_off_at_exit()
+            || crate::autostart::status(app) != crate::autostart::LoginItemStatus::Managed
+        {
+            return Err("managed, turning it off changed the login item".into());
+        }
+        return Ok(());
+    }
+    let turn_off = || {
+        switch(false)?;
+        if entry()? != before {
+            return Err(
+                "turning it off as the autostart unit changed the entry at once".to_owned(),
+            );
+        }
+        if !crate::autostart::marked_off_at_exit() {
+            return Err("turning it off as the autostart unit set no mark".into());
+        }
+        if crate::autostart::status(app).is_on() {
+            return Err("turned off, it still reads as on".into());
+        }
+        Ok(())
+    };
+    turn_off()?;
+    if before {
+        // The plugin's file (auto-launch): $HOME/.config/autostart.
+        let written = || {
+            std::env::home_dir()
+                .map(|home| {
+                    home.join(".config/autostart")
+                        .join(format!("{}.desktop", app.package_info().name))
+                })
+                .and_then(|file| {
+                    std::fs::metadata(file)
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                })
+        };
+        let at = written();
+        switch(true)?;
+        if crate::autostart::marked_off_at_exit() || !crate::autostart::status(app).is_on() {
+            return Err("turned on again as the autostart unit, it still goes at the exit".into());
+        }
+        if at.is_none() || written() != at {
+            return Err("turned on again as the autostart unit, the entry was rewritten".into());
+        }
+        turn_off()?;
+    }
+    let entry = if before { "stands" } else { "is absent" };
+    stderr_line!(
+        "[steno-desktop] smoke: as the autostart unit, Launch at login turned off waits for the exit (the entry {entry})"
+    );
     Ok(())
 }
 

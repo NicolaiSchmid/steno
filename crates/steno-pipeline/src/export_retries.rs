@@ -11,22 +11,21 @@
 //! retried rather than its processing failed, and only the user's export
 //! starts this count again.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
 use chrono::TimeDelta;
 use uuid::Uuid;
 
-use crate::files::{read_json, write_json};
+use crate::files::MeetingValues;
 
 /// The launch re-exports in a row of each meeting that did not deliver
 /// every row
 /// ([`ProcessingPipeline::redeliver_unfinished`](crate::ProcessingPipeline::redeliver_unfinished)
 /// counts each before it runs; any re-export the user causes
 /// [resets](Self::reset) the count).
-/// Read with [`read_json`], so a missing or corrupt file counts 0 for every
-/// meeting, and replaced with [`write_json`] on every change; a file that
+/// Read with [`read_json`](crate::files::read_json), so a missing or
+/// corrupt file counts 0 for every meeting, and replaced with
+/// [`write_json`](crate::files::write_json) on every change; a file that
 /// may not be written leaves the counts of this run in memory only, as
 /// `preferences.json`'s flags do.
 ///
@@ -44,11 +43,7 @@ use crate::files::{read_json, write_json};
 /// ```
 #[derive(Debug)]
 pub struct ExportRetries {
-    path: PathBuf,
-    counts: Mutex<BTreeMap<Uuid, u32>>,
-    /// False for [`in_memory`](Self::in_memory), and when the file on disk
-    /// could not be read or set aside.
-    writable: bool,
+    counts: MeetingValues<u32>,
 }
 
 impl ExportRetries {
@@ -66,12 +61,8 @@ impl ExportRetries {
     /// The counts in `path`, read now.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        let (counts, writable) = read_json(&path);
         ExportRetries {
-            path,
-            counts: Mutex::new(counts),
-            writable,
+            counts: MeetingValues::new(path.into()),
         }
     }
 
@@ -87,9 +78,7 @@ impl ExportRetries {
     #[must_use]
     pub fn in_memory() -> Self {
         ExportRetries {
-            path: PathBuf::new(),
-            counts: Mutex::default(),
-            writable: false,
+            counts: MeetingValues::in_memory(),
         }
     }
 
@@ -97,7 +86,7 @@ impl ExportRetries {
     /// every row.
     #[must_use]
     pub fn count(&self, meeting_id: Uuid) -> u32 {
-        self.lock().get(&meeting_id).copied().unwrap_or(0)
+        self.counts.get(meeting_id).unwrap_or(0)
     }
 
     /// Whether the launch stopped retrying `meeting_id`'s failed export:
@@ -110,47 +99,26 @@ impl ExportRetries {
     /// Starts `meeting_id`'s count again from 0: the user caused a
     /// re-export, or a launch re-export delivered every row.
     pub fn reset(&self, meeting_id: Uuid) {
-        let mut counts = self.lock();
-        if counts.remove(&meeting_id).is_some() {
-            self.write(&counts);
-        }
+        // A failed write is logged; the count stays in memory.
+        let _ = self
+            .counts
+            .change(|counts| counts.remove(&meeting_id).is_some());
     }
 
     /// One more launch re-export of `meeting_id`, counted before it runs so
     /// an exit mid-export counts too.
     pub(crate) fn attempted(&self, meeting_id: Uuid) {
-        let mut counts = self.lock();
-        let count = counts.entry(meeting_id).or_insert(0);
-        *count = count.saturating_add(1);
-        self.write(&counts);
+        let _ = self.counts.change(|counts| {
+            let count = counts.entry(meeting_id).or_insert(0);
+            *count = count.saturating_add(1);
+            true
+        });
     }
 
     /// Keeps only the counts of the meetings `keep` accepts. The launch
     /// drops a meeting that delivered every row since, or that was deleted.
-    pub(crate) fn retain(&self, mut keep: impl FnMut(Uuid) -> bool) {
-        let mut counts = self.lock();
-        let before = counts.len();
-        counts.retain(|meeting_id, _| keep(*meeting_id));
-        if counts.len() != before {
-            self.write(&counts);
-        }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, BTreeMap<Uuid, u32>> {
-        self.counts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Replaces the file with `counts`, logging a failure: the counts of
-    /// this run stay in memory then.
-    fn write(&self, counts: &BTreeMap<Uuid, u32>) {
-        if !self.writable {
-            return;
-        }
-        if let Err(error) = write_json(&self.path, counts) {
-            tracing::warn!("{} could not be written: {error}", self.path.display());
-        }
+    pub(crate) fn retain(&self, keep: impl FnMut(Uuid) -> bool) {
+        self.counts.retain(keep);
     }
 }
 

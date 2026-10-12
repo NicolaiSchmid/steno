@@ -4,14 +4,16 @@
 //! power loss (the phone intake), creating folders whose entries survive
 //! one (a new meeting folder among them), and reading and writing a JSON
 //! file this process owns, set aside when it does not parse
-//! (`preferences.json`, `export-retries.json`). The services and the CLI
-//! use these too, so there is one implementation. On Windows a folder
-//! flush alone does not make a rename durable (the FAT driver treats a
-//! flush of a folder other than the drive's root as a no-op), so the
-//! renames are written through and the renamed file is flushed as well as
-//! the folders (`windows`). [`may_lose_recent_writes`] tells Settings about
-//! a folder whose writes may still be lost: a Windows drive where that is
-//! not enough, or a network drive or mount (`windows`, `mount`).
+//! (`preferences.json`, `export-retries.json`; `damaged-audio.json` is
+//! left in place instead, see [`DamagedAudio`](crate::DamagedAudio)). The
+//! services and the CLI use these too, so there is one implementation. On
+//! Windows a folder flush alone does not make a rename durable (the FAT
+//! driver treats a flush of a folder other than the drive's root as a
+//! no-op), so the renames are written through and the renamed file is
+//! flushed as well as the folders (`windows`). [`may_lose_recent_writes`]
+//! tells Settings about a folder whose writes may still be lost: a Windows
+//! drive where that is not enough, or a network drive or mount (`windows`,
+//! `mount`).
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 mod mount;
@@ -19,14 +21,17 @@ mod mount;
 #[allow(unsafe_code)]
 mod windows;
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use steno_core::busy_file::{self, is_busy};
+use uuid::Uuid;
 
 /// The syncs a durable write makes, and its waits before it tries a busy
 /// file again ([`retried`]); the disk and the clock in the product, a
@@ -448,6 +453,83 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> std::io::Res
         create_dir_all_durably(parent)?;
     }
     replace_file(path, &data, Access::Default)
+}
+
+/// A value per meeting in a JSON file this process owns (meeting id to
+/// value): [`ExportRetries`](crate::ExportRetries)'s counts and
+/// [`DamagedAudio`](crate::DamagedAudio)'s damage, read with [`read_json`]
+/// or as the owner reads it, and replaced with [`write_json`] on every
+/// change; a file that may not be written keeps the values of this run in
+/// memory only.
+#[derive(Debug)]
+pub(crate) struct MeetingValues<V> {
+    path: PathBuf,
+    values: Mutex<BTreeMap<Uuid, V>>,
+    /// False for [`in_memory`](Self::in_memory), and when the file on disk
+    /// could not be read or set aside.
+    writable: bool,
+}
+
+impl<V: Serialize + DeserializeOwned + Clone> MeetingValues<V> {
+    /// The values in `path`, read now with [`read_json`]: a missing or
+    /// corrupt file holds none.
+    pub(crate) fn new(path: PathBuf) -> Self {
+        let (values, writable) = read_json(&path);
+        Self::from_read(path, values, writable)
+    }
+
+    /// `values`, as read from `path`, written there on a change when
+    /// `writable`.
+    pub(crate) fn from_read(path: PathBuf, values: BTreeMap<Uuid, V>, writable: bool) -> Self {
+        MeetingValues {
+            path,
+            values: Mutex::new(values),
+            writable,
+        }
+    }
+
+    /// Values that live in memory only and are never written.
+    pub(crate) fn in_memory() -> Self {
+        Self::from_read(PathBuf::new(), BTreeMap::new(), false)
+    }
+
+    /// `meeting_id`'s value, if it has one.
+    pub(crate) fn get(&self, meeting_id: Uuid) -> Option<V> {
+        self.lock().get(&meeting_id).cloned()
+    }
+
+    /// Runs `change` over the values and replaces the file when it says it
+    /// changed them. A failed write is logged and returned; the values of
+    /// this run stay in memory then, as they do when the file may not be
+    /// written, which is no error.
+    pub(crate) fn change(
+        &self,
+        change: impl FnOnce(&mut BTreeMap<Uuid, V>) -> bool,
+    ) -> std::io::Result<()> {
+        let mut values = self.lock();
+        if !change(&mut values) || !self.writable {
+            return Ok(());
+        }
+        write_json(&self.path, &*values).inspect_err(|error| {
+            tracing::warn!("{} could not be written: {error}", self.path.display());
+        })
+    }
+
+    /// Keeps only the values of the meetings `keep` accepts, replacing the
+    /// file when that drops any; a failed write is logged.
+    pub(crate) fn retain(&self, mut keep: impl FnMut(Uuid) -> bool) {
+        let _ = self.change(|values| {
+            let before = values.len();
+            values.retain(|meeting_id, _| keep(*meeting_id));
+            values.len() != before
+        });
+    }
+
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<Uuid, V>> {
+        self.values
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// Makes `options` create the file with mode 0600 where the platform has

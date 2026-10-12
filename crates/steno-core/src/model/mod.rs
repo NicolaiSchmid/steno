@@ -24,7 +24,7 @@ mod template;
 mod transcript;
 
 pub use audio::{AudioAsset, AudioFormat, AudioRetention, AudioRetentionKind};
-pub use audio_buffer::AudioBuffer16k;
+pub use audio_buffer::{AudioBuffer16k, AudioDamage};
 pub use delivery::{
     DeliveredFile, Delivery, DeliveryReceipt, DeliveryStatus, DeliveryStatusKind, FileOwnership,
 };

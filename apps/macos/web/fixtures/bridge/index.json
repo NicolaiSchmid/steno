@@ -5,6 +5,7 @@
   "progress",
   "meetings.list",
   "meeting.detail",
+  "meeting.detail.damagedAudio",
   "settings.general",
   "settings.recording",
   "settings.transcription",

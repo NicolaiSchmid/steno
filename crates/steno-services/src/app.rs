@@ -20,12 +20,15 @@ use steno_host::services::{LoginItem, LoginItemStatus, Opener, Preferences, Serv
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
-    ExportRetries, MeetingEventBus, PipelineDependencies, RecordingIntake, RetentionSweep,
+    DamagedAudio, ExportRetries, MeetingEventBus, PipelineDependencies, RecordingIntake,
+    RetentionSweep,
 };
 
 use crate::block_on;
+use crate::detection::{DetectionController, DetectionOptions};
 use crate::handover::{GatedHandover, ListenerHandover, start_if_paired};
 use crate::llm::{ClientLlmService, codex_store};
+use crate::model_gate::ResumingSpeechModels;
 use crate::pipeline::{
     BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
 };
@@ -36,7 +39,7 @@ use crate::recovery::{Interrupted, LiveRecordingCheck, adopt_orphans, reconcile_
 use crate::secrets::{KeepsApiKey, KeyringUnavailable, SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 use crate::swift_import::{GraphImport, HandoverGate, ImportGate};
-use crate::updates::{InstallGate, NeverIdle, ScheduleParts, UpdateSchedule, UpdateSource};
+use crate::updates::{IdleGate, ScheduleParts, UpdateSchedule, UpdateSource};
 
 /// What stops the graph from being built: another process holds the
 /// database ([`DatabaseLock`]), or the database could not be opened or
@@ -71,16 +74,16 @@ pub struct AppOptions {
     /// The updater the update schedule drives; the shell's (`updater.rs`),
     /// `None` for a fake that never checks (the CLI, the tests).
     pub update_source: Option<Arc<dyn UpdateSource>>,
-    /// Whether an update may install now (stable plan P25); [`NeverIdle`]
-    /// until the shell supplies the real gate, and through it nothing
-    /// downloads or installs by itself.
-    pub install_gate: Arc<dyn InstallGate>,
     /// The runtime the host's synchronous service calls block on.
     pub runtime: tokio::runtime::Handle,
     /// `CFBundleShortVersionString`'s equivalent.
     pub version: String,
     /// Builds a capture session; `CaptureSession::new` in the product.
     pub make_capture_session: MakeCaptureSession,
+    /// Meeting detection with the shell's prompt panel
+    /// ([`crate::detection`]); `None` runs no detection (the CLI, the
+    /// tests).
+    pub detection: Option<DetectionOptions>,
     /// How long [`build`] waits for the database's lock while another
     /// process holds it ([`DatabaseLock::acquire_within`]):
     /// [`LOCK_PATIENCE`] in the product, whose update relaunch starts the
@@ -106,12 +109,12 @@ impl AppOptions {
             opener,
             login_item: None,
             update_source: None,
-            install_gate: Arc::new(NeverIdle),
             runtime,
             version: version.to_owned(),
             make_capture_session: Arc::new(|configuration| {
                 CaptureSession::new(configuration).map_err(|error| error.to_string())
             }),
+            detection: None,
             lock_patience: LOCK_PATIENCE,
         })
     }
@@ -142,6 +145,9 @@ pub struct App {
     /// step is over.
     pub import_gate: Option<Arc<ImportGate>>,
     pub recorder: Arc<CaptureRecorder>,
+    /// Meeting detection, when the shell passed its prompt panel;
+    /// [`App::launch`] starts it.
+    pub detection: Option<Arc<DetectionController>>,
     /// Where the speech and diarization models live.
     pub models_directory: std::path::PathBuf,
     pub zone: FixedOffset,
@@ -253,6 +259,10 @@ pub struct GraphSecrets {
 /// the meeting completes with its raw transcript and without a summary
 /// instead of failing at it, and its summary can be run again once a key
 /// is saved.
+/// is saved. The decode stage records what of each recording it replaced
+/// by silence in `damaged_audio`, the support directory's
+/// [`DamagedAudio`], which the detail reads, and the retention rule is to
+/// ask.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,
@@ -260,6 +270,7 @@ pub fn pipeline_dependencies(
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
+    damaged_audio: &Arc<DamagedAudio>,
 ) -> Result<BuiltPipeline, BuildError> {
     let settings = store.settings()?;
     let api_key = api_key(secrets.secrets.as_ref(), runtime).unwrap_or_else(|warning| {
@@ -293,7 +304,8 @@ pub fn pipeline_dependencies(
         store.clone(),
         events.clone(),
     )
-    .with_speech_engine(speech_engine);
+    .with_speech_engine(speech_engine)
+    .with_damaged_audio(damaged_audio.clone());
     let dependencies = match passes {
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
         None => dependencies,
@@ -307,7 +319,8 @@ pub fn pipeline_dependencies(
     })
 }
 
-/// [`pipeline_dependencies`] over clones of its inputs, for the reloads.
+/// [`pipeline_dependencies`] over clones of its inputs, for the reloads,
+/// every build sharing `damaged_audio`.
 fn make_dependencies(
     store: &Arc<Store>,
     engines: &Arc<SpeechEngines>,
@@ -315,16 +328,28 @@ fn make_dependencies(
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
+    damaged_audio: &Arc<DamagedAudio>,
 ) -> MakeDependencies {
-    let (store, engines, secrets, codex, events, runtime) = (
+    let (store, engines, secrets, codex, events, runtime, damaged_audio) = (
         store.clone(),
         engines.clone(),
         secrets.clone(),
         codex.clone(),
         events.clone(),
         runtime.clone(),
+        damaged_audio.clone(),
     );
-    Arc::new(move || pipeline_dependencies(&store, &engines, &secrets, &codex, &events, &runtime))
+    Arc::new(move || {
+        pipeline_dependencies(
+            &store,
+            &engines,
+            &secrets,
+            &codex,
+            &events,
+            &runtime,
+            &damaged_audio,
+        )
+    })
 }
 
 /// The phone intake over whichever pipeline is current when a recording
@@ -420,7 +445,7 @@ fn listener_over_identity(
     ));
     let mac_id = identity.mac_id();
     let service = Arc::new(crate::handover::service(
-        listener_configuration(paths),
+        listener_configuration(paths, store),
         store.clone(),
         intake,
         identity,
@@ -447,18 +472,29 @@ fn lock_or_run_without(
     }
 }
 
-/// The listener's configuration: the default, and in this crate's tests
-/// loopback only, unadvertised, with the inbox under the test's support
-/// directory.
-fn listener_configuration(paths: &StenoPaths) -> steno_handover::HandoverConfiguration {
-    let configuration = steno_handover::HandoverConfiguration::default();
-    if !cfg!(test) {
-        return configuration;
+/// The listener's configuration, with the inbox under the support
+/// directory: [`crate::handover::configuration`] over the environment, and
+/// in this crate's tests loopback only, unadvertised, on a port the system
+/// chooses.
+fn listener_configuration(
+    paths: &StenoPaths,
+    store: &Store,
+) -> steno_handover::HandoverConfiguration {
+    let inbox_directory = paths
+        .support_directory
+        .join(steno_handover::HandoverConfiguration::INBOX_DIRECTORY_NAME);
+    if cfg!(test) {
+        return steno_handover::HandoverConfiguration {
+            advertise: false,
+            inbox_directory,
+            ..steno_handover::HandoverConfiguration::default()
+        };
     }
+    let environment = std::env::var_os(crate::handover::PORT_VARIABLE)
+        .map(|value| value.to_string_lossy().into_owned());
     steno_handover::HandoverConfiguration {
-        advertise: false,
-        inbox_directory: paths.support_directory.join("handover-inbox"),
-        ..configuration
+        inbox_directory,
+        ..crate::handover::configuration(store, environment.as_deref())
     }
 }
 
@@ -582,6 +618,22 @@ fn import_step(
     ))
 }
 
+/// Turns a stored engine id other than Parakeet v3 (Whisper, Ultra or the
+/// German Parakeet the Swift app offered) into Parakeet v3, before
+/// anything reads the engine, with the notice the main window shows once:
+/// its pending flag
+/// ([`engine_notice::PENDING_KEY`](steno_host::setup::engine_notice::PENDING_KEY))
+/// is written to `preferences`, the graph's one `preferences.json`, before
+/// the database changes. A failed update is a warning.
+fn retire_the_engine(store: &Store, preferences: &FilePreferences, warnings: &mut Vec<String>) {
+    let retired = store.retire_speech_engine(|| {
+        preferences.set_flag(steno_host::setup::engine_notice::PENDING_KEY, true);
+    });
+    if let Err(error) = retired {
+        warnings.push(format!("Steno could not switch to Parakeet v3: {error}"));
+    }
+}
+
 /// Builds the graph. First the database's lock ([`DatabaseLock`]): while
 /// another process holds it past [`AppOptions::lock_patience`] the build
 /// fails with [`BuildError::Lock`] before the database is opened; on a
@@ -638,6 +690,8 @@ pub fn build_with_import(
     let runtime = options.runtime;
     let zone = local_zone();
 
+    // The engine notice's flag goes into the graph's one `preferences.json`.
+    retire_the_engine(&store, &preferences, &mut warnings);
     // The speech settings and the models directory are read once, here:
     // the pipeline (and every reload, which keeps its engine when it runs
     // where the last one did) and the model service share them.
@@ -646,19 +700,42 @@ pub fn build_with_import(
         &paths,
     )));
     let speech = engines.setup();
+    // What the decoder replaced by silence per meeting, in the support
+    // directory, which the detail reads through `HostPipeline`; a deleted
+    // meeting's entry goes at launch.
+    let damaged_audio = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
+    damaged_audio.retain(|meeting_id| store.meeting(meeting_id).map_or(true, |m| m.is_some()));
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
     let withheld_api_key = graph_secrets
         .key_gate
         .clone()
         .map(|gate| gate as Arc<dyn steno_host::services::WithheldApiKey>);
-    let make = make_dependencies(&store, &engines, &graph_secrets, &codex, &events, &runtime);
-    let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
+    let make = make_dependencies(
+        &store,
+        &engines,
+        &graph_secrets,
+        &codex,
+        &events,
+        &runtime,
+        &damaged_audio,
+    );
+    let pipeline = Arc::new(
+        CurrentPipeline::new(make()?, make, runtime.clone()).resuming_when({
+            let engines = engines.clone();
+            Arc::new(move |on| engines.models_installed(on))
+        }),
+    );
     let sweep = RetentionSweep::new(store.clone());
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
 
     let permissions = Arc::new(FakePermissions::all_granted());
-    let speech_models = Arc::new(ModelStoreSpeechModels::new(speech));
+    // Settings and onboarding install the models; the pipeline never does
+    // (`model_gate`), so an install resumes the meetings waiting for it.
+    let speech_models = Arc::new(ResumingSpeechModels::resuming(
+        ModelStoreSpeechModels::new(speech),
+        pipeline.clone(),
+    ));
     let recorder = CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
@@ -671,6 +748,9 @@ pub fn build_with_import(
     );
     // The save writes to the database's volume too.
     recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
+    let detection = options
+        .detection
+        .map(|detection| detection.controller(recorder.clone(), store.clone()));
 
     let gated_handover = import
         .as_ref()
@@ -688,14 +768,16 @@ pub fn build_with_import(
 
     let clock = Arc::new(WallClock);
     // The one `preferences.json` the launch half, the import's step, the
-    // update schedule and the host share.
+    // engine notice, the update schedule and the host share.
     let preferences: Arc<dyn Preferences> = preferences;
     let updates = options.update_source.map(|source| {
         UpdateSchedule::new(ScheduleParts {
             source,
             preferences: preferences.clone(),
             clock: clock.clone(),
-            gate: options.install_gate,
+            // Stable plan P25: no update installs over a recording or a
+            // processing job.
+            gate: Arc::new(IdleGate::new(recorder.clone(), pipeline.clone())),
             recorder: recorder.clone(),
             support_directory: paths.support_directory.clone(),
             managed: crate::updates::updates_are_managed(),
@@ -749,6 +831,7 @@ pub fn build_with_import(
         gated_handover,
         import_gate: import.map(|import| import.gate),
         recorder,
+        detection,
         models_directory: speech.models_directory.clone(),
         zone,
         runtime,
@@ -1009,7 +1092,8 @@ impl App {
     /// `failed`; a start or a stop in progress settles; a recording in
     /// progress is stopped with the `quit` end reason and saved (its asset
     /// written, the meeting enqueued, where it stays `queued` until the
-    /// next launch processes it); and the handover listener stops. Every
+    /// next launch processes it); the handover listener stops; and
+    /// meeting detection stops ([`DetectionController::stop`]). Every
     /// write is a committed transaction by then, so the store has nothing
     /// left to flush. A handover still waiting for its listener gets none
     /// after this ([`ListenerHandover::close`]). Swift:
@@ -1028,11 +1112,20 @@ impl App {
         {
             block_on(&self.runtime, handover.stop());
         }
+        // Last: the quit save must not wait for a detector start or a
+        // snapshot under way, and a prompt's Record meanwhile is refused,
+        // as the quit refuses every start.
+        if let Some(detection) = &self.detection {
+            detection.stop();
+        }
     }
 
     /// Everything that happens once at launch, in order:
     ///
-    /// 1. The pipeline's events are subscribed and routed into the host.
+    /// 1. The pipeline's events are subscribed and routed into the host,
+    ///    the recorder's changes into the host and the detection
+    ///    controller, and meeting detection starts following its setting
+    ///    ([`DetectionController::run`]).
     /// 2. The meetings left `recording`, the folder each was recorded into
     ///    and the known audio folders ([`crate::audio_folders`]) are
     ///    listed, before anything here can start a recording.
@@ -1088,8 +1181,16 @@ impl App {
     /// recording instead of recovering it.
     pub fn launch(&self, host: &Arc<Host>) {
         let recorder_host = host.clone();
-        self.recorder
-            .on_change(Arc::new(move || recorder_host.recorder_changed()));
+        let detection = self.detection.as_ref().map(Arc::downgrade);
+        self.recorder.on_change(Arc::new(move || {
+            recorder_host.recorder_changed();
+            if let Some(detection) = detection.as_ref().and_then(std::sync::Weak::upgrade) {
+                detection.recorder_changed();
+            }
+        }));
+        if let Some(detection) = &self.detection {
+            detection.run();
+        }
         self.report_update_checks(host);
 
         let mut receiver = self.events.subscribe();
@@ -1107,7 +1208,8 @@ impl App {
                                 event_host.store_changed();
                             }
                             MeetingEvent::SpeakersNeedReview { .. }
-                            | MeetingEvent::Deleted { .. } => {
+                            | MeetingEvent::Deleted { .. }
+                            | MeetingEvent::ModelsMissing { .. } => {
                                 event_host.store_changed();
                             }
                             MeetingEvent::OperationFailed { .. } => {
@@ -1548,6 +1650,33 @@ mod tests {
         assert_eq!(disk.database_folder.as_deref(), database.parent());
     }
 
+    /// The build drops the damage marks of meetings that are gone and
+    /// keeps the others: a mark for a stored meeting and one for a meeting
+    /// deleted since, and after the next build only the first is in the
+    /// file.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_build_drops_the_damage_marks_of_deleted_meetings() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let app = build(options_under(&support)).unwrap();
+        let kept = steno_core::testing::sample_data::meeting();
+        app.store.save_meeting(&kept).unwrap();
+        drop(app);
+        let deleted = uuid::Uuid::new_v4();
+        let damage = steno_core::AudioDamage {
+            parts: 3,
+            seconds: 0.07,
+        };
+        let marks = DamagedAudio::in_directory(&support);
+        marks.record(kept.id, damage).unwrap();
+        marks.record(deleted, damage).unwrap();
+        let app = build(options_under(&support)).unwrap();
+        let marks = DamagedAudio::in_directory(&support);
+        assert_eq!(marks.damage(kept.id), damage);
+        assert!(marks.damage(deleted).is_none());
+        drop(app);
+    }
+
     /// What `App::launch` does to a meeting a previous process left
     /// recording with no audio in the audio folder, which is there: it
     /// fails with Swift's reason.
@@ -1697,24 +1826,245 @@ mod tests {
         assert_eq!(app.recorder.status().warning, None);
     }
 
+    /// The app's resumes ask the app's gates: a meeting a run left waiting
+    /// for models stays waiting through a reload while they are missing,
+    /// no run started, and the first reload once every model the gates
+    /// check is on disk (the `steno` command's install) starts it. The
+    /// models directory is the settings' one in the test's directory, which
+    /// wins over `STENO_MODELS_DIR`: the placeholder models never land in
+    /// a directory the environment names.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_resumes_the_waiting_meetings_once_the_apps_gates_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        std::fs::create_dir_all(&support).unwrap();
+        // The sidecar on every platform; a closed port, should anything
+        // fetch.
+        std::fs::write(
+            support.join("speech.json"),
+            r#"{"onnxSidecarOnMac":true,"modelsMirror":"http://127.0.0.1:9"}"#,
+        )
+        .unwrap();
+        let models = dir.path().join("models");
+        let store = open_store(&StenoPaths::new(&support).database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        settings.models_directory = Some(file_url(&models, true));
+        store.save_settings(&settings).unwrap();
+        drop(store);
+        let app = build(options_under(&support)).unwrap();
+        assert_eq!(app.models_directory, models);
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.id = uuid::Uuid::new_v4();
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            &dir.path().join("audio"),
+            meeting.id,
+            steno_core::AudioRetention::KeepForever,
+        )
+        .unwrap();
+        app.pipeline.current().enqueue(&meeting, &asset).unwrap();
+        app.pipeline.current().wait_until_idle().await;
+        let waiting = || app.pipeline.current().dependencies().model_waits.waiting();
+        assert_eq!(waiting(), [meeting.id]);
+        let mut events = app.events.subscribe();
+        let decodes = |events: &mut steno_pipeline::EventReceiver| {
+            std::iter::from_fn(|| events.try_recv().ok())
+                .filter(|event| {
+                    matches!(event, steno_core::MeetingEvent::Progress { progress, .. }
+                        if progress.stage == steno_core::PipelineStage::Decode)
+                })
+                .count()
+        };
+
+        app.pipeline.reload().unwrap();
+        app.pipeline.current().wait_until_idle().await;
+        assert_eq!(decodes(&mut events), 0, "no run started");
+        assert_eq!(waiting(), [meeting.id]);
+
+        crate::speech::testing::install_every_model(&crate::speech::testing::models_in(
+            &app.models_directory,
+        ));
+        app.pipeline.reload().unwrap();
+        assert_eq!(waiting(), Vec::<uuid::Uuid>::new());
+        assert!(decodes(&mut events) > 0, "the meeting started");
+        app.pipeline.quit();
+        app.pipeline.current().wait_until_idle().await;
+    }
+
+    /// The reload test above, run as a child of this test binary with
+    /// `STENO_MODELS_DIR` naming a directory that holds a model file of
+    /// known bytes, and a home of its own: the child passes, and the
+    /// directory holds that file alone, its bytes unchanged. A child,
+    /// because the environment is the process's: setting the variable here
+    /// is `unsafe` and would reach every test running beside this one.
+    #[test]
+    fn the_reload_test_leaves_the_models_directory_the_environment_names_alone() {
+        const RELOAD_TEST: &str =
+            "app::tests::a_reload_resumes_the_waiting_meetings_once_the_apps_gates_pass";
+        let home = tempfile::tempdir().unwrap();
+        let named = tempfile::tempdir().unwrap();
+        let asset = steno_diarize::models::asset();
+        let sentinel = crate::speech::testing::models_in(named.path())
+            .speech
+            .directory(&asset)
+            .join(&asset.files[0].name);
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        let bytes = b"a developer's downloaded model";
+        std::fs::write(&sentinel, bytes).unwrap();
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", RELOAD_TEST, "--test-threads=1"])
+            .env("HOME", home.path())
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("APPDATA", home.path().join("appdata"))
+            .env("CODEX_HOME", home.path().join("codex"))
+            .env(steno_speech::ModelStore::ENVIRONMENT_VARIABLE, named.path())
+            .env_remove(steno_speech::ModelStore::MIRROR_ENVIRONMENT_VARIABLE)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            stdout.contains("1 passed"),
+            "the child ran the test: {stdout}"
+        );
+        let after = std::fs::read(&sentinel).unwrap();
+        assert!(
+            after == bytes,
+            "the model file was overwritten: {} bytes now",
+            after.len()
+        );
+        assert_eq!(
+            crate::speech::testing::files_under(named.path()),
+            std::collections::BTreeSet::from([sentinel])
+        );
+    }
+
+    /// A stored engine the Rust app does not run (the Swift app's Whisper)
+    /// is Parakeet v3 once the app is built, with the notice's pending flag
+    /// in `preferences.json`, which the main window then shows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_build_retires_a_stored_whisper_engine_with_the_notice_pending() {
+        use steno_host::setup::engine_notice::PENDING_KEY;
+
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let paths = StenoPaths::new(&support);
+        let store = open_store(&paths.database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        "whisperkit-large-v3-turbo".clone_into(&mut settings.speech_engine_id);
+        store.save_settings(&settings).unwrap();
+        drop(store);
+        let preferences = support.join("preferences.json");
+
+        let app = build(options_under(&support)).unwrap();
+        assert_eq!(
+            app.store.settings().unwrap().speech_engine_id,
+            "parakeet-v3"
+        );
+        assert!(FilePreferences::new(&preferences).flag(PENDING_KEY));
+        assert!(app.services.preferences.flag(PENDING_KEY));
+        app.pipeline.quit();
+    }
+
+    /// The retirement writes the notice's flag through the one
+    /// `preferences.json` the import's launch half got, so a flag that
+    /// half's instance writes later (as the import's step does) keeps the
+    /// notice's flag, and the host reads both.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_engine_notice_and_the_import_share_one_preferences_file() {
+        use steno_host::setup::engine_notice::PENDING_KEY;
+
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let paths = StenoPaths::new(&support);
+        let store = open_store(&paths.database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        "whisperkit-large-v3-turbo".clone_into(&mut settings.speech_engine_id);
+        store.save_settings(&settings).unwrap();
+        drop(store);
+
+        let mut imported = None;
+        let app = build_with_import(options_under(&support), |preferences| {
+            preferences.set_flag("steno.onboardingCompleted", true);
+            imported = Some(preferences);
+            None
+        })
+        .unwrap();
+        let imported = imported.unwrap();
+        imported.set_flag(crate::swift_import::IMPORT_RAN_KEY, true);
+
+        let on_disk = FilePreferences::new(support.join("preferences.json"));
+        for key in [
+            PENDING_KEY,
+            "steno.onboardingCompleted",
+            crate::swift_import::IMPORT_RAN_KEY,
+        ] {
+            assert!(on_disk.flag(key), "{key}");
+            assert!(app.services.preferences.flag(key), "{key}");
+        }
+        app.pipeline.quit();
+    }
+
+    /// The notice's pending flag is written inside the retirement's
+    /// transaction, before the engine's row changes: when the database
+    /// refuses the update, the flag is pending all the same, the build
+    /// warns, and the stored engine is as it was, for the next launch to
+    /// retire.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retirement_the_database_refuses_leaves_the_notice_pending_and_warns() {
+        use steno_host::setup::engine_notice::PENDING_KEY;
+
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let paths = StenoPaths::new(&support);
+        let store = open_store(&paths.database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        "whisperkit-large-v3-turbo".clone_into(&mut settings.speech_engine_id);
+        store.save_settings(&settings).unwrap();
+        drop(store);
+        rusqlite::Connection::open(paths.database_path())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse_the_engine BEFORE UPDATE ON setting \
+                 WHEN OLD.key = 'speechEngineID' AND NEW.value <> OLD.value \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+
+        let app = build(options_under(&support)).unwrap();
+        assert!(
+            app.startup_warnings
+                .iter()
+                .any(|warning| warning.starts_with("Steno could not switch to Parakeet v3")),
+            "{:?}",
+            app.startup_warnings
+        );
+        assert_eq!(
+            app.store.settings().unwrap().speech_engine_id,
+            "whisperkit-large-v3-turbo"
+        );
+        assert!(FilePreferences::new(support.join("preferences.json")).flag(PENDING_KEY));
+        app.pipeline.quit();
+    }
+
     /// The models directory is decided once, when the app is built: a
     /// reload after the settings name another directory keeps the first,
-    /// so the pipeline and the model service agree. Both directories are
-    /// plain files, so the engine's `prepare` fails naming the one it uses
-    /// without touching the network (`CoreML` misses its bundles under it
-    /// on the Mac; elsewhere the sidecar's store cannot create its folder
-    /// in it).
+    /// so the pipeline and the model service agree. The first is empty,
+    /// the second holds every model (placeholder files of their sizes):
+    /// the engine's `prepare` is refused for missing models before the
+    /// reload and still after it, where an engine over the second would
+    /// get past the gate. No network.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_keeps_the_models_directory_the_app_was_built_with() {
+        use crate::speech::testing::{install_every_model, models_in};
         let dir = tempfile::tempdir().unwrap();
         let paths = StenoPaths::new(dir.path().join("support"));
         let (first, reloaded) = (
             dir.path().join("built-models"),
             dir.path().join("reloaded-models"),
         );
-        for file in [&first, &reloaded] {
-            std::fs::write(file, b"not a directory").unwrap();
-        }
+        std::fs::create_dir_all(&first).unwrap();
+        install_every_model(&models_in(&reloaded));
         let store = open_store(&paths.database_path()).unwrap();
         let mut settings = store.settings().unwrap();
         settings.models_directory = Some(file_url(&first, true));
@@ -1722,21 +2072,21 @@ mod tests {
         drop(store);
 
         let app = build(options_under(&dir.path().join("support"))).unwrap();
-        let prepare = async || {
+        let refused = async || {
             let engine = app.pipeline.current().dependencies().speech_engine.clone();
-            engine.prepare().await.unwrap_err().to_string()
+            let error = engine.prepare().await.unwrap_err();
+            error
+                .downcast_ref::<steno_pipeline::PipelineFailure>()
+                .is_some_and(steno_pipeline::PipelineFailure::is_models_missing)
         };
-        let named = first.display().to_string();
-        let error = prepare().await;
-        assert!(error.contains(&named), "{named} in {error}");
+        assert!(refused().await, "the empty directory");
 
         settings.models_directory = Some(file_url(&reloaded, true));
         app.store.save_settings(&settings).unwrap();
         app.pipeline.reload().unwrap();
-        let error = prepare().await;
         assert!(
-            error.contains(&named) && !error.contains("reloaded-models"),
-            "{named} in {error}"
+            refused().await,
+            "still the empty directory after the reload"
         );
     }
 
@@ -2290,7 +2640,11 @@ mod tests {
             async fn ask(&self, _question: crate::updates::Question<'_>) -> bool {
                 false
             }
+            fn installer(&self) -> crate::updates::Installer {
+                crate::updates::Installer::InPlace
+            }
             fn tell_install_failed(&self, _message: &str) {}
+            fn tell_relaunch_waits(&self, _version: &str, _busy: crate::updates::Busy) {}
             fn announce(&self, _version: &str) {}
         }
         let dir = tempfile::tempdir().unwrap();
@@ -2330,10 +2684,10 @@ mod tests {
             opener: Arc::new(steno_host::fakes::FakeOpener::default()),
             login_item: None,
             update_source: None,
-            install_gate: Arc::new(NeverIdle),
             runtime: tokio::runtime::Handle::current(),
             version: "0.0.0".to_owned(),
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+            detection: None,
             lock_patience: std::time::Duration::ZERO,
         }
     }
@@ -3013,6 +3367,7 @@ mod tests {
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
+            &Arc::new(DamagedAudio::in_memory()),
         )
         .expect("the graph builds without the key");
         assert!(built.dependencies.cleaner.is_none());
@@ -3032,6 +3387,31 @@ mod tests {
         }
     }
 
+    /// Every build of the app's pipeline, the first and each reload, records
+    /// the decoder's damage in the one store the app reads it from.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_build_records_damage_in_the_apps_store() {
+        let (dir, store) = temp_store();
+        let paths = StenoPaths::new(dir.path().join("support"));
+        let damaged = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
+        let make = make_dependencies(
+            &store,
+            &Arc::new(SpeechEngines::new(SpeechSetup::new(
+                &store.settings().unwrap(),
+                &paths,
+            ))),
+            &ungated(Arc::new(BrokenSecrets)),
+            &codex_store(),
+            &MeetingEventBus::new(),
+            &tokio::runtime::Handle::current(),
+            &damaged,
+        );
+        for _build in 0..2 {
+            let built = make().unwrap();
+            assert!(Arc::ptr_eq(&built.dependencies.damaged_audio, &damaged));
+        }
+    }
+
     /// The Authorization header one build of the pipeline sends: builds it
     /// as a reload does over `secrets` and runs its cleanup once against
     /// `server`.
@@ -3048,6 +3428,7 @@ mod tests {
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
+            &Arc::new(DamagedAudio::in_memory()),
         )
         .unwrap();
         let cleaner = built.dependencies.cleaner.expect("an endpoint is set");

@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension as _, params};
 use steno_core::store::convert::{DbDate, DbUuid};
 use steno_core::*;
 
-use common::{MEETING_ID, PERSON_ID, date, populated, uuid};
+use common::{MEETING_ID, PERSON_ID, date, logged, populated, uuid};
 
 fn count(store: &Store, table: &str) -> i64 {
     store
@@ -403,6 +403,35 @@ fn a_known_property_set_to_none_loses_its_row() {
     assert_eq!(store.settings_with_defaults(&defaults).unwrap(), settings);
 }
 
+/// The README's command stores `'23900'` under `handoverPort`, and the
+/// port loads. A value that is not a port (not JSON, a JSON string, out
+/// of range, negative) loads as unset with a warning rather than failing
+/// every settings read, and the next save removes its row. No other test
+/// here reaches the warning's callsite, which `tracing` caches when it is
+/// first hit.
+#[test]
+fn a_stored_handover_port_loads_and_one_that_is_not_a_port_is_ignored() {
+    const WARNING: &str = "the stored handoverPort is not a port from 0 to 65535";
+    let store = Store::in_memory().unwrap();
+    let defaults = Settings::defaults(&StenoPaths::new("/support"));
+    for (stored, port) in [("23900", 23900), ("0", 0)] {
+        put_setting_row(&store, "handoverPort", stored);
+        let (settings, log) = logged(|| store.settings_with_defaults(&defaults).unwrap());
+        assert_eq!(settings.handover_port, Some(port), "{stored:?}");
+        assert!(!log.contains(WARNING), "{stored:?}: {log}");
+    }
+
+    for invalid in ["abc", r#""23900""#, "70000", "-1", "23900.5", ""] {
+        put_setting_row(&store, "handoverPort", invalid);
+        let (settings, log) = logged(|| store.settings_with_defaults(&defaults).unwrap());
+        assert!(log.contains(WARNING), "{invalid:?}: {log}");
+        assert_eq!(settings.handover_port, None, "{invalid:?}");
+        assert_eq!(settings, defaults, "{invalid:?}: the rest still loads");
+        store.save_settings(&settings).unwrap();
+        assert_eq!(setting_row(&store, "handoverPort"), None, "{invalid:?}");
+    }
+}
+
 /// A field inside the Obsidian value that this build does not know comes
 /// back on save, next to the edit.
 #[test]
@@ -423,6 +452,72 @@ fn an_unknown_obsidian_field_survives_a_load_edit_save() {
         setting_row(&store, "obsidian").as_deref(),
         Some(r#"{"futureFolder":"Daily","includeAudio":true,"vaultPath":"/vault"}"#)
     );
+}
+
+/// Every stored engine id but `parakeet-v3` becomes `parakeet-v3`, which
+/// Swift decodes too: the three the Swift app offered beyond it and one
+/// this build has never heard of. `before_rewrite` runs once and the move
+/// happens once; `parakeet-v3` or no row change nothing and call nothing.
+#[test]
+fn every_stored_engine_but_parakeet_v3_becomes_parakeet_v3_once() {
+    for retired in [
+        "whisperkit-large-v3-turbo",
+        "parakeet-ultra",
+        "parakeet-de",
+        "some-later-engine",
+    ] {
+        let store = Store::in_memory().unwrap();
+        put_setting_row(&store, "speechEngineID", &format!("\"{retired}\""));
+        put_setting_row(&store, "aFutureSetting", "1");
+        let mut calls = 0;
+        assert!(
+            store.retire_speech_engine(|| calls += 1).unwrap(),
+            "{retired}"
+        );
+        assert_eq!(calls, 1, "{retired}");
+        assert_eq!(
+            setting_row(&store, "speechEngineID").as_deref(),
+            Some(r#""parakeet-v3""#)
+        );
+        assert_eq!(store.settings().unwrap().speech_engine_id, "parakeet-v3");
+        assert_eq!(setting_row(&store, "aFutureSetting").as_deref(), Some("1"));
+        assert!(
+            !store
+                .retire_speech_engine(|| panic!("called again for {retired}"))
+                .unwrap(),
+            "only once"
+        );
+    }
+    for kept in [Some(r#""parakeet-v3""#), None] {
+        let store = Store::in_memory().unwrap();
+        if let Some(value) = kept {
+            put_setting_row(&store, "speechEngineID", value);
+        }
+        assert!(
+            !store
+                .retire_speech_engine(|| panic!("called for {kept:?}"))
+                .unwrap()
+        );
+        assert_eq!(setting_row(&store, "speechEngineID").as_deref(), kept);
+    }
+}
+
+/// `before_rewrite` comes before the rewrite: when it does not return
+/// (the process ends there), the old id stays stored, so the next launch
+/// retires it and records the notice again.
+#[test]
+fn an_engine_retirement_that_ends_in_before_rewrite_stores_nothing() {
+    let store = Store::in_memory().unwrap();
+    put_setting_row(&store, "speechEngineID", r#""parakeet-ultra""#);
+    let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.retire_speech_engine(|| panic!("the process ends here"))
+    }));
+    assert!(ended.is_err());
+    assert_eq!(
+        setting_row(&store, "speechEngineID").as_deref(),
+        Some(r#""parakeet-ultra""#)
+    );
+    assert!(store.retire_speech_engine(|| {}).unwrap());
 }
 
 #[test]

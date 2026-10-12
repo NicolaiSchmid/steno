@@ -13,14 +13,23 @@ struct Run {
     stderr: String,
 }
 
-fn steno(args: &[&str], home: &Path) -> Run {
+/// The `steno` binary on `home`: its support directory and models are
+/// `home`'s, never the developer's key or the models directory their
+/// environment names for the real-model tests.
+fn steno_on(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_steno"));
     command
-        .args(args)
         .env("HOME", home)
         .env("XDG_DATA_HOME", home.join("share"))
         .env("APPDATA", home.join("appdata"))
-        .env_remove("STENO_LLM_API_KEY");
+        .env_remove("STENO_LLM_API_KEY")
+        .env_remove("STENO_MODELS_DIR");
+    command
+}
+
+fn steno(args: &[&str], home: &Path) -> Run {
+    let mut command = steno_on(home);
+    command.args(args);
     // Every run on Unix carries a variable that is not Unicode, as a
     // user's environment may: the secret overrides, which read every
     // variable, must read past it (`std::env::vars()` would panic).
@@ -46,6 +55,23 @@ fn fixtures_root() -> PathBuf {
 
 fn export(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// The `steno` every test runs has its home set and the developer's key
+/// and models directory removed from its environment, so no run writes
+/// into the models the developer keeps for the real-model tests.
+#[test]
+fn the_steno_the_tests_run_inherits_no_models_directory_or_key() {
+    let home = tempfile::tempdir().unwrap();
+    let command = steno_on(home.path());
+    let envs: Vec<_> = command.get_envs().collect();
+    for removed in ["STENO_MODELS_DIR", "STENO_LLM_API_KEY"] {
+        assert!(
+            envs.contains(&(std::ffi::OsStr::new(removed), None)),
+            "{removed} is removed: {envs:?}"
+        );
+    }
+    assert!(envs.contains(&(std::ffi::OsStr::new("HOME"), Some(home.path().as_os_str()))));
 }
 
 // The Swift test is one flow too: each step reads the one before.
@@ -566,13 +592,9 @@ fn relative_paths_are_taken_from_the_working_directory() {
     )
     .unwrap();
     let run = |args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_steno"))
+        let output = steno_on(home)
             .args(args)
             .current_dir(&work)
-            .env("HOME", home)
-            .env("XDG_DATA_HOME", home.join("share"))
-            .env("APPDATA", home.join("appdata"))
-            .env_remove("STENO_LLM_API_KEY")
             .output()
             .unwrap();
         assert!(
@@ -650,13 +672,10 @@ fn the_models_variable_names_the_models_directory() {
     let relative = Path::new("relative").join("models");
     let expected = work.join(&relative);
     std::fs::create_dir_all(&expected).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_steno"))
+    let output = steno_on(home)
         .args(["dev", "models", "list", "--db"])
         .arg(home.join("steno.sqlite"))
         .current_dir(&work)
-        .env("HOME", home)
-        .env("XDG_DATA_HOME", home.join("share"))
-        .env("APPDATA", home.join("appdata"))
         .env("STENO_MODELS_DIR", &relative)
         .output()
         .unwrap();
@@ -743,16 +762,18 @@ fn models_list_line(home: &Path, asset: &str) -> String {
 }
 
 /// Parakeet v3 is listed with the size of the model the platform runs:
-/// the `CoreML` build's on the Mac by default; the fp32 export's (about
-/// 2.6 GB) elsewhere, and on the Mac too once `speech.json` chooses the
-/// speech sidecar.
+/// the `CoreML` build's manifest on the Mac by default (about 483 MB); the
+/// fp32 export's (about 2.6 GB) elsewhere, and on the Mac too once
+/// `speech.json` chooses the speech sidecar.
 #[test]
 fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     let not_installed =
         |bytes: i64| format!("not installed (~{})", steno_host::labels::file_size(bytes));
-    let coreml = not_installed(steno_host::speech::ModelAsset::ParakeetV3.approximate_bytes());
+    let coreml = not_installed(
+        i64::try_from(steno_speech::ModelAsset::parakeet_v3_coreml().total_size()).unwrap(),
+    );
     let fp32 = not_installed(
         i64::try_from(steno_speech::ModelAsset::parakeet_v3_fp32().total_size()).unwrap(),
     );
@@ -909,6 +930,97 @@ fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
         allowed.stderr
     );
     assert!(allowed.stderr.contains("transcribe"), "{}", allowed.stderr);
+}
+
+/// `steno process --meeting` writes what the decoder replaced by silence
+/// into `damaged-audio.json` beside the database, where the app reads it:
+/// a phone meeting whose recording becomes the fixture with three
+/// undecodable packets is marked with them after the run.
+#[test]
+fn process_meeting_writes_the_damage_beside_the_database() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let audio = home.join("audio");
+    let first = steno(
+        &[
+            "process",
+            fixtures_root()
+                .join("audio/conversation-mic-6s.wav")
+                .to_str()
+                .unwrap(),
+            "--source",
+            "phone",
+            "--db",
+            db.to_str().unwrap(),
+            "--audio-folder",
+            audio.to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(first.status, 0, "{}", first.stderr);
+    let meeting_id = first.stdout.trim().to_owned();
+    let id = uuid::Uuid::parse_str(&meeting_id).unwrap();
+    let store = steno_core::Store::open(&db).unwrap();
+    let mut asset = store.asset(id).unwrap().unwrap();
+    let master = steno_core::paths::file_url_path(&asset.url).unwrap();
+    let damaged = master.with_file_name("recording.m4a");
+    std::fs::copy(
+        fixtures_root().join("audio/tone-440-44k1-500ms-damaged.m4a"),
+        &damaged,
+    )
+    .unwrap();
+    asset.url = steno_core::paths::file_url(&damaged, false);
+    asset.format = steno_core::AudioFormat::M4aAac;
+    store.save_asset(&asset).unwrap();
+    drop(store);
+    let marks = || steno_pipeline::DamagedAudio::in_directory(home);
+    assert_eq!(marks().parts(id), 0, "the WAV decoded clean");
+
+    let again = steno(
+        &[
+            "process",
+            "--meeting",
+            &meeting_id,
+            "--allow-ready",
+            "--db",
+            db.to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(again.status, 0, "{}", again.stderr);
+    assert_eq!(marks().parts(id), 3);
+}
+
+/// A queued meeting is not processed again. The command's pipeline is its
+/// own, so it cannot tell a meeting the app is processing from one the app
+/// left waiting for its speech models; it says what happens to both.
+#[test]
+fn process_meeting_on_a_queued_meeting_says_the_app_processes_it() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let mut meeting = steno_core::testing::sample_data::meeting();
+    meeting.state = steno_core::MeetingState::Queued;
+    steno_core::Store::open(&db)
+        .unwrap()
+        .save_meeting(&meeting)
+        .unwrap();
+    let id = steno_core::json::uuid_string(meeting.id);
+    let queued = steno(
+        &["process", "--meeting", &id, "--db", db.to_str().unwrap()],
+        home,
+    );
+    assert_eq!(queued.status, 2, "{}", queued.stderr);
+    assert!(
+        queued.stderr.contains(&format!(
+            "Meeting {id} is queued or being processed; the app processes it at its next \
+             launch, or once the speech models are installed in Settings."
+        )),
+        "{}",
+        queued.stderr
+    );
+    assert_eq!(queued.stdout, "");
 }
 
 /// `--meeting` stands instead of the input, `--allow-ready` needs it, and

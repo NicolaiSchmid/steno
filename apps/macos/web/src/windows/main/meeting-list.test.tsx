@@ -7,7 +7,7 @@ import type {
 } from "@/bridge/contract";
 import { loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
-import { MeetingList, QUERY_DEBOUNCE_MS } from "./meeting-list";
+import { MeetingList, QUERY_DEBOUNCE_MS, rowPreview } from "./meeting-list";
 
 const FIRST = "00000000-0000-0000-0000-000000000001";
 const FAILED = "00000000-0000-0000-0000-000000000044";
@@ -201,6 +201,28 @@ const THIRD = "00000000-0000-0000-0000-000000000003";
 const PROCESSING = "00000000-0000-0000-0000-000000000002";
 
 describe("MeetingList rows", () => {
+	it("says to download the speech model for a meeting that waits for it", async () => {
+		const list = await fixtureList();
+		const row = list.groups[0]?.meetings[0];
+		if (!row) {
+			throw new Error("fixture has no meeting");
+		}
+		const queued = { ...row, state: "queued" as const, preview: undefined };
+		expect(rowPreview(queued, undefined, false)).toBe("Waiting to process.");
+		expect(
+			rowPreview(
+				queued,
+				{
+					meetingID: row.id,
+					stage: "modelsMissing",
+					title: "Download the speech models in Settings",
+					fraction: 0,
+				},
+				false,
+			),
+		).toBe("Download the speech models in Settings.");
+	});
+
 	it("leads with the source and ends line 1 with the start time once ready", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<MeetingList />, harness);
