@@ -5040,6 +5040,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "libc",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

@@ -3,7 +3,8 @@
 //! `AppEnvironment.reloadPipeline`, `runRetentionSweep`, and the
 //! `Task`s `MeetingDetailViewModel` ran the re-runs in.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use chrono::Utc;
 use steno_core::protocols::BoundaryResult;
@@ -50,6 +51,30 @@ pub type MakeDependencies = Arc<dyn Fn() -> Result<BuiltPipeline, BuildError> + 
 /// ([`SpeechEngines::models_installed`](crate::speech::SpeechEngines::models_installed)).
 pub type ModelsInstalled = Arc<dyn Fn(SpeechRuntime) -> bool + Send + Sync>;
 
+/// When [`CurrentPipeline`] tries again the meetings that wait for the
+/// store (another process held its write lock past the busy timeout, see
+/// [`ProcessingPipeline::resume_waiting_for_store`]): `first` after a
+/// meeting starts waiting, then twice as long after each try, up to
+/// `longest`, for as long as anything waits and the app runs. A quiet spell
+/// longer than `longest` after a try starts again from `first`. Rust only:
+/// the Swift pipeline failed the meeting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreRetry {
+    /// The wait before the first try.
+    pub first: Duration,
+    /// The longest wait between two tries.
+    pub longest: Duration,
+}
+
+impl StoreRetry {
+    /// The app's: 15 s, doubling to 4 minutes. Another program mostly holds
+    /// the lock for one transaction, so the first try gets through.
+    pub const APP: StoreRetry = StoreRetry {
+        first: Duration::from_secs(15),
+        longest: Duration::from_secs(4 * 60),
+    };
+}
+
 /// The pipeline [`CurrentPipeline`] holds, with the engine it was built
 /// with, swapped together.
 struct Current {
@@ -89,10 +114,13 @@ impl Current {
 /// holds, and one [`ModelWaits`], so
 /// [`resume_waiting`](Self::resume_waiting) starts the meetings any of
 /// them left waiting for models, on the current one (the rules are on
-/// [`ModelWaits`]). Held by `App`, the recorder, the phone intake and
-/// [`HostPipeline`].
+/// [`ModelWaits`]). The meetings any of them left waiting for the store are
+/// tried again on the current one by a task of its own ([`StoreRetry`]),
+/// which ends when this value is dropped. Held by `App`, the recorder, the
+/// phone intake and [`HostPipeline`].
 pub struct CurrentPipeline {
-    current: Mutex<Current>,
+    /// Shared with the store's retry, which holds it weakly.
+    current: Arc<Mutex<Current>>,
     make: MakeDependencies,
     runtime: tokio::runtime::Handle,
     quit_latch: QuitLatch,
@@ -101,10 +129,19 @@ pub struct CurrentPipeline {
     /// Whether a resume starts the waiting meetings
     /// ([`resuming_when`](Self::resuming_when)).
     models_installed: ModelsInstalled,
+    /// The task that tries again the meetings waiting for the store.
+    store_retry: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for CurrentPipeline {
+    fn drop(&mut self) {
+        self.store_retry.abort();
+    }
 }
 
 impl CurrentPipeline {
-    /// The pipeline over `built`, reloading through `make`.
+    /// The pipeline over `built`, reloading through `make`, trying the
+    /// store again on [`StoreRetry::APP`].
     #[must_use]
     pub fn new(
         built: BuiltPipeline,
@@ -114,15 +151,40 @@ impl CurrentPipeline {
         let quit_latch = QuitLatch::default();
         let in_flight = InFlight::default();
         let model_waits = ModelWaits::default();
+        let current = Arc::new(Mutex::new(Current::new(
+            built,
+            &quit_latch,
+            &in_flight,
+            &model_waits,
+        )));
+        let store_retry = runtime.spawn(retry_the_store(
+            Arc::downgrade(&current),
+            model_waits.clone(),
+            StoreRetry::APP,
+        ));
         CurrentPipeline {
-            current: Mutex::new(Current::new(built, &quit_latch, &in_flight, &model_waits)),
+            current,
             make,
             runtime,
             quit_latch,
             in_flight,
             model_waits,
             models_installed: Arc::new(|_| true),
+            store_retry,
         }
+    }
+
+    /// Tries the store again on `retry` instead of [`StoreRetry::APP`]:
+    /// the tests' short waits.
+    #[must_use]
+    pub fn retrying_the_store(mut self, retry: StoreRetry) -> Self {
+        self.store_retry.abort();
+        self.store_retry = self.runtime.spawn(retry_the_store(
+            Arc::downgrade(&self.current),
+            self.model_waits.clone(),
+            retry,
+        ));
+        self
     }
 
     /// [`resume_waiting`](Self::resume_waiting), an install's or a
@@ -139,9 +201,7 @@ impl CurrentPipeline {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Current> {
-        self.current
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock(&self.current)
     }
 
     /// The pipeline new work goes to.
@@ -168,11 +228,12 @@ impl CurrentPipeline {
     /// [`reload`](Self::reload), so models the `steno` command installed
     /// into the app's models directory are picked up at the next settings
     /// change (or the next launch); it returns at once while a model is
-    /// missing or nothing waits. A failure, a busy store included, is
-    /// logged and not retried: the meetings stay `queued` for the next of
-    /// these or the launch's recovery. Not the launch's recovery itself,
-    /// which is [`ProcessingPipeline::resume_unfinished`] over every
-    /// queued meeting.
+    /// missing or nothing waits. A failure is logged: the meetings stay
+    /// `queued` for the next of these or the launch's recovery, or, when
+    /// another process held the store, for the store's retry
+    /// ([`StoreRetry`]). Not the launch's recovery itself, which is
+    /// [`ProcessingPipeline::resume_unfinished`] over every queued meeting
+    /// (the store's retry runs it again when the store refused it too).
     pub fn resume_waiting(&self) {
         let _entered = self.runtime.enter();
         let (pipeline, engine) = self.current_with_engine();
@@ -247,6 +308,56 @@ impl CurrentPipeline {
             let _ = operation.await;
         });
         Ok(())
+    }
+}
+
+/// The current pipeline, under its lock.
+fn lock(current: &Mutex<Current>) -> std::sync::MutexGuard<'_, Current> {
+    current
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The store's retry ([`StoreRetry`]): waits until something waits for
+/// the store ([`ModelWaits::until_store_retry`]), then `retry`'s wait, then
+/// tries on the current pipeline, off the async workers, as a write can
+/// wait out the store's busy timeout. Ends once the [`CurrentPipeline`] is
+/// gone or quits.
+async fn retry_the_store(current: Weak<Mutex<Current>>, waits: ModelWaits, retry: StoreRetry) {
+    let mut wait = retry.first;
+    let mut tried_at = None::<tokio::time::Instant>;
+    loop {
+        waits.until_store_retry().await;
+        if tried_at.is_some_and(|at| at.elapsed() > retry.longest) {
+            wait = retry.first;
+        }
+        tokio::time::sleep(wait).await;
+        let Some(pipeline) = current
+            .upgrade()
+            .map(|current| lock(&current).pipeline.clone())
+        else {
+            return;
+        };
+        if pipeline.dependencies().quit_latch.is_set() {
+            return;
+        }
+        match tokio::task::spawn_blocking(move || pipeline.resume_waiting_for_store()).await {
+            Ok(Ok(resumed)) if !resumed.is_empty() => {
+                tracing::info!(
+                    count = resumed.len(),
+                    "resumed meetings waiting for the database"
+                );
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "meetings waiting for the database could not be resumed yet");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the retry of the meetings waiting for the database stopped");
+            }
+        }
+        tried_at = Some(tokio::time::Instant::now());
+        wait = wait.saturating_mul(2).min(retry.longest);
     }
 }
 
@@ -348,7 +459,7 @@ impl Pipeline for HostPipeline {
 
 /// The host's reading of a refused [`ProcessingPipeline::process_again`]:
 /// a queued or processing meeting is already being processed unless it
-/// waits for its models, and a meeting without a recording on record
+/// waits for its models or the store, and a meeting without a recording on record
 /// reads as one whose recording is gone, as the pipeline's docs ask.
 fn process_again_refusal(error: ReprocessError) -> ProcessAgainRefusal {
     match error {
@@ -359,6 +470,7 @@ fn process_again_refusal(error: ReprocessError) -> ProcessAgainRefusal {
         }
         | ReprocessError::Busy(_) => ProcessAgainRefusal::Busy,
         ReprocessError::WaitingForModels(_) => ProcessAgainRefusal::ModelsMissing,
+        ReprocessError::WaitingForStore(_) => ProcessAgainRefusal::StoreBusy,
         ReprocessError::Unfinished { .. } | ReprocessError::NotOffered(_) => {
             ProcessAgainRefusal::NotOffered
         }
@@ -2020,5 +2132,231 @@ mod tests {
         assert_eq!(current.current().resume_unfinished().unwrap(), [meeting.id]);
         current.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, meeting.id), MeetingState::Ready);
+    }
+
+    /// The fake engine, its first warm-up held until `open`: the run's
+    /// first write (`processing`) comes right after.
+    #[derive(Default)]
+    struct HeldWarmUp {
+        used: AtomicBool,
+        entered: tokio::sync::Notify,
+        open: tokio::sync::Notify,
+        inner: FakeSpeechEngine,
+    }
+
+    #[async_trait]
+    impl SpeechEngine for HeldWarmUp {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+
+        fn supported_languages(&self) -> &std::collections::BTreeSet<LanguageTag> {
+            self.inner.supported_languages()
+        }
+
+        async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+            if !self.used.swap(true, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.open.notified().await;
+            }
+            self.inner.prepare().await
+        }
+
+        async fn transcribe(
+            &self,
+            audio: &AudioBuffer16k,
+            hint: Option<&LanguageTag>,
+        ) -> steno_core::protocols::BoundaryResult<Vec<RawSegment>> {
+            self.inner.transcribe(audio, hint).await
+        }
+    }
+
+    /// A second connection's write transaction on the store in `dir`,
+    /// another process's lock until it is dropped.
+    struct WriteLock(rusqlite::Connection);
+
+    impl WriteLock {
+        fn take(dir: &std::path::Path) -> Self {
+            let connection = rusqlite::Connection::open(dir.join("steno.sqlite")).unwrap();
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            WriteLock(connection)
+        }
+    }
+
+    impl Drop for WriteLock {
+        fn drop(&mut self) {
+            let _ = self.0.execute_batch("ROLLBACK");
+        }
+    }
+
+    /// A current pipeline over `store` with `engine`, trying the store
+    /// again on `retry`.
+    fn retrying(
+        store: &Arc<Store>,
+        engine: Arc<dyn SpeechEngine>,
+        retry: StoreRetry,
+    ) -> Arc<CurrentPipeline> {
+        let dependencies = fake_dependencies(store, "fake-engine")
+            .with_speech_engine(steno_pipeline::SharedSpeechEngine::new(engine));
+        let make: MakeDependencies = {
+            let dependencies = dependencies.clone();
+            Arc::new(move || Ok(crate::testing::built(dependencies.clone())))
+        };
+        Arc::new(
+            CurrentPipeline::new(
+                crate::testing::built(dependencies),
+                make,
+                tokio::runtime::Handle::current(),
+            )
+            .retrying_the_store(retry),
+        )
+    }
+
+    /// A run whose first write meets another process's lock for longer
+    /// than the store's five-second busy timeout leaves the meeting
+    /// `queued`, never `failed`, and the store's retry, which keeps trying
+    /// while the lock is held, processes it once the lock is let go.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_meeting_the_store_kept_locked_is_processed_by_the_retry_once_let_go() {
+        let (dir, store) = temp_store();
+        let engine = Arc::new(HeldWarmUp::default());
+        let current = retrying(
+            &store,
+            engine.clone(),
+            StoreRetry {
+                first: Duration::from_millis(20),
+                longest: Duration::from_millis(80),
+            },
+        );
+        let mut events = current.current().dependencies().events.subscribe();
+        let meeting = enqueue_call(dir.path(), &current.current());
+        tokio::time::timeout(PATIENCE, engine.entered.notified())
+            .await
+            .expect("the run is warming up");
+        let lock = WriteLock::take(dir.path());
+        engine.open.notify_one();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while events.recv().await.unwrap()
+                != (MeetingEvent::StoreBusy {
+                    meeting_id: meeting,
+                })
+            {}
+        })
+        .await
+        .expect("the run left the meeting waiting for the store");
+        // The retries meet the lock too while it is held: nothing is
+        // written.
+        assert_eq!(meeting_state(&store, meeting), MeetingState::Queued);
+
+        drop(lock);
+        crate::testing::eventually_within(
+            Duration::from_secs(30),
+            "the retry processed the meeting",
+            || meeting_state(&store, meeting) == MeetingState::Ready,
+        )
+        .await;
+        current.current().wait_until_idle().await;
+        assert_eq!(current.model_waits.waiting_for_store(), Vec::<Uuid>::new());
+    }
+
+    /// An install's resume the store refuses is tried again by the store's
+    /// retry: the meeting it took, waiting for its models until then, is
+    /// processed once the lock is let go, without another install or a
+    /// launch. The resume meets the lock at its write that fails an older
+    /// waiting meeting whose asset row is gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_install_resume_the_store_refuses_is_tried_again() {
+        let (dir, store) = temp_store();
+        let (installed, current) = gated_current(&store, Arc::new(FakeSpeechEngine::default()));
+        let current = current.retrying_the_store(StoreRetry {
+            first: Duration::from_millis(20),
+            longest: Duration::from_millis(80),
+        });
+        let gone = enqueue_call(dir.path(), &current.current());
+        let mut later = sample_data::meeting();
+        later.id = Uuid::new_v4();
+        later.started_at += chrono::Duration::minutes(1);
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            dir.path(),
+            later.id,
+            AudioRetention::KeepForever,
+        )
+        .unwrap();
+        current.current().enqueue(&later, &asset).unwrap();
+        current.current().wait_until_idle().await;
+        let mut both = vec![gone, later.id];
+        both.sort();
+        assert_eq!(current.model_waits.waiting(), both);
+        store
+            .write(|transaction| {
+                transaction.execute(
+                    "DELETE FROM audioAsset WHERE meetingID = ?1",
+                    [steno_core::json::uuid_string(gone)],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        installed.store(true, Ordering::SeqCst);
+        store
+            .read(|connection| Ok(connection.busy_timeout(Duration::ZERO)?))
+            .unwrap();
+        let lock = WriteLock::take(dir.path());
+
+        current.resume_waiting();
+        assert_eq!(current.model_waits.waiting(), Vec::<Uuid>::new());
+        // The retries meet the lock at the same write while it is held.
+        assert_eq!(meeting_state(&store, later.id), MeetingState::Queued);
+        drop(lock);
+        eventually("the retry processed the meeting", || {
+            meeting_state(&store, later.id) == MeetingState::Ready
+        })
+        .await;
+        current.current().wait_until_idle().await;
+        assert!(matches!(
+            meeting_state(&store, gone),
+            MeetingState::Failed { .. }
+        ));
+    }
+
+    /// "Process again" from a stale detail on a meeting waiting for the
+    /// store says what its card says, not "already being processed", and
+    /// leaves it waiting.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_again_on_a_meeting_waiting_for_the_store_says_so() {
+        let (dir, store) = temp_store();
+        let engine = Arc::new(HeldWarmUp::default());
+        let service = Arc::new(HostPipeline {
+            // No retry within the test.
+            pipeline: retrying(
+                &store,
+                engine.clone(),
+                StoreRetry {
+                    first: Duration::from_secs(3600),
+                    longest: Duration::from_secs(3600),
+                },
+            ),
+            sweep: RetentionSweep::new(store.clone()),
+            export_retries: Arc::new(ExportRetries::in_memory()),
+        });
+        store
+            .read(|connection| Ok(connection.busy_timeout(Duration::ZERO)?))
+            .unwrap();
+        let meeting = enqueue_call(dir.path(), &service.pipeline.current());
+        tokio::time::timeout(PATIENCE, engine.entered.notified())
+            .await
+            .expect("the run is warming up");
+        let _lock = WriteLock::take(dir.path());
+        engine.open.notify_one();
+        eventually("the run left the meeting waiting for the store", || {
+            service.pipeline.model_waits.waiting_for_store() == [meeting]
+        })
+        .await;
+
+        assert_eq!(
+            process_again(&service, meeting),
+            Err(ProcessAgainRefusal::StoreBusy)
+        );
+        assert_eq!(service.pipeline.model_waits.waiting_for_store(), [meeting]);
+        assert_eq!(meeting_state(&store, meeting), MeetingState::Queued);
     }
 }

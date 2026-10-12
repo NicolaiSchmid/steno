@@ -24,10 +24,20 @@ pub struct ProgressEntry {
     pub progress: Option<ProcessingProgress>,
     /// When `progress` landed, or when the entry was created.
     pub since: DateTime<Utc>,
-    /// The last run was refused because a model is not installed
-    /// ([`MeetingEvent::ModelsMissing`]); the meeting waits in the queue
-    /// until the next run's first event. Rust only.
-    pub models_missing: bool,
+    /// What the last run was set aside for, the meeting waiting in the
+    /// queue until the next run's first event; `None` otherwise. Rust only.
+    pub parked: Option<Parked>,
+}
+
+/// Why a queued meeting's last run was set aside. Rust only: the Swift
+/// pipeline downloaded the models inside the run and failed it on a busy
+/// store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Parked {
+    /// A model is not installed ([`MeetingEvent::ModelsMissing`]).
+    ModelsMissing,
+    /// Another process held the store ([`MeetingEvent::StoreBusy`]).
+    StoreBusy,
 }
 
 impl ProgressEntry {
@@ -44,6 +54,15 @@ impl ProgressEntry {
     /// finishes" for it.
     pub const MODELS_MISSING_STAGE: &'static str = "modelsMissing";
 
+    /// The title of a meeting whose run met the store locked by another
+    /// process (the other app, another program).
+    pub const STORE_BUSY_TITLE: &'static str =
+        "Waiting for another app to finish with Steno's library";
+
+    /// The bridge stage of such a meeting, beside `modelsMissing`; the page
+    /// drops "starts when the current meeting finishes" for it too.
+    pub const STORE_BUSY_STAGE: &'static str = "storeBusy";
+
     #[must_use]
     pub fn stage(&self) -> Option<PipelineStage> {
         self.progress.as_ref().map(|progress| progress.stage)
@@ -51,11 +70,14 @@ impl ProgressEntry {
 
     /// `stage_label` plus an ellipsis, "Transcribing…"; [`Self::WAITING_TITLE`]
     /// before the first event, [`Self::MODELS_MISSING_TITLE`] after a
-    /// refusal for a missing model.
+    /// refusal for a missing model and [`Self::STORE_BUSY_TITLE`] after one
+    /// by a busy store.
     #[must_use]
     pub fn title(&self) -> String {
-        if self.models_missing {
-            return Self::MODELS_MISSING_TITLE.to_owned();
+        match self.parked {
+            Some(Parked::ModelsMissing) => return Self::MODELS_MISSING_TITLE.to_owned(),
+            Some(Parked::StoreBusy) => return Self::STORE_BUSY_TITLE.to_owned(),
+            None => {}
         }
         self.progress.as_ref().map_or_else(
             || Self::WAITING_TITLE.to_owned(),
@@ -95,8 +117,8 @@ impl ProcessingProgressModel {
     /// even when an earlier run's entry is still there; any other stage
     /// updates the meeting's entry and never lowers its fraction. Progress
     /// for a meeting without an entry drives nothing. `deleted` evicts.
-    /// `modelsMissing` starts an entry without progress that says so,
-    /// until the next run's first event.
+    /// `modelsMissing` and `storeBusy` start an entry without progress that
+    /// says so, until the next run's first event.
     pub fn apply(&mut self, event: &MeetingEvent, now: DateTime<Utc>) {
         match event {
             MeetingEvent::Progress {
@@ -110,7 +132,7 @@ impl ProcessingProgressModel {
                             meeting_id: *meeting_id,
                             progress: Some(progress.clone()),
                             since: now,
-                            models_missing: false,
+                            parked: None,
                         },
                     );
                 } else if let Some(current) = self.entries.get(meeting_id) {
@@ -123,7 +145,7 @@ impl ProcessingProgressModel {
                             meeting_id: *meeting_id,
                             progress: Some(next),
                             since: now,
-                            models_missing: false,
+                            parked: None,
                         },
                     );
                 }
@@ -132,20 +154,28 @@ impl ProcessingProgressModel {
                 self.entries.remove(meeting_id);
             }
             MeetingEvent::ModelsMissing { meeting_id } => {
-                self.entries.insert(
-                    *meeting_id,
-                    ProgressEntry {
-                        meeting_id: *meeting_id,
-                        progress: None,
-                        since: now,
-                        models_missing: true,
-                    },
-                );
+                self.park(*meeting_id, Parked::ModelsMissing, now);
+            }
+            MeetingEvent::StoreBusy { meeting_id } => {
+                self.park(*meeting_id, Parked::StoreBusy, now);
             }
             MeetingEvent::SpeakersNeedReview { .. }
             | MeetingEvent::RetentionApplied { .. }
             | MeetingEvent::OperationFailed { .. } => {}
         }
+    }
+
+    /// An entry without progress for a run set aside for `parked`.
+    fn park(&mut self, meeting_id: Uuid, parked: Parked, now: DateTime<Utc>) {
+        self.entries.insert(
+            meeting_id,
+            ProgressEntry {
+                meeting_id,
+                progress: None,
+                since: now,
+                parked: Some(parked),
+            },
+        );
     }
 
     /// The meeting list as the store delivers it: every meeting in `queued`
@@ -163,7 +193,7 @@ impl ProcessingProgressModel {
                             meeting_id: meeting.id,
                             progress: None,
                             since: now,
-                            models_missing: false,
+                            parked: None,
                         });
                 }
                 MeetingStateKind::Recording

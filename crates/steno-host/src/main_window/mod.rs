@@ -8,4 +8,6 @@ pub mod snapshots;
 
 pub use detail::{MeetingDetailViewModel, RecordingStatus};
 pub use list::{DayGroup, MeetingListViewModel};
-pub use progress::{MeetingEvent, ProcessingProgress, ProcessingProgressModel, ProgressEntry};
+pub use progress::{
+    MeetingEvent, Parked, ProcessingProgress, ProcessingProgressModel, ProgressEntry,
+};

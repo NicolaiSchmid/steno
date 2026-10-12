@@ -48,6 +48,9 @@ rustix.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+# A second connection that holds the store's write lock, as another
+# process's write does, for the tests of a run the store keeps waiting.
+rusqlite.workspace = true
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-pipeline = { path = ".", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }

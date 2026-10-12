@@ -1013,7 +1013,8 @@ impl App {
                             }
                             MeetingEvent::SpeakersNeedReview { .. }
                             | MeetingEvent::Deleted { .. }
-                            | MeetingEvent::ModelsMissing { .. } => {
+                            | MeetingEvent::ModelsMissing { .. }
+                            | MeetingEvent::StoreBusy { .. } => {
                                 event_host.store_changed();
                             }
                             MeetingEvent::OperationFailed { .. } => {
