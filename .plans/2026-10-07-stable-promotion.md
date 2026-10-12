@@ -714,8 +714,11 @@ Every package is written in parallel except where a dependency is named:
       iPhone section says that Steno could not bring over this Mac's phone
       pairing, with Try again, which repeats the export and its prompt. Only
       when the user chooses Pair again there, which says that every phone must
-      pair again, is a new identity minted: Pair again removes the paired phones
-      and the recorded fingerprint, then mints through `HandoverIdentity::store`.
+      pair again, is a new identity minted: Pair again writes the import's
+      `swift-import-done` marker first, then mints a new identity and writes it
+      to the secret store, then removes the paired phones, then records the new
+      fingerprint (`HandoverIdentity::mint_anew`), so a refused write changes
+      nothing and a stop after the write waits as replaced instead of minting.
       That waiting state in Settings, with both bridge methods
       (`settings.iphone.tryAgain`, `settings.iphone.pairAgain`), its fixture
       and a test that a refused read mints nothing, came with
@@ -1388,7 +1391,7 @@ an install needs a newer build installed by hand (Rollback).
       login keychain password once per stored secret (choose Always Allow);
     - an old "Steno" entry in Login Items may need removing (S6);
     - phones stay paired; if macOS's export prompt is denied, Steno keeps the
-      phones waiting and offers Try again in Settings > Phones, and phones pair
+      phones waiting and offers Try again in Settings > iPhone, and phones pair
       again only where D5 says so or the user chooses Pair again;
     - the optional mixdown is now WAV;
     - Whisper, Ultra and DE now transcribe with Parakeet v3;

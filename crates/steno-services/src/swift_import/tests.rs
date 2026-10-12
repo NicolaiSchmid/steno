@@ -743,10 +743,6 @@ impl FingerprintRecord for RefusingRecord {
         }
         self.file.record(fingerprint)
     }
-
-    fn forget(&self) -> BoundaryResult<()> {
-        self.file.forget()
-    }
 }
 
 /// The handover's own load, as the listener does it, over `secrets` and
@@ -1377,8 +1373,15 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
             "nothing left to import"
         );
         let gated = app.gated_handover.clone().unwrap();
-        gated.clone().follow(|| {}).await;
+        tokio::time::timeout(crate::testing::PATIENCE, gated.clone().follow(|| {}))
+            .await
+            .expect("the listener is adopted, waiting");
         assert!(gated.service().is_none(), "unreadable: {unreadable}");
+        assert_eq!(
+            app.store.paired_devices().unwrap().len(),
+            1,
+            "the phone stays (unreadable: {unreadable})"
+        );
         assert_eq!(
             gated.waiting(),
             Some(if unreadable {
@@ -1445,17 +1448,52 @@ fn a_marker_that_cannot_be_written_stops_the_import_s_pair_again() {
     step.keychain.deny_export();
     step.import.run();
     *step.keychain.mark_refusal.lock().unwrap() = Some("errSecInteractionNotAllowed".to_owned());
-    let error = step
-        .import
-        .pair_again(&|| panic!("nothing is minted"))
-        .unwrap_err();
-    assert!(error.contains("errSecInteractionNotAllowed"), "{error}");
+    let (error, logged) = crate::testing::warnings(|| {
+        step.import
+            .pair_again(&|| panic!("nothing is minted"))
+            .unwrap_err()
+    });
+    assert_eq!(error, crate::handover::MARKER_NOT_WRITTEN, "plain words");
+    assert!(
+        logged.contains("errSecInteractionNotAllowed"),
+        "the reason goes to the log: {logged}"
+    );
     assert!(!step.preferences.flag(IMPORT_RAN_KEY));
     assert_eq!(
         step.graph.gate.handover(),
         HandoverGate::Waiting(WaitReason::ImportDenied)
     );
     assert_eq!(step.import.status().stage, SwiftImportStage::Waiting);
+}
+
+/// Settings' Try again while the onboarding window runs the step answers
+/// that the step is under way, not the last run's line, and runs no second
+/// export; Pair again then says the same, and once the step is over says
+/// that the phones can send recordings.
+#[test]
+fn settings_meets_a_run_under_way_or_over_with_its_own_answer() {
+    use crate::handover::WaitingImport as _;
+
+    let step = step(FakeKeychain::swift_app(), None);
+    step.keychain.deny_export();
+    assert_eq!(step.import.run().stage, SwiftImportStage::Waiting);
+    step.keychain.allow_export();
+    {
+        let _onboarding = step.import.running.lock().unwrap();
+        assert_eq!(step.import.try_again(), Err(STEP_UNDER_WAY.to_owned()));
+        assert_eq!(
+            step.import.pair_again(&|| panic!("nothing is minted")),
+            Err(STEP_UNDER_WAY.to_owned())
+        );
+    }
+    assert_eq!(step.keychain.count("export"), 1, "no second export");
+    step.import.try_again().unwrap();
+    assert_eq!(step.import.status().stage, SwiftImportStage::Done);
+    assert_eq!(step.import.try_again(), Ok(()), "nothing left to do");
+    assert_eq!(
+        step.import.pair_again(&|| panic!("nothing is minted")),
+        Err(crate::handover::NOT_WAITING.to_owned())
+    );
 }
 
 /// The graph after a denied export, a phone paired with the Swift

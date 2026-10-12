@@ -66,7 +66,7 @@
 //! | Run: export or store denied or failed | | Waiting (Try again) | nothing |
 //! | Run: identity stored, its fingerprint not recorded | | Waiting (Try again repeats the store) | the identity; no marker, no `IMPORT_RAN` |
 //! | Settings' Try again while Waiting | | as a run | as a run |
-//! | Settings' Pair again while Waiting | | Ready | the marker, then the new identity and its fingerprint, then `IMPORT_RAN`; the paired phones go |
+//! | Settings' Pair again while Waiting | | Ready | the marker, the new identity, the paired phones go, its fingerprint, then `IMPORT_RAN` |
 //! | Not now, or the window closed | withheld (open when no key item) | Waiting | nothing: the step returns at the next launch |
 //! | A key saved in Settings | open | | the key; `KEY_DENIED` cleared |
 //! | Later launch with `KEY_DENIED` | withheld until a key is saved | | nothing |
@@ -861,15 +861,18 @@ impl ImportStep {
         *self.gate.key() == KeyGate::Open
     }
 
-    /// Held for a run or a skip; `None` when another run is under way or
-    /// the step is over, and the caller answers the status.
-    fn one_at_a_time(&self) -> Option<MutexGuard<'_, ()>> {
+    /// Held for a run, a skip or Pair again; why not when another one is
+    /// under way or the step is over.
+    fn one_at_a_time(&self) -> Result<MutexGuard<'_, ()>, NotNow> {
         let running = match self.running.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return None,
+            Err(TryLockError::WouldBlock) => return Err(NotNow::UnderWay),
         };
-        (self.state().stage != SwiftImportStage::Done).then_some(running)
+        if self.state().stage == SwiftImportStage::Done {
+            return Err(NotNow::Over);
+        }
+        Ok(running)
     }
 
     /// The step had no Swift key to read: the store answers from now on.
@@ -980,9 +983,36 @@ impl SwiftImport for ImportStep {
 
     fn run(&self) -> SwiftImportStatus {
         // A second Continue or Try again brings up no second prompt.
-        let Some(_running) = self.one_at_a_time() else {
+        let Ok(_running) = self.one_at_a_time() else {
             return self.status();
         };
+        self.run_held()
+    }
+
+    fn skip(&self) -> SwiftImportStatus {
+        // A run under way sets the stage itself; the caller may be the
+        // main thread, which must not wait on its prompts.
+        let Ok(_running) = self.one_at_a_time() else {
+            return self.status();
+        };
+        // Not now brings up no prompt: a key item is left unread for this
+        // launch, whoever stored it.
+        let items = self.state().items;
+        if items.read_key || items.other_key {
+            self.key_read(KeyGate::Withheld);
+        } else {
+            self.open_key(false);
+        }
+        self.state().stage = SwiftImportStage::Waiting;
+        self.gate
+            .set_handover(HandoverGate::Waiting(WaitReason::ImportDenied));
+        self.status()
+    }
+}
+
+impl ImportStep {
+    /// The run, its caller holding the lock ([`Self::one_at_a_time`]).
+    fn run_held(&self) -> SwiftImportStatus {
         if self.state().items.read_key {
             // A key saved in Settings since the launch wins: the Swift
             // key is not read over it.
@@ -1028,33 +1058,21 @@ impl SwiftImport for ImportStep {
         }
         self.status()
     }
-
-    fn skip(&self) -> SwiftImportStatus {
-        // A run under way sets the stage itself; the caller may be the
-        // main thread, which must not wait on its prompts.
-        let Some(_running) = self.one_at_a_time() else {
-            return self.status();
-        };
-        // Not now brings up no prompt: a key item is left unread for this
-        // launch, whoever stored it.
-        let items = self.state().items;
-        if items.read_key || items.other_key {
-            self.key_read(KeyGate::Withheld);
-        } else {
-            self.open_key(false);
-        }
-        self.state().stage = SwiftImportStage::Waiting;
-        self.gate
-            .set_handover(HandoverGate::Waiting(WaitReason::ImportDenied));
-        self.status()
-    }
 }
 
 /// Settings' iPhone section drives the step while the handover waits
 /// for it (`crate::handover::GatedHandover`).
 impl crate::handover::WaitingImport for ImportStep {
-    fn run_again(&self) -> Result<(), String> {
-        let status = self.run();
+    /// The run, as the step's Try again; `STEP_UNDER_WAY` while the
+    /// onboarding window runs it, whose outcome reaches the section
+    /// through the gate, rather than the last run's line.
+    fn try_again(&self) -> Result<(), String> {
+        let _running = match self.one_at_a_time() {
+            Ok(running) => running,
+            Err(NotNow::UnderWay) => return Err(STEP_UNDER_WAY.to_owned()),
+            Err(NotNow::Over) => return Ok(()),
+        };
+        let status = self.run_held();
         if status.stage == SwiftImportStage::Done {
             return Ok(());
         }
@@ -1069,13 +1087,14 @@ impl crate::handover::WaitingImport for ImportStep {
     /// `IMPORT_RAN` and the gate opens. What the step left unread stays
     /// so for this launch, as after Not now.
     fn pair_again(&self, mint: &dyn Fn() -> Result<(), String>) -> Result<(), String> {
-        let Some(_running) = self.one_at_a_time() else {
-            return Err(STEP_UNDER_WAY.to_owned());
+        let _running = match self.one_at_a_time() {
+            Ok(running) => running,
+            Err(NotNow::UnderWay) => return Err(STEP_UNDER_WAY.to_owned()),
+            Err(NotNow::Over) => return Err(crate::handover::NOT_WAITING.to_owned()),
         };
-        self.keychain.mark_import_done().map_err(|error| {
-            tracing::warn!(%error, "the import's marker was not written, so Pair again stopped");
-            crate::handover::marker_not_written(&error)
-        })?;
+        self.keychain
+            .mark_import_done()
+            .map_err(|error| crate::handover::marker_not_written(&error))?;
         mint()?;
         {
             let mut state = self.state();
@@ -1089,8 +1108,16 @@ impl crate::handover::WaitingImport for ImportStep {
     }
 }
 
-/// What Pair again answers while the step runs, or once it is over.
+/// What Try again and Pair again answer while the step runs.
 const STEP_UNDER_WAY: &str = "Steno is still bringing over this Mac's phone pairing.";
+
+/// Why [`ImportStep::one_at_a_time`] did not take the lock.
+enum NotNow {
+    /// Another run, skip or Pair again holds it.
+    UnderWay,
+    /// The step is over.
+    Over,
+}
 
 #[cfg(test)]
 mod tests;

@@ -725,7 +725,7 @@ pub fn build_with_import(
         .detection
         .map(|detection| detection.controller(recorder.clone(), store.clone()));
 
-    let identity = identity_source(
+    let source = identity_source(
         &store,
         &pipeline,
         &secrets,
@@ -740,11 +740,11 @@ pub fn build_with_import(
     let gated_handover = import
         .as_ref()
         .zip(step.as_ref())
-        .map(|(import, step)| gated_handover(import, step, &identity));
+        .map(|(import, step)| gated_handover(import, step, &source));
     let handover = if gated_handover.is_some() {
         None
     } else {
-        handover_listener(&identity)
+        handover_listener(&source)
             .inspect_err(|error| warnings.push(format!("Phone handover is unavailable: {error}")))
             .ok()
     };
@@ -3395,7 +3395,7 @@ mod tests {
         crate::testing::pair_a_phone(&app.store);
         let lost = Arc::new(CountingIdentityReads::default());
         let refused = listener(&lost).unwrap_err();
-        assert!(refused.contains("pair again"), "{refused}");
+        assert!(refused.contains("no longer saved"), "{refused}");
         assert_eq!(lost.reads.load(Ordering::SeqCst), 1);
         assert_eq!(
             block_on(

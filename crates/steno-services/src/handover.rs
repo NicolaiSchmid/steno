@@ -10,6 +10,22 @@
 //! refuses it, the handover waits with the reason ([`Handover::waiting`])
 //! and never mints over it; Try again reads it again and Pair again makes
 //! a new one, the import's marker written first (stable plan S6).
+//!
+//! The waiting state, one row per event. A plain handover
+//! ([`ListenerHandover`]) has its listener or waits with a reason; a gated
+//! one ([`GatedHandover`]) has no listener until the Swift import's gate
+//! opens, then adopts a [`ListenerHandover`], which may itself wait.
+//!
+//! | Event | Plain handover | Gated handover | Read or written |
+//! |-------|----------------|----------------|-----------------|
+//! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read; a mint only where the guard allows |
+//! | Try again while waiting | the listener once the read succeeds, else the new reason | the gate waits: the import's step runs again; a listener adopted: its Try again | the identity read (or the import's export) |
+//! | Try again with a listener | nothing | the adopted listener's: nothing | nothing |
+//! | Pair again while waiting | the listener over a new identity | the gate waits: the import ends with a new identity and the gate opens; a listener adopted: its Pair again | the marker, the new identity, the paired phones go, its fingerprint |
+//! | The keyring answered after asking at the launch (`App::launch`) | as Try again | nothing: Try again reads it | as Try again |
+//! | Gate ready | | the listener built and adopted | the identity read, as at the launch |
+//! | A failed build (the store's checkpoint) | | no listener; built again at the next gate change | nothing |
+//! | Shutdown | no listener handed over from now on | no listener built or adopted from now on | nothing |
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -79,13 +95,6 @@ impl FingerprintRecord for FingerprintFile {
             Access::Default,
         )?;
         Ok(())
-    }
-
-    fn forget(&self) -> BoundaryResult<()> {
-        match std::fs::remove_file(&self.path) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(Box::new(error)),
-            _ => Ok(()),
-        }
     }
 }
 
@@ -215,13 +224,14 @@ impl IdentitySource {
         Ok(self.listener_over(identity))
     }
 
-    /// Pair again's mint alone ([`HandoverIdentity::pair_again`]): the
-    /// paired phones and the recorded fingerprint go, a new identity is
-    /// stored. Whoever calls it writes the marker first.
+    /// Pair again's mint alone ([`HandoverIdentity::mint_anew`]): the new
+    /// identity is written to the secret store, then the paired phones go,
+    /// then its fingerprint is recorded. Whoever calls it writes the
+    /// marker first.
     pub fn mint_anew(&self) -> Result<HandoverIdentity, String> {
         block_on(
             &self.runtime,
-            HandoverIdentity::pair_again(
+            HandoverIdentity::mint_anew(
                 self.secrets.as_ref(),
                 self.record.as_ref(),
                 &self.store,
@@ -229,7 +239,10 @@ impl IdentitySource {
                 chrono::Utc::now(),
             ),
         )
-        .map_err(|error| identity_failure(&error))
+        .map_err(|error| {
+            tracing::warn!(%error, "Pair again made no new phone pairing");
+            identity_failure(&error)
+        })
     }
 
     fn listener_over(&self, identity: HandoverIdentity) -> (Arc<HandoverService>, Uuid) {
@@ -238,18 +251,43 @@ impl IdentitySource {
     }
 }
 
-/// Pair again's answer when the marker could not be written.
+/// Pair again's answer when the import's marker could not be written
+/// (only on the Mac, whose login keychain holds it); the error goes to the
+/// log.
 pub(crate) fn marker_not_written(error: &str) -> String {
-    format!("Steno made no new pairing, as it could not note that the earlier one is gone: {error}")
+    tracing::warn!(%error, "the import's marker was not written, so Pair again stopped");
+    MARKER_NOT_WRITTEN.to_owned()
 }
 
-/// Why the identity is not available, for the Phones settings' details:
-/// the keyring's own sentence when it was not opened at start, as that one
-/// already names the pairing.
+/// What [`marker_not_written`] answers.
+pub(crate) const MARKER_NOT_WRITTEN: &str = "Steno made no new pairing, as macOS did not let it save to the login keychain. Choose Pair again, and unlock the keychain if macOS asks.";
+
+/// The word for this computer in the handover's answers.
+const COMPUTER: &str = if cfg!(target_os = "macos") {
+    "Mac"
+} else {
+    "computer"
+};
+
+/// Why the identity is not available, for the iPhone section's details,
+/// in plain words: the keyring's own sentence when it was not opened at
+/// start, as that one already names the pairing; a sentence of its own
+/// when the guard refused the identity; the read's error otherwise.
 pub(crate) fn identity_failure(error: &IdentityError) -> String {
-    match keyring_failure(error) {
-        Some(not_opened @ KeyringUnavailable::NotOpened(_)) => not_opened.to_string(),
-        _ => error.to_string(),
+    match error {
+        IdentityError::Unavailable(Unavailability::Missing) => {
+            format!("The pairing your phones know is no longer saved on this {COMPUTER}.")
+        }
+        IdentityError::Unavailable(Unavailability::Replaced) => {
+            format!("This {COMPUTER} has a different pairing saved than the one your phones know.")
+        }
+        IdentityError::Secrets(source) => {
+            format!("Steno could not save the new phone pairing on this {COMPUTER} ({source}).")
+        }
+        _ => match keyring_failure(error) {
+            Some(not_opened @ KeyringUnavailable::NotOpened(_)) => not_opened.to_string(),
+            _ => error.to_string(),
+        },
     }
 }
 
@@ -291,29 +329,31 @@ pub struct ListenerHandover {
     listener: OnceLock<(Arc<HandoverService>, Uuid)>,
     /// Why there is no listener yet, and whether the app shut down; `set`
     /// and `close` hold it throughout.
-    waiting: Mutex<Waiting>,
+    pending: Mutex<Pending>,
     /// Where Try again and Pair again read and mint; `None` for a
     /// handover made over a listener alone.
-    identity: Option<Arc<IdentitySource>>,
+    source: Option<Arc<IdentitySource>>,
     /// Held by a read or a mint, one at a time.
     attempt: Mutex<()>,
     store: Arc<Store>,
     runtime: tokio::runtime::Handle,
 }
 
-struct Waiting {
+/// Why a [`ListenerHandover`] has no listener yet, and whether the app
+/// shut down.
+struct Pending {
     /// The failure the listener state shows.
-    reason: String,
+    failure: String,
     /// Why the handover waits, for the iPhone section; `None` with a
     /// listener.
-    wait: Option<PhoneWaitingReason>,
+    reason: Option<PhoneWaitingReason>,
     closed: bool,
 }
 
 /// What Try again and Pair again answer while another one runs.
-const ATTEMPT_UNDER_WAY: &str = "Steno is already reading this computer's phone pairing.";
-/// What Pair again answers once the listener is there.
-const NOT_WAITING: &str = "Phone handover is not waiting for a new pairing.";
+const ATTEMPT_UNDER_WAY: &str = "Steno is already working on this phone pairing.";
+/// What Pair again answers once the phones can send recordings.
+pub(crate) const NOT_WAITING: &str = "Your phones can already send recordings.";
 /// What Try again and Pair again answer once the app shuts down.
 const SHUT_DOWN: &str = "Steno is quitting.";
 
@@ -353,18 +393,18 @@ impl ListenerHandover {
     }
 
     fn empty(
-        identity: Option<Arc<IdentitySource>>,
+        source: Option<Arc<IdentitySource>>,
         store: Arc<Store>,
         runtime: tokio::runtime::Handle,
     ) -> Self {
         ListenerHandover {
             listener: OnceLock::new(),
-            waiting: Mutex::new(Waiting {
-                reason: String::new(),
-                wait: None,
+            pending: Mutex::new(Pending {
+                failure: String::new(),
+                reason: None,
                 closed: false,
             }),
-            identity,
+            source,
             attempt: Mutex::new(()),
             store,
             runtime,
@@ -383,11 +423,11 @@ impl ListenerHandover {
     /// so a shutdown either stops the started listener or comes first and
     /// keeps it from starting.
     fn set(&self, service: Arc<HandoverService>, mac_id: Uuid) -> bool {
-        let mut waiting = self.lock();
-        if waiting.closed || self.listener.set((service, mac_id)).is_err() {
+        let mut pending = self.lock();
+        if pending.closed || self.listener.set((service, mac_id)).is_err() {
             return false;
         }
-        waiting.wait = None;
+        pending.reason = None;
         self.start_if_paired();
         true
     }
@@ -409,16 +449,18 @@ impl ListenerHandover {
     /// Reads the identity again while the handover waits and hands the
     /// listener over when the read succeeds; the failure's reason, kept
     /// for the iPhone section, when it does not. Nothing to do with a
-    /// listener, or while another read or mint runs. Try again, and the
-    /// launch's reread once a keyring that was asking the user answered.
+    /// listener; `ATTEMPT_UNDER_WAY` while another read or mint runs,
+    /// as the handover still waits. Try again, and the launch's reread
+    /// once a keyring that was asking the user answered.
     pub fn read_again(&self) -> Result<(), String> {
         if self.listener().is_some() {
             return Ok(());
         }
-        let source = self.identity.as_ref().ok_or_else(|| self.unavailable())?;
-        let Some(_attempt) = self.one_at_a_time() else {
+        let source = self.source.as_ref().ok_or_else(|| self.unavailable())?;
+        let _attempt = self.one_at_a_time().ok_or(ATTEMPT_UNDER_WAY)?;
+        if self.listener().is_some() {
             return Ok(());
-        };
+        }
         match source.read() {
             Ok((service, mac_id)) => {
                 if self.set(service, mac_id) || self.listener().is_some() {
@@ -428,6 +470,7 @@ impl ListenerHandover {
                 }
             }
             Err(error) => {
+                tracing::warn!(%error, "phone handover still waits for its identity");
                 self.wait_for(&error);
                 Err(identity_failure(&error))
             }
@@ -437,9 +480,9 @@ impl ListenerHandover {
     /// Why the identity is not available, as the listener state and the
     /// iPhone section show it.
     fn wait_for(&self, error: &IdentityError) {
-        let mut waiting = self.lock();
-        waiting.reason = identity_failure(error);
-        waiting.wait = Some(wait_reason(error));
+        let mut pending = self.lock();
+        pending.failure = identity_failure(error);
+        pending.reason = Some(wait_reason(error));
     }
 
     /// Held for a read or a mint; `None` while another one runs.
@@ -451,12 +494,12 @@ impl ListenerHandover {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Waiting> {
-        self.waiting.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, Pending> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn unavailable(&self) -> String {
-        format!("Phone handover is unavailable: {}", self.lock().reason)
+        format!("Phone handover is unavailable: {}", self.lock().failure)
     }
 }
 
@@ -535,7 +578,7 @@ impl Handover for ListenerHandover {
         if self.listener().is_some() {
             return None;
         }
-        self.lock().wait
+        self.lock().reason
     }
 
     fn try_again(&self) -> BoundaryResult<()> {
@@ -544,13 +587,18 @@ impl Handover for ListenerHandover {
 
     /// Only while the handover waits, and never after the shutdown: the
     /// marker, the mint ([`IdentitySource::pair_again`]), then the
-    /// listener over the new identity.
+    /// listener over the new identity. Checked again once the attempt is
+    /// this one's, as a read that just ended may have handed a listener
+    /// over.
     fn pair_again(&self) -> BoundaryResult<()> {
         if self.listener().is_some() {
             return Err(NOT_WAITING.into());
         }
-        let source = self.identity.as_ref().ok_or_else(|| self.unavailable())?;
+        let source = self.source.as_ref().ok_or_else(|| self.unavailable())?;
         let _attempt = self.one_at_a_time().ok_or(ATTEMPT_UNDER_WAY)?;
+        if self.listener().is_some() {
+            return Err(NOT_WAITING.into());
+        }
         if self.lock().closed {
             return Err(SHUT_DOWN.into());
         }
@@ -562,14 +610,14 @@ impl Handover for ListenerHandover {
 
 /// What `start` and `revoke` answer while the import waits, before a
 /// listener build failed.
-pub const WAITING_FOR_IMPORT: &str = "Phones can upload again once Steno has brought over this Mac's phone pairing from the previous version. This happens in the welcome step when Steno next starts.";
+pub const WAITING_FOR_IMPORT: &str = "Phones can upload again once Steno has brought over this Mac's phone pairing from the previous version, in the welcome step or with Try again in Settings > iPhone.";
 
 /// The Swift import's step as the gated handover drives it while the
 /// import's gate waits (`crate::swift_import::ImportStep`).
 pub trait WaitingImport: Send + Sync {
     /// Try again: the step runs again (the export and its prompt); its line
     /// when the identity still did not come over.
-    fn run_again(&self) -> Result<(), String>;
+    fn try_again(&self) -> Result<(), String>;
     /// Pair again ends the import: the marker first (one that cannot be
     /// written stops it), then `mint`, then the gate opens.
     fn pair_again(&self, mint: &dyn Fn() -> Result<(), String>) -> Result<(), String>;
@@ -677,7 +725,14 @@ impl GatedHandover {
     /// Builds the listener, then adopts it and starts it when a phone is
     /// paired, under the latch [`Self::close`] takes: `false`, with nothing
     /// adopted or started, once the app shut down.
+    ///
+    /// The latch is checked before the build too, so a shutdown that came
+    /// first reads no identity; it is not held during the build, which may
+    /// wait on a keychain prompt that the shutdown must not wait for.
     fn build_and_adopt(&self) -> Result<bool, String> {
+        if *self.lock_closed() {
+            return Ok(false);
+        }
         let listener = (self.make)()?;
         let closed = self.lock_closed();
         if *closed {
@@ -804,8 +859,9 @@ impl Handover for GatedHandover {
 
     /// The adopted listener reads its identity again, so a listener left
     /// waiting on the keyring gets past an unlock; before one, while the
-    /// gate waits, the step runs again, and once the gate opened and a
-    /// build failed, `follow` builds again.
+    /// gate waits, the step runs again. Once the gate opened and a build
+    /// failed, `follow` builds again; Settings never offers Try again
+    /// then, as [`Handover::waiting`] has no reason to show.
     fn try_again(&self) -> BoundaryResult<()> {
         if let Some(listener) = self.listener.get() {
             return listener.try_again();
@@ -814,7 +870,7 @@ impl Handover for GatedHandover {
         // block.
         let gate = *self.gate.borrow();
         match gate {
-            HandoverGate::Waiting(_) => Ok(self.import.run_again()?),
+            HandoverGate::Waiting(_) => Ok(self.import.try_again()?),
             HandoverGate::Pending => Err(WAITING_FOR_IMPORT.into()),
             HandoverGate::Ready => {
                 self.retry.notify_one();
@@ -1050,20 +1106,26 @@ mod tests {
     }
 
     /// A secret store in memory that refuses every read of the identity
-    /// while `refuse` is set, as a denied keychain prompt does, and logs
-    /// every write into `log`.
+    /// while `refuse` is set, as a denied keychain prompt does, and every
+    /// write while `refuse_writes` is; counts the identity's reads and logs
+    /// every write it took into `log`.
     #[derive(Default)]
     struct Keychain {
         inner: steno_core::testing::InMemorySecretStore,
         refuse: std::sync::atomic::AtomicBool,
+        refuse_writes: std::sync::atomic::AtomicBool,
+        reads: AtomicUsize,
         log: Arc<Mutex<Vec<String>>>,
     }
 
     #[steno_core::async_trait]
     impl SecretStore for Keychain {
         async fn secret(&self, key: &steno_core::SecretKey) -> BoundaryResult<Option<String>> {
-            if key.as_str() == HandoverIdentity::SECRET_KEY && self.refuse.load(Ordering::SeqCst) {
-                return Err("denied: the user refused the keychain prompt".into());
+            if key.as_str() == HandoverIdentity::SECRET_KEY {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                if self.refuse.load(Ordering::SeqCst) {
+                    return Err("denied: the user refused the keychain prompt".into());
+                }
             }
             self.inner.secret(key).await
         }
@@ -1073,11 +1135,34 @@ mod tests {
             key: &steno_core::SecretKey,
             value: Option<&str>,
         ) -> BoundaryResult<()> {
+            if self.refuse_writes.load(Ordering::SeqCst) {
+                return Err("denied: the user refused to let Steno change the item".into());
+            }
             self.log
                 .lock()
                 .unwrap()
                 .push(format!("set {}", key.as_str()));
             self.inner.set_secret(key, value).await
+        }
+    }
+
+    /// A fingerprint record over the app's file that refuses every write
+    /// while `refuse` is set.
+    struct Record {
+        file: FingerprintFile,
+        refuse: std::sync::atomic::AtomicBool,
+    }
+
+    impl FingerprintRecord for Record {
+        fn recorded(&self) -> BoundaryResult<Option<String>> {
+            self.file.recorded()
+        }
+
+        fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
+            if self.refuse.load(Ordering::SeqCst) {
+                return Err("No space left on device".into());
+            }
+            self.file.record(fingerprint)
         }
     }
 
@@ -1102,14 +1187,16 @@ mod tests {
     }
 
     /// A computer whose phone paired with `identity`, recorded under
-    /// `dir`; `stored` puts the identity in the keychain too.
+    /// `dir`; `stored` puts the identity in the keychain too. `listens`
+    /// counts the listeners its source built.
     struct Paired {
         dir: tempfile::TempDir,
         store: Arc<Store>,
         keychain: Arc<Keychain>,
-        record: Arc<FingerprintFile>,
+        record: Arc<Record>,
         marker: Arc<Marker>,
         identity: HandoverIdentity,
+        listens: Arc<AtomicUsize>,
     }
 
     impl Paired {
@@ -1118,7 +1205,10 @@ mod tests {
             let store = Arc::new(Store::in_memory().unwrap());
             crate::testing::pair_a_phone(&store);
             let keychain = Arc::new(Keychain::default());
-            let record = Arc::new(FingerprintFile::in_support_directory(dir.path()));
+            let record = Arc::new(Record {
+                file: FingerprintFile::in_support_directory(dir.path()),
+                refuse: std::sync::atomic::AtomicBool::new(false),
+            });
             let identity = HandoverIdentity::mint("Steno on a test", chrono::Utc::now()).unwrap();
             if stored {
                 identity.store(&keychain.inner, &*record).await.unwrap();
@@ -1138,20 +1228,107 @@ mod tests {
                 record,
                 marker,
                 identity,
+                listens: Arc::new(AtomicUsize::new(0)),
             }
         }
 
         fn source(&self) -> Arc<IdentitySource> {
             let (store, inbox) = (self.store.clone(), self.dir.path().to_path_buf());
+            let listens = self.listens.clone();
             Arc::new(IdentitySource {
                 store: self.store.clone(),
                 secrets: self.keychain.clone(),
                 record: self.record.clone(),
                 marker: Some(self.marker.clone()),
                 common_name: "Steno on a test".to_owned(),
-                listen: Box::new(move |identity| Arc::new(test_service(&store, &inbox, identity))),
+                listen: Box::new(move |identity| {
+                    listens.fetch_add(1, Ordering::SeqCst);
+                    Arc::new(test_service(&store, &inbox, identity))
+                }),
                 runtime: tokio::runtime::Handle::current(),
             })
+        }
+
+        /// The phone's id.
+        fn phone(&self) -> Uuid {
+            self.store.paired_devices().unwrap()[0].id
+        }
+
+        /// A recording the phone is still sending (its receipt `receiving`,
+        /// its chunks in the inbox) and one already admitted as a meeting
+        /// (its receipt `complete`, its row in the admission ledger).
+        fn seed_recordings(&self) -> Recordings {
+            let now = chrono::Utc::now();
+            let receipt = |recording_id, state| HandoverReceipt {
+                recording_id,
+                device_id: self.phone(),
+                state,
+                byte_count: 4,
+                sha256: vec![7; 32],
+                chunk_size: 4,
+                received_chunks: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            };
+            let receiving = Uuid::new_v4();
+            self.store
+                .save_handover_receipt(&receipt(receiving, steno_core::HandoverState::Receiving))
+                .unwrap();
+            let inbox = self.dir.path().join("inbox");
+            std::fs::create_dir_all(&inbox).unwrap();
+            let partial = inbox.join(format!("{}.partial", receiving.hyphenated()));
+            std::fs::write(&partial, b"aac").unwrap();
+            let meeting = steno_core::Meeting {
+                id: Uuid::new_v4(),
+                ..steno_core::testing::sample_data::meeting()
+            };
+            let asset = steno_core::AudioAsset {
+                id: Uuid::new_v4(),
+                meeting_id: meeting.id,
+                url: format!("file:///tmp/Audio/{}/master.m4a", meeting.id),
+                format: steno_core::AudioFormat::M4aAac,
+                lanes: vec![steno_core::AudioLane::Mixed],
+                sidecars_16k: BTreeMap::new(),
+                mixdown_url: None,
+                retention: steno_core::AudioRetention::KeepForever,
+                expires_at: None,
+            };
+            let admitted = Uuid::new_v4();
+            let complete = steno_core::HandoverState::Complete {
+                meeting_id: meeting.id,
+            };
+            self.store
+                .save_admission_durably(&receipt(admitted, complete), &meeting, &asset)
+                .unwrap();
+            Recordings {
+                receiving,
+                partial,
+                admitted,
+                meeting: meeting.id,
+            }
+        }
+
+        /// Keeps the phone paired whatever deletes it, as a disk that
+        /// refuses the write would, until [`Self::let_the_phone_go`].
+        fn keep_the_phone(&self) {
+            self.store
+                .write(|transaction| {
+                    transaction.execute_batch(
+                        "CREATE TRIGGER keep_the_phone BEFORE DELETE ON pairedDevice \
+                         BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;",
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        fn let_the_phone_go(&self) {
+            self.store
+                .write(|transaction| {
+                    transaction.execute_batch("DROP TRIGGER keep_the_phone;")?;
+                    Ok(())
+                })
+                .unwrap();
         }
 
         /// The stored identity, the recorded fingerprint and the paired
@@ -1166,6 +1343,15 @@ mod tests {
                 self.record.recorded().unwrap(),
                 self.store.paired_devices().unwrap().len(),
             )
+        }
+
+        /// The identity's fingerprint as recorded, in hex.
+        fn fingerprint_of(stored: Option<&String>) -> Option<String> {
+            stored.map(|pem| {
+                steno_handover::identity::hex(
+                    &HandoverIdentity::from_pem(pem).unwrap().fingerprint(),
+                )
+            })
         }
 
         fn log(&self) -> Vec<String> {
@@ -1190,6 +1376,13 @@ mod tests {
             panic!("a waiting handover reads as failed");
         };
         assert!(reason.contains("refused the keychain prompt"), "{reason}");
+        {
+            // A Try again while another read or mint runs says so: the
+            // handover still waits.
+            let _other = handover.attempt.lock().unwrap();
+            let busy = tokio::task::block_in_place(|| handover.try_again()).unwrap_err();
+            assert_eq!(busy.to_string(), ATTEMPT_UNDER_WAY);
+        }
         assert_eq!(
             paired.places().await,
             before,
@@ -1221,6 +1414,12 @@ mod tests {
             handover.state()
         );
         assert_eq!(paired.places().await, before);
+
+        // Once there, Try again reads nothing and builds no second listener.
+        let reads = paired.keychain.reads.load(Ordering::SeqCst);
+        tokio::task::block_in_place(|| handover.try_again()).unwrap();
+        assert_eq!(paired.keychain.reads.load(Ordering::SeqCst), reads);
+        assert_eq!(paired.listens.load(Ordering::SeqCst), 1, "one listener");
         tokio::task::block_in_place(|| handover.stop());
     }
 
@@ -1277,13 +1476,204 @@ mod tests {
         let handover = ListenerHandover::read(paired.source());
         paired.marker.fail.store(true, Ordering::SeqCst);
         let error = tokio::task::block_in_place(|| handover.pair_again()).unwrap_err();
-        assert!(
-            error.to_string().contains("the keychain is locked"),
-            "{error}"
-        );
+        assert_eq!(error.to_string(), MARKER_NOT_WRITTEN, "in plain words");
         assert_eq!(paired.log(), ["marker"], "no identity written");
         assert_eq!(paired.places().await, before);
         assert_eq!(handover.waiting(), Some(PhoneWaitingReason::Missing));
+    }
+
+    /// [`Paired::seed_recordings`]' two recordings.
+    struct Recordings {
+        receiving: Uuid,
+        partial: PathBuf,
+        admitted: Uuid,
+        meeting: Uuid,
+    }
+
+    impl Recordings {
+        /// Neither recording was marked delivered or dropped on this
+        /// computer: the admitted one keeps its ledger row and its meeting,
+        /// the one still being sent has no ledger row, and while the phone
+        /// is paired (`phone`) both receipts and the chunks stay. Without
+        /// the phone the receipts went with it, and the phone, which keeps
+        /// its copy, sends the recording again once it paired again.
+        fn assert_kept(&self, store: &Store, phone: bool, when: &str) {
+            assert_eq!(
+                store.admitted_meeting(self.admitted, 4, &[7; 32]).unwrap(),
+                Some(self.meeting),
+                "{when}: the admitted recording stays delivered"
+            );
+            assert!(
+                store.meeting(self.meeting).unwrap().is_some(),
+                "{when}: its meeting stays"
+            );
+            assert_eq!(
+                store.admitted_meeting(self.receiving, 4, &[7; 32]).unwrap(),
+                None,
+                "{when}: the recording still being sent is not delivered"
+            );
+            let receiving = store.handover_receipt(self.receiving).unwrap();
+            if phone {
+                assert_eq!(
+                    receiving.map(|receipt| receipt.state),
+                    Some(steno_core::HandoverState::Receiving),
+                    "{when}"
+                );
+                assert!(
+                    store.handover_receipt(self.admitted).unwrap().is_some(),
+                    "{when}"
+                );
+                assert!(self.partial.exists(), "{when}: its chunks stay");
+            } else {
+                assert_eq!(receiving, None, "{when}: its receipt went with the phone");
+            }
+        }
+    }
+
+    /// A Pair again whose new identity the keychain refuses to write
+    /// changes nothing, whichever reason the handover waits for: the
+    /// stored identity, the recorded fingerprint, the paired phone and its
+    /// recordings stay, the handover still waits for the same reason, and
+    /// so does the next launch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_write_leaves_pair_again_waiting_with_its_reason() {
+        for reason in [
+            PhoneWaitingReason::Unreadable,
+            PhoneWaitingReason::Missing,
+            PhoneWaitingReason::Replaced,
+        ] {
+            let paired = Paired::new(reason != PhoneWaitingReason::Missing).await;
+            match reason {
+                PhoneWaitingReason::Unreadable => {
+                    paired.keychain.refuse.store(true, Ordering::SeqCst);
+                }
+                PhoneWaitingReason::Replaced => {
+                    let other = HandoverIdentity::mint("Steno elsewhere", chrono::Utc::now())
+                        .unwrap()
+                        .to_pem()
+                        .unwrap();
+                    paired
+                        .keychain
+                        .inner
+                        .set_secret(&HandoverIdentity::secret_key(), Some(&other))
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let recordings = paired.seed_recordings();
+            let handover = ListenerHandover::read(paired.source());
+            assert_eq!(handover.waiting(), Some(reason));
+            let before = paired.places().await;
+
+            paired.keychain.refuse_writes.store(true, Ordering::SeqCst);
+            let error = tokio::task::block_in_place(|| handover.pair_again()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("Steno could not save the new phone pairing"),
+                "{reason}: {error}"
+            );
+            assert_eq!(paired.places().await, before, "{reason}: nothing changed");
+            assert_eq!(handover.waiting(), Some(reason), "{reason}: still waiting");
+            assert!(handover.listener().is_none());
+            recordings.assert_kept(&paired.store, true, &format!("{reason}: a refused write"));
+
+            let next = ListenerHandover::read(paired.source());
+            assert_eq!(next.waiting(), Some(reason), "{reason}: the next launch");
+            assert_eq!(paired.places().await, before, "{reason}: mints nothing");
+        }
+    }
+
+    /// A Pair again that stops after the new identity was written, with the
+    /// phone still paired or once it went, leaves the new identity beside
+    /// the old fingerprint: the next launch waits as replaced and writes
+    /// nothing, and one more Pair again leaves the computer cleanly paired,
+    /// which the launch after it reads without waiting.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_after_the_new_identity_waits_as_replaced_and_pair_again_finishes() {
+        for stop in ["after the write", "after the phones"] {
+            let paired = Paired::new(false).await;
+            let recordings = paired.seed_recordings();
+            let old = paired.places().await.1;
+            let handover = ListenerHandover::read(paired.source());
+            assert_eq!(handover.waiting(), Some(PhoneWaitingReason::Missing));
+
+            let phone_stays = stop == "after the write";
+            if phone_stays {
+                paired.keep_the_phone();
+            } else {
+                paired.record.refuse.store(true, Ordering::SeqCst);
+            }
+            tokio::task::block_in_place(|| handover.pair_again()).unwrap_err();
+            if phone_stays {
+                paired.let_the_phone_go();
+            } else {
+                paired.record.refuse.store(false, Ordering::SeqCst);
+            }
+            let stopped = paired.places().await;
+            assert!(stopped.0.is_some(), "{stop}: the new identity was written");
+            assert_eq!(stopped.1, old, "{stop}: the old fingerprint stays");
+            assert_eq!(stopped.2, usize::from(phone_stays), "{stop}");
+            recordings.assert_kept(&paired.store, phone_stays, stop);
+
+            let writes = paired.log().len();
+            let next = ListenerHandover::read(paired.source());
+            assert_eq!(
+                next.waiting(),
+                Some(PhoneWaitingReason::Replaced),
+                "{stop}: the next launch waits"
+            );
+            assert_eq!(paired.places().await, stopped, "{stop}: and mints nothing");
+            assert_eq!(paired.log().len(), writes, "{stop}: nothing written");
+
+            tokio::task::block_in_place(|| next.pair_again()).unwrap();
+            let (stored, recorded, phones) = paired.places().await;
+            assert_eq!(Paired::fingerprint_of(stored.as_ref()), recorded, "{stop}");
+            assert_ne!(recorded, old, "{stop}");
+            assert_eq!(phones, 0, "{stop}");
+            assert_eq!(next.waiting(), None, "{stop}");
+            recordings.assert_kept(&paired.store, false, stop);
+            let after = ListenerHandover::read(paired.source());
+            assert_eq!(after.waiting(), None, "{stop}: cleanly paired");
+            assert!(after.listener().is_some(), "{stop}");
+        }
+    }
+
+    /// Through every stop of a Pair again and its end, nothing the phone
+    /// sent is marked delivered or dropped on this computer while the phone
+    /// is paired: the admitted recording keeps its ledger row, the one
+    /// still being sent never gets one, and its receipt and chunks stay
+    /// until the phone goes. The listener's start then clears the chunks no
+    /// receipt names, as the phone sends that recording again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pair_again_keeps_the_admission_ledger_and_marks_nothing_delivered() {
+        let paired = Paired::new(false).await;
+        let recordings = paired.seed_recordings();
+        let handover = ListenerHandover::read(paired.source());
+        let pair_again = || tokio::task::block_in_place(|| handover.pair_again());
+
+        paired.keychain.refuse_writes.store(true, Ordering::SeqCst);
+        pair_again().unwrap_err();
+        paired.keychain.refuse_writes.store(false, Ordering::SeqCst);
+        recordings.assert_kept(&paired.store, true, "a refused write");
+
+        paired.keep_the_phone();
+        pair_again().unwrap_err();
+        paired.let_the_phone_go();
+        recordings.assert_kept(&paired.store, true, "a stop after the write");
+
+        paired.record.refuse.store(true, Ordering::SeqCst);
+        pair_again().unwrap_err();
+        paired.record.refuse.store(false, Ordering::SeqCst);
+        recordings.assert_kept(&paired.store, false, "a stop after the phones");
+
+        pair_again().unwrap();
+        recordings.assert_kept(&paired.store, false, "Pair again");
+        tokio::task::block_in_place(|| handover.start()).unwrap();
+        assert!(!recordings.partial.exists(), "the start cleared the chunks");
+        recordings.assert_kept(&paired.store, false, "the start");
+        tokio::task::block_in_place(|| handover.stop());
     }
 
     /// The import's step as a test drives it: counts the runs and the
@@ -1296,7 +1686,7 @@ mod tests {
     }
 
     impl WaitingImport for FakeImport {
-        fn run_again(&self) -> Result<(), String> {
+        fn try_again(&self) -> Result<(), String> {
             self.runs.fetch_add(1, Ordering::SeqCst);
             if self.refuse_run.load(Ordering::SeqCst) {
                 return Err("macOS did not let Steno read this Mac's phone pairing.".to_owned());
@@ -1363,10 +1753,15 @@ mod tests {
         paired.keychain.refuse.store(true, Ordering::SeqCst);
         let (gate, receiver) = tokio::sync::watch::channel(HandoverGate::Ready);
         let source = paired.source();
+        let builds = Arc::new(AtomicUsize::new(0));
+        let built = builds.clone();
         let gated = Arc::new(GatedHandover::new(
             paired.store.clone(),
             receiver,
-            Box::new(move || Ok(Arc::new(ListenerHandover::read(source.clone())))),
+            Box::new(move || {
+                built.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(ListenerHandover::read(source.clone())))
+            }),
             Arc::new(FakeImport::default()),
             Box::new(|| unreachable!("no Pair again here")),
         ));
@@ -1382,10 +1777,44 @@ mod tests {
             steno_handover::ListenerState::Listening { .. }
         ));
         assert_eq!(gated.waiting(), None);
+
+        // Once there, Try again reads nothing and builds no second listener.
+        let reads = paired.keychain.reads.load(Ordering::SeqCst);
+        tokio::task::block_in_place(|| gated.try_again()).unwrap();
+        assert_eq!(paired.keychain.reads.load(Ordering::SeqCst), reads);
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "built once");
+        assert_eq!(paired.listens.load(Ordering::SeqCst), 1, "one listener");
         drop(gate);
         if let Some(service) = gated.close() {
             service.stop().await;
         }
+    }
+
+    /// A shutdown before the gate opened: `follow` builds nothing, so no
+    /// identity is read (nor a prompt brought up) during the quit, and ends
+    /// without `changed`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shutdown_before_the_build_reads_no_identity() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (gate, receiver) = tokio::sync::watch::channel(HandoverGate::Pending);
+        let gated = Arc::new(GatedHandover::new(
+            store,
+            receiver,
+            Box::new(|| panic!("no identity is read after the shutdown")),
+            Arc::new(FakeImport::default()),
+            Box::new(|| unreachable!("no Pair again here")),
+        ));
+        assert!(gated.close().is_none());
+        gate.send_replace(HandoverGate::Ready);
+        tokio::time::timeout(
+            crate::testing::PATIENCE,
+            gated
+                .clone()
+                .follow(|| panic!("no listener is adopted after the shutdown")),
+        )
+        .await
+        .expect("follow ends");
+        assert!(gated.service().is_none());
     }
 
     /// A shutdown while `follow` builds the listener: the build finishes

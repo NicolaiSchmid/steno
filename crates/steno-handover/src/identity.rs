@@ -13,7 +13,7 @@
 //! loader never mints one while phones are paired or after one was in use
 //! ([`HandoverIdentity::load_or_create`], over the identity's fingerprint
 //! in a [`FingerprintRecord`]). Only the user's Pair again mints over one
-//! ([`HandoverIdentity::pair_again`]).
+//! ([`HandoverIdentity::mint_anew`]).
 
 use std::sync::Arc;
 
@@ -156,46 +156,61 @@ impl HandoverIdentity {
         Ok(minted)
     }
 
-    /// Pair again, the user's choice when the identity the paired phones
-    /// know cannot be read or is gone (stable plan S6): every paired phone
-    /// is removed from `store` and the recorded fingerprint is forgotten,
-    /// then a new identity is minted with `common_name` and stored
-    /// ([`HandoverIdentity::store`]). Every phone must pair again. The one
-    /// mint over an identity that may exist; a step that fails stops the
-    /// rest, and what it left is never a reason for
-    /// [`HandoverIdentity::load_or_create`] to mint (the stored secret, or
-    /// a phone not yet removed, still refuses it).
-    pub async fn pair_again(
+    /// Pair again's identity step, the user's choice when the identity the
+    /// paired phones know cannot be read or is gone (stable plan S6): a new
+    /// identity is minted with `common_name` and written to `secrets`, then
+    /// every paired phone is removed from `store`, then the new fingerprint
+    /// is recorded in `record`. Every phone must pair again. The one mint
+    /// over an identity that may exist. A step that fails stops the rest,
+    /// and the order keeps what it leaves safe: a write that `secrets`
+    /// refuses changes nothing (the phones, the fingerprint and the old
+    /// identity stay), and a stop after the write, before or after the
+    /// phones go, leaves the new identity beside the old fingerprint, which
+    /// [`HandoverIdentity::load_or_create`] refuses as
+    /// [`Unavailability::Replaced`] rather than minting; the next Pair again
+    /// finishes.
+    pub async fn mint_anew(
         secrets: &dyn SecretStore,
         record: &dyn FingerprintRecord,
         store: &Store,
         common_name: &str,
         now: DateTime<Utc>,
     ) -> Result<Self, IdentityError> {
+        let minted = Self::mint(common_name, now)?;
+        minted.write_secret(secrets).await?;
         for device in store.paired_devices()? {
             store.delete_paired_device(device.id)?;
         }
-        record.forget().map_err(IdentityError::Record)?;
-        let minted = Self::mint(common_name, now)?;
-        minted.store(secrets, record).await?;
+        minted.record_fingerprint(record)?;
         Ok(minted)
     }
 
     /// Stores the identity in `secrets` and records its fingerprint in
-    /// `record`, over whatever either held: every write of the identity
-    /// goes through here (the mint, Pair again, and an identity brought
-    /// over from elsewhere). The secret is written first, so a write that fails
-    /// records nothing; a record that fails after it leaves the next load
+    /// `record`, over whatever either held: the mint and an identity
+    /// brought over from elsewhere; [`HandoverIdentity::mint_anew`] does
+    /// the same two writes with the phones removed between them. The
+    /// secret is written first, so a write that fails records nothing; a
+    /// record that fails after it leaves the next load
     /// [`Unavailability::Replaced`], never a mint.
     pub async fn store(
         &self,
         secrets: &dyn SecretStore,
         record: &dyn FingerprintRecord,
     ) -> Result<(), IdentityError> {
+        self.write_secret(secrets).await?;
+        self.record_fingerprint(record)
+    }
+
+    /// Writes the identity to `secrets` under [`HandoverIdentity::SECRET_KEY`],
+    /// over what it held: every write of the secret goes through here.
+    async fn write_secret(&self, secrets: &dyn SecretStore) -> Result<(), IdentityError> {
         secrets
             .set_secret(&Self::secret_key(), Some(&self.to_pem()?))
             .await
-            .map_err(IdentityError::Secrets)?;
+            .map_err(IdentityError::Secrets)
+    }
+
+    fn record_fingerprint(&self, record: &dyn FingerprintRecord) -> Result<(), IdentityError> {
         record
             .record(&hex(&self.fingerprint()))
             .map_err(IdentityError::Record)
@@ -305,9 +320,6 @@ pub trait FingerprintRecord: Send + Sync {
     fn recorded(&self) -> Result<Option<String>, BoxError>;
     /// Records `fingerprint`, replacing what was recorded.
     fn record(&self, fingerprint: &str) -> Result<(), BoxError>;
-    /// Forgets what was recorded ([`HandoverIdentity::pair_again`]);
-    /// nothing recorded is no error.
-    fn forget(&self) -> Result<(), BoxError>;
 }
 
 /// Why the identity is unavailable rather than minted. No Swift

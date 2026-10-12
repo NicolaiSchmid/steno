@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{TimeZone as _, Utc};
 use steno_core::{BoundaryResult, PairedDevice, SecretKey, SecretStore, Store};
@@ -117,16 +118,23 @@ fn the_swift_test_identity_hashes_to_its_recorded_fingerprint() {
     );
 }
 
+/// A secret store in memory that refuses reads or writes while
+/// `refuse_reads` or `refuse_writes` is set.
 #[derive(Default)]
 struct MemorySecrets {
     values: Mutex<Vec<(SecretKey, String)>>,
     reads: Mutex<u32>,
+    refuse_reads: AtomicBool,
+    refuse_writes: AtomicBool,
 }
 
 #[steno_core::async_trait]
 impl SecretStore for MemorySecrets {
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
         *self.reads.lock().unwrap() += 1;
+        if self.refuse_reads.load(Ordering::SeqCst) {
+            return Err("the keyring is locked".into());
+        }
         Ok(self
             .values
             .lock()
@@ -137,6 +145,9 @@ impl SecretStore for MemorySecrets {
     }
 
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+        if self.refuse_writes.load(Ordering::SeqCst) {
+            return Err("the keyring refused the write".into());
+        }
         let mut values = self.values.lock().unwrap();
         values.retain(|(stored, _)| stored != key);
         if let Some(value) = value {
@@ -146,9 +157,10 @@ impl SecretStore for MemorySecrets {
     }
 }
 
-/// A fingerprint record in memory.
+/// A fingerprint record in memory that refuses writes while its flag is
+/// set.
 #[derive(Default)]
-struct MemoryRecord(Mutex<Option<String>>);
+struct MemoryRecord(Mutex<Option<String>>, AtomicBool);
 
 impl MemoryRecord {
     fn get(&self) -> Option<String> {
@@ -162,12 +174,10 @@ impl FingerprintRecord for MemoryRecord {
     }
 
     fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
+        if self.1.load(Ordering::SeqCst) {
+            return Err("No space left on device".into());
+        }
         *self.0.lock().unwrap() = Some(fingerprint.to_owned());
-        Ok(())
-    }
-
-    fn forget(&self) -> BoundaryResult<()> {
-        *self.0.lock().unwrap() = None;
         Ok(())
     }
 }
@@ -213,6 +223,26 @@ impl Places {
         self.store()
             .save_paired_device(&device, &[1u8; 32])
             .unwrap();
+    }
+
+    /// The stored identity, the recorded fingerprint and the paired
+    /// phones' ids, as they stand.
+    fn places(&self) -> (Option<String>, Option<String>, Vec<uuid::Uuid>) {
+        (
+            self.stored_pem(),
+            self.record.get(),
+            self.store()
+                .paired_devices()
+                .unwrap()
+                .iter()
+                .map(|device| device.id)
+                .collect(),
+        )
+    }
+
+    async fn mint_anew(&self, name: &str) -> Result<HandoverIdentity, IdentityError> {
+        HandoverIdentity::mint_anew(&self.secrets, &self.record, self.store(), name, Utc::now())
+            .await
     }
 
     fn stored_pem(&self) -> Option<String> {
@@ -415,9 +445,6 @@ async fn a_record_that_cannot_be_read_mints_nothing() {
         fn record(&self, _fingerprint: &str) -> BoundaryResult<()> {
             panic!("nothing is recorded");
         }
-        fn forget(&self) -> BoundaryResult<()> {
-            panic!("nothing is forgotten");
-        }
     }
     let places = Places::new();
     let error = HandoverIdentity::load_or_create(
@@ -462,22 +489,14 @@ async fn a_mint_whose_write_fails_records_nothing() {
 }
 
 /// Pair again replaces the identity the phones know, which a load never
-/// does: the paired phones are removed, the old fingerprint is forgotten,
-/// and a new identity is stored with its own; the next load finds it.
+/// does: the new identity is written, the paired phones are removed, and
+/// its fingerprint replaces the old one; the next load finds it.
 #[tokio::test]
 async fn pair_again_removes_the_phones_and_mints_a_new_identity() {
     let places = Places::new();
     let old = places.load("x").await.unwrap();
     places.pair_a_phone();
-    let new = HandoverIdentity::pair_again(
-        &places.secrets,
-        &places.record,
-        places.store(),
-        "y",
-        Utc::now(),
-    )
-    .await
-    .unwrap();
+    let new = places.mint_anew("y").await.unwrap();
     assert_ne!(new.fingerprint(), old.fingerprint());
     assert!(places.store().paired_devices().unwrap().is_empty());
     assert_eq!(places.record.get(), Some(hex(&new.fingerprint())));
@@ -486,49 +505,82 @@ async fn pair_again_removes_the_phones_and_mints_a_new_identity() {
     assert_eq!(loaded.fingerprint(), new.fingerprint());
 }
 
-/// A Pair again whose write fails leaves no new identity, and nothing a
-/// load would mint over: the old secret still answers the next load.
+/// A Pair again whose write the secret store refuses changes nothing, for
+/// each reason a load refuses the identity: the paired phone, the recorded
+/// fingerprint and the stored identity stay, and the next load refuses it
+/// for the same reason.
 #[tokio::test]
-async fn a_pair_again_whose_write_fails_stores_no_identity() {
-    struct Refusing(MemorySecrets);
-    #[steno_core::async_trait]
-    impl SecretStore for Refusing {
-        async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
-            self.0.secret(key).await
+async fn a_pair_again_whose_write_is_refused_changes_nothing() {
+    for reason in ["unreadable", "missing", "replaced"] {
+        let places = Places::new();
+        places.load("x").await.unwrap();
+        places.pair_a_phone();
+        let key = HandoverIdentity::secret_key();
+        match reason {
+            "missing" => places.secrets.set_secret(&key, None).await.unwrap(),
+            "replaced" => {
+                let other = HandoverIdentity::mint("z", Utc::now()).unwrap();
+                let pem = other.to_pem().unwrap();
+                places.secrets.set_secret(&key, Some(&pem)).await.unwrap();
+            }
+            _ => places.secrets.refuse_reads.store(true, Ordering::SeqCst),
         }
-        async fn set_secret(&self, _key: &SecretKey, _value: Option<&str>) -> BoundaryResult<()> {
-            Err("the keyring refused the write".into())
-        }
+        let before = places.places();
+        places.secrets.refuse_writes.store(true, Ordering::SeqCst);
+        let error = places.mint_anew("y").await.unwrap_err();
+        assert!(
+            matches!(error, IdentityError::Secrets(_)),
+            "{reason}: {error}"
+        );
+        assert_eq!(places.places(), before, "{reason}: nothing changed");
+        let next = places.load("x").await.unwrap_err();
+        let same = match reason {
+            "unreadable" => matches!(
+                next,
+                IdentityError::Unavailable(Unavailability::Unreadable(_))
+            ),
+            "missing" => matches!(next, IdentityError::Unavailable(Unavailability::Missing)),
+            _ => matches!(next, IdentityError::Unavailable(Unavailability::Replaced)),
+        };
+        assert!(same, "{reason}: {next}");
+        assert_eq!(places.places(), before, "{reason}: the load minted nothing");
     }
+}
+
+/// A Pair again that stops after the new identity was written and the
+/// phones were removed, before its fingerprint is recorded (here the record
+/// refuses), leaves the old fingerprint beside the new identity: the next
+/// load refuses it as replaced and mints nothing, and one more Pair again
+/// finishes.
+#[tokio::test]
+async fn a_pair_again_stopped_before_the_record_waits_as_replaced_and_finishes_next_time() {
     let places = Places::new();
     let old = places.load("x").await.unwrap();
-    let refusing = Refusing(MemorySecrets::default());
-    refusing
-        .0
-        .set_secret(
-            &HandoverIdentity::secret_key(),
-            places.stored_pem().as_deref(),
-        )
-        .await
-        .unwrap();
-    let error =
-        HandoverIdentity::pair_again(&refusing, &places.record, places.store(), "y", Utc::now())
-            .await
-            .unwrap_err();
-    assert!(matches!(error, IdentityError::Secrets(_)), "{error}");
+    places.pair_a_phone();
+    places.record.1.store(true, Ordering::SeqCst);
+    let error = places.mint_anew("y").await.unwrap_err();
+    assert!(matches!(error, IdentityError::Record(_)), "{error}");
+    places.record.1.store(false, Ordering::SeqCst);
+    let (stored, recorded, phones) = places.places();
+    assert_ne!(stored, Some(old.to_pem().unwrap()), "the new identity");
     assert_eq!(
-        places.record.get(),
-        None,
-        "the old fingerprint is forgotten"
+        recorded,
+        Some(hex(&old.fingerprint())),
+        "the old fingerprint"
     );
-    let loaded = HandoverIdentity::load_or_create(
-        &refusing,
-        &places.record,
-        places.store(),
-        "x",
-        Utc::now(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(loaded.fingerprint(), old.fingerprint(), "the old one, kept");
+    assert_eq!(phones, Vec::<uuid::Uuid>::new());
+
+    let stopped = places.places();
+    let next = places.load("x").await.unwrap_err();
+    assert!(
+        matches!(next, IdentityError::Unavailable(Unavailability::Replaced)),
+        "{next}"
+    );
+    assert_eq!(places.places(), stopped, "nothing minted");
+
+    let new = places.mint_anew("y").await.unwrap();
+    assert_eq!(places.record.get(), Some(hex(&new.fingerprint())));
+    assert_eq!(places.stored_pem(), Some(new.to_pem().unwrap()));
+    let loaded = places.load("x").await.unwrap();
+    assert_eq!(loaded.fingerprint(), new.fingerprint());
 }
