@@ -509,12 +509,15 @@ struct Outage {
     /// The capture is recovering: from a `DeviceChanged` until it is back,
     /// at its `DeviceResumed` when no `StillRestarting` is outstanding
     /// (`restarting`), else at `Delivering`; a dismissal leaves it. The
-    /// call auto-stop's countdown neither arms nor ends the recording
-    /// meanwhile, and once the capture is back the notice thread calls
-    /// [`CaptureRecorder::resume_auto_stop`] (S2 in
-    /// `.plans/2026-10-07-stable-promotion.md`): a restart of the audio
-    /// service empties the call detector's process list too, so the call
-    /// app seems to have let go of the microphone. Rust only.
+    /// call auto-stop waits meanwhile, for one grace at most: the
+    /// countdown the release armed is not shown and ends nothing, a fresh
+    /// one takes its place when it runs out or once the capture is back
+    /// (the notice thread calls [`CaptureRecorder::resume_auto_stop`]),
+    /// and that one ends the call whatever the capture does
+    /// ([`crate::auto_stop`]; S2 in `.plans/2026-10-07-stable-promotion.md`).
+    /// A restart of the audio service empties the call detector's process
+    /// list too, so the call app seems to have let go of the microphone.
+    /// Rust only.
     recovering: bool,
     /// A `StillRestarting` came and no `Delivering` since: a resume then
     /// does not end the recovery, since the stream may stall again soon.
@@ -929,9 +932,9 @@ impl CaptureRecorder {
     /// Another app's microphone activity while Steno records ([`crate::auto_stop`]):
     /// an `Opened` while the recording starts or runs is a call, and stops
     /// a countdown; a `Released` while a call records arms the countdown,
-    /// once such a call was seen, and is remembered for
-    /// [`Self::resume_auto_stop`]. Ignored, and not remembered, while idle
-    /// or stopping. Swift: `RecordingController.microphoneActivity`.
+    /// once such a call was seen, not shown while the capture recovers
+    /// (then [`Self::resume_auto_stop`] replaces it). Ignored while idle or
+    /// stopping. Swift: `RecordingController.microphoneActivity`.
     pub fn microphone_activity(&self, activity: MicrophoneActivity) {
         let mut inner = self.inner();
         let state = inner.status.state;
@@ -943,8 +946,7 @@ impl CaptureRecorder {
                 inner.calls.opened(app_name);
             }
             MicrophoneActivity::Released => {
-                let recovering = Self::capture_recovering(&inner);
-                if !self.arm_auto_stop(&mut inner, |calls, now| calls.released(now, recovering)) {
+                if !self.arm_auto_stop(&mut inner, CallWatch::released) {
                     return;
                 }
             }
@@ -955,8 +957,9 @@ impl CaptureRecorder {
 
     /// The capture is back after a device change or a restart: while a
     /// call records whose app let go of the microphone and has not opened
-    /// it since, a fresh countdown is armed ([`crate::auto_stop`]), since
-    /// the detector does not report that release again. Takes the
+    /// it since, a fresh countdown takes the place of the one the release
+    /// armed ([`crate::auto_stop`]), since the detector does not report
+    /// that release again; one that took its place already stays. Takes the
     /// recorder's lock only to arm, spawns the countdown's thread and
     /// waits for nothing, so the capture's notice thread may call it: a
     /// stop joins that thread without the lock. An armed countdown is
@@ -1008,8 +1011,10 @@ impl CaptureRecorder {
     }
 
     /// Whether the capture of the recording in progress is recovering
-    /// ([`Outage::recovering`]), so the auto-stop waits. Takes the outage's
-    /// lock under the recorder's, as the status does. Rust only.
+    /// ([`Outage::recovering`]), so the auto-stop waits: the countdown the
+    /// release armed is not shown, and running out it is replaced by a
+    /// fresh one ([`CallWatch::postpone`]). Takes the outage's lock under
+    /// the recorder's, as the status does. Rust only.
     fn capture_recovering(inner: &Inner) -> bool {
         inner.active.as_ref().is_some_and(|active| {
             active
@@ -1023,12 +1028,21 @@ impl CaptureRecorder {
     /// The auto-stop's countdown `number` ran out: the recording stops and
     /// is saved as Stop does, with the call's end reason, unless the
     /// countdown was disarmed meanwhile, the recording is already
-    /// stopping, or its capture is recovering (the countdown stays armed
-    /// for [`Self::resume_auto_stop`] to replace).
+    /// stopping, or it is the countdown the release armed and the capture
+    /// is recovering: then a fresh one takes its place, shown, and that
+    /// one ends the call whatever the capture does.
     fn call_ended(&self, number: u64) {
         let (active, reason) = {
             let mut inner = self.inner();
-            if inner.status.state != RecordingState::Recording || Self::capture_recovering(&inner) {
+            if inner.status.state != RecordingState::Recording {
+                return;
+            }
+            let recovering = Self::capture_recovering(&inner);
+            if self.arm_auto_stop(&mut inner, |calls, now| {
+                calls.postpone(number, now, recovering)
+            }) {
+                drop(inner);
+                self.notify();
                 return;
             }
             let Some(reason) = inner.calls.elapsed(number) else {
@@ -1697,7 +1711,9 @@ impl Recorder for CaptureRecorder {
         let mut status = inner.status.clone();
         if status.state != RecordingState::Idle {
             status.call_app = inner.calls.call_app().map(str::to_owned);
-            status.auto_stop = inner.calls.status(self.clock().now());
+            status.auto_stop = inner
+                .calls
+                .status(self.clock().now(), Self::capture_recovering(&inner));
         }
         if status.state == RecordingState::Recording
             && let Some(active) = &inner.active
