@@ -2219,13 +2219,22 @@ mod tests {
     }
 
     /// A volume of the largest size with `available` bytes free, whose
-    /// floor stops recordings, as the system's readings but the Mac's
-    /// `statvfs` fallback do on every platform.
+    /// floor stops recordings, as every system reading's does but the
+    /// Mac's `statvfs` fallback.
     fn volume(available: u64) -> Volume {
         Volume {
             available,
             total: u64::MAX,
             stops: true,
+        }
+    }
+
+    /// [`volume`] as the Mac's `statvfs` fallback reads it: its floor only
+    /// warns.
+    fn warning_only(available: u64) -> Volume {
+        Volume {
+            stops: false,
+            ..volume(available)
         }
     }
 
@@ -4728,12 +4737,6 @@ mod tests {
             watch
         };
         let at = |minutes_left: u64| Some(volume(minutes(minutes_left)));
-        let warning_only = |free: u64| {
-            Some(Volume {
-                stops: false,
-                ..volume(free)
-            })
-        };
         // The recordings folder does not exist yet: its parent is asked.
         let recordings = audio.path().join("Audio");
         let room = |watch: DiskWatch| watch.room_for(audio.path(), rate);
@@ -4751,27 +4754,26 @@ mod tests {
         let half_the_floor = DiskWatch::STOP_BELOW_BYTES / 2;
         // 256 MiB at 224 000 bytes a second, to a full disk.
         assert_eq!(
-            room(watch(warning_only(half_the_floor), at(20))),
+            room(watch(Some(warning_only(half_the_floor)), at(20))),
             low(19, false)
         );
         assert_eq!(
             room(watch(
-                warning_only(half_the_floor),
+                Some(warning_only(half_the_floor)),
                 Some(volume(half_the_floor + 1))
             )),
             Some(Room::Full)
         );
         assert_eq!(
-            room(watch(Some(volume(half_the_floor)), warning_only(0))),
+            room(watch(Some(volume(half_the_floor)), Some(warning_only(0)))),
             Some(Room::Full)
         );
     }
 
     /// Where the floor stops a recording, the minutes count to it and
     /// below it there is no room; where it does not (the Mac's `statvfs`
-    /// fallback), the warning
-    /// comes at the same point, the minutes count to a full disk, and the
-    /// room never runs out.
+    /// fallback), the warning comes at the same point, the minutes count to
+    /// a full disk, and the room never runs out.
     #[test]
     fn the_room_left_counts_from_the_floor() {
         let rate = 448_000;
@@ -4833,10 +4835,7 @@ mod tests {
         );
         assert_eq!(
             or_warning_only(failed(), || Ok(volume(7))).unwrap(),
-            Volume {
-                stops: false,
-                ..volume(7)
-            }
+            warning_only(7)
         );
         assert!(or_warning_only(failed(), failed).is_err());
     }
@@ -4853,10 +4852,7 @@ mod tests {
             let reads = reads.clone();
             disk_with(move |_| {
                 reads.fetch_add(1, Ordering::SeqCst);
-                Ok(Volume {
-                    stops: false,
-                    ..volume(DiskWatch::STOP_BELOW_BYTES / 2)
-                })
+                Ok(warning_only(DiskWatch::STOP_BELOW_BYTES / 2))
             })
         });
         start(&harness.recorder).await;
