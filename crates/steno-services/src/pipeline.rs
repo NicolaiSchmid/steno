@@ -2171,23 +2171,17 @@ mod tests {
         }
     }
 
-    /// A second connection's write transaction on the store in `dir`,
-    /// another process's lock until it is dropped.
-    struct WriteLock(rusqlite::Connection);
-
-    impl WriteLock {
-        fn take(dir: &std::path::Path) -> Self {
-            let connection = rusqlite::Connection::open(dir.join("steno.sqlite")).unwrap();
-            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-            WriteLock(connection)
-        }
+    /// Another process's write lock on the store in `dir`, until it is
+    /// dropped.
+    fn write_lock(dir: &std::path::Path) -> steno_core::testing::WriteLockHold {
+        steno_core::testing::WriteLockHold::new(&dir.join("steno.sqlite"))
     }
 
-    impl Drop for WriteLock {
-        fn drop(&mut self) {
-            let _ = self.0.execute_batch("ROLLBACK");
-        }
-    }
+    /// The store's retry within a test: tries every few milliseconds.
+    const QUICK_RETRY: StoreRetry = StoreRetry {
+        first: Duration::from_millis(20),
+        longest: Duration::from_millis(80),
+    };
 
     /// A current pipeline over `store` with `engine`, trying the store
     /// again on `retry`.
@@ -2220,20 +2214,13 @@ mod tests {
     async fn a_meeting_the_store_kept_locked_is_processed_by_the_retry_once_let_go() {
         let (dir, store) = temp_store();
         let engine = Arc::new(HeldWarmUp::default());
-        let current = retrying(
-            &store,
-            engine.clone(),
-            StoreRetry {
-                first: Duration::from_millis(20),
-                longest: Duration::from_millis(80),
-            },
-        );
+        let current = retrying(&store, engine.clone(), QUICK_RETRY);
         let mut events = current.current().dependencies().events.subscribe();
         let meeting = enqueue_call(dir.path(), &current.current());
         tokio::time::timeout(PATIENCE, engine.entered.notified())
             .await
             .expect("the run is warming up");
-        let lock = WriteLock::take(dir.path());
+        let lock = write_lock(dir.path());
         engine.open.notify_one();
         tokio::time::timeout(Duration::from_secs(30), async {
             while events.recv().await.unwrap()
@@ -2268,10 +2255,7 @@ mod tests {
     async fn an_install_resume_the_store_refuses_is_tried_again() {
         let (dir, store) = temp_store();
         let (installed, current) = gated_current(&store, Arc::new(FakeSpeechEngine::default()));
-        let current = current.retrying_the_store(StoreRetry {
-            first: Duration::from_millis(20),
-            longest: Duration::from_millis(80),
-        });
+        let current = current.retrying_the_store(QUICK_RETRY);
         let gone = enqueue_call(dir.path(), &current.current());
         let mut later = sample_data::meeting();
         later.id = Uuid::new_v4();
@@ -2300,7 +2284,7 @@ mod tests {
         store
             .read(|connection| Ok(connection.busy_timeout(Duration::ZERO)?))
             .unwrap();
-        let lock = WriteLock::take(dir.path());
+        let lock = write_lock(dir.path());
 
         current.resume_waiting();
         assert_eq!(current.model_waits.waiting(), Vec::<Uuid>::new());
@@ -2345,7 +2329,7 @@ mod tests {
         tokio::time::timeout(PATIENCE, engine.entered.notified())
             .await
             .expect("the run is warming up");
-        let _lock = WriteLock::take(dir.path());
+        let _lock = write_lock(dir.path());
         engine.open.notify_one();
         eventually("the run left the meeting waiting for the store", || {
             service.pipeline.model_waits.waiting_for_store() == [meeting]
