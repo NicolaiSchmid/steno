@@ -88,10 +88,10 @@ fn join_words(words: &[TimedWord]) -> String {
 }
 
 /// One backend or more, the vocabulary, a detector and the configuration;
-/// owns everything it needs, so it can move to a worker thread. With more
-/// than one backend ([`Transcriber::with_workers`]) the chunks decode in
-/// parallel, one backend per thread; the merge sees them in order, so the
-/// transcript does not depend on the number of workers.
+/// owns everything it needs, so it can move to a blocking thread. With
+/// more than one backend ([`Transcriber::with_more_workers`]) the chunks
+/// decode in parallel, one backend per thread; the merge sees them in
+/// order, so the transcript does not depend on the number of workers.
 pub struct Transcriber<B: SpeechBackend> {
     /// The first decodes every chunk when it is alone and the probes of
     /// [`Transcriber::decode_range`].
@@ -121,11 +121,12 @@ impl<B: SpeechBackend> Transcriber<B> {
     }
 
     /// Adds backends that decode chunks in parallel with the first, one
-    /// thread each; `CoreML` runs four, as `FluidAudio` does
-    /// (`parallelChunkConcurrency`). ONNX Runtime spreads one call over
-    /// its own threads, so the ONNX engine runs one.
+    /// thread each, so `more` backends make `more + 1` workers; `CoreML`
+    /// runs four, as `FluidAudio` does (`parallelChunkConcurrency`). ONNX
+    /// Runtime spreads one call over its own threads, so the ONNX engine
+    /// runs one.
     #[must_use]
-    pub fn with_workers(mut self, more: impl IntoIterator<Item = B>) -> Self {
+    pub fn with_more_workers(mut self, more: impl IntoIterator<Item = B>) -> Self {
         self.workers.extend(more);
         self
     }
@@ -138,7 +139,7 @@ impl<B: SpeechBackend> Transcriber<B> {
 
     /// How many chunks decode at once.
     #[must_use]
-    pub fn workers(&self) -> usize {
+    pub fn worker_count(&self) -> usize {
         self.workers.len()
     }
 
@@ -222,8 +223,9 @@ impl<B: SpeechBackend> Transcriber<B> {
 
     /// Every chunk's tokens, in chunk order: on the one backend in turn,
     /// or on every backend at once, each taking the next chunk as it
-    /// finishes one. After an error no worker starts another chunk, and
-    /// the error of the earliest chunk is returned.
+    /// finishes one. After an error or a panic no worker starts another
+    /// chunk, and the error of the earliest chunk is returned (a panic is
+    /// re-raised).
     fn decode_chunks(
         &mut self,
         samples: &[f32],
@@ -251,6 +253,8 @@ impl<B: SpeechBackend> Transcriber<B> {
                 .map(|backend| {
                     let (next, failed) = (&next, &failed);
                     scope.spawn(move || {
+                        // A panic stops the other workers as an error does.
+                        let _stop = StopOnPanic(failed);
                         let mut decoder = ChunkDecoder {
                             backend,
                             vocab,
@@ -288,7 +292,25 @@ impl<B: SpeechBackend> Transcriber<B> {
         // Workers take chunks in order and finish every chunk they take,
         // so the filled slots come first, and without an error every slot
         // is filled; the collect stops at the earliest error.
+        debug_assert!(
+            slots
+                .iter()
+                .skip_while(|slot| slot.is_some())
+                .all(Option::is_none),
+            "a decoded chunk follows one that was not decoded"
+        );
         slots.into_iter().flatten().collect()
+    }
+}
+
+/// Sets the flag when the worker that holds it unwinds.
+struct StopOnPanic<'a>(&'a AtomicBool);
+
+impl Drop for StopOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -444,7 +466,13 @@ mod fake {
     //! (duration 0) and then blank, so the decoder loop, the chunker and the
     //! merge are exercised end to end with a known answer. A window shorter
     //! than `min_frames` encodes to silence, which stands in for spike D's
-    //! zero-token window so the recovery has something to recover.
+    //! zero-token window so the recovery has something to recover. For the
+    //! error paths a backend can fail or panic on a window that holds a
+    //! given piece, take its time over every other window, and count the
+    //! windows it is given.
+
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
     use crate::backend::{
@@ -454,12 +482,24 @@ mod fake {
     pub struct FrameTokenBackend {
         shape: ModelShape,
         min_frames: usize,
+        /// Windows holding one of these pieces fail with `piece <id>`.
+        pub fail_on: Vec<u32>,
+        /// A window holding this piece panics.
+        pub panic_on: Option<u32>,
+        /// How long every other window takes.
+        pub delay: Duration,
+        /// Counts the windows, shared between backends.
+        pub windows: Arc<AtomicUsize>,
     }
 
     impl FrameTokenBackend {
         pub fn new(vocab: &Vocab, min_frames: usize) -> Self {
             FrameTokenBackend {
                 min_frames,
+                fail_on: Vec::new(),
+                panic_on: None,
+                delay: Duration::ZERO,
+                windows: Arc::default(),
                 shape: ModelShape {
                     vocab_size: vocab.len(),
                     blank_id: vocab.blank_id(),
@@ -490,7 +530,16 @@ mod fake {
                         .max_by_key(|&(_, n)| n)
                         .map_or(0.0, |(k, _)| k as f32)
                 })
-                .collect();
+                .collect::<Vec<f32>>();
+            self.windows.fetch_add(1, Ordering::SeqCst);
+            let holds = |piece: u32| data.contains(&(piece as f32));
+            if let Some(&piece) = self.fail_on.iter().find(|&&piece| holds(piece)) {
+                return Err(SpeechError::Backend(format!("piece {piece}").into()));
+            }
+            if let Some(piece) = self.panic_on.filter(|&piece| holds(piece)) {
+                panic!("piece {piece}");
+            }
+            std::thread::sleep(self.delay);
             Ok(Features {
                 mels: 1,
                 frames,
@@ -558,8 +607,11 @@ mod fake {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::fake::{FrameTokenBackend, audio};
     use super::*;
+    use crate::chunker::Cut;
     use crate::language::StopwordRecognizer;
     use crate::vad::{EnergyVad, VadConfig};
 
@@ -573,6 +625,14 @@ mod tests {
     }
 
     fn transcriber(config: PipelineConfig, min_frames: usize) -> Transcriber<FrameTokenBackend> {
+        transcriber_over(config, vec![FrameTokenBackend::new(&vocab(), min_frames)])
+    }
+
+    /// The fixtures' detector over `backends`, one worker each.
+    fn transcriber_over(
+        config: PipelineConfig,
+        backends: Vec<FrameTokenBackend>,
+    ) -> Transcriber<FrameTokenBackend> {
         let vocab = vocab();
         let tagger = LanguageTagger::with_recognizer(
             LanguageTagger::default_candidates(),
@@ -589,8 +649,9 @@ mod tests {
                 ..VadConfig::default()
             },
         };
-        let backend = FrameTokenBackend::new(&vocab, min_frames);
-        Transcriber::new(backend, vocab, Box::new(vad), tagger, config)
+        let mut backends = backends.into_iter();
+        let first = backends.next().expect("one backend at least");
+        Transcriber::new(first, vocab, Box::new(vad), tagger, config).with_more_workers(backends)
     }
 
     /// Copies the non-silent samples of `other` over `samples`.
@@ -732,8 +793,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn chunks_decoded_on_several_workers_merge_as_on_one() {
+    /// 20 words over 36 s in chunks of about 6 s: the parallel fixture.
+    fn twenty_words() -> (PipelineConfig, Vec<f32>) {
         let config = PipelineConfig {
             chunker: ChunkerConfig {
                 target_seconds: 6.0,
@@ -749,15 +810,128 @@ mod tests {
             overlay(&mut samples, &audio(36.0, frame, &[word, 20 + word]));
         }
         fill_noise(&mut samples, SAMPLE_RATE + 1..34 * SAMPLE_RATE);
+        (config, samples)
+    }
+
+    /// `count` fake backends, each changed by `setup`.
+    fn backends(count: usize, setup: impl Fn(&mut FrameTokenBackend)) -> Vec<FrameTokenBackend> {
+        (0..count)
+            .map(|_| {
+                let mut backend = FrameTokenBackend::new(&vocab(), 0);
+                setup(&mut backend);
+                backend
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chunks_decoded_on_several_workers_merge_as_on_one() {
+        let (config, samples) = twenty_words();
         let mut one = transcriber(config.clone(), 0);
         let alone = one.transcribe(&samples, None).unwrap();
-        let vocab = vocab();
-        let mut three =
-            transcriber(config, 0).with_workers((0..2).map(|_| FrameTokenBackend::new(&vocab, 0)));
-        assert_eq!(three.workers(), 3);
+        let mut three = transcriber_over(config, backends(3, |_| {}));
+        assert_eq!(three.worker_count(), 3);
         let parallel = three.transcribe(&samples, None).unwrap();
         assert!(alone.chunks.len() >= 4, "{:?}", alone.chunks);
         assert_eq!(parallel, alone);
+    }
+
+    #[test]
+    fn a_failing_chunk_fails_the_transcription_with_the_earliest_error() {
+        // Words 5 and 15 fail the chunks that hold them; the earlier
+        // chunk's error comes back, on one worker and on three.
+        let (config, samples) = twenty_words();
+        for workers in [1, 3] {
+            let mut t = transcriber_over(
+                config.clone(),
+                backends(workers, |b| b.fail_on = vec![15, 5]),
+            );
+            let error = t.transcribe(&samples, None).unwrap_err().to_string();
+            assert!(error.contains("piece 5"), "{workers} workers: {error}");
+        }
+    }
+
+    #[test]
+    fn a_panicking_worker_stops_the_others_and_the_panic_comes_back() {
+        // Word 1 lies in the first chunk only, which panics at once; the
+        // other windows take 100 ms each, so a worker that finishes one
+        // sees the stop before it takes another.
+        let (config, samples) = twenty_words();
+        let windows = Arc::new(AtomicUsize::new(0));
+        let mut t = transcriber_over(
+            config.clone(),
+            backends(3, |b| {
+                b.panic_on = Some(1);
+                b.delay = std::time::Duration::from_millis(100);
+                b.windows = Arc::clone(&windows);
+            }),
+        );
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            t.transcribe(&samples, None)
+        }));
+        let panic = outcome.expect_err("the worker's panic is re-raised");
+        assert_eq!(
+            panic.downcast_ref::<String>().map(String::as_str),
+            Some("piece 1")
+        );
+        let chunks = transcriber(config, 0)
+            .transcribe(&samples, None)
+            .unwrap()
+            .chunks;
+        let decoded = windows.load(Ordering::SeqCst);
+        assert!(
+            decoded <= 3 && decoded < chunks.len(),
+            "{decoded} of {} chunks decoded after the panic",
+            chunks.len()
+        );
+    }
+
+    #[test]
+    fn the_merge_runs_at_the_two_second_default_overlap() {
+        // Word 5 is a 1.6 s run of one piece that starts 0.88 s before the
+        // second chunk does. The fake emits a run once per window, at its
+        // first frame there: the first chunk at the run's start, the
+        // second at its own. Within the 1 s tolerance of a 2 s overlap the
+        // merge matches the two; at 1.5 s (0.75 s) it keeps both.
+        let config = PipelineConfig {
+            chunker: ChunkerConfig {
+                target_seconds: 8.0,
+                search_seconds: 1.0,
+                ..ChunkerConfig::default()
+            },
+            recovery: RecoveryConfig {
+                min_speech_seconds: 100.0,
+                ..RecoveryConfig::default()
+            },
+            ..PipelineConfig::default()
+        };
+        assert_eq!(config.chunker.overlap_seconds, 2.0);
+        let mut samples = audio(13.0, 15, &[1]);
+        overlay(&mut samples, &audio(13.0, 130, &[3]));
+        fill_noise(&mut samples, SAMPLE_RATE / 2..33 * SAMPLE_RATE / 4);
+        fill_noise(&mut samples, 35 * SAMPLE_RATE / 4..12 * SAMPLE_RATE);
+        let mut t = transcriber(config.clone(), 0);
+        let speech = t.vad.speech_regions(&samples).unwrap();
+        let chunks = layout(&samples, &speech, &config.chunker);
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
+        assert_eq!(chunks[0].cut, Cut::Pause);
+        let right_frame = chunks[1].range.start / FRAME_SAMPLES;
+        overlay(&mut samples, &audio(13.0, right_frame - 11, &[5; 20]));
+        let transcript = t.transcribe(&samples, None).unwrap();
+        assert_eq!(transcript.chunks, chunks);
+        assert_eq!(transcript.text(), "w1 w5 w3");
+        let mut stats = DecodeStats::default();
+        let windows: Vec<Vec<Token>> = chunks
+            .iter()
+            .map(|c| {
+                t.decode_range(&samples, c.range.clone(), &mut stats)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            t.render(&merge_all(&windows, 1.5, t.vocab())),
+            "w1 w5 w5 w3"
+        );
     }
 
     #[test]

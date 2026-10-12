@@ -58,3 +58,26 @@ impl From<SpeechError> for steno_speech::SpeechError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pipeline_error_goes_back_unchanged_and_a_model_error_as_a_backend_error() {
+        let inner = steno_speech::SpeechError::Shape("frames".to_owned());
+        let back = steno_speech::SpeechError::from(SpeechError::Pipeline(inner));
+        assert!(
+            matches!(&back, steno_speech::SpeechError::Shape(detail) if detail == "frames"),
+            "{back:?}"
+        );
+        let model = steno_speech::SpeechError::from(SpeechError::MissingOutput("logits"));
+        let steno_speech::SpeechError::Backend(source) = model else {
+            panic!("{model:?}");
+        };
+        assert!(matches!(
+            source.downcast_ref::<SpeechError>(),
+            Some(SpeechError::MissingOutput("logits"))
+        ));
+    }
+}

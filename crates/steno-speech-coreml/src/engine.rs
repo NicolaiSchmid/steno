@@ -39,8 +39,13 @@ pub const WORKERS: usize = 4;
 /// - the clamp is the models' 15 s window;
 /// - no pause is long enough to be skipped: with the energy detector a
 ///   chunk that began just before speech after a long pause lost words
-///   (5.86 % mean WER against 5.09 % without the skip), and a quiet
-///   stretch the detector takes for silence is still decoded.
+///   (5.86 % mean WER against 5.09 % without the skip).
+///
+/// What is not decoded: the audio before the first chunk, which starts
+/// 0.25 s before the first speech the detector finds; the audio after the
+/// last, which ends 0.25 s after the last speech; and, where a chunk would
+/// start inside a pause, the pause up to 0.25 s before the speech after
+/// it. Quiet speech the detector takes for silence there is lost.
 #[must_use]
 pub fn pipeline_config() -> PipelineConfig {
     // 240,000 samples is exactly 15 s, so the clamp is the window.
@@ -98,7 +103,9 @@ impl CoreMlParakeetEngine {
         CoreMlParakeetEngine::with_config(model_directory, pipeline_config(), WORKERS)
     }
 
-    /// With `config` and `workers` chunks decoded at once (at least one).
+    /// With `config` and `workers` windows decoded at once (at least one).
+    /// The detector is not part of `config`: the engine always runs the
+    /// adaptive energy detector with [`VadConfig::default`].
     #[must_use]
     pub fn with_config(
         model_directory: impl Into<PathBuf>,
@@ -142,10 +149,15 @@ impl CoreMlParakeetEngine {
         &self,
         work: impl FnOnce(&mut Transcriber<Backend>) -> Result<T, SpeechError>,
     ) -> Result<T, SpeechError> {
-        let mut slot = self
-            .transcriber
-            .lock()
-            .map_err(|_| SpeechError::CoreMl("engine lock poisoned".to_owned()))?;
+        // A panic in a transcription poisons the lock; the backends may
+        // have stopped inside a model call, so they go and the models load
+        // again.
+        let mut slot = self.transcriber.lock().unwrap_or_else(|poisoned| {
+            let mut slot = poisoned.into_inner();
+            *slot = None;
+            self.transcriber.clear_poison();
+            slot
+        });
         if slot.is_none() {
             let models = Arc::new(Models::load(&self.model_directory)?);
             let vocab = models.vocab().clone();
@@ -161,7 +173,7 @@ impl CoreMlParakeetEngine {
                     LanguageTagger::new(),
                     self.config.clone(),
                 )
-                .with_workers(more),
+                .with_more_workers(more),
             );
         }
         let transcriber = slot.as_mut().expect("loaded above");
@@ -243,10 +255,44 @@ mod tests {
             model_directory(Path::new("/tmp/Steno")),
             PathBuf::from("/tmp/Steno/Models/fluidaudio/parakeet-tdt-0.6b-v3")
         );
+    }
+
+    #[test]
+    fn the_engine_skips_no_pause_and_chunks_to_the_models_window() {
+        let config = pipeline_config();
         assert_eq!(
-            steno_speech::sample_count(pipeline_config().chunker.max_seconds),
+            steno_speech::sample_count(config.chunker.max_seconds),
             MAX_WINDOW_SAMPLES
         );
+        assert_eq!(config.chunker.long_pause_seconds, f32::INFINITY);
+        let rest = PipelineConfig {
+            chunker: ChunkerConfig {
+                max_seconds: config.chunker.max_seconds,
+                long_pause_seconds: f32::INFINITY,
+                ..ChunkerConfig::default()
+            },
+            ..PipelineConfig::default()
+        };
+        assert_eq!(config, rest);
+        let engine = CoreMlParakeetEngine::with_config("/nonexistent", config, 0);
+        assert_eq!(engine.workers, 1);
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_lock_drops_the_transcriber_and_loads_again() {
+        let engine = CoreMlParakeetEngine::new("/nonexistent/models");
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _slot = engine.transcriber.lock().unwrap();
+            panic!("a worker panicked");
+        }));
+        assert!(poisoned.is_err());
+        assert!(engine.transcriber.is_poisoned());
+        // The next call clears the poison and tries the load again, which
+        // fails here for the missing directory, not for the lock.
+        let error = engine.prepare().await.unwrap_err().to_string();
+        assert!(error.contains("nonexistent"), "{error}");
+        assert!(!engine.transcriber.is_poisoned());
+        assert!(!engine.is_loaded());
     }
 
     #[tokio::test]
