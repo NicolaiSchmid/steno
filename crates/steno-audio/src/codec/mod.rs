@@ -72,6 +72,18 @@
 //!   file with more damaged packets than clean ones fails
 //!   ([`MAX_DAMAGED_SHARE`]), so a corrupt file never becomes a meeting of
 //!   silence.
+//! - **A recording without an index.** The phone's `AVAudioRecorder`
+//!   writes the `moov` only when it stops, so a recorder killed
+//!   mid-recording (a crash, a jetsam kill, a force-quit) leaves raw AAC
+//!   packets that symphonia and AVFoundation both refuse ("missing moov
+//!   atom"), and the Swift app loses the recording. Such a file, in the
+//!   recorder's layout only, is read packet by packet from the packets' own
+//!   bits with the phone's fixed settings, less [`priming::APPLE_PRIMING`],
+//!   up to where it was cut off ([`salvage`]); a damaged packet in it
+//!   becomes silence as above. The decode says so
+//!   ([`AudioDamage::salvaged`]), so the meeting's detail warns and the
+//!   retention rule keeps the recording. Any other file without a `moov`
+//!   fails as before.
 //! - **CAF**: PCM only (what the writer produces); a CAF holding AAC fails.
 //! - An unfinished master (data chunk size -1) decodes to its last whole
 //!   frame through the crate's own CAF reader (the chunk walk
@@ -98,9 +110,10 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::TimeBase;
 
-use priming::Priming;
+use priming::{APPLE_PRIMING, Priming};
 pub use resample::LaneResampler;
 use resample::length_at_16k;
+use salvage::SalvagedPackets;
 
 use crate::writer::caf::CafReader;
 use crate::writer::{WavFile, WavStreamWriter};
@@ -436,15 +449,17 @@ impl Frames {
             Self::Symphonia(frames) => AudioDamage {
                 parts: u32::try_from(frames.damage.parts).unwrap_or(u32::MAX),
                 seconds: frames.damage.seconds,
+                salvaged: matches!(frames.source, Source::Salvaged(_)),
             },
         }
     }
 }
 
-/// Symphonia's demuxer and decoder over one file.
+/// Symphonia's demuxer, or the salvage's packets, and symphonia's decoder
+/// over one file.
 struct SymphoniaFrames {
     path: PathBuf,
-    format: Box<dyn FormatReader>,
+    source: Source,
     decoder: Box<dyn Decoder>,
     /// The track's codec parameters, which a fresh decoder is made from
     /// after a damaged packet; their rate (when declared) and time base
@@ -664,8 +679,79 @@ fn decode_packet<'d>(
     }
 }
 
+/// Where a file's packets come from.
+enum Source {
+    /// Symphonia's demuxer.
+    Format(Box<dyn FormatReader>),
+    /// A phone recording without a `moov`, read packet by packet from its
+    /// bits ([`salvage`]).
+    Salvaged(Box<SalvagedPackets>),
+}
+
+impl Source {
+    /// The next packet; `None` at the end of the stream.
+    fn next_packet(&mut self, path: &Path) -> Result<Option<Packet>, CodecError> {
+        match self {
+            Self::Format(format) => match format.next_packet() {
+                Ok(packet) => Ok(Some(packet)),
+                Err(SymphoniaError::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    Ok(None)
+                }
+                Err(SymphoniaError::ResetRequired) => Ok(None),
+                Err(e) => Err(CodecError::ConversionFailed(e.to_string())),
+            },
+            Self::Salvaged(packets) => packets.next_packet().map_err(|e| io_error(path, &e)),
+        }
+    }
+}
+
 impl SymphoniaFrames {
+    /// Symphonia's demuxer over the file at `path`; a phone recording that
+    /// it cannot read for want of a `moov` is salvaged ([`salvage`]), and
+    /// any other file it cannot read fails as before.
     fn open(path: &Path) -> Result<Self, CodecError> {
+        match Self::probe(path) {
+            Ok(frames) => Ok(frames),
+            Err(error) => match salvage(path) {
+                Some(packets) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "the recording has no index, as the phone's recorder leaves one it was \
+                         killed in; reading its packets without one"
+                    );
+                    Self::salvaged(path, packets)
+                }
+                None => Err(error),
+            },
+        }
+    }
+
+    /// The salvage's packets with the phone's settings, less
+    /// [`APPLE_PRIMING`]: the file is in `AVAudioRecorder`'s layout, as
+    /// [`priming`] requires for the trim, but has no box that says more.
+    fn salvaged(path: &Path, packets: SalvagedPackets) -> Result<Self, CodecError> {
+        let params = SalvagedPackets::codec_params();
+        Ok(Self {
+            path: path.to_path_buf(),
+            source: Source::Salvaged(Box::new(packets)),
+            decoder: make_decoder(&params)?,
+            track_id: salvage::TRACK_ID,
+            frames: None,
+            priming: Some(Trim {
+                frames: APPLE_PRIMING,
+                rate: salvage::SAMPLE_RATE,
+                time_base: TimeBase::new(1, salvage::SAMPLE_RATE),
+            }),
+            last_frames: None,
+            damage: Damage::default(),
+            params,
+        })
+    }
+
+    fn probe(path: &Path) -> Result<Self, CodecError> {
         let file = std::fs::File::open(path).map_err(|e| io_error(path, &e))?;
         let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
@@ -694,7 +780,7 @@ impl SymphoniaFrames {
         let decoder = make_decoder(&params)?;
         Ok(Self {
             path: path.to_path_buf(),
-            format,
+            source: Source::Format(format),
             decoder,
             track_id,
             frames: params.n_frames,
@@ -716,17 +802,7 @@ impl SymphoniaFrames {
         let mut stream = Stream::default();
         let mut buffer: Option<SampleBuffer<f32>> = None;
         self.damage = Damage::default();
-        loop {
-            let packet = match self.format.next_packet() {
-                Ok(packet) => packet,
-                Err(SymphoniaError::IoError(e))
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    break;
-                }
-                Err(SymphoniaError::ResetRequired) => break,
-                Err(e) => return Err(CodecError::ConversionFailed(e.to_string())),
-            };
+        while let Some(packet) = self.source.next_packet(&self.path)? {
             if packet.track_id() != self.track_id {
                 continue;
             }
@@ -772,6 +848,21 @@ impl SymphoniaFrames {
                 self.damage.damaged,
                 self.damage.packets
             )));
+        }
+        if let Source::Salvaged(packets) = &self.source {
+            if packets.too_little() {
+                return Err(CodecError::ConversionFailed(format!(
+                    "{}: the recording has no index, and less than half of it reads as packets \
+                     ({} read)",
+                    self.path.display(),
+                    packets.packets()
+                )));
+            }
+            tracing::warn!(
+                packets = packets.packets(),
+                stopped = ?packets.stopped(),
+                "the recording without an index was read up to where it was cut off"
+            );
         }
         stream.spec.filter(|spec| spec.audible()).ok_or_else(|| {
             CodecError::UnsupportedFormat(format!("{}: no decodable audio", self.path.display()))
@@ -887,6 +978,16 @@ impl SymphoniaFrames {
         self.priming
             .map_or(0, |trim| trim.frames_before(ts, frames))
     }
+}
+
+/// The salvage's packets of the file at `path`, when it is a phone
+/// recording without a `moov`; a read that fails is logged, and the file
+/// then fails with symphonia's error, as any other file it cannot read.
+fn salvage(path: &Path) -> Option<SalvagedPackets> {
+    SalvagedPackets::open(path).unwrap_or_else(|error| {
+        tracing::warn!(path = %path.display(), %error, "the recording could not be read for a salvage");
+        None
+    })
 }
 
 /// A decoder for `params`.

@@ -30,22 +30,30 @@ pub struct AudioDamage {
     /// The silence they became, in seconds of the recording (less any of
     /// it the encoder priming trims).
     pub seconds: f64,
+    /// Whether the recording had no index and was read without one: a
+    /// phone recording whose recorder was killed mid-recording, read up to
+    /// where it was cut off (`steno_audio::codec::salvage`). Left out of
+    /// the JSON when false, so a record from before it reads the same.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub salvaged: bool,
 }
 
 impl AudioDamage {
-    /// No part damaged: a clean decode.
+    /// No part damaged and nothing salvaged: a clean decode.
     #[must_use]
     pub fn is_none(self) -> bool {
-        self.parts == 0
+        self.parts == 0 && !self.salvaged
     }
 
-    /// The larger count and the longer silence of the two: the damage of
-    /// a recording whose lanes read the same packets.
+    /// The larger count and the longer silence of the two, salvaged if
+    /// either was: the damage of a recording whose lanes read the same
+    /// packets.
     #[must_use]
     pub fn max(self, other: AudioDamage) -> AudioDamage {
         AudioDamage {
             parts: self.parts.max(other.parts),
             seconds: self.seconds.max(other.seconds),
+            salvaged: self.salvaged || other.salvaged,
         }
     }
 }
@@ -125,6 +133,42 @@ mod tests {
         // Exact: test buffers are tiny.
         #[allow(clippy::cast_precision_loss)]
         AudioBuffer16k::new((0..count).map(|i| i as f32).collect())
+    }
+
+    /// A salvaged recording counts as damaged with no part lost, the flag
+    /// survives `max`, and the JSON of a recording that was not salvaged
+    /// stays as it was before the flag, both ways.
+    #[test]
+    fn a_salvage_is_damage_and_its_flag_is_left_out_when_false() {
+        let salvaged = AudioDamage {
+            salvaged: true,
+            ..AudioDamage::default()
+        };
+        assert!(AudioDamage::default().is_none());
+        assert!(!salvaged.is_none());
+        let parts = AudioDamage {
+            parts: 2,
+            seconds: 0.05,
+            salvaged: false,
+        };
+        assert_eq!(
+            parts.max(salvaged),
+            AudioDamage {
+                salvaged: true,
+                ..parts
+            }
+        );
+        assert_eq!(salvaged.max(AudioDamage::default()), salvaged);
+
+        let old = r#"{"parts":2,"seconds":0.05}"#;
+        assert_eq!(serde_json::to_string(&parts).unwrap(), old);
+        assert_eq!(serde_json::from_str::<AudioDamage>(old).unwrap(), parts);
+        let json = serde_json::to_string(&salvaged).unwrap();
+        assert_eq!(json, r#"{"parts":0,"seconds":0.0,"salvaged":true}"#);
+        assert_eq!(
+            serde_json::from_str::<AudioDamage>(&json).unwrap(),
+            salvaged
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@ use crate::files::MeetingValues;
 /// let dir = tempfile::tempdir()?;
 /// let damaged = DamagedAudio::in_directory(dir.path());
 /// let meeting = Uuid::new_v4();
-/// damaged.record(meeting, AudioDamage { parts: 3, seconds: 0.07 })?;
+/// damaged.record(meeting, AudioDamage { parts: 3, seconds: 0.07, salvaged: false })?;
 /// assert_eq!(DamagedAudio::in_directory(dir.path()).parts(meeting), 3);
 /// damaged.record(meeting, AudioDamage::default())?;
 /// assert!(!DamagedAudio::in_directory(dir.path()).may_be_damaged(meeting));
@@ -133,12 +133,13 @@ impl DamagedAudio {
         self.known
     }
 
-    /// Whether `meeting_id`'s recording has damaged parts, or may have
-    /// them because the store does not [know](Self::known): what the
-    /// retention rule is to keep a recording for.
+    /// Whether `meeting_id`'s recording has damaged parts or was salvaged
+    /// ([`AudioDamage::salvaged`]), or may be either because the store does
+    /// not [know](Self::known): what the retention rule is to keep a
+    /// recording for.
     #[must_use]
     pub fn may_be_damaged(&self, meeting_id: Uuid) -> bool {
-        !self.known || self.parts(meeting_id) > 0
+        !self.known || !self.damage(meeting_id).is_none()
     }
 
     /// `damage` for `meeting_id`, replacing what an earlier run counted;
@@ -170,6 +171,7 @@ mod tests {
         AudioDamage {
             parts,
             seconds: f64::from(parts) * 0.023,
+            salvaged: false,
         }
     }
 
@@ -197,6 +199,27 @@ mod tests {
             "{}"
         );
         assert!(!DamagedAudio::in_directory(dir.path()).may_be_damaged(meeting));
+    }
+
+    /// A salvaged recording (no index, read up to where it was cut off)
+    /// counts as damaged with no part lost, so the retention rule keeps it,
+    /// also after a restart.
+    #[test]
+    fn a_salvaged_recording_may_be_damaged_with_no_part_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let meeting = Uuid::new_v4();
+        let salvaged = AudioDamage {
+            salvaged: true,
+            ..AudioDamage::default()
+        };
+        DamagedAudio::in_directory(dir.path())
+            .record(meeting, salvaged)
+            .unwrap();
+        let relaunched = DamagedAudio::in_directory(dir.path());
+        assert_eq!(relaunched.damage(meeting), salvaged);
+        assert_eq!(relaunched.parts(meeting), 0);
+        assert!(relaunched.may_be_damaged(meeting));
+        assert!(!relaunched.may_be_damaged(Uuid::new_v4()));
     }
 
     /// A file that does not parse stays as it is and is never written, and

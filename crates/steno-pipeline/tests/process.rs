@@ -5458,6 +5458,7 @@ async fn a_damaged_recording_stays_unstamped_through_every_automatic_stamp() {
     *world.decoder.damage.lock().unwrap() = steno_core::AudioDamage {
         parts: 3,
         seconds: 0.07,
+        salvaged: false,
     };
     let meeting = call_meeting(world.now);
     let asset = call_asset(

@@ -1678,6 +1678,7 @@ mod tests {
         let damage = steno_core::AudioDamage {
             parts: 3,
             seconds: 0.07,
+            salvaged: false,
         };
         let marks = DamagedAudio::in_directory(&support);
         marks.record(kept.id, damage).unwrap();
