@@ -17,7 +17,7 @@
 //! The salvage reads such a file as the phone's recorder wrote it, from its
 //! fixed settings (`mobile/src/features/recorder/recording-options.ts`):
 //! AAC-LC, mono, 44.1 kHz, 1 024 samples a packet. Each packet's length
-//! comes from its own bits ([`frame_length`]), which matched the sample
+//! comes from its own bits ([`packet_length`]), which matched the sample
 //! table of every finished file of Apple's encoder at those settings
 //! (101 375 packets). Only a file in the recorder's layout is salvaged: a
 //! `ftyp` with major brand `M4A ` and `mp42` among its compatible brands
@@ -34,7 +34,7 @@
 //! ([`SalvagedPackets::too_little`]), as a file with more than half of its
 //! packets damaged is none ([`super::MAX_DAMAGED_SHARE`]).
 
-pub mod frame;
+pub mod packet;
 mod tables;
 
 use std::fs::File;
@@ -46,7 +46,7 @@ use symphonia::core::codecs::{CODEC_TYPE_AAC, CodecParameters};
 use symphonia::core::formats::Packet;
 use symphonia::core::units::TimeBase;
 
-pub use frame::{FrameError, MAX_FRAME_BYTES, frame_length};
+pub use packet::{MAX_PACKET_BYTES, PacketError, packet_length};
 
 use super::priming::recorder_brands;
 
@@ -154,13 +154,13 @@ impl SalvagedPackets {
         }
         self.fill()?;
         let offset = self.buffer_offset + self.at as u64;
-        let length = match frame_length(&self.buffer[self.at..]) {
+        let length = match packet_length(&self.buffer[self.at..]) {
             Ok(length) => length,
-            Err(FrameError::Truncated) => {
+            Err(PacketError::Truncated) => {
                 self.stopped = Some(Stop::End);
                 return Ok(None);
             }
-            Err(FrameError::Invalid(why)) => {
+            Err(PacketError::Invalid(why)) => {
                 // Zeros to the end are space no packet was written to, so
                 // not counted as unread; anything else is a part of the
                 // recording not read.
@@ -212,10 +212,10 @@ impl SalvagedPackets {
         self.read.saturating_mul(2) < self.end - self.start
     }
 
-    /// Keeps at least [`MAX_FRAME_BYTES`] unread in the buffer, or the
+    /// Keeps at least [`MAX_PACKET_BYTES`] unread in the buffer, or the
     /// rest of the file.
     fn fill(&mut self) -> std::io::Result<()> {
-        if self.buffer.len() - self.at >= MAX_FRAME_BYTES {
+        if self.buffer.len() - self.at >= MAX_PACKET_BYTES {
             return Ok(());
         }
         self.buffer.drain(..self.at);
@@ -325,18 +325,18 @@ fn first_packet(file: &mut File, region: Region, end: u64) -> std::io::Result<Op
 /// one and then every packet to the end of the file.
 fn packets_parse_from(file: &mut File, start: u64, end: u64) -> std::io::Result<bool> {
     let length =
-        usize::try_from((end - start).min((START_RUN * MAX_FRAME_BYTES) as u64)).unwrap_or(0);
+        usize::try_from((end - start).min((START_RUN * MAX_PACKET_BYTES) as u64)).unwrap_or(0);
     let mut bytes = vec![0u8; length];
     read_at(file, start, &mut bytes)?;
     let mut at = 0;
     for parsed in 0..START_RUN {
-        match frame_length(&bytes[at..]) {
+        match packet_length(&bytes[at..]) {
             Ok(length) => at += length,
             // The end of a short file, inside a packet the kill cut off.
-            Err(FrameError::Truncated) => {
+            Err(PacketError::Truncated) => {
                 return Ok(parsed > 0 && start + bytes.len() as u64 == end);
             }
-            Err(FrameError::Invalid(_)) => return Ok(false),
+            Err(PacketError::Invalid(_)) => return Ok(false),
         }
         if at == bytes.len() && start + at as u64 == end {
             return Ok(true);
@@ -381,7 +381,7 @@ fn read_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> std::io::Result<(
 mod tests {
     use super::*;
 
-    /// Apple's silent frame: a long window with no bands, then `END`.
+    /// Apple's silent packet: a long window with no bands, then `END`.
     const SILENT: [u8; 4] = [0x00, 0xd0, 0x00, 0x07];
 
     fn parses_from(bytes: &[u8]) -> bool {

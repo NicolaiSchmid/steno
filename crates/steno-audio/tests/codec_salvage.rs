@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use steno_audio::codec::salvage::{self, FrameError, frame_length};
+use steno_audio::codec::salvage::{self, PacketError, packet_length};
 use steno_audio::codec::{CodecError, SymphoniaAudioCodec};
 use steno_core::paths::file_url;
 use steno_core::{AudioAsset, AudioDamage, AudioDecoder, AudioFormat, AudioLane, AudioRetention};
@@ -181,13 +181,13 @@ fn every_packet_ends_where_the_sample_table_says() {
         let sizes = sample_sizes(&bytes);
         for (index, &size) in sizes.iter().enumerate() {
             assert_eq!(
-                frame_length(&bytes[at..]),
+                packet_length(&bytes[at..]),
                 Ok(size),
                 "{name}, packet {index}"
             );
             assert_eq!(
-                frame_length(&bytes[at..at + size - 1]),
-                Err(FrameError::Truncated),
+                packet_length(&bytes[at..at + size - 1]),
+                Err(PacketError::Truncated),
                 "{name}, packet {index} less its last byte"
             );
             at += size;
@@ -405,7 +405,7 @@ fn a_packet_the_decoder_refuses_becomes_silence_in_a_salvage() {
         "0",   // no pulse, TNS or gain control
         "111", // END
     ]);
-    assert_eq!(frame_length(&refused), Ok(refused.len()));
+    assert_eq!(packet_length(&refused), Ok(refused.len()));
     let at = PACKETS_AT + packet_offset(20);
     let spliced = [&bytes[..at], &refused, &bytes[at..]].concat();
     let path = written(directory.path(), "refused.m4a", &spliced);

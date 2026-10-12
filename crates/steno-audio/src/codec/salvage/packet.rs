@@ -1,8 +1,8 @@
-//! The length of one AAC-LC frame (a `raw_data_block`, ISO/IEC 14496-3
+//! The length of one AAC-LC packet (a `raw_data_block`, ISO/IEC 14496-3
 //! 4.4.2.1) read off its bits, for a stream that has no sample table to say
-//! where each frame ends: the frame's syntax elements are walked to its
+//! where each packet ends: the packet's syntax elements are walked to its
 //! `END` element, decoding every Huffman codeword on the way but none of
-//! the audio, and the frame ends at the next byte.
+//! the audio, and the packet ends at the next byte.
 //!
 //! Only the shape the phone's recorder writes is accepted (mono AAC-LC at
 //! 44.1 kHz): one single channel element (`SCE`), any fill (`FIL`) and data
@@ -10,36 +10,36 @@
 //! low-frequency channel, a program config, predictor data or gain control
 //! (neither of which AAC-LC has), a reserved codebook, a section past the
 //! last band, a scale factor out of its range, an impossible escape or a
-//! frame longer than [`MAX_FRAME_BYTES`] is [`FrameError::Invalid`]: bytes
-//! that are not a frame of that shape, which ends the salvage there.
+//! packet longer than [`MAX_PACKET_BYTES`] is [`PacketError::Invalid`]: bytes
+//! that are not a packet of that shape, which ends the salvage there.
 
 use std::sync::LazyLock;
 
 use super::tables::{self, Codebook, LONG_BANDS, SHORT_BANDS};
 
-/// The longest frame a mono AAC stream may hold: the decoder's input buffer
+/// The longest packet a mono AAC stream may hold: the decoder's input buffer
 /// of 6 144 bits per channel (ISO/IEC 14496-3 4.5.3.1).
-pub const MAX_FRAME_BYTES: usize = 6_144 / 8;
+pub const MAX_PACKET_BYTES: usize = 6_144 / 8;
 
-/// Why bytes are not one whole frame.
+/// Why bytes are not one whole packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameError {
-    /// The bytes end inside the frame: a recording cut off mid-frame.
+pub enum PacketError {
+    /// The bytes end inside the packet: a recording cut off mid-packet.
     Truncated,
-    /// Not a frame of the phone's shape, and why.
+    /// Not a packet of the phone's shape, and why.
     Invalid(&'static str),
 }
 
-/// The length in bytes of the frame that starts `bytes`; `bytes` may run on
+/// The length in bytes of the packet that starts `bytes`; `bytes` may run on
 /// past it.
-pub fn frame_length(bytes: &[u8]) -> Result<usize, FrameError> {
+pub fn packet_length(bytes: &[u8]) -> Result<usize, PacketError> {
     let mut bits = Bits::new(bytes);
     let mut channels = 0;
     loop {
         match bits.read(3)? {
             SCE => {
                 if channels > 0 {
-                    return Err(FrameError::Invalid("a second channel"));
+                    return Err(PacketError::Invalid("a second channel"));
                 }
                 // The element's instance tag.
                 bits.read(4)?;
@@ -68,12 +68,12 @@ pub fn frame_length(bytes: &[u8]) -> Result<usize, FrameError> {
             }
             END => {
                 if channels == 0 {
-                    return Err(FrameError::Invalid("a frame without a channel"));
+                    return Err(PacketError::Invalid("a packet without a channel"));
                 }
                 return Ok(bits.at.div_ceil(8));
             }
             _ => {
-                return Err(FrameError::Invalid(
+                return Err(PacketError::Invalid(
                     "an element the phone's recorder does not write",
                 ));
             }
@@ -104,7 +104,7 @@ const TNS_MAX_ORDER_SHORT: u32 = 7;
 
 /// An `individual_channel_stream` (4.4.2.7) outside a channel pair, so with
 /// its own `ics_info`.
-fn channel_stream(bits: &mut Bits<'_>) -> Result<(), FrameError> {
+fn channel_stream(bits: &mut Bits<'_>) -> Result<(), PacketError> {
     let global_gain = bits.read(8)?;
     let window = ics_info(bits)?;
     let codebooks = section_data(bits, &window)?;
@@ -113,7 +113,7 @@ fn channel_stream(bits: &mut Bits<'_>) -> Result<(), FrameError> {
     tns_data(bits, &window)?;
     // gain_control_data, which only AAC SSR has.
     if bits.bit()? {
-        return Err(FrameError::Invalid(
+        return Err(PacketError::Invalid(
             "gain control, which AAC-LC has none of",
         ));
     }
@@ -143,9 +143,9 @@ impl Window {
 type Codebooks = [[u8; LONG_BANDS.len() - 1]; 8];
 
 /// `ics_info` (4.4.2.1, Table 4.6).
-fn ics_info(bits: &mut Bits<'_>) -> Result<Window, FrameError> {
+fn ics_info(bits: &mut Bits<'_>) -> Result<Window, PacketError> {
     if bits.bit()? {
-        return Err(FrameError::Invalid("the reserved bit is set"));
+        return Err(PacketError::Invalid("the reserved bit is set"));
     }
     let short = bits.read(2)? == EIGHT_SHORT_SEQUENCE;
     // The window shape.
@@ -166,14 +166,14 @@ fn ics_info(bits: &mut Bits<'_>) -> Result<Window, FrameError> {
     } else {
         let max_sfb = bits.read(6)? as usize;
         if bits.bit()? {
-            return Err(FrameError::Invalid(
+            return Err(PacketError::Invalid(
                 "predictor data, which AAC-LC has none of",
             ));
         }
         (max_sfb, &LONG_BANDS)
     };
     if max_sfb > bands.len() - 1 {
-        return Err(FrameError::Invalid("more bands than the rate has"));
+        return Err(PacketError::Invalid("more bands than the rate has"));
     }
     Ok(Window {
         short,
@@ -185,7 +185,7 @@ fn ics_info(bits: &mut Bits<'_>) -> Result<Window, FrameError> {
 }
 
 /// `section_data` (Table 4.52): each band's codebook.
-fn section_data(bits: &mut Bits<'_>, window: &Window) -> Result<Codebooks, FrameError> {
+fn section_data(bits: &mut Bits<'_>, window: &Window) -> Result<Codebooks, PacketError> {
     let mut codebooks = [[ZERO_HCB; LONG_BANDS.len() - 1]; 8];
     let (length_bits, escape) = if window.short { (3, 7) } else { (5, 31) };
     for group in codebooks.iter_mut().take(window.group_count) {
@@ -193,7 +193,7 @@ fn section_data(bits: &mut Bits<'_>, window: &Window) -> Result<Codebooks, Frame
         while band < window.max_sfb {
             let codebook = bits.read(4)? as u8;
             if codebook == RESERVED_HCB {
-                return Err(FrameError::Invalid("the reserved codebook"));
+                return Err(PacketError::Invalid("the reserved codebook"));
             }
             let mut length = 0;
             loop {
@@ -204,7 +204,7 @@ fn section_data(bits: &mut Bits<'_>, window: &Window) -> Result<Codebooks, Frame
                 }
             }
             if length == 0 || band + length > window.max_sfb {
-                return Err(FrameError::Invalid("a section past the last band"));
+                return Err(PacketError::Invalid("a section past the last band"));
             }
             group[band..band + length].fill(codebook);
             band += length;
@@ -222,7 +222,7 @@ fn scale_factor_data(
     window: &Window,
     codebooks: &Codebooks,
     global_gain: u32,
-) -> Result<(), FrameError> {
+) -> Result<(), PacketError> {
     let mut scale_factor = i64::from(global_gain);
     let mut noise_pcm = true;
     for group in &codebooks[..window.group_count] {
@@ -240,7 +240,7 @@ fn scale_factor_data(
                 _ => {
                     scale_factor += i64::from(TREES.scale_factors.decode(bits)?) - 60;
                     if !(0..=255).contains(&scale_factor) {
-                        return Err(FrameError::Invalid("a scale factor out of range"));
+                        return Err(PacketError::Invalid("a scale factor out of range"));
                     }
                 }
             }
@@ -250,23 +250,23 @@ fn scale_factor_data(
 }
 
 /// `pulse_data` (Table 4.7), in a long window only.
-fn pulse_data(bits: &mut Bits<'_>, window: &Window) -> Result<(), FrameError> {
+fn pulse_data(bits: &mut Bits<'_>, window: &Window) -> Result<(), PacketError> {
     if !bits.bit()? {
         return Ok(());
     }
     if window.short {
-        return Err(FrameError::Invalid("pulse data in a short window"));
+        return Err(PacketError::Invalid("pulse data in a short window"));
     }
     let pulses = bits.read(2)? + 1;
     if bits.read(6)? as usize >= LONG_BANDS.len() - 1 {
-        return Err(FrameError::Invalid("pulses past the last band"));
+        return Err(PacketError::Invalid("pulses past the last band"));
     }
     // Each pulse's offset and amplitude.
     bits.skip(pulses as usize * (5 + 4))
 }
 
 /// `tns_data` (Table 4.48).
-fn tns_data(bits: &mut Bits<'_>, window: &Window) -> Result<(), FrameError> {
+fn tns_data(bits: &mut Bits<'_>, window: &Window) -> Result<(), PacketError> {
     if !bits.bit()? {
         return Ok(());
     }
@@ -282,7 +282,7 @@ fn tns_data(bits: &mut Bits<'_>, window: &Window) -> Result<(), FrameError> {
             bits.read(length_bits)?;
             let order = bits.read(order_bits)?;
             if order > max_order {
-                return Err(FrameError::Invalid("a TNS filter of too high an order"));
+                return Err(PacketError::Invalid("a TNS filter of too high an order"));
             }
             if order > 0 {
                 // The direction.
@@ -302,7 +302,7 @@ fn spectral_data(
     bits: &mut Bits<'_>,
     window: &Window,
     codebooks: &Codebooks,
-) -> Result<(), FrameError> {
+) -> Result<(), PacketError> {
     for (group, &windows) in codebooks.iter().zip(window.groups()) {
         for (band, &codebook) in group[..window.max_sfb].iter().enumerate() {
             if matches!(
@@ -325,7 +325,7 @@ fn spectral_data(
 
 /// One spectral codeword of `codebook` and the sign and escape bits that
 /// follow it (4.6.3.3).
-fn spectral_codeword(bits: &mut Bits<'_>, tree: &Tree, codebook: u8) -> Result<(), FrameError> {
+fn spectral_codeword(bits: &mut Bits<'_>, tree: &Tree, codebook: u8) -> Result<(), PacketError> {
     let index = u32::from(tree.decode(bits)?);
     match codebook {
         // Signed codebooks: no sign bits.
@@ -351,7 +351,7 @@ fn spectral_codeword(bits: &mut Bits<'_>, tree: &Tree, codebook: u8) -> Result<(
                 while bits.bit()? {
                     ones += 1;
                     if ones > 8 {
-                        return Err(FrameError::Invalid("an escape past 8 191"));
+                        return Err(PacketError::Invalid("an escape past 8 191"));
                     }
                 }
                 bits.skip(ones + 4)?;
@@ -361,12 +361,12 @@ fn spectral_codeword(bits: &mut Bits<'_>, tree: &Tree, codebook: u8) -> Result<(
     Ok(())
 }
 
-/// The bits of a frame, most significant first, never past
-/// [`MAX_FRAME_BYTES`].
+/// The bits of a packet, most significant first, never past
+/// [`MAX_PACKET_BYTES`].
 struct Bits<'a> {
     bytes: &'a [u8],
-    /// Whether `bytes` was cut at [`MAX_FRAME_BYTES`]: running out of it
-    /// then means a frame too long, not one cut off.
+    /// Whether `bytes` was cut at [`MAX_PACKET_BYTES`]: running out of it
+    /// then means a packet too long, not one cut off.
     capped: bool,
     /// The next bit's index.
     at: usize,
@@ -374,23 +374,23 @@ struct Bits<'a> {
 
 impl<'a> Bits<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        let capped = bytes.len() >= MAX_FRAME_BYTES;
+        let capped = bytes.len() >= MAX_PACKET_BYTES;
         Self {
-            bytes: &bytes[..bytes.len().min(MAX_FRAME_BYTES)],
+            bytes: &bytes[..bytes.len().min(MAX_PACKET_BYTES)],
             capped,
             at: 0,
         }
     }
 
-    fn out_of_bits(&self) -> FrameError {
+    fn out_of_bits(&self) -> PacketError {
         if self.capped {
-            FrameError::Invalid("longer than a frame can be")
+            PacketError::Invalid("longer than a packet can be")
         } else {
-            FrameError::Truncated
+            PacketError::Truncated
         }
     }
 
-    fn bit(&mut self) -> Result<bool, FrameError> {
+    fn bit(&mut self) -> Result<bool, PacketError> {
         let byte = *self
             .bytes
             .get(self.at / 8)
@@ -401,7 +401,7 @@ impl<'a> Bits<'a> {
     }
 
     /// The next `count` bits (at most 32) as a number.
-    fn read(&mut self, count: u32) -> Result<u32, FrameError> {
+    fn read(&mut self, count: u32) -> Result<u32, PacketError> {
         let mut value = 0;
         for _ in 0..count {
             value = value << 1 | u32::from(self.bit()?);
@@ -409,7 +409,7 @@ impl<'a> Bits<'a> {
         Ok(value)
     }
 
-    fn skip(&mut self, count: usize) -> Result<(), FrameError> {
+    fn skip(&mut self, count: usize) -> Result<(), PacketError> {
         let to = self.at + count;
         if to > self.bytes.len() * 8 {
             return Err(self.out_of_bits());
@@ -418,7 +418,7 @@ impl<'a> Bits<'a> {
         Ok(())
     }
 
-    /// To the next byte, counted from the frame's start.
+    /// To the next byte, counted from the packet's start.
     fn align(&mut self) {
         self.at = self.at.next_multiple_of(8);
     }
@@ -457,12 +457,12 @@ impl Tree {
     }
 
     /// The index of the codeword next in `bits`.
-    fn decode(&self, bits: &mut Bits<'_>) -> Result<u16, FrameError> {
+    fn decode(&self, bits: &mut Bits<'_>) -> Result<u16, PacketError> {
         let mut node = 0;
         loop {
             let next = self.nodes[node][usize::from(bits.bit()?)];
             if next == 0 {
-                return Err(FrameError::Invalid("not a codeword"));
+                return Err(PacketError::Invalid("not a codeword"));
             }
             if next & LEAF != 0 {
                 return Ok(next & !LEAF);
@@ -520,7 +520,7 @@ mod tests {
     }
 
     /// `parts` of '0' and '1' as bytes, zero-padded to the next byte, and
-    /// the bytes a frame of exactly those bits takes.
+    /// the bytes a packet of exactly those bits takes.
     fn bits(parts: &[&str]) -> (Vec<u8>, usize) {
         let text: String = parts.concat();
         let bytes = text
@@ -565,7 +565,7 @@ mod tests {
     fn a_long_window_walks_its_sections_scale_factors_and_spectrum() {
         // One band of codebook 1 (signed quads, four lines a codeword).
         let zero_quad = spectrum(1, 40);
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             &long(1),
             "0001",
             "00001",
@@ -574,9 +574,9 @@ mod tests {
             &zero_quad,
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
+        assert_eq!(packet_length(&packet), Ok(length));
         // Two bands, the second of width 4 too: twice the codewords.
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             &long(2),
             "0001",
             "00010",
@@ -587,7 +587,7 @@ mod tests {
             &zero_quad,
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
+        assert_eq!(packet_length(&packet), Ok(length));
         // Sections of codebook 0 and 1, the first's length escaped (31 + 10);
         // band 41 (lines 704 to 736) is 32 lines: eight quads.
         let quads = [zero_quad.as_str(); 8];
@@ -604,8 +604,8 @@ mod tests {
         parts.extend(quads.iter().map(|q| (*q).to_owned()));
         parts.push(END_BITS.into());
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let (frame, length) = bits(&parts);
-        assert_eq!(frame_length(&frame), Ok(length));
+        let (packet, length) = bits(&parts);
+        assert_eq!(packet_length(&packet), Ok(length));
     }
 
     #[test]
@@ -613,7 +613,7 @@ mod tests {
         // Codebook 3, index 1 is (0, 0, 0, 1): one sign bit; index 40,
         // (1, 1, 1, 1): four.
         for (index, signs) in [(0, ""), (1, "1"), (40, "0101")] {
-            let (frame, length) = bits(&[
+            let (packet, length) = bits(&[
                 &long(1),
                 "0011",
                 "00001",
@@ -623,13 +623,13 @@ mod tests {
                 signs,
                 END_BITS,
             ]);
-            assert_eq!(frame_length(&frame), Ok(length), "index {index}");
+            assert_eq!(packet_length(&packet), Ok(length), "index {index}");
         }
         // Codebook 7 (pairs 0 to 7), index 9 is (1, 1); codebook 9 (0 to
         // 12), index 14 is (1, 1); codebook 5 is signed: none.
         for (book, index, signs) in [(7, 9, "01"), (9, 14, "10"), (7, 8, "1"), (5, 0, "")] {
             let pair = spectrum(book, index);
-            let (frame, length) = bits(&[
+            let (packet, length) = bits(&[
                 &long(1),
                 &format!("{book:04b}"),
                 "00001",
@@ -641,7 +641,7 @@ mod tests {
                 END_BITS,
             ]);
             assert_eq!(
-                frame_length(&frame),
+                packet_length(&packet),
                 Ok(length),
                 "codebook {book} index {index}"
             );
@@ -657,7 +657,7 @@ mod tests {
             ("110101010", true),
             ("1111111110000000000000", false),
         ] {
-            let (frame, length) = bits(&[
+            let (packet, length) = bits(&[
                 &long(1),
                 "1011",
                 "00001",
@@ -670,16 +670,16 @@ mod tests {
                 END_BITS,
             ]);
             if valid {
-                assert_eq!(frame_length(&frame), Ok(length), "{escape}");
+                assert_eq!(packet_length(&packet), Ok(length), "{escape}");
             } else {
                 assert_eq!(
-                    frame_length(&frame),
-                    Err(FrameError::Invalid("an escape past 8 191"))
+                    packet_length(&packet),
+                    Err(PacketError::Invalid("an escape past 8 191"))
                 );
             }
         }
         // (16, 16): both signs, then both escapes.
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             &long(1),
             "1011",
             "00001",
@@ -692,7 +692,7 @@ mod tests {
             &spectrum(11, 0),
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
+        assert_eq!(packet_length(&packet), Ok(length));
     }
 
     #[test]
@@ -713,11 +713,11 @@ mod tests {
         parts.extend(std::iter::repeat_n(zero_quad.clone(), 8));
         parts.push(END_BITS.into());
         let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let (frame, length) = bits(&refs);
-        assert_eq!(frame_length(&frame), Ok(length));
+        let (packet, length) = bits(&refs);
+        assert_eq!(packet_length(&packet), Ok(length));
         // Groups of 2 and 6 windows ("1011111"): band 0 of codebook 1 in
         // the first (two quads), of codebook 0 in the second.
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             &short("0001", "1011111"),
             "0001",
             "001",
@@ -729,7 +729,7 @@ mod tests {
             &zero_quad,
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
+        assert_eq!(packet_length(&packet), Ok(length));
         // Eight groups of one window: a section each.
         let mut parts = vec![short("0001", "0000000")];
         for _ in 0..8 {
@@ -740,15 +740,15 @@ mod tests {
         parts.extend(std::iter::repeat_n(zero_quad.clone(), 8));
         parts.push(END_BITS.into());
         let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let (frame, length) = bits(&refs);
-        assert_eq!(frame_length(&frame), Ok(length));
+        let (packet, length) = bits(&refs);
+        assert_eq!(packet_length(&packet), Ok(length));
         // 15 bands is one past a short window's 14; pulses are long only.
-        let (frame, _) = bits(&[&short("1111", "1111111"), "0000", "111", "111", END_BITS]);
+        let (packet, _) = bits(&[&short("1111", "1111111"), "0000", "111", "111", END_BITS]);
         assert_eq!(
-            frame_length(&frame),
-            Err(FrameError::Invalid("more bands than the rate has"))
+            packet_length(&packet),
+            Err(PacketError::Invalid("more bands than the rate has"))
         );
-        let (frame, _) = bits(&[
+        let (packet, _) = bits(&[
             &short("0000", "1111111"),
             "1",
             "00",
@@ -758,12 +758,12 @@ mod tests {
             END_BITS,
         ]);
         assert_eq!(
-            frame_length(&frame),
-            Err(FrameError::Invalid("pulse data in a short window"))
+            packet_length(&packet),
+            Err(PacketError::Invalid("pulse data in a short window"))
         );
         // TNS in a short window: one filter bit per window; window 0 has
         // one filter of order 1 (4-bit length, 3-bit order), 3-bit coefficients.
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             &short("0000", "1111111"),
             "0",
             "1",
@@ -778,13 +778,13 @@ mod tests {
             "0",
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
+        assert_eq!(packet_length(&packet), Ok(length));
     }
 
     #[test]
     fn pulses_tns_noise_and_intensity_take_their_bits() {
         // Two pulses from band 3: their offsets and amplitudes.
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             &long(0),
             "1",
             "01",
@@ -795,15 +795,15 @@ mod tests {
             "0",
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
-        let (frame, _) = bits(&[&long(0), "1", "00", "110001", "000000000", "00", END_BITS]);
+        assert_eq!(packet_length(&packet), Ok(length));
+        let (packet, _) = bits(&[&long(0), "1", "00", "110001", "000000000", "00", END_BITS]);
         assert_eq!(
-            frame_length(&frame),
-            Err(FrameError::Invalid("pulses past the last band"))
+            packet_length(&packet),
+            Err(PacketError::Invalid("pulses past the last band"))
         );
         // TNS, long: two filters, 4-bit coefficients compressed to 3, orders
         // 2 and 0.
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             &long(0),
             "0",
             "1",
@@ -819,8 +819,8 @@ mod tests {
             "0",
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
-        let (frame, _) = bits(&[
+        assert_eq!(packet_length(&packet), Ok(length));
+        let (packet, _) = bits(&[
             &long(0),
             "0",
             "1",
@@ -832,12 +832,12 @@ mod tests {
             END_BITS,
         ]);
         assert_eq!(
-            frame_length(&frame),
-            Err(FrameError::Invalid("a TNS filter of too high an order"))
+            packet_length(&packet),
+            Err(PacketError::Invalid("a TNS filter of too high an order"))
         );
         // Noise in bands 0 and 1 (the first energy 9 bits, the next a
         // codeword), intensity in band 2: no spectral bits for either.
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             &long(3),
             "1101",
             "00010",
@@ -849,7 +849,7 @@ mod tests {
             NO_TOOLS,
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
+        assert_eq!(packet_length(&packet), Ok(length));
     }
 
     #[test]
@@ -857,55 +857,55 @@ mod tests {
         let silent = "00000000110100000000000000000"; // SCE of a silent long window
         // FIL with an escaped count: 15 + 2 - 1 = 16 bytes.
         let filler = format!("110 1111 00000010 {}", "0".repeat(16 * 8)).replace(' ', "");
-        let (frame, length) = bits(&[silent, &filler, END_BITS]);
-        assert_eq!(frame_length(&frame), Ok(length));
-        let (frame, length) = bits(&[&filler, silent, END_BITS]);
-        assert_eq!(frame_length(&frame), Ok(length));
+        let (packet, length) = bits(&[silent, &filler, END_BITS]);
+        assert_eq!(packet_length(&packet), Ok(length));
+        let (packet, length) = bits(&[&filler, silent, END_BITS]);
+        assert_eq!(packet_length(&packet), Ok(length));
         // An escape count of 0: 14 bytes.
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             "110 1111 00000000".replace(' ', "").as_str(),
             &"0".repeat(14 * 8),
             silent,
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
+        assert_eq!(packet_length(&packet), Ok(length));
         // DSE of 3 bytes, aligned: the bits to the next byte, then the data.
         let data = "100 0000 1 00000011".replace(' ', "");
         let before = silent.len() + data.len();
         let padding = "0".repeat(before.next_multiple_of(8) - before);
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             silent,
             &data,
             &padding,
             "101010101010101010101010",
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
+        assert_eq!(packet_length(&packet), Ok(length));
         // The same unaligned is three bytes later by the padding's bits.
-        let (frame, length) = bits(&[
+        let (packet, length) = bits(&[
             silent,
             "100 0000 0 00000011".replace(' ', "").as_str(),
             &"0".repeat(24),
             END_BITS,
         ]);
-        assert_eq!(frame_length(&frame), Ok(length));
-        // A DSE of 255 + 255 bytes, twice, is longer than a frame can be.
+        assert_eq!(packet_length(&packet), Ok(length));
+        // A DSE of 255 + 255 bytes, twice, is longer than a packet can be.
         let long_data =
             format!("100 0000 0 11111111 11111111 {}", "0".repeat(510 * 8)).replace(' ', "");
-        let (frame, _) = bits(&[silent, &long_data, &long_data, END_BITS]);
+        let (packet, _) = bits(&[silent, &long_data, &long_data, END_BITS]);
         assert_eq!(
-            frame_length(&frame),
-            Err(FrameError::Invalid("longer than a frame can be"))
+            packet_length(&packet),
+            Err(PacketError::Invalid("longer than a packet can be"))
         );
     }
 
     #[test]
     fn what_aac_lc_or_the_phone_never_writes_is_invalid() {
         let invalid = |parts: &[&str], why: &'static str| {
-            let (frame, _) = bits(parts);
+            let (packet, _) = bits(parts);
             assert_eq!(
-                frame_length(&frame),
-                Err(FrameError::Invalid(why)),
+                packet_length(&packet),
+                Err(PacketError::Invalid(why)),
                 "{parts:?}"
             );
         };
@@ -935,38 +935,41 @@ mod tests {
         invalid(&["010"], "an element the phone's recorder does not write");
         invalid(&["101"], "an element the phone's recorder does not write");
         invalid(&[&long(0), NO_TOOLS, &long(0)], "a second channel");
-        invalid(&[END_BITS], "a frame without a channel");
+        invalid(&[END_BITS], "a packet without a channel");
         let reserved = "000 0000 01100100 1".replace(' ', "");
         invalid(&[&reserved], "the reserved bit is set");
     }
 
-    /// The silent frame Apple's encoder writes for a mono 44.1 kHz stream
+    /// The silent packet Apple's encoder writes for a mono 44.1 kHz stream
     /// of zeros: a long window with no bands, then `END`, four bytes.
     #[test]
-    fn a_silent_frame_is_four_bytes() {
+    fn a_silent_packet_is_four_bytes() {
         let silent = [0x00, 0xd0, 0x00, 0x07];
-        assert_eq!(frame_length(&silent), Ok(4));
-        assert_eq!(frame_length(&[0x00, 0xd0, 0x00, 0x07, 0x00, 0xd0]), Ok(4));
-        assert_eq!(frame_length(&silent[..3]), Err(FrameError::Truncated));
-        assert_eq!(frame_length(&[]), Err(FrameError::Truncated));
+        assert_eq!(packet_length(&silent), Ok(4));
+        assert_eq!(packet_length(&[0x00, 0xd0, 0x00, 0x07, 0x00, 0xd0]), Ok(4));
+        assert_eq!(packet_length(&silent[..3]), Err(PacketError::Truncated));
+        assert_eq!(packet_length(&[]), Err(PacketError::Truncated));
     }
 
     #[test]
     fn other_elements_are_not_the_phones_shape() {
         // A channel pair, then the reserved bit set, then END alone.
         assert!(matches!(
-            frame_length(&[0x20, 0, 0, 0]),
-            Err(FrameError::Invalid(_))
+            packet_length(&[0x20, 0, 0, 0]),
+            Err(PacketError::Invalid(_))
         ));
         assert!(matches!(
-            frame_length(&[0x00, 0xd1, 0, 0x07]),
-            Err(FrameError::Invalid(_))
+            packet_length(&[0x00, 0xd1, 0, 0x07]),
+            Err(PacketError::Invalid(_))
         ));
-        assert!(matches!(frame_length(&[0xe0]), Err(FrameError::Invalid(_))));
+        assert!(matches!(
+            packet_length(&[0xe0]),
+            Err(PacketError::Invalid(_))
+        ));
         // Zeros: a channel with no bands, then a second channel.
         assert!(matches!(
-            frame_length(&[0; 16]),
-            Err(FrameError::Invalid(_))
+            packet_length(&[0; 16]),
+            Err(PacketError::Invalid(_))
         ));
     }
 }

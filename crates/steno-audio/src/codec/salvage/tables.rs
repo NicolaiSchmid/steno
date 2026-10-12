@@ -11,7 +11,7 @@
 // `deny.toml` allows symphonia's files; the rest of the crate keeps its own
 // licence.
 
-//! The standard's tables [`super::frame`] walks an AAC-LC frame with: the
+//! The standard's tables [`super::packet`] walks an AAC-LC packet with: the
 //! eleven spectrum codebooks and the scale factor codebook, each a codeword
 //! and its length per index, in the order the standard lists them, and the
 //! scale factor bands at 44.1 kHz (and 48 kHz).
