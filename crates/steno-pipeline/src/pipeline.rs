@@ -608,8 +608,8 @@ impl ModelWaits {
         self.lock().waiting.extend(meetings);
     }
 
-    /// Records `meetings` as waiting for the store and wakes its retry;
-    /// none leaves both as they are.
+    /// Records `meetings` as waiting for the store and wakes its retry. An
+    /// empty `meetings` records nothing and wakes nothing.
     fn wait_for_store(&self, meetings: impl IntoIterator<Item = Uuid>) {
         let mut meetings = meetings.into_iter().peekable();
         if meetings.peek().is_none() {
@@ -1990,9 +1990,9 @@ impl ProcessingPipeline {
     /// resumes and a refused run's restart started, and the re-exports of
     /// `redeliver_unfinished`. A refused run is waited for until its
     /// meeting waits (for models or the store) or starts again (rule 1 on
-    /// [`ModelWaits`]); a restart
-    /// on another pipeline (rule 3) is that pipeline's to wait for. The CLI
-    /// and the tests call it before reading results.
+    /// [`ModelWaits`]); a restart on another pipeline (rule 3) is that
+    /// pipeline's to wait for. The CLI and the tests call it before reading
+    /// results.
     pub async fn wait_until_idle(&self) {
         loop {
             let handle = {
@@ -2066,13 +2066,14 @@ impl ProcessingPipeline {
     /// ([`PipelineFailure::is_busy`]): it leaves the meeting `queued`,
     /// waiting for the store's retry
     /// ([`resume_waiting_for_store`](Self::resume_waiting_for_store)), and
-    /// what the run committed before stays. A failing `diarize` or `match_speakers`
-    /// does not fail it: the transcript is kept with the speakers stored
-    /// for the meeting, or, when none are stored, one unknown speaker for
-    /// the diarized lane. Once `persist` has marked the meeting `ready`
-    /// nothing downgrades it, not an error or a panic later in the run: the
-    /// meeting is delivered and its retention applied, and the panic's or
-    /// the `retention` error's failure is returned to the caller.
+    /// what the run committed before stays. A failing `diarize` or
+    /// `match_speakers` does not fail it: the transcript is kept with the
+    /// speakers stored for the meeting, or, when none are stored, one
+    /// unknown speaker for the diarized lane. Once `persist` has marked the
+    /// meeting `ready` nothing downgrades it, not an error or a panic later
+    /// in the run: the meeting is delivered and its retention applied, and
+    /// the panic's or the `retention` error's failure is returned to the
+    /// caller.
     /// Once the pipeline [quits](Self::quit), a failure is returned and
     /// not persisted, and a call made after it fails at once: the meeting
     /// stays `queued` or `processing`, which the next launch's
