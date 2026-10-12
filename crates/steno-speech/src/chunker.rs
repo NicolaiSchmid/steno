@@ -4,9 +4,10 @@
 //! 100 ms frame there. A long pause that starts before the window's far
 //! edge, or within `min_chunk_seconds` past it, ends the chunk early and is
 //! not decoded. `overlap_seconds` of audio is shared with the next chunk
-//! for the merge. No chunk exceeds `max_seconds`, a memory clamp (attention
-//! grows with the square of the window: 13 GB at 600 s, spike E), not the
-//! position table's 800 s cap.
+//! for the merge. No chunk exceeds `max_seconds`: for ONNX a memory clamp
+//! (attention grows with the square of the window: 13 GB at 600 s, spike
+//! E), not the position table's 800 s cap; for `CoreML` the models' fixed
+//! 15 s window.
 //!
 //! The search and the cuts are ported from
 //! `spikes/onnx-speech/src/chunker.rs`; the long-pause rule is not. The
@@ -61,7 +62,8 @@ pub struct ChunkerConfig {
     pub overlap_seconds: f32,
     /// A pause this long ends the chunk and is not decoded.
     pub long_pause_seconds: f32,
-    /// The memory clamp.
+    /// The longest chunk: the memory clamp, or the models' fixed 15 s
+    /// window (`CoreML`).
     pub max_seconds: f32,
     /// Silence kept around speech at a chunk's edges.
     pub pad_seconds: f32,

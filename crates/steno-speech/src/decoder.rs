@@ -7,11 +7,11 @@
 //!
 //! [`DecoderConfig::default`] is `NeMo`'s reference semantics
 //! (`GreedyTDTInfer`), which sherpa-onnx matched at 5.3 % WER in spike F;
-//! the ONNX and the `CoreML` backends both run it. `FluidAudio`'s guards
-//! (two symbols a frame, 150 tokens a window, a token past the window's
-//! end dropped, the tail flush of the last window) changed nothing on
-//! FLEURS German and are not ported (A2 in
-//! `.plans/2026-10-07-stable-promotion.md`).
+//! the ONNX and the `CoreML` backends both run it. Three of `FluidAudio`'s
+//! guards (two symbols a frame, 150 tokens a window, a token past the
+//! window's end dropped) changed nothing on FLEURS German and are not
+//! ported (A2 in `.plans/2026-10-07-stable-promotion.md`); its tail flush
+//! of the last window, not measured, is not ported either.
 //! Swift: `FluidAudio`'s `TdtDecoderV3`, ported in
 //! `spikes/coreml-rs/src/decoder.rs`.
 

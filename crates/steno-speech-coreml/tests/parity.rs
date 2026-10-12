@@ -68,11 +68,11 @@ fn rust_transcripts_match_the_swift_baseline() {
     let mean = report.mean_file_wer() * 100.0;
     assert!(
         mean <= max_wer,
-        "mean per-file WER {mean:.2} % exceeds the {max_wer:.2} % gate"
+        "mean per-file WER {mean:.2} % exceeds the {max_wer:.2} % limit"
     );
     let offset = report.mean_start_offset_seconds() * 1000.0;
     assert!(
         offset.abs() <= max_offset_ms,
-        "mean start offset {offset:+.1} ms is outside the {max_offset_ms:.1} ms gate"
+        "mean start offset {offset:+.1} ms is outside the {max_offset_ms:.1} ms limit"
     );
 }

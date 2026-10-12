@@ -2,7 +2,7 @@
 //! pause-aligned chunker, the greedy TDT decoder, the overlap merge and the
 //! mapping from pieces to segments, with the model calls behind one trait:
 //! ONNX Runtime here, `CoreML` in `steno-speech-coreml`, which runs the
-//! same [`Transcriber`] under its own chunker clamp and detector. Plan:
+//! same [`Transcriber`] under its own chunker settings and detector. Plan:
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (WP4, invariant 4) and
 //! decisions 1 to 5 of `.plans/2026-10-01-cross-platform-speech-stack.md`.
 //!
@@ -15,7 +15,8 @@
 //! - [`vad`]: [`VoiceActivityDetector`], Silero through ONNX Runtime, and
 //!   energy detectors: a fixed threshold for tests, one that follows the
 //!   recording's level for the `CoreML` engine.
-//! - [`chunker`]: the longest-pause layout with the 60 s memory clamp.
+//! - [`chunker`]: the longest-pause layout with the 60 s memory clamp, or
+//!   the models' fixed 15 s window (`CoreML`).
 //! - [`merge`]: the time-tolerant LCS merge of overlapping windows.
 //! - [`segmentation`]: pieces to words to [`RawSegment`](steno_core::RawSegment)s.
 //! - [`language`]: the per-segment language tagger.

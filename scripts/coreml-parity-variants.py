@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Measurement only, never committed to a build: puts environment switches
 into a scratch checkout of Steno for the variant runs of
-`scripts/coreml-parity-forge.sh --variants` (A2 of
-`.plans/2026-10-07-stable-promotion.md`). The CoreML crate's own merge,
+`scripts/coreml-parity-forge.sh` (the arguments after its two revisions;
+A2 of `.plans/2026-10-07-stable-promotion.md`). The CoreML crate's own merge,
 seam-word collapse and seam-gap repair come back from the last commit that
 had them (BASE below) as `steno_speech_coreml::old`.
 
