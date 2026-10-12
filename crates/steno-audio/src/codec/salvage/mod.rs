@@ -68,6 +68,10 @@ const AUDIO_SPECIFIC_CONFIG: [u8; 2] = [0x12, 0x08];
 /// 57 316 bytes; a megabyte leaves room for another writer's reserve.
 const MAX_RESERVE: u64 = 1 << 20;
 
+/// The top-level boxes looked at, before the packets and after an `mdat`:
+/// a few at most.
+const MAX_BOXES: usize = 16;
+
 /// The bytes read from the file at a time.
 const READ_BLOCK: usize = 64 * 1024;
 
@@ -244,7 +248,7 @@ impl SalvagedPackets {
 /// its top-level boxes: past the `ftyp` and any `free`, `skip` or `wide`,
 /// either the body of an `mdat` or, where the boxes stop, the zeros of the
 /// reserve. `None` when the `ftyp` is not the recorder's or a `moov` is
-/// there.
+/// among the boxes, before the `mdat` or after it.
 fn packet_region(file: &mut File, end: u64) -> std::io::Result<Option<Region>> {
     if end < 8 {
         return Ok(None);
@@ -259,8 +263,7 @@ fn packet_region(file: &mut File, end: u64) -> std::io::Result<Option<Region>> {
         return Ok(None);
     }
     let mut at = ftyp_size;
-    // A few boxes at most precede the packets.
-    for _ in 0..16 {
+    for _ in 0..MAX_BOXES {
         if at + 8 > end {
             return Ok(Some(Region::Reserve(at)));
         }
@@ -268,12 +271,10 @@ fn packet_region(file: &mut File, end: u64) -> std::io::Result<Option<Region>> {
         match &kind {
             b"moov" => return Ok(None),
             b"mdat" => {
-                let body = if size == 1 { at + 16 } else { at + 8 };
-                // A sized `mdat` may have a `moov` after it.
-                if size >= 8
-                    && at.saturating_add(size).saturating_add(8) <= end
-                    && &box_header(file, at + size)?.1 == b"moov"
-                {
+                let Some((body, size)) = box_extent(file, at, size, end)? else {
+                    return Ok(Some(Region::Mdat(end.min(at + 8))));
+                };
+                if moov_after(file, at.saturating_add(size), end)? {
                     return Ok(None);
                 }
                 return Ok(Some(Region::Mdat(body.min(end))));
@@ -283,6 +284,50 @@ fn packet_region(file: &mut File, end: u64) -> std::io::Result<Option<Region>> {
         }
     }
     Ok(None)
+}
+
+/// The body's offset and the whole size of the box at `at` whose 32-bit
+/// size field is `size`: a size of 1 is followed by the 64-bit size, and a
+/// size of 0 runs to the end of the file. `None` for a size that cannot be
+/// a box's (2 to 7, or one whose 64-bit size is under 16).
+fn box_extent(
+    file: &mut File,
+    at: u64,
+    size: u64,
+    end: u64,
+) -> std::io::Result<Option<(u64, u64)>> {
+    Ok(match size {
+        0 => Some((at + 8, end - at)),
+        1 if at + 16 <= end => {
+            let mut large = [0u8; 8];
+            read_at(file, at + 8, &mut large)?;
+            Some(u64::from_be_bytes(large))
+                .filter(|&size| size >= 16)
+                .map(|size| (at + 16, size))
+        }
+        1..8 => None,
+        size => Some((at + 8, size)),
+    })
+}
+
+/// Whether a `moov` is among the top-level boxes from `at` to the end of
+/// the file, walking at most [`MAX_BOXES`] of them; a box whose size cannot
+/// be read ends the walk, as nothing after it can be found.
+fn moov_after(file: &mut File, mut at: u64, end: u64) -> std::io::Result<bool> {
+    for _ in 0..MAX_BOXES {
+        if at.saturating_add(8) > end {
+            return Ok(false);
+        }
+        let (size, kind) = box_header(file, at)?;
+        if &kind == b"moov" {
+            return Ok(true);
+        }
+        let Some((_, size)) = box_extent(file, at, size, end)? else {
+            return Ok(false);
+        };
+        at = at.saturating_add(size);
+    }
+    Ok(false)
 }
 
 /// Where a file's packets may start.
@@ -295,16 +340,15 @@ enum Region {
 }
 
 /// The offset of a file's first packet: an `mdat`'s body if its packets
-/// parse from there; else, in the reserve, the first byte that is not zero
-/// or one of the three before it (a packet may start with zero bytes:
-/// Apple's first one does), whichever [`START_RUN`] packets parse from
-/// first, nearest that byte first.
+/// parse from there; else, in the reserve (or in that body: a writer may
+/// leave a placeholder `mdat` header before zeros), the first byte that is
+/// not zero or one of the three before it (a packet may start with zero
+/// bytes: Apple's first one does), whichever [`START_RUN`] packets parse
+/// from first, nearest that byte first.
 fn first_packet(file: &mut File, region: Region, end: u64) -> std::io::Result<Option<u64>> {
     let reserve = match region {
-        Region::Mdat(body) => {
-            return Ok(packets_parse_from(file, body, end)?.then_some(body));
-        }
-        Region::Reserve(at) => at,
+        Region::Mdat(body) if packets_parse_from(file, body, end)? => return Ok(Some(body)),
+        Region::Mdat(at) | Region::Reserve(at) => at,
     };
     let limit = end.min(reserve.saturating_add(MAX_RESERVE));
     let Some(first) = first_non_zero(file, reserve, limit)? else {

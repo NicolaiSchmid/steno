@@ -202,9 +202,10 @@ fn every_packet_ends_where_the_sample_table_says() {
 
 /// Only the recorder's layout is salvaged: the killed file with another
 /// major brand, without `mp42`, with a `moov` box in its reserve or after
-/// an `mdat`, or that is no MP4 file at all stays failed with symphonia's
-/// error, as any file it cannot read; so does a file that holds only the
-/// `ftyp`, or the `ftyp` and the reserve.
+/// an `mdat` (of a 32- or a 64-bit size, next to it or after another box),
+/// or that is no MP4 file at all stays failed with symphonia's error, as
+/// any file it cannot read; so does a file that holds only the `ftyp`, or
+/// the `ftyp` and the reserve. None of them is written to.
 #[test]
 fn only_the_recorders_layout_is_salvaged() {
     let directory = tempfile::tempdir().unwrap();
@@ -234,6 +235,23 @@ fn only_the_recorders_layout_is_salvaged() {
         "a moov after the mdat",
         [&bytes[..28], &mdat_size, b"mdat", packets, &broken_moov].concat(),
     ));
+    let free = [16u32.to_be_bytes().as_slice(), b"free", &[0; 8]].concat();
+    variants.push((
+        "a moov after the mdat and a free box",
+        [
+            &bytes[..28],
+            &mdat_size,
+            b"mdat",
+            packets,
+            &free,
+            &broken_moov,
+        ]
+        .concat(),
+    ));
+    variants.push((
+        "a moov after a 64-bit mdat",
+        [&bytes[..28], &mdat_64(packets), &broken_moov].concat(),
+    ));
     variants.push(("only the ftyp", bytes[..28].to_vec()));
     variants.push(("only the reserve", bytes[..PACKETS_AT].to_vec()));
     for (name, variant) in variants {
@@ -243,8 +261,22 @@ fn only_the_recorders_layout_is_salvaged() {
             "{name}: {:?}",
             decode(&path).map(|d| d.samples.len())
         );
+        assert_eq!(std::fs::read(&path).unwrap(), variant, "{name}");
     }
     assert!(decode(&written(directory.path(), "kept.m4a", &bytes)).is_ok());
+}
+
+/// `packets` in an `mdat` box of a 64-bit size: a size field of 1, the type,
+/// then the size in 64 bits.
+fn mdat_64(packets: &[u8]) -> Vec<u8> {
+    let size = u64::try_from(packets.len() + 16).unwrap();
+    [
+        1u32.to_be_bytes().as_slice(),
+        b"mdat",
+        &size.to_be_bytes(),
+        packets,
+    ]
+    .concat()
 }
 
 /// A recording cut inside a packet (the kill came mid-write) decodes up
@@ -278,9 +310,10 @@ fn a_recording_cut_mid_packet_decodes_up_to_the_cut() {
 }
 
 /// Where the packets start is found, not assumed: with a reserve of
-/// 1 000 bytes or of 70 000 the decode is the same; an `mdat` header left
-/// in front of the packets (with a size of 0, to the end of the file) is
-/// stepped over.
+/// 1 000 bytes or of 70 000, or a longer `ftyp`, the decode is the same; an
+/// `mdat` header left in front of the packets (with a size of 0, to the end
+/// of the file, or a 64-bit size) is stepped over, and so is one left in
+/// front of the zeros (with a size of 0 or of 8, an empty box).
 #[test]
 fn the_packets_are_found_wherever_the_reserve_ends() {
     let directory = tempfile::tempdir().unwrap();
@@ -290,13 +323,28 @@ fn the_packets_are_found_wherever_the_reserve_ends() {
         .samples;
     let (ftyp, packets) = (&bytes[..28], &bytes[PACKETS_AT..]);
     let with_reserve = |reserve: usize| [ftyp, &vec![0; reserve], packets].concat();
-    let mut mdat = [ftyp, &[0, 0, 0, 0], b"mdat", packets].concat();
-    mdat[28..32].copy_from_slice(&0u32.to_be_bytes());
+    let mdat = [ftyp, &[0, 0, 0, 0], b"mdat", packets].concat();
+    let placeholder = |size: u32| {
+        [
+            ftyp,
+            &size.to_be_bytes(),
+            b"mdat",
+            &vec![0; PACKETS_AT - 36],
+            packets,
+        ]
+        .concat()
+    };
+    let mut longer_ftyp = [&bytes[..28], b"iso2", &bytes[28..PACKETS_AT], packets].concat();
+    longer_ftyp[..4].copy_from_slice(&32u32.to_be_bytes());
     for (name, variant) in [
         ("short", with_reserve(1_000)),
         ("long", with_reserve(70_000)),
         ("none", with_reserve(0)),
         ("mdat", mdat),
+        ("64-bit mdat", [ftyp, &mdat_64(packets)].concat()),
+        ("placeholder of 0", placeholder(0)),
+        ("placeholder of 8", placeholder(8)),
+        ("longer ftyp", longer_ftyp),
     ] {
         let path = written(directory.path(), &format!("{name}.m4a"), &variant);
         assert_eq!(decode(&path).unwrap().samples, expected, "{name}");
