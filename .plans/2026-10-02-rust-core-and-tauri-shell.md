@@ -2023,10 +2023,12 @@ parity item until a plan says otherwise:
   AVFoundation and symphonia both refuse; the Swift app fails the meeting.
   The Rust decoder reads such a file, in the recorder's layout only (its
   `ftyp` brands, no `moov`), packet by packet from the packets' own bits with
-  the phone's fixed settings and `AVAudioRecorder`'s 2 112 samples of
-  priming, up to where it was cut off; the meeting is Ready, its detail says
-  the recording was cut off, and the retention rule keeps the recording
-  (`AudioDamage::salvaged`, stable plan A14).
+  the phone's fixed settings (44.1 kHz mono, pinned to the phone's preset by
+  a test, since the bits cannot tell 44.1 from 48 kHz) and
+  `AVAudioRecorder`'s 2 112 samples of priming, up to where it was cut off
+  or could not be read; the meeting is Ready, its detail says the recording
+  was cut off and its end may be missing, and the retention rule keeps the
+  recording (`AudioDamage::salvaged`, stable plan A14).
 - **AAC-LC only.** AVFoundation also decoded HE-AAC; symphonia decodes
   AAC-LC alone. The iOS recorder writes AAC-LC, so nothing is lost today; a
   plan adds HE-AAC if an import needs it.
