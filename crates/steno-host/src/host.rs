@@ -382,6 +382,22 @@ pub fn delete_recording_prompt() -> ConfirmDestructiveParams {
     }
 }
 
+/// What "Process again" asks first when the meeting has a speaker the user
+/// confirmed or named ([`MeetingDetailViewModel::process_again_asks_first`]):
+/// a run whose diarizer works gives new speakers, and a name it cannot
+/// match to one of them again is cleared; the note is delivered again,
+/// beside the user's own when they edited it. Rust only: the Swift app
+/// refuses "Process again".
+pub fn process_again_prompt() -> ConfirmDestructiveParams {
+    ConfirmDestructiveParams {
+        title: "Process this meeting again?".to_owned(),
+        message: "Speaker names Steno cannot find again are cleared, and the note is written \
+                  again. If you edited it, your version stays and Steno's goes beside it."
+            .to_owned(),
+        confirm_title: "Process again".to_owned(),
+    }
+}
+
 /// The preferences flag Swift's `AppController` set on its first launch on
 /// the Mac; here it counts the first launch on Linux and Windows.
 pub const LOGIN_ITEM_REGISTERED_KEY: &str = "steno.loginItemRegistered";
@@ -1756,10 +1772,26 @@ impl BridgeHost for Host {
         self.detail_write(|detail| detail.reexport(&*self.shared.services.pipeline))
     }
 
+    /// "Process again" on the selected meeting, after
+    /// [`process_again_prompt`] when the meeting has a speaker the user
+    /// confirmed or named. A decline changes nothing: no claim, no state,
+    /// no error line. The prompt runs with the lock released; when the
+    /// selection moved while it was up, nothing is started, so a run never
+    /// starts on a meeting the user was not asked about.
     fn meeting_process_again(&self) -> Outcome<()> {
+        let (meeting_id, asks) = {
+            let inner = self.lock();
+            let detail = inner.detail.as_ref().ok_or_else(no_selection)?;
+            (detail.id, detail.process_again_asks_first())
+        };
+        if asks && !self.confirm(&process_again_prompt()) {
+            return Ok(());
+        }
         let platform = self.shared.config.platform;
         self.detail_write(|detail| {
-            detail.process_again(&*self.shared.services.pipeline, platform);
+            if detail.id == meeting_id {
+                detail.process_again(&*self.shared.services.pipeline, platform);
+            }
         })
     }
 

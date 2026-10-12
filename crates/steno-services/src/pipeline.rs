@@ -1043,7 +1043,9 @@ mod tests {
     }
 
     /// `meeting` saved in `state` with a six-second call recorded under
-    /// `audio`.
+    /// `audio`, and that duration: a ready one with no transcript is under
+    /// the empty-lane bound, so its results are complete
+    /// (`steno_core::results_need_the_audio`).
     fn recorded_meeting(
         store: &Store,
         audio: &std::path::Path,
@@ -1052,6 +1054,7 @@ mod tests {
         let mut meeting = sample_data::meeting();
         meeting.id = Uuid::new_v4();
         meeting.state = state;
+        meeting.duration = 6.0;
         let asset = steno_pipeline::fixtures::two_lane_call(
             audio,
             meeting.id,
@@ -1629,7 +1632,9 @@ mod tests {
 
     /// A meeting a run left waiting for models is not "already being
     /// processed": "Process again" from a stale detail says to download
-    /// the models, and the meeting keeps waiting, untouched, until an
+    /// the models, also when an earlier run's diarizer fallback left the
+    /// room speaker that keeps its recording (#237's refusal comes before
+    /// #241's rule), and the meeting keeps waiting, untouched, until an
     /// install resumes it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_on_a_meeting_waiting_for_models_says_to_download_them() {
@@ -1646,6 +1651,23 @@ mod tests {
         assert_eq!(
             process_again(&service, waiting),
             Err(ProcessAgainRefusal::ModelsMissing)
+        );
+        let parked = store.meeting(waiting).unwrap().unwrap();
+        let room = steno_core::Speaker {
+            id: steno_core::room_speaker_id(waiting),
+            meeting_id: waiting,
+            cluster_label: "Speaker 1".to_owned(),
+            assignment: steno_core::SpeakerAssignment::Unknown,
+            embedding: None,
+            sample_clip_range: None,
+            sample_clip_url: None,
+            cluster_confidence: 0.0,
+        };
+        store.replace_transcript(&parked, &[], &[room]).unwrap();
+        assert_eq!(
+            process_again(&service, waiting),
+            Err(ProcessAgainRefusal::ModelsMissing),
+            "kept incomplete, still waiting for the models"
         );
         service.pipeline.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);

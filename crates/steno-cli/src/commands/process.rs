@@ -7,7 +7,9 @@
 //!
 //! `steno process --meeting <id>` processes a stored meeting again from its
 //! recording, and reports as above: a meeting the app offers "Process
-//! again" for (a failed one), through the pipeline's `process_again`, or
+//! again" for (a failed one, or a ready one whose results may be
+//! incomplete or whose recording may be damaged), through the pipeline's
+//! `process_again`, or
 //! with `--allow-ready` a ready one too, through `reprocess` (see
 //! `--allow-ready` for what that replaces). Rust only: Swift's CLI had no
 //! such flag.
@@ -53,8 +55,9 @@ pub struct Process {
     /// 16 kHz mono WAV: the mic lane of a call, or the room recording.
     #[arg(required_unless_present = "meeting")]
     pub input: Option<PathBuf>,
-    /// Process a stored failed meeting again from its recording, instead
-    /// of a new one from <INPUT>.
+    /// Process a stored meeting again from its recording, instead of a new
+    /// one from <INPUT>: a failed meeting, or a ready one whose speakers or
+    /// transcript may be incomplete or whose recording may be damaged.
     #[arg(
         long,
         value_name = "ID",
@@ -62,7 +65,7 @@ pub struct Process {
         conflicts_with_all = ["input", "system_lane", "source", "title", "template", "audio_folder"]
     )]
     pub meeting: Option<Uuid>,
-    /// With --meeting, process a ready meeting again too. It delivers the
+    /// With --meeting, process any ready meeting again too. It delivers the
     /// meeting's note again, replacing the one in the vault even if you
     /// edited it; without an LLM endpoint its cleaned transcript goes back
     /// to the raw text.
@@ -331,7 +334,7 @@ fn reprocess_failure(error: ReprocessError) -> Failure {
             uuid_string(meeting_id)
         )),
         ReprocessError::NotOffered(id) => Failure::runtime(format!(
-            "Meeting {} is ready; pass --allow-ready to process it again.",
+            "Meeting {} is ready and complete; pass --allow-ready to process it again.",
             uuid_string(id)
         )),
         ReprocessError::NoAsset(id) => Failure::runtime(format!(
@@ -465,7 +468,7 @@ mod tests {
             (
                 ReprocessError::NotOffered(id),
                 Failure::runtime(format!(
-                    "Meeting {s} is ready; pass --allow-ready to process it again."
+                    "Meeting {s} is ready and complete; pass --allow-ready to process it again."
                 )),
             ),
             (

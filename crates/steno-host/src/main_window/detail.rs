@@ -8,7 +8,8 @@ use steno_bridge::DetailTab;
 use steno_core::protocols::{BoundaryResult, BoxError};
 use steno_core::{
     AudioRetention, Delivery, Meeting, MeetingExport, MeetingOperation, MeetingStateKind, Platform,
-    Settings, Store, StoreError, SummaryTemplate, paths::file_url_path,
+    Settings, SpeakerAssignment, Store, StoreError, SummaryTemplate, paths::file_url_path,
+    results_need_the_audio,
 };
 use uuid::Uuid;
 
@@ -30,6 +31,12 @@ pub enum RecordingStatus {
     KeptUntilExportSucceeds,
     /// A finite rule, no stamp, meeting failed: re-processing needs the audio.
     KeptProcessingFailed,
+    /// A finite rule, no stamp, meeting ready and delivered, but its
+    /// speakers or transcript may be incomplete
+    /// ([`steno_core::results_need_the_audio`]) or its recording may be
+    /// damaged ([`MeetingDetailViewModel::audio_may_be_damaged`]), so the
+    /// automatic retention keeps the recording. Rust only.
+    KeptIncomplete,
     /// A finite rule, no stamp, meeting still on its way to the retention stage.
     KeptWhileProcessing,
 }
@@ -189,8 +196,10 @@ impl MeetingDetailViewModel {
     }
 
     /// "Process again": the meeting is one it is offered for
-    /// ([`Meeting::offers_process_again`]), its recording is on disk, and
-    /// the API key is not withheld ([`key_withheld`](Self::key_withheld)).
+    /// ([`Meeting::offers_process_again`] over the export's rows and
+    /// [`audio_may_be_damaged`](Self::audio_may_be_damaged): failed, or
+    /// ready and kept incomplete), its recording is on disk, and the API
+    /// key is not withheld ([`key_withheld`](Self::key_withheld)).
     /// The snapshot's `canProcessAgain`, and the guard of
     /// [`process_again`](Self::process_again), so the button and the action
     /// cannot drift apart.
@@ -199,11 +208,33 @@ impl MeetingDetailViewModel {
         self.process_again_refusal().is_none()
     }
 
+    /// "Process again" asks first ([`crate::host::process_again_prompt`]):
+    /// it is offered, and a speaker of the meeting is confirmed to a
+    /// person, by a pick or a typed name, which a run whose diarizer works
+    /// may not find again. Failed or ready alike.
+    #[must_use]
+    pub fn process_again_asks_first(&self) -> bool {
+        self.can_process_again()
+            && self.export.as_ref().is_some_and(|export| {
+                export.speakers.iter().any(|speaker| {
+                    matches!(speaker.assignment, SpeakerAssignment::Confirmed { .. })
+                })
+            })
+    }
+
     /// Why the detail itself refuses "Process again": the meeting is not
     /// one it is offered for, its recording is gone, or the API key is
     /// withheld.
     fn process_again_refusal(&self) -> Option<ProcessAgainRefusal> {
-        if !self.meeting().is_some_and(Meeting::offers_process_again) {
+        let offered = self.export.as_ref().is_some_and(|export| {
+            export.meeting.offers_process_again(
+                &export.speakers,
+                &export.segments,
+                export.audio.as_ref(),
+                self.audio_may_be_damaged,
+            )
+        });
+        if !offered {
             Some(ProcessAgainRefusal::NotOffered)
         } else if !self.recording_files_exist {
             Some(ProcessAgainRefusal::RecordingGone)
@@ -354,10 +385,19 @@ impl MeetingDetailViewModel {
         }
         Some(match export.meeting.state.kind() {
             MeetingStateKind::Ready => {
-                if all_delivered(&self.deliveries) {
-                    RecordingStatus::KeptWhileProcessing
-                } else {
+                if !all_delivered(&self.deliveries) {
                     RecordingStatus::KeptUntilExportSucceeds
+                } else if self.audio_may_be_damaged
+                    || results_need_the_audio(
+                        &export.meeting,
+                        &export.speakers,
+                        &export.segments,
+                        asset,
+                    )
+                {
+                    RecordingStatus::KeptIncomplete
+                } else {
+                    RecordingStatus::KeptWhileProcessing
                 }
             }
             MeetingStateKind::Failed => RecordingStatus::KeptProcessingFailed,
@@ -478,7 +518,8 @@ pub fn process_again_refusal_line(
     Some(match refusal {
         ProcessAgainRefusal::MeetingGone => "This meeting no longer exists.".to_owned(),
         ProcessAgainRefusal::NotOffered => {
-            "Only a failed meeting can be processed again.".to_owned()
+            "Only a failed meeting, or one whose results may be incomplete, can be processed again."
+                .to_owned()
         }
         ProcessAgainRefusal::RecordingGone => platform
             .mac_or(
