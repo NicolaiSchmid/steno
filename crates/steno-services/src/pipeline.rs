@@ -359,11 +359,22 @@ async fn retry_the_store(current: Weak<Mutex<Current>>, waits: ModelWaits, retry
                 );
             }
             Ok(Ok(_)) => {}
+            Ok(Err(error)) if error.is_busy() => {
+                tracing::info!(%error, "meetings waiting for the database could not be resumed yet");
+            }
             Ok(Err(error)) => {
-                tracing::warn!(%error, "meetings waiting for the database could not be resumed yet");
+                tracing::warn!(
+                    %error,
+                    "meetings waiting for the database could not be resumed; \
+                     they stay queued for the next launch"
+                );
             }
             Err(error) => {
-                tracing::warn!(%error, "the retry of the meetings waiting for the database stopped");
+                tracing::warn!(
+                    %error,
+                    "a retry of the meetings waiting for the database ended early; \
+                     they stay queued for the next launch"
+                );
             }
         }
         last = Some((wait, tokio::time::Instant::now()));
@@ -2394,5 +2405,67 @@ mod tests {
             "a spell as long as the longest wait is not quiet"
         );
         assert_eq!(retry.next_wait(Some((secs(240), secs(241)))), secs(15));
+    }
+
+    /// While the lock keeps refusing it, the retry backs off. Each try
+    /// starts the meeting, whose run meets the lock and posts `StoreBusy`
+    /// again, so the events count the tries: with `first` at 20 ms, doubling,
+    /// at most 7 fit in the 4 s after the first park (20 + 40 + ... + 1280
+    /// ms, plus each run's time), while a loop that starts again from
+    /// `first` on every try makes dozens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_store_retry_backs_off_while_the_lock_refuses_it() {
+        let (dir, store) = temp_store();
+        let engine = Arc::new(HeldWarmUp::default());
+        let current = retrying(
+            &store,
+            engine.clone(),
+            StoreRetry {
+                first: Duration::from_millis(20),
+                longest: Duration::from_secs(60),
+            },
+        );
+        let mut events = current.current().dependencies().events.subscribe();
+        store
+            .read(|connection| Ok(connection.busy_timeout(Duration::ZERO)?))
+            .unwrap();
+        let meeting = enqueue_call(dir.path(), &current.current());
+        tokio::time::timeout(PATIENCE, engine.entered.notified())
+            .await
+            .expect("the run is warming up");
+        let lock = write_lock(dir.path());
+        engine.open.notify_one();
+        let busy = MeetingEvent::StoreBusy {
+            meeting_id: meeting,
+        };
+        tokio::time::timeout(PATIENCE, async {
+            while events.recv().await.unwrap() != busy {}
+        })
+        .await
+        .expect("the first park");
+        let mut parks = 0;
+        let window = tokio::time::sleep(Duration::from_secs(4));
+        tokio::pin!(window);
+        loop {
+            tokio::select! {
+                () = &mut window => break,
+                event = events.recv() => match event {
+                    Ok(event) if event == busy => parks += 1,
+                    Ok(_) => {}
+                    // Lagged behind: far more events than a backed-off retry posts.
+                    Err(_) => parks += 100,
+                },
+            }
+        }
+        assert!(parks >= 2, "the retry kept trying: {parks}");
+        assert!(parks <= 7, "the retry backed off: {parks} tries in 4 s");
+        drop(lock);
+        crate::testing::eventually_within(
+            Duration::from_secs(60),
+            "the retry processed the meeting",
+            || meeting_state(&store, meeting) == MeetingState::Ready,
+        )
+        .await;
+        current.current().wait_until_idle().await;
     }
 }
