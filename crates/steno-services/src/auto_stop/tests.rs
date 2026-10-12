@@ -1191,28 +1191,31 @@ impl steno_audio::CaptureBackend for GatedRestart {
     }
 }
 
-/// The notice thread reads the session before it takes the outage's lock:
-/// a rebuild's start holds the session's lock for seconds, and the
-/// status, the microphone's activity and the countdown's end, which take
-/// the outage's lock, do not wait for it. Here the thread handles a
-/// resume while the next rebuild's start waits at a gate.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
+/// A recording whose device changes twice for `reason`, a second into
+/// each start, and whose second rebuild's start waits at a gate: the
+/// receiver hears when it waits, and the sender opens it.
+fn recording_whose_second_rebuild_waits(
+    reason: steno_audio::DeviceChangeReason,
+) -> (
+    Recording,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
     let (entered, waiting) = std::sync::mpsc::channel();
     let (open, opened) = std::sync::mpsc::channel();
     let gate = Arc::new(Gate {
         entered: std::sync::Mutex::new(entered),
         open: std::sync::Mutex::new(opened),
     });
-    let gated = gate.clone();
     let recording = recording_over(synthetic_recorder_over(Arc::new(move |configuration| {
         let options = crate::testing::synthetic_tone(&configuration)
             .change_device_after(1.0)
-            .changes(2);
+            .changes(2)
+            .change_reason(reason);
         let backend = GatedRestart {
             synthetic: steno_audio::testing::SyntheticCaptureBackend::new(options),
             starts: std::sync::atomic::AtomicUsize::new(0),
-            gate: gated.clone(),
+            gate: gate.clone(),
         };
         steno_audio::CaptureSession::with_backend(
             configuration,
@@ -1223,6 +1226,18 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
         )
         .map_err(|error| error.to_string())
     })));
+    (recording, waiting, open)
+}
+
+/// The notice thread reads the session before it takes the outage's lock:
+/// a rebuild's start holds the session's lock for seconds, and the
+/// status, the microphone's activity and the countdown's end, which take
+/// the outage's lock, do not wait for it. Here the thread handles a
+/// resume while the next rebuild's start waits at a gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
+    let (recording, waiting, open) =
+        recording_whose_second_rebuild_waits(steno_audio::DeviceChangeReason::DefaultInputChanged);
     // The first change's notice waits until the second rebuild's start
     // holds the session, so the thread reads the session for the first
     // resume while that start runs.
@@ -1270,32 +1285,8 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
 /// same outcome. Here the second stall's rebuild waits at a gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call() {
-    let (entered, waiting) = std::sync::mpsc::channel();
-    let (open, opened) = std::sync::mpsc::channel();
-    let gate = Arc::new(Gate {
-        entered: std::sync::Mutex::new(entered),
-        open: std::sync::Mutex::new(opened),
-    });
-    let gated = gate.clone();
-    let recording = recording_over(synthetic_recorder_over(Arc::new(move |configuration| {
-        let options = crate::testing::synthetic_tone(&configuration)
-            .change_device_after(1.0)
-            .changes(2)
-            .change_reason(steno_audio::DeviceChangeReason::DeliveryStalled);
-        let backend = GatedRestart {
-            synthetic: steno_audio::testing::SyntheticCaptureBackend::new(options),
-            starts: std::sync::atomic::AtomicUsize::new(0),
-            gate: gated.clone(),
-        };
-        steno_audio::CaptureSession::with_backend(
-            configuration,
-            Arc::new(backend),
-            None,
-            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-            Arc::new(steno_audio::SystemClock::new()),
-        )
-        .map_err(|error| error.to_string())
-    })));
+    let (recording, waiting, open) =
+        recording_whose_second_rebuild_waits(steno_audio::DeviceChangeReason::DeliveryStalled);
     let (seen, go) = hold_the_notices(&recording, 2);
     recording.start(CaptureMode::Call, None);
     recording.opened(Some("Zen"));
