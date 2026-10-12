@@ -2564,10 +2564,9 @@ mod tests {
     /// A stall's note names a cause, so it stays.
     fn without_the_missing_audio_note(recorder: &CaptureRecorder) -> Option<String> {
         let warning = recorder.status().warning?;
-        let Some((_, rest)) = warning
-            .strip_prefix("About ")
-            .and_then(|note| note.split_once(" of the recording "))
-            .and_then(|(_, note)| note.split_once(" missing."))
+        let Some(rest) = seconds_noted(&warning)
+            .and_then(|seconds| note_for_seconds(seconds, None))
+            .and_then(|note| warning.strip_prefix(note.as_str()))
         else {
             return Some(warning);
         };
@@ -2726,7 +2725,7 @@ mod tests {
         )
     }
 
-    /// Records over `harness` until `warning` shows, within `patience`,
+    /// Records over `harness` until `warning` shows ([`until_the_warning`]),
     /// and checks the meter reads silence then and the warning stands for
     /// `holds` more; stops, checks the note after the stop names the
     /// `stalled` device, or none, and returns the seconds it says are
@@ -2735,7 +2734,6 @@ mod tests {
         harness: &Harness,
         warning: &str,
         stalled: Option<&str>,
-        patience: Duration,
         holds: Duration,
     ) -> u64 {
         let status = || harness.recorder.status();
@@ -2745,7 +2743,7 @@ mod tests {
         })
         .await;
         assert_eq!(status().warning, None);
-        until_the_warning(harness, warning, patience).await;
+        until_the_warning(harness, warning).await;
         let mic = status().levels.map(|levels| levels.mic);
         assert!(
             mic.is_some_and(|mic| mic < 1e-6),
@@ -2774,25 +2772,34 @@ mod tests {
     /// `stalled` device, or none: "About 1 second" as well as the plural.
     fn seconds_missing(note: &str, stalled: Option<&str>) -> u64 {
         let missing = note.find("About ").map_or("", |start| &note[start..]);
-        let seconds: u64 = missing
-            .strip_prefix("About ")
-            .and_then(|rest| rest.split(' ').next())
-            .and_then(|seconds| seconds.parse().ok())
-            .unwrap_or_else(|| panic!("the note: {note}"));
-        // A gap that rounds to `seconds`, past the note's 1 s floor.
-        let gap = Duration::from_secs(seconds).as_secs_f64() + 0.25;
+        let seconds = seconds_noted(missing).unwrap_or_else(|| panic!("the note: {note}"));
         assert_eq!(
             Some(missing),
-            missing_audio_note(gap, stalled).as_deref(),
+            note_for_seconds(seconds, stalled).as_deref(),
             "{note}"
         );
         seconds
     }
 
-    /// Waits up to `patience` for the recorder to show `warning`, as it
-    /// does once the restarts pass the attempts.
-    async fn until_the_warning(harness: &Harness, warning: &str, patience: Duration) {
-        let deadline = std::time::Instant::now() + patience;
+    /// The seconds a `note` that starts with a missing-audio note says are
+    /// missing.
+    fn seconds_noted(note: &str) -> Option<u64> {
+        note.strip_prefix("About ")?.split(' ').next()?.parse().ok()
+    }
+
+    /// [`missing_audio_note`]'s note for `seconds` missing and the
+    /// `stalled` device, or none.
+    fn note_for_seconds(seconds: u64, stalled: Option<&str>) -> Option<String> {
+        // A gap that rounds to `seconds`, past the note's 1 s floor.
+        missing_audio_note(Duration::from_secs(seconds).as_secs_f64() + 0.25, stalled)
+    }
+
+    /// Waits for the recorder to show `warning`, as it does once the
+    /// restarts pass the attempts, failing the test as hung after
+    /// [`HANG_GUARD`]: the restarts are real work, which a loaded runner
+    /// stretches.
+    async fn until_the_warning(harness: &Harness, warning: &str) {
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         while harness.recorder.status().warning.as_deref() != Some(warning) {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -2806,9 +2813,6 @@ mod tests {
     /// Seconds of tone before the device stops delivering: long enough for
     /// the meter to show a level on a loaded host first.
     const BEFORE_THE_OUTAGE: f64 = 3.0;
-    /// How long the warning may take to show after the start: the tone,
-    /// the stall's 2 s, and four restarts that wait 2 s each for a frame.
-    const STILL_TRYING_WITHIN: Duration = Duration::from_secs(30);
     const STILL_TRYING_ON_USB: &str = "No audio from USB Microphone. Still trying.";
     const USB_MICROPHONE: &str = "USB Microphone";
 
@@ -2830,7 +2834,6 @@ mod tests {
             &harness,
             STILL_TRYING_ON_USB,
             Some(USB_MICROPHONE),
-            STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
         .await;
@@ -2853,7 +2856,6 @@ mod tests {
             &harness,
             STILL_TRYING_ON_USB,
             Some(USB_MICROPHONE),
-            STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
         .await;
@@ -2879,7 +2881,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
-        until_the_warning(&harness, warning, STILL_TRYING_WITHIN).await;
+        until_the_warning(&harness, warning).await;
         stop(&harness.recorder);
         seconds_missing(
             &harness.recorder.status().warning.unwrap_or_default(),
@@ -2905,7 +2907,6 @@ mod tests {
             &harness,
             "No audio is arriving. Still trying.",
             None,
-            STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
         .await;

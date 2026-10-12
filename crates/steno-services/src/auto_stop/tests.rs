@@ -854,7 +854,8 @@ struct AtNotice {
 /// Holds the capture's notice thread in the change hook after each of its
 /// first `notices` notices, so the recorder's view of the capture stays
 /// there until the test lets it go on: each one sends the status and
-/// waits for the reply.
+/// waits for the reply, under [`HANG_GUARD`], since a test may reply only
+/// after real capture work (a dropped reply ends the wait at once).
 fn hold_the_notices(
     recording: &Recording,
     notices: usize,
@@ -880,7 +881,7 @@ fn hold_the_notices(
             armed: status.auto_stop.map(|armed| armed.remaining_seconds),
             warning: status.warning,
         });
-        let _ = gone.lock().unwrap().recv_timeout(PATIENCE);
+        let _ = gone.lock().unwrap().recv_timeout(HANG_GUARD);
     }));
     (seen, go)
 }
@@ -1289,15 +1290,15 @@ async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call()
     let (seen, go) = hold_the_notices(&recording, 2);
     recording.start(CaptureMode::Call, None);
     recording.opened(Some("Zen"));
-    seen.recv_timeout(PATIENCE).expect("the first stall");
+    seen.recv_timeout(HANG_GUARD).expect("the first stall");
     go.send(()).unwrap();
-    seen.recv_timeout(PATIENCE).expect("the first resume");
+    seen.recv_timeout(HANG_GUARD).expect("the first resume");
     // Back from the first stall: the release's countdown runs, shown.
     recording.released();
     recording.sleepers(1);
     assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 90.0)));
     waiting
-        .recv_timeout(PATIENCE)
+        .recv_timeout(HANG_GUARD)
         .expect("the second stall's rebuild starts");
     go.send(()).unwrap();
     // Well inside the gate's own patience, so a read that came first
