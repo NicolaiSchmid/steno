@@ -29,10 +29,8 @@ pub fn merge_all(windows: &[Vec<Token>], overlap_seconds: f64, vocab: &Vocab) ->
 fn enforce_monotonic(tokens: &mut [Token]) {
     let mut max = (0, 0);
     for token in tokens {
-        if (token.frame, token.phase) < max {
-            (token.frame, token.phase) = max;
-        }
-        max = (token.frame, token.phase);
+        max = max.max((token.frame, token.phase));
+        (token.frame, token.phase) = max;
     }
 }
 
