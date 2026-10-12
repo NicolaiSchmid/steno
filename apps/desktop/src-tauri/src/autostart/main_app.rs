@@ -18,8 +18,8 @@
 //! registers or removes the login item ([`set_enabled`]).
 //!
 //! The rules run over two traits, [`MainApp`] and [`LaunchAgents`], which
-//! the tests fake; the system's are [`SystemMainApp`] and
-//! [`UserLaunchAgents`], macOS only. A smoke run (`STENO_SMOKE_SECONDS`)
+//! the tests fake; the system's are `SystemMainApp` and
+//! `UserLaunchAgents`, macOS only. A smoke run (`STENO_SMOKE_SECONDS`)
 //! registers and removes nothing. Only a run from an installed app bundle
 //! ([`installed_bundle`]: not a plain binary under `target/`, a mounted
 //! disk image or a copy Gatekeeper translocated; a bundle built under

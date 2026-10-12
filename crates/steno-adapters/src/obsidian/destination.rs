@@ -287,7 +287,7 @@ impl ObsidianFolderDestination {
     /// [`Destination::deliver`] without the boundary error wrapper and on
     /// the calling thread, where the tests call it. Blocks while another
     /// delivery into the same vault runs in this process (`vault_lock`). A
-    /// delivery that kept a note the user edited ([`Self::write_note`]) or
+    /// delivery that kept a note the user edited (`write_note`) or
     /// went without the audio it should copy ([`Self::NO_AUDIO_WARNING`])
     /// succeeds and says so in the receipt's `warnings`.
     pub fn deliver_meeting(
