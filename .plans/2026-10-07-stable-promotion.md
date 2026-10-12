@@ -925,12 +925,14 @@ Each lands before `0.11.0-rc.1`.
 - **A2 CoreML on the shared chunker** (#263). The CoreML backend moves onto the shared
   chunker, merge and decoder settings, settling the unticked WP4 integration
   notes. Parity: FLEURS and the Swift fixtures hold within today's tolerance.
-  Measured: FLEURS German `cat/` through CoreML 4.87 % mean WER, from 5.46 %
-  (the ONNX engine 4.88 %); against the Swift transcripts of the calibration
-  corpus 8.46 % mean per-file WER, from 0.00 %, outside the old 2 % gate: the
-  windows are laid out differently. The parity test's gate is 10 %; that
-  needs Nicolai's confirmation. The numbers per item are in the port plan's WP4
-  integration notes.
+  FLEURS, which has references, is the accuracy gate (Nicolai, 2026-10-12).
+  Measured with A13 (#279) in: FLEURS German `cat/` through CoreML 4.87 % mean
+  WER, from 5.46 % (the ONNX engine 4.88 %). The parity test against the Swift
+  transcripts of the calibration corpus tracks drift from the old Swift output:
+  8.46 % mean per-file WER, from 0.00 %, because the windows are laid out
+  differently, under its limit of 10 %; and the mean word-start offset from
+  Swift's, +4.2 ms (+7.4 ms on FLEURS), under its limit of 15 ms. The numbers per
+  item are in the port plan's WP4 integration notes.
 - **A3 The diarizer on `ModelStore` and in the sidecar.** Its models come
   through `steno_speech::ModelStore` (resume, lock, mirror; #229), and its
   inference runs in the speech sidecar's child on every platform, the Mac
@@ -1253,10 +1255,15 @@ Each lands before `0.11.0-rc.1`.
     matching and the recovery count whole frames, so none of their
     decisions changes; the merge's monotonic pass orders tokens by frame
     and phase.
-  - The CoreML backend's own pipeline decodes only windows on the frame
+  - The CoreML backend's own pipeline decoded only windows on the frame
     grid, so its starts were exact (mean offset 0.0 ms from Swift's on the
-    corpus and FLEURS) and do not change; it takes the fix with the shared
-    chunker (A2).
+    corpus and FLEURS). On the shared chunker (A2, #263) its chunks start
+    anywhere too, and the fix applies: the text is unchanged, every start
+    moves 0 to 79 ms later, and against Swift's starts the mean offset is
+    +2.5 ms on the corpus and +7.5 ms on FLEURS, from -30.5 and -27.7 ms
+    without the phase (p10 and p90 -56 and +56 ms on the corpus, -48 and
+    +64 ms on FLEURS; matched as above). The CoreML parity test holds the
+    corpus mean within 15 ms; its own alignment of the words gives +4.2 ms.
   - Measured on the ONNX backend: text and word order identical on FLEURS
     German `cat/`, the Swift corpus, the seven calibration calls and the
     fixtures; FLEURS mean WER 4.927 % before and after (CoreML 5.462 %

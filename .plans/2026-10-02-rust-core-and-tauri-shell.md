@@ -298,9 +298,14 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     calibration corpus): 8.46 % mean per-file WER, from 0.00 %; the windows are laid
     out differently, so the model hears different context. Of the items above only the
     decode loop (0.25 points), the seam-gap repair (0.36) and the merge (under 0.1)
-    moved that figure; the rest is the layout, which FLEURS scores better. The gate is
-    10 %. Word starts agree within 10 ms for about half the words, from all of them: see
-    the open item on chunk starts between encoder frames.
+    moved that figure; the rest is the layout, which FLEURS scores better. The test
+    tracks drift from the old Swift output; FLEURS, which has references, is the
+    accuracy gate (Nicolai, 2026-10-12), and the test's limit is 10 %. Word starts,
+    with each chunk's words timed from its exact start (A13): +4.2 ms from Swift's on
+    average (p10 -56 ms, p90 +56 ms), from 0.0 ms on the crate's own frame-aligned
+    windows and -30.5 ms on the shared layout without the phase; the spread is wider
+    because Swift's windows sit on the frame grid and the shared chunks do not. The
+    test's limit on that mean is 15 ms.
   - The settings that still differ, CoreML then ONNX: the clamp (15 s, 60 s), the
     long-pause skip (none, 3 s), the detector (`AdaptiveEnergyVad`, Silero) and the
     workers (four, one: ONNX Runtime spreads one call over its threads).
