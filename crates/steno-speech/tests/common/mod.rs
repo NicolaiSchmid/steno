@@ -1,14 +1,13 @@
-//! Shared by the model-gated integration tests: the environment gate, the
-//! PCM-16 WAV reader and spike F's word error rate scorer
-//! ([`steno_speech::wer`]).
+//! Shared by the model-gated integration tests: the environment gate and
+//! the PCM-16 WAV reader. The tests score with spike F's scorer,
+//! [`steno_speech::wer`].
 
-// `dead_code` and `unused_imports`: the `transcribe` example includes this
-// module for `read_wav` alone. The cast allows repeat the crate's because a test target does not
+// `dead_code`: the `transcribe` example includes this module for `read_wav`
+// alone. The cast allows repeat the crate's because a test target does not
 // inherit `lib.rs` attributes and `[lints] workspace = true` leaves no room
 // for a per-package table.
 #![allow(
     dead_code,
-    unused_imports,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -18,7 +17,6 @@
 
 use std::path::{Path, PathBuf};
 
-pub use steno_speech::wer::{normalise, word_errors as score};
 use steno_speech::{ModelAsset, ModelStore};
 
 /// The model store, when both assets are installed in the models directory

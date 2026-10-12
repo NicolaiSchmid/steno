@@ -23,6 +23,7 @@ use std::time::Instant;
 
 use steno_audio::SymphoniaAudioCodec;
 use steno_audio::realtime::RateConverter;
+use steno_speech::wer::{normalise, word_errors};
 use steno_speech::{
     ModelAsset, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig, SAMPLE_RATE, VadConfig,
 };
@@ -94,13 +95,13 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
         let transcript = transcriber.transcribe(&samples, None).unwrap();
         let wall = started.elapsed().as_secs_f64();
         let hypothesis = transcript.text();
-        let score = common::score(&reference, &hypothesis);
+        let score = word_errors(&reference, &hypothesis);
         let audio_seconds = samples.len() as f64 / SAMPLE_RATE as f64;
         println!(
             "| {} | {} | {} | {:.1}% | {}/{}/{} | {} | {}/{} | {:.1} |",
             path.file_stem().unwrap().to_string_lossy(),
             score.reference_words,
-            common::normalise(&hypothesis).len(),
+            normalise(&hypothesis).len(),
             score.rate() * 100.0,
             score.substitutions,
             score.deletions,
@@ -211,7 +212,7 @@ fn fleurs_wer_from_44k1_is_at_most_a_tenth_of_a_point_over_48k() {
                 path.display()
             );
             let transcript = transcriber.transcribe(lane, None).unwrap();
-            let score = common::score(&reference, &transcript.text());
+            let score = word_errors(&reference, &transcript.text());
             wers[index].push(score.rate());
             errors[index] += score.edits();
             row[index] = score.rate();
