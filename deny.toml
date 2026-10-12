@@ -57,7 +57,9 @@ exceptions = [
 ]
 
 [licenses.private]
-# The workspace's own crates are `publish = false` and MIT.
+# The workspace's own crates are `publish = false` and MIT, except the files
+# README.md's "License" lists, which keep their own licences; cargo-deny
+# checks dependencies only.
 ignore = true
 
 [advisories]

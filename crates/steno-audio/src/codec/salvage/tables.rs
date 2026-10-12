@@ -1,15 +1,39 @@
-// This file is subject to the terms of the Mozilla Public License, v. 2.0.
-// If a copy of the MPL was not distributed with this file, You can obtain one
-// at https://mozilla.org/MPL/2.0/.
+// This file is under the Mozilla Public License, v. 2.0, not the MIT
+// licence of the rest of Steno: the MPL applies per file, and this file is
+// copied from symphonia-codec-aac 0.5.5, the AAC decoder Steno already
+// ships, so it keeps symphonia's licence (README.md, "License"). cargo-deny
+// does not check it: it checks the licences of dependencies, and
+// `deny.toml` ignores the workspace's own crates
+// (`[licenses.private] ignore = true`).
 //
 // The tables are ISO/IEC 14496-3's AAC Huffman codebooks (Tables 4.A.1 to
-// 4.A.12) and its scale factor bands at 44.1 and 48 kHz (Tables 4.129 and
-// 4.131), copied from `symphonia-codec-aac` 0.5.5 (`src/aac/codebooks.rs` and
-// `src/aac/common.rs`,
-// Copyright (c) 2019-2022 The Project Symphonia Developers, MPL-2.0), the
-// AAC decoder Steno already ships. The file stays under the MPL-2.0, as
-// `deny.toml` allows symphonia's files; the rest of the crate keeps its own
-// licence.
+// 4.A.12), from symphonia's `src/aac/codebooks.rs`, and its scale factor
+// bands at 44.1 and 48 kHz (Tables 4.129 and 4.131), from its
+// `src/aac/common.rs`. The notices of those two files follow, verbatim.
+//
+// `src/aac/codebooks.rs`:
+//
+// Symphonia
+// Copyright (c) 2019-2022 The Project Symphonia Developers.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+//
+// `src/aac/common.rs`:
+//
+// Symphonia
+// Copyright (c) 2019-2022 The Project Symphonia Developers.
+//
+// Previous Author: Kostya Shishkov <kostya.shiskov@gmail.com>
+//
+// This source file includes code originally written for the NihAV
+// project. With the author's permission, it has been relicensed for,
+// and ported to the Symphonia project.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The standard's tables [`super::packet`] walks an AAC-LC packet with: the
 //! eleven spectrum codebooks and the scale factor codebook, each a codeword
