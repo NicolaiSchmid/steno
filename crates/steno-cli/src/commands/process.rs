@@ -285,6 +285,11 @@ impl Process {
         });
         start(&pipeline)?;
         pipeline.wait_until_idle().await;
+        let waits_for_the_store = pipeline
+            .dependencies()
+            .model_waits
+            .waiting_for_store()
+            .contains(&meeting_id);
         drop(events);
         drop(pipeline);
         let _ = printer.await;
@@ -298,12 +303,26 @@ impl Process {
         if let MeetingState::Failed { reason } = &result.state {
             return Err(Failure::runtime(format!("processing failed: {reason}")));
         }
+        if waits_for_the_store {
+            return Err(left_queued(meeting_id));
+        }
         if skipped {
             eprintln!("summary skipped: no LLM endpoint configured");
         }
         println!("{}", uuid_string(meeting_id));
         Ok(())
     }
+}
+
+/// What the command prints when its run left the meeting queued because
+/// another program kept the database locked past its busy timeout: the
+/// command does not wait for it, and the app's next launch processes it.
+fn left_queued(meeting_id: Uuid) -> Failure {
+    Failure::runtime(format!(
+        "Meeting {} was not processed: another program kept the database locked. It stays in \
+         the queue, and the app processes it at its next launch.",
+        uuid_string(meeting_id)
+    ))
 }
 
 /// What `--meeting` prints when the pipeline refuses the meeting. An id
@@ -314,15 +333,17 @@ fn reprocess_failure(error: ReprocessError) -> Failure {
             Failure::usage(format!("No meeting has the id {}.", uuid_string(id)))
         }
         // The command's pipeline is its own, so a meeting the app left
-        // waiting for models reads as queued here: the app may not be
-        // running at all.
+        // waiting for models or for the database reads as queued here: the
+        // app may not be running at all.
         ReprocessError::Unfinished {
             meeting_id,
             state: MeetingStateKind::Queued | MeetingStateKind::Processing,
         }
-        | ReprocessError::WaitingForModels(meeting_id) => Failure::runtime(format!(
+        | ReprocessError::WaitingForModels(meeting_id)
+        | ReprocessError::WaitingForStore(meeting_id) => Failure::runtime(format!(
             "Meeting {} is queued or being processed; the app processes it at its next launch, \
-             or once the speech models are installed in Settings.",
+             once the speech models are installed in Settings, or once the database is no \
+             longer locked.",
             uuid_string(meeting_id)
         )),
         ReprocessError::Busy(meeting_id) => Failure::runtime(format!(
@@ -436,7 +457,8 @@ mod tests {
         let busy = format!("Meeting {s} is already being processed.");
         let queued = format!(
             "Meeting {s} is queued or being processed; the app processes it at its next launch, \
-             or once the speech models are installed in Settings."
+             once the speech models are installed in Settings, or once the database is no \
+             longer locked."
         );
         let unfinished = |state| ReprocessError::Unfinished {
             meeting_id: id,
@@ -463,6 +485,10 @@ mod tests {
             ),
             (
                 ReprocessError::WaitingForModels(id),
+                Failure::runtime(queued.clone()),
+            ),
+            (
+                ReprocessError::WaitingForStore(id),
                 Failure::runtime(queued),
             ),
             (
@@ -499,6 +525,19 @@ mod tests {
         for (error, expected) in cases {
             assert_eq!(reprocess_failure(error.clone()), expected, "{error:?}");
         }
+    }
+
+    #[test]
+    fn a_run_the_database_lock_left_queued_says_so_with_a_runtime_failure() {
+        let id = Uuid::from_u128(0x6F96_19FF_8B86_D011_B42D_00C0_4FC9_64FF);
+        assert_eq!(
+            left_queued(id),
+            Failure::runtime(format!(
+                "Meeting {} was not processed: another program kept the database locked. It \
+                 stays in the queue, and the app processes it at its next launch.",
+                uuid_string(id)
+            ))
+        );
     }
 
     #[test]

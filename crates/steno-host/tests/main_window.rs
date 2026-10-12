@@ -2255,6 +2255,10 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
             "Download the speech models in Settings.",
         ),
         (
+            Refusal::StoreBusy,
+            "Waiting for another app to finish with Steno's data.",
+        ),
+        (
             Refusal::NotOffered,
             "Only a failed meeting, or one whose results may be incomplete, can be processed again.",
         ),
@@ -2707,6 +2711,51 @@ fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
         progress: steno_core::ProcessingProgress {
             stage: PipelineStage::Decode,
             fraction: 0.05,
+            next_fraction: 0.1,
+            estimated_remaining_seconds: 60.0,
+            is_estimate_seeded: false,
+            lane: 0,
+            lane_count: 1,
+        },
+    });
+    assert_eq!(entry(&harness)["stage"], "decode");
+}
+
+/// A run the store kept locked leaves the meeting queued, or `processing`
+/// when the store refused that write too; its progress entry then says
+/// what it waits for (stage `storeBusy`), until the next run's first
+/// event. Rust only.
+#[test]
+fn a_meeting_the_store_kept_waiting_says_what_it_waits_for() {
+    let harness = Harness::builder()
+        .seed(|store, _| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x8A);
+            meeting.state = MeetingState::Processing;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+        })
+        .build();
+    let entry = |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
+    harness.host.apply_meeting_event(&MeetingEvent::StoreBusy {
+        meeting_id: uuid(0x8A),
+    });
+    assert_eq!(entry(&harness)["stage"], "storeBusy");
+    assert_eq!(
+        entry(&harness)["title"],
+        "Waiting for another app to finish with Steno's data"
+    );
+    harness.host.store_changed();
+    assert_eq!(
+        entry(&harness)["stage"],
+        "storeBusy",
+        "the store's poll keeps it"
+    );
+    harness.host.apply_meeting_event(&MeetingEvent::Progress {
+        meeting_id: uuid(0x8A),
+        progress: steno_core::ProcessingProgress {
+            stage: PipelineStage::Decode,
+            fraction: 0.0,
             next_fraction: 0.1,
             estimated_remaining_seconds: 60.0,
             is_estimate_seeded: false,
