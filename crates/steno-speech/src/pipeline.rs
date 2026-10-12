@@ -167,7 +167,9 @@ impl<B: SpeechBackend> Transcriber<B> {
         })
     }
 
-    /// Decodes one window of the recording; token frames are absolute.
+    /// Decodes one window of the recording; token frames are absolute and
+    /// their phase places them where the window starts
+    /// ([`Token::phase`]).
     pub fn decode_range(
         &mut self,
         samples: &[f32],
@@ -180,7 +182,7 @@ impl<B: SpeechBackend> Transcriber<B> {
         decode_window(
             &mut self.backend,
             &encoded,
-            range.start / FRAME_SAMPLES,
+            range.start,
             &self.config.decoder,
             stats,
         )
@@ -494,15 +496,56 @@ mod tests {
         assert_eq!(transcript.chunks.len(), 1);
         assert_eq!(transcript.text(), "w1s21s22 w2");
         assert_eq!(transcript.segments.len(), 2, "{:?}", transcript.segments);
-        // Frame 10 starts at 0.72 s after the one-frame emission delay; the
-        // chunk's frame grid may sit one frame off the recording's.
+        // Frame 10 starts at 0.72 s after the one-frame emission delay. The
+        // chunk's frames start where the chunk does, so the fake's word lands
+        // on the chunk frame nearest the recording's: within half a frame.
         assert!(
-            (transcript.words[0].start - 0.72).abs() < 0.09,
-            "{}",
-            transcript.words[0].start
+            (transcript.words[0].start - 0.72).abs() <= 0.04 + 1e-9,
+            "{} from a chunk at {:?}",
+            transcript.words[0].start,
+            transcript.chunks[0].range
         );
         assert_eq!(transcript.stats.windows, 1);
         assert_eq!(transcript.stats.recoveries_tried, 0);
+    }
+
+    #[test]
+    fn a_chunk_off_the_frame_grid_times_its_words_from_its_own_start() {
+        // A window starting 500 samples into the recording's frame 10, with
+        // "w3" on the window's own frame 5 and "w4" on its frame 9.
+        let mut t = transcriber(PipelineConfig::default(), 0);
+        let start = 10 * FRAME_SAMPLES + 500;
+        let mut samples = vec![0.0f32; 4 * SAMPLE_RATE];
+        for (frame, piece) in [(5, 3.0), (9, 4.0)] {
+            let at = start + frame * FRAME_SAMPLES;
+            samples[at..at + FRAME_SAMPLES].fill(piece / 1000.0);
+        }
+        let mut stats = DecodeStats::default();
+        let tokens = t
+            .decode_range(&samples, start..start + 2 * SAMPLE_RATE, &mut stats)
+            .unwrap();
+        // The frames stay on the recording's grid, for the merge.
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|t| (t.frame, t.phase))
+                .collect::<Vec<_>>(),
+            [(15, 500), (19, 500)]
+        );
+        let words = TokenAggregator.words(&timed_pieces(&tokens, t.vocab()));
+        assert_eq!(join_words(&words), "w3 w4");
+        // One frame of emission delay before the window's frames 5 and 9:
+        // 1.12 s and 1.44 s plus the 500 samples, not rounded down to the
+        // recording's frames 14 and 18.
+        for (word, frame) in words.iter().zip([4, 8]) {
+            let exact = (start + frame * FRAME_SAMPLES) as f64 / SAMPLE_RATE as f64;
+            assert!(
+                (word.start - exact).abs() < 1e-9,
+                "{} != {exact}",
+                word.start
+            );
+        }
+        assert!((words[0].start - 1.151_25).abs() < 1e-9);
     }
 
     #[test]
@@ -648,6 +691,7 @@ mod tests {
         let token = |id, frame| Token {
             id,
             frame,
+            phase: 0,
             confidence: 1.0,
             duration: 1,
         };
@@ -691,5 +735,85 @@ mod tests {
         assert!(transcript.segments.is_empty());
         assert!(transcript.chunks.is_empty());
         assert_eq!(t.render(&[]), "");
+    }
+
+    /// A xorshift64 generator, so the random cases are the same every run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            (x % n as u64) as usize
+        }
+    }
+
+    /// Windows at random starts, on the grid, inside the first frame and
+    /// anywhere: every token starts at its exact sample time, never before
+    /// 0, and on the grid with the bits it had before tokens had a phase.
+    #[test]
+    fn a_window_at_any_sample_times_every_token_at_its_exact_sample() {
+        let mut t = transcriber(PipelineConfig::default(), 0);
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let (mut checked, mut frame0_clamped, mut on_grid) = (0, 0, 0);
+        for case in 0..3000 {
+            let start = match case % 4 {
+                0 => rng.below(FRAME_SAMPLES),
+                1 => rng.below(200) * FRAME_SAMPLES,
+                _ => rng.below(10 * SAMPLE_RATE),
+            };
+            let frames = 2 + rng.below(30);
+            let len = frames * FRAME_SAMPLES + rng.below(FRAME_SAMPLES);
+            let mut samples = vec![0.0f32; start + len];
+            let mut expected = Vec::new();
+            let (mut k, mut id) = (rng.below(3), 1u32);
+            while k < frames {
+                let at = start + k * FRAME_SAMPLES;
+                samples[at..at + FRAME_SAMPLES].fill(id as f32 / 1000.0);
+                expected.push((id, k));
+                id = id % 20 + 1;
+                k += 2 + rng.below(3);
+            }
+            let mut stats = DecodeStats::default();
+            let tokens = t
+                .decode_range(&samples, start..start + len, &mut stats)
+                .unwrap();
+            assert_eq!(
+                tokens
+                    .iter()
+                    .map(|t| (t.id, t.frame - start / FRAME_SAMPLES))
+                    .collect::<Vec<_>>(),
+                expected,
+                "case {case} start {start}"
+            );
+            let pieces = timed_pieces(&tokens, t.vocab());
+            for ((piece, token), &(_, k)) in pieces.iter().zip(&tokens).zip(&expected) {
+                let exact = (start as i64 + (k as i64 - 1) * FRAME_SAMPLES as i64) as f64
+                    / SAMPLE_RATE as f64;
+                assert!(piece.start >= 0.0, "case {case}: {}", piece.start);
+                assert!(
+                    (piece.start - exact.max(0.0)).abs() < 1e-9,
+                    "case {case} start {start} k {k}: {} != {exact}",
+                    piece.start
+                );
+                assert_eq!(token.sample(), start + k * FRAME_SAMPLES);
+                if exact < 0.0 {
+                    frame0_clamped += 1;
+                }
+                if start % FRAME_SAMPLES == 0 {
+                    on_grid += 1;
+                    let old = token.frame.saturating_sub(1) as f64 * crate::backend::FRAME_SECONDS;
+                    assert_eq!(piece.start.to_bits(), old.to_bits(), "case {case}");
+                }
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 10_000 && frame0_clamped > 50 && on_grid > 2_000,
+            "{checked} {frame0_clamped} {on_grid}"
+        );
     }
 }

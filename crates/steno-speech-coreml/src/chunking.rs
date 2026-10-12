@@ -817,6 +817,35 @@ mod tests {
     }
 
     #[test]
+    fn every_window_starts_on_the_frame_grid() {
+        // Word starts are frame times from `frame_origin` (the shared
+        // `Token::phase` is dropped), exact only on the grid. This test
+        // uses: pauses off the grid, a length and a speech end off it, and
+        // the end-aligned fill.
+        let layout = Layout::v3();
+        let mut audio = tone(47.0, 0.1);
+        audio.extend(std::iter::repeat_n(0.0, 777));
+        for pause in [(11.3, 11.9), (24.05, 24.6), (36.71, 37.2)] {
+            let (from, to) = (pause.0 * 16_000.0, pause.1 * 16_000.0);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            audio[from as usize..to as usize].fill(0.0);
+        }
+        let starts = silence_aligned_chunk_starts(&audio, layout, false);
+        let speech_end = speech_end_samples(&audio);
+        for end in [audio.len(), speech_end, audio.len() - 333] {
+            let windows = plan_windows(audio.len(), end, &starts, layout, 0);
+            assert!(windows.len() >= 3, "{windows:?}");
+            assert!(
+                windows
+                    .iter()
+                    .all(|w| w.frame_origin % FRAME_SAMPLES == 0
+                        && w.context_start == w.frame_origin),
+                "{windows:?}"
+            );
+        }
+    }
+
+    #[test]
     fn windows_follow_the_starts_then_the_stride_and_end_align_the_last() {
         let layout = Layout::v3();
         let total = 40 * SAMPLE_RATE;

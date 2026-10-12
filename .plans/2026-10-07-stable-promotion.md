@@ -447,6 +447,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; the call-mode start is A10's, whose step 2 runs the tone check on the Mac | audio (#246) |
 | A10 | Call mode without an output client: the tap includes Steno, and the capture starts a silent output IOProc of its own on the aggregate's clock master, so with nothing playing the first callback comes within 100 ms of `start` returning and 200 ms of the call to `start`; no in-app playback while recording, enforced by `Playback` | audio |
 | A12 | An undecodable AAC packet becomes silence of its length, counted and shown on the meeting | audio (#264) |
+| A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -1091,6 +1092,39 @@ Each lands before `0.11.0-rc.1`.
     (`tests/codec_streaming.rs`). `steno-services` runs the damaged file
     through the pipeline to the host, and a failed write to a failed
     meeting; `steno-host` shows the warning.
+  - Owner: audio.
+- **A13 Word starts from a chunk's exact start.** The shared pipeline
+  counted a chunk's frames from its first sample rounded down to the 80 ms
+  frame (`range.start / 1280`), and the VAD layout's chunks almost never
+  start on a frame boundary, so every word of a chunk came out early by
+  the samples the chunk lay past that boundary: 0 to 80 ms, 38 ms on
+  average. Found by A2 (#263); fixed by #279.
+  - `steno_speech::decode_window` takes the window's first sample. Token
+    frames stay on the recording's grid; each token carries the samples
+    its window lies past that grid (`Token::phase`), and the timings add
+    them. A window on the grid keeps its timings bit for bit. The merge's
+    matching and the recovery count whole frames, so none of their
+    decisions changes; the merge's monotonic pass orders tokens by frame
+    and phase.
+  - The CoreML backend's own pipeline decodes only windows on the frame
+    grid, so its starts were exact (mean offset 0.0 ms from Swift's on the
+    corpus and FLEURS) and do not change; it takes the fix with the shared
+    chunker (A2).
+  - Measured on the ONNX backend: text and word order identical on FLEURS
+    German `cat/`, the Swift corpus, the seven calibration calls and the
+    fixtures; FLEURS mean WER 4.927 % before and after (CoreML 5.462 %
+    both). Every word that moved starts 1 to 77 ms later, and its end
+    moves with it. Against Swift's starts the offset fell with the chunk's
+    phase, from +5 to -63 ms on FLEURS and from +6 to -58 ms on the
+    corpus, and is now flat at +8 to +15 ms (mean -28.1 ms before,
+    +10.0 ms after on FLEURS; -25.5 and +12.4 ms on the corpus); the
+    spread is wider (p10 and p90 -56 and +72 ms on FLEURS, -55 and
+    +56 ms on the corpus) because Swift's starts sit on the recording's
+    grid and the chunks' do not. 3 of 3 651 segments join
+    their neighbour, where a gap of 0.72 s became 0.67 to 0.69 s, under
+    the 0.7 s split. On the calibration calls 32 of 31 629 words (0.10 %)
+    change speaker: 31 in one call, whose segments at the edge of the one
+    cluster's ranges gain or lose a sliver of overlap.
   - Owner: audio.
 
 ### P: no data lost (D3)
