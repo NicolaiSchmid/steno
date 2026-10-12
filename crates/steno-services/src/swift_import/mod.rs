@@ -66,10 +66,15 @@
 //! | Run: export or store denied or failed | | Waiting (Try again) | nothing |
 //! | Run: identity stored, its fingerprint not recorded | | Waiting (Try again repeats the store) | the identity; no marker, no `IMPORT_RAN` |
 //! | Settings' Try again while Waiting | | as a run | as a run |
-//! | Settings' Pair again while Waiting | | Ready | the marker, the new identity, the paired phones go, its fingerprint, then `IMPORT_RAN` |
+//! | Settings' Pair again while Waiting | | Ready | the marker, then the next fingerprint noted, then the new identity, then the paired phones removed, then its fingerprint recorded (dropping the note), then `IMPORT_RAN` |
 //! | Not now, or the window closed | withheld (open when no key item) | Waiting | nothing: the step returns at the next launch |
 //! | A key saved in Settings | open | | the key; `KEY_DENIED` cleared |
 //! | Later launch with `KEY_DENIED` | withheld until a key is saved | | nothing |
+//!
+//! A later launch finds the marker, so a Pair again that stopped is
+//! finished by the handover's read
+//! ([`HandoverIdentity::load_or_create`](steno_handover::HandoverIdentity::load_or_create)),
+//! not by the import.
 //!
 //! The pipeline reloads whenever the key gate changes, before the
 //! handover gate is published, so a launch's held work runs on the
@@ -1109,7 +1114,7 @@ impl crate::handover::WaitingImport for ImportStep {
 }
 
 /// What Try again and Pair again answer while the step runs.
-const STEP_UNDER_WAY: &str = "Steno is still bringing over this Mac's phone pairing.";
+pub(crate) const STEP_UNDER_WAY: &str = "Steno is still bringing over this Mac's phone pairing.";
 
 /// Why [`ImportStep::one_at_a_time`] did not take the lock.
 enum NotNow {

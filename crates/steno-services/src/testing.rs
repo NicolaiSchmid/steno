@@ -257,8 +257,9 @@ pub fn an_hour_later() -> crate::recovery::LiveRecordingCheck {
     }
 }
 
-/// A fingerprint record over the app's file that refuses every write
-/// while `refuse` is set, as a full disk does.
+/// A fingerprint record over the app's file that refuses every record of
+/// a fingerprint while `refuse` is set, as a full disk does, so a Pair
+/// again stops at its last step; the next fingerprint's note is written.
 pub struct RefusingRecord {
     pub file: Arc<crate::handover::FingerprintFile>,
     pub refuse: std::sync::atomic::AtomicBool,
@@ -275,19 +276,30 @@ impl steno_handover::FingerprintRecord for RefusingRecord {
         }
         self.file.record(fingerprint)
     }
+
+    fn next(&self) -> steno_core::BoundaryResult<Option<String>> {
+        self.file.next()
+    }
+
+    fn note_next(&self, fingerprint: Option<&str>) -> steno_core::BoundaryResult<()> {
+        self.file.note_next(fingerprint)
+    }
 }
 
-/// Saves a paired phone in `store`, the evidence that an identity existed.
+/// Saves a paired phone in `store`, the evidence that an identity existed;
+/// each call another phone, with a token of its own.
 pub fn pair_a_phone(store: &Store) {
+    let id = uuid::Uuid::new_v4();
+    let token = [id.as_bytes().as_slice(), id.as_bytes()].concat();
     store
         .save_paired_device(
             &steno_core::PairedDevice {
-                id: uuid::Uuid::new_v4(),
+                id,
                 name: "Phone".to_owned(),
                 paired_at: chrono::Utc::now(),
                 last_seen_at: None,
             },
-            &[1; 32],
+            &token,
         )
         .unwrap();
 }

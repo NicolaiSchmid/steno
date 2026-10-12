@@ -13,7 +13,8 @@
 //! loader never mints one while phones are paired or after one was in use
 //! ([`HandoverIdentity::load_or_create`], over the identity's fingerprint
 //! in a [`FingerprintRecord`]). Only the user's Pair again mints over one
-//! ([`HandoverIdentity::mint_anew`]).
+//! ([`HandoverIdentity::mint_anew`]); one that stopped is finished by the
+//! next load.
 
 use std::sync::Arc;
 
@@ -124,6 +125,21 @@ impl HandoverIdentity {
     /// anchor a rollback keeps: an identity found without a recorded
     /// fingerprint has it recorded again. Only with no phone paired, no
     /// fingerprint and no identity is one minted.
+    ///
+    /// An unfinished Pair again ([`HandoverIdentity::mint_anew`] stopped or
+    /// crashed after it noted the next fingerprint) is decided here, so
+    /// every read applies the same rule (the launch, Try again, the import's
+    /// gate opening and the reread after an unlock):
+    ///
+    /// | The secret store holds | Case | The load |
+    /// |------------------------|------|----------|
+    /// | the identity whose fingerprint is the next one | finished | removes the paired phones, records the fingerprint (which drops the note) and answers the identity; no mint, the admission ledger untouched |
+    /// | the identity whose fingerprint is the recorded one, or no identity | abandoned | drops the note, then reads as it does without one (the identity, [`Unavailability::Missing`], or a mint where the guard allows) |
+    /// | another identity | unknown | keeps the note and refuses it as [`Unavailability::Replaced`]; writes nothing |
+    /// | cannot be read | undecided | keeps the note and refuses as [`Unavailability::Unreadable`]; writes nothing, the next read decides |
+    ///
+    /// A note that cannot be dropped in the abandoned case is logged and
+    /// left: the next read finds the same case.
     pub async fn load_or_create(
         secrets: &dyn SecretStore,
         record: &dyn FingerprintRecord,
@@ -132,43 +148,59 @@ impl HandoverIdentity {
         now: DateTime<Utc>,
     ) -> Result<Self, IdentityError> {
         let recorded = record.recorded().map_err(IdentityError::Record)?;
+        let next = record.next().map_err(IdentityError::Record)?;
         let stored = secrets
             .secret(&Self::secret_key())
             .await
             .map_err(Unavailability::Unreadable)?;
-        if let Some(stored) = stored {
-            let identity = Self::from_pem(&stored)?;
-            let fingerprint = hex(&identity.fingerprint());
-            match recorded {
-                Some(recorded) if recorded != fingerprint => {
-                    return Err(Unavailability::Replaced.into());
-                }
-                Some(_) => {}
-                None => record.record(&fingerprint).map_err(IdentityError::Record)?,
+        let Some(stored) = stored else {
+            if next.is_some() {
+                drop_the_note(record);
             }
-            return Ok(identity);
+            if recorded.is_some() || !store.paired_devices()?.is_empty() {
+                return Err(Unavailability::Missing.into());
+            }
+            let minted = Self::mint(common_name, now)?;
+            minted.store(secrets, record).await?;
+            return Ok(minted);
+        };
+        let identity = Self::from_pem(&stored)?;
+        let fingerprint = hex(&identity.fingerprint());
+        if let Some(next) = next {
+            if next == fingerprint {
+                remove_paired_phones(store)?;
+                identity.record_fingerprint(record)?;
+                return Ok(identity);
+            }
+            if recorded.as_ref() != Some(&fingerprint) {
+                return Err(Unavailability::Replaced.into());
+            }
+            drop_the_note(record);
         }
-        if recorded.is_some() || !store.paired_devices()?.is_empty() {
-            return Err(Unavailability::Missing.into());
+        match recorded {
+            Some(recorded) if recorded != fingerprint => Err(Unavailability::Replaced.into()),
+            Some(_) => Ok(identity),
+            None => {
+                identity.record_fingerprint(record)?;
+                Ok(identity)
+            }
         }
-        let minted = Self::mint(common_name, now)?;
-        minted.store(secrets, record).await?;
-        Ok(minted)
     }
 
     /// Pair again's identity step, the user's choice when the identity the
     /// paired phones know cannot be read or is gone (stable plan S6): a new
-    /// identity is minted with `common_name` and written to `secrets`, then
-    /// every paired phone is removed from `store`, then the new fingerprint
-    /// is recorded in `record`. Every phone must pair again. The one mint
-    /// over an identity that may exist. A step that fails stops the rest,
-    /// and the order keeps what it leaves safe: a write that `secrets`
-    /// refuses changes nothing (the phones, the fingerprint and the old
-    /// identity stay), and a stop after the write, before or after the
-    /// phones go, leaves the new identity beside the old fingerprint, which
-    /// [`HandoverIdentity::load_or_create`] refuses as
-    /// [`Unavailability::Replaced`] rather than minting; the next Pair again
-    /// finishes.
+    /// identity is minted with `common_name`, its fingerprint noted as the
+    /// next one in `record`, the identity written to `secrets`, every
+    /// paired phone removed from `store`, then the fingerprint recorded,
+    /// which drops the note in the same write. Every phone must pair again.
+    /// The one mint over an identity that may exist. A step that fails
+    /// stops the rest, and the order keeps what it leaves safe: a note that
+    /// cannot be written stops before the write; a write that `secrets`
+    /// refuses changes nothing (the note is dropped again, and the phones,
+    /// the fingerprint and the old identity stay); a stop or a crash after
+    /// the write, before or after the phones go, is finished by the next
+    /// load ([`HandoverIdentity::load_or_create`]), whether or not a
+    /// fingerprint was recorded before.
     pub async fn mint_anew(
         secrets: &dyn SecretStore,
         record: &dyn FingerprintRecord,
@@ -177,10 +209,14 @@ impl HandoverIdentity {
         now: DateTime<Utc>,
     ) -> Result<Self, IdentityError> {
         let minted = Self::mint(common_name, now)?;
-        minted.write_secret(secrets).await?;
-        for device in store.paired_devices()? {
-            store.delete_paired_device(device.id)?;
+        record
+            .note_next(Some(&hex(&minted.fingerprint())))
+            .map_err(IdentityError::Record)?;
+        if let Err(error) = minted.write_secret(secrets).await {
+            drop_the_note(record);
+            return Err(error);
         }
+        remove_paired_phones(store)?;
         minted.record_fingerprint(record)?;
         Ok(minted)
     }
@@ -190,8 +226,10 @@ impl HandoverIdentity {
     /// brought over from elsewhere; [`HandoverIdentity::mint_anew`] does
     /// the same two writes with the phones removed between them. The
     /// secret is written first, so a write that fails records nothing; a
-    /// record that fails after it leaves the next load
-    /// [`Unavailability::Replaced`], never a mint.
+    /// record that fails after it leaves the next load to record it again,
+    /// or to refuse it as [`Unavailability::Replaced`] where another
+    /// fingerprint is recorded; never a mint. Like every record, it ends
+    /// an unfinished Pair again.
     pub async fn store(
         &self,
         secrets: &dyn SecretStore,
@@ -311,15 +349,41 @@ fn pem_block(tag: &str, der: &[u8]) -> String {
     text
 }
 
+/// Removes every paired phone from `store`: Pair again's step, and the
+/// load that finishes one.
+fn remove_paired_phones(store: &Store) -> Result<(), IdentityError> {
+    for device in store.paired_devices()? {
+        store.delete_paired_device(device.id)?;
+    }
+    Ok(())
+}
+
+/// Drops the next fingerprint where the Pair again it stood for changed
+/// nothing; one that cannot be dropped is logged and left, as the next
+/// load finds it abandoned again.
+fn drop_the_note(record: &dyn FingerprintRecord) {
+    if let Err(error) = record.note_next(None) {
+        tracing::warn!(%error, "the note of an unfinished Pair again was not dropped");
+    }
+}
+
 /// Where the identity's fingerprint (SHA-256 of the leaf DER, lowercase
-/// hex) is recorded: outside the secret store, which may be the thing that
-/// lost the identity, and outside the settings, which the Swift app's save
+/// hex) is recorded, and, while a Pair again is unfinished, the next one:
+/// outside the secret store, which may be the thing that lost the
+/// identity, and outside the settings, which the Swift app's save
 /// rewrites. Not a secret. No Swift counterpart.
 pub trait FingerprintRecord: Send + Sync {
     /// The recorded fingerprint, `None` when nothing is recorded.
     fn recorded(&self) -> Result<Option<String>, BoxError>;
-    /// Records `fingerprint`, replacing what was recorded.
+    /// Records `fingerprint`, replacing what was recorded, and drops the
+    /// next fingerprint in the same write.
     fn record(&self, fingerprint: &str) -> Result<(), BoxError>;
+    /// The next fingerprint: that of the identity an unfinished Pair again
+    /// is writing ([`HandoverIdentity::mint_anew`]); `None` when none is.
+    fn next(&self) -> Result<Option<String>, BoxError>;
+    /// `Some` notes the next fingerprint and keeps the recorded one;
+    /// `None` drops it.
+    fn note_next(&self, fingerprint: Option<&str>) -> Result<(), BoxError>;
 }
 
 /// Why the identity is unavailable rather than minted. No Swift

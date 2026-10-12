@@ -21,11 +21,15 @@
 //! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read; a mint only where the guard allows |
 //! | Try again while waiting | the listener once the read succeeds, else the new reason | the gate waits: the import's step runs again; a listener adopted: its Try again | the identity read (or the import's export) |
 //! | Try again with a listener | nothing | the adopted listener's: nothing | nothing |
-//! | Pair again while waiting | the listener over a new identity | the gate waits: the import ends with a new identity and the gate opens; a listener adopted: its Pair again | the marker, the new identity, the paired phones go, its fingerprint |
+//! | Pair again while waiting | the listener over a new identity | the gate waits: the import ends with a new identity and the gate opens; a listener adopted: its Pair again | the marker, then the next fingerprint noted, then the new identity, then the paired phones removed, then its fingerprint recorded (dropping the note) |
+//! | Launch, Try again or gate ready after an unfinished Pair again | finished: the listener over the new identity, no phones; abandoned: as Launch; unknown: waiting, replaced; undecided: waiting, unreadable | as plain, at gate ready | finished: the phones removed, its fingerprint recorded, no mint; abandoned: the note dropped; otherwise nothing |
 //! | The keyring answered after asking at the launch (`App::launch`) | as Try again | nothing: Try again reads it | as Try again |
 //! | Gate ready | | the listener built and adopted | the identity read, as at the launch |
 //! | A failed build (the store's checkpoint) | | no listener; built again at the next gate change | nothing |
 //! | Shutdown | no listener handed over from now on | no listener built or adopted from now on | nothing |
+//!
+//! The cases of an unfinished Pair again are
+//! [`HandoverIdentity::load_or_create`]'s.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -48,11 +52,17 @@ use crate::swift_import::{HandoverGate, ImportMarker};
 
 /// The handover identity's fingerprint in `handover-identity.json` under
 /// the support directory, as `{"steno.handoverIdentityFingerprint": "<hex>"}`,
-/// replaced atomically. Not `preferences.json`: that file holds only
-/// flags, is rewritten in place, and a build that reads it as flags would
-/// drop every flag over a text value. The Swift app never reads or writes
-/// this file, so a rollback to it leaves the record alone. No Swift
-/// counterpart.
+/// replaced atomically. While a Pair again is unfinished the file holds the
+/// next fingerprint too, under `steno.handoverIdentityNextFingerprint`
+/// ([`FingerprintRecord::note_next`]); the key is written only while it is
+/// set, so a finished Pair again leaves the same bytes as a file from
+/// before the key, and a file without it reads as before. An older build
+/// reads only the first key and drops the second at its next record; it
+/// waits as replaced, as it would without the note. Not
+/// `preferences.json`: that file holds only flags, is rewritten in place,
+/// and a build that reads it as flags would drop every flag over a text
+/// value. The Swift app never reads or writes this file, so a rollback to
+/// it leaves the record alone. No Swift counterpart.
 #[derive(Debug, Clone)]
 pub struct FingerprintFile {
     path: PathBuf,
@@ -61,6 +71,9 @@ pub struct FingerprintFile {
 impl FingerprintFile {
     /// The key the fingerprint is filed under.
     pub const KEY: &'static str = "steno.handoverIdentityFingerprint";
+    /// The key the next fingerprint is filed under while a Pair again is
+    /// unfinished.
+    pub const NEXT_KEY: &'static str = "steno.handoverIdentityNextFingerprint";
 
     /// The record under `support_directory`.
     #[must_use]
@@ -69,32 +82,58 @@ impl FingerprintFile {
             path: support_directory.join("handover-identity.json"),
         }
     }
-}
 
-impl FingerprintRecord for FingerprintFile {
-    /// A missing file records nothing; one that does not parse is an
-    /// error, never "nothing recorded".
-    fn recorded(&self) -> BoundaryResult<Option<String>> {
-        let bytes = match std::fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(Box::new(error)),
-        };
-        let mut values: BTreeMap<String, String> = serde_json::from_slice(&bytes)?;
-        Ok(values.remove(Self::KEY))
+    /// The file's keys: none when it is missing; one that does not parse
+    /// is an error, never "nothing recorded".
+    fn values(&self) -> BoundaryResult<BTreeMap<String, String>> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(error) => Err(Box::new(error)),
+        }
     }
 
-    fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
+    /// Replaces the file with `fingerprint` and `next`, each only when
+    /// set; with neither the file goes, as before the first record.
+    fn write(&self, fingerprint: Option<&str>, next: Option<&str>) -> BoundaryResult<()> {
+        let values: BTreeMap<&str, &str> = [(Self::KEY, fingerprint), (Self::NEXT_KEY, next)]
+            .into_iter()
+            .filter_map(|(key, value)| Some((key, value?)))
+            .collect();
+        if values.is_empty() {
+            return match std::fs::remove_file(&self.path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(Box::new(error)),
+                _ => Ok(()),
+            };
+        }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let values = BTreeMap::from([(Self::KEY, fingerprint)]);
         replace_file(
             &self.path,
             &serde_json::to_vec_pretty(&values)?,
             Access::Default,
         )?;
         Ok(())
+    }
+}
+
+impl FingerprintRecord for FingerprintFile {
+    fn recorded(&self) -> BoundaryResult<Option<String>> {
+        Ok(self.values()?.remove(Self::KEY))
+    }
+
+    fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
+        self.write(Some(fingerprint), None)
+    }
+
+    fn next(&self) -> BoundaryResult<Option<String>> {
+        Ok(self.values()?.remove(Self::NEXT_KEY))
+    }
+
+    fn note_next(&self, fingerprint: Option<&str>) -> BoundaryResult<()> {
+        let recorded = self.recorded()?;
+        self.write(recorded.as_deref(), fingerprint)
     }
 }
 
@@ -213,7 +252,9 @@ impl IdentitySource {
     /// Pair again: the import's marker first, so a later launch never
     /// brings the Swift identity back over the new one; a marker that
     /// cannot be written stops here, before anything is removed. Then
-    /// [`Self::mint_anew`] and the listener over the new identity.
+    /// [`Self::mint_anew`] (the next fingerprint noted, the new identity,
+    /// the phones removed, its fingerprint recorded) and the listener over
+    /// the new identity.
     pub fn pair_again(&self) -> Result<(Arc<HandoverService>, Uuid), String> {
         if let Some(marker) = &self.marker {
             marker
@@ -225,9 +266,11 @@ impl IdentitySource {
     }
 
     /// Pair again's mint alone ([`HandoverIdentity::mint_anew`]): the new
-    /// identity is written to the secret store, then the paired phones go,
-    /// then its fingerprint is recorded. Whoever calls it writes the
-    /// marker first.
+    /// identity's fingerprint is noted as the next one, the identity
+    /// written to the secret store, the paired phones removed, then its
+    /// fingerprint recorded, which drops the note; a stop after the write
+    /// is finished by the next read. Whoever calls it writes the marker
+    /// first.
     pub fn mint_anew(&self) -> Result<HandoverIdentity, String> {
         block_on(
             &self.runtime,
@@ -240,8 +283,12 @@ impl IdentitySource {
             ),
         )
         .map_err(|error| {
-            tracing::warn!(%error, "Pair again made no new phone pairing");
-            identity_failure(&error)
+            tracing::warn!(%error, "Pair again did not finish");
+            match error {
+                // A stop after the write, which the next read finishes.
+                IdentityError::Store(_) | IdentityError::Record(_) => UNFINISHED.to_owned(),
+                error => identity_failure(&error),
+            }
         })
     }
 
@@ -271,18 +318,26 @@ const COMPUTER: &str = if cfg!(target_os = "macos") {
 
 /// Why the identity is not available, for the iPhone section's details,
 /// in plain words: the keyring's own sentence when it was not opened at
-/// start, as that one already names the pairing; a sentence of its own
-/// when the guard refused the identity; the read's error otherwise.
+/// start, as that one already names the pairing; the waiting card's first
+/// sentence when the guard refused the identity; a sentence of its own when
+/// the database or the fingerprint record failed (the caller logs the
+/// error); the read's error otherwise.
 pub(crate) fn identity_failure(error: &IdentityError) -> String {
     match error {
         IdentityError::Unavailable(Unavailability::Missing) => {
-            format!("The pairing your phones know is no longer saved on this {COMPUTER}.")
+            format!("This {COMPUTER}'s phone pairing is no longer saved.")
         }
         IdentityError::Unavailable(Unavailability::Replaced) => {
-            format!("This {COMPUTER} has a different pairing saved than the one your phones know.")
+            format!(
+                "Steno found a different phone pairing on this {COMPUTER} than the one your \
+                 phones know."
+            )
         }
         IdentityError::Secrets(source) => {
             format!("Steno could not save the new phone pairing on this {COMPUTER} ({source}).")
+        }
+        IdentityError::Store(_) | IdentityError::Record(_) => {
+            format!("Steno could not open its records of this {COMPUTER}'s phone pairing.")
         }
         _ => match keyring_failure(error) {
             Some(not_opened @ KeyringUnavailable::NotOpened(_)) => not_opened.to_string(),
@@ -298,6 +353,14 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
         _ => None,
     }
 }
+
+/// What Pair again answers when it stopped after the new identity was
+/// written (the phones' removal or the record failed).
+const UNFINISHED: &str = if cfg!(target_os = "macos") {
+    "Steno could not finish the new phone pairing on this Mac. Choose Pair again."
+} else {
+    "Steno could not finish the new phone pairing on this computer. Choose Pair again."
+};
 
 /// What the iPhone section says the handover waits for, by why the
 /// identity was not available: a stored identity that does not parse, a
@@ -610,7 +673,7 @@ impl Handover for ListenerHandover {
 
 /// What `start` and `revoke` answer while the import waits, before a
 /// listener build failed.
-pub const WAITING_FOR_IMPORT: &str = "Phones can upload again once Steno has brought over this Mac's phone pairing from the previous version, in the welcome step or with Try again in Settings > iPhone.";
+pub const WAITING_FOR_IMPORT: &str = "Your phones can send recordings again once Steno has brought over this Mac's phone pairing from the previous version, in the welcome step or with Try again in Settings > iPhone.";
 
 /// The Swift import's step as the gated handover drives it while the
 /// import's gate waits (`crate::swift_import::ImportStep`).
@@ -999,6 +1062,108 @@ mod tests {
         );
         std::fs::write(dir.path().join("support/handover-identity.json"), b"{").unwrap();
         assert!(file.recorded().is_err(), "a damaged record is no empty one");
+        assert!(file.next().is_err(), "nor a record without a note");
+    }
+
+    /// The bytes a build from before the next fingerprint wrote, exactly.
+    const OLDER_FILE: &[u8] = b"{\n  \"steno.handoverIdentityFingerprint\": \"cd34\"\n}";
+
+    /// A file from before the next fingerprint reads as before, with no
+    /// note. The note is written beside the recorded fingerprint and kept
+    /// by it; recording drops it, which leaves exactly the older bytes, and
+    /// dropping it leaves them too, or no file where nothing was recorded.
+    #[test]
+    fn an_older_fingerprint_file_reads_and_a_finished_pair_again_writes_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("handover-identity.json");
+        let file = FingerprintFile::in_support_directory(dir.path());
+        assert_eq!(file.next().unwrap(), None, "no file, no note");
+        std::fs::write(&path, OLDER_FILE).unwrap();
+        assert_eq!(file.recorded().unwrap().as_deref(), Some("cd34"));
+        assert_eq!(file.next().unwrap(), None);
+
+        file.note_next(Some("ef56")).unwrap();
+        assert_eq!(file.recorded().unwrap().as_deref(), Some("cd34"), "kept");
+        assert_eq!(file.next().unwrap().as_deref(), Some("ef56"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\n  \"steno.handoverIdentityFingerprint\": \"cd34\",\n  \
+             \"steno.handoverIdentityNextFingerprint\": \"ef56\"\n}"
+        );
+        file.note_next(None).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), OLDER_FILE, "dropped");
+
+        file.note_next(Some("ef56")).unwrap();
+        file.record("cd34").unwrap();
+        assert_eq!(file.next().unwrap(), None, "the record drops the note");
+        assert_eq!(std::fs::read(&path).unwrap(), OLDER_FILE, "the older bytes");
+
+        // Nothing recorded, as on the first launch after the Swift app.
+        std::fs::remove_file(&path).unwrap();
+        file.note_next(Some("ef56")).unwrap();
+        assert_eq!(file.recorded().unwrap(), None);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\n  \"steno.handoverIdentityNextFingerprint\": \"ef56\"\n}"
+        );
+        file.note_next(None).unwrap();
+        assert!(!path.exists(), "nothing left to file");
+        file.note_next(None).unwrap();
+    }
+
+    /// The answers Try again and Pair again give, pinned as text, as the
+    /// tests compare against the constants: each in plain words, with no
+    /// developer word in it, and Missing and Replaced in the waiting card's
+    /// words.
+    #[test]
+    fn the_handover_s_answers_are_plain_sentences() {
+        assert_eq!(
+            ATTEMPT_UNDER_WAY,
+            "Steno is already working on this phone pairing."
+        );
+        assert_eq!(NOT_WAITING, "Your phones can already send recordings.");
+        assert_eq!(SHUT_DOWN, "Steno is quitting.");
+        let failures = [
+            IdentityError::Unavailable(Unavailability::Missing),
+            IdentityError::Unavailable(Unavailability::Replaced),
+            IdentityError::Store(steno_core::StoreError::from(rusqlite::Error::InvalidQuery)),
+            IdentityError::Record("No space left on device".into()),
+        ]
+        .map(|error| identity_failure(&error));
+        let answers = [
+            ATTEMPT_UNDER_WAY,
+            NOT_WAITING,
+            SHUT_DOWN,
+            crate::swift_import::STEP_UNDER_WAY,
+            MARKER_NOT_WRITTEN,
+            WAITING_FOR_IMPORT,
+            UNFINISHED,
+        ]
+        .map(str::to_owned);
+        for answer in answers.iter().chain(&failures) {
+            for word in [
+                "identity",
+                "secret",
+                "fingerprint",
+                "listener",
+                "keyring entry",
+                "upload",
+                "database",
+                "record:",
+            ] {
+                assert!(!answer.to_lowercase().contains(word), "{word}: {answer}");
+            }
+        }
+        for (reason, failure) in [PhoneWaitingReason::Missing, PhoneWaitingReason::Replaced]
+            .into_iter()
+            .zip(&failures)
+        {
+            let card = steno_host::settings::snapshots::waiting_message(
+                reason,
+                steno_core::Platform::CURRENT,
+            );
+            assert!(card.starts_with(failure.as_str()), "{card} / {failure}");
+        }
     }
 
     /// Only a gate that says ready opens the listener.
@@ -1288,13 +1453,16 @@ mod tests {
             }
         }
 
-        /// Keeps the phone paired whatever deletes it, as a disk that
-        /// refuses the write would, until [`Self::let_the_phone_go`].
+        /// Keeps the last paired phone whatever deletes it, as a disk that
+        /// refuses the write would, until [`Self::let_the_phone_go`]: Pair
+        /// again stops right after the write with one phone paired, and
+        /// after the first phone with two.
         fn keep_the_phone(&self) {
             self.store
                 .write(|transaction| {
                     transaction.execute_batch(
                         "CREATE TRIGGER keep_the_phone BEFORE DELETE ON pairedDevice \
+                         WHEN (SELECT COUNT(*) FROM pairedDevice) = 1 \
                          BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;",
                     )?;
                     Ok(())
@@ -1311,9 +1479,15 @@ mod tests {
                 .unwrap();
         }
 
-        /// The stored identity, the recorded fingerprint and the paired
-        /// phones, as they stand.
-        async fn places(&self) -> (Option<String>, Option<String>, usize) {
+        /// No fingerprint recorded, as on the first launch after the Swift
+        /// app, whose phones come from the shared database.
+        fn forget_the_record(&self) {
+            self.record.file.write(None, None).unwrap();
+        }
+
+        /// The stored identity, the recorded fingerprint, the next one and
+        /// the paired phones, as they stand.
+        async fn places(&self) -> (Option<String>, Option<String>, Option<String>, usize) {
             (
                 self.keychain
                     .inner
@@ -1321,6 +1495,7 @@ mod tests {
                     .await
                     .unwrap(),
                 self.record.recorded().unwrap(),
+                self.record.next().unwrap(),
                 self.store.paired_devices().unwrap().len(),
             )
         }
@@ -1425,8 +1600,9 @@ mod tests {
             paired.marker.marked.load(Ordering::SeqCst),
             "the marker stays"
         );
-        let (stored, recorded, phones) = paired.places().await;
+        let (stored, recorded, next, phones) = paired.places().await;
         let minted = HandoverIdentity::from_pem(&stored.unwrap()).unwrap();
+        assert_eq!(next, None, "no note left");
         assert_ne!(minted.fingerprint(), paired.identity.fingerprint());
         assert_eq!(
             recorded,
@@ -1565,58 +1741,140 @@ mod tests {
         }
     }
 
-    /// A Pair again that stops after the new identity was written, with the
-    /// phone still paired or once it went, leaves the new identity beside
-    /// the old fingerprint: the next launch waits as replaced and writes
-    /// nothing, and one more Pair again leaves the computer cleanly paired,
-    /// which the launch after it reads without waiting.
+    /// A Pair again that stops after the new identity was written (the
+    /// phone still paired, one of two removed, or every phone removed and
+    /// the record refused) is finished by the next read, at the next
+    /// launch or at Try again in the same one, whether or not a fingerprint
+    /// was recorded before (none is on the first launch after the Swift
+    /// app): the listener comes up over the new identity with no phone
+    /// listed, its fingerprint recorded and the note dropped, nothing
+    /// minted, and the recordings kept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_stop_after_the_new_identity_waits_as_replaced_and_pair_again_finishes() {
-        for stop in ["after the write", "after the phones"] {
-            let paired = Paired::new(false).await;
-            let recordings = paired.seed_recordings();
-            let old = paired.places().await.1;
+    async fn a_stop_after_the_new_identity_is_finished_at_the_next_launch() {
+        for recorded_before in [true, false] {
+            for stop in ["after the write", "after phone 1 of 2", "after the phones"] {
+                for read in ["the next launch", "Try again"] {
+                    let case = format!("recorded before {recorded_before}, {stop}, {read}");
+                    let paired = Paired::new(false).await;
+                    if !recorded_before {
+                        paired.forget_the_record();
+                    }
+                    if stop == "after phone 1 of 2" {
+                        crate::testing::pair_a_phone(&paired.store);
+                    }
+                    let recordings = paired.seed_recordings();
+                    let handover = ListenerHandover::read(paired.source());
+                    assert_eq!(handover.waiting(), Some(PhoneWaitingReason::Missing));
+
+                    let refuse_record = stop == "after the phones";
+                    if refuse_record {
+                        paired.record.refuse.store(true, Ordering::SeqCst);
+                    } else {
+                        paired.keep_the_phone();
+                    }
+                    tokio::task::block_in_place(|| handover.pair_again()).unwrap_err();
+                    if refuse_record {
+                        paired.record.refuse.store(false, Ordering::SeqCst);
+                    } else {
+                        paired.let_the_phone_go();
+                    }
+                    let (stored, recorded, next, phones) = paired.places().await;
+                    let new_identity = HandoverIdentity::from_pem(
+                        stored.as_deref().expect("the new identity was written"),
+                    )
+                    .unwrap();
+                    let new = Paired::fingerprint_of(stored.as_ref());
+                    assert_eq!(recorded.is_some(), recorded_before, "{case}");
+                    assert_ne!(recorded, new, "{case}: the old record stays");
+                    assert_eq!(next, new, "{case}: the note");
+                    assert_eq!(phones, usize::from(!refuse_record), "{case}");
+                    let phone_stays = phones == 1 && stop != "after phone 1 of 2";
+                    recordings.assert_kept(&paired.store, phone_stays, &case);
+
+                    let writes = paired.log().len();
+                    let finished = if read == "Try again" {
+                        tokio::task::block_in_place(|| handover.try_again()).unwrap();
+                        handover
+                    } else {
+                        ListenerHandover::read(paired.source())
+                    };
+                    assert_eq!(finished.waiting(), None, "{case}: finished");
+                    assert_eq!(
+                        paired.places().await,
+                        (stored, new.clone(), None, 0),
+                        "{case}: no phone listed, the fingerprint recorded, nothing minted"
+                    );
+                    assert_eq!(paired.log().len(), writes, "{case}: no secret written");
+                    assert!(
+                        tokio::task::block_in_place(|| finished.paired_devices())
+                            .unwrap()
+                            .is_empty(),
+                        "{case}: Settings lists no phone"
+                    );
+                    assert_eq!(
+                        finished.mac_id(),
+                        steno_core::json::uuid_string(new_identity.mac_id()),
+                        "{case}: over the new identity"
+                    );
+                    recordings.assert_kept(&paired.store, false, &case);
+                    let after = ListenerHandover::read(paired.source());
+                    assert_eq!(after.waiting(), None, "{case}: settled");
+                }
+            }
+        }
+    }
+
+    /// The launch over the note of an unfinished Pair again whose identity
+    /// the secret store does not hold: the old identity (the note goes,
+    /// the listener comes up with the phone), no identity (the note goes,
+    /// it waits as missing), another identity (the note stays, it waits as
+    /// replaced) or a keychain that refuses the read (the note stays, it
+    /// waits as unreadable). None of them writes a secret or removes the
+    /// phone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unfinished_pair_again_is_decided_at_the_launch() {
+        let next = steno_handover::identity::hex(
+            &HandoverIdentity::mint("Steno on a test", chrono::Utc::now())
+                .unwrap()
+                .fingerprint(),
+        );
+        for (stored, expected, kept) in [
+            ("the old identity", None, false),
+            ("no identity", Some(PhoneWaitingReason::Missing), false),
+            ("another identity", Some(PhoneWaitingReason::Replaced), true),
+            ("unreadable", Some(PhoneWaitingReason::Unreadable), true),
+        ] {
+            let paired = Paired::new(stored != "no identity").await;
+            if stored == "another identity" {
+                let other = HandoverIdentity::mint("Steno elsewhere", chrono::Utc::now())
+                    .unwrap()
+                    .to_pem()
+                    .unwrap();
+                paired
+                    .keychain
+                    .inner
+                    .set_secret(&HandoverIdentity::secret_key(), Some(&other))
+                    .await
+                    .unwrap();
+            }
+            paired
+                .keychain
+                .refuse
+                .store(stored == "unreadable", Ordering::SeqCst);
+            paired.record.note_next(Some(&next)).unwrap();
+            let before = paired.places().await;
+
             let handover = ListenerHandover::read(paired.source());
-            assert_eq!(handover.waiting(), Some(PhoneWaitingReason::Missing));
-
-            let phone_stays = stop == "after the write";
-            if phone_stays {
-                paired.keep_the_phone();
-            } else {
-                paired.record.refuse.store(true, Ordering::SeqCst);
-            }
-            tokio::task::block_in_place(|| handover.pair_again()).unwrap_err();
-            if phone_stays {
-                paired.let_the_phone_go();
-            } else {
-                paired.record.refuse.store(false, Ordering::SeqCst);
-            }
-            let stopped = paired.places().await;
-            assert!(stopped.0.is_some(), "{stop}: the new identity was written");
-            assert_eq!(stopped.1, old, "{stop}: the old fingerprint stays");
-            assert_eq!(stopped.2, usize::from(phone_stays), "{stop}");
-            recordings.assert_kept(&paired.store, phone_stays, stop);
-
-            let writes = paired.log().len();
-            let next = ListenerHandover::read(paired.source());
+            assert_eq!(handover.waiting(), expected, "{stored}");
+            let after = paired.places().await;
             assert_eq!(
-                next.waiting(),
-                Some(PhoneWaitingReason::Replaced),
-                "{stop}: the next launch waits"
+                (&after.0, &after.1, after.3),
+                (&before.0, &before.1, 1),
+                "{stored}: nothing minted or removed"
             );
-            assert_eq!(paired.places().await, stopped, "{stop}: and mints nothing");
-            assert_eq!(paired.log().len(), writes, "{stop}: nothing written");
-
-            tokio::task::block_in_place(|| next.pair_again()).unwrap();
-            let (stored, recorded, phones) = paired.places().await;
-            assert_eq!(Paired::fingerprint_of(stored.as_ref()), recorded, "{stop}");
-            assert_ne!(recorded, old, "{stop}");
-            assert_eq!(phones, 0, "{stop}");
-            assert_eq!(next.waiting(), None, "{stop}");
-            recordings.assert_kept(&paired.store, false, stop);
-            let after = ListenerHandover::read(paired.source());
-            assert_eq!(after.waiting(), None, "{stop}: cleanly paired");
-            assert!(after.listener().is_some(), "{stop}");
+            let note = if kept { Some(next.clone()) } else { None };
+            assert_eq!(after.2, note, "{stored}: the note");
+            assert!(paired.log().is_empty(), "{stored}: no secret written");
         }
     }
 
@@ -1647,6 +1905,10 @@ mod tests {
         pair_again().unwrap_err();
         paired.record.refuse.store(false, Ordering::SeqCst);
         recordings.assert_kept(&paired.store, false, "a stop after the phones");
+
+        let finished = ListenerHandover::read(paired.source());
+        assert_eq!(finished.waiting(), None);
+        recordings.assert_kept(&paired.store, false, "the launch that finishes");
 
         pair_again().unwrap();
         recordings.assert_kept(&paired.store, false, "Pair again");
