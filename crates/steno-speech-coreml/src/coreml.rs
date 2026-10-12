@@ -437,20 +437,6 @@ impl Array {
         }
         Ok(out)
     }
-
-    /// Copy a contiguous `f32` array of the same length into `dst`.
-    pub fn copy_f32_into(&self, dst: &mut [f32]) -> Result<(), SpeechError> {
-        let src = self.as_f32()?;
-        if src.len() != dst.len() {
-            return Err(SpeechError::CoreMl(format!(
-                "length mismatch: array {} vs destination {}",
-                src.len(),
-                dst.len()
-            )));
-        }
-        dst.copy_from_slice(src);
-        Ok(())
-    }
 }
 
 /// The inputs of one prediction: a dictionary feature provider over
