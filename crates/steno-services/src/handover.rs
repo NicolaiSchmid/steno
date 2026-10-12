@@ -102,7 +102,9 @@ use crate::swift_import::{HandoverGate, ImportMarker};
 /// Not `preferences.json`: that file holds only flags, is rewritten in
 /// place, and a build that reads it as flags would drop every flag over a
 /// text value. The Swift app never reads or writes this file, so a
-/// rollback to it leaves the record alone. No Swift counterpart.
+/// rollback to it leaves the record alone; it keeps its own,
+/// `swift-handover-identity.json`, which this app never reads. Swift:
+/// `IdentityRecordFile` in `Sources/StenoHandover/Identity/`.
 ///
 #[derive(Debug, Clone)]
 pub struct FingerprintFile {
@@ -1415,6 +1417,32 @@ mod tests {
             );
             assert!(card.starts_with(failure.as_str()), "{card} / {failure}");
         }
+    }
+
+    /// The Swift app's own record, `swift-handover-identity.json` beside
+    /// this one, is neither read nor written, even when it names another
+    /// identity. Swift: `IdentityGuardTests.theRustAppsRecordIsNeitherReadNorWritten`.
+    #[tokio::test]
+    async fn the_swift_app_s_record_is_neither_read_nor_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let swift = dir.path().join("swift-handover-identity.json");
+        let swift_bytes = format!(r#"{{"{}": "{}"}}"#, FingerprintFile::KEY, "ab".repeat(32));
+        std::fs::write(&swift, &swift_bytes).unwrap();
+        let record = FingerprintFile::in_support_directory(dir.path());
+        let secrets = steno_core::testing::InMemorySecretStore::new();
+        let store = Store::in_memory().unwrap();
+        let now = chrono::Utc::now();
+
+        let minted = HandoverIdentity::load_or_create(&secrets, &record, &store, "A", now)
+            .await
+            .unwrap();
+        let fingerprint = steno_handover::identity::hex(&minted.fingerprint());
+        assert_eq!(record.recorded().unwrap(), Some(fingerprint.clone()));
+        let loaded = HandoverIdentity::load_or_create(&secrets, &record, &store, "A", now)
+            .await
+            .unwrap();
+        assert_eq!(loaded.fingerprint(), minted.fingerprint(), "not replaced");
+        assert_eq!(std::fs::read_to_string(&swift).unwrap(), swift_bytes);
     }
 
     /// Only a gate that says ready opens the listener.

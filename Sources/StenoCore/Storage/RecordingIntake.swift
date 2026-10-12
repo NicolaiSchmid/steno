@@ -258,7 +258,8 @@ public struct RecordingIntake: HandoverIntake, Sendable {
 extension RecordingIntake {
   /// The syncs a durable admission makes. A file's sync throws; a folder's
   /// is best effort, as in Rust's `Syncs` (`crates/steno-pipeline/src/files.rs`).
-  struct Syncs: Sendable {
+  /// `fullSync(_:)` is public for the handover's identity record.
+  public struct Syncs: Sendable {
     /// Flushes the file at the URL to the disk.
     var file: @Sendable (URL) throws -> Void
     /// Makes the entries of the folder at the URL (a new file, a new
@@ -271,7 +272,7 @@ extension RecordingIntake {
       file: { url in try fullSync(url) },
       directory: { url in try? fullSync(url) })
 
-    static func fullSync(_ url: URL) throws {
+    public static func fullSync(_ url: URL) throws {
       let descriptor = open(url.path, O_RDONLY)
       guard descriptor >= 0 else { throw posixError() }
       defer { close(descriptor) }

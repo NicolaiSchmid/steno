@@ -208,11 +208,17 @@ final class AppEnvironment {
   /// The product: on-disk store under Application Support, the live capture
   /// backend, the real engines and diarizer over `ModelStore`, cosine speaker
   /// memory, the Obsidian coordinator, the handover listener with its
-  /// login-keychain identity, EventKit, ServiceManagement, TCC and Sparkle.
+  /// login-keychain identity (never minted over paired phones,
+  /// `HandoverIdentityGuard`), EventKit, ServiceManagement, TCC and Sparkle.
   /// One `EKEventStore` for the calendar service and the permission check.
   private static let eventStore = EKEventStore()
 
-  static func live(updater: any UpdaterControlling) async throws -> AppEnvironment {
+  /// `askToPairAgain` answers when the handover identity the paired phones
+  /// know is missing or replaced (`PairAgainAlert.ask` in the product).
+  static func live(
+    updater: any UpdaterControlling,
+    askToPairAgain: @MainActor () async -> Bool = PairAgainAlert.ask
+  ) async throws -> AppEnvironment {
     let paths = try StenoPaths.default()
     // One bus: the store posts `deleted` on it, the pipeline `progress`,
     // `speakersNeedReview` and `retentionApplied`; the app subscribes once.
@@ -268,12 +274,16 @@ final class AppEnvironment {
       updater: updater,
       clock: ContinuousClock())
     environment.startupWarnings = warnings
+    let identityGuard = HandoverIdentityGuard(
+      keychain: IdentityKeychain.Store(),
+      record: IdentityRecordFile(supportDirectory: paths.supportDirectory), store: store)
     do {
       environment.handover = try await makeHandover(
         store: store, intake: environment.makeIntake(), configuration: HandoverConfiguration()
       ) {
-        try IdentityKeychain.loadOrCreate(
-          commonName: "Steno on \(HandoverConfiguration.defaultServiceName())")
+        try await identityGuard.loadOrPairAgain(
+          commonName: "Steno on \(HandoverConfiguration.defaultServiceName())",
+          askToPairAgain: askToPairAgain)
       }
     } catch {
       environment.startupWarnings.append("Phone handover is unavailable: \(error)")
@@ -289,11 +299,11 @@ final class AppEnvironment {
   /// Rust: `handover_listener` in `crates/steno-services/src/app.rs`.
   static func makeHandover(
     store: MeetingStore, intake: any HandoverIntake, configuration: HandoverConfiguration,
-    identity: () throws -> HandoverIdentity
+    identity: () async throws -> HandoverIdentity
   ) async throws -> HandoverService {
     try await HandoverService.checkpointStore(store)
     return HandoverService(
-      configuration: configuration, store: store, intake: intake, identity: try identity())
+      configuration: configuration, store: store, intake: intake, identity: try await identity())
   }
 
   /// Beside `-steno-ui-testing`: the preview's `FakeSpeechEngine` sleeps in

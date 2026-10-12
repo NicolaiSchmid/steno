@@ -388,7 +388,8 @@ fn drop_the_note(record: &dyn FingerprintRecord) {
 /// hex) is recorded, and, while a Pair again is unfinished, the next one:
 /// outside the secret store, which may be the thing that lost the
 /// identity, and outside the settings, which the Swift app's save
-/// rewrites. Not a secret. No Swift counterpart.
+/// rewrites. Not a secret. Swift: `IdentityRecordFile`, the Swift app's
+/// own file.
 pub trait FingerprintRecord: Send + Sync {
     /// The recorded fingerprint, `None` when nothing is recorded.
     fn recorded(&self) -> Result<Option<String>, BoxError>;
@@ -409,8 +410,8 @@ pub trait FingerprintRecord: Send + Sync {
     fn note_next(&self, fingerprint: Option<&str>) -> Result<(), BoxError>;
 }
 
-/// Why the identity is unavailable rather than minted. No Swift
-/// counterpart.
+/// Why the identity is unavailable rather than minted. Swift:
+/// `IdentityUnavailability` in `Identity/IdentityGuard.swift`.
 #[derive(Debug, Error)]
 pub enum Unavailability {
     /// The secret store's read failed (a locked keyring, a keyring still

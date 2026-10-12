@@ -12,7 +12,9 @@ import StenoCore
 /// below, test-only). On Apple platforms it is imported with
 /// `SecPKCS12Import` and `kSecImportToMemoryOnly`, so no keychain is touched;
 /// on Linux only the certificate DER beside it is read, for the plaintext
-/// loopback listener.
+/// loopback listener. `other-identity` beside it (`CN=Steno other test
+/// identity`, same password) is a second one, for a keychain holding
+/// another identity.
 enum TestIdentity {
   static let password = "steno-test"
   static let commonName = "Steno test identity"
@@ -21,11 +23,10 @@ enum TestIdentity {
     "76ac0c0b28f976f25589214d5b2c614d983df9de081b06ec1fe9247bf1e40d92"
 
   static var p12URL: URL { Fixtures.url("handover/test-identity.p12") }
-  static var derURL: URL { Fixtures.url("handover/test-identity.der") }
 
-  static func load() throws -> HandoverIdentity {
+  static func load(_ name: String = "test-identity") throws -> HandoverIdentity {
     #if canImport(Security)
-      let data = try Data(contentsOf: p12URL)
+      let data = try Data(contentsOf: Fixtures.url("handover/\(name).p12"))
       var items: CFArray?
       let options: [CFString: Any] = [
         kSecImportExportPassphrase: password,
@@ -43,7 +44,8 @@ enum TestIdentity {
       return try HandoverIdentity(
         secIdentity: unsafeBitCast(identity as CFTypeRef, to: SecIdentity.self))
     #else
-      return HandoverIdentity(certificateDER: try Data(contentsOf: derURL))
+      return HandoverIdentity(
+        certificateDER: try Data(contentsOf: Fixtures.url("handover/\(name).der")))
     #endif
   }
 }
