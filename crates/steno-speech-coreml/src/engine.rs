@@ -40,23 +40,22 @@ pub const WORKERS: usize = 4;
 /// - no pause is long enough to be skipped: with the energy detector a
 ///   chunk that began just before speech after a long pause lost words
 ///   (5.86 % mean WER against 5.09 % without the skip);
-/// - the audio the chunks leave out is decoded too, in extra windows
-///   ([`steno_speech::chunker::gap_windows`]): the chunks still start
-///   0.25 s before the first speech the detector finds, a chunk that
+/// - the gaps, the audio the chunks leave out, are decoded too, in extra
+///   windows ([`steno_speech::chunker::gap_windows`]): the chunks still
+///   start 0.25 s before the first speech the detector finds, a chunk that
 ///   starts inside a pause still moves to 0.25 s before the speech after
 ///   it, and the last chunk still ends 0.25 s after the last speech, and
-///   each stretch those leave out is decoded in windows of at most 15 s
-///   that stay inside it; their words go in between the chunks' and never
-///   replace one ([`steno_speech::pipeline`]). Quiet speech the detector
-///   takes for silence there is kept.
+///   each gap those leave is decoded in windows of at most 15 s that stay
+///   inside it; their words go in between the chunks' and never replace
+///   one ([`steno_speech::pipeline`]). Quiet speech the detector takes for
+///   silence there is kept.
 ///
-/// The limit: a stretch shorter than
-/// [`MIN_GAP_SECONDS`](steno_speech::chunker::MIN_GAP_SECONDS) (2.5 s) is
-/// not decoded, and that includes the part of a longer pause a chunk
-/// leaves out at its edge, because windows that short insert words. Quiet
-/// speech the detector misses there is lost. Laying the chunks out over
-/// all of that audio instead moved every later cut and cost more on
-/// FLEURS than it recovered.
+/// The limit: a gap shorter than 2.5 s
+/// ([`MIN_GAP_SECONDS`](steno_speech::chunker::MIN_GAP_SECONDS)) is not
+/// decoded, even where it is the uncovered edge of a longer pause, because
+/// windows that short insert words. Quiet speech the detector misses there
+/// is lost. Laying the chunks out over all of that audio instead moved
+/// every later cut and cost more on FLEURS than it recovered.
 #[must_use]
 pub fn pipeline_config() -> PipelineConfig {
     // 240,000 samples is exactly 15 s, so the clamp is the window.
@@ -270,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn the_engine_decodes_every_sample_in_windows_of_the_models_size() {
+    fn the_engine_decodes_every_gap_of_2_5_s_or_more_in_windows_of_the_models_size() {
         let config = pipeline_config();
         assert_eq!(
             steno_speech::sample_count(config.chunker.max_seconds),
