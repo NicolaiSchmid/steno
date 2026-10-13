@@ -62,6 +62,139 @@ reproducible byte for byte. Both are cut to the recorder's layout: `ftyp`,
 match. `AVAudioFile` reads 20 416 frames from the first and 22 464 from the
 second, with the onset at sample 8 823; the Rust test asserts the same.
 
+Three more from the same encoder with the same settings, for the salvage of
+a phone recording whose recorder was killed, so it has no `moov`
+(`crates/steno-audio/tests/codec_salvage.rs`). They keep the writer's
+layout whole, the 57 KB reserve of zeros included (it compresses to a few
+bytes), since that layout is what the salvage reads; each holds a few KB of
+packets.
+
+- `speech-44k1-avaudiofile.m4a`: 1.6 s (70 560 frames) of synthetic speech
+  (`say -v Samantha "One, two, three, four."`, its first 1.2 s), four clicks
+  and a 440 Hz tone over a little noise, written by `AVAudioFile` in
+  4 096-frame pieces and closed: 71 packets.
+- `speech-44k1-avaudiofile-killed.m4a`: the same written by a process that
+  stops after 49 152 frames without closing the file and is then SIGKILLed:
+  the `ftyp`, zeros to byte 57 344, and the finished file's first 48 packets
+  byte for byte. Apple's encoder now and then encodes a run differently, so
+  a killed file is kept only once it is the finished file's prefix.
+- `silence-44k1-avaudiorecorder-killed.m4a`: `AVAudioRecorder` SIGKILLed 4 s
+  into a recording over SSH, where the microphone gives zeros: the `ftyp`,
+  zeros to byte 57 344 and 126 packets of silence, four bytes each.
+
+The tools, built with `swiftc -O` on macOS 26 and run on Forge:
+
+```swift
+// rec.swift
+// AVAudioRecorder with the phone's settings (mobile/src/features/recorder/recording-options.ts).
+// rec <out.m4a> <seconds>: records, then stops cleanly. seconds 0: records until killed.
+import AVFoundation
+import Foundation
+let url = URL(fileURLWithPath: CommandLine.arguments[1])
+let seconds = Double(CommandLine.arguments[2])!
+try? FileManager.default.removeItem(at: url)
+let r = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44_100,
+    AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64_000, AVEncoderAudioQualityKey: 96])
+print("record", r.prepareToRecord(), r.record()); fflush(stdout)
+if seconds > 0 {
+    Thread.sleep(forTimeInterval: seconds)
+    r.stop(); print("stopped"); fflush(stdout)
+} else {
+    while true { Thread.sleep(forTimeInterval: 1) }
+}
+```
+
+```swift
+// enc.swift
+// Encodes <in>[,<in>...] (any file AVAudioFile reads, 44.1 kHz mono float) to <out.m4a> through AVAudioFile with the
+// phone's settings. enc <in> <out.m4a> [hangAfterFrames]: with a frame count, stops writing there and sleeps
+// without closing the file, so a SIGKILL leaves it as a killed writer would.
+import AVFoundation
+import Foundation
+let inputs = try CommandLine.arguments[1].split(separator: ",").map { try AVAudioFile(forReading: URL(fileURLWithPath: String($0))) }
+let out = URL(fileURLWithPath: CommandLine.arguments[2])
+let hang = CommandLine.arguments.count > 3 ? AVAudioFramePosition(CommandLine.arguments[3])! : -1
+try? FileManager.default.removeItem(at: out)
+var file: AVAudioFile? = try AVAudioFile(forWriting: out, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC,
+    AVSampleRateKey: 44_100, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64_000, AVEncoderAudioQualityKey: 96],
+    commonFormat: .pcmFormatFloat32, interleaved: false)
+let buffer = AVAudioPCMBuffer(pcmFormat: inputs[0].processingFormat, frameCapacity: 4096)!
+var written: AVAudioFramePosition = 0
+for input in inputs {
+while input.framePosition < input.length {
+    try input.read(into: buffer)
+    if hang >= 0 && written + AVAudioFramePosition(buffer.frameLength) > hang {
+        print("hang", written); fflush(stdout)
+        while true { Thread.sleep(forTimeInterval: 1) }
+    }
+    try file!.write(from: buffer)
+    written += AVAudioFramePosition(buffer.frameLength)
+}
+}
+file = nil
+print("closed", written); fflush(stdout)
+```
+
+```swift
+// fix.swift
+// fix <speech.wav> <out.wav>: the fixture input, 44.1 kHz mono float: the speech (at most 1.2 s), then clicks
+// (transients that force short windows), a 440 Hz tone with a noise bed, 1.6 s in all.
+import AVFoundation
+let rate = 44_100.0
+let speech = try AVAudioFile(forReading: URL(fileURLWithPath: CommandLine.arguments[1]))
+let sb = AVAudioPCMBuffer(pcmFormat: speech.processingFormat, frameCapacity: AVAudioFrameCount(speech.length))!
+try speech.read(into: sb)
+var s = Array(UnsafeBufferPointer(start: sb.floatChannelData![0], count: min(Int(sb.frameLength), Int(1.2 * rate))))
+var seed: UInt64 = 7
+func noise() -> Float { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Float(Int64(bitPattern: seed >> 11) % 2_000_000) / 1_000_000 - 1 }
+for _ in 0..<4 { s.append(contentsOf: [0.9, -0.8, 0.6]); s.append(contentsOf: [Float](repeating: 0, count: Int(0.05 * rate))) }
+while s.count < Int(1.6 * rate) { let t = Double(s.count) / rate; s.append(Float(0.3 * sin(2 * .pi * 440 * t)) + 0.02 * noise()) }
+let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false)!
+let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(s.count))!
+out.frameLength = AVAudioFrameCount(s.count)
+s.withUnsafeBufferPointer { out.floatChannelData![0].update(from: $0.baseAddress!, count: s.count) }
+let url = URL(fileURLWithPath: CommandLine.arguments[2]); try? FileManager.default.removeItem(at: url)
+var file: AVAudioFile? = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+try file!.write(from: out); file = nil
+print("frames", s.count)
+```
+
+```sh
+# killrun.sh
+#!/bin/zsh
+# killrun.sh <seconds> <out.m4a> <command...>: starts the command in the background, SIGKILLs it (by the PID
+# from $!) <seconds> after the start, or after 60 s without the output file growing, or never if it exits.
+zmodload zsh/datetime
+secs=$1; out=$2; shift 2
+"$@" > $out.log 2>&1 &
+pid=$!
+start=$EPOCHREALTIME; last=-1; changed=$EPOCHREALTIME
+while true; do
+  sleep 0.05
+  now=$EPOCHREALTIME
+  if ! kill -0 $pid 2>/dev/null; then echo "exited by itself"; break; fi
+  if (( now - start >= secs )); then kill -9 $pid; echo "killed $pid at $(( now - start )) s"; break; fi
+  size=$(stat -f %z $out 2>/dev/null || echo 0)
+  if (( size != last )); then last=$size; changed=$now; fi
+  if (( now - changed >= 60 )); then kill -9 $pid; echo "no progress for 60 s, killed $pid"; break; fi
+done
+wait $pid 2>/dev/null
+echo "size $(stat -f %z $out 2>/dev/null)"
+```
+
+The commands:
+
+```sh
+lockf -k ~/.steno-live-audio.lockfile ./killrun.sh 4 \
+  silence-44k1-avaudiorecorder-killed.m4a ./rec silence-44k1-avaudiorecorder-killed.m4a 0
+say -v Samantha -o short.aiff "One, two, three, four."
+afconvert -f WAVE -d LEF32@44100 -c 1 short.aiff short.wav
+./fix short.wav fixture.wav
+./enc fixture.wav speech-44k1-avaudiofile.m4a
+./killrun.sh 3 speech-44k1-avaudiofile-killed.m4a \
+  ./enc fixture.wav speech-44k1-avaudiofile-killed.m4a 49152
+```
+
 No real meeting audio, ever. Audio is generated: `steno dev fixtures generate
 --out Tests/Fixtures` runs `FixtureGenerator` (seeded SplitMix64 noise, integer
 phase accumulators, Int16 WAV), which is byte-identical on every machine.

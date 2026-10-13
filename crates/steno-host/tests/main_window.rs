@@ -758,25 +758,34 @@ fn the_detail_warns_about_a_recording_replaced_in_parts_by_silence() {
     let detail = harness.snapshot(BridgeTopic::MeetingDetail);
     assert_eq!(detail["id"], id(0x67));
     assert!(detail.get("audioWarning").is_none(), "{detail}");
-    for (parts, seconds, warning) in [
+    for (parts, seconds, salvaged, warning) in [
         (
             3,
             0.07,
+            false,
             "About 0.1 seconds of the phone recording could not be read and was replaced by silence.",
         ),
         (
             1_200,
             27.9,
+            false,
             "About 28 seconds of the phone recording could not be read and was replaced by silence.",
         ),
+        (
+            0,
+            0.0,
+            true,
+            "The phone recording was cut off unexpectedly, and its end may be missing.",
+        ),
     ] {
-        harness
-            .fakes
-            .pipeline
-            .damaged_audio
-            .lock()
-            .unwrap()
-            .insert(uuid(0x67), steno_core::AudioDamage { parts, seconds });
+        harness.fakes.pipeline.damaged_audio.lock().unwrap().insert(
+            uuid(0x67),
+            steno_core::AudioDamage {
+                parts,
+                seconds,
+                salvaged,
+            },
+        );
         harness.host.store_changed();
         let detail = harness.snapshot(BridgeTopic::MeetingDetail);
         assert_eq!(detail["audioWarning"], warning);
@@ -2647,6 +2656,7 @@ fn a_damaged_recording_reads_kept_incomplete_and_can_still_be_deleted_now() {
         steno_core::AudioDamage {
             parts: 3,
             seconds: 0.07,
+            salvaged: false,
         },
     );
     harness.host.store_changed();

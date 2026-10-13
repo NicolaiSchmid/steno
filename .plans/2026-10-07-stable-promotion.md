@@ -323,8 +323,15 @@ why and the alternative.
     | Sidecar's 2 ms lag | Final, accepted | Far below a word; Swift had the same relationship. `tests/codec.rs` pins both onsets and the 32 samples between them. |
     | AAC priming (23 to 48 ms late on phone recordings) | Fixed (A9, #246) | The decoder reads the edit list (ffmpeg's files), else iTunes' gapless tag (`AVAudioFile`, so the Swift app's mixdowns: 2 112 samples), else the 2 112 AVFoundation assumes, but only in the layout of the phone's `AVAudioRecorder`, which writes neither box (major brand `M4A `, `mp42`, no `udta`, and an `esds` with ES_ID 0 and stream byte 0x14). Any other file that declares neither keeps every sample: Android's recorder primes 1 024 and declares nothing, and 25 ms of priming is harmless where 25 ms of speech is not. It drops exactly that many frames, so the decode starts where AVFoundation's did (checked on files from Apple's encoder in both layouts); every other input decodes bit for bit as before. |
     | Call mode without an output client (the tap's IOProc runs only once another client opens the output) | Fixed first (A10) | Forge reproduces the loss over SSH: 0 callbacks while nothing plays. The tap aggregate runs only while a process the tap includes drives the output. The Swift app shares the defect and keeps its exclusion of its own process until the handoff, so this is not a regression, but D3 makes the loss blocking. The fix includes Steno in the tap, so the rule is: no in-app playback while recording, enforced by `Playback`. |
+    | A phone recording without a `moov` (AVFoundation and symphonia both refuse it) | Fixed (A14) | The phone's recorder writes the index only when it stops, so a crash, a jetsam kill or a force-quit leaves the audio with no index, and the phone's crash recovery still hands it over. Under D3 that recording must not be lost: the decoder reads such a file from the packets' own bits with the phone's fixed settings, in the recorder's layout only, and the meeting says it was cut off. The Swift app keeps failing it. |
     | A damaged AAC packet (AVFoundation conceals it; symphonia stopped the whole decode) | Fixed (A12, #264) | Under D3 one bad packet must not lose a phone recording. The packet becomes silence of its container duration, so later audio keeps its time; the meeting says how long the silence lasts. A file in which more than half of the packets fail is an error, never a meeting of silence. |
 
+  - **A known limit, A11** (Nicolai, 2026-10-12): a Bluetooth headset that is
+    the system output may switch to hands-free while a call is recorded,
+    because recording the call also opens the headset's microphone. It costs
+    quality only, no audio is lost, and the Swift app is unchanged. It is
+    revisited after stable; A10's step 6 notes whether it happens on
+    Nicolai's Mac.
   - The Swift defects under "Store", "Adapters", "Handover", "LLM" and "Audio"
     and the CLI's `--title`, and the parity notes' other "before cutover" ports
     to Swift, close with the handoff. If a bridge release ships (Release
@@ -447,8 +454,10 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A8 | Meeting detection on Linux, over PipeWire's streams | #222 |
 | A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; the call-mode start is A10's, whose step 2 runs the tone check on the Mac | audio (#246) |
 | A10 | Call mode without an output client: the tap includes Steno, and the capture starts a silent output IOProc of its own on the aggregate's clock master, so with nothing playing the first callback comes within 100 ms of `start` returning and 200 ms of the call to `start`; no in-app playback while recording, enforced by `Playback` | audio |
+| A11 | Known limit (Nicolai, 2026-10-12): a Bluetooth headset that is the system output may switch to hands-free while a call is recorded, because recording the call also opens the headset's microphone; quality only, no audio lost; Swift unchanged; revisit after stable | none before stable (A10's step 6 notes it) |
 | A12 | An undecodable AAC packet becomes silence of its length, counted and shown on the meeting | audio (#264) |
 | A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
+| A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -483,6 +492,11 @@ after the port".
   which the tap includes and `Playback` cannot see.
 - Layer-shell panels on wlroots, Hyprland and Plasma (X2's rules cover them
   until then).
+- The phone records in a crash-safe container (CAF, or fragmented MP4), so a
+  recorder killed mid-recording leaves a file any reader opens, not one only
+  A14's salvage reads. After stable, and not the audio owner's: it changes
+  the recorder's settings and moves the native fingerprint, so it needs a
+  TestFlight build (`mobile/README.md`).
 - The speech settings without a Settings row, which
   `.plans/2026-10-07-speech-settings-ui.md` plans; the untested `steno-llm`
   cleanup paths.
@@ -955,9 +969,9 @@ Each lands before `0.11.0-rc.1`.
     - Forge, live, one test at a time. Two bounds, both from the first
       callback: 100 ms from `start` returning, always asserted (what A10
       changes), and 200 ms from the call to `start`, always printed and
-      asserted while the one-minute load is under 4 (`start`'s own tap,
-      aggregate and rate settle take 54 to 100 ms on a quiet Mac and up to
-      844 ms on a busy one). `call_capture_runs_from_its_start_with_nothing_playing`
+      asserted while the one- and the five-minute load are both under 4
+      (`start`'s own tap, aggregate and rate settle take 54 to 100 ms on a
+      quiet Mac and up to 844 ms on a busy one). `call_capture_runs_from_its_start_with_nothing_playing`
       fails on main (0 callbacks, 0.00 s in 4 s) and passes on the branch:
       first callbacks 23 to 64 ms after `start` returned, 77 to 204 ms after
       it was called (asserted at load 2: 77 and 111 ms; the 204 ms run was at
@@ -990,9 +1004,10 @@ Each lands before `0.11.0-rc.1`.
          call_capture_runs_from_its_start_with_nothing_playing -- --ignored
          --nocapture`. Pass when it passes and prints `first callback A after
          start returned (bound 100ms), B after start was called (bound
-         200ms)` with A at most 100 ms and B at most 200 ms. At a load of 4 or
-         more it prints `end-to-end bound not checked: load N`; B is then
-         read against 200 ms by eye.
+         200ms)` with A at most 100 ms and B at most 200 ms. When the one- or
+         the five-minute load is 4 or more it prints `end-to-end bound not
+         checked: load N (1 min), M (5 min)`; B is then read against 200 ms
+         by eye.
        - The tone, with main checked out and its CLI rebuilt once #246 has
          merged (#246 adds the `info` line and `steno dev onsets`; its
          description has the full take): with the Rust app built from main
@@ -1017,7 +1032,10 @@ Each lands before `0.11.0-rc.1`.
        headset's "Current SampleRate" with `system_profiler SPAudioDataType |
        grep -A8 "<the headset's name>"`. Pass when the headset stays at 44.1
        or 48 kHz. A switch to 16 or 24 kHz is compared with main while
-       `afplay` plays. The aggregate's own inputs are A11's, not A10's.
+       `afplay` plays. The aggregate's own inputs are A11's, not A10's: a
+       headset that drops to hands-free because recording the call also
+       opens the headset's microphone is A11's known limit, noted (step 6),
+       not a failure here.
     4. Alerts on the speakers, the output on a headset: in System Settings,
        Sound, set "Play sound effects through" to the Mac's speakers and the
        output to a headset, then run step 2's `cargo test` command with
@@ -1034,6 +1052,14 @@ Each lands before `0.11.0-rc.1`.
        start` line; when the `mic ... dBFS  system ... dBFS` lines go on
        after each `device resumed`; and when the summary prints `duration`
        within 1 s of 60.
+    6. AirPods, A11's known limit (noted, neither passed nor failed): with
+       AirPods connected as the output and the built-in microphone chosen as
+       the input, record a two-minute call in the app while a call or a video
+       plays through the AirPods. Note whether the AirPods switch to
+       hands-free while it records (their sound turns narrow, and
+       `system_profiler SPAudioDataType | grep -A8 AirPods` shows a "Current
+       SampleRate" of 16 or 24 kHz) and whether they switch back after the
+       stop. The note goes on A11's row.
   - Owner: audio. It lands before `0.11.0-rc.1`, with its own pipeline.
 - **A12 An undecodable AAC packet becomes silence.** A packet the decoder
   cannot read (corrupt payload: symphonia's invalid data, an element its
@@ -1127,6 +1153,130 @@ Each lands before `0.11.0-rc.1`.
     change speaker: 31 in one call, whose segments at the edge of the one
     cluster's ranges gain or lose a sliver of overlap.
   - Owner: audio.
+- **A14 A phone recording without a `moov` is salvaged.** Found by #246's
+  testing: `AVAudioRecorder` writes the `moov` only when it stops, so a
+  recorder killed mid-recording (a crash, a jetsam kill, a force-quit)
+  leaves a file that `AVAudioFile` and symphonia both refuse ("missing moov
+  atom"). The phone's crash recovery (`recovery.ts`) queues and hands over
+  that file, and the Mac failed it, though its audio is all there.
+  - **Measured on Forge** (macOS 26.7.1), with the phone's settings
+    (`recording-options.ts`: AAC-LC in `.m4a`, mono, 44.1 kHz, 64 kbps,
+    quality 96). `AVAudioRecorder` SIGKILLed after 1, 4 and 30 s, and
+    `AVAudioFile` (the same encoder and file writer) killed mid-encode on
+    synthetic speech, music, noise and clicks. A
+    finished file is `ftyp` (28 bytes: `M4A `, then `M4A `, `mp42`,
+    `isom`), `moov`, a `free` box filling the reserve, `mdat`, whose body
+    starts at byte 57 344 (a 19-minute file: `ftyp`, `free`, `mdat`, then
+    `moov`, the body again at 57 344). A killed one is the `ftyp`, zeros to
+    57 344, then the packets, with no `moov`, no `mdat` header and no sample
+    table; the packets are whole and byte for byte the finished file's.
+    Killed at 1 s, the file is the `ftyp` alone (no packet was written yet,
+    and the phone does not adopt a file under 1 KiB); at 4 s it holds 126
+    packets, at 30 s 1 262 (29.3 s).
+  - **The split.** Without a sample table nothing says where a packet ends,
+    so each packet's length is read off its own bits: a walk of the AAC-LC
+    `raw_data_block` (the channel's section data, scale factors, pulse and
+    TNS data and every spectral Huffman codeword, none of the audio decoded)
+    to its `END` element (`steno_audio::codec::salvage::packet`; the
+    standard's Huffman tables come from symphonia's AAC decoder, MPL-2.0,
+    in a file that stays under that licence). Against the sample tables of
+    12 finished files of Apple's encoder at the phone's settings (about 39
+    minutes: speech in eight synthetic voices, chords, a chirp, noise
+    bursts, clicks, silence, a full-scale square wave, levels from 0.02 to
+    3 times), it split all 101 375 packets where `stsz` says; the 19-minute
+    file splits in 0.16 s. Those packets hold 4 050 short-window packets,
+    11 352 with TNS and 479 336 codebook-11 escapes; Apple's encoder wrote
+    no noise band, pulse, fill or data element in them, so those branches
+    are tested on hand-built packets only. Apple's encoder is not always
+    deterministic: one of four killed encodes of the same input diverged
+    from its finished twin inside packet 36 (both valid streams). Nothing
+    else gives the sizes: these files hold no `mdat` header and no partial
+    `moov`, and AVFoundation has no recovery of its own to follow
+    (`AVAudioFile` fails on them).
+  - **The salvage.** When symphonia cannot read a file and it is in the
+    recorder's layout (the `ftyp` brands #246's priming checks, no `moov`
+    among the first 16 top-level boxes, before an `mdat` or after it or
+    after a box of another type, whatever the size field's width), the
+    decoder reads its packets with the phone's settings and trims
+    `AVAudioRecorder`'s 2 112 samples of priming. Where the packets start
+    is found, not assumed: past the zeros (or an `mdat` header, should iOS
+    leave one, then past the zeros in its body if the packets do not start
+    right after it), where eight packets parse in a row. It reads to the
+    end of the file, dropping a last packet the kill cut off; bytes that
+    are not a packet end it there (logged), and a salvage that reads less
+    than half of the bytes after the start fails, as a file with more than
+    half of its packets damaged does (A12). A packet that parses but does
+    not decode becomes silence (A12). Any other file without a `moov`
+    fails as before, with its recording kept. The file is never written.
+  - **The rate.** 44.1 and 48 kHz share their band tables, so the packets'
+    bits cannot tell the two apart (a 48 kHz stream would decode 8.8 %
+    slow, unflagged). The evidence is the phone's fixed preset instead: the
+    salvage assumes 44.1 kHz mono (`salvage::SAMPLE_RATE`), the preset in
+    `recording-options.ts` asks for it, and a Rust test fails unless the
+    preset holds exactly one `sampleRate:` and one `numberOfChannels:`,
+    reading `44_100` and `1`; Rust CI runs it whenever the preset changes. A
+    stream of more than one channel does not parse, so it stays failed. In
+    the app only the phone's uploads are `.m4a` masters (the Mac records
+    CAF, `steno process` takes WAV), so only they reach the salvage. A
+    recovered recording carries no wall-clock span to check the length
+    against: the phone records only its start, and its crash recovery
+    estimates the duration from the bytes at 64 kbps. The residual risk is
+    iOS ignoring the requested rate on some route, a Bluetooth microphone
+    say; the file is kept either way, and Nicolai's checks below compare
+    the length.
+  - **The meeting.** `AudioDamage` gains `salvaged` (left out of
+    `damaged-audio.json` when false, so earlier records read the same), so
+    the meeting is Ready with the detail's `audioWarning` "The phone
+    recording was cut off unexpectedly, and its end may be missing." (plus
+    A12's sentence when packets became silence; no bridge field changes).
+    The salvage reads up to where the recording was cut off or could not
+    be read, so the sentence holds for both stops.
+    `DamagedAudio::may_be_damaged` answers yes, so #241's retention leaves
+    the recording unstamped and the detail reads kept incomplete.
+  - **Not measured: iOS.** The phone's own files may differ (another
+    reserve, an `mdat` header); the salvage looks for the packets rather
+    than assuming the offset, but a different layout may still fail.
+    **Nicolai**, three times, with a build of the app: start a recording on
+    the phone, force-quit the app from the app switcher, relaunch it, let
+    the recording upload, and check that the meeting on the Mac is Ready
+    with the warning above and as long as the recording ran (within a
+    second or two). Once after about 30 s and once after more than 5
+    minutes, on the phone's built-in microphone; and once after about 30 s
+    while recording through AirPods, the route most likely to ignore the
+    preset's rate. If one fails or its length is off, the uploaded file (in
+    the meeting's folder) is what the salvage needs to read; send its first
+    64 KB.
+  - Tests: three fixtures made on Forge (`Tests/Fixtures/README.md`): the
+    killed `AVAudioFile` file decodes as its finished twin, sample for
+    sample, up to the kill; `AVAudioRecorder`'s killed file decodes to its
+    126 packets of silence; every packet of the finished fixtures splits
+    where `stsz` says; other brands, a `moov` in the reserve, no `ftyp`,
+    an `ftyp` alone and a reserve alone stay failed, as does a `moov`
+    after an `mdat` (next to it, after a `free` box, after a 64-bit
+    `mdat`, or after a `uuid` box before the `mdat`, which the box walk
+    alone also refuses), none of them written to; a file on which
+    symphonia's probe panics in a debug build (a 64-bit box size of
+    2^64 - 1) fails, the panic caught and no crash log written, with the
+    file kept; packets of a channel pair or of two channels stay failed; a
+    file cut mid-packet decodes up to the cut; a reserve of 0, 1 000 or
+    70 000 bytes, a longer `ftyp`, an `mdat` header (of size 0 or a 64-bit
+    size) or a placeholder `mdat` before the zeros decodes the same; a
+    finished file whose `moov` is gone reads from its `mdat`; the packets
+    24 times over (198 KB, past three reads of the file) decode to the
+    last one; bytes overwritten from packet 40 end the salvage there, from
+    packet 8 fail it; overwritten from about 45 % of the packets' bytes
+    the salvage fails, from about 55 % or with exactly half overwritten it
+    reads; a test pins the preset's rate and channels; a packet that
+    parses but does not decode becomes silence and is counted. Packet
+    tests build every syntax branch by hand (short windows and their
+    groups, escapes, pulses, TNS, noise and intensity bands, fill and data
+    elements, and each invalid case). `steno-services` processes the
+    killed fixture to a Ready meeting with the recording untouched, and
+    the same file with another brand to a failed one, its recording
+    untouched too; under "delete after processing" the salvaged recording
+    stays unstamped through the sweep and its detail reads kept
+    incomplete, while its finished twin is stamped.
+  - Owner: audio. It blocks stable (D3).
 
 ### P: no data lost (D3)
 

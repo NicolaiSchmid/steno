@@ -22,6 +22,7 @@ below first.
 | `/etc/ufw/applications.d/steno-desktop` | [`ufw-steno-desktop`](ufw-steno-desktop): the `ufw` profile `Steno`, TCP 23820, the phone handover's port on Linux (X4). `sudo ufw allow Steno` opens it; `ufw` admits mDNS by default, so the profile leaves UDP 5353 out. In `backup=`: an edited profile survives an upgrade. Another port there also needs the same port in Steno (`STENO_HANDOVER_PORT` or `handoverPort`) and `sudo ufw app update Steno` for the rule already added |
 | `/usr/share/licenses/steno-desktop-bin/LICENSE` | [`LICENSE`](LICENSE), a copy of the repository's |
 | `/usr/share/licenses/steno-desktop-bin/speexdsp-COPYING` | [`speexdsp-COPYING`](speexdsp-COPYING), a copy of `crates/steno-audio/vendor/speexdsp/COPYING`: the binary compiles in SpeexDSP's echo canceller, and its BSD licence asks for the notice with the binary |
+| `/usr/share/licenses/steno-desktop-bin/symphonia-aac-tables.rs` | [`symphonia-aac-tables.rs`](symphonia-aac-tables.rs), a copy of `crates/steno-audio/src/codec/salvage/tables.rs`: the binary compiles in AAC tables copied from symphonia, in a file that keeps symphonia's MPL-2.0, so the file itself, with symphonia's notices, goes with the binary |
 
 The install script, [`steno-desktop.install`](steno-desktop.install), only
 prints `sudo ufw allow Steno` after an install or an upgrade, and
@@ -167,7 +168,7 @@ OpenPGP signatures"), copy the new public key over `keys/pgp/` too.
 and the installed files in a throwaway Arch container (the AUR package job
 in `.github/workflows/aur-ci.yml` runs it on every pull request that touches
 this directory, the drop-ins in `apps/desktop/src-tauri/linux/`, the release
-key, `LICENSE` or SpeexDSP's `COPYING`). From the checkout's root:
+key, `LICENSE`, SpeexDSP's `COPYING` or the salvage's AAC tables). From the checkout's root:
 
 ```sh
 docker run --rm --cpus=2 --memory=4g -v "$PWD":/src:ro \

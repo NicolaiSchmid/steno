@@ -19,7 +19,7 @@ esac
 pkgdesc='Bot-free meeting recorder that transcribes on this computer'
 arch=('x86_64')
 url='https://github.com/NicolaiSchmid/steno'
-license=('MIT' 'BSD-3-Clause')
+license=('MIT' 'BSD-3-Clause' 'MPL-2.0')
 # What the binary links, plus two namcap cannot see: the tray library, which
 # the app loads at run time, and pipewire, whose client.conf every recording
 # needs. The .deb's Depends map to libayatana-appindicator, glibc (Arch's is
@@ -66,6 +66,7 @@ source=(
   'ufw-steno-desktop'
   'LICENSE'
   'speexdsp-COPYING'
+  'symphonia-aac-tables.rs'
 )
 # The release signing key: apps/desktop/release-signing-key.asc, also
 # keys/pgp/ here.
@@ -77,7 +78,8 @@ sha256sums=('2f2dfb3b3452a5473e7de6ab44a3733cf143871cf7da14d708a78ffc532e60e5'
             '9c1f94b44d7b0e260e4a8ebcad2fee81b6dcb948ea37e4aecfb1e3953e8a4028'
             'd328e4b6d255451214e0498a79e2e5b0923986fdf7b0d2db16f1f7a4746ae8e5'
             '4adbf25a93d2acbdb0e1feb850b1a4e88b64ebfdf2063ae917a3827732fe7a86'
-            '2654a4264b2bfe298dedc508748d140111840c315cc8eb646a3a68c13fa75b01')
+            '2654a4264b2bfe298dedc508748d140111840c315cc8eb646a3a68c13fa75b01'
+            '682f6d346e909f9c9eee305aa0bf59ec522f28c1e4724d02ead629503b6f5150')
 
 # Installs the copy $1 at $2, where the pinned .deb lacks the file; once the
 # .deb ships it, the build fails until Bump step 3 deletes the copy.
@@ -119,4 +121,9 @@ package() {
   # The binary compiles in SpeexDSP (BSD-3-Clause), whose notice goes with it.
   install -Dm644 speexdsp-COPYING \
     "$pkgdir/usr/share/licenses/$pkgname/speexdsp-COPYING"
+  # It also compiles in AAC tables copied from symphonia, in a file that
+  # keeps its MPL-2.0; the file itself, with symphonia's notices, goes with
+  # it.
+  install -Dm644 symphonia-aac-tables.rs \
+    "$pkgdir/usr/share/licenses/$pkgname/symphonia-aac-tables.rs"
 }

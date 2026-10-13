@@ -295,14 +295,20 @@ fn first_media_time(elst: &[u8]) -> Option<u64> {
 /// from the missing `udta`, which the caller checks: its brands, and its
 /// sound track's ES_ID and stream byte.
 fn recorder_layout(file: &mut File, ftyp: Mp4Box, mdia: Mp4Box) -> bool {
+    body(file, ftyp, 64).is_some_and(|ftyp| recorder_brands(&ftyp))
+        && stream_signature(file, mdia) == Some((0, 0x14))
+}
+
+/// Whether the body of an `ftyp` box names `AVAudioRecorder`'s brands for
+/// an `.m4a`: the major brand `M4A ` and `mp42` among the compatible ones.
+/// The salvage of a recording without a `moov` checks them too
+/// ([`super::salvage`]).
+pub(crate) fn recorder_brands(ftyp: &[u8]) -> bool {
     // The major brand, the minor version, then the compatible brands.
-    let brands = body(file, ftyp, 64).is_some_and(|ftyp| {
-        ftyp.get(..4) == Some(b"M4A ")
-            && ftyp
-                .get(8..)
-                .is_some_and(|compatible| compatible.as_chunks::<4>().0.contains(b"mp42"))
-    });
-    brands && stream_signature(file, mdia) == Some((0, 0x14))
+    ftyp.get(..4) == Some(b"M4A ")
+        && ftyp
+            .get(8..)
+            .is_some_and(|compatible| compatible.as_chunks::<4>().0.contains(b"mp42"))
 }
 
 /// The ES_ID and the stream byte (the stream type, the upstream flag and
