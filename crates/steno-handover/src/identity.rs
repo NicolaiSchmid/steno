@@ -219,19 +219,18 @@ impl HandoverIdentity {
     }
 
     /// The pairing-time rule for identities found with nothing recorded,
-    /// the one statement of it (Swift, with #284:
-    /// `HandoverIdentityGuard.knownByEveryPhone` in
+    /// the one statement of it: of the identities whose certificates start
+    /// at `starts` ([`Self::not_valid_before`]), the index of the one every
+    /// phone paired at `paired` knows, judged at `now`. A phone knows the
+    /// newest identity whose start is at or before its pairing, as a phone
+    /// paired before an identity's start cannot know it. All three times
+    /// come from this computer's clock, and a minted certificate starts a
+    /// minute before its mint ([`Self::mint`]), the margin for a pairing
+    /// right after it. A time at most a second after `now` still counts as
+    /// not after it, a margin for the database's rounding of a pairing
+    /// time. Swift, with #284: `HandoverIdentityGuard.knownByEveryPhone` in
     /// `Sources/StenoHandover/Identity/IdentityGuard.swift`, whose caller
-    /// `adoptable` checks the clock): of the
-    /// identities whose certificates start at `starts`
-    /// ([`Self::not_valid_before`]), the index of the one every phone
-    /// paired at `paired` knows, judged at `now`. A phone knows the newest
-    /// identity whose start is at or before its pairing, as a phone paired
-    /// before an identity's start cannot know it. All three times come
-    /// from this computer's clock, and a minted certificate starts a minute
-    /// before its mint ([`Self::mint`]), the margin for a pairing right
-    /// after it. A time within a second after `now` is not after it, as the
-    /// database rounds a pairing time to the millisecond, half up.
+    /// `adoptable` checks the clock; here the rule checks it.
     ///
     /// | Starts and pairings | Result |
     /// |---------------------|--------|
@@ -575,10 +574,12 @@ pub enum Unavailability {
 }
 
 /// How far after now a start or a pairing may be before the pairing-time
-/// rule waits for the clock ([`HandoverIdentity::known_by_every_phone`]): a
-/// second, as the database rounds a pairing time to the millisecond, half
-/// up, so a phone paired just now can read a little after now. The Swift
-/// guard (#284) has none: it waits for any time after now.
+/// rule waits for the clock ([`HandoverIdentity::known_by_every_phone`]).
+/// The database stores a pairing time rounded half up to the millisecond,
+/// so a phone paired in the instant the rule runs can read up to half a
+/// millisecond after now; a second is a round margin over that. Starts are
+/// never rounded but share it, so the check stays one comparison. The
+/// Swift guard (#284) has none: it waits for any time after now.
 const CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
 
 /// Lowercase hex, for logs and tests.
@@ -673,6 +674,16 @@ mod tests {
             assert_eq!(known_at(&starts, &[3_000], 2_999).unwrap(), index(c));
             assert_eq!(known_at(&starts, &[], 2_999).unwrap(), index(c));
             assert_eq!(known_at(&starts, &[10_001], 10_000).unwrap(), index(c));
+            // A millisecond past the second waits: the slack is a second,
+            // not more.
+            let past = at(10_001) + chrono::TimeDelta::milliseconds(1);
+            for (starts, paired) in [(vec![a], vec![past]), (vec![past], vec![])] {
+                assert!(clock(HandoverIdentity::known_by_every_phone(
+                    &starts,
+                    &paired,
+                    at(10_000)
+                )));
+            }
         }
         // No identity at all: no phone knows one.
         assert!(replaced(known(&[], &[])));

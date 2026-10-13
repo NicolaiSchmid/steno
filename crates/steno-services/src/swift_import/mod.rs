@@ -518,17 +518,23 @@ pub struct CertificateChoice {
 /// Of the Swift certificates the keychain holds (`certificates`, the DER
 /// of each in the keychain's order), the one to import, or `None` when
 /// there is none. Copies of one certificate count once. The Swift app's
-/// record ([`SwiftRecord::fingerprint`]) decides first, then the
-/// pairing-time rule ([`HandoverIdentity::known_by_every_phone`], whose table gives
-/// its outcomes):
+/// record ([`SwiftRecord::fingerprint`]) decides among several, and a
+/// record naming none waits; otherwise the pairing-time rule decides
+/// ([`HandoverIdentity::known_by_every_phone`], whose table gives its
+/// outcomes):
 ///
 /// | Swift certificates | The Swift app's record | Result |
 /// |--------------------|------------------------|--------|
 /// | none | any | `None`: nothing to import |
 /// | several | names one of them | that one, without the rule |
-/// | one or several | names none of them | waits as [`WaitReason::Replaced`]: the phones know a certificate that is gone |
 /// | one | names it | the rule over it, as without a record |
+/// | one or several | names none of them | waits as [`WaitReason::Replaced`]: the phones know a certificate that is gone |
 /// | one or several | none, unreadable, not parsing, or no fingerprint | the rule over them |
+///
+/// A record naming the identity a Swift Pair Again staged and did not
+/// promote (labelled `Steno handover identity (new)`, which the keychain
+/// query does not match) names none of them; Pair Again had removed the
+/// phones by then, so Pair again here loses nothing.
 ///
 /// | The rule | Result |
 /// |----------|--------|
@@ -987,7 +993,7 @@ pub const REPLACED_PAIRING: &str = "Steno found a different phone pairing on thi
      Settings > iPhone to start over.";
 /// The step's line when the paired phones do not all know one Swift
 /// certificate ([`WaitReason::PartlyReplaced`]): the iPhone section's
-/// sentence for that reason on the Mac.
+/// first sentence for that reason on the Mac, then where Pair again is.
 pub const PARTLY_REPLACED_PAIRING: &str = "Some of your phones were paired before this Mac's \
      pairing changed and can't connect. To reconnect them, choose Pair again in Settings > \
      iPhone.";

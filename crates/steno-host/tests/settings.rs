@@ -2243,12 +2243,12 @@ fn the_waiting_reasons_are_plain_sentences() {
          then choose Try again."
     );
     // Some phones paired before the pairing changed: the Swift app's words
-    // up to what to do, and Pair again in Settings > iPhone, as the button
-    // reads, is what reconnects them.
+    // up to what to do, and Pair again, the button below, as it reads, is
+    // what reconnects them.
     assert_eq!(
         waiting_message(PhoneWaitingReason::PartlyReplaced, Platform::Macos),
         "Some of your phones were paired before this Mac's pairing changed and can't connect. \
-         To reconnect them, choose Pair again in Settings > iPhone."
+         To reconnect them, choose Pair again."
     );
     // The clock went back: the fix is the clock, then Try again.
     assert_eq!(

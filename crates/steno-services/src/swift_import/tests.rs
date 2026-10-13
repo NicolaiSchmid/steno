@@ -3196,6 +3196,29 @@ fn one_swift_certificate_the_swift_record_names_is_judged_by_the_rule() {
     }
 }
 
+/// Two copies of one Swift certificate (one identity in two keychains)
+/// with no Swift record count once: they do not tie as two certificates
+/// of one second, so the rule brings it over, with no phone or a phone
+/// paired after it.
+#[test]
+fn two_copies_of_one_swift_certificate_without_a_record_count_once() {
+    for phones in [&[][..], &[1][..]] {
+        let step = step(FakeKeychain::swift_app(), None);
+        *step.keychain.certificates.lock().unwrap() = vec![identity_der(); 2];
+        pair_phones_at(&step.store, phones);
+        assert_eq!(
+            step.import.run().stage,
+            SwiftImportStage::Done,
+            "{phones:?}"
+        );
+        assert_eq!(
+            exported_and_stored(&step),
+            (vec![identity_der()], Some(FIXTURE_FINGERPRINT.to_owned())),
+            "{phones:?}"
+        );
+    }
+}
+
 /// A Swift record naming a certificate the keychain no longer holds means
 /// the phones know an identity that is gone: with one certificate or two,
 /// whatever the pairing-time rule would choose, the run waits as replaced,
@@ -3441,7 +3464,7 @@ fn a_swift_certificate_or_pairing_after_now_waits_for_the_clock() {
 /// minted after a keychain reset, which the phones cannot know: the run
 /// waits as replaced, exports and stores nothing, and the iPhone section
 /// says so; some phones before it and some after wait as partly replaced,
-/// with the section's sentence. Once the old login keychain is added back,
+/// with the section's first sentence. Once the old login keychain is added back,
 /// Try again brings over the identity the phones know.
 #[test]
 fn a_swift_certificate_the_phones_predate_waits_and_the_old_one_comes_over_once_it_is_back() {
@@ -3483,10 +3506,10 @@ fn a_swift_certificate_the_phones_predate_waits_and_the_old_one_comes_over_once_
         HandoverGate::Waiting(WaitReason::PartlyReplaced)
     );
     let reason = steno_bridge::PhoneWaitingReason::from(WaitReason::PartlyReplaced);
-    assert_eq!(
-        steno_host::settings::snapshots::waiting_message(reason, steno_core::Platform::Macos),
-        PARTLY_REPLACED_PAIRING
-    );
+    let card =
+        steno_host::settings::snapshots::waiting_message(reason, steno_core::Platform::Macos);
+    let (first, _) = PARTLY_REPLACED_PAIRING.split_once(" To reconnect").unwrap();
+    assert!(card.starts_with(first), "{card}");
     assert_eq!(exported_and_stored(&step), (vec![], None));
 }
 

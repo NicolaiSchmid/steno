@@ -411,9 +411,8 @@ const COMPUTER: &str = if cfg!(target_os = "macos") {
 /// in plain words: the keyring's own sentence when it was not opened at
 /// start, as that one already names the pairing; the waiting card's first
 /// sentence when the guard refused the identity or the record could not be
-/// opened, and both of the card's sentences, starting in lowercase, when
-/// some phones were paired before the pairing changed (it follows "Phone
-/// handover is unavailable:"); a sentence of its own when the database
+/// opened, followed by where to choose Pair again when some phones were
+/// paired before the pairing changed; a sentence of its own when the database
 /// failed or the record does not parse, and when Pair again could not note
 /// the next fingerprint (the caller logs the error); the read's error
 /// otherwise.
@@ -428,12 +427,12 @@ pub(crate) fn identity_failure(error: &IdentityError) -> String {
                  phones know."
             )
         }
-        // After "Phone handover is unavailable:": the first sentence is the
-        // Swift app's (`IdentityUnavailability.partlyReplaced`, #284), the
-        // second names this app's button.
+        // The first sentence is the Swift app's
+        // (`IdentityUnavailability.partlyReplaced`, #284), the second names
+        // this app's button.
         IdentityError::Unavailable(Unavailability::PartlyReplaced) => {
             format!(
-                "some of your phones were paired before this {COMPUTER}'s pairing changed and \
+                "Some of your phones were paired before this {COMPUTER}'s pairing changed and \
                  can't connect. To reconnect them, choose Pair again in Settings > iPhone."
             )
         }
@@ -1369,8 +1368,7 @@ mod tests {
     }
 
     /// With nothing recorded, an identity some paired phones predate and
-    /// others do not waits with the mixed words after "Phone handover is
-    /// unavailable:", and its own reason, whose card in Settings offers Pair
+    /// others do not waits with the mixed words and its own reason, whose card in Settings offers Pair
     /// again first; Pair again reconnects every phone over a new identity.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_identity_some_phones_predate_waits_with_the_mixed_words_until_pair_again() {
@@ -1383,7 +1381,7 @@ mod tests {
         assert_eq!(
             handover.state(),
             ListenerState::Failed(format!(
-                "Phone handover is unavailable: some of your phones were paired before this \
+                "Phone handover is unavailable: Some of your phones were paired before this \
                  {COMPUTER}'s pairing changed and can't connect. To reconnect them, choose Pair \
                  again in Settings > iPhone."
             ))
@@ -1415,7 +1413,8 @@ mod tests {
 
     /// With nothing recorded, a phone paired after now on this computer's
     /// clock (the clock went back since) waits for the clock with its own
-    /// reason and words, writes nothing, and never asks for Pair again.
+    /// reason and words, writes nothing, and its words do not ask for Pair
+    /// again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_identity_with_a_pairing_after_now_waits_for_the_clock() {
         let paired = Paired::new(true).await;
@@ -1495,8 +1494,8 @@ mod tests {
 
     /// The answers Try again and Pair again give, pinned as text, as the
     /// tests compare against the constants: each in plain words, with no
-    /// developer word in it, and Missing and Replaced in the waiting card's
-    /// words.
+    /// developer word in it, and each identity reason's details line
+    /// opening with its waiting card's first sentence.
     #[test]
     fn the_handover_s_answers_are_plain_sentences() {
         assert_eq!(
@@ -1508,6 +1507,8 @@ mod tests {
         let failures = [
             IdentityError::Unavailable(Unavailability::Missing),
             IdentityError::Unavailable(Unavailability::Replaced),
+            IdentityError::Unavailable(Unavailability::PartlyReplaced),
+            IdentityError::Unavailable(Unavailability::ClockBehind),
             IdentityError::Record(Box::new(std::io::Error::from(
                 std::io::ErrorKind::PermissionDenied,
             ))),
@@ -1542,6 +1543,8 @@ mod tests {
         for (reason, failure) in [
             PhoneWaitingReason::Missing,
             PhoneWaitingReason::Replaced,
+            PhoneWaitingReason::PartlyReplaced,
+            PhoneWaitingReason::ClockBehind,
             PhoneWaitingReason::FileNotOpened,
         ]
         .into_iter()
@@ -1551,7 +1554,8 @@ mod tests {
                 reason,
                 steno_core::Platform::CURRENT,
             );
-            assert!(card.starts_with(failure.as_str()), "{card} / {failure}");
+            let first = failure.split(". ").next().unwrap();
+            assert!(card.starts_with(first), "{card} / {failure}");
         }
     }
 
