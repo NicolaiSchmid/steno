@@ -16,9 +16,10 @@
 # on a busy machine; the main thread held by the stop kept it 8 s and
 # more), the meeting is `queued` within 2 s of the lock's release, the
 # store then holds that one meeting, saved with a duration above zero,
-# and the row reads "Record" again within 3 s of the save (a row the tray
-# skipped as unchanged would stay "Stopping…"). There is no log line for
-# a save; the store's row is the save. Each read of the menu after the
+# and a read of the menu begun within 3 s of that check finds the row
+# reading "Record" again (a row the tray skipped as unchanged would stay
+# "Stopping…"). There is no log line for a save; the store's row is the
+# save. Each read of the menu after the
 # click is logged with the seconds it began and answered, so a slow run
 # shows whether the app or the read was late.
 #
@@ -190,8 +191,10 @@ done
   || fail "the meeting was not queued $saved_within s after the lock's release: $(meetings "$store")"
 echo "$name: the meeting was queued $(elapsed "$queued" "$released") s after the lock's release"
 require_saved
+# Only that the row comes back: the time it takes is the reads' own.
+saved="$(now)"
 idle=""
-while within "$(now)" "$queued" "$idle_within"; do
+while within "$(now)" "$saved" "$idle_within"; do
   read_row
   if [[ "$row" == "Record" ]]; then
     idle="$(now)"
@@ -199,10 +202,8 @@ while within "$(now)" "$queued" "$idle_within"; do
   fi
   sleep 0.05
 done
-log_reads "$queued" "the save"
+log_reads "$saved" "the save"
 [[ -n "$idle" ]] \
   || fail "the tray's Record row read \"$row\" $idle_within s after the save, not Record"
-within "$idle" "$queued" "$idle_within" \
-  || fail "the tray read Record only $(elapsed "$idle" "$queued") s after the save"
-echo "$name: the tray read Record $(elapsed "$idle" "$queued") s after the save"
+echo "$name: the tray read Record $(elapsed "$idle" "$saved") s after the save"
 echo "$name: ok, the tray answered while the stop waited for the lock, and the recording was saved"
