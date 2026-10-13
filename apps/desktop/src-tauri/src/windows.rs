@@ -164,37 +164,29 @@ pub fn open_requested(app: &AppHandle, params: &WindowParams) -> Result<(), Brid
             .state::<Kept>()
             .document(params.window.as_str())
             .is_none();
-    match params.window {
+    let asked = match params.window {
         BridgeWindow::Onboarding => {
             open(app, BridgeWindow::Onboarding, None, None).map_err(failed)?;
+            None
         }
         BridgeWindow::Main => {
             let window = open(app, BridgeWindow::Main, None, None).map_err(failed)?;
-            if let Some(meeting_id) = params.meeting_id {
-                request(
-                    app,
-                    &pages,
-                    window.label(),
-                    window.clone(),
-                    Request::meeting(&meeting_id),
-                );
-            }
+            params
+                .meeting_id
+                .map(|meeting_id| (window, Request::meeting(&meeting_id)))
         }
         BridgeWindow::Settings => {
             let section = params.section;
             let query = section.map(|section| format!("section={section}"));
             let window =
                 open(app, BridgeWindow::Settings, query.as_deref(), None).map_err(failed)?;
-            if let (true, Some(section)) = (existed, section) {
-                request(
-                    app,
-                    &pages,
-                    window.label(),
-                    window.clone(),
-                    Request::section(section),
-                );
-            }
+            section
+                .filter(|_| existed)
+                .map(|section| (window, Request::section(section)))
         }
+    };
+    if let Some((window, asked)) = asked {
+        request(app, &pages, window.label(), window.clone(), asked);
     }
     Ok(())
 }
