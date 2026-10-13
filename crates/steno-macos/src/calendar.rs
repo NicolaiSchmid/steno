@@ -201,10 +201,10 @@ fn read_event(event: &EKEvent) -> Event {
     // its superclass) declares, and each Rust type is the property's:
     // `eventIdentifier` and `title` are `NSString *`, `startDate` and
     // `endDate` `NSDate *`, `attendees` `NSArray<EKParticipant *> *`, all
-    // object returns retained by `Retained`. Each is read as optional: the
-    // headers leave their nullability unspecified, and a `nil` read as
-    // non-optional would panic. `isAllDay` goes through the binding and
-    // returns a plain `BOOL`.
+    // object returns retained by `Retained`. Each is read as optional:
+    // the headers mark them `null_unspecified`, `null_resettable` or
+    // `nullable`, and a `nil` read as non-optional would panic. `isAllDay`
+    // goes through the binding and returns a plain `BOOL`.
     unsafe {
         let id: Option<Retained<NSString>> = msg_send![event, eventIdentifier];
         let title: Option<Retained<NSString>> = msg_send![event, title];
