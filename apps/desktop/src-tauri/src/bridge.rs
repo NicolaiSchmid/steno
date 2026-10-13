@@ -287,12 +287,19 @@ pub async fn bridge_call(
                 }
                 Ok(dialogs::chosen_path_reply(chosen.as_deref()))
             }
-            // The worker hands its other tasks on while the call blocks.
-            None if blocks_for_long(&method) => {
-                tokio::task::block_in_place(|| host.call(&window, &method, params))
-            }
-            None => host.call(&window, &method, params),
+            None => off_the_worker_if_long(&method, || host.call(&window, &method, params)),
         },
+    }
+}
+
+/// Runs `call`, the host's answer to `method`, in `block_in_place` when the
+/// method blocks for long ([`blocks_for_long`]): the async worker hands its
+/// other tasks on while the call blocks.
+pub fn off_the_worker_if_long<T>(method: &str, call: impl FnOnce() -> T) -> T {
+    if blocks_for_long(method) {
+        tokio::task::block_in_place(call)
+    } else {
+        call()
     }
 }
 
@@ -394,6 +401,25 @@ mod tests {
         }
         for method in ["onboarding.skip", "recording.start", "page.ready"] {
             assert!(!blocks_for_long(method), "{method}");
+        }
+    }
+
+    /// Each permission request runs where the worker may block: only
+    /// inside `block_in_place` may a worker thread block on another
+    /// runtime, which panics on a bare worker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_permission_request_leaves_the_async_worker() {
+        for method in [
+            "onboarding.request",
+            "settings.recording.requestPermission",
+            "settings.general.requestCalendar",
+        ] {
+            let other = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            off_the_worker_if_long(method, || other.block_on(async {}));
+            // A runtime is dropped outside an async context.
+            std::thread::spawn(move || drop(other)).join().unwrap();
         }
     }
 
