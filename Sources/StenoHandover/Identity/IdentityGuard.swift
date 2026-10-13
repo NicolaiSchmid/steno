@@ -39,17 +39,19 @@ public enum IdentityUnavailability: Error, CustomStringConvertible, Equatable, S
   case missing
   /// The keychain's identity is not the one whose fingerprint is recorded,
   /// or, with nothing recorded, no paired phone knows any identity it holds
-  /// (`knownByEveryPhone`).
+  /// (with no phone, its two newest start in the same second;
+  /// `knownByEveryPhone`).
   case replaced
   /// With nothing recorded, some paired phones know one of the keychain's
   /// identities, and the others another one or none. A `replaced` in all
   /// but its words, so the launch asks the same question.
   case partlyReplaced
-  /// With nothing recorded, a phone paired, or an identity started, later
-  /// than this Mac's clock says it is now: the clock is wrong now or was
-  /// then, so the dates cannot say which identity the phones know. The
-  /// launch asks nothing and records nothing; once the clock has passed
-  /// those times, a launch decides by them again.
+  /// With nothing recorded and an identity under the label, a phone
+  /// paired, or an identity started, later than this Mac's clock says it
+  /// is now: the clock is wrong now or was then, so the dates cannot say
+  /// which identity the phones know. The launch asks nothing and records
+  /// nothing; once the clock has passed those times, a launch decides by
+  /// them again.
   case clockBehind
 
   public var description: String {
@@ -95,11 +97,12 @@ public struct HandoverIdentityGuard: Sendable {
   /// Throws `IdentityUnavailability` when the keychain cannot be read,
   /// holds no identity while a fingerprint is recorded or a phone is
   /// paired, holds one whose fingerprint is not the recorded one, or, with
-  /// nothing recorded, none that every paired phone knows, or a phone
-  /// paired or an identity started after now (`clockBehind`). A staged
-  /// identity is a mint or a Pair Again cut short: when it is the recorded
-  /// one it becomes the current one, and with no record, no identity and
-  /// no paired phone it is installed. Only then, with nothing staged, is a
+  /// nothing recorded, none that every paired phone knows, or, with
+  /// nothing recorded and an identity under the label, a phone paired or
+  /// an identity started after now (`clockBehind`). A staged identity is a
+  /// mint or a Pair Again cut short: when it is the recorded one it
+  /// becomes the current one, and with no record, no identity and no
+  /// paired phone it is installed. Only then, with nothing staged, is a
   /// new identity minted, staged and installed.
   public func loadOrCreate(commonName: String) async throws -> HandoverIdentity {
     let recorded = try record.recorded()
@@ -166,7 +169,8 @@ public struct HandoverIdentityGuard: Sendable {
   /// - after the phones, before the record: the same, with no phone left;
   ///   with no record either (phones paired without one), the launch
   ///   records the keychain's newest identity, since no phone is left to
-  ///   predate it, or, with an empty keychain, installs the staged one
+  ///   predate it (unless its two newest start in the same second, which
+  ///   asks again), or, with an empty keychain, installs the staged one
   ///   instead of minting;
   /// - after the record, before the promote: the staged identity is the
   ///   recorded one, so the launch promotes it;
@@ -216,7 +220,8 @@ public struct HandoverIdentityGuard: Sendable {
   ///
   /// Throws `replaced` when no phone knows any of them, and
   /// `partlyReplaced` when some do but not all know the same one.
-  /// Rust: `HandoverIdentity::known_by_every_phone`.
+  /// Rust: `HandoverIdentity::known_by_every_phone`, which also checks the
+  /// clock that `adoptable` checks here.
   static func knownByEveryPhone(starts: [Date], paired: [Date]) throws -> Int {
     let seconds = starts.map { $0.timeIntervalSince1970.rounded(.down) }
     /// The index of the one newest start at or before `instant`.

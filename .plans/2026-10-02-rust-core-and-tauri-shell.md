@@ -1113,39 +1113,42 @@ still has to draw the window side. `[ ]` is not ported yet.
   writes the Swift import's `swift-import-done` marker (`IdentitySource::pair_again`,
   #281), so the import never brings the old Swift identity back; the Swift app has no
   import to stop and writes none. Rust overwrites its one secret. Swift stages the new
-  keychain items under a second label, `Steno handover identity (new)`, and gives them the
-  default label last, because the file keychain cannot replace a certificate and its key
-  in one write; its delete takes the certificates before their keys, so a run cut short
-  never leaves a certificate without its key, and a launch that finds the staged identity
-  recorded finishes the move. Of several identities under the default label across the
-  keychain search list (an old login keychain added back), the Swift app loads the
-  recorded one.
+  keychain items under a second label, `Steno handover identity (new)`, and gives them
+  the default label last, because the file keychain cannot replace a certificate and its
+  key in one write; its delete takes the certificates before their keys, so a run cut
+  short never leaves a certificate without its key, and a launch that finds the staged
+  identity recorded finishes the move. Of several identities under the default label
+  across the keychain search list (an old login keychain added back), the Swift app loads
+  the recorded one.
   - With nothing recorded (an upgrade from a build without the record, or a lost
-    record), the Swift app refines the rewrite from the identity found by the `pairedAt`
-    rule (`HandoverIdentityGuard.knownByEveryPhone`): a phone paired before a
-    certificate's `notValidBefore` cannot know that identity, so each paired phone knows
-    the newest identity whose `notValidBefore` is at or before its `pairedAt`. When every
-    phone knows the same one, it is recorded; with no phone paired, the newest. Both
-    times come from the Mac's clock, and a minted certificate starts a minute before its
-    mint. A certificate in two keychains is one identity, and two that start in the same
-    second are no newest one, so a phone whose newest start they share knows neither.
-    When no phone knows any identity, the launch is `replaced`; when some do but the
-    phones know different ones or some know none, it is `partlyReplaced`, which asks the
-    same question and says "some of your phones were paired before this Mac's pairing
-    changed and can't connect. Choose Pair Again the next time Steno opens to reconnect
-    them." Neither records anything, and a certificate whose `notValidBefore` cannot be
-    read is unreadable.
-  - A phone paired, or an identity started, after this Mac's clock says it is now is a
-    clock error (`clockBehind`): the clock is wrong now or was then, so the dates cannot
-    say which identity the phones know. The launch asks nothing, records nothing and
-    waits, with the startup warning "this Mac's date and time are earlier than when its
-    phone pairing was made, so Steno can't tell which pairing your phones know. Check the
-    date and time in System Settings, then open Steno again." A clock that was fast when
-    a phone paired waits until that time has passed. Only this choice reads the times,
-    so a recorded identity loads whatever the clock says.
+    record), the Swift app records the identity the `pairedAt` rule chooses
+    (`HandoverIdentityGuard.knownByEveryPhone`), not simply the one it finds: a phone
+    paired before a certificate's `notValidBefore` cannot know that identity, so each
+    paired phone knows the newest identity whose `notValidBefore` is at or before its
+    `pairedAt`. When every phone knows the same one, it is recorded; with no phone
+    paired, the newest. Both times come from the Mac's clock, and a minted certificate
+    starts a minute before its mint. A certificate in two keychains is one identity, and
+    two that start in the same second are no newest one, so a phone whose newest start
+    they share knows neither. When no phone knows any identity, the launch is
+    `replaced`; when some do but the phones know different ones or some know none, it is
+    `partlyReplaced`, which asks the same question and says "some of your phones were
+    paired before this Mac's pairing changed and can't connect. Choose Pair Again the
+    next time Steno opens to reconnect them." Neither records anything, and a
+    certificate whose `notValidBefore` cannot be read is unreadable.
+  - With nothing recorded and an identity under the label, a phone paired, or an
+    identity started, after this Mac's clock says it is now is a clock error
+    (`clockBehind`; Swift: any time after now; Rust, with #289: more than a second after
+    now, for the store's rounding of a pairing time to the millisecond, half up): the
+    clock is wrong now or was then, so the dates cannot say which identity the phones
+    know. The launch asks nothing, records nothing and waits, with the startup warning
+    "this Mac's date and time are earlier than when its phone pairing was made, so Steno
+    can't tell which pairing your phones know. Check the date and time in System
+    Settings, then open Steno again." A clock that was fast when a phone paired waits
+    until that time has passed. Only this choice reads the times, so a recorded identity
+    loads whatever the clock says.
   - Rust records the identity it finds with nothing recorded until #289 gives
-    `load_or_create` and the import the same `pairedAt` rule, ties included
-    (`HandoverIdentity::known_by_every_phone`); the clock rule is still to come there.
+    `load_or_create` and the import the same `pairedAt` rule, with ties, copies counted
+    once and the clock (`HandoverIdentity::known_by_every_phone`, `ClockBehind`).
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
