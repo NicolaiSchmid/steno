@@ -1985,6 +1985,33 @@ mod tests {
         }
     }
 
+    /// A `handover-identity.json` that cannot be opened (here a folder in
+    /// its place) is no record that does not parse: the launch waits as
+    /// unreadable, and Pair again stops at the note, before the write,
+    /// with its own sentence rather than one that sends the user back to
+    /// Pair again. Nothing is written or moved, and the phone stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_that_cannot_be_opened_stops_pair_again_before_the_write() {
+        let paired = Paired::new(true).await;
+        let path = paired.dir.path().join("handover-identity.json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let handover = ListenerHandover::read(paired.source());
+        assert_eq!(handover.waiting(), Some(PhoneWaitingReason::Unreadable));
+
+        let error = tokio::task::block_in_place(|| handover.pair_again()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("Steno made no new pairing, as it could not save its records"),
+            "{error}"
+        );
+        assert_eq!(paired.log(), ["marker"], "no secret written");
+        assert!(path.is_dir(), "nothing moved");
+        assert_eq!(paired.store.paired_devices().unwrap().len(), 1);
+        assert_eq!(handover.waiting(), Some(PhoneWaitingReason::Unreadable));
+    }
+
     /// A Pair again that stops after the new identity was written (the
     /// phone still paired, one of two removed, or every phone removed and
     /// the record refused) is finished by the next read, at the next
