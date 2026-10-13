@@ -28,25 +28,64 @@ use crate::pipeline::{BuiltEngine, BuiltPipeline, CurrentPipeline, MakeDependenc
 use crate::recorder::MakeCaptureSession;
 
 /// How long a test waits for work driven by its own fakes, gates and
-/// manual clock, or for the synthetic capture's first audio once it
-/// records (a level, frames in the files), before it fails. That work
-/// takes milliseconds, so this bound only turns a hang into a failure;
-/// for real capture work see [`HANG_GUARD`].
+/// manual clock before it fails. That work takes milliseconds, so this
+/// bound only turns a hang into a failure; for real capture work, the
+/// synthetic capture's first audio included, see [`HANG_GUARD`].
 pub const PATIENCE: Duration = Duration::from_secs(5);
 
 /// How long a test waits for real work over the synthetic capture before
 /// it fails as hung: a start, a stop and save, a quit, a rebuild or
-/// restart, a recording that ends on its own. A loaded runner stretches
-/// that work past [`PATIENCE`]. A gate that waits while such work runs,
-/// before the test can open it, takes this bound too, and so does a call
-/// that does the work only when the behaviour under test is broken (a
-/// refused start accepted after all), so the break fails on its
-/// assertion. A gate the test opens after only its own checks keeps
-/// [`PATIENCE`], so a claim can be timed against it. No verdict rests on
-/// how long the work took: a test about how often something happens
-/// counts it, and a product patience a test passes in takes this bound
-/// unless that patience is what it checks.
+/// restart, a recording that ends on its own, and the first audio once
+/// it records (a level, frames in the files), which passes the producer,
+/// the processing and the writer threads at wall-clock pace. A loaded
+/// runner stretches that work past [`PATIENCE`]. A gate that waits while
+/// such work runs, before the test can open it, takes this bound too,
+/// and so does a call that does the work only when the behaviour under
+/// test is broken (a refused start accepted after all), so the break
+/// fails on its assertion. A gate the test opens after only its own
+/// checks keeps [`PATIENCE`], so a claim can be timed against it. No
+/// verdict rests on how long the work took: a test about how often
+/// something happens counts it, and a product patience a test passes in
+/// takes this bound unless that patience is what it checks. An outage
+/// that can end a wait's condition (a device change whose rebuild
+/// silences the meter) is held by the test until that wait is over
+/// ([`HeldOutages`]): once the outage began, no bound would help.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
+
+/// The synthetic backends a test's capture built with their outages held
+/// (`SyntheticOptions::hold_outages`), so that the test lets each outage
+/// go once it saw what comes before it.
+#[derive(Clone, Default)]
+pub struct HeldOutages(Arc<Mutex<Vec<Arc<steno_audio::testing::SyntheticCaptureBackend>>>>);
+
+impl HeldOutages {
+    /// A backend over `options` with its outages held, kept for
+    /// [`release`](Self::release).
+    pub fn backend(
+        &self,
+        options: steno_audio::testing::synthetic::SyntheticOptions,
+    ) -> Arc<steno_audio::testing::SyntheticCaptureBackend> {
+        let backend = Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(
+            options.hold_outages(),
+        ));
+        self.0.lock().unwrap().push(backend.clone());
+        backend
+    }
+
+    /// Lets the next held outage of every backend kept go. Call it once
+    /// the start built the capture: a release saves nothing for a backend
+    /// built later.
+    pub fn release(&self) {
+        let backends = self.0.lock().unwrap();
+        assert!(
+            !backends.is_empty(),
+            "released before the start built the capture"
+        );
+        for backend in backends.iter() {
+            backend.release_outage();
+        }
+    }
+}
 
 /// A fresh store; the directory lives as long as the guard.
 pub fn temp_store() -> (tempfile::TempDir, Arc<Store>) {

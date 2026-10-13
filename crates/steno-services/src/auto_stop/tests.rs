@@ -14,8 +14,8 @@ use steno_host::services::Recorder as _;
 
 use super::*;
 use crate::testing::{
-    HANG_GUARD, PATIENCE, SyntheticRecorder, eventually, eventually_within, on_own_thread,
-    synthetic_recorder, synthetic_recorder_over,
+    HANG_GUARD, HeldOutages, PATIENCE, SyntheticRecorder, eventually, eventually_within,
+    on_own_thread, synthetic_recorder, synthetic_recorder_over,
 };
 
 /// One step of a [`CallWatch`] script.
@@ -1157,19 +1157,22 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
 }
 
 /// Where a test holds a rebuild's start: the backend says when the start
-/// is waiting, and goes on once the test opens it or after [`PATIENCE`].
-/// From that word on the test does only its own checks before it opens
-/// the gate, and times a claim against this patience; [`HANG_GUARD`] here
-/// would turn a notice thread that fell behind into a 120 s failure.
+/// is waiting, and goes on once the test opens it or after [`PATIENCE`],
+/// which it records, so a test that passed only once the gate gave up
+/// fails on [`SecondRebuild::stop`] instead. From that word on the test
+/// does only its own checks before it opens the gate, and times a claim
+/// against this patience; [`HANG_GUARD`] here would turn a notice thread
+/// that fell behind into a 120 s failure.
 struct Gate {
     entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
     open: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    gave_up: AtomicBool,
 }
 
 /// The synthetic backend whose second restart waits at `gate`, so that
 /// rebuild's start holds the session's lock until the test opens it.
 struct GatedRestart {
-    synthetic: steno_audio::testing::SyntheticCaptureBackend,
+    synthetic: Arc<steno_audio::testing::SyntheticCaptureBackend>,
     starts: std::sync::atomic::AtomicUsize,
     gate: Arc<Gate>,
 }
@@ -1183,7 +1186,8 @@ impl steno_audio::CaptureBackend for GatedRestart {
     ) -> Result<steno_audio::CaptureStream, steno_audio::CaptureError> {
         if self.starts.fetch_add(1, Ordering::SeqCst) == 2 {
             let _ = self.gate.entered.lock().unwrap().send(());
-            let _ = self.gate.open.lock().unwrap().recv_timeout(PATIENCE);
+            let opened = self.gate.open.lock().unwrap().recv_timeout(PATIENCE);
+            self.gate.gave_up.store(opened.is_err(), Ordering::SeqCst);
         }
         self.synthetic.start(lanes, input_device_uid, sink)
     }
@@ -1194,41 +1198,78 @@ impl steno_audio::CaptureBackend for GatedRestart {
 }
 
 /// A recording whose device changes twice for `reason`, a second into
-/// each start, and whose second rebuild's start waits at a gate: the
-/// receiver hears when it waits, and the sender opens it.
-fn recording_whose_second_rebuild_waits(
-    reason: steno_audio::DeviceChangeReason,
-) -> (
-    Recording,
-    std::sync::mpsc::Receiver<()>,
-    std::sync::mpsc::Sender<()>,
-) {
+/// each start, and whose second rebuild's start waits at a gate. The
+/// second change waits until the test releases it, so the notice thread
+/// read the session for the first change before that start can hold it.
+struct SecondRebuild {
+    recording: Recording,
+    /// Hears when the second rebuild's start waits at the gate.
+    waiting: std::sync::mpsc::Receiver<()>,
+    /// Opens it.
+    open: std::sync::mpsc::Sender<()>,
+    gate: Arc<Gate>,
+    second_change: HeldOutages,
+}
+
+impl SecondRebuild {
+    /// Stops the recording, ended by hand, and checks the test opened the
+    /// gate: one that gave up let the start go on its own, and the test
+    /// would have passed whatever it checked meanwhile.
+    fn stop(&self) {
+        self.recording.stop();
+        assert_eq!(
+            self.recording.meetings()[0].end_reason,
+            Some(RecordingEndReason::Manual)
+        );
+        assert!(
+            !self.gate.gave_up.load(Ordering::SeqCst),
+            "the test opened the gate before it gave up"
+        );
+    }
+}
+
+/// The [`SecondRebuild`] whose changes report `reason`.
+fn recording_whose_second_rebuild_waits(reason: steno_audio::DeviceChangeReason) -> SecondRebuild {
     let (entered, waiting) = std::sync::mpsc::channel();
     let (open, opened) = std::sync::mpsc::channel();
     let gate = Arc::new(Gate {
         entered: std::sync::Mutex::new(entered),
         open: std::sync::Mutex::new(opened),
+        gave_up: AtomicBool::new(false),
     });
-    let recording = recording_over(synthetic_recorder_over(Arc::new(move |configuration| {
-        let options = crate::testing::synthetic_tone(&configuration)
-            .change_device_after(1.0)
-            .changes(2)
-            .change_reason(reason);
-        let backend = GatedRestart {
-            synthetic: steno_audio::testing::SyntheticCaptureBackend::new(options),
-            starts: std::sync::atomic::AtomicUsize::new(0),
-            gate: gate.clone(),
-        };
-        steno_audio::CaptureSession::with_backend(
-            configuration,
-            Arc::new(backend),
-            None,
-            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-            Arc::new(steno_audio::SystemClock::new()),
-        )
-        .map_err(|error| error.to_string())
+    let second_change = HeldOutages::default();
+    let recording = recording_over(synthetic_recorder_over(Arc::new({
+        let (gate, second_change) = (gate.clone(), second_change.clone());
+        move |configuration| {
+            let options = crate::testing::synthetic_tone(&configuration)
+                .change_device_after(1.0)
+                .changes(2)
+                .change_reason(reason);
+            let synthetic = second_change.backend(options);
+            // The first change goes at its time.
+            synthetic.release_outage();
+            let backend = GatedRestart {
+                synthetic,
+                starts: std::sync::atomic::AtomicUsize::new(0),
+                gate: gate.clone(),
+            };
+            steno_audio::CaptureSession::with_backend(
+                configuration,
+                Arc::new(backend),
+                None,
+                steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+                Arc::new(steno_audio::SystemClock::new()),
+            )
+            .map_err(|error| error.to_string())
+        }
     })));
-    (recording, waiting, open)
+    SecondRebuild {
+        recording,
+        waiting,
+        open,
+        gate,
+        second_change,
+    }
 }
 
 /// The notice thread reads the session with the outage's lock released:
@@ -1238,23 +1279,27 @@ fn recording_whose_second_rebuild_waits(
 /// resume while the next rebuild's start waits at a gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
-    let (recording, waiting, open) =
+    let rebuild =
         recording_whose_second_rebuild_waits(steno_audio::DeviceChangeReason::DefaultInputChanged);
-    // The first change's notice waits until the second rebuild's start
-    // holds the session, so the thread reads the session for the first
-    // resume while that start runs.
+    let recording = &rebuild.recording;
+    // The first change's notice, once handled, lets the second change go
+    // and waits until the second rebuild's start holds the session, so the
+    // thread reads the session for the first resume while that start runs.
     let (go, gone) = std::sync::mpsc::channel::<()>();
     let gone = std::sync::Mutex::new(gone);
     let once = AtomicBool::new(false);
+    let second_change = rebuild.second_change.clone();
     recording.recorder.on_change(Arc::new(move || {
         if on_the_notice_thread() && !once.swap(true, Ordering::SeqCst) {
+            second_change.release();
             let _ = gone.lock().unwrap().recv_timeout(HANG_GUARD);
         }
     }));
     recording.start(CaptureMode::Call, None);
     recording.opened(Some("Zen"));
     recording.released();
-    waiting
+    rebuild
+        .waiting
         .recv_timeout(HANG_GUARD)
         .expect("the second rebuild's start waits");
     go.send(()).unwrap();
@@ -1270,12 +1315,8 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
             }
         },
     );
-    open.send(()).unwrap();
-    recording.stop();
-    assert_eq!(
-        recording.meetings()[0].end_reason,
-        Some(RecordingEndReason::Manual)
-    );
+    rebuild.open.send(()).unwrap();
+    rebuild.stop();
 }
 
 /// A device change begins the recovery before the notice thread reads the
@@ -1288,19 +1329,23 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
 /// second stall's rebuild waits at a gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call() {
-    let (recording, waiting, open) =
+    let rebuild =
         recording_whose_second_rebuild_waits(steno_audio::DeviceChangeReason::DeliveryStalled);
-    let (seen, go) = hold_the_notices(&recording, 2);
+    let recording = &rebuild.recording;
+    let (seen, go) = hold_the_notices(recording, 2);
     recording.start(CaptureMode::Call, None);
     recording.opened(Some("Zen"));
     seen.recv_timeout(HANG_GUARD).expect("the first stall");
     go.send(()).unwrap();
     seen.recv_timeout(HANG_GUARD).expect("the first resume");
+    // The first stall's read is done: the second stall may come.
+    rebuild.second_change.release();
     // Back from the first stall: the release's countdown runs, shown.
     recording.released();
     recording.sleepers(1);
     assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 90.0)));
-    waiting
+    rebuild
+        .waiting
         .recv_timeout(HANG_GUARD)
         .expect("the second stall's rebuild starts");
     go.send(()).unwrap();
@@ -1315,13 +1360,9 @@ async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call()
         recording.armed() == Some((Some("Zen".to_owned()), 90.0))
     })
     .await;
-    assert_still_recording(&recording);
-    open.send(()).unwrap();
-    recording.stop();
-    assert_eq!(
-        recording.meetings()[0].end_reason,
-        Some(RecordingEndReason::Manual)
-    );
+    assert_still_recording(recording);
+    rebuild.open.send(()).unwrap();
+    rebuild.stop();
 }
 
 /// Audio back after the capture recovered arms a fresh countdown when the

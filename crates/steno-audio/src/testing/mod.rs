@@ -7,7 +7,9 @@
 //! Not feature-gated, unlike `steno-core`'s `testing`: the synthetic
 //! backend is the production path's test double on Linux CI and the
 //! shell's capture source where no HAL exists, and nothing here pulls in
-//! a dependency the crate does not already have.
+//! a dependency the crate does not already have. Only the synthetic
+//! backend's held outages are, behind `test-support`: a test releases
+//! them, and no build of the shell or the CLI carries them.
 
 pub mod fake_activity;
 pub mod fixtures;

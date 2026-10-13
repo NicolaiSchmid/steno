@@ -4046,8 +4046,10 @@ fn restarts_that_never_offer_a_frame_back_off_up_to_the_longest_wait() {
 }
 
 /// A stop while a restart waits for its first frame, or while the rebuild
-/// waits out the backoff, cancels the wait and returns the recording at
-/// once, well within one start's deadline, leaving nothing asleep.
+/// waits out the backoff, cancels the wait and returns the recording
+/// without a further start, leaving nothing asleep. The clock stands still
+/// meanwhile, so a wait the stop did not cancel would keep it from
+/// returning; the starts are counted rather than the stop timed.
 #[test]
 fn a_stop_during_the_wait_for_a_first_frame_or_the_backoff_returns_at_once() {
     for in_the_backoff in [false, true] {
@@ -4079,18 +4081,16 @@ fn a_stop_during_the_wait_for_a_first_frame_or_the_backoff_returns_at_once() {
             assert!(clock.wait_for_sleepers(2), "the backoff");
         }
         let stopping = Arc::clone(&session);
-        let began = Instant::now();
         let result = within_deadline("the stop", move || stopping.stop()).unwrap();
-        assert!(
-            began.elapsed() < Duration::from_secs(3),
-            "within one start's deadline: {:?}",
-            began.elapsed()
+        assert_eq!(
+            backend.starts(),
+            2,
+            "no further start, in the backoff: {in_the_backoff}"
         );
         assert!(clock.wait_for_sleepers(0), "nothing left asleep");
         assert_eq!(session.state(), CaptureState::Idle);
         assert_eq!(result.statistics.duration, 0.5);
         assert!(!result.statistics.ended_on_device_loss);
-        assert_eq!(backend.starts(), 2, "in the backoff: {in_the_backoff}");
     }
 }
 
@@ -5147,4 +5147,129 @@ fn two_recording_sessions_keep_the_gate_shut_until_both_stop() {
     assert_eq!(playback.begin(|| {}).unwrap_err(), PlaybackRefused);
     second.stop().unwrap();
     assert!(playback.begin(|| {}).is_ok());
+}
+
+/// The backend alone over a sink nothing drains, `options` held, until it
+/// delivered past the frame its outage was due at (100 ms in): the ring
+/// fills, and it waits for room.
+fn held_past_its_frame(
+    options: SyntheticOptions,
+) -> (
+    SyntheticCaptureBackend,
+    Arc<LaneFrameSink>,
+    Receiver<DeviceChangeReason>,
+) {
+    let (reported, reports) = channel();
+    let sink = Arc::new(LaneFrameSink::with_handler(
+        &[AudioLane::Mixed],
+        SAMPLE_RATE,
+        1.0,
+        Box::new(move |reason| {
+            let _ = reported.send(reason);
+        }),
+    ));
+    let backend = SyntheticCaptureBackend::new(options.hold_outages());
+    backend
+        .start(&[AudioLane::Mixed], None, Arc::clone(&sink))
+        .unwrap();
+    let deadline = Instant::now() + RECV;
+    while backend.frames_delivered() <= HELD_AT {
+        assert!(Instant::now() < deadline, "it delivers past the outage");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    (backend, sink, reports)
+}
+
+/// The frame 100 ms in, where [`held_past_its_frame`]'s outage is due.
+const HELD_AT: usize = 4_800;
+
+/// A held device change waits for the test's release, the producer
+/// delivering on past its frame meanwhile, and goes once released; a
+/// release before the next change lets that one go at its frame. Rust
+/// only.
+#[test]
+fn a_held_change_waits_for_its_release() {
+    let (backend, sink, reports) = held_past_its_frame(
+        tones(&[AudioLane::Mixed], 10.0)
+            .change_device_after(0.1)
+            .changes(2),
+    );
+    assert_eq!(reports.try_recv().ok(), None, "held");
+    backend.release_outage();
+    sink.ring(0).drain_all();
+    assert_eq!(
+        reports.recv_timeout(RECV).unwrap(),
+        DeviceChangeReason::DefaultInputChanged
+    );
+    backend.wait_until_finished();
+    backend.stop();
+
+    backend.release_outage();
+    sink.clear();
+    sink.rearm_device_change();
+    let before = backend.frames_delivered();
+    backend
+        .start(&[AudioLane::Mixed], None, Arc::clone(&sink))
+        .unwrap();
+    assert_eq!(
+        reports.recv_timeout(RECV).unwrap(),
+        DeviceChangeReason::DefaultInputChanged
+    );
+    backend.wait_until_finished();
+    assert_eq!(backend.frames_delivered() - before, HELD_AT, "at its frame");
+    backend.stop();
+}
+
+/// One release lets one held change go: the next start's change stays
+/// held past its frame until its own release. Rust only.
+#[test]
+fn one_release_lets_only_one_change_go() {
+    let (backend, sink, reports) = held_past_its_frame(
+        tones(&[AudioLane::Mixed], 10.0)
+            .change_device_after(0.1)
+            .changes(2),
+    );
+    backend.release_outage();
+    sink.ring(0).drain_all();
+    assert_eq!(
+        reports.recv_timeout(RECV).unwrap(),
+        DeviceChangeReason::DefaultInputChanged
+    );
+    backend.wait_until_finished();
+    backend.stop();
+
+    sink.clear();
+    sink.rearm_device_change();
+    let before = backend.frames_delivered();
+    backend
+        .start(&[AudioLane::Mixed], None, Arc::clone(&sink))
+        .unwrap();
+    let deadline = Instant::now() + RECV;
+    while backend.frames_delivered() - before <= HELD_AT {
+        assert!(Instant::now() < deadline, "it delivers past the outage");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(reports.try_recv().ok(), None, "the second change is held");
+    backend.release_outage();
+    sink.ring(0).drain_all();
+    assert_eq!(
+        reports.recv_timeout(RECV).unwrap(),
+        DeviceChangeReason::DefaultInputChanged
+    );
+    backend.stop();
+}
+
+/// A held stall goes on delivering until the test releases it, and then
+/// stalls. Rust only.
+#[test]
+fn a_held_stall_waits_for_its_release() {
+    let (backend, sink, _) = held_past_its_frame(stalling(10.0, 0.1));
+    backend.release_outage();
+    sink.ring(0).drain_all();
+    backend.wait_until_finished();
+    let stalled = backend.frames_delivered();
+    assert!(stalled > HELD_AT, "past its frame: {stalled}");
+    settle();
+    assert_eq!(backend.frames_delivered(), stalled, "stalled");
+    backend.stop();
 }
