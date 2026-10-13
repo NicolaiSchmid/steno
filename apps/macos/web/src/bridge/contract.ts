@@ -710,6 +710,7 @@ export const phoneSettingsSnapshot = z
 					"replaced",
 					"partlyReplaced",
 					"fileNotOpened",
+					"clockBehind",
 				]),
 				message: z.string(),
 				busy: z.boolean(),

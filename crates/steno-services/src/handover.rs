@@ -18,7 +18,7 @@
 //!
 //! | Event | Plain handover | Gated handover | Read or written |
 //! |-------|----------------|----------------|-----------------|
-//! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read; a mint only where the guard allows |
+//! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read; a mint only where the guard allows; an identity found unrecorded is recorded only where the pairing-time rule adopts it ([`HandoverIdentity::adoptable`]), else waiting with the rule's reason (replaced, partly replaced, the clock) |
 //! | Try again while waiting | the listener once the read succeeds, else the new reason | the gate waits: the import's step runs again; a listener adopted: its Try again | the identity read (or the import's export) |
 //! | Try again with a listener | nothing | the adopted listener's: nothing | nothing |
 //! | Pair again while waiting | the listener over a new identity | the gate waits: the import ends with a new identity and the gate opens; a listener adopted: its Pair again | the marker, then the next fingerprint noted (a record that does not parse set aside first), then the new identity, then the paired phones removed, then its fingerprint recorded (dropping the note); a stop leaves the note |
@@ -103,7 +103,10 @@ use crate::swift_import::{HandoverGate, ImportMarker};
 /// Not `preferences.json`: that file holds only flags, is rewritten in
 /// place, and a build that reads it as flags would drop every flag over a
 /// text value. The Swift app never reads or writes this file, so a
-/// rollback to it leaves the record alone. No Swift counterpart.
+/// rollback to it leaves the record alone. With #284 the Swift app keeps
+/// its own record in this format, `swift-handover-identity.json`
+/// ([`SwiftRecord`](crate::swift_import::SwiftRecord)), which in this app
+/// only the import reads, read only.
 ///
 #[derive(Debug, Clone)]
 pub struct FingerprintFile {
@@ -408,9 +411,12 @@ const COMPUTER: &str = if cfg!(target_os = "macos") {
 /// in plain words: the keyring's own sentence when it was not opened at
 /// start, as that one already names the pairing; the waiting card's first
 /// sentence when the guard refused the identity or the record could not be
-/// opened; a sentence of its own when the database failed or the record
-/// does not parse, and when Pair again could not note the next fingerprint
-/// (the caller logs the error); the read's error otherwise.
+/// opened, and both of the card's sentences, starting in lowercase, when
+/// some phones were paired before the pairing changed (it follows "Phone
+/// handover is unavailable:"); a sentence of its own when the database
+/// failed or the record does not parse, and when Pair again could not note
+/// the next fingerprint (the caller logs the error); the read's error
+/// otherwise.
 pub(crate) fn identity_failure(error: &IdentityError) -> String {
     match error {
         IdentityError::Unavailable(Unavailability::Missing) => {
@@ -422,12 +428,19 @@ pub(crate) fn identity_failure(error: &IdentityError) -> String {
                  phones know."
             )
         }
-        // After "Phone handover is unavailable:", in the Swift app's words
-        // up to what to do (`IdentityUnavailability.partlyReplaced`).
+        // After "Phone handover is unavailable:": the first sentence is the
+        // Swift app's (`IdentityUnavailability.partlyReplaced`, #284), the
+        // second names this app's button.
         IdentityError::Unavailable(Unavailability::PartlyReplaced) => {
             format!(
                 "some of your phones were paired before this {COMPUTER}'s pairing changed and \
-                 can't connect. To reconnect them, choose Pair Again in Settings."
+                 can't connect. To reconnect them, choose Pair again in Settings > iPhone."
+            )
+        }
+        IdentityError::Unavailable(Unavailability::ClockBehind) => {
+            format!(
+                "This {COMPUTER}'s clock reads earlier than when its phone pairing was made, so \
+                 Steno cannot tell which pairing your phones know."
             )
         }
         IdentityError::Secrets(source) => {
@@ -490,6 +503,7 @@ fn wait_reason(error: &IdentityError) -> PhoneWaitingReason {
         IdentityError::Unavailable(Unavailability::PartlyReplaced) => {
             PhoneWaitingReason::PartlyReplaced
         }
+        IdentityError::Unavailable(Unavailability::ClockBehind) => PhoneWaitingReason::ClockBehind,
         _ => PhoneWaitingReason::Unreadable,
     }
 }
@@ -1337,7 +1351,7 @@ mod tests {
             ListenerState::Failed(format!(
                 "Phone handover is unavailable: some of your phones were paired before this \
                  {COMPUTER}'s pairing changed and can't connect. To reconnect them, choose Pair \
-                 Again in Settings."
+                 again in Settings > iPhone."
             ))
         );
         let card = steno_host::settings::snapshots::waiting_message(
@@ -1363,6 +1377,37 @@ mod tests {
             ))
         );
         assert_eq!(phones, 0, "every phone pairs again");
+    }
+
+    /// With nothing recorded, a phone paired after now on this computer's
+    /// clock (the clock went back since) waits for the clock with its own
+    /// reason and words, writes nothing, and never asks for Pair again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_identity_with_a_pairing_after_now_waits_for_the_clock() {
+        let paired = Paired::new(true).await;
+        std::fs::remove_file(paired.dir.path().join("handover-identity.json")).unwrap();
+        crate::testing::pair_a_phone_at(
+            &paired.store,
+            chrono::Utc::now() + chrono::TimeDelta::days(1),
+        );
+        let handover = ListenerHandover::read(paired.source());
+        assert_eq!(handover.waiting(), Some(PhoneWaitingReason::ClockBehind));
+        assert_eq!(
+            handover.state(),
+            ListenerState::Failed(format!(
+                "Phone handover is unavailable: This {COMPUTER}'s clock reads earlier than when \
+                 its phone pairing was made, so Steno cannot tell which pairing your phones know."
+            ))
+        );
+        let card = steno_host::settings::snapshots::waiting_message(
+            PhoneWaitingReason::ClockBehind,
+            steno_core::Platform::CURRENT,
+        );
+        assert!(card.ends_with("then choose Try again."), "{card}");
+        assert!(!card.contains("Pair again"), "{card}");
+        let (_, recorded, _, phones) = paired.places().await;
+        assert_eq!((recorded, phones), (None, 2), "nothing written");
+        assert_eq!(paired.listens.load(Ordering::SeqCst), 0);
     }
 
     /// A set-aside that fails stops the write: here the support folder's

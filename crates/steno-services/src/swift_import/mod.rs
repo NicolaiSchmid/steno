@@ -35,7 +35,7 @@
 //! |------|-------|
 //! | Launch half | [`launch`], [`launch_on_this_mac`], [`LaunchContext`] with [`SkipReason`], [`Launch`], [`LaunchKey`], [`PendingImport`] |
 //! | The graph | [`GraphImport`] (the gated secret store and the step), [`ImportGate`], [`HandoverGate`] with [`WaitReason`], [`key_denied_secrets`] |
-//! | The step | [`ImportStep`], [`NotImported`], [`DENIED_EXPORT`], [`FAILED_EXPORT`], [`REPLACED_PAIRING`], [`PARTLY_REPLACED_PAIRING`] |
+//! | The step | [`ImportStep`], [`NotImported`], [`DENIED_EXPORT`], [`FAILED_EXPORT`], [`REPLACED_PAIRING`], [`PARTLY_REPLACED_PAIRING`], [`CLOCK_BEHIND_PAIRING`] |
 //! | The certificate | [`choose_certificate`], [`CertificateChoice`] |
 //! | Sources (`sources.rs`) | [`SwiftDefaults`], [`SwiftKeychain`] with [`ImportMarker`], [`ApiKeyItem`], [`KeychainRefusal`], [`SwiftRecord`]; on the Mac `DefaultsCommand` and `LoginKeychain`, and [`marker_on_this_mac`] |
 //! | Identity (`identity.rs`) | [`decode_pkcs12`], [`store_imported_identity`], [`ImportedIdentityError`] |
@@ -66,7 +66,7 @@
 //! | Run: the key read | read | | `KEY_READ` |
 //! | Run: the key refused | withheld | | `KEY_READ`, `KEY_DENIED` (unless a key was saved meanwhile) |
 //! | Run: identity stored | | Ready | the identity and its fingerprint, then the marker, then `IMPORT_RAN` |
-//! | Run: the paired phones predate every Swift certificate, or some do ([`choose_certificate`]) | | Waiting, replaced or partly replaced (Try again, Pair again) | nothing |
+//! | Run: no one Swift certificate is chosen ([`choose_certificate`]) | | Waiting, replaced, partly replaced or the clock (Try again, Pair again) | nothing |
 //! | Run: export or store denied or failed | | Waiting (Try again) | nothing |
 //! | Run: identity stored, its fingerprint not recorded | | Waiting (Try again repeats the store) | the identity; no marker, no `IMPORT_RAN` |
 //! | Settings' Try again while Waiting | | as a run | as a run |
@@ -478,14 +478,18 @@ impl HandoverGate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitReason {
     /// The export of the Swift identity was denied, failed or skipped, or
-    /// the certificate could not be chosen ([`choose_certificate`]).
+    /// a certificate's start or the paired phones could not be read.
     ImportDenied,
-    /// Every paired phone was paired before every Swift certificate
-    /// starts ([`Unavailability::Replaced`]).
+    /// No paired phone knows any Swift certificate, or the Swift app's
+    /// record names one the keychain no longer holds
+    /// ([`choose_certificate`]).
     Replaced,
-    /// Some paired phones know one Swift certificate and the others
-    /// another one or none ([`Unavailability::PartlyReplaced`]).
+    /// The paired phones do not all know one Swift certificate, but some
+    /// know one ([`choose_certificate`]).
     PartlyReplaced,
+    /// A pairing or a certificate's start is after now on this Mac's clock
+    /// ([`choose_certificate`]).
+    ClockBehind,
 }
 
 /// The iPhone section's reason for the gate's.
@@ -495,6 +499,7 @@ impl From<WaitReason> for steno_bridge::PhoneWaitingReason {
             WaitReason::ImportDenied => steno_bridge::PhoneWaitingReason::ImportDenied,
             WaitReason::Replaced => steno_bridge::PhoneWaitingReason::Replaced,
             WaitReason::PartlyReplaced => steno_bridge::PhoneWaitingReason::PartlyReplaced,
+            WaitReason::ClockBehind => steno_bridge::PhoneWaitingReason::ClockBehind,
         }
     }
 }
@@ -505,27 +510,35 @@ pub struct CertificateChoice {
     pub swift_record: SwiftRecord,
     /// The database, for the paired phones' pairing times.
     pub store: Arc<Store>,
+    /// This Mac's clock, which the pairing-time rule judges by
+    /// (`chrono::Utc::now` in the product).
+    pub now: fn() -> chrono::DateTime<chrono::Utc>,
 }
 
 /// Of the Swift certificates the keychain holds (`certificates`, the DER
 /// of each in the keychain's order), the one to import, or `None` when
-/// there is none. Copies of one certificate count once. Then:
+/// there is none. Copies of one certificate count once. The Swift app's
+/// record ([`SwiftRecord::fingerprint`]) decides first, then the
+/// pairing-time rule ([`HandoverIdentity::adoptable`], whose table gives
+/// its outcomes):
 ///
-/// 1. Of several, the one the Swift app's record names
-///    ([`SwiftRecord::fingerprint`]). With one certificate the record is
-///    not read; a record that names none of several, cannot be read or
-///    does not parse counts as none.
-/// 2. Otherwise the one every paired phone knows, by the pairing-time rule
-///    ([`HandoverIdentity::known_by_every_phone`]): each phone knows the
-///    newest certificate that starts at or before its pairing; with no
-///    phone paired, the newest. This holds for one certificate too: a
-///    certificate every phone predates is one the Swift app minted after
-///    the phones paired (a keychain reset), which they cannot know.
+/// | Swift certificates | The Swift app's record | Result |
+/// |--------------------|------------------------|--------|
+/// | none | any | `None`: nothing to import |
+/// | several | names one of them | that one, without the rule |
+/// | one or several | names none of them | waits as [`WaitReason::Replaced`]: the phones know a certificate that is gone |
+/// | one | names it | the rule over it, as without a record |
+/// | one or several | none, unreadable, not parsing, or no fingerprint | the rule over them |
 ///
-/// Never the first one silently: when the phones settle nothing, the run
-/// waits as [`WaitReason::Replaced`] (no phone knows any) or
-/// [`WaitReason::PartlyReplaced`] (some do), and a start or a paired phone
-/// that cannot be read waits as a failed lookup does.
+/// | The rule | Result |
+/// |----------|--------|
+/// | adopts one | that one |
+/// | [`Unavailability::Replaced`] | waits as [`WaitReason::Replaced`], [`REPLACED_PAIRING`] |
+/// | [`Unavailability::PartlyReplaced`] | waits as [`WaitReason::PartlyReplaced`], [`PARTLY_REPLACED_PAIRING`] |
+/// | [`Unavailability::ClockBehind`] | waits as [`WaitReason::ClockBehind`], [`CLOCK_BEHIND_PAIRING`] |
+/// | a start or the paired phones cannot be read | waits as a failed lookup ([`FAILED_EXPORT`]) |
+///
+/// A certificate is never chosen by the keychain's order.
 pub fn choose_certificate(
     mut certificates: Vec<Vec<u8>>,
     choice: &CertificateChoice,
@@ -535,14 +548,24 @@ pub fn choose_certificate(
     if certificates.is_empty() {
         return Ok(None);
     }
-    if certificates.len() > 1
-        && let Some(recorded) = choice.swift_record.fingerprint()
-        && let Some(named) = certificates.iter().position(|certificate| {
+    if let Some(recorded) = choice.swift_record.fingerprint() {
+        let named = certificates.iter().position(|certificate| {
             steno_handover::identity::hex(&HandoverIdentity::fingerprint_of_der(certificate))
                 == recorded
-        })
-    {
-        return Ok(Some(certificates.swap_remove(named)));
+        });
+        match named {
+            None => {
+                tracing::warn!("the Swift app's record names a certificate the keychain lacks");
+                return Err(NotImported {
+                    line: REPLACED_PAIRING,
+                    reason: WaitReason::Replaced,
+                });
+            }
+            Some(named) if certificates.len() > 1 => {
+                return Ok(Some(certificates.swap_remove(named)));
+            }
+            Some(_) => {}
+        }
     }
     let starts = certificates
         .iter()
@@ -562,17 +585,15 @@ pub fn choose_certificate(
         .into_iter()
         .map(|device| device.paired_at)
         .collect();
-    match HandoverIdentity::known_by_every_phone(&starts, &paired) {
-        Ok(known) => Ok(Some(certificates.swap_remove(known))),
-        Err(Unavailability::PartlyReplaced) => Err(NotImported {
-            line: PARTLY_REPLACED_PAIRING,
-            reason: WaitReason::PartlyReplaced,
-        }),
-        Err(_) => Err(NotImported {
-            line: REPLACED_PAIRING,
-            reason: WaitReason::Replaced,
-        }),
-    }
+    let (line, reason) = match HandoverIdentity::adoptable(&starts, &paired, (choice.now)()) {
+        Ok(known) => return Ok(Some(certificates.swap_remove(known))),
+        Err(Unavailability::PartlyReplaced) => {
+            (PARTLY_REPLACED_PAIRING, WaitReason::PartlyReplaced)
+        }
+        Err(Unavailability::ClockBehind) => (CLOCK_BEHIND_PAIRING, WaitReason::ClockBehind),
+        Err(_) => (REPLACED_PAIRING, WaitReason::Replaced),
+    };
+    Err(NotImported { line, reason })
 }
 
 /// Why a run brought no identity over: the step's line and the reason the
@@ -962,15 +983,23 @@ pub const DENIED_EXPORT: &str =
     "macOS did not let Steno read this Mac's phone pairing. Choose Try again, then Always Allow.";
 /// The step's line when the export failed another way.
 pub const FAILED_EXPORT: &str = "Steno could not bring over this Mac's phone pairing.";
-/// The step's line when every paired phone predates every Swift
-/// certificate ([`WaitReason::Replaced`]).
-pub const REPLACED_PAIRING: &str =
-    "Steno found a different phone pairing on this Mac than the one your phones know.";
-/// The step's line when only some paired phones know a Swift certificate,
-/// or they know different ones ([`WaitReason::PartlyReplaced`]): the iPhone
-/// section's sentence for that reason on the Mac.
+/// The step's line when no paired phone knows a Swift certificate, or the
+/// Swift app's record names one that is gone ([`WaitReason::Replaced`]).
+pub const REPLACED_PAIRING: &str = "Steno found a different phone pairing on this Mac than the \
+     one your phones know. Choose Try again if you put the old one back, or Pair again in \
+     Settings > iPhone to start over.";
+/// The step's line when the paired phones do not all know one Swift
+/// certificate ([`WaitReason::PartlyReplaced`]): the iPhone section's
+/// sentence for that reason on the Mac.
 pub const PARTLY_REPLACED_PAIRING: &str = "Some of your phones were paired before this Mac's \
-     pairing changed and can't connect. To reconnect them, choose Pair Again in Settings.";
+     pairing changed and can't connect. To reconnect them, choose Pair again in Settings > \
+     iPhone.";
+/// The step's line when a pairing or a certificate's start is after now
+/// ([`WaitReason::ClockBehind`]): the iPhone section's sentence for that
+/// reason on the Mac.
+pub const CLOCK_BEHIND_PAIRING: &str = "This Mac's clock reads earlier than when its phone \
+     pairing was made, so Steno cannot tell which pairing your phones know. Check this Mac's \
+     date and time, then choose Try again.";
 
 impl ImportStep {
     fn state(&self) -> MutexGuard<'_, StepState> {

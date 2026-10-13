@@ -2243,15 +2243,29 @@ fn the_waiting_reasons_are_plain_sentences() {
          then choose Try again."
     );
     // Some phones paired before the pairing changed: the Swift app's words
-    // up to what to do, and Pair again in Settings is what reconnects them.
+    // up to what to do, and Pair again in Settings > iPhone, as the button
+    // reads, is what reconnects them.
     assert_eq!(
         waiting_message(PhoneWaitingReason::PartlyReplaced, Platform::Macos),
         "Some of your phones were paired before this Mac's pairing changed and can't connect. \
-         To reconnect them, choose Pair Again in Settings."
+         To reconnect them, choose Pair again in Settings > iPhone."
     );
+    // The clock went back: the fix is the clock, then Try again.
+    assert_eq!(
+        waiting_message(PhoneWaitingReason::ClockBehind, Platform::Macos),
+        "This Mac's clock reads earlier than when its phone pairing was made, so Steno cannot \
+         tell which pairing your phones know. Check this Mac's date and time, then choose Try \
+         again."
+    );
+    // Pair again cannot help with a file or the clock.
     for platform in Platform::ALL {
-        let message = waiting_message(PhoneWaitingReason::FileNotOpened, *platform);
-        assert!(!message.contains("Pair again"), "{platform}: {message}");
+        for reason in [
+            PhoneWaitingReason::FileNotOpened,
+            PhoneWaitingReason::ClockBehind,
+        ] {
+            let message = waiting_message(reason, *platform);
+            assert!(!message.contains("Pair again"), "{platform}: {message}");
+        }
     }
 }
 

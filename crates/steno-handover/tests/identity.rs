@@ -187,14 +187,16 @@ impl Places {
     }
 
     async fn load(&self, name: &str) -> Result<HandoverIdentity, IdentityError> {
-        HandoverIdentity::load_or_create(
-            &self.secrets,
-            &self.record,
-            self.store(),
-            name,
-            Utc::now(),
-        )
-        .await
+        self.load_at(name, Utc::now()).await
+    }
+
+    /// [`Places::load`] with this computer's clock at `now`.
+    async fn load_at(
+        &self,
+        name: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<HandoverIdentity, IdentityError> {
+        HandoverIdentity::load_or_create(&self.secrets, &self.record, self.store(), name, now).await
     }
 
     fn pair_a_phone(&self) {
@@ -960,4 +962,104 @@ async fn an_unrecorded_identity_whose_times_cannot_be_read_is_not_recorded() {
     assert!(matches!(error, IdentityError::Store(_)), "{error}");
     assert_eq!(places.record.get_recorded(), None);
     assert_eq!(places.stored_pem(), Some(identity.to_pem().unwrap()));
+}
+
+/// A recorded identity is adopted without the pairing-time rule, even when
+/// every phone (or some) predates its start or a time is after now, as the
+/// Swift import may record one the Swift app's record named: it loads,
+/// writes nothing and keeps the phones.
+#[tokio::test]
+async fn a_recorded_identity_the_phones_predate_loads_without_the_rule() {
+    for (phones, now) in [
+        (&[-86_400, -3600][..], MINT + 86_400),
+        (&[-86_400, 3600][..], MINT + 86_400),
+        (&[-86_400][..], MINT - 3600),
+        (&[3600][..], MINT),
+    ] {
+        let case = format!("{phones:?} at {now}");
+        let (places, identity) = unrecorded_identity_with_phones(phones).await;
+        places.record.record(&hex(&identity.fingerprint())).unwrap();
+        let loaded = places.load_at("x", common::date(now)).await.unwrap();
+        assert_eq!(loaded.fingerprint(), identity.fingerprint(), "{case}");
+        assert_eq!(
+            places.places(),
+            (
+                Some(identity.to_pem().unwrap()),
+                Some(hex(&identity.fingerprint())),
+                None,
+                (1..=phones.len() as u128)
+                    .map(uuid::Uuid::from_u128)
+                    .collect()
+            ),
+            "{case}: nothing written, the phones stay"
+        );
+    }
+}
+
+/// With nothing recorded, a certificate that starts after now, or a phone
+/// paired after now (by more than a second, the database's rounding),
+/// means this computer's clock went back: the load waits
+/// for the clock, with phones or without, records and mints nothing; once
+/// the clock has passed both, the rule decides.
+#[tokio::test]
+async fn an_unrecorded_identity_or_pairing_after_now_waits_for_the_clock() {
+    let start = MINT - 60;
+    for (phones, now, recorded_later) in [
+        // The certificate starts after now, no phone paired.
+        (&[][..], start - 2, true),
+        // The certificate starts after now, a phone paired since.
+        (&[-3600][..], MINT - 7200, false),
+        // A phone paired after now (the clock was fast when it paired).
+        (&[86_400][..], MINT + 3600, true),
+        (&[3600, 86_400][..], MINT + 7200, true),
+        (&[-86_400, 86_400][..], MINT + 7200, false),
+    ] {
+        let case = format!("{phones:?} at {now}");
+        let (places, identity) = unrecorded_identity_with_phones(phones).await;
+        let error = places.load_at("x", common::date(now)).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                IdentityError::Unavailable(Unavailability::ClockBehind)
+            ),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            places.places(),
+            (
+                Some(identity.to_pem().unwrap()),
+                None,
+                None,
+                (1..=phones.len() as u128)
+                    .map(uuid::Uuid::from_u128)
+                    .collect()
+            ),
+            "{case}: nothing written"
+        );
+        // Once the clock is past every time, the rule decides.
+        let later = places.load_at("x", common::date(MINT + 2 * 86_400)).await;
+        if recorded_later {
+            assert_eq!(
+                later.unwrap().fingerprint(),
+                identity.fingerprint(),
+                "{case}"
+            );
+            assert_eq!(
+                places.record.get_recorded(),
+                Some(hex(&identity.fingerprint())),
+                "{case}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    later,
+                    Err(IdentityError::Unavailable(
+                        Unavailability::Replaced | Unavailability::PartlyReplaced
+                    ))
+                ),
+                "{case}"
+            );
+            assert_eq!(places.record.get_recorded(), None, "{case}");
+        }
+    }
 }

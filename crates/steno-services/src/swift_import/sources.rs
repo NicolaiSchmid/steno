@@ -70,9 +70,11 @@ pub trait SwiftKeychain: ImportMarker {
 /// `swift-handover-identity.json` in the support directory both apps share
 /// (Swift: `IdentityRecordFile` in `Sources/StenoHandover/Identity/`), in
 /// [`FingerprintFile`](crate::handover::FingerprintFile)'s format under its
-/// key. The import reads it, and only to choose among several Swift
-/// certificates ([`choose_certificate`](super::choose_certificate)); it
-/// never writes, moves or deletes it. Nothing else in this app reads it.
+/// key. The import reads it, and only to choose the Swift certificate
+/// ([`choose_certificate`](super::choose_certificate)). The type has no
+/// write: its one access is [`std::fs::read`], which opens the file read
+/// only, so it never writes, moves or deletes it, and a read-only file
+/// decides the same. Nothing else in this app reads it.
 #[derive(Debug, Clone)]
 pub struct SwiftRecord {
     path: PathBuf,
@@ -93,6 +95,7 @@ impl SwiftRecord {
     /// The recorded fingerprint. A missing file is no record, and so is
     /// one that cannot be read or does not parse, or that holds no
     /// fingerprint (logged): the step then chooses as without a record.
+    /// Opened read only, never for writing.
     #[must_use]
     pub fn fingerprint(&self) -> Option<String> {
         let bytes = match std::fs::read(&self.path) {

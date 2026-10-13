@@ -122,6 +122,7 @@ describe("PhoneSection", () => {
 		"replaced",
 		"partlyReplaced",
 		"fileNotOpened",
+		"clockBehind",
 	] as const)(
 		"offers Try again and Pair again while it waits: %s",
 		async (reason) => {

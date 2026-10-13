@@ -590,6 +590,7 @@ fn import_step(
             &paths.support_directory,
         ),
         store: store.clone(),
+        now: chrono::Utc::now,
     };
     Arc::new(import.step(
         runtime.clone(),
