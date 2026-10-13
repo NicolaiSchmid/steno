@@ -4727,12 +4727,11 @@ fn wait_for_probes(backend: &ChosenOrDefault, count: usize) {
 /// that can ask one on a stream of its own: the session records the
 /// default in its place and asks after `CHOSEN_INPUT_RECHECK`, then twice
 /// as long after each ask. Asks that find it still not delivering cost the
-/// recording nothing (no restart, no gap, no drop, every whole frame
-/// delivered in the master, the duration exactly those frames); nothing
-/// else is asked of the backend. No wall-clock bound: the backend paces
-/// itself on its own thread, which the asks cannot hold, and each step
-/// waits until it delivered, so a wall bound would measure only this
-/// host's scheduling and the stop's latency.
+/// recording nothing (no restart, no gap, no drop, the master exactly the
+/// whole frames delivered); nothing else is asked of the backend. There is
+/// no wall-clock bound: the backend paces itself on its own thread, which
+/// the asks cannot hold, and every clock step waits for delivery, so wall
+/// time would measure only the host's scheduling and the stop's latency.
 #[test]
 fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing() {
     let directory = tempfile::tempdir().unwrap();
