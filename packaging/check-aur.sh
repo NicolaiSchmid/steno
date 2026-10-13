@@ -13,6 +13,9 @@
 #   crates/steno-audio/vendor/speexdsp/COPYING, symphonia-aac-tables.rs
 #   from crates/steno-audio/src/codec/salvage/tables.rs, or a copy here of a
 #   drop-in from its file in apps/desktop/src-tauri/linux/;
+# - license= is not exactly MIT, BSD-3-Clause and MPL-2.0, the licences of
+#   LICENSE, speexdsp-COPYING and symphonia-aac-tables.rs (read from
+#   .SRCINFO, which the first check holds to the PKGBUILD);
 # - the PKGBUILD's _copy, while it has one, installs a copy over a file the
 #   .deb ships or not where the .deb lacks it;
 # - the .deb's checksum or its signature from the release key does not
@@ -77,6 +80,9 @@ cmp -s "$root/crates/steno-audio/vendor/speexdsp/COPYING" "$work/speexdsp-COPYIN
 cmp -s "$root/crates/steno-audio/src/codec/salvage/tables.rs" "$work/symphonia-aac-tables.rs" \
   || die "packaging/aur/symphonia-aac-tables.rs is not crates/steno-audio/src/codec/salvage/tables.rs"
 echo "ok: LICENSE is the repository's, speexdsp-COPYING the vendored SpeexDSP's, symphonia-aac-tables.rs the salvage's tables"
+diff -u <(printf '\tlicense = %s\n' MIT BSD-3-Clause MPL-2.0) <(grep $'^\tlicense = ' "$work/.SRCINFO") \
+  || die "license= is not exactly MIT, BSD-3-Clause and MPL-2.0, the licences of the three files above"
+echo "ok: license= declares MIT, BSD-3-Clause and MPL-2.0"
 
 # The stop timeout drop-ins (P5): the path under /usr/lib/systemd/user, the
 # file in apps/desktop/src-tauri/linux (and its copy here while the pinned
