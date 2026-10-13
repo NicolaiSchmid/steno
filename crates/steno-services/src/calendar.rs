@@ -5,7 +5,7 @@
 //! (`apps/macos/Steno/Services/CalendarService.swift`).
 //!
 //! - [`Calendar`] is the seam: the timed events of a day. On the Mac it is
-//!   [`EventKitCalendar`] over `steno_macos::calendar`; elsewhere
+//!   `EventKitCalendar` over `steno_macos::calendar`; elsewhere
 //!   [`NoCalendar`], which never prompts and lists nothing. Neither ever
 //!   asks for access: the prompt is the calendar permission's request
 //!   (onboarding and Settings > General), as in the Swift app.
@@ -49,7 +49,7 @@ impl Calendar for NoCalendar {
     }
 }
 
-/// The calendar this platform has: [`EventKitCalendar`] on the Mac,
+/// The calendar this platform has: `EventKitCalendar` on the Mac,
 /// [`NoCalendar`] elsewhere.
 #[must_use]
 pub fn system_calendar() -> Arc<dyn Calendar> {
@@ -78,6 +78,10 @@ impl Calendar for EventKitCalendar {
         let Some((start, end)) = day_bounds(day, &chrono::Local) else {
             return Ok(Vec::new());
         };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "milliseconds since 1970 sit far inside an f64's 52 bits"
+        )]
         let to_seconds = |time: DateTime<Utc>| time.timestamp_millis() as f64 / 1000.0;
         let events = match events_between(to_seconds(start), to_seconds(end)) {
             Ok(events) => events,
@@ -117,8 +121,11 @@ impl Calendar for EventKitCalendar {
 /// Seconds since 1970 as `EventKit`'s `NSDate` gives them, to the
 /// millisecond.
 #[cfg(target_os = "macos")]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "calendar dates sit far inside `i64` milliseconds"
+)]
 fn from_seconds(seconds: f64) -> Option<DateTime<Utc>> {
-    // Calendar dates sit far inside `i64` milliseconds.
     DateTime::from_timestamp_millis((seconds * 1000.0).round() as i64)
 }
 

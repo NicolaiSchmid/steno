@@ -80,7 +80,7 @@ pub struct AppOptions {
     pub update_source: Option<Arc<dyn UpdateSource>>,
     /// What the system says of each permission; the shell's
     /// (`permissions.rs`), which the graph's
-    /// [`SystemPermissions`](crate::permissions::SystemPermissions) gives
+    /// [`SystemPermissions`] gives
     /// the Mac's system audio probe. `None` for a fake that grants
     /// everything (the CLI, the tests).
     pub permissions: Option<Arc<dyn Permissions>>,
