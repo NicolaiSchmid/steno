@@ -1082,54 +1082,70 @@ still has to draw the window side. `[ ]` is not ported yet.
 - Handover identity guard, every platform: the identity's SHA-256 fingerprint is
   recorded outside the secret store and the settings, in `handover-identity.json` under
   the support directory (`steno.handoverIdentityFingerprint`, written atomically;
-  `FingerprintFile`), and every write of the identity goes through
-  `HandoverIdentity::store`, which records it. `HandoverIdentity::load_or_create`
-  returns `IdentityError::Unavailable` and mints nothing when the secret store cannot be
-  read, when it holds no identity while a fingerprint is recorded or a phone is paired,
-  or when the identity's fingerprint is not the recorded one; Settings > iPhone then
-  says why and waits, with Try again and Pair again (#281; an identity read while the
-  Linux keyring asked the user is read again once it answered). It mints only with no
-  phone paired, no fingerprint and no identity. A rollback to the Swift app leaves the
-  file alone; a lost record is rewritten from the identity found while the paired
-  phones, which the Swift app keeps, hold the guard. A keychain that comes back empty (the
-  Mac's Create New Keychain) or holding another identity, at the next launch, with Try
-  again and Pair again, is tested end to end in `steno-services`' `keychain_reset_tests`,
-  over the secrets file, the Keychain's stand-in; so are the launch over an unfinished
-  Pair again's note, in each of its four cases, and a record that does not parse, which
-  waits until Pair again sets it aside. Swift keeps its own identity in the Keychain and,
-  since #284, the same guard (`HandoverIdentityGuard`) over its own record,
-  `swift-handover-identity.json` (`IdentityRecordFile`); the guards never read each
-  other's file. Instead of waiting in Settings > iPhone, the Swift app asks once at launch
-  in a native alert: Pair Again, after a second warning, or Not Now; a relaunch reads the
-  keychain again. A keychain or a record it cannot read turns its handover off for the run
-  with the startup warning, without the alert. Pair Again writes the new identity first,
-  then removes the phones, then records it, in both apps (`HandoverIdentity::mint_anew`,
-  `HandoverIdentityGuard.pairAgain`), so a refused write changes nothing and a run cut
-  short never mints. On a Mac, Rust's Pair again first writes the Swift import's
-  `swift-import-done` marker (`IdentitySource::pair_again`, #281), so the import never
-  brings the old Swift identity back; the Swift app has no import to stop and writes none.
-  Rust overwrites its one secret. Swift
-  stages the new keychain items under a second label, `Steno handover identity (new)`,
-  and gives them the default label last, because the file keychain cannot replace a
-  certificate and its key in one write; its delete takes the certificates before their
-  keys, so a run cut short never leaves a certificate without its key, and a launch that
-  finds the staged identity recorded finishes the move. Of several identities under the
-  default label across the keychain search list (an old login keychain added back), the
-  Swift app loads the recorded one. With nothing recorded (an upgrade from a build
-  without the record, or a lost record), the rewrite from the identity found is refined
-  by the `pairedAt` rule: a phone paired before a certificate's `notValidBefore` cannot
-  know that identity, so each paired phone knows the newest identity whose
-  `notValidBefore` is at or before its `pairedAt`. When every phone knows the same one,
-  the Swift app records it; with no phone paired, the newest. Both times come from the
-  Mac's clock, and a minted certificate starts a minute before its mint. When no phone
-  knows any identity, the launch is `replaced`; when some do but the phones know
-  different ones or some know none, it is `partlyReplaced`, which asks the same question
-  and says "some of your phones were paired before this Mac's pairing changed and can't
-  connect. Choose Pair Again the next time Steno opens to reconnect them." Neither
-  records anything, and a certificate whose `notValidBefore` cannot be read is
-  unreadable. Rust still records the identity it finds with nothing recorded; a
-  follow-up PR, the one for the Rust import's choice among several Swift certificates,
-  gives `load_or_create` and the import the same rule.
+  `FingerprintFile`; while a Pair again is unfinished also
+  `steno.handoverIdentityNextFingerprint`), and every write of the identity goes through
+  `HandoverIdentity::store` or Pair again's `HandoverIdentity::mint_anew`, both of which
+  record it. `HandoverIdentity::load_or_create` returns `IdentityError::Unavailable` and
+  mints nothing when the secret store cannot be read, when it holds no identity while a
+  fingerprint is recorded or a phone is paired, or when the identity's fingerprint is not
+  the recorded one; Settings > iPhone then says why and waits, with Try again and Pair
+  again (#281; `Handover::waiting`; an identity read while the Linux keyring asked the
+  user is read again once it answered). It mints only with no phone paired, no
+  fingerprint and no identity. A record that does not parse is replaced only by a write
+  (Pair again's note, or the record of the Swift import's store), after setting it aside
+  (`files::set_aside`, kept as `handover-identity.json.corrupt-<time>`). A rollback to
+  the Swift app leaves the file alone; a lost record is rewritten from the identity found
+  while the paired phones, which the Swift app keeps, hold the guard. A keychain that
+  comes back empty (the Mac's Create New Keychain) or holding another identity, at the
+  next launch, with Try again and Pair again, is tested end to end in `steno-services`'
+  `keychain_reset_tests`, over the secrets file, the Keychain's stand-in; so are the
+  launch over an unfinished Pair again's note, in each of its four cases, and a record
+  that does not parse, which waits until Pair again sets it aside. Swift keeps its own
+  identity in the Keychain and, since #284, the same guard (`HandoverIdentityGuard`) over
+  its own record, `swift-handover-identity.json` (`IdentityRecordFile`); the guards never
+  read each other's file. Instead of waiting in Settings > iPhone, the Swift app asks once
+  at launch in a native alert: Pair Again, after a second warning, or Not Now; a relaunch
+  reads the keychain again. A keychain or a record it cannot read turns its handover off
+  for the run with the startup warning, without the alert. Pair Again writes the new
+  identity first, then removes the phones, then records it, in both apps
+  (`HandoverIdentity::mint_anew`, `HandoverIdentityGuard.pairAgain`), so a refused write
+  changes nothing and a run cut short never mints. On a Mac, Rust's Pair again first
+  writes the Swift import's `swift-import-done` marker (`IdentitySource::pair_again`,
+  #281), so the import never brings the old Swift identity back; the Swift app has no
+  import to stop and writes none. Rust overwrites its one secret. Swift stages the new
+  keychain items under a second label, `Steno handover identity (new)`, and gives them the
+  default label last, because the file keychain cannot replace a certificate and its key
+  in one write; its delete takes the certificates before their keys, so a run cut short
+  never leaves a certificate without its key, and a launch that finds the staged identity
+  recorded finishes the move. Of several identities under the default label across the
+  keychain search list (an old login keychain added back), the Swift app loads the
+  recorded one.
+  - With nothing recorded (an upgrade from a build without the record, or a lost
+    record), the Swift app refines the rewrite from the identity found by the `pairedAt`
+    rule (`HandoverIdentityGuard.knownByEveryPhone`): a phone paired before a
+    certificate's `notValidBefore` cannot know that identity, so each paired phone knows
+    the newest identity whose `notValidBefore` is at or before its `pairedAt`. When every
+    phone knows the same one, it is recorded; with no phone paired, the newest. Both
+    times come from the Mac's clock, and a minted certificate starts a minute before its
+    mint. A certificate in two keychains is one identity, and two that start in the same
+    second are no newest one, so a phone whose newest start they share knows neither.
+    When no phone knows any identity, the launch is `replaced`; when some do but the
+    phones know different ones or some know none, it is `partlyReplaced`, which asks the
+    same question and says "some of your phones were paired before this Mac's pairing
+    changed and can't connect. Choose Pair Again the next time Steno opens to reconnect
+    them." Neither records anything, and a certificate whose `notValidBefore` cannot be
+    read is unreadable.
+  - A phone paired, or an identity started, after this Mac's clock says it is now is a
+    clock error (`clockBehind`): the clock is wrong now or was then, so the dates cannot
+    say which identity the phones know. The launch asks nothing, records nothing and
+    waits, with the startup warning "this Mac's date and time are earlier than when its
+    phone pairing was made, so Steno can't tell which pairing your phones know. Check the
+    date and time in System Settings, then open Steno again." A clock that was fast when
+    a phone paired waits until that time has passed. Only this choice reads the times,
+    so a recorded identity loads whatever the clock says.
+  - Rust records the identity it finds with nothing recorded until #289 gives
+    `load_or_create` and the import the same `pairedAt` rule, ties included
+    (`HandoverIdentity::known_by_every_phone`); the clock rule is still to come there.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
