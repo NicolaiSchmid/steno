@@ -283,8 +283,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     (`steno_speech::chunker::MIN_GAP_SECONDS`) is decoded in extra windows that stay
     inside it (`gap_windows`), and their words go in between the chunks' without
     changing one (`splice_gaps`; chunk words a recovery kept inside a gap cover it,
-    those on each side of its middle from the first of them to the last); a window of
-    digital silence is left out. FLEURS and the corpus are unchanged (4.874 %, 8.46 %,
+    those the earlier chunk's recovery kept, up to 2 s past the gap's start, and those
+    after them, each from the first of them to the last; at a seam a window's word
+    falls away only as the chunk's next or last word heard again, the same piece
+    starting within two frames of it, so a word said twice across a gap's edge stays,
+    and so does the window's copy of a word sounding across the edge when the two
+    copies start further apart); a window of digital silence is left out. FLEURS and the corpus are unchanged (4.874 %, 8.46 %,
     no word added), quiet speech at -20 and -26 dB comes through as the lead-in, a 9.1 s
     gap and the tail (14, 19 and 14 words, main's level), and the cost is +13 % on
     FLEURS, +9 % on the corpus and +10 % on a 15-minute meeting's two lanes (+21 % on
