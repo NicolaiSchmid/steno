@@ -16,7 +16,7 @@
 //! `Stopping` reaches the tray at once, as its `recording` snapshot. The
 //! lane keeps the clicks in order, as the main thread did: a Record
 //! clicked during that stop runs once it has ended, and Quit waits for it
-//! ([`quit_from_menu`]).
+//! ([`quit_from_menu`]), having refused every start first.
 //!
 //! Swift: `MenuBarView.swift` (the buttons), `AppCommands` in
 //! `StenoApp.swift` (the Record menu).
@@ -32,7 +32,7 @@ use tauri::{
 use crate::{
     bridge::{BridgeError, failed},
     host::{self, ShellHost},
-    tray, updater,
+    updater,
     windows::{self, BridgeWindow},
 };
 
@@ -150,17 +150,18 @@ pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
         MenuAction::RecordInPerson => report(record(app, Some(CaptureMode::InPerson))),
         MenuAction::OpenMain => open(app, BridgeWindow::Main),
         MenuAction::OpenSettings => open(app, BridgeWindow::Settings),
-        MenuAction::LaunchAtLogin => {
-            match host_window(app) {
-                Ok(window) => launch_at_login_through(app.clone(), window),
-                Err(error) => {
-                    report(Err(error));
-                    // The check mark follows the system, even when the
-                    // change failed.
-                    tray::note_login_item(app);
-                }
+        MenuAction::LaunchAtLogin => match host_window(app) {
+            Ok(window) => launch_at_login_through(app.clone(), window),
+            Err(error) => {
+                report(Err(error));
+                // The check mark follows the system, even when the change
+                // failed, read off the main thread.
+                host::call_in_order(app.clone(), "menu", |host| {
+                    host.note_login_item(host.login_item_on());
+                    Ok(())
+                });
             }
-        }
+        },
         MenuAction::CheckForUpdates => check_for_updates(app),
         MenuAction::Quit => quit_from_menu(app),
     }
@@ -188,9 +189,9 @@ pub fn launch_at_login_command(value: bool) -> (&'static str, Value) {
 /// shows why in Settings > General. Blocking (the system's login item,
 /// then the host), so it runs off the main thread: from Settings on
 /// Tauri's blocking pool (`bridge::host_command`), from the tray on the
-/// shell's ordered lane ([`launch_at_login_through`]). The check mark
-/// moves on the main thread, once the host has answered, even when the
-/// change failed.
+/// shell's ordered lane ([`launch_at_login_through`]). Once the host has
+/// answered, even when the change failed, the system's login item is read
+/// again here and the check mark shows it, on the main thread.
 /// Swift: `MenuBarViewModel.setLaunchAtLogin`.
 pub fn set_launch_at_login<H: ShellHost>(
     host: &H,
@@ -200,7 +201,7 @@ pub fn set_launch_at_login<H: ShellHost>(
     let switched = host.switch_login_item(value);
     let (method, params) = launch_at_login_command(value);
     let told = host.call(window, method, params);
-    host.note_login_item();
+    host.note_login_item(host.login_item_on());
     switched?;
     told?;
     Ok(())
@@ -230,22 +231,35 @@ pub fn quit(app: &AppHandle) {
     app.exit(QUIT_CODE);
 }
 
-/// The menus' Quit. The tray's Record rows read "Quitting…", disabled, at
-/// once (`tray::note_quitting`), so no click is taken that could not
-/// start a recording any more. The exit then waits for the actions
-/// clicked before it ([`exit_after_queued`]): a Stop whose save waits on
-/// the store finishes it, with its own end reason, as it did when the main
-/// thread ran the Stop and the Quit waited behind it. Past
-/// [`SHUTDOWN_PATIENCE`](steno_services::app::SHUTDOWN_PATIENCE) the exit
-/// goes ahead: its shutdown tries the stop's commit no more, and a save
-/// still waiting leaves the meeting `recording` for the next launch's
-/// recovery.
+/// The menus' Quit ([`quit_through`] with
+/// [`SHUTDOWN_PATIENCE`](steno_services::app::SHUTDOWN_PATIENCE)).
 pub fn quit_from_menu(app: &AppHandle) {
-    tray::note_quitting(app);
     let exiting = app.clone();
-    exit_after_queued(app, steno_services::app::SHUTDOWN_PATIENCE, move || {
+    quit_through(app, steno_services::app::SHUTDOWN_PATIENCE, move || {
         quit(&exiting);
     });
+}
+
+/// The menus' Quit on `host`, on the main thread. Every recording start is
+/// refused at once (`ShellHost::refuse_starts`), so a Record from any
+/// surface, the tray's queued before the Quit included, says "Steno is
+/// quitting" and leaves no meeting to save on the way out; the tray's
+/// Record rows read "Quitting…", disabled, and Launch at login is
+/// disabled (`tray::note_quitting`). Then `exit` waits for the actions
+/// clicked before the Quit ([`exit_after_queued`]): a Stop whose save
+/// waits on the store finishes it, with its own end reason, as it did when
+/// the main thread ran the Stop and the Quit waited behind it. Past
+/// `patience` the exit goes ahead: its shutdown tries the stop's commit no
+/// more, and a save still waiting leaves the meeting `recording` for the
+/// next launch's recovery.
+pub fn quit_through<H: ShellHost>(
+    host: &H,
+    patience: std::time::Duration,
+    exit: impl FnOnce() + Send + 'static,
+) {
+    host.refuse_starts();
+    host.note_quitting();
+    exit_after_queued(host, patience, exit);
 }
 
 /// Calls `exit` from a thread of its own once every job queued on `host`'s
@@ -292,7 +306,7 @@ mod tests {
 
     /// The tray's Record while the host's stop is held (its save waits on
     /// the store): the menu event returns at once, and the stop goes on
-    /// and ends on the blocking pool.
+    /// and ends on the lane.
     #[test]
     fn the_trays_record_returns_before_the_stop_ends() {
         let host = GatedHost::holding("recording.toggle");
@@ -340,6 +354,7 @@ mod tests {
             host.wait_noted(1, Duration::from_secs(1)),
             "the check mark follows the system"
         );
+        assert_eq!(host.checked(), [true], "as read once switched");
     }
 
     /// The tray's Stop, on a stand-in main thread: the host publishes
@@ -384,7 +399,7 @@ mod tests {
                 if let Some(state) =
                     crate::bridge::recording_state_for_shell("main", event.topic, &event.payload)
                 {
-                    let _ = self.rows.send(tray::record_label(state));
+                    let _ = self.rows.send(crate::tray::record_label(state));
                 }
             }
         }
@@ -485,6 +500,7 @@ mod tests {
         host.open();
         assert!(host.wait_noted(2, Duration::from_secs(5)));
         assert_eq!(host.switched(), [true, false]);
+        assert_eq!(host.checked(), [true, false]);
     }
 
     /// The menus' Quit while the Stop clicked before it waits on the
@@ -512,19 +528,74 @@ mod tests {
     }
 
     /// A stop that still waits once the patience has passed does not hold
-    /// the exit: it goes ahead, and the shutdown takes over the stop.
+    /// the exit: it goes ahead about when the patience ends, never seconds
+    /// later, and the shutdown takes over the stop.
     #[test]
     fn a_quit_goes_ahead_once_its_patience_has_passed() {
         let (host, _opens) = a_held_stop();
         let (exited, exit) = std::sync::mpsc::channel();
+        let asked = std::time::Instant::now();
         exit_after_queued(&host, Duration::from_millis(200), move || {
-            let _ = exited.send(());
+            let _ = exited.send(asked.elapsed());
         });
-        assert!(exit.recv_timeout(Duration::from_secs(5)).is_ok());
+        let after = exit.recv_timeout(Duration::from_secs(10)).expect("an exit");
+        assert!(after >= Duration::from_millis(190), "{after:?}");
+        assert!(after < Duration::from_millis(1500), "{after:?}");
         assert_eq!(
             host.answered(),
             Vec::<String>::new(),
             "the stop is still held"
+        );
+    }
+
+    /// The menus' Quit refuses every start and retitles the tray before it
+    /// returns, on the main thread, while the Stop clicked before it still
+    /// waits on the store: neither waits behind that stop on the lane.
+    #[test]
+    fn a_quit_refuses_starts_and_retitles_the_tray_at_once() {
+        let (host, _opens) = a_held_stop();
+        let clicked = host.clone();
+        assert!(
+            returns_at_once(move || quit_through(&clicked, Duration::from_secs(5), || {})),
+            "the Quit waited"
+        );
+        assert_eq!(host.quit_steps(), ["refuse starts", "quitting"]);
+        assert_eq!(host.answered(), Vec::<String>::new(), "the stop is held");
+    }
+
+    /// A Record clicked while the Stop before it waits on the store, then
+    /// Quit: the Record runs after the stop and before the exit, and is
+    /// refused, as the Quit refused every start before either ran, so no
+    /// recording is left to save on the way out. Its call takes 300 ms
+    /// here, so an exit that came before it would find it unanswered.
+    #[test]
+    fn a_record_queued_before_a_quit_is_refused_before_the_exit() {
+        let host = GatedHost::holding("recording.toggle")
+            .delaying("recording.start", Duration::from_millis(300));
+        let _opens = host.opens_on_drop();
+        record_through(host.clone(), "main", None);
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the stop reached the host"
+        );
+        record_through(host.clone(), "main", Some(CaptureMode::InPerson));
+        let (exited, exit) = std::sync::mpsc::channel();
+        let seen = host.clone();
+        quit_through(&host, Duration::from_secs(5), move || {
+            let _ = exited.send(seen.answered());
+        });
+        assert!(
+            exit.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the exit came while the stop was held"
+        );
+        host.open();
+        assert_eq!(
+            exit.recv_timeout(Duration::from_secs(5)),
+            Ok(vec![
+                "recording.toggle".to_owned(),
+                "recording.start refused".to_owned()
+            ]),
+            "the Record queued before the Quit ran, refused, before the exit"
         );
     }
 

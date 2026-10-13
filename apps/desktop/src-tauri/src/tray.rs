@@ -31,7 +31,6 @@
 //! in `StenoApp.swift` and `FloatingContent.swift`.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{
     AppHandle, Manager, Wry,
@@ -86,8 +85,9 @@ pub struct RecordRows {
 }
 
 /// The Record rows for the recorder's `state`: once quitting, both read
-/// "Quitting…", disabled, whatever the recorder does next, since no start
-/// is taken any more (Rust only: the Swift app's Quit ended its menu).
+/// "Quitting…", disabled, whatever the recorder does next, since a start
+/// is refused from then on (`Recorder::refuse_starts`; Rust only: the
+/// Swift app's Quit ended its menu).
 pub const fn record_rows(state: RecordingState, quitting: bool) -> RecordRows {
     if quitting {
         RecordRows {
@@ -112,17 +112,68 @@ pub fn tooltip(state: RecordingState) -> &'static str {
     }
 }
 
+/// The rows that change while the app runs: the two Record rows, and
+/// whether Launch at login can be clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rows {
+    record: RecordRows,
+    launch_at_login: bool,
+}
+
+/// What the changing rows show, apart from the menu items so a test can
+/// drive it. The Record rows follow the recorder until Quit, then read
+/// "Quitting…" ([`record_rows`]); Launch at login, switchable or not from
+/// the build on, is disabled at Quit too, as a switch clicked then would
+/// land beside the exit's own (`autostart::at_exit`) or not at all. It
+/// remembers the rows last set, so a `recording` snapshot that moved only
+/// the levels (20 a second) sets nothing.
+#[derive(Debug)]
+struct RowState {
+    /// Whether the system lets Launch at login be switched
+    /// (`autostart::switchable`).
+    switchable: bool,
+    /// Set once, by [`Self::quit`].
+    quitting: bool,
+    shown: Option<Rows>,
+}
+
+impl RowState {
+    fn new(switchable: bool) -> Self {
+        RowState {
+            switchable,
+            quitting: false,
+            shown: None,
+        }
+    }
+
+    /// A `recording` snapshot in `state`: the rows to set, none when they
+    /// already read so.
+    fn recording(&mut self, state: RecordingState) -> Option<Rows> {
+        self.show(state)
+    }
+
+    /// Quit was chosen: the rows to set, none when they already read so.
+    fn quit(&mut self) -> Option<Rows> {
+        self.quitting = true;
+        self.show(RecordingState::Idle)
+    }
+
+    fn show(&mut self, state: RecordingState) -> Option<Rows> {
+        let rows = Rows {
+            record: record_rows(state, self.quitting),
+            launch_at_login: self.switchable && !self.quitting,
+        };
+        (self.shown.replace(rows) != Some(rows)).then_some(rows)
+    }
+}
+
 /// The live items, kept as managed state so a `recording` snapshot can
 /// retitle them.
 pub struct Tray {
     record: MenuItem<Wry>,
     in_person: MenuItem<Wry>,
     launch_at_login: CheckMenuItem<Wry>,
-    /// Set once by `note_quitting`.
-    quitting: AtomicBool,
-    /// The Record rows as last set, so a `recording` snapshot that moved
-    /// only the levels (20 a second) sets nothing.
-    shown: Mutex<Option<RecordRows>>,
+    rows: Mutex<RowState>,
 }
 
 /// A menu item's shortcut hint, on the Mac only: the menu bar extra's
@@ -170,11 +221,12 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     // A login item the system manages shows checked and cannot be
     // switched (`autostart`).
     let login_item = autostart::status(app);
+    let switchable = autostart::switchable(login_item);
     let launch_at_login = CheckMenuItem::with_id(
         app,
         MenuAction::LaunchAtLogin.as_str(),
         MenuAction::LaunchAtLogin.label(),
-        autostart::switchable(login_item),
+        switchable,
         login_item.is_on(),
         None::<&str>,
     )?;
@@ -210,8 +262,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         record,
         in_person,
         launch_at_login,
-        quitting: AtomicBool::new(false),
-        shown: Mutex::new(None),
+        rows: Mutex::new(RowState::new(switchable)),
     });
     Ok(())
 }
@@ -221,50 +272,58 @@ pub fn note_recording(app: &AppHandle, state: RecordingState) {
     let Some(tray) = app.try_state::<Tray>() else {
         return;
     };
-    set_record_rows(
-        &tray,
-        record_rows(state, tray.quitting.load(Ordering::Acquire)),
-    );
+    let change = tray.row_state().recording(state);
+    set_rows(&tray, change);
     if let Some(icon) = app.tray_by_id(TRAY_ID) {
         let _ = icon.set_tooltip(Some(tooltip(state)));
     }
 }
 
 /// Quit was chosen: both Record rows read "Quitting…", disabled, from now
-/// on ([`record_rows`]), so a Record that could not start a recording any
-/// more is never clicked unseen. On the main thread, before the exit.
+/// on ([`record_rows`]), so a Record that would be refused is never
+/// clicked unseen, and Launch at login is disabled ([`RowState`]). On the
+/// main thread, before the exit.
 pub fn note_quitting(app: &AppHandle) {
-    let Some(tray) = app.try_state::<Tray>() else {
-        return;
-    };
-    tray.quitting.store(true, Ordering::Release);
-    set_record_rows(&tray, record_rows(RecordingState::Idle, true));
+    if let Some(tray) = app.try_state::<Tray>() {
+        let change = tray.row_state().quit();
+        set_rows(&tray, change);
+    }
 }
 
-fn set_record_rows(tray: &Tray, rows: RecordRows) {
-    let mut shown = tray
-        .shown
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if shown.replace(rows) == Some(rows) {
-        return;
+impl Tray {
+    fn row_state(&self) -> std::sync::MutexGuard<'_, RowState> {
+        self.rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+/// Sets the rows a change asked for; nothing for none. On the main thread,
+/// as every change is, so they land in the order they were made.
+fn set_rows(tray: &Tray, change: Option<Rows>) {
+    let Some(Rows {
+        record,
+        launch_at_login,
+    }) = change
+    else {
+        return;
+    };
     for (item, (text, enabled)) in [
-        (&tray.record, rows.record),
-        (&tray.in_person, rows.in_person),
+        (&tray.record, record.record),
+        (&tray.in_person, record.in_person),
     ] {
         let _ = item.set_text(text);
         let _ = item.set_enabled(enabled);
     }
+    let _ = tray.launch_at_login.set_enabled(launch_at_login);
 }
 
 /// The login item changed (from the menu or from Settings): the check mark
-/// follows what the system says, not what was asked.
-pub fn note_login_item(app: &AppHandle) {
+/// follows what the system says, `on`, read off the main thread by the
+/// job that switched it, not what was asked.
+pub fn note_login_item(app: &AppHandle, on: bool) {
     if let Some(tray) = app.try_state::<Tray>() {
-        let _ = tray
-            .launch_at_login
-            .set_checked(autostart::status(app).is_on());
+        let _ = tray.launch_at_login.set_checked(on);
     }
 }
 
@@ -353,6 +412,54 @@ mod tests {
                 rows.in_person,
                 ("Record in person", in_person_enabled(state))
             );
+        }
+    }
+
+    /// A `recording` snapshot that moves nothing the rows show (the
+    /// levels, 20 a second) sets no row, and every one that does sets
+    /// them, back to the first rows set as well.
+    #[test]
+    fn only_a_snapshot_that_moves_a_row_sets_the_rows() {
+        use RecordingState::{Idle, Recording, Stopping};
+        let mut rows = RowState::new(true);
+        for state in [Idle, Recording, Stopping, Idle, Recording] {
+            assert_eq!(
+                rows.recording(state),
+                Some(Rows {
+                    record: record_rows(state, false),
+                    launch_at_login: true,
+                }),
+                "{state:?}"
+            );
+            assert_eq!(rows.recording(state), None, "{state:?} again");
+        }
+    }
+
+    /// Quit sets the quitting rows (`note_quitting`): both Record rows
+    /// read "Quitting…", disabled, and Launch at login is disabled; every
+    /// snapshot after it (`note_recording`) leaves them so, whatever the
+    /// recorder does on the way out. A login item the system manages
+    /// stays disabled throughout.
+    #[test]
+    fn quit_sets_the_quitting_rows_and_the_snapshots_after_it_keep_them() {
+        use RecordingState::{Idle, Recording, Starting, Stopping};
+        for switchable in [true, false] {
+            let mut rows = RowState::new(switchable);
+            assert_eq!(
+                rows.recording(Recording).map(|rows| rows.launch_at_login),
+                Some(switchable)
+            );
+            let quitting = Rows {
+                record: record_rows(Idle, true),
+                launch_at_login: false,
+            };
+            assert_eq!(quitting.record.record, ("Quitting…", false));
+            assert_eq!(rows.quit(), Some(quitting));
+            for state in [Stopping, Idle, Starting, Recording] {
+                assert_eq!(rows.recording(state), None, "{state:?}");
+            }
+            assert_eq!(rows.quit(), None);
+            assert_eq!(rows.shown, Some(quitting));
         }
     }
 

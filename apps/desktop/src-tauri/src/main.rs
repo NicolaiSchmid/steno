@@ -269,7 +269,7 @@ fn setup(
     autostart::remove_earlier_agent();
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
-    tray::note_login_item(handle);
+    tray::note_login_item(handle, autostart::status(handle).is_on());
     #[cfg(target_os = "linux")]
     autostart::sync_at_launch(handle);
     #[cfg(unix)]

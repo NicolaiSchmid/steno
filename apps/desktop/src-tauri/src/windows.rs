@@ -231,7 +231,10 @@ impl Request {
 /// second instance's link can reach it the same way), so it waits here
 /// and goes out right after the page's first snapshots. One lock over
 /// both, so a `page.ready` on one thread and a request on another cannot
-/// leave a request owed to a page that already listens. Managed state.
+/// leave a request owed to a page that already listens, and a request is
+/// handed to its publish ([`publish`], which only queues it) under that
+/// lock, so two requests are queued in the order they took it: an owed
+/// one before a later one. Managed state.
 #[derive(Debug, Default)]
 pub struct Pages {
     state: Mutex<PagesState>,
@@ -245,12 +248,16 @@ struct PagesState {
 
 impl Pages {
     /// The page of `label` sent `page.ready`: the request it was owed, if
-    /// any, to publish now. A page that mounts again (a reload) owes
-    /// nothing new.
-    pub fn ready(&self, label: &str) -> Option<Request> {
-        let mut state = self.state.lock().ok()?;
+    /// any, goes to `publish` now, under the lock. A page that mounts again
+    /// (a reload) owes nothing new.
+    pub fn ready(&self, label: &str, publish: impl FnOnce(Request)) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
         state.ready.insert(label.to_owned());
-        state.owed.remove(label)
+        if let Some(owed) = state.owed.remove(label) {
+            publish(owed);
+        }
     }
 
     #[cfg(test)]
@@ -260,16 +267,18 @@ impl Pages {
             .is_ok_and(|state| state.ready.contains(label))
     }
 
-    /// `request` for the page of `label`: handed back to publish now when
-    /// the page listens, else kept for its `page.ready` (a later one
-    /// replaces it) and `None`.
-    pub fn publish_or_owe(&self, label: &str, request: Request) -> Option<Request> {
-        let mut state = self.state.lock().ok()?;
+    /// `request` for the page of `label`: to `publish` now, under the
+    /// lock, when the page listens, else kept for its `page.ready` (a later
+    /// one replaces it).
+    pub fn publish_or_owe(&self, label: &str, request: Request, publish: impl FnOnce(Request)) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
         if state.ready.contains(label) {
-            return Some(request);
+            publish(request);
+        } else {
+            state.owed.insert(label.to_owned(), request);
         }
-        state.owed.insert(label.to_owned(), request);
-        None
     }
 
     /// The window of `label` was destroyed: its page is gone and so is
@@ -283,12 +292,7 @@ impl Pages {
 }
 
 /// Publishes `request` to `window`, of `label`, when its page listens,
-/// else owes it to the page for its `page.ready`. The publish is queued on
-/// the shell's ordered lane and not waited for (`host::call_in_order`): it
-/// selects the meeting, which reads the store, and the caller is a command
-/// worker or, for a deep link, the main thread. On the lane two requests
-/// go out in the order they came, so the later deep link is the one
-/// shown; a request waits there behind a tray Stop whose save waits.
+/// else owes it to the page for its `page.ready` ([`publish_owed`]).
 pub fn request<H: ShellHost>(
     host: &H,
     pages: &Pages,
@@ -296,11 +300,27 @@ pub fn request<H: ShellHost>(
     window: H::Window,
     request: Request,
 ) {
-    if let Some(now) = pages.publish_or_owe(label, request) {
-        host::call_in_order(host.clone(), "a window request", move |host| {
-            host.publish_request(&window, now.field.as_str(), &now.value)
-        });
-    }
+    pages.publish_or_owe(label, request, |now| publish(host, window, now));
+}
+
+/// The page of `window`, of `label`, has mounted and has its first
+/// snapshots: the request it was owed, if any, is published now.
+pub fn publish_owed<H: ShellHost>(host: &H, pages: &Pages, label: &str, window: H::Window) {
+    pages.ready(label, |owed| publish(host, window, owed));
+}
+
+/// Queues `request`'s publish to `window` on the shell's ordered lane and
+/// returns without waiting for it (`host::call_in_order`): it selects the
+/// meeting, which reads the store, and the caller is a command worker,
+/// the blocking pool's `page.ready` or, for a deep link, the main thread.
+/// On the lane requests go out in the order they were queued, and
+/// [`Pages`] queues them in the order they came, an owed one first, so
+/// the later of two deep links is the one shown; a request waits there
+/// behind a tray Stop whose save waits.
+pub fn publish<H: ShellHost>(host: &H, window: H::Window, request: Request) {
+    host::call_in_order(host.clone(), "a window request", move |host| {
+        host.publish_request(&window, request.field.as_str(), &request.value)
+    });
 }
 
 /// Whether closing the window of `label` keeps it instead (`keep`):
@@ -547,18 +567,32 @@ mod tests {
     /// A request for a page that has not mounted waits for its
     /// `page.ready`; one for a page that has goes out at once; a destroyed
     /// window forgets both.
+    /// What `ready` hands its publish, if anything.
+    fn ready(pages: &Pages, label: &str) -> Option<Request> {
+        let mut published = None;
+        pages.ready(label, |owed| published = Some(owed));
+        published
+    }
+
+    /// What `publish_or_owe` hands its publish, if anything.
+    fn publish_or_owe(pages: &Pages, label: &str, request: Request) -> Option<Request> {
+        let mut published = None;
+        pages.publish_or_owe(label, request, |now| published = Some(now));
+        published
+    }
+
     #[test]
     fn a_request_waits_for_the_page_then_goes_out() {
         let pages = Pages::default();
         let id = steno_core::json::parse_uuid("00000000-0000-0000-0000-00000000000c").unwrap();
         assert!(!pages.is_ready("main"));
-        assert_eq!(pages.publish_or_owe("main", Request::meeting(&id)), None);
+        assert_eq!(publish_or_owe(&pages, "main", Request::meeting(&id)), None);
         // Only the latest request is owed.
         let export = Request::section(steno_bridge::SettingsSection::Export);
-        assert_eq!(pages.publish_or_owe("main", export.clone()), None);
+        assert_eq!(publish_or_owe(&pages, "main", export.clone()), None);
         assert!(!pages.is_ready("main"));
         assert_eq!(
-            pages.ready("main"),
+            ready(&pages, "main"),
             Some(Request {
                 field: RequestField::SettingsSection,
                 value: "export".into(),
@@ -566,22 +600,22 @@ mod tests {
         );
         assert!(pages.is_ready("main"));
         // A reload mounts again and is owed nothing.
-        assert_eq!(pages.ready("main"), None);
+        assert_eq!(ready(&pages, "main"), None);
         assert!(pages.is_ready("main"));
         // A page that listens gets the request back to publish at once,
         // and owes nothing for its next mount.
-        assert_eq!(pages.publish_or_owe("main", export.clone()), Some(export));
-        assert_eq!(pages.ready("main"), None);
+        assert_eq!(publish_or_owe(&pages, "main", export.clone()), Some(export));
+        assert_eq!(ready(&pages, "main"), None);
         // The other windows are their own.
         assert!(!pages.is_ready("settings"));
-        assert_eq!(pages.ready("settings"), None);
+        assert_eq!(ready(&pages, "settings"), None);
         assert_eq!(
-            pages.publish_or_owe("onboarding", Request::meeting(&id)),
+            publish_or_owe(&pages, "onboarding", Request::meeting(&id)),
             None
         );
         pages.gone("onboarding");
         assert!(!pages.is_ready("onboarding"));
-        assert_eq!(pages.ready("onboarding"), None);
+        assert_eq!(ready(&pages, "onboarding"), None);
         assert_eq!(
             Request::meeting(&id),
             Request {
@@ -616,11 +650,11 @@ mod tests {
         let pages = std::sync::Arc::new(Pages::default());
         request(&host, &pages, "settings", "settings", meeting.clone());
         assert_eq!(
-            pages.ready("settings"),
+            ready(&pages, "settings"),
             Some(meeting.clone()),
             "owed to the page"
         );
-        assert!(pages.ready("main").is_none());
+        assert!(ready(&pages, "main").is_none());
         let (clicked, listening) = (host.clone(), pages.clone());
         assert!(
             returns_at_once(move || request(&clicked, &listening, "main", "main", meeting)),
@@ -646,7 +680,7 @@ mod tests {
         use crate::host::gated::GatedHost;
 
         let pages = Pages::default();
-        pages.ready("main");
+        pages.ready("main", |_| {});
         let meeting = |value: &str| Request {
             field: RequestField::MeetingId,
             value: value.to_owned(),
@@ -666,5 +700,50 @@ mod tests {
             })
             .count();
         assert_eq!(reordered, 0, "{reordered} of {rounds} pairs were reordered");
+    }
+
+    /// A request owed to a page that has not mounted, then the page's
+    /// `page.ready`, then a second request (a deep link at a cold launch,
+    /// then another), while the tray's Stop before them waits on the
+    /// store: the owed one is queued at the page's ready, before the later
+    /// one, so after the stop the later one is the meeting shown.
+    /// Published beside the lane, the owed one would reach the host first
+    /// here, and could land last.
+    #[test]
+    fn an_owed_request_goes_out_before_a_later_one() {
+        use std::time::Duration;
+
+        use crate::host::gated::GatedHost;
+
+        let meeting = |value: &str| Request {
+            field: RequestField::MeetingId,
+            value: value.to_owned(),
+        };
+        let host = GatedHost::holding("recording.toggle");
+        let _opens = host.opens_on_drop();
+        let pages = Pages::default();
+        request(&host, &pages, "main", "main", meeting("m-a"));
+        crate::actions::record_through(host.clone(), "main", None);
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the stop reached the host"
+        );
+        publish_owed(&host, &pages, "main", "main");
+        request(&host, &pages, "main", "main", meeting("m-b"));
+        assert_eq!(
+            host.answered(),
+            Vec::<String>::new(),
+            "all wait on the stop"
+        );
+        host.open();
+        assert!(host.wait_answers(3, Duration::from_secs(5)));
+        assert_eq!(
+            host.answered(),
+            [
+                "recording.toggle",
+                "request requestedMeetingID=m-a",
+                "request requestedMeetingID=m-b",
+            ]
+        );
     }
 }

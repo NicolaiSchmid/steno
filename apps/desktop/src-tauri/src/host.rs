@@ -56,7 +56,8 @@ pub type Job = Box<dyn FnOnce() + Send>;
 /// workers: the app, through its managed [`Host`], or a test's fake. The
 /// calls into the host, and the login item's switch and read, can wait, so
 /// each runs inside [`call_blocking`] or [`call_in_order`];
-/// `note_login_item` and `queue` only post and return.
+/// `refuse_starts`, `note_quitting`, `note_login_item` and `queue` never
+/// wait, and the main thread calls the first two.
 pub trait ShellHost: Clone + Send + Sync + 'static {
     /// The window a call answers for.
     type Window: Clone + Send + Sync + 'static;
@@ -91,9 +92,20 @@ pub trait ShellHost: Clone + Send + Sync + 'static {
     /// Switches the login item in the system (`autostart::set_enabled`).
     fn switch_login_item(&self, value: bool) -> Result<(), BridgeError>;
 
-    /// The tray's check mark follows the system's login item, on the main
-    /// thread (`tray::note_login_item`): posted there, never waited for.
-    fn note_login_item(&self);
+    /// The tray's check mark follows the system's login item, `on` as the
+    /// caller read it ([`Self::login_item_on`]), on the main thread
+    /// (`tray::note_login_item`): posted there, never waited for.
+    fn note_login_item(&self, on: bool);
+
+    /// The menus' Quit, on the main thread: every recording start is
+    /// refused from now on ([`Host::refuse_starts`]). It sets a flag and
+    /// returns; queued on the lane it would wait behind the Records
+    /// clicked before the Quit, which it must refuse.
+    fn refuse_starts(&self);
+
+    /// The menus' Quit, on the main thread: the tray reads quitting
+    /// (`tray::note_quitting`).
+    fn note_quitting(&self);
 
     /// Queues `job` on the shell's ordered lane ([`Lane::queue`]), as
     /// `what` in the log; returns at once.
@@ -104,13 +116,13 @@ impl ShellHost for AppHandle {
     type Window = WebviewWindow;
 
     fn page_ready(&self, window: &WebviewWindow) -> Result<(), BridgeError> {
-        let host = host(self);
-        host.page_ready(window)?;
-        // What was asked of the window before its page could hear it (a
-        // deep link at launch) goes out after the first snapshots.
-        if let Some(owed) = self.state::<crate::windows::Pages>().ready(window.label()) {
-            host.publish_request(window, owed.field.as_str(), &owed.value)?;
-        }
+        host(self).page_ready(window)?;
+        crate::windows::publish_owed(
+            self,
+            &self.state::<crate::windows::Pages>(),
+            window.label(),
+            window.clone(),
+        );
         Ok(())
     }
 
@@ -144,11 +156,23 @@ impl ShellHost for AppHandle {
         crate::autostart::set_enabled(self, value)
     }
 
-    fn note_login_item(&self) {
+    fn note_login_item(&self, on: bool) {
         let app = self.clone();
-        if let Err(error) = self.run_on_main_thread(move || crate::tray::note_login_item(&app)) {
+        if let Err(error) = self.run_on_main_thread(move || crate::tray::note_login_item(&app, on))
+        {
             tracing::debug!(%error, "the tray's check mark not moved: the run loop has ended");
         }
+    }
+
+    fn refuse_starts(&self) {
+        // Not managed in an app that refused to start.
+        if let Some(host) = self.try_state::<Host>() {
+            host.refuse_starts();
+        }
+    }
+
+    fn note_quitting(&self) {
+        crate::tray::note_quitting(self);
     }
 
     fn queue(&self, what: &'static str, job: Job) {
@@ -959,6 +983,18 @@ impl Host {
         }
     }
 
+    /// Every recording start is refused from now on, the status saying
+    /// why (`steno_host::services::Recorder::refuse_starts`): the menus'
+    /// Quit, on the main thread, before its exit waits for the actions
+    /// clicked before it. Only sets a flag; a no-op for the fixtures.
+    pub fn refuse_starts(&self) {
+        #[cfg(not(feature = "fixture-host"))]
+        {
+            use steno_host::services::Recorder as _;
+            self.inner.app.recorder.refuse_starts();
+        }
+    }
+
     /// The onboarding window is gone, closed by the user or by Finish:
     /// the host counts the pages as seen, as the Swift window's
     /// `onDisappear` did. It reads the store, so not on the main thread.
@@ -1222,16 +1258,20 @@ pub mod gated {
     use crate::bridge::BridgeError;
 
     /// A host whose calls of `held` wait at a gate until it opens; every
-    /// other call answers at once. It notes each answered call (a window
-    /// request as `request <field>=<value>`, the onboarding close as
-    /// `onboarding.closed`), each switch of the login item, which it then
-    /// reads back, and each check mark it was asked to move. `before_hold`
-    /// runs inside a held call before it waits, as the host publishes
-    /// `Stopping` before the stop's save. It owns a [`Lane`] of its own.
+    /// other call answers at once, or after its delay (`delaying`). It
+    /// notes each answered call (a window request as
+    /// `request <field>=<value>`, the onboarding close as
+    /// `onboarding.closed`, a `recording.start` after `refuse_starts` as
+    /// `recording.start refused`), each switch of the login item, which it
+    /// then reads back, each check mark it was asked to move, and what a
+    /// Quit asked of the main thread. `before_hold` runs inside a held call
+    /// before it waits, as the host publishes `Stopping` before the stop's
+    /// save. It owns a [`Lane`] of its own.
     #[derive(Clone)]
     pub struct GatedHost {
         held: &'static str,
         before_hold: Option<Arc<dyn Fn() + Send + Sync>>,
+        delayed: Option<(&'static str, Duration)>,
         state: Arc<(Mutex<State>, Condvar)>,
         lane: Arc<Lane>,
     }
@@ -1243,16 +1283,26 @@ pub mod gated {
         answered: Vec<String>,
         switched: Vec<bool>,
         login_item_on: bool,
-        notes: usize,
+        /// The check marks, as each was asked to show.
+        checked: Vec<bool>,
+        starts_refused: bool,
+        /// `refuse starts` and `quitting`, in the order asked.
+        quit_steps: Vec<&'static str>,
     }
 
     /// Opens the gate when dropped, so a failed test never leaves a call
     /// waiting.
     pub struct Opens(GatedHost);
 
+    impl Drop for Opens {
+        fn drop(&mut self) {
+            self.0.open();
+        }
+    }
+
     /// Runs `call` on a thread of its own, as a menu event or a window's
-    /// close runs on the main thread, and whether it returned within a
-    /// second.
+    /// close runs on the main thread, and returns whether it returned
+    /// within a second.
     pub fn returns_at_once(call: impl FnOnce() + Send + 'static) -> bool {
         let (returned, done) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1262,17 +1312,12 @@ pub mod gated {
         done.recv_timeout(Duration::from_secs(1)).is_ok()
     }
 
-    impl Drop for Opens {
-        fn drop(&mut self) {
-            self.0.open();
-        }
-    }
-
     impl GatedHost {
         pub fn holding(held: &'static str) -> Self {
             GatedHost {
                 held,
                 before_hold: None,
+                delayed: None,
                 state: Arc::default(),
                 lane: Arc::new(Lane::start()),
             }
@@ -1280,6 +1325,13 @@ pub mod gated {
 
         pub fn before_hold(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
             self.before_hold = Some(Arc::new(hook));
+            self
+        }
+
+        /// Every call of `method` takes `delay` before it answers, as a
+        /// start that opens the devices does.
+        pub fn delaying(mut self, method: &'static str, delay: Duration) -> Self {
+            self.delayed = Some((method, delay));
             self
         }
 
@@ -1325,7 +1377,7 @@ pub mod gated {
         /// Whether the check mark was asked to move `times` times within
         /// `patience`.
         pub fn wait_noted(&self, times: usize, patience: Duration) -> bool {
-            self.wait_for(patience, |state| state.notes == times)
+            self.wait_for(patience, |state| state.checked.len() == times)
         }
 
         pub fn answered(&self) -> Vec<String> {
@@ -1337,7 +1389,15 @@ pub mod gated {
         }
 
         pub fn notes(&self) -> usize {
-            self.state().notes
+            self.state().checked.len()
+        }
+
+        pub fn checked(&self) -> Vec<bool> {
+            self.state().checked.clone()
+        }
+
+        pub fn quit_steps(&self) -> Vec<&'static str> {
+            self.state().quit_steps.clone()
         }
     }
 
@@ -1366,9 +1426,21 @@ pub mod gated {
                 }
                 state.waiting -= 1;
             }
-            self.state().answered.push(method.to_owned());
+            if let Some((delayed, delay)) = self.delayed
+                && delayed == method
+            {
+                std::thread::sleep(delay);
+            }
+            let mut state = self.state();
+            let answer = if method == "recording.start" && state.starts_refused {
+                format!("{method} refused")
+            } else {
+                method.to_owned()
+            };
+            state.answered.push(answer.clone());
+            drop(state);
             self.state.1.notify_all();
-            Ok(Value::String(method.to_owned()))
+            Ok(Value::String(answer))
         }
 
         fn publish_request(
@@ -1396,9 +1468,19 @@ pub mod gated {
             Ok(())
         }
 
-        fn note_login_item(&self) {
-            self.state().notes += 1;
+        fn note_login_item(&self, on: bool) {
+            self.state().checked.push(on);
             self.state.1.notify_all();
+        }
+
+        fn refuse_starts(&self) {
+            let mut state = self.state();
+            state.starts_refused = true;
+            state.quit_steps.push("refuse starts");
+        }
+
+        fn note_quitting(&self) {
+            self.state().quit_steps.push("quitting");
         }
 
         fn queue(&self, what: &'static str, job: Job) {
