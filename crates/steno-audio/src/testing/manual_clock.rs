@@ -8,8 +8,9 @@
 //! time entering the assertions.
 
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use super::HANG_GUARD;
 use crate::clock::{Cancel, Clock};
 
 /// A clock tests move by hand; see the module doc.
@@ -55,11 +56,12 @@ impl ManualClock {
         self.lock().sleepers.len()
     }
 
-    /// Polls until exactly `count` sleeps are in progress, for up to about
-    /// ten seconds of wall time (a loaded CI host can take seconds to
+    /// Polls until exactly `count` sleeps are in progress, for up to
+    /// [`HANG_GUARD`] of wall time (a loaded CI host can take seconds to
     /// schedule the thread that arms a timer); `true` when they are.
     pub fn wait_for_sleepers(&self, count: usize) -> bool {
-        for _ in 0..10_000 {
+        let deadline = Instant::now() + HANG_GUARD;
+        while Instant::now() < deadline {
             if self.pending_sleepers() == count {
                 return true;
             }

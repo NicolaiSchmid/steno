@@ -2,7 +2,9 @@
 //! hand on a manual clock: how often they try, what they log, when the
 //! warning comes and goes, and that a capture that comes back loses
 //! nothing. Each test reads the lines the binary logs, so the tests here
-//! run one at a time. Rust only.
+//! run one at a time. The waits for the session's threads take
+//! [`HANG_GUARD`], which only turns a hang into a failure: every claim
+//! here is about the manual clock, never wall time. Rust only.
 
 // Test arithmetic: frame counts cast freely, and gap seconds compare
 // exactly on purpose.
@@ -23,7 +25,7 @@ use steno_audio::capture::{
     CaptureResult, CaptureSession, CaptureStream, DeviceChangeReason,
 };
 use steno_audio::realtime::LaneFrameSink;
-use steno_audio::testing::ManualClock;
+use steno_audio::testing::{HANG_GUARD, ManualClock};
 use steno_audio::writer::CafFile;
 use steno_audio::{Clock, SAMPLE_RATE};
 use steno_core::AudioLane;
@@ -31,7 +33,6 @@ use steno_core::paths::file_url_path;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-const RECV: Duration = Duration::from_secs(10);
 /// Frames in one pushed callback: 10 ms at 48 kHz.
 const CALLBACK: usize = 480;
 /// One sample of the watch thread, the step the clock moves by.
@@ -298,7 +299,7 @@ impl Drive {
     /// while one runs. A notice sent before a thread slept is taken before
     /// the count is trusted.
     fn settle(&mut self) {
-        let deadline = Instant::now() + RECV;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             self.take_notices();
             let sleepers = 1 + usize::from(self.rebuilding);
@@ -317,7 +318,7 @@ impl Drive {
         for _ in 0..steps {
             self.settle();
             if delivering {
-                let deadline = Instant::now() + RECV;
+                let deadline = Instant::now() + HANG_GUARD;
                 while !self.rebuilding && self.backend.backlog() > 0 {
                     assert!(Instant::now() < deadline, "the processing thread reads");
                     std::thread::sleep(Duration::from_millis(1));

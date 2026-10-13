@@ -11,6 +11,8 @@
 //! backend's held outages are, behind `test-support`: a test releases
 //! them, and no build of the shell or the CLI carries them.
 
+use std::time::Duration;
+
 pub mod fake_activity;
 pub mod fixtures;
 pub mod manual_clock;
@@ -21,6 +23,19 @@ pub use fake_activity::FakeProcessAudioActivity;
 pub use fixtures::{AudioFixtures, SplitMix64};
 pub use manual_clock::ManualClock;
 pub use synthetic::{SyntheticCaptureBackend, SyntheticEcho, SyntheticLane};
+
+/// How long a test waits for real work before it fails as hung: a notice,
+/// a state, a level or a frame the synthetic producer delivers, a thread
+/// that reaches its sleep on a [`ManualClock`], a stop or a finalise that
+/// returns. That work takes milliseconds, but it runs on real threads at
+/// the host's pace, and a loaded runner has stalled a test binary for
+/// longer than ten seconds, so this bound only turns a hang into a
+/// failure and no verdict rests on it. A claim that nothing arrives (no
+/// notice, no restart) waits a short window instead and fails only by an
+/// extra event, so that window stays short; a claim about when something
+/// happens steps a [`ManualClock`] or counts, and reads no wall time. The
+/// same bound as `steno_services::testing::HANG_GUARD`. Rust only.
+pub const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// Whether a backend's `start` or `stop` on this thread logs its own lines
 /// at `debug`: inside the session's restarts once their streak logged a
