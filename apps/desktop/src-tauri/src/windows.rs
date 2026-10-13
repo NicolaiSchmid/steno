@@ -600,7 +600,7 @@ mod tests {
     fn a_window_request_is_published_off_the_callers_thread() {
         use std::time::Duration;
 
-        use crate::host::gated::GatedHost;
+        use crate::host::gated::{GatedHost, returns_at_once};
 
         let meeting = Request {
             field: RequestField::MeetingId,
@@ -621,14 +621,9 @@ mod tests {
             "owed to the page"
         );
         assert!(pages.ready("main").is_none());
-        let (returned, done) = std::sync::mpsc::channel();
         let (clicked, listening) = (host.clone(), pages.clone());
-        std::thread::spawn(move || {
-            request(&clicked, &listening, "main", "main", meeting);
-            let _ = returned.send(());
-        });
         assert!(
-            done.recv_timeout(Duration::from_secs(1)).is_ok(),
+            returns_at_once(move || request(&clicked, &listening, "main", "main", meeting)),
             "the caller waited for the publish"
         );
         assert!(

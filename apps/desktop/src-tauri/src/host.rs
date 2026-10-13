@@ -1250,6 +1250,18 @@ pub mod gated {
     /// waiting.
     pub struct Opens(GatedHost);
 
+    /// Runs `call` on a thread of its own, as a menu event or a window's
+    /// close runs on the main thread, and whether it returned within a
+    /// second.
+    pub fn returns_at_once(call: impl FnOnce() + Send + 'static) -> bool {
+        let (returned, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            call();
+            let _ = returned.send(());
+        });
+        done.recv_timeout(Duration::from_secs(1)).is_ok()
+    }
+
     impl Drop for Opens {
         fn drop(&mut self) {
             self.0.open();

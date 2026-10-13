@@ -274,17 +274,20 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::host::gated::GatedHost;
+    use crate::host::gated::{GatedHost, Opens, returns_at_once};
 
-    /// Runs `click` on a thread of its own, as the menu event runs on the
-    /// main thread, and whether it returned within a second.
-    fn returns_at_once(click: impl FnOnce() + Send + 'static) -> bool {
-        let (returned, done) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            click();
-            let _ = returned.send(());
-        });
-        done.recv_timeout(Duration::from_secs(1)).is_ok()
+    /// A host whose stop is held (its save waits on the store), with the
+    /// tray's Stop clicked and waiting at the gate, which opens when the
+    /// guard drops.
+    fn a_held_stop() -> (GatedHost, Opens) {
+        let host = GatedHost::holding("recording.toggle");
+        let opens = host.opens_on_drop();
+        record_through(host.clone(), "main", None);
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the stop reached the host"
+        );
+        (host, opens)
     }
 
     /// The tray's Record while the host's stop is held (its save waits on
@@ -459,13 +462,7 @@ mod tests {
     /// stop has ended, so it starts a recording rather than being dropped.
     #[test]
     fn a_record_clicked_during_a_held_stop_runs_after_it() {
-        let host = GatedHost::holding("recording.toggle");
-        let _opens = host.opens_on_drop();
-        record_through(host.clone(), "main", None);
-        assert!(
-            host.wait_held(Duration::from_secs(5)),
-            "the stop reached the host"
-        );
+        let (host, _opens) = a_held_stop();
         record_through(host.clone(), "main", Some(CaptureMode::InPerson));
         assert!(
             !host.wait_answered("recording.start", Duration::from_millis(500)),
@@ -482,13 +479,7 @@ mod tests {
     /// reading it at the click would repeat the first.
     #[test]
     fn a_second_launch_at_login_click_undoes_the_first() {
-        let host = GatedHost::holding("recording.toggle");
-        let _opens = host.opens_on_drop();
-        record_through(host.clone(), "main", None);
-        assert!(
-            host.wait_held(Duration::from_secs(5)),
-            "the stop reached the host"
-        );
+        let (host, _opens) = a_held_stop();
         launch_at_login_through(host.clone(), "main");
         launch_at_login_through(host.clone(), "main");
         host.open();
@@ -502,13 +493,7 @@ mod tests {
     /// waited behind it; then the exit comes.
     #[test]
     fn a_quit_waits_for_the_stop_clicked_before_it() {
-        let host = GatedHost::holding("recording.toggle");
-        let _opens = host.opens_on_drop();
-        record_through(host.clone(), "main", None);
-        assert!(
-            host.wait_held(Duration::from_secs(5)),
-            "the stop reached the host"
-        );
+        let (host, _opens) = a_held_stop();
         let (exited, exit) = std::sync::mpsc::channel();
         let seen = host.clone();
         exit_after_queued(&host, Duration::from_secs(5), move || {
@@ -530,13 +515,7 @@ mod tests {
     /// the exit: it goes ahead, and the shutdown takes over the stop.
     #[test]
     fn a_quit_goes_ahead_once_its_patience_has_passed() {
-        let host = GatedHost::holding("recording.toggle");
-        let _opens = host.opens_on_drop();
-        record_through(host.clone(), "main", None);
-        assert!(
-            host.wait_held(Duration::from_secs(5)),
-            "the stop reached the host"
-        );
+        let (host, _opens) = a_held_stop();
         let (exited, exit) = std::sync::mpsc::channel();
         exit_after_queued(&host, Duration::from_millis(200), move || {
             let _ = exited.send(());

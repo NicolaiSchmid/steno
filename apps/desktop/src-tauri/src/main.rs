@@ -1317,18 +1317,13 @@ mod tests {
     fn the_onboarding_close_reaches_the_host_off_the_closing_thread() {
         use std::time::Duration;
 
-        use crate::host::gated::GatedHost;
+        use crate::host::gated::{GatedHost, returns_at_once};
 
         let host = GatedHost::holding("onboarding.closed");
         let _opens = host.opens_on_drop();
-        let (returned, done) = std::sync::mpsc::channel();
         let closed = host.clone();
-        std::thread::spawn(move || {
-            count_onboarding_seen(closed);
-            let _ = returned.send(());
-        });
         assert!(
-            done.recv_timeout(Duration::from_secs(1)).is_ok(),
+            returns_at_once(move || count_onboarding_seen(closed)),
             "the close waited for the host"
         );
         assert!(
