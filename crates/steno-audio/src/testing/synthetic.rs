@@ -607,17 +607,9 @@ impl CaptureBackend for SyntheticCaptureBackend {
 /// for it. Without the `test-support` feature nothing is held.
 #[derive(Debug, Clone, Default)]
 struct OutageHold {
-    /// `None` when not held.
+    /// The releases no outage spent yet; `None` when not held.
     #[cfg(feature = "test-support")]
-    releases: Option<Arc<Releases>>,
-}
-
-/// What the test let go and what began of it.
-#[cfg(feature = "test-support")]
-#[derive(Debug, Default)]
-struct Releases {
-    granted: AtomicUsize,
-    begun: AtomicUsize,
+    unspent: Option<Arc<AtomicUsize>>,
 }
 
 impl OutageHold {
@@ -625,7 +617,7 @@ impl OutageHold {
     fn new(options: &SyntheticOptions) -> Self {
         Self {
             #[cfg(feature = "test-support")]
-            releases: options.hold_outages.then(Arc::default),
+            unspent: options.hold_outages.then(Arc::default),
         }
     }
 
@@ -633,20 +625,20 @@ impl OutageHold {
     #[cfg_attr(not(feature = "test-support"), allow(clippy::unused_self))]
     fn lets_go(&self) -> bool {
         #[cfg(feature = "test-support")]
-        if let Some(releases) = &self.releases {
+        if let Some(unspent) = &self.unspent {
             // The producer alone spends a release, so none is spent twice.
-            if releases.begun.load(Ordering::Acquire) >= releases.granted.load(Ordering::Acquire) {
+            if unspent.load(Ordering::Acquire) == 0 {
                 return false;
             }
-            releases.begun.fetch_add(1, Ordering::AcqRel);
+            unspent.fetch_sub(1, Ordering::AcqRel);
         }
         true
     }
 
     #[cfg(feature = "test-support")]
     fn release(&self) {
-        if let Some(releases) = &self.releases {
-            releases.granted.fetch_add(1, Ordering::AcqRel);
+        if let Some(unspent) = &self.unspent {
+            unspent.fetch_add(1, Ordering::AcqRel);
         }
     }
 }

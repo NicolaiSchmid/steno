@@ -2694,9 +2694,7 @@ mod tests {
     /// speed and the wall clock, set up by `options` (a stall or a change
     /// `BEFORE_THE_OUTAGE` in, and the restarts after it), under a recorder.
     fn stalling_harness(options: fn(SyntheticOptions) -> SyntheticOptions) -> Harness {
-        stalling_harness_over(options, |options| {
-            Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options))
-        })
+        stalling_harness_over(options, None)
     }
 
     /// [`stalling_harness`] whose outage waits until the test releases it.
@@ -2704,21 +2702,13 @@ mod tests {
         options: fn(SyntheticOptions) -> SyntheticOptions,
     ) -> (Harness, HeldOutages) {
         let held = HeldOutages::default();
-        let harness = stalling_harness_over(options, {
-            let held = held.clone();
-            move |options| held.backend(options)
-        });
-        (harness, held)
+        (stalling_harness_over(options, Some(held.clone())), held)
     }
 
-    /// [`stalling_harness`] over the backend `backend` makes of the
-    /// options.
+    /// [`stalling_harness`], its outages held by `held` when given.
     fn stalling_harness_over(
         options: fn(SyntheticOptions) -> SyntheticOptions,
-        backend: impl Fn(SyntheticOptions) -> Arc<steno_audio::testing::SyntheticCaptureBackend>
-        + Send
-        + Sync
-        + 'static,
+        held: Option<HeldOutages>,
     ) -> Harness {
         let capture: MakeCaptureSession = Arc::new(move |configuration: CaptureConfiguration| {
             let tone = SyntheticOptions::tones(
@@ -2734,7 +2724,12 @@ mod tests {
             let tone = tone.stream(on_usb.clone()).stream_after_restart(on_usb);
             CaptureSession::with_backend(
                 configuration,
-                backend(options(tone)),
+                match &held {
+                    Some(held) => held.backend(options(tone)),
+                    None => Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options(
+                        tone,
+                    ))),
+                },
                 None,
                 CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
                 Arc::new(steno_audio::SystemClock::new()),
