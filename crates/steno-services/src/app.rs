@@ -1470,8 +1470,7 @@ mod tests {
     use super::*;
     use crate::secrets::KeyringUnavailable;
     use crate::testing::{
-        HANG_GUARD, PATIENCE, built, fake_dependencies, on_own_thread, options_under,
-        temp_store,
+        HANG_GUARD, PATIENCE, built, fake_dependencies, on_own_thread, options_under, temp_store,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
