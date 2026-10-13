@@ -192,25 +192,43 @@ fn in_person_capture_starts_and_stops_within_bounds() {
 const FIRST_CALLBACK: Duration = Duration::from_millis(100);
 
 /// The bound on the first callback after the call to `start`, so that a
-/// slower setup cannot hide behind [`FIRST_CALLBACK`]. Asserted only below
-/// [`QUIET_LOAD`]: `start` itself took 54 to 100 ms on a quiet Mac and up to
-/// 844 ms on a busy one.
+/// slower setup cannot hide behind [`FIRST_CALLBACK`]. Asserted only while
+/// both the one- and the five-minute load are below [`QUIET_LOAD`]: `start`
+/// itself took 54 to 100 ms on a quiet Mac and up to 844 ms on a busy one,
+/// and a one-minute load that just dropped hides a machine still busy.
 const END_TO_END: Duration = Duration::from_millis(200);
 
-/// The one-minute load average below which [`END_TO_END`] is asserted.
+/// The load below which [`END_TO_END`] is asserted, by both the one- and
+/// the five-minute average.
 const QUIET_LOAD: f64 = 4.0;
 
-/// The one-minute load average (`sysctl vm.loadavg`), `None` when it does
-/// not read.
-fn load_average() -> Option<f64> {
+/// The one- and the five-minute load averages (`sysctl vm.loadavg`, which
+/// prints `{ 1.23 2.34 3.45 }`), `None` when they do not read.
+fn load_average() -> Option<(f64, f64)> {
     let output = std::process::Command::new("sysctl")
         .args(["-n", "vm.loadavg"])
         .output()
         .ok()?;
-    String::from_utf8(output.stdout)
-        .ok()?
+    load_averages(&String::from_utf8(output.stdout).ok()?)
+}
+
+/// The first two numbers in `text`: the one- and five-minute averages.
+fn load_averages(text: &str) -> Option<(f64, f64)> {
+    let mut numbers = text
         .split_whitespace()
-        .find_map(|field| field.parse().ok())
+        .filter_map(|field| field.parse().ok());
+    Some((numbers.next()?, numbers.next()?))
+}
+
+#[test]
+fn the_load_reads_the_one_and_the_five_minute_average() {
+    let (one, five) = load_averages("{ 4.56 4.33 4.03 }").unwrap();
+    assert!(
+        (one - 4.56).abs() < 1e-9 && (five - 4.33).abs() < 1e-9,
+        "{one} {five}"
+    );
+    assert_eq!(load_averages("{ 1.5 }"), None);
+    assert_eq!(load_averages(""), None);
 }
 
 /// What one call capture measured.
@@ -293,8 +311,9 @@ fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> CallR
 
 /// What a call capture with nothing playing must show: its first callback
 /// within [`FIRST_CALLBACK`] of `start` returning, within [`END_TO_END`] of
-/// the call to `start` while the load is under [`QUIET_LOAD`] (always
-/// printed), and about as many seconds of frames as it ran.
+/// the call to `start` while the one- and five-minute loads are both under
+/// [`QUIET_LOAD`] (always printed), and about as many seconds of frames as
+/// it ran.
 fn assert_ran_from_the_start(run: &CallRun) {
     let first = run
         .first
@@ -309,13 +328,15 @@ fn assert_ran_from_the_start(run: &CallRun) {
          {end_to_end:?} after start was called (bound {END_TO_END:?})"
     );
     match load_average() {
-        Some(load) if load < QUIET_LOAD => assert!(
+        Some((one, five)) if one < QUIET_LOAD && five < QUIET_LOAD => assert!(
             end_to_end <= END_TO_END,
             "the first callback came {end_to_end:?} after start was called, more than \
-             {END_TO_END:?} at load {load}"
+             {END_TO_END:?} at load {one} (1 min), {five} (5 min)"
         ),
-        Some(load) => println!("end-to-end bound not checked: load {load}"),
-        None => println!("end-to-end bound not checked: load unknown"),
+        Some((one, five)) => {
+            println!("end-to-end bound not checked: load {one} (1 min), {five} (5 min)");
+        }
+        None => println!("end-to-end bound not checked: load unknown (1 and 5 min)"),
     }
     assert!(
         run.seconds >= run.elapsed.as_secs_f64() - 0.2,

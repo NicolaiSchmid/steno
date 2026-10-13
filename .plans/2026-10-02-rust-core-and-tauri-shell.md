@@ -2017,6 +2017,18 @@ parity item until a plan says otherwise:
   log for a panic it caught, and the meeting's detail says how long the
   silence lasts; a file with more than half of its packets damaged fails
   (stable plan A12).
+- **A recording without an index is salvaged: Rust only.** The phone's
+  `AVAudioRecorder` writes the `moov` only when it stops, so a recorder
+  killed mid-recording leaves raw AAC packets with no index, which
+  AVFoundation and symphonia both refuse; the Swift app fails the meeting.
+  The Rust decoder reads such a file, in the recorder's layout only (its
+  `ftyp` brands, no `moov`), packet by packet from the packets' own bits with
+  the phone's fixed settings (44.1 kHz mono, pinned to the phone's preset by
+  a test, since the bits cannot tell 44.1 from 48 kHz) and
+  `AVAudioRecorder`'s 2 112 samples of priming, up to where it was cut off
+  or could not be read; the meeting is Ready, its detail says the recording
+  was cut off and its end may be missing, and the retention rule keeps the
+  recording (`AudioDamage::salvaged`, stable plan A14).
 - **AAC-LC only.** AVFoundation also decoded HE-AAC; symphonia decodes
   AAC-LC alone. The iOS recorder writes AAC-LC, so nothing is lost today; a
   plan adds HE-AAC if an import needs it.
@@ -3434,6 +3446,7 @@ PR off `main`.
 | S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | merged |
 | The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | merged |
 | Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | merged |
+| Stable plan A14: a phone recording without a `moov` (its recorder killed) is salvaged: each AAC-LC packet's length read off its bits (`steno_audio::codec::salvage`), in the recorder's layout only, with the phone's settings and `AVAudioRecorder`'s priming; `AudioDamage::salvaged` and the detail's warning; A10's bound over the 1- and 5-minute loads; #264's pruned marks checked in the pipeline (`steno-audio`, `steno-core`, `steno-pipeline`, `steno-host`, `steno-services`, `steno-cli`) | `fix/a14-salvage-moovless-phone-recording` | #280 | open |
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | merged |
 | The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | merged |
 | An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | merged |

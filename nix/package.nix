@@ -180,7 +180,10 @@ in
     meta = {
       description = "Bot-free meeting recorder: records calls locally, transcribes and summarises on-device";
       homepage = "https://github.com/NicolaiSchmid/steno";
-      license = lib.licenses.mit;
+      # MIT, and the files that keep their own licence (README.md,
+      # "License"): SpeexDSP's echo canceller (BSD) and the salvage's AAC
+      # tables, copied from symphonia (MPL-2.0).
+      license = with lib.licenses; [mit bsd3 mpl20];
       mainProgram = "steno-desktop";
       platforms = ["x86_64-linux"];
       sourceProvenance = [lib.sourceTypes.fromSource];

@@ -1680,11 +1680,30 @@ mod tests {
         let damage = steno_core::AudioDamage {
             parts: 3,
             seconds: 0.07,
+            salvaged: false,
         };
         let marks = DamagedAudio::in_directory(&support);
         marks.record(kept.id, damage).unwrap();
         marks.record(deleted, damage).unwrap();
         let app = build(options_under(&support)).unwrap();
+        // The pipeline holds the store the launch pruned, not a copy read
+        // before it: the detail and the retention rule see what is on disk.
+        assert_eq!(
+            app.pipeline
+                .current()
+                .dependencies()
+                .damaged_audio
+                .damage(kept.id),
+            damage
+        );
+        assert!(
+            app.pipeline
+                .current()
+                .dependencies()
+                .damaged_audio
+                .damage(deleted)
+                .is_none()
+        );
         let marks = DamagedAudio::in_directory(&support);
         assert_eq!(marks.damage(kept.id), damage);
         assert!(marks.damage(deleted).is_none());

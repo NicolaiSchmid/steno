@@ -2896,6 +2896,127 @@ async fn a_run_that_panics_releases_its_asset_and_its_meeting() {
     );
 }
 
+/// A decoder whose next `decode` panics while `panics` is set, as
+/// symphonia's demuxer does on a crafted file: its `next_packet` asserts
+/// on a `co64` offset near 2^64, in a release build too, synchronously
+/// inside `SymphoniaAudioCodec::decode`.
+struct PanickingDecoder {
+    inner: Arc<WavDecoder>,
+    panics: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl steno_core::AudioDecoder for PanickingDecoder {
+    async fn decode(
+        &self,
+        asset: &AudioAsset,
+        lane: AudioLane,
+    ) -> steno_core::protocols::BoundaryResult<steno_core::AudioBuffer16k> {
+        assert!(
+            !self.panics.swap(false, std::sync::atomic::Ordering::SeqCst),
+            "the demuxer broke"
+        );
+        self.inner.decode(asset, lane).await
+    }
+
+    fn mixdown_format(&self) -> AudioFormat {
+        self.inner.mixdown_format()
+    }
+
+    async fn mixdown(
+        &self,
+        asset: &AudioAsset,
+        to: &Path,
+    ) -> steno_core::protocols::BoundaryResult<()> {
+        self.inner.mixdown(asset, to).await
+    }
+}
+
+/// Every file in the asset's folder but its `.processing-runs`, with its
+/// bytes.
+fn audio_files(asset: &AudioAsset) -> BTreeMap<PathBuf, Vec<u8>> {
+    let folder = file_url_path(&asset.url).unwrap();
+    std::fs::read_dir(folder.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_file() && *path != runs_file(asset))
+        .map(|path| {
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect()
+}
+
+/// A panic in the decode (symphonia's demuxer on a crafted file) fails the
+/// meeting and keeps every audio file under "delete after processing",
+/// through the sweep too; the worker lives on for the next meeting, and the
+/// failed one can be reprocessed. The same on the launch's resume path.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decoder_panic_fails_the_meeting_and_keeps_its_audio() {
+    let world = world(false, None, AudioRetention::DeleteAfterProcessing);
+    let decoder = Arc::new(PanickingDecoder {
+        inner: world.decoder.clone(),
+        panics: std::sync::atomic::AtomicBool::new(true),
+    });
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.decoder = decoder.clone();
+    let pipeline = ProcessingPipeline::new(dependencies);
+
+    let mut meeting = call_meeting(world.now);
+    meeting.id = Uuid::new_v4();
+    let asset = call_asset(
+        &world.audio,
+        meeting.id,
+        AudioRetention::DeleteAfterProcessing,
+    );
+    let before = audio_files(&asset);
+    assert!(!before.is_empty());
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+    let MeetingState::Failed { reason } = meeting_state(&world, meeting.id) else {
+        panic!(
+            "the panic fails the meeting: {:?}",
+            meeting_state(&world, meeting.id)
+        );
+    };
+    assert!(
+        reason.contains(steno_pipeline::OPERATION_PANICKED),
+        "{reason}"
+    );
+    assert_eq!(audio_files(&asset), before, "every audio file is kept");
+    assert!(world.store.asset(meeting.id).unwrap().is_some());
+    let _ = RetentionSweep::new(world.store.clone()).run(world.now + Duration::days(400));
+    assert_eq!(audio_files(&asset), before, "the sweep keeps them too");
+
+    let mut next = call_meeting(world.now);
+    next.id = Uuid::new_v4();
+    let next_asset = call_asset(&world.audio, next.id, AudioRetention::KeepForever);
+    pipeline.enqueue(&next, &next_asset).unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, next.id), MeetingState::Ready);
+
+    pipeline.reprocess(meeting.id).unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+
+    // A meeting left processing at the last quit, resumed at launch.
+    decoder
+        .panics
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (resumed, resumed_asset) = processing_with_count(&world, 0);
+    let before = audio_files(&resumed_asset);
+    assert_eq!(pipeline.resume_unfinished().unwrap(), [resumed.id]);
+    pipeline.wait_until_idle().await;
+    assert!(matches!(
+        meeting_state(&world, resumed.id),
+        MeetingState::Failed { .. }
+    ));
+    assert_eq!(audio_files(&resumed_asset), before);
+    pipeline.reprocess(resumed.id).unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, resumed.id), MeetingState::Ready);
+}
+
 /// The asset's `.processing-runs`.
 fn runs_file(asset: &AudioAsset) -> PathBuf {
     RecordingLayout::from_asset(asset)
@@ -5458,6 +5579,7 @@ async fn a_damaged_recording_stays_unstamped_through_every_automatic_stamp() {
     *world.decoder.damage.lock().unwrap() = steno_core::AudioDamage {
         parts: 3,
         seconds: 0.07,
+        salvaged: false,
     };
     let meeting = call_meeting(world.now);
     let asset = call_asset(
