@@ -263,14 +263,14 @@ fn quiet_speech_the_chunks_leave_out_comes_through() {
         let transcript = transcribe(&case);
         let words = words_inside(&transcript, &case.stretches[0], 0.0).len();
         let decoded_by_gaps = transcript
-            .gaps
+            .gap_windows
             .iter()
             .any(|g| g.start < case.stretches[0].end && case.stretches[0].start < g.end);
         println!(
             "{}: {words} words in the quiet stretch, {} chunks, {} extra windows{}",
             case.name,
             transcript.chunks.len(),
-            transcript.gaps.len(),
+            transcript.gap_windows.len(),
             if decoded_by_gaps {
                 ", some over it"
             } else {
@@ -303,13 +303,13 @@ fn silence_and_room_noise_the_chunks_leave_out_add_no_word() {
             assert!(
                 !noise
                     || transcript
-                        .gaps
+                        .gap_windows
                         .iter()
                         .any(|g| g.start < stretch.end && stretch.start < g.end),
                 "{}: no extra window over {stretch:?}: chunks {:?}, windows {:?}",
                 case.name,
                 transcript.chunks,
-                transcript.gaps
+                transcript.gap_windows
             );
             let words = words_inside(&transcript, stretch, EDGE_SECONDS);
             assert!(
@@ -326,7 +326,7 @@ fn silence_and_room_noise_the_chunks_leave_out_add_no_word() {
             case.name,
             transcript.words.len(),
             transcript.chunks.len(),
-            transcript.gaps.len()
+            transcript.gap_windows.len()
         );
     }
 }
