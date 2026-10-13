@@ -69,6 +69,12 @@ pub enum MeetingEvent {
     /// row and is processed once the models are installed. Rust only: the Swift
     /// pipeline downloaded the model inside the run.
     ModelsMissing { meeting_id: Uuid },
+    /// Posted when a run meets the store locked by another process (the
+    /// other app, another program) past its busy timeout: the meeting
+    /// stays `queued` with what the run committed and is processed again
+    /// once the store lets the run through. Rust only: the Swift pipeline
+    /// failed the meeting.
+    StoreBusy { meeting_id: Uuid },
     /// Posted when a summary re-run or a re-export fails after the
     /// pipeline accepted it. The services start both in the background and
     /// return at once, so this is how the failure reaches the detail's
@@ -113,6 +119,7 @@ impl MeetingEvent {
             | MeetingEvent::RetentionApplied { meeting_id }
             | MeetingEvent::Deleted { meeting_id }
             | MeetingEvent::ModelsMissing { meeting_id }
+            | MeetingEvent::StoreBusy { meeting_id }
             | MeetingEvent::OperationFailed { meeting_id, .. } => *meeting_id,
         }
     }

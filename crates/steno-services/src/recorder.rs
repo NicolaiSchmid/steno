@@ -22,12 +22,16 @@
 //! error line also says the recording is saved. The watcher also keeps an
 //! eye on the free space on the volumes of the recordings folder and of
 //! the database, the smaller of the two: a recording warns when about half
-//! an hour is left and, on Linux and Windows, does not start without room
-//! and stops and is saved before the disk fills; on the Mac a low reading
-//! only warns (why on `DiskWatch::STOP_BELOW_BYTES`). A volume that
-//! reports no size, or more space free than it holds (some network and
-//! FUSE file systems), counts as unreadable and never warns, stops or
-//! refuses a recording. Rust only: Swift had no disk check.
+//! an hour is left, does not start without room, and stops and is saved
+//! before the disk fills, on every platform. On the Mac the reading is the
+//! larger of `statvfs` and the space macOS frees for important use
+//! (`steno_macos::volume`), which counts what APFS would purge, held to
+//! `statvfs` plus 384 MiB, so below 128 MiB of `statvfs` there is no room
+//! (`DiskWatch::HARD_FLOOR_BYTES`); a failed read of the second leaves
+//! `statvfs` alone. A volume that reports no size, or more space free than
+//! it holds (some network and FUSE file systems), counts as unreadable and
+//! never warns, stops or refuses a recording. Rust only: Swift had no disk
+//! check.
 //!
 //! The session's notices are followed too: while its restarts go on past
 //! `CaptureSession::RESTART_ATTEMPTS`, until audio arrives again, the
@@ -98,48 +102,41 @@ pub(crate) struct DiskWatch {
     /// The database's folder, whose volume is read beside the recordings
     /// folder's: the save writes there too.
     pub(crate) database_folder: Option<PathBuf>,
-    /// Whether a reading below [`Self::STOP_BELOW_BYTES`] refuses a start
-    /// and stops a recording; when not, it only warns, and the minutes
-    /// left count to a full disk. Off on the Mac only ([`Self::system`];
-    /// why on [`Self::STOP_BELOW_BYTES`]).
-    pub(crate) stops: bool,
 }
 
 impl DiskWatch {
     /// Below this a recording does not start, and one in progress stops and
     /// is saved: room for the database, the processing and the system, so
-    /// the save itself never meets a full disk. Linux and Windows only: on
-    /// the Mac `statvfs` leaves out the space APFS would purge for the user
-    /// (tens of GB with local Time Machine snapshots), so a reading below
-    /// it there only warns ([`Self::stops`]); a recording refused or cut on
-    /// a disk that had room would lose the meeting. Nothing keeps the save
-    /// its room there yet: a failed write still ends the recording and
-    /// Steno tries to save it, but a disk that is truly full can fail the
-    /// save too, and the files stay for the recovery at the next launch.
-    /// The Mac gets the floor once the `steno-macos` crate reads
-    /// `NSURLVolumeAvailableCapacityForImportantUsageKey`, which counts
-    /// that space (reading it takes `unsafe`, which belongs there).
+    /// the save itself never meets a full disk. On the Mac the reading
+    /// also counts the space APFS would purge for the user (tens of GB
+    /// with local Time Machine snapshots), which `statvfs` leaves out, held
+    /// to `statvfs` plus 384 MiB, so below 128 MiB of `statvfs` there is no
+    /// room ([`Self::HARD_FLOOR_BYTES`], `mac_volume`).
     pub(crate) const STOP_BELOW_BYTES: u64 = 512 * 1024 * 1024;
+    /// Below this `statvfs` reading the Mac does not start a recording and
+    /// stops one in progress, whatever space macOS says it frees for
+    /// important use: `CacheDelete` purges that space asynchronously and a
+    /// write never waits for it, so a write can meet a full disk while the
+    /// purgeable space is still counted. The purge's window is the 384 MiB
+    /// gap up to [`Self::STOP_BELOW_BYTES`], about 15 minutes of a call's
+    /// writing; what is left keeps the save its room.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) const HARD_FLOOR_BYTES: u64 = 128 * 1024 * 1024;
     /// The recording time left above [`Self::STOP_BELOW_BYTES`] below which
     /// a recording warns.
     pub(crate) const WARN_BELOW: Duration = Duration::from_secs(30 * 60);
 
-    /// The file system's free space (`statvfs`, `GetDiskFreeSpaceExW`),
-    /// read every five seconds, on the volumes of the recordings folder and
-    /// of `database_folder`; the floor stops recordings everywhere but on
-    /// the Mac (see [`Self::STOP_BELOW_BYTES`]).
+    /// The system's free space, read every five seconds, on the volumes of
+    /// the recordings folder and of `database_folder`: `statvfs` and
+    /// `GetDiskFreeSpaceExW`, on the Mac with the space free for important
+    /// use beside it (`mac_volume`). The floor stops recordings on every
+    /// platform (see [`Self::STOP_BELOW_BYTES`]).
     #[must_use]
     pub(crate) fn system(database_folder: Option<&Path>) -> Self {
         Self {
-            free_space: Arc::new(|path| {
-                fs4::statvfs(path).map(|stats| Volume {
-                    available: stats.available_space(),
-                    total: stats.total_space(),
-                })
-            }),
+            free_space: system_volume(),
             interval: Duration::from_secs(5),
             database_folder: database_folder.map(Path::to_path_buf),
-            stops: !cfg!(target_os = "macos"),
         }
     }
 
@@ -176,6 +173,96 @@ impl DiskWatch {
     }
 }
 
+/// The volume that holds a path as the system reports it
+/// ([`DiskWatch::system`]): `statvfs`, an error when that read fails, and
+/// the space free for important use beside it ([`mac_volume`]), left out
+/// when that read fails ([`important_use`]): the reading drops to
+/// `statvfs`, which can stop a recording. Each read asks macOS afresh on a
+/// new `NSURL` (a reused one caches its values; see
+/// `steno_macos::volume`), so the reading follows the writes.
+#[cfg(target_os = "macos")]
+fn system_volume() -> FreeSpace {
+    let failing = Mutex::default();
+    Arc::new(move |path| {
+        let statvfs = statvfs(path)?;
+        let important = important_use(
+            path,
+            steno_macos::volume::available_for_important_usage,
+            &failing,
+        );
+        Ok(mac_volume(statvfs, important))
+    })
+}
+
+/// The volume that holds a path as the system reports it
+/// ([`DiskWatch::system`]).
+#[cfg(not(target_os = "macos"))]
+fn system_volume() -> FreeSpace {
+    Arc::new(statvfs)
+}
+
+/// The space free for important use on the volume of `path` as `read`
+/// reports it, `None` when the read fails. The first failure of a streak
+/// on a folder logs a `warn` line with the error's kind alone (the error's
+/// text names the folder), every failure the full error at `debug`; a
+/// read that succeeds ends the streak. `failing` holds the folders whose
+/// last read failed.
+#[cfg(any(target_os = "macos", test))]
+fn important_use(
+    path: &Path,
+    read: impl FnOnce(&Path) -> std::io::Result<u64>,
+    failing: &Mutex<std::collections::HashSet<PathBuf>>,
+) -> Option<u64> {
+    let result = read(path);
+    let mut failing = failing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match result {
+        Ok(bytes) => {
+            failing.remove(path);
+            Some(bytes)
+        }
+        Err(error) => {
+            if failing.insert(path.to_path_buf()) {
+                tracing::warn!(
+                    kind = ?error.kind(),
+                    "the space free for important use could not be read"
+                );
+            }
+            tracing::debug!(%error, "the space free for important use could not be read");
+            None
+        }
+    }
+}
+
+/// `statvfs` (`GetDiskFreeSpaceExW` on Windows) of the volume that holds
+/// `path`.
+fn statvfs(path: &Path) -> std::io::Result<Volume> {
+    fs4::statvfs(path).map(|stats| Volume {
+        available: stats.available_space(),
+        total: stats.total_space(),
+    })
+}
+
+/// The Mac's reading of a volume from its `statvfs` and the space macOS
+/// frees on it for `important` use (`None` when that read failed): the
+/// larger of the two, so the space APFS would purge counts, and a 0 from a
+/// volume `CacheDelete` does not manage (an external drive, a disk image)
+/// leaves `statvfs` deciding. It is held to `statvfs` plus the gap between
+/// [`DiskWatch::STOP_BELOW_BYTES`] and [`DiskWatch::HARD_FLOOR_BYTES`]: it
+/// is below the floor once the larger reading is, or `statvfs` is below
+/// the hard floor, and the minutes left count to whichever comes first.
+#[cfg(any(target_os = "macos", test))]
+fn mac_volume(statvfs: Volume, important: Option<u64>) -> Volume {
+    let ceiling = statvfs
+        .available
+        .saturating_add(DiskWatch::STOP_BELOW_BYTES - DiskWatch::HARD_FLOOR_BYTES);
+    Volume {
+        available: important.unwrap_or(0).clamp(statvfs.available, ceiling),
+        ..statvfs
+    }
+}
+
 /// What a recording does about the space left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Room {
@@ -191,23 +278,19 @@ enum Room {
 
 impl Room {
     /// The room `free` bytes leave a recording that writes
-    /// `bytes_per_second`. The warning comes under
-    /// [`DiskWatch::WARN_BELOW`] above the floor either way; when the floor
-    /// `stops` the recording, below it there is no room and the minutes
-    /// count to it, else they count to a full disk and the room stays low.
-    fn of(free: u64, bytes_per_second: u64, stops: bool) -> Self {
+    /// `bytes_per_second`: below the floor there is none, and the warning
+    /// comes under [`DiskWatch::WARN_BELOW`] above it, the minutes counting
+    /// to it.
+    fn of(free: u64, bytes_per_second: u64) -> Self {
         let rate = bytes_per_second.max(1);
-        let spare = free.checked_sub(DiskWatch::STOP_BELOW_BYTES);
-        if spare.is_some_and(|spare| spare / rate >= DiskWatch::WARN_BELOW.as_secs()) {
+        let Some(spare) = free.checked_sub(DiskWatch::STOP_BELOW_BYTES) else {
+            return Room::Full;
+        };
+        if spare / rate >= DiskWatch::WARN_BELOW.as_secs() {
             return Room::Enough;
         }
-        let left = match (spare, stops) {
-            (None, true) => return Room::Full,
-            (Some(spare), true) => spare,
-            (_, false) => free,
-        };
         Room::Low {
-            minutes: (left / rate / 60).max(1),
+            minutes: (spare / rate / 60).max(1),
         }
     }
 }
@@ -378,17 +461,14 @@ const KEPT_FOR_THE_NEXT_LAUNCH: &str = "The recording is kept, but it could not 
 const RECOVERED_AFTER_A_FAILURE: &str =
     "Recording stopped because of an error; the audio up to that point was kept.";
 
-/// The warning of a recording with `minutes` left; a recording the floor
-/// `stops` ([`DiskWatch::stops`]) is promised the stop, one it does not
-/// (the Mac's) is asked for room instead.
-fn low_space_warning(minutes: u64, stops: bool) -> String {
+/// The warning of a recording with `minutes` left, which promises the
+/// stop.
+fn low_space_warning(minutes: u64) -> String {
     let unit = if minutes == 1 { "minute" } else { "minutes" };
-    let then = if stops {
-        "Steno stops and saves the recording before the disk fills."
-    } else {
-        "Free some space to keep recording."
-    };
-    format!("The disk is almost full: about {minutes} {unit} of recording left. {then}")
+    format!(
+        "The disk is almost full: about {minutes} {unit} of recording left. \
+         Steno stops and saves the recording before the disk fills."
+    )
 }
 
 /// The status line of a recording stopped because the disk was nearly full.
@@ -430,8 +510,6 @@ struct Active {
 
 /// The disk watch's warning of one recording ([`low_space_warning`]).
 struct DiskWarning {
-    /// Whether the floor stops this recording ([`DiskWatch::stops`]).
-    stops: bool,
     /// The minutes left at the latest reading; `None` with room.
     minutes: Option<u64>,
     /// The minutes left when the user dismissed the warning
@@ -447,7 +525,7 @@ impl DiskWarning {
         let minutes = self
             .minutes
             .filter(|minutes| self.dismissed.is_none_or(|dismissed| *minutes < dismissed))?;
-        Some(low_space_warning(minutes, self.stops))
+        Some(low_space_warning(minutes))
     }
 
     /// After a reading that leaves `minutes`, `None` with room.
@@ -1226,7 +1304,7 @@ impl CaptureRecorder {
         let rate = bytes_per_second(&configuration);
         let room = disk
             .free_for(&audio_folder)
-            .map_or(Room::Enough, |free| Room::of(free, rate, disk.stops));
+            .map_or(Room::Enough, |free| Room::of(free, rate));
         if room == Room::Full {
             return Err(refused("no room", NO_ROOM_TO_START));
         }
@@ -1306,7 +1384,6 @@ impl CaptureRecorder {
                 recording_since,
                 notice_thread,
                 disk_warning: DiskWarning {
-                    stops: disk.stops,
                     minutes: match room {
                         Room::Low { minutes } => Some(minutes),
                         Room::Enough | Room::Full => None,
@@ -1370,7 +1447,7 @@ impl CaptureRecorder {
                     let Some(free) = disk.free_for(folder) else {
                         continue;
                     };
-                    match Room::of(free, rate, disk.stops) {
+                    match Room::of(free, rate) {
                         Room::Enough => recorder.warn(meeting_id, None),
                         Room::Low { minutes } => recorder.warn(meeting_id, Some(minutes)),
                         Room::Full => {
@@ -2006,7 +2083,7 @@ mod tests {
     use crate::app::BuildError;
     use crate::pipeline::{BuiltEngine, BuiltPipeline, MakeDependencies};
     use crate::testing::{
-        PATIENCE, eventually, eventually_within, fake_dependencies, on_own_thread,
+        HANG_GUARD, PATIENCE, eventually, eventually_within, fake_dependencies, on_own_thread,
         synthetic_capture, temp_store,
     };
     use steno_audio::testing::synthetic::SyntheticOptions;
@@ -2165,8 +2242,7 @@ mod tests {
     }
 
     /// A disk watch over `free_space`, read every 20 ms, on the recordings
-    /// folder's volume alone, whose floor stops recordings as off the Mac,
-    /// on every platform.
+    /// folder's volume alone.
     fn disk_with(
         free_space: impl Fn(&Path) -> std::io::Result<Volume> + Send + Sync + 'static,
     ) -> DiskWatch {
@@ -2174,7 +2250,6 @@ mod tests {
             free_space: Arc::new(free_space),
             interval: Duration::from_millis(20),
             database_folder: None,
-            stops: true,
         }
     }
 
@@ -2282,28 +2357,43 @@ mod tests {
         }
     }
 
-    async fn start(recorder: &Arc<CaptureRecorder>) {
-        let starting = recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::InPerson, None))
-            .await
-            .unwrap();
+    /// Starts an in-person recording on a thread of its own, failing the
+    /// test as hung after [`HANG_GUARD`], and checks that it records.
+    fn start(recorder: &Arc<CaptureRecorder>) {
+        try_start(recorder, CaptureMode::InPerson);
         assert_eq!(recorder.status().state, RecordingState::Recording);
     }
 
-    async fn stop(recorder: &Arc<CaptureRecorder>) {
-        let stopping = recorder.clone();
-        tokio::task::spawn_blocking(move || stopping.stop())
-            .await
-            .unwrap();
+    /// Starts a `mode` recording on a thread of its own, which may refuse
+    /// it, failing the test as hung after [`HANG_GUARD`].
+    fn try_start(recorder: &Arc<CaptureRecorder>, mode: CaptureMode) {
+        let starting = recorder.clone();
+        on_own_thread(HANG_GUARD, "the start returned", move || {
+            starting.start(mode, None);
+        });
     }
 
-    /// Quits on a thread of its own, failing the test rather than hanging
-    /// it when quitting never returns.
+    /// Stops the recording on a thread of its own and returns once the
+    /// stop saved it, failing the test as hung after [`HANG_GUARD`].
+    fn stop(recorder: &Arc<CaptureRecorder>) {
+        let stopping = recorder.clone();
+        on_own_thread(HANG_GUARD, "the stop returned", move || stopping.stop());
+    }
+
+    /// Quits on a thread of its own, failing the test as hung after
+    /// [`HANG_GUARD`].
     fn quit(recorder: &Arc<CaptureRecorder>) {
         let quitting = recorder.clone();
-        on_own_thread(PATIENCE, "quitting returned", move || {
+        on_own_thread(HANG_GUARD, "quitting returned", move || {
             quitting.stop_for_quit();
         });
+    }
+
+    /// The harness's recorder's status after a start on a thread of its
+    /// own, which may refuse it.
+    fn status_after_a_start(harness: &Harness) -> RecorderStatus {
+        try_start(&harness.recorder, CaptureMode::InPerson);
+        harness.recorder.status()
     }
 
     /// Every change that finds the recorder in `state` holds it there for
@@ -2330,7 +2420,7 @@ mod tests {
     /// diarizer, which `warm_up` loads after the speech engine; whether
     /// the speech engine was loaded too.
     async fn warmed_the_engine(harness: &Harness) -> bool {
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         eventually("the diarizer was loaded while recording", || {
             harness.diarizer.preparations.count() > 0
         })
@@ -2345,7 +2435,7 @@ mod tests {
     async fn a_recording_start_warms_the_pipeline_up_when_the_models_are_installed() {
         let harness = harness(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]);
         assert_eq!(warmed_the_engine(&harness).await, cfg!(target_os = "macos"));
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// With Parakeet in the speech sidecar (here chosen on every
@@ -2359,18 +2449,18 @@ mod tests {
             platform_rule(crate::speech::testing::sidecar_chosen()),
         );
         assert!(!warmed_the_engine(&harness).await);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_never_warms_up_models_that_would_download() {
         let harness = harness(&[ModelAsset::OfflineDiarizer]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(harness.engine.preparations.count(), 0);
         assert_eq!(harness.diarizer.preparations.count(), 0);
         // Processing the recording loads them, as it always did.
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// The warm-up follows the engine a reload built: the Mac's rule on
@@ -2389,7 +2479,7 @@ mod tests {
         );
         harness.save_engine("parakeet-v3").unwrap();
         assert!(warmed_the_engine(&harness).await);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// After a failed reload the pipeline keeps the engine it was built
@@ -2410,7 +2500,7 @@ mod tests {
         sidecar.failing_reloads.store(true, Ordering::SeqCst);
         assert!(sidecar.save_engine("parakeet-v3").is_err());
         assert!(!warmed_the_engine(&sidecar).await);
-        stop(&sidecar.recorder).await;
+        stop(&sidecar.recorder);
 
         let in_process = harness_over(
             models_with(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]),
@@ -2420,7 +2510,7 @@ mod tests {
         in_process.failing_reloads.store(true, Ordering::SeqCst);
         assert!(in_process.save_engine("parakeet-ultra").is_err());
         assert!(warmed_the_engine(&in_process).await);
-        stop(&in_process.recorder).await;
+        stop(&in_process.recorder);
     }
 
     /// A microphone input for the warning tests: `None` names none.
@@ -2470,6 +2560,22 @@ mod tests {
         )
     }
 
+    /// The recorder's warning without a leading missing-audio note
+    /// ([`missing_audio_note`]): a rebuild that takes over a second on a
+    /// loaded runner leaves a gap the stop notes, and the fallback tests
+    /// check the fallback's warning and note, not how long a rebuild took.
+    /// A stall's note names a cause, so it stays.
+    fn without_the_missing_audio_note(recorder: &CaptureRecorder) -> Option<String> {
+        let warning = recorder.status().warning?;
+        let Some(rest) = leading_seconds(&warning)
+            .and_then(|seconds| note_for_seconds(seconds, None))
+            .and_then(|note| warning.strip_prefix(note.as_str()))
+        else {
+            return Some(warning);
+        };
+        Some(rest.trim_start().to_owned()).filter(|rest| !rest.is_empty())
+    }
+
     /// A rebuild that records the default input in place of the chosen
     /// microphone shows a warning naming the one recorded, until it is
     /// dismissed (then no note follows the stop) or the recording stops.
@@ -2486,10 +2592,10 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }));
-        let warning = || harness.recorder.status().warning;
-        start(&harness.recorder).await;
+        let warning = || without_the_missing_audio_note(&harness.recorder);
+        start(&harness.recorder);
         assert_eq!(warning(), None, "the chosen microphone records");
-        eventually("the rebuild's fallback is named", || {
+        eventually_within(HANG_GUARD, "the rebuild's fallback is named", || {
             warning().as_deref()
                 == Some(
                     "Recording from Built-in Audio. The microphone chosen in Settings is not \
@@ -2500,7 +2606,7 @@ mod tests {
         harness.recorder.clear_messages();
         assert_eq!(warning(), None, "dismissed");
         let held = Arc::downgrade(&harness.recorder.inner().active.as_ref().unwrap().fallback);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert_eq!(warning(), None, "nothing left after the stop");
         assert_eq!(held.strong_count(), 0, "the notice thread was joined");
     }
@@ -2511,23 +2617,23 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_that_starts_on_the_fallback_microphone_warns_at_once() {
         let harness = harness_on_inputs(input(Some("Built-in Audio"), true), input(None, true));
-        let warning = || harness.recorder.status().warning;
-        start(&harness.recorder).await;
+        let warning = || without_the_missing_audio_note(&harness.recorder);
+        start(&harness.recorder);
         assert_eq!(
             warning().as_deref(),
             Some(
                 "Recording from Built-in Audio. The microphone chosen in Settings is not available."
             )
         );
-        eventually("the unnamed fallback reads as the default", || {
-            warning().as_deref()
-                == Some(
-                    "Recording from the system default microphone. The microphone chosen in \
-                     Settings is not available.",
-                )
-        })
+        let unnamed = "Recording from the system default microphone. The microphone chosen in \
+                       Settings is not available.";
+        eventually_within(
+            HANG_GUARD,
+            "the unnamed fallback reads as the default",
+            || warning().as_deref() == Some(unnamed),
+        )
         .await;
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert_eq!(
             warning().as_deref(),
             Some(
@@ -2546,11 +2652,14 @@ mod tests {
             input(Some("Built-in Audio"), true),
             input(Some("USB Microphone"), false),
         );
-        let warning = || harness.recorder.status().warning;
-        start(&harness.recorder).await;
+        let warning = || without_the_missing_audio_note(&harness.recorder);
+        start(&harness.recorder);
         assert!(warning().is_some(), "on the fallback at the start");
-        eventually("back on the chosen microphone", || warning().is_none()).await;
-        stop(&harness.recorder).await;
+        eventually_within(HANG_GUARD, "back on the chosen microphone", || {
+            warning().is_none()
+        })
+        .await;
+        stop(&harness.recorder);
         assert_eq!(
             warning().as_deref(),
             Some(
@@ -2568,12 +2677,9 @@ mod tests {
             input(Some("Built-in Audio"), true),
             input(Some("Built-in Audio"), true),
         );
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::Call);
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert_eq!(
             harness.recorder.status().warning.as_deref(),
             Some(
@@ -2619,7 +2725,7 @@ mod tests {
         )
     }
 
-    /// Records over `harness` until `warning` shows, within `patience`,
+    /// Records over `harness` until `warning` shows ([`until_the_warning`]),
     /// and checks the meter reads silence then and the warning stands for
     /// `holds` more; stops, checks the note after the stop names the
     /// `stalled` device, or none, and returns the seconds it says are
@@ -2628,17 +2734,16 @@ mod tests {
         harness: &Harness,
         warning: &str,
         stalled: Option<&str>,
-        patience: Duration,
         holds: Duration,
     ) -> u64 {
         let status = || harness.recorder.status();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         eventually("a level from the tone", || {
             status().levels.is_some_and(|levels| levels.mic > 0.1)
         })
         .await;
         assert_eq!(status().warning, None);
-        until_the_warning(harness, warning, patience).await;
+        until_the_warning(harness, warning).await;
         let mic = status().levels.map(|levels| levels.mic);
         assert!(
             mic.is_some_and(|mic| mic < 1e-6),
@@ -2649,7 +2754,7 @@ mod tests {
             assert_eq!(status().warning.as_deref(), Some(warning), "it stands");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         let note = status().warning.unwrap_or_default();
         assert!(note.starts_with("About "), "only the missing audio: {note}");
         let seconds = seconds_missing(&note, stalled);
@@ -2667,26 +2772,41 @@ mod tests {
     /// `stalled` device, or none: "About 1 second" as well as the plural.
     fn seconds_missing(note: &str, stalled: Option<&str>) -> u64 {
         let missing = note.find("About ").map_or("", |start| &note[start..]);
-        let seconds: u64 = missing
-            .strip_prefix("About ")
-            .and_then(|rest| rest.split(' ').next())
-            .and_then(|seconds| seconds.parse().ok())
-            .unwrap_or_else(|| panic!("the note: {note}"));
-        // A gap that rounds to `seconds`, past the note's 1 s floor.
-        let gap = Duration::from_secs(seconds).as_secs_f64() + 0.25;
+        let seconds = leading_seconds(missing).unwrap_or_else(|| panic!("the note: {note}"));
         assert_eq!(
             Some(missing),
-            missing_audio_note(gap, stalled).as_deref(),
+            note_for_seconds(seconds, stalled).as_deref(),
             "{note}"
         );
         seconds
     }
 
-    /// Waits up to `patience` for the recorder to show `warning`, as it
-    /// does once the restarts pass the attempts.
-    async fn until_the_warning(harness: &Harness, warning: &str, patience: Duration) {
-        let deadline = std::time::Instant::now() + patience;
+    /// The seconds a `note` that starts with a missing-audio note says are
+    /// missing.
+    fn leading_seconds(note: &str) -> Option<u64> {
+        note.strip_prefix("About ")?.split(' ').next()?.parse().ok()
+    }
+
+    /// [`missing_audio_note`]'s note for `seconds` missing and the
+    /// `stalled` device, or none.
+    fn note_for_seconds(seconds: u64, stalled: Option<&str>) -> Option<String> {
+        // A gap that rounds to `seconds`, past the note's 1 s floor.
+        missing_audio_note(Duration::from_secs(seconds).as_secs_f64() + 0.25, stalled)
+    }
+
+    /// Waits for the recorder to show `warning`, as it does once the
+    /// restarts pass the attempts, failing the test as hung after
+    /// [`HANG_GUARD`]: the restarts are real work, which a loaded runner
+    /// stretches. A still-trying warning stays once it shows, so another
+    /// one fails the test at once, on its value.
+    async fn until_the_warning(harness: &Harness, warning: &str) {
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         while harness.recorder.status().warning.as_deref() != Some(warning) {
+            if let Some(shown) = harness.recorder.status().warning
+                && shown.ends_with("Still trying.")
+            {
+                assert_eq!(shown, warning, "the still-trying warning");
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "the warning once the restarts pass the attempts: {:?}",
@@ -2699,9 +2819,6 @@ mod tests {
     /// Seconds of tone before the device stops delivering: long enough for
     /// the meter to show a level on a loaded host first.
     const BEFORE_THE_OUTAGE: f64 = 3.0;
-    /// How long the warning may take to show after the start: the tone,
-    /// the stall's 2 s, and four restarts that wait 2 s each for a frame.
-    const STILL_TRYING_WITHIN: Duration = Duration::from_secs(30);
     const STILL_TRYING_ON_USB: &str = "No audio from USB Microphone. Still trying.";
     const USB_MICROPHONE: &str = "USB Microphone";
 
@@ -2723,7 +2840,6 @@ mod tests {
             &harness,
             STILL_TRYING_ON_USB,
             Some(USB_MICROPHONE),
-            STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
         .await;
@@ -2746,7 +2862,6 @@ mod tests {
             &harness,
             STILL_TRYING_ON_USB,
             Some(USB_MICROPHONE),
-            STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
         .await;
@@ -2767,13 +2882,10 @@ mod tests {
         } else {
             "No audio is arriving. Still trying."
         };
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::Call);
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
-        until_the_warning(&harness, warning, STILL_TRYING_WITHIN).await;
-        stop(&harness.recorder).await;
+        until_the_warning(&harness, warning).await;
+        stop(&harness.recorder);
         seconds_missing(
             &harness.recorder.status().warning.unwrap_or_default(),
             cfg!(windows).then_some(USB_MICROPHONE),
@@ -2798,7 +2910,6 @@ mod tests {
             &harness,
             "No audio is arriving. Still trying.",
             None,
-            STILL_TRYING_WITHIN,
             Duration::ZERO,
         )
         .await;
@@ -2930,7 +3041,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quitting_stops_and_saves_the_recording_with_the_quit_reason() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         quit(&harness.recorder);
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
@@ -2949,7 +3060,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quitting_during_a_stop_waits_for_its_save() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
         let stopper = harness.recorder.clone();
@@ -2971,10 +3082,7 @@ mod tests {
         let harness = harness(&[]);
         let clock = Arc::new(steno_audio::testing::ManualClock::new());
         harness.recorder.count_down_on(clock.clone());
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::Call);
         harness
             .recorder
             .microphone_activity(MicrophoneActivity::Opened { app_name: None });
@@ -3012,11 +3120,7 @@ mod tests {
     async fn no_recording_starts_after_quitting() {
         let harness = harness(&[]);
         quit(&harness.recorder);
-        let starter = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the start returned", move || {
-            starter.start(CaptureMode::InPerson, None);
-        });
-        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
+        assert_eq!(status_after_a_start(&harness).state, RecordingState::Idle);
         assert_eq!(harness.store.all_meetings().unwrap(), []);
     }
 
@@ -3028,22 +3132,17 @@ mod tests {
     async fn a_start_during_an_install_is_refused_with_a_message() {
         let harness = harness(&[]);
         let hold = harness.recorder.hold_starts();
-        let starter = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the start returned", move || {
-            starter.start(CaptureMode::InPerson, None);
-        });
-        let status = harness.recorder.status();
+        let status = status_after_a_start(&harness);
         assert_eq!(status.state, RecordingState::Idle);
         assert_eq!(status.error.as_deref(), Some(INSTALLING_UPDATE));
         assert_eq!(harness.store.all_meetings().unwrap(), []);
 
         drop(hold);
         assert_eq!(harness.recorder.status().error, None);
-        let starter = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the start returned", move || {
-            starter.start(CaptureMode::InPerson, None);
-        });
-        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+        assert_eq!(
+            status_after_a_start(&harness).state,
+            RecordingState::Recording
+        );
         let hold = harness.recorder.hold_starts();
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
         drop(hold);
@@ -3125,15 +3224,6 @@ mod tests {
         tokio::spawn(async move { schedule.offer("0.12.0").await })
     }
 
-    /// The harness's recorder after a start on a thread of its own.
-    fn status_after_a_start(harness: &Harness) -> RecorderStatus {
-        let starter = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the start returned", move || {
-            starter.start(CaptureMode::InPerson, None);
-        });
-        harness.recorder.status()
-    }
-
     /// A Record while the install waits on a password prompt records at
     /// once, over the app's gate: recording always wins over an install.
     /// Cancelling the prompt fails the install, which relaunches nothing,
@@ -3153,7 +3243,7 @@ mod tests {
         assert_eq!(*source.told.lock().unwrap(), ["User canceled."]);
         assert_eq!(source.relaunches.load(Ordering::SeqCst), 0);
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         quit(&harness.recorder);
         assert_eq!(harness.store.all_meetings().unwrap().len(), 1);
     }
@@ -3170,7 +3260,7 @@ mod tests {
             status_after_a_start(&harness).state,
             RecordingState::Recording
         );
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert_eq!(harness.recorder.status().error, None);
         let meetings = harness.store.all_meetings().unwrap();
         assert_eq!(meetings.len(), 1);
@@ -3194,7 +3284,7 @@ mod tests {
             recorder: Some(harness.recorder.clone()),
             ..WaitingSource::default()
         });
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let offer = offer_after_a_check(&harness, source.clone()).await;
         tokio::time::sleep(crate::updates::IDLE_POLL * 2).await;
         assert_eq!(
@@ -3204,7 +3294,7 @@ mod tests {
         assert_eq!(*source.steps.lock().unwrap(), Vec::<String>::new());
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
 
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         tokio::time::timeout(PATIENCE + crate::updates::IDLE_POLL * 2, offer)
             .await
             .expect("the install ran once the meeting was processed")
@@ -3325,7 +3415,7 @@ mod tests {
                 })
             })
             .collect();
-        on_own_thread(PATIENCE, "every start returned", move || {
+        on_own_thread(HANG_GUARD, "every start returned", move || {
             for starter in starters {
                 starter.join().unwrap();
             }
@@ -3344,7 +3434,7 @@ mod tests {
     async fn a_toggle_starts_a_call_and_the_next_one_stops_it() {
         let harness = harness(&[]);
         let toggling = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the first toggle returned", move || {
+        on_own_thread(HANG_GUARD, "the first toggle returned", move || {
             toggling.toggle();
         });
         let status = harness.recorder.status();
@@ -3352,7 +3442,7 @@ mod tests {
         assert_eq!(status.mode, Some(CaptureMode::Call));
         let meeting_id = status.meeting_id.unwrap();
         let toggling = harness.recorder.clone();
-        on_own_thread(PATIENCE, "the second toggle returned", move || {
+        on_own_thread(HANG_GUARD, "the second toggle returned", move || {
             toggling.toggle();
         });
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
@@ -3366,14 +3456,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_quit_through_the_exit_gate_exits_after_the_recording_is_saved() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let gate = crate::app::ExitGate::default();
         let (exited, exit_seen) = std::sync::mpsc::channel();
         let quitting = harness.recorder.clone();
         let (store, at_exit) = (harness.store.clone(), harness.recorder.clone());
         let held = gate.exit_requested(
-            crate::app::SHUTDOWN_PATIENCE,
+            HANG_GUARD,
             move || quitting.stop_for_quit(),
             move || {
                 let meeting = store.meeting(meeting_id).unwrap().unwrap();
@@ -3382,12 +3472,11 @@ mod tests {
             },
         );
         assert!(!held, "the exit waits for the save");
-        let (state, meeting, saved) = tokio::task::spawn_blocking(move || {
-            exit_seen.recv_timeout(std::time::Duration::from_secs(20))
-        })
-        .await
-        .unwrap()
-        .expect("exited after the save");
+        let (state, meeting, saved) =
+            tokio::task::spawn_blocking(move || exit_seen.recv_timeout(HANG_GUARD))
+                .await
+                .unwrap()
+                .expect("exited after the save");
         assert_eq!(state, RecordingState::Idle);
         assert!(saved, "the asset was written before the exit");
         assert_eq!(meeting.end_reason, Some(RecordingEndReason::Quit));
@@ -3420,7 +3509,7 @@ mod tests {
             "whisperkit-large-v3-turbo",
             platform_rule(SpeechSettings::default()),
         );
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(harness.engine.preparations.count(), 0);
         assert_eq!(harness.diarizer.preparations.count(), 0);
@@ -3429,7 +3518,7 @@ mod tests {
             before,
             "nothing was downloaded"
         );
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// The synthetic capture, its writer thread dying (a panic) at its
@@ -3458,36 +3547,95 @@ mod tests {
         })
     }
 
-    /// The busy timeout the quit tests give the store: one commit try waits
-    /// this long, so a test that allows `2 * QUIT_BUSY` tells one try (plus
-    /// a slow runner's overhead, over a second on Windows CI) from two.
-    const QUIT_BUSY: std::time::Duration = std::time::Duration::from_secs(2);
+    /// How many commit tries found the database held, and whether the try
+    /// in progress may end: what a quit test shares with its busy handler
+    /// ([`BusyTries::on_busy`]). Each test keeps one in a static of its
+    /// own, since SQLite's busy handler is a plain function that captures
+    /// nothing.
+    struct BusyTries {
+        tries: AtomicUsize,
+        open: AtomicBool,
+    }
+
+    impl BusyTries {
+        const fn new() -> Self {
+            Self {
+                tries: AtomicUsize::new(0),
+                open: AtomicBool::new(false),
+            }
+        }
+
+        fn tries(&self) -> usize {
+            self.tries.load(Ordering::SeqCst)
+        }
+
+        /// Lets the try in progress, and every later one, end at once.
+        fn open(&self) {
+            self.open.store(true, Ordering::SeqCst);
+        }
+
+        /// The quit test's busy handler, in place of the store's busy
+        /// timeout. SQLite calls it with `waits` 0 when a try first finds
+        /// the database held, so it counts the commit's tries, and it
+        /// keeps the try in progress waiting until the test opens it (or
+        /// for [`HANG_GUARD`]'s worth of 1 ms naps, at least that long), as
+        /// a long busy timeout would.
+        fn on_busy(&self, waits: i32) -> bool {
+            if waits == 0 {
+                self.tries.fetch_add(1, Ordering::SeqCst);
+            }
+            if self.open.load(Ordering::SeqCst) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            Duration::from_millis(waits.unsigned_abs().into()) < HANG_GUARD
+        }
+    }
+
+    /// Gives the harness's store `handler`, a quit test's
+    /// [`BusyTries::on_busy`], for its busy handler, and holds the
+    /// database from another connection until the hold is dropped.
+    fn held_with_counted_tries(
+        harness: &Harness,
+        handler: fn(i32) -> bool,
+    ) -> steno_core::testing::WriteLockHold {
+        harness
+            .store
+            .read(|connection| Ok(connection.busy_handler(Some(handler))?))
+            .unwrap();
+        steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"))
+    }
+
+    /// [`quit`]s on a thread of its own and, once the recorder has seen the
+    /// quit, lets the commit's try end without waiting
+    /// ([`BusyTries::on_busy`] over `busy`).
+    async fn quit_while_busy(recorder: &Arc<CaptureRecorder>, busy: &BusyTries) {
+        let quitting = recorder.clone();
+        let quitter = std::thread::spawn(move || quit(&quitting));
+        eventually("the quit came", || recorder.inner().quitting).await;
+        busy.open();
+        quitter.join().unwrap();
+    }
 
     /// A stop for the app's exit tries its commit once: with the database
-    /// held past the busy timeout ([`QUIT_BUSY`]), quitting returns after
-    /// one wait, where three tries would take three waits (15 s at the product's
-    /// 5 s timeout, past the exit's 10 s patience), and the meeting stays
-    /// `recording` for the next launch, its folder still recorded.
+    /// held, quitting returns after one try, where the product's three
+    /// would each wait out the store's 5 s busy timeout (15 s, past the
+    /// exit's 10 s patience), and the meeting stays `recording` for the
+    /// next launch, its folder still recorded.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_for_the_exit_tries_its_commit_once() {
+        static BUSY: BusyTries = BusyTries::new();
         let harness = harness_over(
             models_with(&[]),
             "parakeet-v3",
             platform_rule(SpeechSettings::default()),
         );
-        harness
-            .store
-            .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
-            .unwrap();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let hold =
-            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
-        let started = std::time::Instant::now();
-        quit(&harness.recorder);
-        let took = started.elapsed();
+        let hold = held_with_counted_tries(&harness, |waits| BUSY.on_busy(waits));
+        quit_while_busy(&harness.recorder, &BUSY).await;
         drop(hold);
-        assert!(took < 2 * QUIT_BUSY, "{took:?}");
+        assert_eq!(BUSY.tries(), 1, "one try");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
@@ -3510,61 +3658,48 @@ mod tests {
     }
 
     /// A stop under way when the app quits tries its commit no more once
-    /// the quit came: with the database held past the busy timeout
-    /// ([`QUIT_BUSY`]), quitting returns after the try in progress, where a
-    /// second try would take one busy timeout more, and the meeting is kept
-    /// for the next launch.
+    /// the quit came: with the database held, quitting returns after the
+    /// try in progress, where a second try would wait out the busy
+    /// timeout once more, and the meeting is kept for the next launch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_under_way_when_the_app_quits_tries_its_commit_no_more() {
+        static BUSY: BusyTries = BusyTries::new();
         let harness = harness(&[]);
-        harness
-            .store
-            .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
-            .unwrap();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let hold =
-            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
+        let hold = held_with_counted_tries(&harness, |waits| BUSY.on_busy(waits));
         let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
         let stopper = harness.recorder.clone();
         let manual = std::thread::spawn(move || stopper.stop());
         stop_seen.recv_timeout(PATIENCE).expect("the stop began");
-        let started = std::time::Instant::now();
-        quit(&harness.recorder);
-        let took = started.elapsed();
+        quit_while_busy(&harness.recorder, &BUSY).await;
         drop(hold);
         manual.join().unwrap();
-        // The stop's notice holds it 0.3 s ([`held_in`]), then one try.
-        assert!(took < 2 * QUIT_BUSY, "{took:?}");
+        assert_eq!(BUSY.tries(), 1, "one try");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
     /// A quit that comes while the stop's first try waits on the busy
-    /// database (past the notice's 0.3 s hold, [`held_in`]) is seen before
-    /// the next try: quitting returns once that try ends, where a second
-    /// try would take one busy timeout more, and the meeting is kept.
+    /// database is seen before the next try: quitting returns once that
+    /// try ends, where a second try would wait out the busy timeout once
+    /// more, and the meeting is kept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_quit_during_the_stop_s_first_try_tries_no_more() {
+        static BUSY: BusyTries = BusyTries::new();
         let harness = harness(&[]);
-        harness
-            .store
-            .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
-            .unwrap();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let hold =
-            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
-        let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
+        let hold = held_with_counted_tries(&harness, |waits| BUSY.on_busy(waits));
         let stopper = harness.recorder.clone();
-        let started = std::time::Instant::now();
         let manual = std::thread::spawn(move || stopper.stop());
-        stop_seen.recv_timeout(PATIENCE).expect("the stop began");
-        std::thread::sleep(std::time::Duration::from_millis(700));
-        quit(&harness.recorder);
-        let took = started.elapsed();
+        eventually_within(HANG_GUARD, "the stop's first try waits", || {
+            BUSY.tries() == 1
+        })
+        .await;
+        quit_while_busy(&harness.recorder, &BUSY).await;
         drop(hold);
         manual.join().unwrap();
-        assert!(took < 2 * QUIT_BUSY, "{took:?}");
+        assert_eq!(BUSY.tries(), 1, "one try");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
@@ -3604,10 +3739,10 @@ mod tests {
         ];
         for (change, deleted) in changes.into_iter().zip([false, true]) {
             let harness = harness(&[]);
-            start(&harness.recorder).await;
+            start(&harness.recorder);
             let meeting_id = harness.recorder.status().meeting_id.unwrap();
             change(&harness.store, meeting_id);
-            stop(&harness.recorder).await;
+            stop(&harness.recorder);
             assert_eq!(
                 harness.recorder.status().error.as_deref(),
                 Some(MEETING_NOT_STORED)
@@ -3644,10 +3779,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_saved_stop_keeps_its_folder_for_the_next_launch_to_forget() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let support = harness.dir.path().join("support");
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
         assert!(
             crate::audio_folders::recorded(&support)
@@ -3672,9 +3807,9 @@ mod tests {
     async fn a_power_loss_after_a_saved_stop_leaves_the_master_to_the_next_launch() {
         let harness = harness(&[]);
         harness.store.checkpoint_durably().unwrap();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
         harness.recorder.pipeline.current().wait_until_idle().await;
 
@@ -3702,10 +3837,10 @@ mod tests {
             platform_rule(SpeechSettings::default()),
             dying_capture(20, died.clone()),
         );
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         eventually("the writer died", || died.load(Ordering::SeqCst)).await;
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
 
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Idle);
@@ -3750,7 +3885,7 @@ mod tests {
                 platform_rule(SpeechSettings::default()),
                 dying_capture(20, died.clone()),
             );
-            start(&harness.recorder).await;
+            start(&harness.recorder);
             let meeting_id = harness.recorder.status().meeting_id.unwrap();
             eventually("the writer died", || died.load(Ordering::SeqCst)).await;
             let audio = harness.dir.path().join("audio");
@@ -3765,7 +3900,7 @@ mod tests {
                 }
             })
             .await;
-            stop(&harness.recorder).await;
+            stop(&harness.recorder);
             assert_kept(&harness, meeting_id, &audio);
         }
     }
@@ -3782,10 +3917,7 @@ mod tests {
             .unwrap();
         let hold =
             steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::InPerson, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::InPerson);
         drop(hold);
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Idle);
@@ -3837,10 +3969,7 @@ mod tests {
             platform_rule(SpeechSettings::default()),
             failing,
         );
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::InPerson, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::InPerson);
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
 
         let audio_folder = harness.dir.path().join("audio");
@@ -3985,9 +4114,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let harness = harness(&[]);
         harness.store.checkpoint_durably().unwrap();
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         harness.recorder.pipeline.current().wait_until_idle().await;
         let support = harness.dir.path().join("support");
 
@@ -4156,14 +4285,14 @@ mod tests {
             })
         });
         let recorder = &harness.recorder;
-        start(recorder).await;
+        start(recorder);
         let meeting_id = recorder.status().meeting_id.unwrap();
         let finished = backend.clone();
-        tokio::task::spawn_blocking(move || finished.wait_until_finished())
-            .await
-            .unwrap();
+        on_own_thread(HANG_GUARD, "the backend delivered", move || {
+            finished.wait_until_finished();
+        });
         go.send(()).unwrap();
-        stop(recorder).await;
+        stop(recorder);
         let text = log.text();
         assert!(
             text.lines()
@@ -4173,17 +4302,14 @@ mod tests {
         );
     }
 
-    /// How long [`ended_on_its_own`] waits. An ending takes its own time
-    /// before the save (a lost device's restarts back off for about two
-    /// seconds, a failed write waits for the watcher's tick), which a
-    /// loaded Windows runner stretched past [`PATIENCE`]; a recorder that
-    /// never ends still fails the test.
-    const ENDING_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
-
     /// Waits until the recorder is idle again after a recording that ended
-    /// on its own, and returns the saved meeting.
+    /// on its own, and returns the saved meeting. An ending takes its own
+    /// time before the save (a lost device's restarts back off for about
+    /// two seconds, a failed write waits for the watcher's tick), so only
+    /// [`HANG_GUARD`] bounds it: a recorder that never ends still fails
+    /// the test.
     async fn ended_on_its_own(harness: &Harness, meeting_id: Uuid) -> steno_core::Meeting {
-        eventually_within(ENDING_PATIENCE, "the recording ended on its own", || {
+        eventually_within(HANG_GUARD, "the recording ended on its own", || {
             harness.recorder.status().state == RecordingState::Idle
         })
         .await;
@@ -4222,7 +4348,7 @@ mod tests {
             }
             Ok(session)
         }));
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let meeting = ended_on_its_own(&harness, meeting_id).await;
         assert_eq!(
@@ -4278,7 +4404,7 @@ mod tests {
     async fn ends_as_a_lost_device(device: fn(SyntheticOptions) -> SyntheticOptions) {
         let harness = harness(&[]);
         harness.capture_with(failing_capture(None, device));
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let meeting = ended_on_its_own(&harness, meeting_id).await;
         assert_eq!(
@@ -4300,7 +4426,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_that_panics_leaves_the_recorder_idle_with_an_error() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         eventually("frames reached the files", || {
             harness.recorder.status().levels.is_some()
@@ -4336,8 +4462,8 @@ mod tests {
             crate::audio_folders::recorded(&support).unwrap()[&meeting_id],
             audio_folder
         );
-        start(&harness.recorder).await;
-        stop(&harness.recorder).await;
+        start(&harness.recorder);
+        stop(&harness.recorder);
     }
 
     /// A start that panics part way (here the host's change hook, on the
@@ -4363,8 +4489,8 @@ mod tests {
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Idle);
         assert_eq!(status.error.as_deref(), Some(START_PANICKED));
-        start(&harness.recorder).await;
-        stop(&harness.recorder).await;
+        start(&harness.recorder);
+        stop(&harness.recorder);
     }
 
     /// A start that panics once its meeting is begun and its writer made
@@ -4405,8 +4531,8 @@ mod tests {
         let support = harness.dir.path().join("support");
         assert!(crate::audio_folders::recorded(&support).unwrap().is_empty());
         harness.capture_with(synthetic_capture());
-        start(&harness.recorder).await;
-        stop(&harness.recorder).await;
+        start(&harness.recorder);
+        stop(&harness.recorder);
     }
 
     /// A device that disappeared cut the recording short whoever stopped
@@ -4474,10 +4600,7 @@ mod tests {
         harness
             .free
             .store(DiskWatch::STOP_BELOW_BYTES - 1, Ordering::SeqCst);
-        let starting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
-            .await
-            .unwrap();
+        try_start(&harness.recorder, CaptureMode::Call);
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Idle);
         assert_eq!(
@@ -4500,7 +4623,7 @@ mod tests {
         harness
             .free
             .store(DiskWatch::STOP_BELOW_BYTES + ten_minutes, Ordering::SeqCst);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         assert_eq!(
             harness.recorder.status().warning.as_deref(),
@@ -4524,7 +4647,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_disk_warning_appears_once_the_room_runs_low_while_recording() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         assert_eq!(harness.recorder.status().warning, None);
         harness.free.store(
             DiskWatch::STOP_BELOW_BYTES + 60 * (48_000 * 4 + 16_000 * 2),
@@ -4543,7 +4666,7 @@ mod tests {
             harness.recorder.status().warning.is_none()
         })
         .await;
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// A dismissed disk warning stays away while the room left is what it
@@ -4570,14 +4693,14 @@ mod tests {
             })
             .await;
         };
-        start(&harness.recorder).await;
-        assert_eq!(warning(), Some(low_space_warning(10, true)));
+        start(&harness.recorder);
+        assert_eq!(warning(), Some(low_space_warning(10)));
         harness.recorder.clear_messages();
         ticks().await;
         assert_eq!(warning(), None, "dismissed at 10 minutes");
         free.store(minutes(5), Ordering::SeqCst);
         eventually("the warning shows again with less room", || {
-            warning() == Some(low_space_warning(5, true))
+            warning() == Some(low_space_warning(5))
         })
         .await;
         harness.recorder.clear_messages();
@@ -4585,10 +4708,10 @@ mod tests {
         ticks().await;
         free.store(minutes(10), Ordering::SeqCst);
         eventually("a low room after room again warns afresh", || {
-            warning() == Some(low_space_warning(10, true))
+            warning() == Some(low_space_warning(10))
         })
         .await;
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// The disk's warning and the fallback microphone's show side by side.
@@ -4602,16 +4725,16 @@ mod tests {
             DiskWatch::STOP_BELOW_BYTES + 60 * (48_000 * 4 + 16_000 * 2),
             Ordering::SeqCst,
         );
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         assert_eq!(
             harness.recorder.status().warning,
             Some(format!(
                 "{} Recording from Built-in Audio. The microphone chosen in Settings is not \
                  available.",
-                low_space_warning(1, true)
+                low_space_warning(1)
             ))
         );
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
     }
 
     /// A free space that cannot be read never stops a recording.
@@ -4626,13 +4749,13 @@ mod tests {
                 Err(std::io::Error::other("statvfs failed"))
             })
         });
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         eventually("the space was read while recording", || {
             reads.load(Ordering::SeqCst) > 2
         })
         .await;
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
-        stop(&harness.recorder).await;
+        stop(&harness.recorder);
         assert_eq!(harness.recorder.status().error, None);
     }
 
@@ -4643,12 +4766,12 @@ mod tests {
     async fn a_volume_that_reports_no_size_lets_the_recording_run() {
         for reported in [
             Volume {
-                available: 0,
                 total: 0,
+                ..volume(0)
             },
             Volume {
-                available: 2,
                 total: 1,
+                ..volume(2)
             },
         ] {
             let harness = harness(&[]);
@@ -4660,7 +4783,7 @@ mod tests {
                     Ok(reported)
                 })
             });
-            start(&harness.recorder).await;
+            start(&harness.recorder);
             eventually("the space was read while recording", || {
                 reads.load(Ordering::SeqCst) > 2
             })
@@ -4668,7 +4791,7 @@ mod tests {
             let status = harness.recorder.status();
             assert_eq!(status.state, RecordingState::Recording);
             assert_eq!(status.warning, None);
-            stop(&harness.recorder).await;
+            stop(&harness.recorder);
             assert_eq!(harness.recorder.status().error, None);
         }
     }
@@ -4704,100 +4827,307 @@ mod tests {
         assert_eq!(watch(None, None).free_for(audio.path()), None);
     }
 
-    /// Where the floor stops a recording, the minutes count to it and
-    /// below it there is no room; where it does not (the Mac), the warning
-    /// comes at the same point, the minutes count to a full disk, and the
-    /// room never runs out.
+    /// The minutes count to the floor, and below it there is no room.
     #[test]
     fn the_room_left_counts_from_the_floor() {
         let rate = 448_000;
         let floor = DiskWatch::STOP_BELOW_BYTES;
-        assert_eq!(Room::of(0, rate, true), Room::Full);
-        assert_eq!(Room::of(floor - 1, rate, true), Room::Full);
-        assert_eq!(Room::of(floor + 30 * 60 * rate, rate, true), Room::Enough);
+        assert_eq!(Room::of(0, rate), Room::Full);
+        assert_eq!(Room::of(floor - 1, rate), Room::Full);
+        assert_eq!(Room::of(floor + 30 * 60 * rate, rate), Room::Enough);
         assert_eq!(
-            Room::of(floor + 29 * 60 * rate, rate, true),
+            Room::of(floor + 29 * 60 * rate, rate),
             Room::Low { minutes: 29 }
         );
-        assert_eq!(Room::of(floor, rate, true), Room::Low { minutes: 1 });
-
-        assert_eq!(Room::of(floor + 30 * 60 * rate, rate, false), Room::Enough);
-        assert_eq!(
-            Room::of(floor + 29 * 60 * rate, rate, false),
-            Room::Low {
-                minutes: 29 + floor / rate / 60
-            }
-        );
-        assert_eq!(
-            Room::of(30 * 60 * rate, rate, false),
-            Room::Low { minutes: 30 }
-        );
-        assert_eq!(Room::of(0, rate, false), Room::Low { minutes: 1 });
+        assert_eq!(Room::of(floor, rate), Room::Low { minutes: 1 });
     }
 
-    /// The warning promises the stop only where the floor stops the
-    /// recording.
+    /// The warning promises the stop.
     #[test]
-    fn the_low_space_warning_promises_a_stop_only_where_there_is_one() {
+    fn the_low_space_warning_promises_the_stop() {
         assert_eq!(
-            low_space_warning(29, true),
+            low_space_warning(29),
             "The disk is almost full: about 29 minutes of recording left. \
              Steno stops and saves the recording before the disk fills."
         );
         assert_eq!(
-            low_space_warning(1, false),
+            low_space_warning(1),
             "The disk is almost full: about 1 minute of recording left. \
-             Free some space to keep recording."
+             Steno stops and saves the recording before the disk fills."
         );
     }
 
-    /// The system's disk watch stops recordings at the floor everywhere
-    /// but on the Mac, whose `statvfs` leaves out purgeable space.
+    /// The system's reading of a folder's volume reports a size that holds
+    /// its free space, which the floor then counts on every platform. On
+    /// the Mac it counts the space free for important use: no less than
+    /// `statvfs` and no more than `statvfs` plus the gap between the floor
+    /// and the hard floor, and above `statvfs` by up to that gap where
+    /// important use reads more (a boot volume with purgeable space), give
+    /// or take what other processes write between the reads. Up to five
+    /// tries, the first whose `statvfs` reads before and after the reading
+    /// moved by no more than that tolerance deciding: a busy disk can move
+    /// further between two reads.
     #[test]
-    fn the_system_disk_watch_stops_at_the_floor_only_off_the_mac() {
-        assert_eq!(DiskWatch::system(None).stops, !cfg!(target_os = "macos"));
+    fn the_system_reading_of_a_folder_s_volume_is_within_its_size() {
+        let folder = tempfile::tempdir().unwrap();
+        let watch = DiskWatch::system(None);
+        let volume = (watch.free_space)(folder.path()).unwrap();
+        assert!(volume.total > 0, "{volume:?}");
+        assert!(volume.available <= volume.total, "{volume:?}");
+        #[cfg(target_os = "macos")]
+        {
+            let gap = DiskWatch::STOP_BELOW_BYTES - DiskWatch::HARD_FLOOR_BYTES;
+            let slack = 128 * MIB;
+            let mut tries = Vec::new();
+            let held = (0..5).any(|_| {
+                let before = statvfs(folder.path()).unwrap().available;
+                let reading = (watch.free_space)(folder.path()).unwrap().available;
+                let important =
+                    steno_macos::volume::available_for_important_usage(folder.path()).unwrap();
+                let after = statvfs(folder.path()).unwrap().available;
+                let (low, high) = (before.min(after), before.max(after));
+                tries.push(format!(
+                    "the reading {reading}, statvfs {before} then {after}, important use {important}"
+                ));
+                let purgeable = important.saturating_sub(high).min(gap);
+                high - low <= slack
+                    && reading + slack >= low + purgeable
+                    && reading <= high + gap + slack
+            });
+            assert!(held, "{tries:#?}");
+        }
     }
 
-    /// Under the Mac's policy a reading below the floor neither refuses
-    /// the start nor stops the recording: it starts with a warning that
-    /// promises no stop, records on through many readings, and a Stop
-    /// saves it as usual.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn under_the_mac_s_policy_a_reading_below_the_floor_only_warns() {
-        let harness = harness(&[]);
-        let reads = Arc::new(AtomicUsize::new(0));
-        harness.recorder.watch_disk_with({
-            let reads = reads.clone();
-            DiskWatch {
-                stops: false,
-                ..disk_with(move |_| {
-                    reads.fetch_add(1, Ordering::SeqCst);
-                    Ok(volume(DiskWatch::STOP_BELOW_BYTES / 2))
-                })
-            }
+    /// A read of the space free for important use that keeps failing warns
+    /// once per streak on each folder, with the error's kind and not its
+    /// text, which names the folder; a read that succeeds ends the streak.
+    #[test]
+    fn a_failing_important_use_read_warns_once_per_streak_without_the_folder() {
+        let failing = Mutex::default();
+        let folder = Path::new("/Users/someone/Recordings");
+        let other = Path::new("/Volumes/External");
+        let fails = |path: &Path| {
+            std::io::Result::<u64>::Err(std::io::Error::other(format!(
+                "the volume of {} could not be read",
+                path.display()
+            )))
+        };
+        let (readings, logged) = crate::testing::warnings(|| {
+            [
+                important_use(folder, fails, &failing),
+                important_use(folder, fails, &failing),
+                important_use(folder, |_| Ok(7), &failing),
+                important_use(folder, fails, &failing),
+            ]
         });
-        start(&harness.recorder).await;
-        let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        // 256 MiB at 224 000 bytes a second, to a full disk.
+        assert_eq!(readings, [None, None, Some(7), None]);
+        assert_eq!(logged.matches("could not be read").count(), 2, "{logged}");
+        assert!(logged.contains("kind=Other"), "{logged}");
+        assert!(!logged.contains("someone"), "{logged}");
+
+        let (reading, logged) = crate::testing::warnings(|| important_use(other, fails, &failing));
+        assert_eq!(reading, None);
+        assert_eq!(logged.matches("could not be read").count(), 1, "{logged}");
+        assert!(!logged.contains("External"), "{logged}");
+    }
+
+    const MIB: u64 = 1024 * 1024;
+    const GB: u64 = 1_000_000_000;
+
+    /// The Mac reads the larger of `statvfs` and the space free for
+    /// important use. A volume `CacheDelete` does not manage (an external
+    /// drive, a disk image, `/nix`) answers 0 for the second, and a 1 GB
+    /// disk image then records on `statvfs`'s reading, as it does when
+    /// that read fails; where APFS would purge, the purgeable space counts
+    /// up to the gap between the floor and the hard floor.
+    #[test]
+    fn the_mac_reads_the_larger_of_statvfs_and_the_space_for_important_use() {
+        let rate = 448_000;
+        let gap = DiskWatch::STOP_BELOW_BYTES - DiskWatch::HARD_FLOOR_BYTES;
+        // As a 1 GB APFS or HFS+ image reports itself on macOS 26.
+        let image = Volume {
+            available: 1_050_000_000,
+            total: 1_070_000_000,
+        };
+        assert_eq!(mac_volume(image, Some(0)), image);
+        assert_eq!(mac_volume(image, None), image);
+        assert_eq!(Room::of(image.available, rate), Room::Low { minutes: 19 });
+        assert_eq!(mac_volume(volume(GB), Some(GB + 7)), volume(GB + 7));
         assert_eq!(
-            harness.recorder.status().warning.as_deref(),
-            Some(
-                "The disk is almost full: about 19 minutes of recording left. Free some space to keep recording."
-            )
+            mac_volume(volume(400 * MIB), Some(5 * GB)),
+            volume(400 * MIB + gap)
         );
-        let at_start = reads.load(Ordering::SeqCst);
-        eventually("the space was read while recording", || {
-            reads.load(Ordering::SeqCst) > at_start + 5
-        })
-        .await;
-        let status = harness.recorder.status();
-        assert_eq!(status.state, RecordingState::Recording);
-        assert_eq!(status.error, None);
-        stop(&harness.recorder).await;
-        assert_eq!(harness.recorder.status().error, None);
-        let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
-        assert_eq!(meeting.end_reason, Some(RecordingEndReason::Manual));
-        assert!(harness.store.asset(meeting_id).unwrap().is_some());
+        assert_eq!(
+            mac_volume(volume(10 * GB), Some(50 * GB)),
+            volume(10 * GB + gap)
+        );
+    }
+
+    /// Below the hard floor on `statvfs` the Mac's reading has no room,
+    /// whatever the space free for important use says: macOS may not have
+    /// purged in time. Above it the minutes count to the hard floor: a call
+    /// at 200 MiB of `statvfs` has 2 left, with 50 GB to purge. With that
+    /// read failed `statvfs` meets the floor itself.
+    #[test]
+    fn the_mac_has_no_room_below_the_hard_floor_whatever_important_use_says() {
+        let rate = 448_000;
+        let room = |statvfs: u64, important: Option<u64>| {
+            Room::of(mac_volume(volume(statvfs), important).available, rate)
+        };
+        let (floor, hard_floor) = (DiskWatch::STOP_BELOW_BYTES, DiskWatch::HARD_FLOOR_BYTES);
+        assert_eq!(room(100 * MIB, Some(5 * GB)), Room::Full);
+        assert_eq!(room(hard_floor - 1, Some(u64::MAX)), Room::Full);
+        assert_eq!(room(hard_floor, Some(5 * GB)), Room::Low { minutes: 1 });
+        assert_eq!(room(200 * MIB, Some(50 * GB)), Room::Low { minutes: 2 });
+        assert_eq!(room(floor - 1, None), Room::Full);
+        assert_eq!(room(floor - 1, Some(0)), Room::Full);
+        assert_eq!(room(floor, None), Room::Low { minutes: 1 });
+    }
+
+    /// On the Mac's reading a recording does not start, and one in progress
+    /// stops and is saved, at a `statvfs` of 100 MiB though the space free
+    /// for important use reads 5 GB, and with that read failed at a
+    /// `statvfs` just below the floor; the words are those of every full
+    /// disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_mac_s_reading_refuses_and_stops_a_recording_below_its_floors() {
+        for (low, important) in [
+            (100 * MIB, Some(5 * GB)),
+            (DiskWatch::STOP_BELOW_BYTES - 1, None),
+        ] {
+            let harness = harness(&[]);
+            let statvfs = Arc::new(AtomicU64::new(low));
+            harness.recorder.watch_disk_with({
+                let statvfs = statvfs.clone();
+                disk_with(move |_| {
+                    Ok(mac_volume(
+                        volume(statvfs.load(Ordering::SeqCst)),
+                        important,
+                    ))
+                })
+            });
+            let status = status_after_a_start(&harness);
+            assert_eq!(status.state, RecordingState::Idle, "{important:?}");
+            assert_eq!(
+                status.error,
+                Some(format!("{COULD_NOT_START} {NO_ROOM_TO_START}"))
+            );
+            assert_eq!(harness.store.meetings(10, 0).unwrap(), []);
+
+            statvfs.store(5 * GB, Ordering::SeqCst);
+            start(&harness.recorder);
+            let meeting_id = harness.recorder.status().meeting_id.unwrap();
+            statvfs.store(low, Ordering::SeqCst);
+            let meeting = ended_on_its_own(&harness, meeting_id).await;
+            assert_eq!(
+                harness.recorder.status().error.as_deref(),
+                Some(STOPPED_FOR_SPACE)
+            );
+            assert_eq!(meeting.end_reason, Some(RecordingEndReason::Failed));
+            assert!(harness.store.asset(meeting_id).unwrap().is_some());
+        }
+    }
+
+    /// A 1 GB APFS or HFS+ disk image, attached for a test and detached
+    /// with it.
+    #[cfg(target_os = "macos")]
+    struct DiskImage {
+        /// Holds the image and its mount point.
+        _folder: tempfile::TempDir,
+        mount_point: PathBuf,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl DiskImage {
+        /// Creates an empty image of `file_system` and attaches it, hidden
+        /// from the Finder.
+        fn attach(file_system: &str) -> Self {
+            let folder = tempfile::tempdir().unwrap();
+            let image = folder.path().join("probe.dmg");
+            let mount_point = folder.path().join("volume");
+            std::fs::create_dir(&mount_point).unwrap();
+            let run = |command: &mut std::process::Command| {
+                let status = command
+                    .stdout(std::process::Stdio::null())
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "{command:?}: {status}");
+            };
+            run(std::process::Command::new("hdiutil")
+                .args([
+                    "create",
+                    "-size",
+                    "1g",
+                    "-fs",
+                    file_system,
+                    "-volname",
+                    "StenoProbe",
+                ])
+                .arg(&image));
+            run(std::process::Command::new("hdiutil")
+                .args(["attach", "-nobrowse", "-mountpoint"])
+                .arg(&mount_point)
+                .arg(&image));
+            Self {
+                _folder: folder,
+                mount_point,
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for DiskImage {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("hdiutil")
+                .args(["detach", "-force"])
+                .arg(&self.mount_point)
+                .stdout(std::process::Stdio::null())
+                .status();
+        }
+    }
+
+    /// A recording into an external volume starts: on a 1 GB APFS or HFS+
+    /// disk image as the recordings folder and the disk watch's database
+    /// folder, which macOS reports 0 bytes free for important use on
+    /// (`CacheDelete` does not manage it), the disk watch reads about
+    /// `statvfs`'s free space and the start is not refused. Ignored: it
+    /// attaches disk images with `hdiutil` (no admin rights needed). On a
+    /// Mac, run
+    /// `cargo test -p steno-services --lib -- --ignored --nocapture
+    /// a_recording_into_a_disk_image_starts`.
+    #[cfg(target_os = "macos")]
+    #[ignore = "attaches disk images with hdiutil"]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_into_a_disk_image_starts() {
+        for file_system in ["APFS", "HFS+"] {
+            let image = DiskImage::attach(file_system);
+            let volume = image.mount_point.as_path();
+            let important = steno_macos::volume::available_for_important_usage(volume).unwrap();
+            let total = steno_macos::volume::total_capacity(volume).unwrap();
+            let statvfs = statvfs(volume).unwrap();
+            let disk = DiskWatch::system(Some(volume));
+            let reading = (disk.free_space)(volume).unwrap();
+            eprintln!(
+                "{file_system}: important use {} of {}, statvfs {} of {}, the disk watch {}",
+                important, total, statvfs.available, statvfs.total, reading.available,
+            );
+            assert!(
+                reading.available.abs_diff(statvfs.available) < 16 * MIB,
+                "{reading:?} against {statvfs:?}"
+            );
+            assert_ne!(Room::of(reading.available, 448_000), Room::Full);
+
+            let harness = harness(&[]);
+            harness.recorder.watch_disk_with(disk);
+            let mut settings = harness.store.settings().unwrap();
+            settings.audio_folder = file_url(&volume.join("Audio"), true);
+            harness.store.save_settings(&settings).unwrap();
+            start(&harness.recorder);
+            let meeting_id = harness.recorder.status().meeting_id.unwrap();
+            stop(&harness.recorder);
+            assert_eq!(harness.recorder.status().error, None, "{file_system}");
+            assert!(harness.store.asset(meeting_id).unwrap().is_some());
+        }
     }
 
     /// A low-space warning that arrives while the recording is stopping
@@ -4805,7 +5135,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_disk_warning_during_a_stop_does_not_show() {
         let harness = harness(&[]);
-        start(&harness.recorder).await;
+        start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
         let stopper = harness.recorder.clone();

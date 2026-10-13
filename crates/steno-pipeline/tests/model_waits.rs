@@ -4,100 +4,25 @@
 //! (the first test, on a current-thread runtime) or by one its runtime's
 //! worker threads alone use (the others), which no other test shares.
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use steno_core::paths::{file_url, file_url_path};
+use common::Uninstalled;
 use steno_core::protocols::BoundaryResult;
-use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory, sample_data};
+use steno_core::testing::{FakeSpeechEngine, sample_data};
 use steno_core::{
-    AudioAsset, AudioBuffer16k, AudioFormat, AudioLane, AudioRetention, Delivery,
-    DeliveryDispatcher, LanguageTag, MeetingEvent, MeetingState, PipelineStage, RawSegment,
-    SpeechEngine, Store, async_trait,
+    AudioBuffer16k, AudioRetention, LanguageTag, MeetingEvent, MeetingState, PipelineStage,
+    RawSegment, SpeechEngine, Store, async_trait,
 };
-use steno_pipeline::{
-    BACKGROUND_RUN_LOG, MeetingEventBus, PipelineDependencies, PipelineFailure, ProcessingPipeline,
-};
+use steno_pipeline::{BACKGROUND_RUN_LOG, PipelineFailure, ProcessingPipeline};
 use tracing_subscriber::layer::SubscriberExt as _;
 use uuid::Uuid;
 
 /// How long a test waits for a gate or for its runs to end.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Reads the 16 kHz mono WAV fixtures.
-struct WavDecoder;
-
-#[async_trait]
-impl steno_core::AudioDecoder for WavDecoder {
-    async fn decode(&self, asset: &AudioAsset, lane: AudioLane) -> BoundaryResult<AudioBuffer16k> {
-        let url = asset.sidecars_16k.get(&lane).unwrap_or(&asset.url);
-        let bytes = std::fs::read(file_url_path(url).ok_or("not a file URL")?)?;
-        Ok(AudioBuffer16k::new(
-            bytes[44..]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|pair| f32::from(i16::from_le_bytes(*pair)) / 32768.0)
-                .collect(),
-        ))
-    }
-
-    fn mixdown_format(&self) -> AudioFormat {
-        AudioFormat::Wav16kInt16
-    }
-
-    async fn mixdown(&self, asset: &AudioAsset, to: &Path) -> BoundaryResult<()> {
-        std::fs::copy(file_url_path(&asset.url).ok_or("not a file URL")?, to)?;
-        Ok(())
-    }
-}
-
-/// Delivers to no destination.
-struct NoDestinations;
-
-#[async_trait]
-impl DeliveryDispatcher for NoDestinations {
-    async fn deliver_all(&self, _meeting_id: Uuid) -> Vec<Delivery> {
-        Vec::new()
-    }
-}
-
-/// A speech engine whose transcription is refused for missing models until
-/// `installed` is set, as the app's gated engines refuse.
-#[derive(Default)]
-struct Uninstalled {
-    installed: AtomicBool,
-    inner: FakeSpeechEngine,
-}
-
-#[async_trait]
-impl SpeechEngine for Uninstalled {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-
-    fn supported_languages(&self) -> &std::collections::BTreeSet<LanguageTag> {
-        self.inner.supported_languages()
-    }
-
-    async fn prepare(&self) -> BoundaryResult<()> {
-        self.inner.prepare().await
-    }
-
-    async fn transcribe(
-        &self,
-        audio: &AudioBuffer16k,
-        hint: Option<&LanguageTag>,
-    ) -> BoundaryResult<Vec<RawSegment>> {
-        if !self.installed.load(Ordering::SeqCst) {
-            return Err(Box::new(PipelineFailure::models_missing(
-                PipelineStage::Transcribe,
-            )));
-        }
-        self.inner.transcribe(audio, hint).await
-    }
-}
 
 /// A speech engine whose first transcription decides its model is
 /// missing, then waits at a gate (`entered`, then `open`) before it
@@ -147,20 +72,8 @@ fn pipeline_over(
     dir: &Path,
     engine: Arc<dyn SpeechEngine>,
 ) -> (Arc<Store>, std::path::PathBuf, ProcessingPipeline) {
-    let audio = dir.join("audio");
-    let store = Arc::new(Store::open(dir.join("steno.sqlite")).unwrap());
-    let mut settings = store.settings().unwrap();
-    settings.audio_folder = file_url(&audio, true);
-    store.save_settings(&settings).unwrap();
-    let pipeline = ProcessingPipeline::new(PipelineDependencies::new(
-        Arc::new(WavDecoder),
-        engine,
-        Arc::new(FakeDiarizer::default()),
-        Arc::new(InMemorySpeakerMemory::new(Vec::new())),
-        Arc::new(NoDestinations),
-        store.clone(),
-        MeetingEventBus::new(),
-    ));
+    let (store, audio) = common::store_with_audio(&dir.join("steno.sqlite"));
+    let pipeline = ProcessingPipeline::new(common::dependencies(&store, engine));
     (store, audio, pipeline)
 }
 

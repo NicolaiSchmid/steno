@@ -16,7 +16,10 @@ use steno_core::{MeetingSource, Store};
 
 use super::*;
 use crate::auto_stop::MicrophoneActivity;
-use crate::testing::{PATIENCE, SyntheticRecorder, on_own_thread, synthetic_recorder, temp_store};
+use crate::testing::{
+    HANG_GUARD, PATIENCE, SyntheticRecorder, eventually_within, on_own_thread, synthetic_recorder,
+    temp_store,
+};
 
 #[derive(Default)]
 struct FakeRecorder {
@@ -508,6 +511,15 @@ fn advance(harness: &Harness, sleepers: usize, seconds: f64) {
     harness.clock.advance(Duration::from_secs_f64(seconds));
 }
 
+/// The prompt's Record for prompt `number` on a thread of its own, as the
+/// panel calls it, failing the test only if it never returns.
+fn record(harness: &Harness, number: Option<u64>) {
+    let controller = harness.controller.clone();
+    on_own_thread(HANG_GUARD, "Record returned", move || {
+        controller.record(number);
+    });
+}
+
 /// Swift's `testDetectorEventsReachTheControllerAfterTheDebounce`, through
 /// the real detector: the prompt comes after the 2 s debounce, goes with
 /// the release's, and a blip shorter than the debounce never prompts.
@@ -596,10 +608,7 @@ async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again(
         .panel
         .wait_until("Zoom prompts", |shown| !shown.is_empty());
 
-    let controller = harness.controller.clone();
-    on_own_thread(PATIENCE, "Record returned", move || {
-        controller.record(Some(1));
-    });
+    record(&harness, Some(1));
     let status = capture.recorder.status();
     assert_eq!(status.state, RecordingState::Recording);
     assert_eq!(status.mode, Some(CaptureMode::Call));
@@ -608,12 +617,8 @@ async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again(
     assert_eq!(meeting.source, MeetingSource::MacCall, "a call's source");
 
     // A second Record, a stale click, starts nothing more.
-    let controller = harness.controller.clone();
-    on_own_thread(PATIENCE, "Record returned", move || {
-        controller.record(Some(1));
-    });
-    let recorder = capture.recorder.clone();
-    on_own_thread(PATIENCE, "Stop returned", move || recorder.stop());
+    record(&harness, Some(1));
+    capture.stop();
     assert_eq!(
         capture.store.meetings(10, 0).unwrap().len(),
         1,
@@ -654,18 +659,15 @@ async fn a_prompt_never_starts_a_second_recording() {
     harness.controller.set_enabled(true);
     harness.controller.handle(opened(Some("us.zoom.xos")));
     assert!(harness.controller.has_prompt());
-    let recorder = capture.recorder.clone();
-    on_own_thread(PATIENCE, "the start returned", move || {
-        recorder.start(CaptureMode::InPerson, None);
-    });
+    capture.start(CaptureMode::InPerson, None);
     assert!(
         !harness.controller.has_prompt(),
         "the recording took it down"
     );
-    let controller = harness.controller.clone();
-    on_own_thread(PATIENCE, "Record returned", move || controller.record(None));
+    // Each call returns at once, unless it starts a recording after all.
+    record(&harness, None);
     let recorder = capture.recorder.clone();
-    on_own_thread(PATIENCE, "the call's start returned", move || {
+    on_own_thread(HANG_GUARD, "the call's start returned", move || {
         CallRecorder::start_call(&*recorder, Some("us.zoom.xos"));
     });
     let meetings = capture.store.meetings(10, 0).unwrap();
@@ -806,7 +808,7 @@ async fn the_quit_save_does_not_wait_for_a_held_detector_start() {
     app.detection = Some(controller.clone());
     let app = Arc::new(app);
     let recorder = app.recorder.clone();
-    on_own_thread(PATIENCE, "the start returned", move || {
+    on_own_thread(HANG_GUARD, "the start returned", move || {
         recorder.start(CaptureMode::Call, None);
     });
     let meeting_id = app.recorder.status().meeting_id.expect("recording");
@@ -815,16 +817,20 @@ async fn the_quit_save_does_not_wait_for_a_held_detector_start() {
         let app = app.clone();
         std::thread::spawn(move || app.shutdown())
     };
-    crate::testing::eventually("the quit saved the call while the start is held", || {
-        store
-            .meeting(meeting_id)
-            .unwrap()
-            .is_some_and(|meeting| meeting.end_reason == Some(RecordingEndReason::Quit))
-    })
+    eventually_within(
+        HANG_GUARD,
+        "the quit saved the call while the start is held",
+        || {
+            store
+                .meeting(meeting_id)
+                .unwrap()
+                .is_some_and(|meeting| meeting.end_reason == Some(RecordingEndReason::Quit))
+        },
+    )
     .await;
     // The meeting is written before the stop joins its threads and goes
     // idle.
-    crate::testing::eventually("the recorder settled", || {
+    eventually_within(HANG_GUARD, "the recorder settled", || {
         app.recorder.status().state == RecordingState::Idle
     })
     .await;

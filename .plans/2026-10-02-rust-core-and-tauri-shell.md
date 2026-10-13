@@ -843,19 +843,19 @@ still has to draw the window side. `[ ]` is not ported yet.
   failure to Stop too, and a Stop or a quit that met a failed write or close says the
   recording may be incomplete); and the free space is read every 5 s on the volumes of
   the recordings folder and of the database, the smaller counting (`DiskWatch`,
-  `fs4::statvfs`): a warning under 30 minutes of recording left and, on Linux and
-  Windows, no start below 512 MiB free and a stop that saves before the disk fills
-  (Rust only). A volume that reports no size or more free than its size counts as
-  unreadable and never stops a recording. On the Mac a low reading only warns, never
-  refusing a start or stopping a recording, and its minutes count to a full disk:
-  `statvfs` leaves out APFS's purgeable space (tens of GB with local Time Machine
-  snapshots), and a meeting not recorded is lost. A failed write there ends the
-  recording and Steno tries to save it, but a disk that is truly full can fail the
-  save too (the meeting marked failed without its asset row, or left `recording`); the
-  files stay, and P3's salvage at launch (#233) and P17's asset row recover them. The
-  Mac gets the floor, and the save its room, once `steno-macos` (#236, the stable
-  plan's D10) reads `NSURLVolumeAvailableCapacityForImportantUsageKey`, which counts
-  that space and takes `unsafe`.
+  `fs4::statvfs`): a warning under 30 minutes of recording left, no start below
+  512 MiB free and a stop that saves before the disk fills, on every platform (Rust
+  only). A volume that reports no size or more free than its size counts as
+  unreadable and never stops a recording. On the Mac the reading is the larger of
+  `statvfs` and `NSURLVolumeAvailableCapacityForImportantUsageKey` (through
+  `steno-macos`'s `volume`, the stable plan's D10), which counts APFS's purgeable
+  space (tens of GB with local Time Machine snapshots) but is 0 on every volume
+  CacheDelete does not manage (an external drive, a disk image, `/nix`), so there
+  `statvfs` decides; a failed read of it leaves `statvfs` against the floor. The
+  reading is held to `statvfs` plus 384 MiB, so a `statvfs` below 128 MiB refuses a
+  start and stops the recording whatever macOS says it can purge: CacheDelete purges
+  asynchronously and a write never waits for it. The disk-image check is an ignored
+  test, `a_recording_into_a_disk_image_starts`, run on a Mac.
 - A start or a stop that panics leaves the recorder idle with an error (a start that
   panics after its meeting began also fails the meeting and removes its folder), and a
   capture start that panics leaves the session `Failed`, its backend stopped (the
@@ -2018,6 +2018,18 @@ parity item until a plan says otherwise:
   log for a panic it caught, and the meeting's detail says how long the
   silence lasts; a file with more than half of its packets damaged fails
   (stable plan A12).
+- **A recording without an index is salvaged: Rust only.** The phone's
+  `AVAudioRecorder` writes the `moov` only when it stops, so a recorder
+  killed mid-recording leaves raw AAC packets with no index, which
+  AVFoundation and symphonia both refuse; the Swift app fails the meeting.
+  The Rust decoder reads such a file, in the recorder's layout only (its
+  `ftyp` brands, no `moov`), packet by packet from the packets' own bits with
+  the phone's fixed settings (44.1 kHz mono, pinned to the phone's preset by
+  a test, since the bits cannot tell 44.1 from 48 kHz) and
+  `AVAudioRecorder`'s 2 112 samples of priming, up to where it was cut off
+  or could not be read; the meeting is Ready, its detail says the recording
+  was cut off and its end may be missing, and the retention rule keeps the
+  recording (`AudioDamage::salvaged`, stable plan A14).
 - **AAC-LC only.** AVFoundation also decoded HE-AAC; symphonia decodes
   AAC-LC alone. The iOS recorder writes AAC-LC, so nothing is lost today; a
   plan adds HE-AAC if an import needs it.
@@ -3350,16 +3362,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `crates/steno-pipeline/src/files.rs`,
   `Sources/StenoCore/Storage/RecordingIntake.swift`, `crates/steno-llm`. Found: #167,
   #185, #213.
-- **Unowned.** A busy store fails a resumed meeting. A meeting resumed after its
-  models are installed whose run then meets a store write locked for longer than the
-  5 s busy timeout ends `failed` with "database is locked", as any run on main does;
-  #237 does not change that. A resume the store refuses (busy) is logged and not
-  retried, and the meetings stay `queued` for the next install, reload or launch. The
-  likely remedy treats a busy store (`StoreError::is_busy`) as a reason to park the
-  meeting and retry it, on the waiting set #237 adds (`ModelWaits`). Who owns it is
-  still to be decided. Where: `crates/steno-pipeline/src/pipeline.rs`,
-  `crates/steno-services/src/pipeline.rs`, `crates/steno-core/src/store/mod.rs`.
-  Found: #237.
 - **Unowned.** A Pair that lands during the quit starts a listener after it:
   `App::shutdown` stops the listener, but `ListenerHandover::close` only keeps a
   waiting handover from receiving one, so a `start` waiting on the stop's lock binds
@@ -3445,6 +3447,7 @@ PR off `main`.
 | S4: the update schedule (a daily check over the Tauri updater, the automatic-check and automatic-download flags in `preferences.json`, the last check time in `update-check.json`, a 60 s limit per check, no announcement while a recording starts, runs or stops, a second confirm before a yes ends one and no install over a recording started during the download, recording starts held off from the install through the relaunch, downloads and installs by itself only through the P25 install gate and so none until P25, none for a packaged install) and the pairing QR code drawn as a PNG (`steno-services`, `steno-host`, desktop shell) | `feat/rust-update-schedule` | #258 | merged |
 | The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | merged |
 | Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | merged |
+| Stable plan A14: a phone recording without a `moov` (its recorder killed) is salvaged: each AAC-LC packet's length read off its bits (`steno_audio::codec::salvage`), in the recorder's layout only, with the phone's settings and `AVAudioRecorder`'s priming; `AudioDamage::salvaged` and the detail's warning; A10's bound over the 1- and 5-minute loads; #264's pruned marks checked in the pipeline (`steno-audio`, `steno-core`, `steno-pipeline`, `steno-host`, `steno-services`, `steno-cli`) | `fix/a14-salvage-moovless-phone-recording` | #280 | open |
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | merged |
 | The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | merged |
 | An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | merged |

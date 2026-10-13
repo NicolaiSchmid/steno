@@ -758,25 +758,34 @@ fn the_detail_warns_about_a_recording_replaced_in_parts_by_silence() {
     let detail = harness.snapshot(BridgeTopic::MeetingDetail);
     assert_eq!(detail["id"], id(0x67));
     assert!(detail.get("audioWarning").is_none(), "{detail}");
-    for (parts, seconds, warning) in [
+    for (parts, seconds, salvaged, warning) in [
         (
             3,
             0.07,
+            false,
             "About 0.1 seconds of the phone recording could not be read and was replaced by silence.",
         ),
         (
             1_200,
             27.9,
+            false,
             "About 28 seconds of the phone recording could not be read and was replaced by silence.",
         ),
+        (
+            0,
+            0.0,
+            true,
+            "The phone recording was cut off unexpectedly, and its end may be missing.",
+        ),
     ] {
-        harness
-            .fakes
-            .pipeline
-            .damaged_audio
-            .lock()
-            .unwrap()
-            .insert(uuid(0x67), steno_core::AudioDamage { parts, seconds });
+        harness.fakes.pipeline.damaged_audio.lock().unwrap().insert(
+            uuid(0x67),
+            steno_core::AudioDamage {
+                parts,
+                seconds,
+                salvaged,
+            },
+        );
         harness.host.store_changed();
         let detail = harness.snapshot(BridgeTopic::MeetingDetail);
         assert_eq!(detail["audioWarning"], warning);
@@ -2255,6 +2264,10 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
             "Download the speech models in Settings.",
         ),
         (
+            Refusal::StoreBusy,
+            "Waiting for another app to finish with Steno's data.",
+        ),
+        (
             Refusal::NotOffered,
             "Only a failed meeting, or one whose results may be incomplete, can be processed again.",
         ),
@@ -2643,6 +2656,7 @@ fn a_damaged_recording_reads_kept_incomplete_and_can_still_be_deleted_now() {
         steno_core::AudioDamage {
             parts: 3,
             seconds: 0.07,
+            salvaged: false,
         },
     );
     harness.host.store_changed();
@@ -2707,6 +2721,51 @@ fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
         progress: steno_core::ProcessingProgress {
             stage: PipelineStage::Decode,
             fraction: 0.05,
+            next_fraction: 0.1,
+            estimated_remaining_seconds: 60.0,
+            is_estimate_seeded: false,
+            lane: 0,
+            lane_count: 1,
+        },
+    });
+    assert_eq!(entry(&harness)["stage"], "decode");
+}
+
+/// A run the store kept locked leaves the meeting queued, or `processing`
+/// when the store refused that write too; its progress entry then says
+/// what it waits for (stage `storeBusy`), until the next run's first
+/// event. Rust only.
+#[test]
+fn a_meeting_the_store_kept_waiting_says_what_it_waits_for() {
+    let harness = Harness::builder()
+        .seed(|store, _| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x8A);
+            meeting.state = MeetingState::Processing;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+        })
+        .build();
+    let entry = |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
+    harness.host.apply_meeting_event(&MeetingEvent::StoreBusy {
+        meeting_id: uuid(0x8A),
+    });
+    assert_eq!(entry(&harness)["stage"], "storeBusy");
+    assert_eq!(
+        entry(&harness)["title"],
+        "Waiting for another app to finish with Steno's data"
+    );
+    harness.host.store_changed();
+    assert_eq!(
+        entry(&harness)["stage"],
+        "storeBusy",
+        "the store's poll keeps it"
+    );
+    harness.host.apply_meeting_event(&MeetingEvent::Progress {
+        meeting_id: uuid(0x8A),
+        progress: steno_core::ProcessingProgress {
+            stage: PipelineStage::Decode,
+            fraction: 0.0,
             next_fraction: 0.1,
             estimated_remaining_seconds: 60.0,
             is_estimate_seeded: false,

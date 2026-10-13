@@ -37,7 +37,7 @@ import {
 } from "@/lib/platform";
 import { deleteMeeting } from "./delete-meeting";
 import { firstSentence, format, formatSource } from "./format";
-import { MODELS_MISSING_STAGE } from "./processing-card";
+import { isParked } from "./processing-card";
 import { SOURCE } from "./source";
 
 export const QUERY_DEBOUNCE_MS = 200;
@@ -63,10 +63,14 @@ export function rowPreview(
 				? "Recording now."
 				: "Not saved yet. Steno will process it the next time it starts.";
 		case "queued":
-			return progress?.stage === MODELS_MISSING_STAGE
+			return progress && isParked(progress)
 				? `${progress.title}.`
 				: "Waiting to process.";
 		case "processing":
+			// A run set aside whose meeting the store kept `processing`.
+			if (progress && isParked(progress)) {
+				return `${progress.title}.`;
+			}
 			return progress ? `${progress.title}…` : "Processing.";
 		case "failed":
 			return row.failureReason

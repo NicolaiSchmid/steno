@@ -26,7 +26,7 @@ use crate::labels::{
 };
 use crate::main_window::detail::{MeetingDetailViewModel, RecordingStatus};
 use crate::main_window::list::MeetingListViewModel;
-use crate::main_window::progress::{ProcessingProgressModel, ProgressEntry};
+use crate::main_window::progress::ProcessingProgressModel;
 use crate::services::RecorderStatus;
 use crate::setup::{ExportStatus, SetupBannerMessage, SummaryStatus, copy, engine_notice};
 use crate::summary_markdown::detail_sections;
@@ -170,12 +170,11 @@ pub fn progress_snapshot(model: &ProcessingProgressModel) -> ProgressSnapshot {
             .into_iter()
             .map(|entry| BridgeProgressEntry {
                 meeting_id: entry.meeting_id,
-                stage: if entry.models_missing {
-                    ProgressEntry::MODELS_MISSING_STAGE.to_owned()
-                } else {
-                    entry
+                stage: match entry.parked {
+                    Some(parked) => parked.stage().to_owned(),
+                    None => entry
                         .stage()
-                        .map_or_else(|| "waiting".to_owned(), |stage| stage.as_str().to_owned())
+                        .map_or_else(|| "waiting".to_owned(), |stage| stage.as_str().to_owned()),
                 },
                 title: entry.title(),
                 fraction: entry.fraction(),

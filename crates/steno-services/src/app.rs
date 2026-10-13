@@ -1193,7 +1193,8 @@ impl App {
                             }
                             MeetingEvent::SpeakersNeedReview { .. }
                             | MeetingEvent::Deleted { .. }
-                            | MeetingEvent::ModelsMissing { .. } => {
+                            | MeetingEvent::ModelsMissing { .. }
+                            | MeetingEvent::StoreBusy { .. } => {
                                 event_host.store_changed();
                             }
                             MeetingEvent::OperationFailed { .. } => {
@@ -1438,7 +1439,9 @@ mod tests {
 
     use super::*;
     use crate::secrets::KeyringUnavailable;
-    use crate::testing::{PATIENCE, built, fake_dependencies, on_own_thread, temp_store};
+    use crate::testing::{
+        HANG_GUARD, PATIENCE, built, fake_dependencies, on_own_thread, temp_store,
+    };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_phone_intake_commits_durably_and_enqueues_on_the_current_pipeline() {
@@ -1639,11 +1642,30 @@ mod tests {
         let damage = steno_core::AudioDamage {
             parts: 3,
             seconds: 0.07,
+            salvaged: false,
         };
         let marks = DamagedAudio::in_directory(&support);
         marks.record(kept.id, damage).unwrap();
         marks.record(deleted, damage).unwrap();
         let app = build(options_under(&support)).unwrap();
+        // The pipeline holds the store the launch pruned, not a copy read
+        // before it: the detail and the retention rule see what is on disk.
+        assert_eq!(
+            app.pipeline
+                .current()
+                .dependencies()
+                .damaged_audio
+                .damage(kept.id),
+            damage
+        );
+        assert!(
+            app.pipeline
+                .current()
+                .dependencies()
+                .damaged_audio
+                .damage(deleted)
+                .is_none()
+        );
         let marks = DamagedAudio::in_directory(&support);
         assert_eq!(marks.damage(kept.id), damage);
         assert!(marks.damage(deleted).is_none());
@@ -2177,11 +2199,13 @@ mod tests {
         host
     }
 
-    /// Calls `method` through `host` on a thread of its own, failing the
-    /// test unless it returns, and returns success, within [`PATIENCE`].
+    /// Calls `method` through `host` on a thread of its own and asserts
+    /// that it succeeded, failing the test as hung after [`HANG_GUARD`]: a
+    /// recording's start and stop through the host are the capture's real
+    /// work.
     fn call(host: &Host, method: steno_bridge::BridgeMethod, params: Option<serde_json::Value>) {
         let dispatcher = steno_bridge::Dispatcher::new(host.clone());
-        let reply = on_own_thread(PATIENCE, &format!("{method} returned"), move || {
+        let reply = on_own_thread(HANG_GUARD, &format!("{method} returned"), move || {
             dispatcher.call(method, params)
         });
         assert!(reply.is_ok(), "{method}: {reply:?}");

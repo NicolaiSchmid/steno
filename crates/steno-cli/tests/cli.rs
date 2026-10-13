@@ -1010,7 +1010,8 @@ fn process_meeting_writes_the_damage_beside_the_database() {
 
 /// A queued meeting is not processed again. The command's pipeline is its
 /// own, so it cannot tell a meeting the app is processing from one the app
-/// left waiting for its speech models; it says what happens to both.
+/// left waiting for its speech models or for the database; it says what
+/// happens to each.
 #[test]
 fn process_meeting_on_a_queued_meeting_says_the_app_processes_it() {
     let home = tempfile::tempdir().unwrap();
@@ -1031,7 +1032,8 @@ fn process_meeting_on_a_queued_meeting_says_the_app_processes_it() {
     assert!(
         queued.stderr.contains(&format!(
             "Meeting {id} is queued or being processed; the app processes it at its next \
-             launch, or once the speech models are installed in Settings."
+             launch, once the speech models are installed in Settings, or once the database \
+             is no longer locked."
         )),
         "{}",
         queued.stderr

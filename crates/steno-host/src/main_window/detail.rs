@@ -532,6 +532,7 @@ pub fn process_again_refusal_line(
             "Steno can't use your API key yet. Enter your API key in Settings, then process the meeting again.".to_owned()
         }
         ProcessAgainRefusal::ModelsMissing => format!("{}.", ProgressEntry::MODELS_MISSING_TITLE),
+        ProcessAgainRefusal::StoreBusy => format!("{}.", ProgressEntry::STORE_BUSY_TITLE),
         ProcessAgainRefusal::Quitting => return None,
         ProcessAgainRefusal::CouldNotStart(reason) => {
             format!("Processing could not start: {reason}")

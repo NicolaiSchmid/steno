@@ -370,6 +370,11 @@ pub enum ProcessAgainRefusal {
     /// them: the detail says what its progress card says
     /// ([`ProgressEntry::MODELS_MISSING_TITLE`](crate::main_window::ProgressEntry::MODELS_MISSING_TITLE)).
     ModelsMissing,
+    /// A run left the meeting queued because another process held the
+    /// store, and it waits for the store: the detail says what its progress
+    /// card says
+    /// ([`ProgressEntry::STORE_BUSY_TITLE`](crate::main_window::ProgressEntry::STORE_BUSY_TITLE)).
+    StoreBusy,
     /// The app is exiting; the next launch can process the meeting again.
     Quitting,
     /// The store failed reading the meeting or saving it queued: the

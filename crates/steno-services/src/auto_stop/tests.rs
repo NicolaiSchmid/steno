@@ -14,8 +14,8 @@ use steno_host::services::Recorder as _;
 
 use super::*;
 use crate::testing::{
-    PATIENCE, SyntheticRecorder, eventually, eventually_within, on_own_thread, synthetic_recorder,
-    synthetic_recorder_over,
+    HANG_GUARD, PATIENCE, SyntheticRecorder, eventually, eventually_within, on_own_thread,
+    synthetic_recorder, synthetic_recorder_over,
 };
 
 /// One step of a [`CallWatch`] script.
@@ -419,17 +419,11 @@ fn recording_over(capture: SyntheticRecorder) -> Recording {
 }
 
 impl Recording {
+    /// As [`SyntheticRecorder::start`], then checks that the recording is
+    /// under way.
     fn start(&self, mode: CaptureMode, call_app: Option<&str>) {
-        let (recorder, call_app) = (self.recorder.clone(), call_app.map(str::to_owned));
-        on_own_thread(PATIENCE, "the start returned", move || {
-            recorder.start(mode, call_app.as_deref());
-        });
+        self.capture.start(mode, call_app);
         assert_eq!(self.recorder.status().state, RecordingState::Recording);
-    }
-
-    fn stop(&self) {
-        let recorder = self.recorder.clone();
-        on_own_thread(PATIENCE, "the stop returned", move || recorder.stop());
     }
 
     fn opened(&self, app: Option<&str>) {
@@ -533,10 +527,7 @@ async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
     let while_stopping = recording.watch_stopping();
     recording.sleepers(1);
     recording.clock.advance(Duration::from_secs(1));
-    eventually("the grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording.idle("the grace stopped the recording").await;
     let status = recording.recorder.status();
     assert_eq!(status.auto_stop, None);
     assert_eq!(status.error, None);
@@ -581,10 +572,7 @@ async fn an_unnamed_app_ends_the_call_with_the_bare_reason() {
     assert_eq!(recording.armed(), Some((None, 90.0)));
     recording.sleepers(1);
     recording.clock.advance(AUTO_STOP_GRACE);
-    eventually("the grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording.idle("the grace stopped the recording").await;
     assert_eq!(
         recording.meetings()[0].end_reason,
         Some(RecordingEndReason::CallEnded { app_name: None })
@@ -674,7 +662,7 @@ async fn a_stop_while_armed_keeps_its_own_reason_and_withdraws_the_countdown() {
         let while_stopping = recording.watch_stopping();
         if quit {
             let recorder = recording.recorder.clone();
-            on_own_thread(PATIENCE, "the quit returned", move || {
+            on_own_thread(HANG_GUARD, "the quit returned", move || {
                 recorder.stop_for_quit();
             });
         } else {
@@ -798,9 +786,21 @@ async fn a_device_change_rearms_the_countdown_at_its_resume() {
     let resumed = Arc::new(ManualClock::new());
     resumed.advance(Duration::from_secs(10));
     recording.recorder.count_down_on(resumed.clone());
-    let armed_then = rebuilt.recv_timeout(PATIENCE).expect("the device changed");
+    let armed_then = rebuilt
+        .recv_timeout(HANG_GUARD)
+        .expect("the device changed");
     assert_eq!(armed_then, None, "not shown while the capture recovers");
-    while rebuilt.recv_timeout(PATIENCE).expect("the capture resumed") != Some(90.0) {}
+    // The notices before the resume read None, so the first armed one is
+    // the resume's.
+    let armed = loop {
+        if let Some(armed) = rebuilt
+            .recv_timeout(HANG_GUARD)
+            .expect("the capture resumed")
+        {
+            break armed;
+        }
+    };
+    assert_eq!(armed, 90.0, "a fresh grace at the resume");
     let recording = std::mem::ManuallyDrop::into_inner(recording);
     assert_eq!(
         recording.armed(),
@@ -813,10 +813,9 @@ async fn a_device_change_rearms_the_countdown_at_its_resume() {
     assert_eq!(recording.recorder.status().state, RecordingState::Recording);
     assert!(resumed.wait_for_sleepers(1));
     resumed.advance(Duration::from_secs(1));
-    eventually("the fresh grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording
+        .idle("the fresh grace stopped the recording")
+        .await;
     assert_eq!(
         recording.meetings()[0].end_reason,
         Some(RecordingEndReason::CallEnded {
@@ -855,7 +854,8 @@ struct AtNotice {
 /// Holds the capture's notice thread in the change hook after each of its
 /// first `notices` notices, so the recorder's view of the capture stays
 /// there until the test lets it go on: each one sends the status and
-/// waits for the reply.
+/// waits for the reply, under [`HANG_GUARD`], since a test may reply only
+/// after real capture work (a dropped reply ends the wait at once).
 fn hold_the_notices(
     recording: &Recording,
     notices: usize,
@@ -881,7 +881,7 @@ fn hold_the_notices(
             armed: status.auto_stop.map(|armed| armed.remaining_seconds),
             warning: status.warning,
         });
-        let _ = gone.lock().unwrap().recv_timeout(PATIENCE);
+        let _ = gone.lock().unwrap().recv_timeout(HANG_GUARD);
     }));
     (seen, go)
 }
@@ -912,7 +912,9 @@ async fn a_restarted_audio_service_ends_no_call(released_before: bool) {
         recording.released();
         recording.sleepers(1);
     }
-    let changed = seen.recv_timeout(PATIENCE).expect("the service restarted");
+    let changed = seen
+        .recv_timeout(HANG_GUARD)
+        .expect("the service restarted");
     assert_eq!(changed.armed, None, "no countdown shown while it recovers");
     if !released_before {
         recording.released();
@@ -924,7 +926,7 @@ async fn a_restarted_audio_service_ends_no_call(released_before: bool) {
         );
     }
     go.send(()).unwrap();
-    let still_restarting = seen.recv_timeout(PATIENCE).expect("the restarts went on");
+    let still_restarting = seen.recv_timeout(HANG_GUARD).expect("the restarts went on");
     assert_eq!(
         still_restarting.warning.as_deref(),
         Some("No audio is arriving. Still trying.")
@@ -932,7 +934,7 @@ async fn a_restarted_audio_service_ends_no_call(released_before: bool) {
     recording.recorder.clear_messages();
     assert_eq!(recording.recorder.status().warning, None, "dismissed");
     go.send(()).unwrap();
-    seen.recv_timeout(PATIENCE).expect("the capture resumed");
+    seen.recv_timeout(HANG_GUARD).expect("the capture resumed");
     // Resumed after the restarts went on, so not yet back: still no
     // countdown shown, and the recording goes on.
     recording.clock.advance(Duration::from_secs(60));
@@ -946,7 +948,7 @@ async fn a_restarted_audio_service_ends_no_call(released_before: bool) {
     recording.recorder.count_down_on(resumed.clone());
     go.send(()).unwrap();
     // Audio is back (`Delivering`): a fresh grace from now.
-    eventually("a fresh countdown once audio is back", || {
+    eventually_within(HANG_GUARD, "a fresh countdown once audio is back", || {
         recording.armed() == Some((Some("Zen".to_owned()), 90.0))
     })
     .await;
@@ -956,10 +958,9 @@ async fn a_restarted_audio_service_ends_no_call(released_before: bool) {
     assert_eq!(recording.recorder.status().state, RecordingState::Recording);
     assert!(resumed.wait_for_sleepers(1));
     resumed.advance(Duration::from_secs(1));
-    eventually("the fresh grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording
+        .idle("the fresh grace stopped the recording")
+        .await;
     assert_eq!(
         recording.meetings()[0].end_reason,
         Some(RecordingEndReason::CallEnded {
@@ -1050,7 +1051,7 @@ async fn a_capture_that_keeps_failing_ends_the_call_two_graces_after_the_release
             .warning
             .is_some_and(|warning| warning.ends_with("Still trying."))
     };
-    eventually("the restarts went on", still_trying).await;
+    eventually_within(HANG_GUARD, "the restarts went on", still_trying).await;
     assert_eq!(recording.armed(), None, "not shown while it recovers");
     recording.clock.advance(AUTO_STOP_GRACE);
     let fresh = Some((Some("Zen".to_owned()), 90.0));
@@ -1070,10 +1071,9 @@ async fn a_capture_that_keeps_failing_ends_the_call_two_graces_after_the_release
     assert!(still_trying(), "the capture still recovers");
     recording.sleepers(1);
     recording.clock.advance(Duration::from_secs(1));
-    eventually("the fresh grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording
+        .idle("the fresh grace stopped the recording")
+        .await;
     assert_saved_as_the_call_ended(&recording);
 }
 
@@ -1115,7 +1115,7 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
     recording.opened(Some("Zen"));
     recording.released();
     recording.sleepers(1);
-    let changed = seen.recv_timeout(PATIENCE).expect("the device changed");
+    let changed = seen.recv_timeout(HANG_GUARD).expect("the device changed");
     assert_eq!(changed.armed, None, "not shown while it recovers");
     // The first recovery is a minute in on the countdown's clock. The
     // fresh countdown on a clock of its own, at the same time, so each
@@ -1125,19 +1125,19 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
     resumed.advance(Duration::from_secs(60));
     recording.recorder.count_down_on(resumed.clone());
     go.send(()).unwrap();
-    eventually("the resume put a fresh grace in its place", || {
-        recording.armed() == Some((Some("Zen".to_owned()), 90.0))
-    })
+    eventually_within(
+        HANG_GUARD,
+        "the resume put a fresh grace in its place",
+        || recording.armed() == Some((Some("Zen".to_owned()), 90.0)),
+    )
     .await;
     recording.sleepers(0);
     assert!(resumed.wait_for_sleepers(1), "the fresh countdown sleeps");
     resumed.advance(Duration::from_secs(60));
     // The three later recoveries, a second apart on the wall clock.
-    eventually_within(
-        Duration::from_secs(20),
-        "the device changed four times",
-        || starts() == 5,
-    )
+    eventually_within(HANG_GUARD, "the device changed four times", || {
+        starts() == 5
+    })
     .await;
     assert_still_recording(&recording);
     assert_eq!(
@@ -1150,15 +1150,17 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
     assert_eq!(recording.recorder.status().state, RecordingState::Recording);
     assert!(resumed.wait_for_sleepers(1));
     resumed.advance(Duration::from_secs(1));
-    eventually("the fresh grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording
+        .idle("the fresh grace stopped the recording")
+        .await;
     assert_saved_as_the_call_ended(&recording);
 }
 
 /// Where a test holds a rebuild's start: the backend says when the start
-/// is waiting, and goes on once the test opens it.
+/// is waiting, and goes on once the test opens it or after [`PATIENCE`].
+/// From that word on the test does only its own checks before it opens
+/// the gate, and times a claim against this patience; [`HANG_GUARD`] here
+/// would turn a notice thread that fell behind into a 120 s failure.
 struct Gate {
     entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
     open: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
@@ -1246,14 +1248,14 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
     let once = AtomicBool::new(false);
     recording.recorder.on_change(Arc::new(move || {
         if on_the_notice_thread() && !once.swap(true, Ordering::SeqCst) {
-            let _ = gone.lock().unwrap().recv_timeout(PATIENCE);
+            let _ = gone.lock().unwrap().recv_timeout(HANG_GUARD);
         }
     }));
     recording.start(CaptureMode::Call, None);
     recording.opened(Some("Zen"));
     recording.released();
     waiting
-        .recv_timeout(PATIENCE)
+        .recv_timeout(HANG_GUARD)
         .expect("the second rebuild's start waits");
     go.send(()).unwrap();
     let recorder = recording.recorder.clone();
@@ -1291,15 +1293,15 @@ async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call()
     let (seen, go) = hold_the_notices(&recording, 2);
     recording.start(CaptureMode::Call, None);
     recording.opened(Some("Zen"));
-    seen.recv_timeout(PATIENCE).expect("the first stall");
+    seen.recv_timeout(HANG_GUARD).expect("the first stall");
     go.send(()).unwrap();
-    seen.recv_timeout(PATIENCE).expect("the first resume");
+    seen.recv_timeout(HANG_GUARD).expect("the first resume");
     // Back from the first stall: the release's countdown runs, shown.
     recording.released();
     recording.sleepers(1);
     assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 90.0)));
     waiting
-        .recv_timeout(PATIENCE)
+        .recv_timeout(HANG_GUARD)
         .expect("the second stall's rebuild starts");
     go.send(()).unwrap();
     // Well inside the gate's own patience, so a read that came first
@@ -1369,10 +1371,9 @@ async fn audio_back_arms_a_fresh_countdown_once_the_call_app_let_go() {
     assert_eq!(recording.recorder.status().state, RecordingState::Recording);
     assert!(resumed.wait_for_sleepers(1));
     resumed.advance(Duration::from_secs(1));
-    eventually("the fresh grace stopped the recording", || {
-        recording.recorder.status().state == RecordingState::Idle
-    })
-    .await;
+    recording
+        .idle("the fresh grace stopped the recording")
+        .await;
     assert_eq!(
         recording.meetings()[0].end_reason,
         Some(RecordingEndReason::CallEnded {
@@ -1418,7 +1419,9 @@ async fn a_resume_on_the_notice_thread_during_a_stop_does_not_deadlock() {
     recording.start(CaptureMode::Call, None);
     recording.opened(Some("Zen"));
     recording.released();
-    in_hook.recv_timeout(PATIENCE).expect("the device changed");
+    in_hook
+        .recv_timeout(HANG_GUARD)
+        .expect("the device changed");
     recording.stop();
     assert!(resumed.load(Ordering::SeqCst), "the resume returned");
     assert_eq!(recording.recorder.status().state, RecordingState::Idle);

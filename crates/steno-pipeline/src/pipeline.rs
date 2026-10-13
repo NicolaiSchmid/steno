@@ -61,7 +61,8 @@ use crate::sample_clips::{self, ClipProbe, ClipStep};
 
 /// The one failure type: any error inside a stage becomes this, and
 /// [`ProcessingPipeline::process`] marks the meeting failed in one place,
-/// unless the failure is [`FailureKind::ModelsMissing`].
+/// unless the failure is [`FailureKind::ModelsMissing`] or wraps a busy
+/// store error ([`is_busy`](Self::is_busy)).
 /// Swift: `PipelineFailure` in `Sources/StenoCore/Pipeline/PipelineStage.swift`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
 pub struct PipelineFailure {
@@ -106,7 +107,9 @@ impl PipelineFailure {
     }
 
     /// The failure wraps a busy store error: nothing is wrong with the
-    /// call, and a caller that can wait may try it again.
+    /// call, and a caller that can wait may try it again. A run that meets
+    /// one leaves its meeting `queued`, waiting for the store
+    /// ([`ModelWaits`]), instead of failing it.
     #[must_use]
     pub fn is_busy(&self) -> bool {
         self.busy
@@ -155,8 +158,14 @@ impl PipelineFailure {
         match carried {
             Some(failure) => failure.clone(),
             None => PipelineFailure {
+                // Bare, or boxed by a boundary over the store (the speaker
+                // memory over it).
                 busy: any
                     .downcast_ref::<StoreError>()
+                    .or_else(|| {
+                        any.downcast_ref::<BoxError>()
+                            .and_then(|boxed| boxed.downcast_ref::<StoreError>())
+                    })
                     .is_some_and(StoreError::is_busy),
                 ..PipelineFailure::new(stage, error.to_string())
             },
@@ -194,6 +203,13 @@ pub enum ReprocessError {
     /// [`PipelineFailure::MODELS_MISSING`] says.
     #[error("meeting {0} waits for the speech models to be installed")]
     WaitingForModels(Uuid),
+    /// A run left the meeting `queued` because another process held the
+    /// store's write lock past its busy timeout, and it waits for the store
+    /// ([`ModelWaits`]): the services' retry
+    /// ([`ProcessingPipeline::resume_waiting_for_store`]) or the next
+    /// launch starts it.
+    #[error("meeting {0} waits for another process to let go of the database")]
+    WaitingForStore(Uuid),
     /// The meeting is finished, but [`process_again`] does not offer it
     /// ([`Meeting::offers_process_again`]): it is ready, its results do
     /// not need the recording, and the recording is not damaged.
@@ -387,7 +403,8 @@ impl InFlight {
     /// background run holds its asset, from its claim (a run still waiting
     /// for its turn included) to its end. A meeting waiting for models is
     /// not in flight ([`ModelWaits`]): it waits for the user, not for a
-    /// job.
+    /// job. Nor is one waiting for the store: it waits for another process,
+    /// not for a job, and the store's retry or the next launch starts it.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.lock().is_idle()
@@ -481,8 +498,30 @@ impl Drop for JobHold {
 ///    again at once instead, on the newest pipeline built over the value
 ///    (after a reload, the current one), so it runs on the settings saved
 ///    last.
+///
+/// The value also keeps the meetings that wait for the store: runs that
+/// met a write another process held locked past the store's busy timeout
+/// ([`PipelineFailure::is_busy`]; the Swift app during the rollback
+/// window, or another program with the database open), recorded under
+/// rule 1, and those of a models resume the store refused.
+/// [`ProcessingPipeline::resume_waiting_for_store`] starts them, and puts
+/// back those a run holds; a meeting waits for one thing at a time, so
+/// neither it nor [`ProcessingPipeline::resume_waiting`] takes the other's,
+/// except when it reruns a launch's resume, which starts every `queued`
+/// meeting as the launch does. Rule 3 has no part here: the caller of
+/// the store's retry tries again for as long as a meeting waits for the
+/// store ([`until_store_retry`](Self::until_store_retry) says when), so a
+/// meeting a retry skipped is taken by the next one. A launch's resume
+/// the store refused is owed the same way.
 #[derive(Debug, Clone, Default)]
-pub struct ModelWaits(Arc<Mutex<Waits>>);
+pub struct ModelWaits(Arc<SharedWaits>);
+
+/// The waits under one lock, and the wake-up of the store's retry.
+#[derive(Debug, Default)]
+struct SharedWaits {
+    waits: Mutex<Waits>,
+    store_retry: tokio::sync::Notify,
+}
 
 /// The waiting meetings, the resume count and the newest pipeline, under
 /// one lock.
@@ -492,6 +531,18 @@ struct Waits {
     resumes: u64,
     /// The pipeline a restart goes to (rule 3), while it lives.
     newest: Weak<Inner>,
+    /// The meetings that wait for the store.
+    for_store: BTreeSet<Uuid>,
+    /// A launch's resume ([`ProcessingPipeline::resume_unfinished`]) the
+    /// store refused, owed to the next retry.
+    unfinished_owed: bool,
+}
+
+/// What the store's retry takes: the meetings that wait for it, and
+/// whether a launch's resume is owed.
+struct StoreWaits {
+    meetings: BTreeSet<Uuid>,
+    unfinished_owed: bool,
 }
 
 impl ModelWaits {
@@ -501,9 +552,29 @@ impl ModelWaits {
         self.lock().waiting.iter().copied().collect()
     }
 
+    /// The meetings waiting for the store now, for the tests and the logs.
+    #[must_use]
+    pub fn waiting_for_store(&self) -> Vec<Uuid> {
+        self.lock().for_store.iter().copied().collect()
+    }
+
+    /// Returns once something waits for the store's retry: a meeting
+    /// recorded as waiting for the store, or put back by a retry that could
+    /// not start it, or a launch's resume the store refused. A wake-up
+    /// while nobody awaits is kept for the next call, so none is lost; any
+    /// number of them before the call make one.
+    pub async fn until_store_retry(&self) {
+        self.0.store_retry.notified().await;
+    }
+
     /// Whether `meeting_id` waits now.
     fn holds(&self, meeting_id: Uuid) -> bool {
         self.lock().waiting.contains(&meeting_id)
+    }
+
+    /// Whether `meeting_id` waits for the store now.
+    fn holds_for_store(&self, meeting_id: Uuid) -> bool {
+        self.lock().for_store.contains(&meeting_id)
     }
 
     /// How many resumes ran, read when a run starts.
@@ -537,6 +608,32 @@ impl ModelWaits {
         self.lock().waiting.extend(meetings);
     }
 
+    /// Records `meetings` as waiting for the store and wakes its retry. An
+    /// empty `meetings` records nothing and wakes nothing.
+    fn wait_for_store(&self, meetings: impl IntoIterator<Item = Uuid>) {
+        let mut meetings = meetings.into_iter().peekable();
+        if meetings.peek().is_none() {
+            return;
+        }
+        self.lock().for_store.extend(meetings);
+        self.0.store_retry.notify_one();
+    }
+
+    /// Owes a launch's resume to the store's retry and wakes it.
+    fn owe_unfinished(&self) {
+        self.lock().unfinished_owed = true;
+        self.0.store_retry.notify_one();
+    }
+
+    /// Takes what waits for the store.
+    fn take_store_waits(&self) -> StoreWaits {
+        let mut waits = self.lock();
+        StoreWaits {
+            meetings: std::mem::take(&mut waits.for_store),
+            unfinished_owed: std::mem::take(&mut waits.unfinished_owed),
+        }
+    }
+
     /// Makes `pipeline`, just built over the value, the one a restart goes
     /// to (rule 3).
     fn built(&self, pipeline: &ProcessingPipeline) {
@@ -551,6 +648,7 @@ impl ModelWaits {
 
     fn lock(&self) -> MutexGuard<'_, Waits> {
         self.0
+            .waits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -632,6 +730,14 @@ impl SharedSpeechEngine {
     #[must_use]
     pub fn downgrade(&self) -> WeakSpeechEngine {
         WeakSpeechEngine(Arc::downgrade(&self.0))
+    }
+
+    /// How many jobs claim the engine now, between their warm-up and their
+    /// last lane: what a test waits on to know a job has claimed it.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn claims(&self) -> usize {
+        *self.claim_count()
     }
 
     /// The number of claims, under their lock.
@@ -1265,7 +1371,8 @@ impl ProcessingPipeline {
     /// ([`TOO_MANY_CRASHED_RUNS`]) gets new tries. Refused, with the
     /// [`ReprocessError`] that says why, when the meeting or its asset is
     /// missing, when it is recording, queued or processing (one queued for
-    /// missing models is [`ReprocessError::WaitingForModels`]), when its master
+    /// missing models is [`ReprocessError::WaitingForModels`], one queued for
+    /// the store [`ReprocessError::WaitingForStore`]), when its master
     /// is gone (the retention sweep keeps the asset row when it removes the
     /// files), when another operation holds it, and once the pipeline
     /// [quits](Self::quit). The retention stamp an earlier run left goes,
@@ -1323,8 +1430,12 @@ impl ProcessingPipeline {
             .ok_or(ReprocessError::MeetingNotFound(meeting_id))?;
         let state = meeting.state.kind();
         if !matches!(state, MeetingStateKind::Ready | MeetingStateKind::Failed) {
-            if self.inner.dependencies.model_waits.holds(meeting_id) {
+            let waits = &self.inner.dependencies.model_waits;
+            if waits.holds(meeting_id) {
                 return Err(ReprocessError::WaitingForModels(meeting_id));
+            }
+            if waits.holds_for_store(meeting_id) {
+                return Err(ReprocessError::WaitingForStore(meeting_id));
             }
             return Err(ReprocessError::Unfinished { meeting_id, state });
         }
@@ -1371,13 +1482,23 @@ impl ProcessingPipeline {
     /// the meetings whose processing was started, those that wait last:
     /// none once the pipeline [quits](Self::quit). It counts as a resume
     /// of the meetings waiting for models ([`ModelWaits`]): a run in
-    /// flight that is refused for missing models runs again.
+    /// flight that is refused for missing models runs again. One the store
+    /// refuses because another process holds it is owed to the store's
+    /// retry ([`resume_waiting_for_store`](Self::resume_waiting_for_store)),
+    /// which runs it again.
     pub fn resume_unfinished(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
         }
-        self.inner.dependencies.model_waits.resume();
-        Ok(self.resume_among(None)?.0)
+        let waits = &self.inner.dependencies.model_waits;
+        waits.resume();
+        self.resume_among(None)
+            .map(|(resumed, _)| resumed)
+            .inspect_err(|failure| {
+                if failure.is_busy() {
+                    waits.owe_unfinished();
+                }
+            })
     }
 
     /// [`resume_unfinished`](Self::resume_unfinished) for the meetings
@@ -1389,7 +1510,10 @@ impl ProcessingPipeline {
     /// "Process again" from a stale detail, which then refuses it) stays
     /// waiting until the next resume (another install, a reload that finds
     /// the models installed, or the launch), and so do all of them
-    /// when the store fails.
+    /// when the store fails, unless another process held it past its busy
+    /// timeout: then they wait for the store instead, whose retry
+    /// ([`resume_waiting_for_store`](Self::resume_waiting_for_store))
+    /// starts them, as the resume was asked once the models were in place.
     pub fn resume_waiting(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
@@ -1403,7 +1527,11 @@ impl ProcessingPipeline {
 
     /// Starts `meetings`, taken from the waiting ones, as
     /// [`resume_waiting`](Self::resume_waiting) does: a meeting a run holds
-    /// goes back to waiting, and all of them do when the store fails.
+    /// goes back to waiting, and all of them do when the store fails, for
+    /// the store when another process held it. Those include any the
+    /// resume started before the write the store refused: such a meeting's
+    /// card reads as waiting for the store until its run's first progress
+    /// event, and the retry skips it while its run holds it.
     fn start_waiting(&self, meetings: BTreeSet<Uuid>) -> Result<Vec<Uuid>> {
         let waits = &self.inner.dependencies.model_waits;
         match self.resume_among(Some(&meetings)) {
@@ -1411,8 +1539,78 @@ impl ProcessingPipeline {
                 waits.put_back(busy);
                 Ok(resumed)
             }
+            Err(failure) if failure.is_busy() && !self.quitting() => {
+                for &meeting_id in &meetings {
+                    self.post_store_busy(meeting_id);
+                }
+                waits.wait_for_store(meetings);
+                Err(failure)
+            }
             Err(failure) => {
                 waits.put_back(meetings);
+                Err(failure)
+            }
+        }
+    }
+
+    /// Starts again the meetings runs left `queued` because another process
+    /// held the store's write lock past its busy timeout ([`ModelWaits`]),
+    /// as [`resume_waiting`](Self::resume_waiting) starts those waiting for
+    /// models; a launch's resume the store refused runs instead, as it
+    /// covers every queued meeting. A meeting a run holds goes back to
+    /// waiting for the store, and so do all of them when another process
+    /// holds the store again (an owed launch resume is owed again); either
+    /// wakes the next retry ([`ModelWaits::until_store_retry`]). Another
+    /// failure leaves them `queued` for the next launch. The meetings
+    /// waiting for models are left waiting, except by an owed launch
+    /// resume, which starts every queued meeting as the launch does and
+    /// puts back for models those it could not start. Those include any it
+    /// started before a later meeting's write the store refused: such a
+    /// meeting waits for models again while its run goes on, and
+    /// [`claim_start`](Self::claim_start) keeps the next resume from
+    /// running it twice. The services call it
+    /// on a timer while anything waits for the store; the next launch's
+    /// [`resume_unfinished`](Self::resume_unfinished) takes the meetings
+    /// too, as they are `queued`. Returns the meetings started, none once
+    /// the pipeline [quits](Self::quit). Needs a `tokio` runtime. Rust
+    /// only: Swift's pipeline failed the meeting.
+    pub fn resume_waiting_for_store(&self) -> Result<Vec<Uuid>> {
+        if self.quitting() {
+            return Ok(Vec::new());
+        }
+        let waits = &self.inner.dependencies.model_waits;
+        let StoreWaits {
+            meetings,
+            unfinished_owed,
+        } = waits.take_store_waits();
+        // An owed launch resume takes every `queued` meeting, those waiting
+        // for the store or for models among them.
+        let mut for_models = BTreeSet::new();
+        let among = if unfinished_owed {
+            for_models = waits.resume();
+            None
+        } else if meetings.is_empty() {
+            return Ok(Vec::new());
+        } else {
+            Some(&meetings)
+        };
+        match self.resume_among(among) {
+            Ok((resumed, held)) => {
+                waits.put_back(held.iter().copied().filter(|id| for_models.contains(id)));
+                waits.wait_for_store(held.into_iter().filter(|id| meetings.contains(id)));
+                Ok(resumed)
+            }
+            Err(failure) => {
+                waits.put_back(for_models);
+                if failure.is_busy() {
+                    if unfinished_owed {
+                        waits.owe_unfinished();
+                    } else {
+                        waits.wait_for_store(meetings);
+                    }
+                }
+                // Not the lock: those waiting for the store stay `queued`
+                // for the next launch.
                 Err(failure)
             }
         }
@@ -1673,8 +1871,8 @@ impl ProcessingPipeline {
     /// [`wait_until_idle`](Self::wait_until_idle) waits for, under `key`,
     /// holding `claim` until `work` ends. The state lock is held from the
     /// spawn to the insert, so the task cannot finish and remove its entry
-    /// before the entry exists. A refusal for missing models `work` hands
-    /// back goes to [`wait_for_models`](Self::wait_for_models) after the
+    /// before the entry exists. A refusal `work` hands back (missing models,
+    /// a busy store) goes to [`set_aside`](Self::set_aside) after the
     /// claim is released and before the entry goes (rule 1 on
     /// [`ModelWaits`]). The task's [`Running`] mark removes the entry
     /// however the task ends, a panic included.
@@ -1695,7 +1893,7 @@ impl ProcessingPipeline {
             let refused = work.await;
             drop(running.claim.take());
             if let Some(refused) = refused {
-                pipeline.wait_for_models(refused);
+                pipeline.set_aside(refused);
             }
             drop(running);
         });
@@ -1743,15 +1941,21 @@ impl ProcessingPipeline {
             }
             drop(counted);
             if let Err(failure) = result {
-                pipeline.log_run_failure(asset_id, &failure);
+                pipeline.log_run_failure(asset_id, &failure, refused.as_ref());
             }
             refused
         });
     }
 
     /// The background run's log line for `failure`: debug for one the exit
-    /// ended, info for a refusal for missing models, warn otherwise.
-    fn log_run_failure(&self, asset_id: Uuid, failure: &PipelineFailure) {
+    /// ended, info for a refusal for missing models or a busy store
+    /// (`refused`), warn otherwise.
+    fn log_run_failure(
+        &self,
+        asset_id: Uuid,
+        failure: &PipelineFailure,
+        refused: Option<&Refused>,
+    ) {
         if self.quitting() {
             // The exit ended the job, which `process` did not persist.
             tracing::debug!(
@@ -1771,6 +1975,15 @@ impl ProcessingPipeline {
             );
             return;
         }
+        if refused.is_some_and(|refused| matches!(refused.awaits, Awaits::Store)) {
+            tracing::info!(
+                target: BACKGROUND_RUN_LOG,
+                %asset_id,
+                stage = failure.stage.as_str(),
+                "processing waits for another process to let go of the database"
+            );
+            return;
+        }
         // The reason can name the audio file (a decode error) or quote the
         // model, so warn carries the stage only; the meeting row has the
         // whole reason.
@@ -1786,9 +1999,10 @@ impl ProcessingPipeline {
     /// Waits for every background task: the processing `enqueue`, the
     /// resumes and a refused run's restart started, and the re-exports of
     /// `redeliver_unfinished`. A refused run is waited for until its
-    /// meeting waits or starts again (rule 1 on [`ModelWaits`]); a restart
-    /// on another pipeline (rule 3) is that pipeline's to wait for. The CLI
-    /// and the tests call it before reading results.
+    /// meeting waits (for models or the store) or starts again (rule 1 on
+    /// [`ModelWaits`]); a restart on another pipeline (rule 3) is that
+    /// pipeline's to wait for. The CLI and the tests call it before reading
+    /// results.
     pub async fn wait_until_idle(&self) {
         loop {
             let handle = {
@@ -1857,13 +2071,19 @@ impl ProcessingPipeline {
     /// ([`PipelineFailure::is_models_missing`]) leaves the meeting `queued`
     /// instead, waiting for a resume ([`ModelWaits`]), and the call returns
     /// the refusal; when a resume ran during the run, the meeting starts
-    /// again in the background. A failing `diarize` or `match_speakers`
-    /// does not fail it: the transcript is kept with the speakers stored
-    /// for the meeting, or, when none are stored, one unknown speaker for
-    /// the diarized lane. Once `persist` has marked the meeting `ready`
-    /// nothing downgrades it, not an error or a panic later in the run: the
-    /// meeting is delivered and its retention applied, and the panic's or
-    /// the `retention` error's failure is returned to the caller.
+    /// again in the background. So does a run that meets the store locked
+    /// by another process past its busy timeout
+    /// ([`PipelineFailure::is_busy`]): it leaves the meeting `queued`,
+    /// waiting for the store's retry
+    /// ([`resume_waiting_for_store`](Self::resume_waiting_for_store)), and
+    /// what the run committed before stays. A failing `diarize` or
+    /// `match_speakers` does not fail it: the transcript is kept with the
+    /// speakers stored for the meeting, or, when none are stored, one
+    /// unknown speaker for the diarized lane. Once `persist` has marked the
+    /// meeting `ready` nothing downgrades it, not an error or a panic later
+    /// in the run: the meeting is delivered and its retention applied, and
+    /// the panic's or the `retention` error's failure is returned to the
+    /// caller.
     /// Once the pipeline [quits](Self::quit), a failure is returned and
     /// not persisted, and a call made after it fails at once: the meeting
     /// stays `queued` or `processing`, which the next launch's
@@ -1872,15 +2092,15 @@ impl ProcessingPipeline {
     pub async fn process(&self, asset_id: Uuid) -> Result<()> {
         let (result, refused) = self.process_held(asset_id).await;
         if let Some(refused) = refused {
-            self.wait_for_models(refused);
+            self.set_aside(refused);
         }
         result
     }
 
     /// [`process`](Self::process) up to the release of the meeting: a run
-    /// refused for missing models also returns what
-    /// [`wait_for_models`](Self::wait_for_models) needs once nothing holds
-    /// the meeting any more.
+    /// refused for missing models or by a busy store also returns what
+    /// [`set_aside`](Self::set_aside) needs once nothing holds the meeting
+    /// any more.
     async fn process_held(&self, asset_id: Uuid) -> (Result<()>, Option<Refused>) {
         self.until_jobs_may_start().await;
         if self.quitting() {
@@ -1925,7 +2145,7 @@ impl ProcessingPipeline {
                         self.park(meeting_id);
                         refused = Some(Refused {
                             meeting_id,
-                            resumes_seen,
+                            awaits: Awaits::Models { resumes_seen },
                         });
                         return Err(failure);
                     }
@@ -1946,6 +2166,14 @@ impl ProcessingPipeline {
                                 .await;
                             return Err(failure);
                         }
+                        if failure.is_busy() {
+                            self.park_for_store(meeting_id);
+                            refused = Some(Refused {
+                                meeting_id,
+                                awaits: Awaits::Store,
+                            });
+                            return Err(failure);
+                        }
                         let _ = self.store().set_state(
                             meeting_id,
                             MeetingState::Failed {
@@ -1964,15 +2192,29 @@ impl ProcessingPipeline {
     }
 
     /// Once nothing holds a refused run's meeting, records it as waiting
-    /// for its models, or, when a resume ran since the run started, starts
-    /// it again in the background on the newest pipeline (rules 1 and 3 on
-    /// [`ModelWaits`]). Once the pipeline quits, the next launch's resume
-    /// processes it.
-    fn wait_for_models(&self, refused: Refused) {
-        let Refused {
-            meeting_id,
-            resumes_seen,
-        } = refused;
+    /// for what it awaits ([`wait_for_models`](Self::wait_for_models), or
+    /// the store, whose retry is woken). Once the pipeline quits, a store
+    /// wait is not recorded: the next launch's resume processes it.
+    fn set_aside(&self, refused: Refused) {
+        match refused.awaits {
+            Awaits::Models { resumes_seen } => {
+                self.wait_for_models(refused.meeting_id, resumes_seen);
+            }
+            Awaits::Store if self.quitting() => {}
+            Awaits::Store => self
+                .inner
+                .dependencies
+                .model_waits
+                .wait_for_store([refused.meeting_id]),
+        }
+    }
+
+    /// Records a refused run's meeting as waiting for its models, or, when
+    /// a resume ran since the run started (`resumes_seen` then differs),
+    /// starts it again in the background on the newest pipeline (rules 1
+    /// and 3 on [`ModelWaits`]). Once the pipeline quits, the next launch's
+    /// resume processes it.
+    fn wait_for_models(&self, meeting_id: Uuid, resumes_seen: u64) {
         let waits = &self.inner.dependencies.model_waits;
         if waits.wait_unless_resumed(meeting_id, resumes_seen) || self.quitting() {
             return;
@@ -2005,6 +2247,37 @@ impl ProcessingPipeline {
             .dependencies
             .events
             .post(MeetingEvent::ModelsMissing { meeting_id });
+    }
+
+    /// A run that met the store locked by another process leaves its
+    /// meeting `queued` and says why with [`MeetingEvent::StoreBusy`]. Only
+    /// a meeting the run marked `processing` is written back: one still
+    /// `queued` (the write the lock refused was that mark) is left as it is,
+    /// so the park does not wait on the lock once more. A write that fails
+    /// too leaves the meeting `processing`; it waits all the same, and the
+    /// resumes take `processing` meetings too. Best effort, like the failed
+    /// mark.
+    fn park_for_store(&self, meeting_id: Uuid) {
+        let processing = self
+            .store()
+            .meeting(meeting_id)
+            .ok()
+            .flatten()
+            .is_some_and(|stored| stored.state == MeetingState::Processing);
+        if processing {
+            let _ = self
+                .store()
+                .set_state(meeting_id, MeetingState::Queued, self.now());
+        }
+        self.post_store_busy(meeting_id);
+    }
+
+    /// Posts [`MeetingEvent::StoreBusy`] for `meeting_id`.
+    fn post_store_busy(&self, meeting_id: Uuid) {
+        self.inner
+            .dependencies
+            .events
+            .post(MeetingEvent::StoreBusy { meeting_id });
     }
 
     async fn process_until_persist(
@@ -2102,15 +2375,17 @@ impl ProcessingPipeline {
 
     /// A stage whose failure costs only the speaker labels (`diarize`,
     /// `match_speakers`, the diarizer's warm-up) is logged with `meeting_id`
-    /// and its stage only, and the run goes on with the transcript. Two
+    /// and its stage only, and the run goes on with the transcript. Three
     /// failures are returned instead. A refusal for missing models
     /// ([`PipelineFailure::is_models_missing`]): the meeting waits for the
     /// diarizer's models rather than being finished without its speakers.
-    /// And any failure once the pipeline quits: the exit may have caused
-    /// it, and the meeting stays `processing` for the next launch. Rust
-    /// only: Swift fails the meeting.
+    /// A busy store ([`PipelineFailure::is_busy`]; the speaker memory reads
+    /// it): the meeting waits for the store for the same reason. And any
+    /// failure once the pipeline quits: the exit may have caused it, and
+    /// the meeting stays `processing` for the next launch. Rust only: Swift
+    /// fails the meeting.
     fn carry_on_after(&self, failure: &PipelineFailure, meeting_id: Uuid) -> Result<()> {
-        if failure.is_models_missing() || self.quitting() {
+        if failure.is_models_missing() || failure.is_busy() || self.quitting() {
             return Err(failure.clone());
         }
         tracing::warn!(
@@ -3295,13 +3570,21 @@ impl Drop for AssetClaim {
     }
 }
 
-/// A run refused for missing models, for
-/// [`ProcessingPipeline::wait_for_models`]: its meeting and the resume
-/// count when it started.
+/// A run refused for missing models or by a busy store, for
+/// [`ProcessingPipeline::set_aside`]: its meeting and what it awaits.
 #[derive(Clone, Copy)]
 struct Refused {
     meeting_id: Uuid,
-    resumes_seen: u64,
+    awaits: Awaits,
+}
+
+/// What a refused run's meeting waits for.
+#[derive(Clone, Copy)]
+enum Awaits {
+    /// The models, with the resume count when the run started.
+    Models { resumes_seen: u64 },
+    /// Another process to let go of the store's write lock.
+    Store,
 }
 
 /// A background run's entry in `running` (by asset id, or a key of its

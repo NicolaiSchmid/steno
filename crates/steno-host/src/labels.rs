@@ -130,24 +130,36 @@ pub fn end_reason_sentence(reason: &RecordingEndReason) -> Option<String> {
 }
 
 /// The detail's warning when the decoder replaced parts of the recording
-/// by silence; `None` for a recording that decoded clean. Names the
-/// phone's recording, the only one that can hold damaged packets (AAC),
-/// and says how long the silence lasts rather than how many packets it
-/// replaced, rounded to tenths of a second, seconds or minutes. Rust
-/// only: `AVFoundation` conceals them and says nothing.
+/// by silence, or read a recording that had no index up to where it was
+/// cut off or could not be read (a phone recording whose recorder was
+/// killed), so its end may be missing; `None` for a recording that decoded
+/// clean. Names the phone's recording, the only one that can hold damaged
+/// packets (AAC) or lack its index, and says how long the silence lasts
+/// rather than how many packets it replaced, rounded to tenths of a
+/// second, seconds or minutes. Rust only:
+/// `AVFoundation` conceals damaged packets and says nothing, and cannot
+/// read a recording without its index.
 #[must_use]
 pub fn damaged_audio_warning(damage: AudioDamage, source: MeetingSource) -> Option<String> {
     if damage.is_none() {
         return None;
     }
-    let recording = match source {
-        MeetingSource::Phone => "the phone recording",
-        MeetingSource::MacCall | MeetingSource::MacInPerson => "the recording",
+    let (recording, the_recording) = match source {
+        MeetingSource::Phone => ("the phone recording", "The phone recording"),
+        MeetingSource::MacCall | MeetingSource::MacInPerson => ("the recording", "The recording"),
     };
-    Some(format!(
-        "{} of {recording} could not be read and was replaced by silence.",
-        silence_length(damage.seconds)
-    ))
+    let replaced = |of: &str| {
+        format!(
+            "{} of {of} could not be read and was replaced by silence.",
+            silence_length(damage.seconds)
+        )
+    };
+    let cut_off = format!("{the_recording} was cut off unexpectedly, and its end may be missing.");
+    Some(match (damage.salvaged, damage.parts > 0) {
+        (false, _) => replaced(recording),
+        (true, false) => cut_off,
+        (true, true) => format!("{cut_off} {}", replaced("it")),
+    })
 }
 
 /// `seconds` of silence in words, rounded: tenths of a second below a
@@ -279,12 +291,39 @@ mod tests {
         let damage = AudioDamage {
             parts: 3,
             seconds: 0.07,
+            salvaged: false,
         };
         assert_eq!(
             damaged_audio_warning(damage, MeetingSource::Phone).as_deref(),
             Some(
                 "About 0.1 seconds of the phone recording could not be read and was replaced by silence."
             )
+        );
+        let salvaged = AudioDamage {
+            salvaged: true,
+            ..AudioDamage::default()
+        };
+        assert_eq!(
+            damaged_audio_warning(salvaged, MeetingSource::Phone).as_deref(),
+            Some("The phone recording was cut off unexpectedly, and its end may be missing.")
+        );
+        assert_eq!(
+            damaged_audio_warning(
+                AudioDamage {
+                    salvaged: true,
+                    ..damage
+                },
+                MeetingSource::Phone
+            )
+            .as_deref(),
+            Some(
+                "The phone recording was cut off unexpectedly, and its end may be missing. About 0.1 \
+                 seconds of it could not be read and was replaced by silence."
+            )
+        );
+        assert_eq!(
+            damaged_audio_warning(salvaged, MeetingSource::MacCall).as_deref(),
+            Some("The recording was cut off unexpectedly, and its end may be missing.")
         );
         assert_eq!(
             damaged_audio_warning(AudioDamage::default(), MeetingSource::Phone),

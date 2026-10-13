@@ -423,6 +423,7 @@ mod tests {
         let damage = steno_core::AudioDamage {
             parts: 2,
             seconds: 0.05,
+            salvaged: false,
         };
         options
             .damaged_audio()
