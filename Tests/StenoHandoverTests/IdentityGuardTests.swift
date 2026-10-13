@@ -265,13 +265,17 @@ import Testing
     #expect(try await store.pairedDevices().isEmpty)
   }
 
-  /// One identity newer than some phones but not all: refused in part, in
-  /// the words the startup warning shows, and nothing changes.
-  @Test func anUnrecordedIdentityNewerThanSomePhonesIsPartlyReplaced() async throws {
+  /// One identity newer than some phones but not all, among them one
+  /// paired a second before its start beside one paired at it: refused in
+  /// part, in the words the startup warning shows, and nothing changes.
+  @Test(arguments: [(-86400.0, 3600.0), (-1.0, 0.0)])
+  func anUnrecordedIdentityNewerThanSomePhonesIsPartlyReplaced(
+    before: TimeInterval, after: TimeInterval
+  ) async throws {
     let keychain = FakeKeychain(known, next: other)
     let identityGuard = try await identityGuard(keychain)
     let start = try known.notValidBefore()
-    try await pair(at: [start.addingTimeInterval(-86400), start.addingTimeInterval(3600)])
+    try await pair(at: [start.addingTimeInterval(before), start.addingTimeInterval(after)])
     var asked = false
     await #expect(throws: IdentityUnavailability.partlyReplaced) {
       try await identityGuard.loadOrPairAgain(commonName: "A") {
@@ -285,8 +289,39 @@ import Testing
     #expect(try await store.pairedDevices().count == 2)
     #expect(
       String(describing: IdentityUnavailability.partlyReplaced)
-        == "Some paired phones were paired before this Mac's current identity and can't "
-        + "connect. Pair Again to reconnect them.")
+        == "some of your phones were paired before this Mac's pairing changed and can't "
+        + "connect. Choose Pair Again the next time Steno opens to reconnect them.")
+  }
+
+  /// A certificate whose start cannot be read is no reason to record it,
+  /// nor to ask: the launch is unreadable and nothing changes.
+  @Test func anUnrecordedIdentityWhoseStartCannotBeReadAsksNothingAndRecordsNothing()
+    async throws
+  {
+    let unparsable = Data([0x30, 0x00])
+    #if canImport(Security)
+      let broken = HandoverIdentity(secIdentity: known.secIdentity, certificateDER: unparsable)
+    #else
+      let broken = HandoverIdentity(certificateDER: unparsable)
+    #endif
+    #expect(throws: (any Error).self) { try broken.notValidBefore() }
+    let keychain = FakeKeychain(broken, next: other)
+    let identityGuard = try await identityGuard(keychain, phones: 1)
+    var asked = false
+    let refusal = await #expect(throws: IdentityUnavailability.self) {
+      try await identityGuard.loadOrPairAgain(commonName: "A") {
+        asked = true
+        return true
+      }
+    }
+    guard case .unreadable = refusal else {
+      Issue.record("expected unreadable, got \(String(describing: refusal))")
+      return
+    }
+    #expect(!asked)
+    #expect(try identityGuard.record.recorded() == nil)
+    #expect(keychain.stages == 0 && keychain.promotes == 0)
+    #expect(try await store.pairedDevices().count == 1)
   }
 
   /// A minted certificate starts a minute before its mint

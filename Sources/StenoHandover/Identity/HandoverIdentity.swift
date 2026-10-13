@@ -30,8 +30,15 @@ public struct HandoverIdentity: @unchecked Sendable {
       guard status == errSecSuccess, let certificate else {
         throw IdentityError.security("SecIdentityCopyCertificate", status)
       }
+      self.init(
+        secIdentity: secIdentity, certificateDER: SecCertificateCopyData(certificate) as Data)
+    }
+
+    /// `secIdentity` with `certificateDER` as its certificate, for a test of
+    /// a certificate that does not parse.
+    init(secIdentity: SecIdentity, certificateDER: Data) {
       self.secIdentity = secIdentity
-      self.certificateDER = SecCertificateCopyData(certificate) as Data
+      self.certificateDER = certificateDER
     }
   #else
     public init(certificateDER: Data) {

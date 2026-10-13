@@ -124,7 +124,7 @@ import Testing
 
   deinit { try? FileManager.default.removeItem(at: directory) }
 
-  /// One Mac: a keychain, a record and a store with one paired phone or none.
+  /// One Mac: a keychain, a record and a store with its paired phones.
   struct Mac {
     let items: FakeItems
     let record: IdentityRecordFile
@@ -151,10 +151,10 @@ import Testing
   }
 
   /// A Mac whose keychain holds `held`, in that order, under the labels
-  /// given, with `recorded` in its record and one phone paired at
-  /// `pairedAt`, none when it is nil.
+  /// given, with `recorded` in its record and one phone paired at each of
+  /// `pairedAt`, one paired now by default.
   func mac(
-    holding held: [(HandoverIdentity, String)], recorded: String?, pairedAt: Date? = Date()
+    holding held: [(HandoverIdentity, String)], recorded: String?, pairedAt: [Date] = [Date()]
   ) async throws -> Mac {
     let items = FakeItems(next: other)
     for (identity, label) in held { items.add(identity, label: label) }
@@ -162,10 +162,10 @@ import Testing
       supportDirectory: directory.appendingPathComponent(UUID().uuidString))
     if let recorded { try record.record(recorded) }
     let store = try MeetingStore.inMemory()
-    if let pairedAt {
+    for (index, date) in pairedAt.enumerated() {
       try await store.save(
-        PairedDevice(id: UUID(), name: "Phone", pairedAt: pairedAt),
-        tokenHash: Data(repeating: 1, count: 32))
+        PairedDevice(id: UUID(), name: "Phone \(index)", pairedAt: date),
+        tokenHash: Data(repeating: UInt8(index + 1), count: 32))
     }
     return Mac(items: items, record: record, store: store)
   }
@@ -256,27 +256,32 @@ import Testing
 
   /// An old login keychain added back beside the new one after a finished
   /// Pair Again: two identities under the current label, the recorded one
-  /// first or second in the keychain's order. The launch loads the
-  /// recorded one and asks nothing, so no Pair Again runs and no promote's
-  /// delete removes the identity the phones know.
-  @Test(arguments: [false, true])
-  func ofTwoIdentitiesUnderTheLabelTheRecordedOneLoads(recordedFirst: Bool) async throws {
-    let held = recordedFirst ? [other, known] : [known, other]
-    let mac = try await mac(holding: held.map { ($0, Self.label) }, recorded: hex(other))
+  /// first or second in the keychain's order, and the older or the newer
+  /// of the two. The launch loads the recorded one and asks nothing, so no
+  /// Pair Again runs and no promote's delete removes the identity the
+  /// phones know.
+  @Test(arguments: [false, true], [false, true])
+  func ofTwoIdentitiesUnderTheLabelTheRecordedOneLoads(recordedFirst: Bool, recordedOlder: Bool)
+    async throws
+  {
+    let (recorded, beside) = recordedOlder ? (known, other) : (other, known)
+    let held = recordedFirst ? [recorded, beside] : [beside, recorded]
+    let mac = try await mac(holding: held.map { ($0, Self.label) }, recorded: hex(recorded))
     var asked = false
     let identity = try await mac.launch.loadOrPairAgain(commonName: "A") {
       asked = true
       return true
     }
-    #expect(hex(identity) == hex(other) && !asked)
+    #expect(hex(identity) == hex(recorded) && !asked)
     #expect(mac.items.writes.isEmpty)
     #expect(mac.items.certificateItems.map { hex($0.identity) } == held.map(hex))
     #expect(mac.items.keyItems.map { hex($0.identity) } == held.map(hex))
-    #expect(try mac.record.recorded() == hex(other))
+    #expect(try mac.record.recorded() == hex(recorded))
     #expect(try await mac.store.pairedDevices().count == 1)
   }
 
-  /// The same with neither recorded is replaced, whichever comes first.
+  /// The same with a record naming neither is replaced, whichever comes
+  /// first.
   @Test(arguments: [false, true])
   func ofTwoIdentitiesUnderTheLabelNeitherRecordedIsReplaced(knownFirst: Bool) async throws {
     let held = knownFirst ? [known, other] : [other, known]
@@ -289,34 +294,69 @@ import Testing
     #expect(try await mac.store.pairedDevices().count == 1)
   }
 
-  /// When the phone was paired, against `known` and `third` (older and
-  /// newer): before both, between them, after both, or no phone.
-  enum Pairing: CaseIterable { case beforeBoth, between, afterBoth, none }
+  /// When the phones were paired, against `known` and `third` (older and
+  /// newer): each phone knows the newer of the two it was paired after, or
+  /// neither when it was paired before both.
+  enum Pairing: CaseIterable {
+    case none, beforeBoth, between, afterBoth, betweenAndAfter, beforeAndBetween, beforeAndAfter
+
+    enum Point { case beforeBoth, between, afterBoth }
+
+    var points: [Point] {
+      switch self {
+      case .none: []
+      case .beforeBoth: [.beforeBoth]
+      case .between: [.between]
+      case .afterBoth: [.afterBoth]
+      case .betweenAndAfter: [.between, .afterBoth]
+      case .beforeAndBetween: [.beforeBoth, .between]
+      case .beforeAndAfter: [.beforeBoth, .afterBoth]
+      }
+    }
+
+    enum Outcome: Equatable {
+      case loadsOlder, loadsNewer
+      case refused(IdentityUnavailability)
+    }
+
+    /// The launch's outcome: the identity every phone knows, the newer
+    /// with no phone; `partlyReplaced` when the phones know different ones
+    /// or some know none, `replaced` when none knows either.
+    var outcome: Outcome {
+      switch self {
+      case .none, .afterBoth: .loadsNewer
+      case .between: .loadsOlder
+      case .beforeBoth: .refused(.replaced)
+      case .betweenAndAfter, .beforeAndBetween, .beforeAndAfter: .refused(.partlyReplaced)
+      }
+    }
+  }
 
   /// The same with nothing recorded (an upgrade from a build without the
-  /// record, or a record file lost), whichever comes first: the newest
-  /// that no paired phone predates is recorded, with no question and no
-  /// other write. A phone that predates both makes the launch replaced,
-  /// and a confirmed Pair Again leaves only the new identity.
+  /// record, or a record file lost), whichever comes first: the identity
+  /// every paired phone knows is recorded, with no question and no other
+  /// write. Phones that know different identities, or none, make the
+  /// launch ask, and nothing is recorded; a confirmed Pair Again leaves
+  /// only the new identity.
   @Test(arguments: [false, true], Pairing.allCases)
-  func ofTwoIdentitiesUnderTheLabelWithNoRecordTheNewestNoPhonePredatesIsRecorded(
+  func ofTwoIdentitiesUnderTheLabelWithNoRecordTheOneEveryPhoneKnowsIsRecorded(
     knownFirst: Bool, pairing: Pairing
   ) async throws {
     let held = knownFirst ? [known, third] : [third, known]
     let (older, newer) = (try known.notValidBefore(), try third.notValidBefore())
-    let pairedAt: Date? =
-      switch pairing {
+    let pairedAt = pairing.points.map { point in
+      switch point {
       case .beforeBoth: older.addingTimeInterval(-3600)
       case .between: older.addingTimeInterval(3600)
       case .afterBoth: newer.addingTimeInterval(3600)
-      case .none: nil
       }
+    }
     let mac = try await mac(
       holding: held.map { ($0, Self.label) }, recorded: nil, pairedAt: pairedAt)
-    let phones = pairedAt == nil ? 0 : 1
     var asked = false
-    if pairing == .beforeBoth {
-      await #expect(throws: IdentityUnavailability.replaced) {
+    switch pairing.outcome {
+    case .refused(let refusal):
+      await #expect(throws: refusal) {
         try await mac.launch.loadOrPairAgain(commonName: "A") {
           asked = true
           return false
@@ -326,14 +366,14 @@ import Testing
       #expect(mac.items.writes.isEmpty)
       #expect(mac.items.certificateItems.map { hex($0.identity) } == held.map(hex))
       #expect(try mac.record.recorded() == nil)
-      #expect(try await mac.store.pairedDevices().count == phones)
+      #expect(try await mac.store.pairedDevices().count == pairedAt.count)
 
       #expect(hex(try await mac.launch.loadOrPairAgain(commonName: "A") { true }) == hex(other))
       expectOnlyTheNewIdentity(mac.items)
       #expect(try mac.record.recorded() == hex(other))
       #expect(try await mac.store.pairedDevices().isEmpty)
-    } else {
-      let chosen = pairing == .between ? known : third
+    case .loadsOlder, .loadsNewer:
+      let chosen = pairing.outcome == .loadsOlder ? known : third
       let identity = try await mac.launch.loadOrPairAgain(commonName: "A") {
         asked = true
         return true
@@ -342,7 +382,7 @@ import Testing
       #expect(mac.items.writes.isEmpty)
       #expect(mac.items.certificateItems.map { hex($0.identity) } == held.map(hex))
       #expect(try mac.record.recorded() == hex(chosen))
-      #expect(try await mac.store.pairedDevices().count == phones)
+      #expect(try await mac.store.pairedDevices().count == pairedAt.count)
     }
   }
 
