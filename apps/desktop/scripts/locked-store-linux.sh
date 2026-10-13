@@ -11,8 +11,10 @@
 # and the panels draw on, and the stop's save waits for the lock (each try
 # waits out the store's 5 s busy timeout). The stop must run off the main
 # thread (`actions.rs`), so the tray goes on answering while the save
-# waits. Exits 0 when the menu's Record row reads "Stopping…" within 1 s of
-# the click, the meeting is `queued` within 2 s of the lock's release, and
+# waits. Exits 0 when the menu's Record row reads "Stopping…" within 3 s of
+# the click (each read of the menu starts Python, a few tenths of a second
+# on a busy machine; the main thread held by the stop kept it 8 s and
+# more), the meeting is `queued` within 2 s of the lock's release, and
 # the store then holds that one meeting, saved with a duration above zero.
 # There is no log line for a save; the store's row is the save.
 #
@@ -43,7 +45,7 @@ python3 -c 'import gi, sqlite3' 2>/dev/null \
 # How long the lock is held, and how soon after the click and after the
 # release each check must hold.
 hold_seconds=8
-stopping_within=1
+stopping_within=3
 saved_within=2
 
 watcher=""
@@ -135,6 +137,9 @@ while within "$(now)" "$clicked" "$stopping_within"; do
 done
 [[ -n "$stopping" ]] \
   || fail "the tray's Record row read \"$row\" $stopping_within s after the click, not Stopping…"
+# A read that began within the bound may have answered after it.
+within "$stopping" "$clicked" "$stopping_within" \
+  || fail "the tray read Stopping… only $(elapsed "$stopping" "$clicked") s after the click"
 echo "$name: the tray read Stopping… $(elapsed "$stopping" "$clicked") s after the click"
 grep -q '^recording ' <<<"$(meetings "$store")" \
   || fail "the meeting was saved under the held lock: $(meetings "$store")"
