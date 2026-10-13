@@ -2759,7 +2759,11 @@ mod tests {
         holds: Duration,
     ) -> u64 {
         let status = || harness.recorder.status();
+        let starting = std::time::Instant::now();
         start(&harness.recorder);
+        // The master holds what came before the start returned, which the
+        // note's wall time leaves out: the warning stands that long more.
+        let start_took = starting.elapsed();
         eventually_within(HANG_GUARD, "a level from the tone", || {
             status().levels.is_some_and(|levels| levels.mic > 0.1)
         })
@@ -2772,7 +2776,7 @@ mod tests {
             mic.is_some_and(|mic| mic < 1e-6),
             "the meter reads silence: {mic:?}"
         );
-        let held = std::time::Instant::now() + holds;
+        let held = std::time::Instant::now() + holds + start_took;
         while std::time::Instant::now() < held {
             assert_eq!(status().warning.as_deref(), Some(warning), "it stands");
             tokio::time::sleep(Duration::from_millis(20)).await;
