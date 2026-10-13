@@ -14,9 +14,13 @@
 # waits. Exits 0 when the menu's Record row reads "Stopping…" within 3 s of
 # the click (each read of the menu starts Python, a few tenths of a second
 # on a busy machine; the main thread held by the stop kept it 8 s and
-# more), the meeting is `queued` within 2 s of the lock's release, and
-# the store then holds that one meeting, saved with a duration above zero.
-# There is no log line for a save; the store's row is the save.
+# more), the meeting is `queued` within 2 s of the lock's release, the
+# store then holds that one meeting, saved with a duration above zero,
+# and the row reads "Record" again within 3 s of the save (a row the tray
+# skipped as unchanged would stay "Stopping…"). There is no log line for
+# a save; the store's row is the save. Each read of the menu after the
+# click is logged with the seconds it began and answered, so a slow run
+# shows whether the app or the read was late.
 #
 # Exits 1 when a check fails, 2 on a usage error or a missing tool.
 #
@@ -47,6 +51,7 @@ python3 -c 'import gi, sqlite3' 2>/dev/null \
 hold_seconds=8
 stopping_within=3
 saved_within=2
+idle_within=3
 
 watcher=""
 holder=""
@@ -78,6 +83,31 @@ record_row() {
 
 now() {
   date +%s.%N
+}
+
+# The menu's reads since the last `log_reads`, each "began answered row".
+reads=()
+
+# Reads the Record row into $row, noting the read in $reads.
+read_row() {
+  local began
+  began="$(now)"
+  row="$(record_row)"
+  reads+=("$began $(now) $row")
+}
+
+# Logs the reads in $reads as the seconds after $1 (named $2) each began
+# and answered, and what it read, then forgets them.
+log_reads() {
+  (( ${#reads[@]} )) || return 0
+  printf '%s\n' "${reads[@]}" | python3 -c '
+import sys
+since = float(sys.argv[1])
+for line in sys.stdin:
+    began, answered, row = line.rstrip("\n").split(" ", 2)
+    print(f"{sys.argv[3]}: read {float(began) - since:.2f}-{float(answered) - since:.2f} s after {sys.argv[2]}: {row}")
+' "$1" "$2" "$name"
+  reads=()
 }
 
 # Whether $1 - $2 is at most $3 seconds.
@@ -127,7 +157,7 @@ python3 "$scripts/tray-watcher-linux.py" click "$bus_name" "$item_path" "Stop re
   || fail "Stop recording could not be clicked"
 stopping=""
 while within "$(now)" "$clicked" "$stopping_within"; do
-  row="$(record_row)"
+  read_row
   # Disabled while the recorder is between states (`tray::record_enabled`).
   if [[ "$row" == "Stopping… (disabled)" ]]; then
     stopping="$(now)"
@@ -135,6 +165,7 @@ while within "$(now)" "$clicked" "$stopping_within"; do
   fi
   sleep 0.05
 done
+log_reads "$clicked" "the click"
 [[ -n "$stopping" ]] \
   || fail "the tray's Record row read \"$row\" $stopping_within s after the click, not Stopping…"
 # A read that began within the bound may have answered after it.
@@ -159,4 +190,19 @@ done
   || fail "the meeting was not queued $saved_within s after the lock's release: $(meetings "$store")"
 echo "$name: the meeting was queued $(elapsed "$queued" "$released") s after the lock's release"
 require_saved
+idle=""
+while within "$(now)" "$queued" "$idle_within"; do
+  read_row
+  if [[ "$row" == "Record" ]]; then
+    idle="$(now)"
+    break
+  fi
+  sleep 0.05
+done
+log_reads "$queued" "the save"
+[[ -n "$idle" ]] \
+  || fail "the tray's Record row read \"$row\" $idle_within s after the save, not Record"
+within "$idle" "$queued" "$idle_within" \
+  || fail "the tray read Record only $(elapsed "$idle" "$queued") s after the save"
+echo "$name: the tray read Record $(elapsed "$idle" "$queued") s after the save"
 echo "$name: ok, the tray answered while the stop waited for the lock, and the recording was saved"
