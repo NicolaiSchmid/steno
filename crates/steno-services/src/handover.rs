@@ -1200,6 +1200,39 @@ mod tests {
         assert!(file.next().is_err(), "nor a record without a note");
     }
 
+    /// A key the app does not know is ignored while its value is a string,
+    /// and the next write drops it. A value that is not a string, under
+    /// any key, makes the file one that does not parse: an error for both
+    /// reads, never "nothing recorded".
+    #[test]
+    fn only_string_values_are_read_and_any_other_value_does_not_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("handover-identity.json");
+        let file = FingerprintFile::in_support_directory(dir.path());
+        std::fs::write(
+            &path,
+            br#"{"steno.handoverIdentityFingerprint": "cd34", "steno.later": "x"}"#,
+        )
+        .unwrap();
+        assert_eq!(file.recorded().unwrap().as_deref(), Some("cd34"));
+        assert_eq!(file.next().unwrap(), None);
+        file.note_next(None).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), OLDER_FILE, "dropped");
+
+        for bad in [
+            &br#"{"steno.handoverIdentityFingerprint": 7}"#[..],
+            br#"{"steno.handoverIdentityNextFingerprint": null}"#,
+            br#"{"steno.handoverIdentityFingerprint": "cd34", "steno.later": 7}"#,
+            br#"{"steno.handoverIdentityFingerprint": "cd34", "steno.later": ["x"]}"#,
+            br#"["cd34"]"#,
+        ] {
+            let case = String::from_utf8_lossy(bad);
+            std::fs::write(&path, bad).unwrap();
+            assert!(file.recorded().is_err(), "{case}: recorded() is an error");
+            assert!(file.next().is_err(), "{case}: next() is an error");
+        }
+    }
+
     /// The bytes a build from before the next fingerprint wrote, exactly.
     const OLDER_FILE: &[u8] = b"{\n  \"steno.handoverIdentityFingerprint\": \"cd34\"\n}";
 

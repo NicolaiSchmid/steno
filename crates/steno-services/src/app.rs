@@ -1482,7 +1482,7 @@ mod tests {
     use super::*;
     use crate::secrets::KeyringUnavailable;
     use crate::testing::{
-        HANG_GUARD, PATIENCE, built, fake_dependencies, on_own_thread, temp_store,
+        HANG_GUARD, PATIENCE, built, fake_dependencies, on_own_thread, options_under, temp_store,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2946,28 +2946,6 @@ mod tests {
         let app = build(options_under(&dir.path().join("support"))).unwrap();
         assert!(app.updates.is_none());
         assert!(app.services.updater.last_check_at().is_none());
-    }
-
-    /// The options of the product's graph under `support`, without a
-    /// capture backend or a keyring.
-    fn options_under(support: &std::path::Path) -> AppOptions {
-        AppOptions {
-            paths: StenoPaths::new(support),
-            database_path: None,
-            keyring: false,
-            opener: Arc::new(steno_host::fakes::FakeOpener::default()),
-            login_item: None,
-            update_source: None,
-            permissions: None,
-            calendar: None,
-            runtime: tokio::runtime::Handle::current(),
-            version: "0.0.0".to_owned(),
-            make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
-            detection: None,
-            lock_patience: std::time::Duration::ZERO,
-            installed_bundle: false,
-            import_marker: None,
-        }
     }
 
     /// After a refused keychain read (`KEY_DENIED_KEY`) the graph's store

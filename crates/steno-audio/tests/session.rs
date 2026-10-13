@@ -4,6 +4,13 @@
 //! no wall-clock sleeps in the code under test.
 //! Swift: `Tests/StenoAudioTests/CaptureSessionTests.swift`,
 //! `LiveAECPathTests.swift`.
+//!
+//! A wait for real work (a notice, a state, a level, a frame, a thread
+//! that sleeps on the clock, a stop or a finalise) takes [`HANG_GUARD`],
+//! a bound that only turns a hang into a failure. Only a claim that
+//! nothing arrives waits a short window ([`settle`]), which fails only by
+//! an extra event and so stays short; a claim about when something
+//! happens steps the `ManualClock` or counts.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -34,7 +41,7 @@ use steno_audio::capture::{
 };
 use steno_audio::realtime::{FrameRelay, LaneFrameSink};
 use steno_audio::testing::synthetic::SyntheticOptions;
-use steno_audio::testing::{ManualClock, SyntheticCaptureBackend, SyntheticLane};
+use steno_audio::testing::{HANG_GUARD, ManualClock, SyntheticCaptureBackend, SyntheticLane};
 use steno_audio::writer::{
     CafFile, LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting, WavFile,
 };
@@ -47,8 +54,6 @@ use steno_core::{AudioFormat, AudioLane, AudioRetention, EchoCanceller, Recordin
 use uuid::Uuid;
 
 use common::{frequency, level_against_sine};
-
-const RECV: Duration = Duration::from_secs(10);
 
 fn configuration(mode: CaptureMode, directory: &Path, keep_raw: bool) -> CaptureConfiguration {
     let mut configuration = CaptureConfiguration::new(mode, directory);
@@ -95,30 +100,39 @@ fn sidecar_of(result: &steno_audio::capture::CaptureResult, lane: AudioLane) -> 
     WavFile::read_16k_mono(&file_url_path(&result.asset.sidecars_16k[&lane]).unwrap()).unwrap()
 }
 
-/// Collects states until the predicate matches, waiting up to `RECV` for
-/// each.
-fn collect_states(
-    states: &Receiver<CaptureState>,
-    done: impl FnMut(&CaptureState) -> bool,
-) -> Vec<CaptureState> {
-    collect_states_within(states, RECV, done)
+/// The next message on `receiver`, failing the test as hung once nothing
+/// came within [`HANG_GUARD`].
+#[track_caller]
+fn recv<T>(receiver: &Receiver<T>) -> T {
+    match receiver.recv_timeout(HANG_GUARD) {
+        Ok(message) => message,
+        Err(RecvTimeoutError::Timeout) => panic!("hung: nothing came within {HANG_GUARD:?}"),
+        Err(RecvTimeoutError::Disconnected) => panic!("the sender is gone"),
+    }
 }
 
-/// [`collect_states`], waiting up to `patience` for each state.
-fn collect_states_within(
+/// Collects states until the predicate matches, failing the test as hung
+/// once the next state did not come within [`HANG_GUARD`].
+#[track_caller]
+fn collect_states(
     states: &Receiver<CaptureState>,
-    patience: Duration,
     mut done: impl FnMut(&CaptureState) -> bool,
 ) -> Vec<CaptureState> {
     let mut seen = Vec::new();
-    while let Ok(state) = states.recv_timeout(patience) {
-        let finished = done(&state);
-        seen.push(state);
-        if finished {
-            break;
+    loop {
+        match states.recv_timeout(HANG_GUARD) {
+            Ok(state) => {
+                let finished = done(&state);
+                seen.push(state);
+                if finished {
+                    return seen;
+                }
+            }
+            Err(error) => {
+                panic!("hung: no further state within {HANG_GUARD:?} ({error}): {seen:?}")
+            }
         }
     }
-    seen
 }
 
 fn kinds(states: &[CaptureState]) -> Vec<&'static str> {
@@ -154,7 +168,9 @@ fn advance_through_sleeps(clock: &ManualClock, count: usize) {
 }
 
 /// Gives every thread a chance to run before asserting nothing further
-/// happened.
+/// happened: the one short window, for the claims that nothing arrives.
+/// Such a claim fails only by an extra event, never by a slow host, so
+/// lengthening this only slows every run.
 fn settle() {
     std::thread::sleep(Duration::from_millis(100));
 }
@@ -183,7 +199,7 @@ fn idle_starting_recording_stopping_idle_over_the_synthetic_backend() {
 
     // The level stream carries the injected tone level (amplitude 0.5 sines
     // are -9.03 dBFS).
-    let first = levels.recv_timeout(RECV).unwrap();
+    let first = recv(&levels);
     assert!((first.mic.rms - -9.03).abs() < 0.2);
     assert!((first.system.unwrap().rms - -9.03).abs() < 0.2);
 
@@ -249,7 +265,7 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     assert!(playback.is_recording());
@@ -322,9 +338,8 @@ fn a_rebuild_that_panics_ends_in_device_lost_with_the_recording() {
     let states = session.states();
     session.start(Uuid::new_v4()).unwrap();
     // The session sends `Stopping`, then `Failed` once the finalise is
-    // done, in that order; a minute for the finalise, since a loaded Windows
-    // runner once took over `RECV` to unwind the restart's panic and finish.
-    let seen = collect_states_within(&states, Duration::from_secs(60), until_failed);
+    // done, in that order.
+    let seen = collect_states(&states, until_failed);
     assert!(seen.contains(&CaptureState::Stopping), "{seen:?}");
     let result = session.stop().unwrap();
     assert_eq!(
@@ -375,7 +390,7 @@ fn a_silent_system_lane_is_reported_in_statistics_and_levels() {
     .unwrap();
     let levels = session.levels();
     session.start(Uuid::new_v4()).unwrap();
-    let first = levels.recv_timeout(RECV).unwrap();
+    let first = recv(&levels);
     assert!((first.mic.rms - -9.03).abs() < 0.2);
     assert_eq!(first.system, Some(LaneLevel::SILENCE));
     backend.wait_until_finished();
@@ -526,7 +541,7 @@ fn refused_syncs_then_a_device_loss_end_device_lost() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     advance_through_sleeps(&clock, CaptureSession::RESTART_ATTEMPTS - 1);
@@ -611,7 +626,7 @@ fn stop_after_device_loss_returns_the_same_recording_every_time() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     advance_through_sleeps(&clock, CaptureSession::RESTART_ATTEMPTS - 1);
@@ -668,7 +683,7 @@ fn in_person_produces_one_channel_and_the_mixed_sidecar() {
         !result.statistics.system_lane_silent,
         "no system lane, so not 'silent'"
     );
-    let latest = levels.recv_timeout(RECV).unwrap();
+    let latest = recv(&levels);
     assert_eq!(latest.system, None);
 }
 
@@ -936,7 +951,7 @@ fn a_chosen_microphone_that_goes_and_comes_back_keeps_the_recording() {
     let backend = Arc::new(ChosenOrDefault::new(0.5));
     let session = backend.session(directory.path(), Arc::new(SystemClock::new()));
     let notices = session.notices();
-    let next_notice = || notices.recv_timeout(Duration::from_secs(5)).unwrap();
+    let next_notice = || recv(&notices);
     let input = || session.stream().and_then(|stream| stream.input);
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(input(), ChosenOrDefault::chosen());
@@ -1005,11 +1020,11 @@ fn a_chosen_microphone_that_comes_back_but_does_not_open_keeps_the_recording() {
     backend.opens.store(false, Ordering::Relaxed);
     session.device_changed(DeviceChangeReason::DefaultInputChanged);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt: 1, .. }
     ));
     assert!(matches!(session.state(), CaptureState::Recording { .. }));
@@ -1040,12 +1055,12 @@ fn a_chosen_microphone_that_stops_opening_is_retried_before_the_default() {
     backend.opens.store(false, Ordering::Relaxed);
     session.device_changed(DeviceChangeReason::DefaultInputChanged);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     advance_through_sleeps(&clock, CaptureSession::RESTART_ATTEMPTS - 1);
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt, .. } if attempt == CaptureSession::RESTART_ATTEMPTS
     ));
     assert_eq!(
@@ -1079,11 +1094,11 @@ fn a_chosen_microphone_that_does_not_run_is_replaced_after_one_restart() {
     backend.stalls.store(true, Ordering::Relaxed);
     session.device_changed(DeviceChangeReason::DefaultInputChanged);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt: 1, .. }
     ));
     assert_eq!(backend.asked(), ChosenOrDefault::chosen_then_default(1));
@@ -1091,7 +1106,7 @@ fn a_chosen_microphone_that_does_not_run_is_replaced_after_one_restart() {
     backend.default_opens.store(false, Ordering::Relaxed);
     session.device_changed(DeviceChangeReason::DefaultInputChanged);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     advance_through_sleeps(&clock, 1);
@@ -1101,7 +1116,7 @@ fn a_chosen_microphone_that_does_not_run_is_replaced_after_one_restart() {
         clock.advance(*step);
     }
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt, .. } if attempt == CaptureSession::RESTART_ATTEMPTS
     ));
     let mut asked = ChosenOrDefault::chosen_then_default(1);
@@ -1130,14 +1145,14 @@ fn a_chosen_microphone_that_does_not_run_at_a_later_restart_is_replaced_there() 
     backend.opens.store(false, Ordering::Relaxed);
     session.device_changed(DeviceChangeReason::DefaultInputChanged);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     assert!(clock.wait_for_sleepers(1), "the first restart failed");
     backend.stalls.store(true, Ordering::Relaxed);
     clock.advance(CaptureSession::RESTART_BACKOFF[0]);
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt: 2, .. }
     ));
     assert_eq!(backend.asked(), ChosenOrDefault::chosen_then_default(2));
@@ -1668,7 +1683,7 @@ fn a_failed_write_with_no_thread_to_end_it_shows_through_write_failed() {
     assert!(!session.write_failed());
     session.start(Uuid::new_v4()).unwrap();
     backend.wait_until_finished();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + HANG_GUARD;
     while !session.write_failed() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -1971,11 +1986,11 @@ fn ring_overruns_before_a_rate_change_keep_their_rate() {
     open.1.notify_all();
     sink.report_device_change(DeviceChangeReason::SampleRateChanged);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::SampleRateChanged)
     );
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt: 1, .. }
     ));
     assert_eq!(session.stream().unwrap().sample_rate, 16_000.0);
@@ -2202,11 +2217,11 @@ fn a_device_change_keeps_recording_on_the_same_files() {
     assert_eq!(session.stream(), Some(CaptureStream::SYNTHETIC));
 
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed {
             attempt: 1,
             gap_seconds: 0.0
@@ -2364,11 +2379,11 @@ fn a_change_to_24_khz_resumes_the_recording() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed {
             attempt: 1,
             gap_seconds: 0.0
@@ -2421,14 +2436,14 @@ fn a_gap_longer_than_the_ring_is_written_in_full() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     advance_through_sleeps(&clock, 2);
     assert!(clock.wait_for_sleepers(1), "the third backoff");
     clock.advance(Duration::from_millis(2_500));
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed {
             attempt: 4,
             gap_seconds: 3.25
@@ -2505,7 +2520,7 @@ fn two_device_changes_rebuild_twice() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     let seen: Vec<CaptureNotice> = (0..4)
-        .filter_map(|_| notices.recv_timeout(RECV).ok())
+        .map_while(|_| notices.recv_timeout(HANG_GUARD).ok())
         .collect();
     assert_eq!(
         seen,
@@ -2699,7 +2714,7 @@ fn a_writer_failure_during_a_rebuild_ends_writer_failed() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     // One failed restart, 250 ms on the clock, then 25 frames of silence.
@@ -2753,7 +2768,7 @@ fn stop_during_a_rebuild_finalises_once() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     assert!(
@@ -2903,7 +2918,8 @@ impl CaptureBackend for GatedStop {
 /// `stop()` has set `Stopping`, which every later rebuild step checks,
 /// however late its thread runs. A finalise holds `Stopping` throughout,
 /// and a `stop()` that arrives after it ends gets the same answer. After
-/// `RECV` the gate opens regardless and the caller's assertions fail.
+/// [`HANG_GUARD`] the gate opens regardless and the caller's assertions
+/// fail.
 /// Returns what `stop()` returned and the producers alive at that moment.
 fn stop_at_the_gate(
     session: &CaptureSession,
@@ -2917,7 +2933,7 @@ fn stop_at_the_gate(
         });
         let started = Instant::now();
         while !stopper.is_finished()
-            && started.elapsed() < RECV
+            && started.elapsed() < HANG_GUARD
             && (started.elapsed() < Duration::from_millis(200)
                 || session.state() != CaptureState::Stopping)
         {
@@ -2948,11 +2964,11 @@ fn stop_during_a_rebuilds_teardown_waits_for_it() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     at_gate
-        .recv_timeout(RECV)
+        .recv_timeout(HANG_GUARD)
         .expect("the rebuild is tearing the backend down");
 
     let (result, alive) = stop_at_the_gate(&session, &backend, &open);
@@ -2999,7 +3015,7 @@ fn stop_during_a_writer_failures_finalise_returns_its_recording() {
     );
     session.start(Uuid::new_v4()).unwrap();
     at_gate
-        .recv_timeout(RECV)
+        .recv_timeout(HANG_GUARD)
         .expect("the writer failure's finalise is stopping the backend");
     assert_eq!(session.state(), CaptureState::Stopping);
 
@@ -3038,12 +3054,12 @@ fn stop_during_the_device_loss_finalise_returns_its_recording() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     advance_through_sleeps(&clock, 3);
     at_gate
-        .recv_timeout(RECV)
+        .recv_timeout(HANG_GUARD)
         .expect("the device loss's finalise is stopping the backend");
     assert_eq!(session.state(), CaptureState::Stopping);
 
@@ -3064,15 +3080,15 @@ fn stop_during_the_device_loss_finalise_returns_its_recording() {
 }
 
 /// Runs `f` on its own thread and fails the test when it has not returned
-/// within `RECV`, rather than hanging the test binary.
+/// within [`HANG_GUARD`], rather than hanging the test binary.
 fn within_deadline<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
     let (done, finished) = channel();
     std::thread::spawn(move || {
         let _ = done.send(f());
     });
-    match finished.recv_timeout(RECV) {
+    match finished.recv_timeout(HANG_GUARD) {
         Ok(value) => value,
-        Err(RecvTimeoutError::Timeout) => panic!("{what} did not return within {RECV:?}"),
+        Err(RecvTimeoutError::Timeout) => panic!("{what} did not return within {HANG_GUARD:?}"),
         Err(RecvTimeoutError::Disconnected) => panic!("{what} panicked"),
     }
 }
@@ -3130,7 +3146,7 @@ fn a_panicking_finalise_ends_failed_and_the_session_starts_again() {
 
     // The writer failure's finalise panics on its own thread.
     session.start(Uuid::new_v4()).unwrap();
-    let deadline = Instant::now() + RECV;
+    let deadline = Instant::now() + HANG_GUARD;
     while backend.panicked.load(Ordering::SeqCst) == 0 {
         assert!(
             Instant::now() < deadline,
@@ -3262,13 +3278,13 @@ fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
     let result = std::thread::scope(|scope| {
         let stopper = scope.spawn(|| session.stop());
         at_gate
-            .recv_timeout(RECV)
+            .recv_timeout(HANG_GUARD)
             .expect("stop() is tearing the backend down");
         full.store(true, Ordering::SeqCst);
         // Asserted once the gate is open: a panic while `stopper` waits at
         // the gate would leave the scope joining it forever.
         let before = backend.delivered();
-        let deadline = Instant::now() + RECV;
+        let deadline = Instant::now() + HANG_GUARD;
         while backend.delivered() == before && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -3277,7 +3293,7 @@ fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
         let returned = stopper.join().unwrap();
         assert!(
             delivered_on,
-            "the backend delivered nothing during the teardown within {RECV:?}"
+            "the backend delivered nothing during the teardown within {HANG_GUARD:?}"
         );
         returned
     })
@@ -3330,10 +3346,10 @@ fn a_gap_wider_than_the_relay_waits_for_the_writer_and_writes_all_its_silence() 
     // The rebuilt backend delivers its second at machine speed into the
     // rings while the gap waits on the clock; the writer drains the relay
     // in real time, so the gap's 5 ms waits are driven as they appear.
-    let mut seen = vec![notices.recv_timeout(RECV).unwrap()];
-    let deadline = Instant::now() + RECV;
+    let mut seen = vec![recv(&notices)];
+    let deadline = Instant::now() + HANG_GUARD;
     while seen.len() < 2 {
-        assert!(Instant::now() < deadline, "no resume within {RECV:?}");
+        assert!(Instant::now() < deadline, "no resume within {HANG_GUARD:?}");
         if let Ok(notice) = notices.recv_timeout(Duration::from_millis(2)) {
             seen.push(notice);
         } else if clock.pending_sleepers() == 1 {
@@ -3435,7 +3451,7 @@ fn stop_while_the_gap_waits_for_the_relay(restarted_rate: f64) {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     advance_through_sleeps(&clock, 3);
@@ -3516,8 +3532,9 @@ impl RecordingWriting for HeldWrites {
         };
         if let Some(hold) = hold {
             let _ = self.at_hold.send(hold);
-            // Bounded, so a failed test cannot hang its session's drop.
-            let _ = self.release.recv_timeout(RECV);
+            // The test's sender drops before its session, so a failed
+            // test does not hold its session's drop here; bounded besides.
+            let _ = self.release.recv_timeout(HANG_GUARD);
         }
         self.inner.write(frames)
     }
@@ -3566,11 +3583,14 @@ fn a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it() {
         }),
     )
     .unwrap();
+    // Declared after the session, so a failing test drops the sender
+    // first and a held write lets go before the session's drop waits.
+    let release = release;
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
-    assert_eq!(holds.recv_timeout(RECV).unwrap(), Held::FirstWrite);
+    assert_eq!(recv(&holds), Held::FirstWrite);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     advance_through_sleeps(&clock, 3);
@@ -3581,11 +3601,11 @@ fn a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it() {
     release.send(()).unwrap();
     // The writer drains the old audio while the gap's waits are stepped,
     // until it holds the first frame of silence.
-    let deadline = Instant::now() + RECV;
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         assert!(
             Instant::now() < deadline,
-            "no frame of silence within {RECV:?}"
+            "no frame of silence within {HANG_GUARD:?}"
         );
         match holds.recv_timeout(Duration::from_millis(2)) {
             Ok(held) => {
@@ -3658,13 +3678,13 @@ fn a_gap_is_capped_at_ten_seconds() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     assert!(clock.wait_for_sleepers(1));
     clock.advance(Duration::from_secs(30));
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed {
             attempt: 2,
             gap_seconds: 10.0
@@ -3704,7 +3724,7 @@ fn a_change_reported_during_a_rebuild_starts_the_next_one() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     assert!(
@@ -3714,19 +3734,19 @@ fn a_change_reported_during_a_rebuild_starts_the_next_one() {
     session.device_changed(DeviceChangeReason::OutputDeviceGone);
     clock.advance(Duration::from_millis(250));
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed {
             attempt: 2,
             gap_seconds: 0.25
         }
     );
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::OutputDeviceGone),
         "kept, not dropped"
     );
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed {
             attempt: 1,
             gap_seconds: 0.0
@@ -3791,7 +3811,7 @@ fn advance_watch(clock: &ManualClock, by: Duration) {
 /// read it, which the watch thread would not see move.
 fn advance_while_delivering(clock: &ManualClock, delivered: impl Fn() -> usize, by: Duration) {
     assert!(clock.wait_for_sleepers(1), "the watch thread sleeps");
-    let deadline = Instant::now() + RECV;
+    let deadline = Instant::now() + HANG_GUARD;
     for _ in 0..2 {
         let before = delivered();
         while delivered() == before {
@@ -3822,7 +3842,7 @@ fn drive_into_a_stall(clock: &ManualClock, notices: &Receiver<CaptureNotice>) {
     );
     clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DeliveryStalled)
     );
 }
@@ -3834,7 +3854,7 @@ fn drive_into_a_stall(clock: &ManualClock, notices: &Receiver<CaptureNotice>) {
 fn advance_until_stalled(clock: &ManualClock, notices: &Receiver<CaptureNotice>) {
     for _ in 0..30 {
         advance_watch(clock, CaptureSession::STALL_CHECK_INTERVAL);
-        let deadline = Instant::now() + RECV;
+        let deadline = Instant::now() + HANG_GUARD;
         while clock.pending_sleepers() == 0 {
             assert!(Instant::now() < deadline, "the watch thread samples");
             std::thread::sleep(Duration::from_millis(1));
@@ -3874,7 +3894,7 @@ fn a_stall_past_the_timeout_rebuilds_and_fills_the_gap() {
     let gap_seconds =
         gap_seconds(CaptureSession::STALL_TIMEOUT + CaptureSession::STALL_CHECK_INTERVAL);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed {
             attempt: 1,
             gap_seconds
@@ -3943,12 +3963,12 @@ fn a_stream_that_never_delivered_is_stalled_too() {
     assert_no_notice(&notices, "exactly STALL_TIMEOUT is no stall yet");
     clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DeliveryStalled),
         "a stream that never delivered is stalled too"
     );
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt: 1, .. }
     ));
     backend.wait_until_finished();
@@ -3969,7 +3989,7 @@ fn advance_the_backoff(clock: &ManualClock, backend: &SyntheticCaptureBackend, w
     settle();
     assert_eq!(backend.starts(), starts, "no restart before {wait:?}");
     clock.advance(Duration::from_millis(1));
-    let deadline = Instant::now() + RECV;
+    let deadline = Instant::now() + HANG_GUARD;
     while backend.starts() == starts {
         assert!(Instant::now() < deadline, "the restart after {wait:?}");
         std::thread::sleep(Duration::from_millis(1));
@@ -3981,7 +4001,7 @@ fn advance_the_backoff(clock: &ManualClock, backend: &SyntheticCaptureBackend, w
 fn resume_delivery_until_a_frame(backend: &SyntheticCaptureBackend) {
     let before = backend.frames_delivered();
     backend.resume_delivery();
-    let deadline = Instant::now() + RECV;
+    let deadline = Instant::now() + HANG_GUARD;
     while backend.frames_delivered() == before {
         assert!(Instant::now() < deadline, "the restart delivers");
         std::thread::sleep(Duration::from_millis(1));
@@ -4150,7 +4170,7 @@ fn restarts_that_start_but_deliver_nothing_are_retried_until_one_does() {
     resume_delivery_until_a_frame(&backend);
     clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed {
             attempt: CaptureSession::RESTART_ATTEMPTS + 1,
             gap_seconds: gap_seconds(CaptureSession::MAXIMUM_GAP)
@@ -4180,7 +4200,7 @@ fn next_resume(notices: &Receiver<CaptureNotice>) -> (usize, f64) {
         if let CaptureNotice::DeviceResumed {
             attempt,
             gap_seconds,
-        } = notices.recv_timeout(RECV).unwrap()
+        } = recv(notices)
         {
             return (attempt, gap_seconds);
         }
@@ -4340,13 +4360,13 @@ fn a_stall_whose_restarts_fail_goes_on_until_one_starts() {
         clock.advance(step);
     }
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::StillRestarting {
             attempt: CaptureSession::RESTART_ATTEMPTS
         }
     );
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt, .. } if attempt == failures + 1
     ));
     backend.wait_until_finished();
@@ -4505,7 +4525,7 @@ fn a_graph_that_does_not_run_at_the_last_restart_is_retried_until_it_runs() {
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
     );
     for step in backoff_past_the_attempts(failures - CaptureSession::RESTART_BACKOFF.len()) {
@@ -4513,13 +4533,13 @@ fn a_graph_that_does_not_run_at_the_last_restart_is_retried_until_it_runs() {
         clock.advance(step);
     }
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::StillRestarting {
             attempt: CaptureSession::RESTART_ATTEMPTS
         }
     );
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt, .. } if attempt == failures + 1
     ));
     backend.wait_until_finished();
@@ -4546,7 +4566,7 @@ fn a_restart_of_the_audio_service_is_retried_until_it_runs() {
     backend.wait_until_finished();
     session.device_changed(DeviceChangeReason::AudioServiceRestarted);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::AudioServiceRestarted)
     );
     for step in backoff_past_the_attempts(failures - CaptureSession::RESTART_BACKOFF.len()) {
@@ -4554,11 +4574,11 @@ fn a_restart_of_the_audio_service_is_retried_until_it_runs() {
         clock.advance(step);
     }
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::StillRestarting { .. }
     ));
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt, .. } if attempt == failures + 1
     ));
     backend.wait_until_finished();
@@ -4594,11 +4614,11 @@ fn a_rebuild_longer_than_the_stall_timeout_is_not_taken_for_a_stall() {
         clock.advance(step);
     }
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::StillRestarting { .. }
     ));
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt, .. } if attempt == failures + 1
     ));
     backend.wait_until_finished();
@@ -4634,11 +4654,11 @@ fn a_gap_runs_from_the_last_frame_the_watch_thread_saw() {
     assert!(clock.wait_for_sleepers(1));
     session.device_changed(DeviceChangeReason::InputDeviceGone);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::InputDeviceGone)
     );
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed {
             attempt: 1,
             gap_seconds: 0.5
@@ -4669,7 +4689,7 @@ fn a_chosen_microphone_that_stalls_again_soon_is_replaced_by_the_default() {
     backend.inner.wait_until_finished();
     drive_into_a_stall(&clock, &notices);
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt: 1, .. }
     ));
     assert_eq!(input(), ChosenOrDefault::chosen(), "restarted once");
@@ -4678,7 +4698,7 @@ fn a_chosen_microphone_that_stalls_again_soon_is_replaced_by_the_default() {
     // The streak goes on: its second restart, after the first backoff step.
     advance_the_backoff(&clock, &backend.inner, CaptureSession::RESTART_BACKOFF[0]);
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt: 2, .. }
     ));
     assert_eq!(input(), ChosenOrDefault::fallback(), "then the default");
@@ -4696,7 +4716,7 @@ fn a_chosen_microphone_that_stalls_again_soon_is_replaced_by_the_default() {
 
 /// Waits until `backend` answered `count` probes in all.
 fn wait_for_probes(backend: &ChosenOrDefault, count: usize) {
-    let deadline = Instant::now() + RECV;
+    let deadline = Instant::now() + HANG_GUARD;
     while backend.probed.load(Ordering::SeqCst) < count {
         assert!(Instant::now() < deadline, "probe {count}");
         std::thread::sleep(Duration::from_millis(1));
@@ -4788,7 +4808,7 @@ fn an_ask_that_finds_the_chosen_microphone_delivering_returns_to_it() {
     backend.opens.store(true, Ordering::Relaxed);
     advance_while_delivering(&clock, delivered, CaptureSession::CHOSEN_INPUT_RECHECK);
     wait_for_probes(&backend, 1);
-    let deadline = Instant::now() + RECV;
+    let deadline = Instant::now() + HANG_GUARD;
     let changed = loop {
         advance_while_delivering(&clock, delivered, CaptureSession::STALL_CHECK_INTERVAL);
         if let Ok(notice) = notices.recv_timeout(Duration::from_millis(50)) {
@@ -4801,7 +4821,7 @@ fn an_ask_that_finds_the_chosen_microphone_delivering_returns_to_it() {
         CaptureNotice::DeviceChanged(DeviceChangeReason::ChosenInputRecheck)
     );
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt: 1, .. }
     ));
     assert_eq!(input(), ChosenOrDefault::chosen(), "back on the chosen one");
@@ -4859,11 +4879,11 @@ fn a_backend_that_cannot_probe_is_never_asked_on_a_timer() {
     backend.opens.store(true, Ordering::Relaxed);
     session.device_changed(DeviceChangeReason::DefaultOutputChanged);
     assert_eq!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultOutputChanged)
     );
     assert!(matches!(
-        notices.recv_timeout(RECV).unwrap(),
+        recv(&notices),
         CaptureNotice::DeviceResumed { attempt: 1, .. }
     ));
     assert_eq!(
@@ -5033,7 +5053,7 @@ fn playback_is_refused_while_the_session_records_and_across_a_rebuild() {
     assert_eq!(playback.begin(|| {}).unwrap_err(), PlaybackRefused);
     session.device_changed(DeviceChangeReason::DefaultOutputChanged);
     loop {
-        let notice = notices.recv_timeout(RECV).unwrap();
+        let notice = recv(&notices);
         if matches!(notice, CaptureNotice::DeviceResumed { .. }) {
             break;
         }
@@ -5172,7 +5192,7 @@ fn held_past_its_frame(
     backend
         .start(&[AudioLane::Mixed], None, Arc::clone(&sink))
         .unwrap();
-    let deadline = Instant::now() + RECV;
+    let deadline = Instant::now() + HANG_GUARD;
     while backend.frames_delivered() <= HELD_AT {
         assert!(Instant::now() < deadline, "it delivers past the outage");
         std::thread::sleep(Duration::from_millis(1));
@@ -5197,10 +5217,7 @@ fn a_held_change_waits_for_its_release() {
     assert_eq!(reports.try_recv().ok(), None, "held");
     backend.release_outage();
     sink.ring(0).drain_all();
-    assert_eq!(
-        reports.recv_timeout(RECV).unwrap(),
-        DeviceChangeReason::DefaultInputChanged
-    );
+    assert_eq!(recv(&reports), DeviceChangeReason::DefaultInputChanged);
     backend.wait_until_finished();
     backend.stop();
 
@@ -5211,10 +5228,7 @@ fn a_held_change_waits_for_its_release() {
     backend
         .start(&[AudioLane::Mixed], None, Arc::clone(&sink))
         .unwrap();
-    assert_eq!(
-        reports.recv_timeout(RECV).unwrap(),
-        DeviceChangeReason::DefaultInputChanged
-    );
+    assert_eq!(recv(&reports), DeviceChangeReason::DefaultInputChanged);
     backend.wait_until_finished();
     assert_eq!(backend.frames_delivered() - before, HELD_AT, "at its frame");
     backend.stop();
@@ -5231,10 +5245,7 @@ fn one_release_lets_only_one_change_go() {
     );
     backend.release_outage();
     sink.ring(0).drain_all();
-    assert_eq!(
-        reports.recv_timeout(RECV).unwrap(),
-        DeviceChangeReason::DefaultInputChanged
-    );
+    assert_eq!(recv(&reports), DeviceChangeReason::DefaultInputChanged);
     backend.wait_until_finished();
     backend.stop();
 
@@ -5244,7 +5255,7 @@ fn one_release_lets_only_one_change_go() {
     backend
         .start(&[AudioLane::Mixed], None, Arc::clone(&sink))
         .unwrap();
-    let deadline = Instant::now() + RECV;
+    let deadline = Instant::now() + HANG_GUARD;
     while backend.frames_delivered() - before <= HELD_AT {
         assert!(Instant::now() < deadline, "it delivers past the outage");
         std::thread::sleep(Duration::from_millis(1));
@@ -5252,10 +5263,7 @@ fn one_release_lets_only_one_change_go() {
     assert_eq!(reports.try_recv().ok(), None, "the second change is held");
     backend.release_outage();
     sink.ring(0).drain_all();
-    assert_eq!(
-        reports.recv_timeout(RECV).unwrap(),
-        DeviceChangeReason::DefaultInputChanged
-    );
+    assert_eq!(recv(&reports), DeviceChangeReason::DefaultInputChanged);
     backend.stop();
 }
 

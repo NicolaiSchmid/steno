@@ -8,8 +8,9 @@
 //! time entering the assertions.
 
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use super::HANG_GUARD;
 use crate::clock::{Cancel, Clock};
 
 /// A clock tests move by hand; see the module doc.
@@ -55,17 +56,30 @@ impl ManualClock {
         self.lock().sleepers.len()
     }
 
-    /// Polls until exactly `count` sleeps are in progress, for up to about
-    /// ten seconds of wall time (a loaded CI host can take seconds to
-    /// schedule the thread that arms a timer); `true` when they are.
+    /// Polls until exactly `count` sleeps are in progress and returns
+    /// `true`, so a caller can `assert!` it with a message that names the
+    /// sleeper. A loaded CI host can take seconds to schedule the thread
+    /// that arms a timer, so the poll lasts up to [`HANG_GUARD`] of wall
+    /// time.
+    ///
+    /// # Panics
+    ///
+    /// When the count is still not `count` after [`HANG_GUARD`]: the code
+    /// under test hung, and the message says how many sleepers it found.
+    #[track_caller]
     pub fn wait_for_sleepers(&self, count: usize) -> bool {
-        for _ in 0..10_000 {
-            if self.pending_sleepers() == count {
+        let deadline = Instant::now() + HANG_GUARD;
+        loop {
+            let found = self.pending_sleepers();
+            if found == count {
                 return true;
             }
+            assert!(
+                Instant::now() < deadline,
+                "hung: {count} sleepers expected on the clock, found {found} after {HANG_GUARD:?}"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
-        self.pending_sleepers() == count
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {

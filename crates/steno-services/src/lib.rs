@@ -101,6 +101,8 @@ pub mod detection;
 pub mod export;
 pub mod handover;
 #[cfg(test)]
+mod keychain_reset_tests;
+#[cfg(test)]
 mod kill_tests;
 pub mod llm;
 pub mod logs;

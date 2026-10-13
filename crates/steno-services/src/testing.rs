@@ -1,10 +1,11 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
-//! frames for a recording writer, a live check that counts every master
-//! old, a paired phone, a recording it delivered, a store that keeps the
-//! last phone, a fingerprint record that refuses writes, the waits that
-//! fail a test instead of hanging it ([`PATIENCE`] for the tests' own
-//! fakes and gates, [`HANG_GUARD`] for real capture work), and
+//! the options of the product's graph under a temp directory, frames for a
+//! recording writer, a live check that counts every master old, a paired
+//! phone, a recording it delivered, a store that keeps the last phone, a
+//! fingerprint record that refuses writes, the waits that fail a test
+//! instead of hanging it ([`PATIENCE`] for the tests' own fakes and gates,
+//! [`HANG_GUARD`] for real capture work), and
 //! [`warnings`], what a call logs at `warn` and above.
 //!
 //! A test that writes models gives the app an explicit models directory in
@@ -49,8 +50,10 @@ pub const PATIENCE: Duration = Duration::from_secs(5);
 /// takes this bound unless that patience is what it checks. An outage
 /// that can end a wait's condition (a device change whose rebuild
 /// silences the meter) is held by the test until that wait is over
-/// ([`HeldOutages`]): once the outage began, no bound would help.
-pub const HANG_GUARD: Duration = Duration::from_secs(120);
+/// ([`HeldOutages`]): once the outage began, no bound would help. The
+/// value is steno-audio's, which its capture tests and
+/// `ManualClock::wait_for_sleepers` wait too.
+pub const HANG_GUARD: Duration = steno_audio::testing::HANG_GUARD;
 
 /// The synthetic backends a test's capture built with their outages held
 /// (`SyntheticOptions::hold_outages`), so that the test lets each outage
@@ -282,6 +285,29 @@ impl Drop for SyntheticRecorder {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(pipeline.wait_until_idle());
         });
+    }
+}
+
+/// The options of the product's graph under `support`, without a
+/// capture backend, a keyring, an updater, permissions, a calendar,
+/// detection or the Swift import's marker.
+pub fn options_under(support: &std::path::Path) -> crate::AppOptions {
+    crate::AppOptions {
+        paths: steno_core::StenoPaths::new(support),
+        database_path: None,
+        keyring: false,
+        opener: Arc::new(steno_host::fakes::FakeOpener::default()),
+        login_item: None,
+        update_source: None,
+        permissions: None,
+        calendar: None,
+        runtime: tokio::runtime::Handle::current(),
+        version: "0.0.0".to_owned(),
+        make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+        detection: None,
+        lock_patience: Duration::ZERO,
+        installed_bundle: false,
+        import_marker: None,
     }
 }
 
