@@ -816,6 +816,38 @@ fn the_import_step_comes_first_and_moves_on_once_the_identity_came_over() {
     );
 }
 
+/// After the handoff (stable plan S3): the import copied the Swift app's
+/// completed flag, but macOS keeps the grants per bundle identifier, so
+/// the new app has none. Onboarding opens, and once the import step is
+/// done it lands on its permissions page, not on page 2.
+#[test]
+fn after_the_handoff_a_missing_grant_lands_on_the_permissions_page() {
+    let harness = Harness::builder()
+        .with_swift_import(2)
+        .seed(|_, fakes| {
+            fakes
+                .preferences
+                .set_flag(OnboardingViewModel::COMPLETED_KEY, true);
+            fakes
+                .permissions
+                .set_state(PermissionKind::Microphone, PermissionState::Unknown);
+            fakes
+                .permissions
+                .set_state(PermissionKind::SystemAudio, PermissionState::Unknown);
+        })
+        .build();
+    assert!(harness.host.should_open_onboarding());
+    harness.host.onboarding_import().unwrap();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["swiftImport"]["state"], "done");
+    assert_eq!(onboarding["page"], "permissions");
+    assert_eq!(onboarding["permissionsComplete"], false);
+    assert!(
+        harness.host.should_open_onboarding(),
+        "and again at the next launch until each is granted"
+    );
+}
+
 #[test]
 fn a_denied_export_stays_on_the_step_with_try_again_until_the_user_goes_on() {
     let harness = Harness::builder().with_swift_import(2).build();

@@ -5,12 +5,12 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use steno_bridge::{PermissionState, Platform, SettingsSection};
+use steno_bridge::{Platform, SettingsSection};
 use steno_core::{Settings, Store};
 
 use super::audio::recording_permissions;
 use super::llm::LlmPreset;
-use crate::services::{Services, UpdateOutcome};
+use crate::services::{Services, UpdateOutcome, permission_is_missing};
 use crate::setup::llm_configured;
 use crate::speech::{ModelAsset, SpeechEngineId};
 
@@ -109,7 +109,7 @@ pub fn refresh(
     version: &str,
 ) -> BTreeMap<SettingsSection, String> {
     let settings = store.settings().ok();
-    let granted = |kind| services.permissions.state(kind) == PermissionState::Granted;
+    let granted = |kind| !permission_is_missing(platform, services.permissions.state(kind));
     let engine: SpeechEngineId = settings
         .as_ref()
         .and_then(|settings| settings.speech_engine_id.parse().ok())
