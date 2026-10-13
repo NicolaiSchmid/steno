@@ -3264,8 +3264,9 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   release, and which follow it, is the blocking list of
   `.plans/2026-10-07-stable-promotion.md` (D3), which replaces the rule that all must
   be ticked before the cutover opens. The lines: the menu bar's queue and recent
-  meetings, the macOS menu bar's Record and Find Meetings items. Several name WP5 or WP8, which merged without
-  them. The other unticked "Speech" line, `SpeechSettings`, covers Rust-only settings
+  meetings, the macOS menu bar's Record and Find Meetings items. Several name WP5
+  or WP8, which merged without them. The other unticked "Speech" line,
+  `SpeechSettings`, covers Rust-only settings
   with no Swift behaviour to match: it does not gate the cutover and has its own
   **Unowned.** item. Where:
   the unticked lines under "Beyond the bridge" and "Speech" and the open items under
