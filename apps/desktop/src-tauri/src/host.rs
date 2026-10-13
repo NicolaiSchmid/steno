@@ -26,26 +26,37 @@
 //! Every call into the host can wait: on the store, for up to its 5 s busy
 //! timeout while another process holds the write lock, on a native prompt,
 //! on the recorder's stop. So none runs on the main thread, which `main`
-//! marks (`steno_host::mark_ui_thread`), nor on a Tauri command worker:
-//! each goes through [`call_blocking`], over a [`ShellHost`], and
-//! [`Host::call`], [`Host::page_ready`], [`Host::publish_request`] and
-//! [`Host::onboarding_window_closed`] fail a debug build on the marked
-//! thread (`steno_host::assert_off_ui_thread`). The launch is the
-//! exemption: it runs during setup, before the event loop (`steno_host`'s
-//! `Threads` section).
+//! marks (`steno_host::mark_ui_thread`), nor on a Tauri command worker,
+//! and each goes through a [`ShellHost`]. A command awaits its call on
+//! Tauri's blocking pool ([`call_blocking`]), beside the page's other
+//! commands. A caller with no one to answer (the tray's actions, a window
+//! request, the onboarding window's close) queues it on the shell's one
+//! ordered lane ([`call_in_order`], [`Lane`]), so those run in the order
+//! they were made. [`Host::call`], [`Host::page_ready`],
+//! [`Host::publish_request`] and [`Host::onboarding_window_closed`] fail a
+//! debug build on the marked thread (`steno_host::assert_off_ui_thread`).
+//! The launch is the exemption: it runs during setup, before the event
+//! loop (`steno_host`'s `Threads` section).
 #![cfg_attr(
     feature = "fixture-host",
     allow(clippy::unused_self, clippy::unnecessary_wraps)
 )]
+
+use std::sync::mpsc;
 
 use serde_json::Value;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::bridge::BridgeError;
 
+/// A job for the [`Lane`].
+pub type Job = Box<dyn FnOnce() + Send>;
+
 /// The host as the shell reaches it off the main thread and the command
-/// workers: the app, through its managed [`Host`], or a test's fake. Every
-/// method blocks, so each runs inside [`call_blocking`].
+/// workers: the app, through its managed [`Host`], or a test's fake. The
+/// calls into the host, and the login item's switch and read, can wait, so
+/// each runs inside [`call_blocking`] or [`call_in_order`];
+/// `note_login_item` and `queue` only post and return.
 pub trait ShellHost: Clone + Send + Sync + 'static {
     /// The window a call answers for.
     type Window: Clone + Send + Sync + 'static;
@@ -62,12 +73,31 @@ pub trait ShellHost: Clone + Send + Sync + 'static {
         params: Value,
     ) -> Result<Value, BridgeError>;
 
+    /// `window.open` names a meeting or a section for a window that
+    /// listens ([`Host::publish_request`]).
+    fn publish_request(
+        &self,
+        window: &Self::Window,
+        field: &str,
+        value: &str,
+    ) -> Result<(), BridgeError>;
+
+    /// The onboarding window is gone ([`Host::onboarding_window_closed`]).
+    fn onboarding_window_closed(&self);
+
+    /// Whether the system's login item is on (`autostart::status`).
+    fn login_item_on(&self) -> bool;
+
     /// Switches the login item in the system (`autostart::set_enabled`).
     fn switch_login_item(&self, value: bool) -> Result<(), BridgeError>;
 
     /// The tray's check mark follows the system's login item, on the main
     /// thread (`tray::note_login_item`): posted there, never waited for.
     fn note_login_item(&self);
+
+    /// Queues `job` on the shell's ordered lane ([`Lane::queue`]), as
+    /// `what` in the log; returns at once.
+    fn queue(&self, what: &'static str, job: Job);
 }
 
 impl ShellHost for AppHandle {
@@ -93,6 +123,23 @@ impl ShellHost for AppHandle {
         host(self).call(window, method, params)
     }
 
+    fn publish_request(
+        &self,
+        window: &WebviewWindow,
+        field: &str,
+        value: &str,
+    ) -> Result<(), BridgeError> {
+        host(self).publish_request(window, field, value)
+    }
+
+    fn onboarding_window_closed(&self) {
+        host(self).onboarding_window_closed();
+    }
+
+    fn login_item_on(&self) -> bool {
+        crate::autostart::status(self).is_on()
+    }
+
     fn switch_login_item(&self, value: bool) -> Result<(), BridgeError> {
         crate::autostart::set_enabled(self, value)
     }
@@ -102,6 +149,10 @@ impl ShellHost for AppHandle {
         if let Err(error) = self.run_on_main_thread(move || crate::tray::note_login_item(&app)) {
             tracing::debug!(%error, "the tray's check mark not moved: the run loop has ended");
         }
+    }
+
+    fn queue(&self, what: &'static str, job: Job) {
+        self.state::<Lane>().queue(what, job);
     }
 }
 
@@ -127,21 +178,69 @@ where
     }
 }
 
-/// Runs `body` with `host` on Tauri's blocking pool and returns at once,
-/// for a caller on the main thread that has no one to answer: a failure is
-/// logged as `what` from the thread the call ran on.
-pub fn call_in_background<H>(
+/// Queues `body` with `host` on the shell's ordered lane ([`Lane`]) and
+/// returns at once, for a caller that has no one to answer: the tray's
+/// actions, a window request (a deep link's, or `window.open`'s) and the
+/// onboarding window's close. They reach the host one at a time, in the
+/// order they were queued, as they did when the main thread ran them: a
+/// Record clicked while a Stop's save waits on the store runs once that
+/// stop has ended, and starts a recording; a second Launch at login undoes
+/// the first; the later of two deep links is the one shown. The cost: a
+/// deep link's request waits behind a slow stop too. A failure is logged
+/// as `what`.
+pub fn call_in_order<H: ShellHost>(
     host: H,
     what: &'static str,
     body: impl FnOnce(&H) -> Result<(), BridgeError> + Send + 'static,
-) where
-    H: Send + 'static,
-{
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = call_blocking(host, body).await {
-            stderr_line!("[steno-desktop] {what}: {error}");
+) {
+    let lane = host.clone();
+    lane.queue(
+        what,
+        Box::new(move || {
+            if let Err(error) = body(&host) {
+                stderr_line!("[steno-desktop] {what}: {error}");
+            }
+        }),
+    );
+}
+
+/// One thread of the shell's own that runs the jobs queued on it one at a
+/// time, in the order they were queued ([`call_in_order`]). Tauri's pools
+/// cannot keep that order: tasks and blocking calls do not start in the
+/// order they were spawned, and a lock over them is not first come, first
+/// served. A job that panics is logged at error, as its `what` alone (the
+/// payload can name a path), and the next job runs. The thread ends when
+/// the lane is dropped; the exit never joins it, and a tray Quit waits only
+/// for the jobs queued before it, for a bounded time
+/// (`actions::exit_after_queued`). Managed state, and a test's fake owns
+/// one.
+pub struct Lane {
+    jobs: mpsc::Sender<(&'static str, Job)>,
+}
+
+impl Lane {
+    /// Starts the lane's thread.
+    pub fn start() -> Self {
+        let (jobs, queued) = mpsc::channel::<(&'static str, Job)>();
+        std::thread::Builder::new()
+            .name("steno-shell-lane".to_owned())
+            .spawn(move || {
+                for (what, job) in queued {
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                        tracing::error!(what, "a call the shell queued panicked");
+                    }
+                }
+            })
+            .expect("the shell's ordered lane");
+        Lane { jobs }
+    }
+
+    /// Runs `job` after every job queued before it; returns at once.
+    pub fn queue(&self, what: &'static str, job: Job) {
+        if self.jobs.send((what, job)).is_err() {
+            tracing::debug!(what, "not run: the shell's lane has ended");
         }
-    });
+    }
 }
 
 #[cfg(not(feature = "fixture-host"))]
@@ -154,7 +253,7 @@ pub(crate) mod real {
     use serde_json::Value;
     use steno_bridge::{BridgeEvent, BridgeMethod, BridgeWindow, Dispatcher, EventSink};
     use steno_host::Host;
-    use tauri::{AppHandle, Manager, WebviewWindow};
+    use tauri::{AppHandle, Manager};
 
     use crate::bridge::BridgeError;
     use crate::windows::RequestField;
@@ -410,16 +509,12 @@ pub(crate) mod real {
             self.host.page_ready()
         }
 
-        pub fn call(
-            &self,
-            window: &WebviewWindow,
-            method: &str,
-            params: Value,
-        ) -> Result<Value, BridgeError> {
+        /// A command from the window of `label`.
+        pub fn call(&self, label: &str, method: &str, params: Value) -> Result<Value, BridgeError> {
             let parsed: BridgeMethod = method.parse().map_err(|_| {
                 BridgeError::unknown_method(format!("The host does not answer {method}."))
             })?;
-            let dispatcher = Dispatcher::new(self.host.for_window(bridge_window(window.label())));
+            let dispatcher = Dispatcher::new(self.host.for_window(bridge_window(label)));
             if crate::dialogs::FolderChooser::for_method(method).is_some() {
                 let folder = params
                     .get("path")
@@ -704,6 +799,30 @@ impl ShellHostError {
     }
 }
 
+/// The window a [`Host`] call answers for, as the host uses it: the real
+/// host answers on its label's view model, the fixtures emit their
+/// snapshots to it. A [`WebviewWindow`], or a test's stand-in.
+pub trait HostWindow {
+    #[cfg(not(feature = "fixture-host"))]
+    fn label(&self) -> &str;
+
+    /// Hands the window a snapshot (`bridge::emit`).
+    #[cfg(feature = "fixture-host")]
+    fn emit(&self, topic: &str, payload: Value) -> Result<(), BridgeError>;
+}
+
+impl HostWindow for WebviewWindow {
+    #[cfg(not(feature = "fixture-host"))]
+    fn label(&self) -> &str {
+        WebviewWindow::label(self)
+    }
+
+    #[cfg(feature = "fixture-host")]
+    fn emit(&self, topic: &str, payload: Value) -> Result<(), BridgeError> {
+        crate::bridge::emit(self, topic, payload)
+    }
+}
+
 /// What the shell manages: the real host, or the fixture answerer.
 pub struct Host {
     #[cfg(not(feature = "fixture-host"))]
@@ -889,7 +1008,7 @@ impl Host {
     }
 
     /// The page has mounted: publish every topic it may show.
-    pub fn page_ready(&self, window: &WebviewWindow) -> Result<(), BridgeError> {
+    pub fn page_ready(&self, window: &impl HostWindow) -> Result<(), BridgeError> {
         steno_host::assert_off_ui_thread("page.ready");
         #[cfg(not(feature = "fixture-host"))]
         {
@@ -899,7 +1018,7 @@ impl Host {
         #[cfg(feature = "fixture-host")]
         {
             for (topic, snapshot) in crate::fixtures::snapshots() {
-                crate::bridge::emit(window, topic, snapshot)?;
+                window.emit(topic, snapshot)?;
             }
             Ok(())
         }
@@ -908,14 +1027,14 @@ impl Host {
     /// A command that is not one of the shell's own.
     pub fn call(
         &self,
-        window: &WebviewWindow,
+        window: &impl HostWindow,
         method: &str,
         params: Value,
     ) -> Result<Value, BridgeError> {
         steno_host::assert_off_ui_thread(method);
         #[cfg(not(feature = "fixture-host"))]
         {
-            self.inner.call(window, method, params)
+            self.inner.call(window.label(), method, params)
         }
         #[cfg(feature = "fixture-host")]
         {
@@ -936,7 +1055,7 @@ impl Host {
     /// `SettingsBridge.swift`, `MainWindowBridge.consumeMeetingRequest`.
     pub fn publish_request(
         &self,
-        window: &WebviewWindow,
+        window: &impl HostWindow,
         field: &str,
         value: &str,
     ) -> Result<(), BridgeError> {
@@ -949,7 +1068,7 @@ impl Host {
         #[cfg(feature = "fixture-host")]
         {
             for app in crate::fixtures::app_snapshots_requesting(field, value) {
-                crate::bridge::emit(window, "app", app)?;
+                window.emit("app", app)?;
             }
             Ok(())
         }
@@ -992,6 +1111,105 @@ mod refusal_tests {
     }
 }
 
+#[cfg(test)]
+mod lane_tests {
+    use std::time::Duration;
+
+    use super::Lane;
+
+    /// The lane runs its jobs in the order they were queued, and a job
+    /// that panics is logged and leaves the lane running the next one.
+    #[test]
+    fn the_lane_runs_its_jobs_in_order_and_past_a_panic() {
+        let lane = Lane::start();
+        let (ran, order) = std::sync::mpsc::channel();
+        for job in 0..20 {
+            let ran = ran.clone();
+            lane.queue("a job", Box::new(move || ran.send(job).unwrap()));
+        }
+        lane.queue(
+            "a job that panics",
+            Box::new(|| panic!("the host panicked")),
+        );
+        lane.queue("the next job", Box::new(move || ran.send(20).unwrap()));
+        let seen: Vec<_> = (0..21)
+            .map(|_| order.recv_timeout(Duration::from_secs(5)).unwrap())
+            .collect();
+        assert_eq!(seen, (0..21).collect::<Vec<_>>());
+    }
+}
+
+/// Each of the shell's host entry points fails a debug build on the
+/// marked UI thread, before it reaches the host: a command, a page load, a
+/// window request and the onboarding window's close.
+#[cfg(all(test, feature = "fixture-host", debug_assertions))]
+mod ui_thread_tests {
+    use serde_json::Value;
+
+    use super::{Host, HostWindow};
+    use crate::bridge::BridgeError;
+
+    /// A window the fixtures' snapshots reach and go no further.
+    struct StandInWindow;
+
+    impl HostWindow for StandInWindow {
+        fn emit(&self, _topic: &str, _payload: Value) -> Result<(), BridgeError> {
+            Ok(())
+        }
+    }
+
+    /// Runs `call` on a thread of its own, marked as the UI thread, and
+    /// requires it to fail with the assert's message for `what`.
+    fn asserts_on_the_ui_thread(what: &'static str, call: impl FnOnce(&Host) + Send + 'static) {
+        std::thread::spawn(move || {
+            steno_host::mark_ui_thread();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                call(&Host::fixtures());
+            }));
+            let payload = outcome.expect_err("the entry point asserted");
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .unwrap_or_default();
+            assert!(
+                message.starts_with(&format!("{what} ran on the UI thread")),
+                "{message}"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn a_command_on_the_ui_thread_asserts() {
+        asserts_on_the_ui_thread("recording.toggle", |host| {
+            let _ = host.call(&StandInWindow, "recording.toggle", Value::Null);
+        });
+    }
+
+    #[test]
+    fn a_page_load_on_the_ui_thread_asserts() {
+        asserts_on_the_ui_thread("page.ready", |host| {
+            let _ = host.page_ready(&StandInWindow);
+        });
+    }
+
+    #[test]
+    fn a_window_request_on_the_ui_thread_asserts() {
+        asserts_on_the_ui_thread("a window request", |host| {
+            let _ = host.publish_request(&StandInWindow, "requestedMeetingID", "m-1");
+        });
+    }
+
+    #[test]
+    fn the_onboarding_close_on_the_ui_thread_asserts() {
+        asserts_on_the_ui_thread(
+            "the onboarding window's close",
+            Host::onboarding_window_closed,
+        );
+    }
+}
+
 /// A [`ShellHost`] for the tests, whose calls of one method wait at a gate.
 #[cfg(test)]
 pub mod gated {
@@ -1000,19 +1218,22 @@ pub mod gated {
 
     use serde_json::Value;
 
-    use super::ShellHost;
+    use super::{Job, Lane, ShellHost};
     use crate::bridge::BridgeError;
 
     /// A host whose calls of `held` wait at a gate until it opens; every
-    /// other call answers at once. It notes each answered call, each
-    /// switch of the login item and each check mark it was asked to move.
-    /// `before_hold` runs inside a held call before it waits, as the host
-    /// publishes `Stopping` before the stop's save.
+    /// other call answers at once. It notes each answered call (a window
+    /// request as `request <field>=<value>`, the onboarding close as
+    /// `onboarding.closed`), each switch of the login item, which it then
+    /// reads back, and each check mark it was asked to move. `before_hold`
+    /// runs inside a held call before it waits, as the host publishes
+    /// `Stopping` before the stop's save. It owns a [`Lane`] of its own.
     #[derive(Clone)]
     pub struct GatedHost {
         held: &'static str,
         before_hold: Option<Arc<dyn Fn() + Send + Sync>>,
         state: Arc<(Mutex<State>, Condvar)>,
+        lane: Arc<Lane>,
     }
 
     #[derive(Default)]
@@ -1021,6 +1242,7 @@ pub mod gated {
         waiting: usize,
         answered: Vec<String>,
         switched: Vec<bool>,
+        login_item_on: bool,
         notes: usize,
     }
 
@@ -1040,6 +1262,7 @@ pub mod gated {
                 held,
                 before_hold: None,
                 state: Arc::default(),
+                lane: Arc::new(Lane::start()),
             }
         }
 
@@ -1080,6 +1303,11 @@ pub mod gated {
         /// Whether `method` answered within `patience`.
         pub fn wait_answered(&self, method: &str, patience: Duration) -> bool {
             self.wait_for(patience, |state| state.answered.iter().any(|m| m == method))
+        }
+
+        /// Whether `count` calls answered within `patience`.
+        pub fn wait_answers(&self, count: usize, patience: Duration) -> bool {
+            self.wait_for(patience, |state| state.answered.len() >= count)
         }
 
         /// Whether the check mark was asked to move `times` times within
@@ -1131,14 +1359,38 @@ pub mod gated {
             Ok(Value::String(method.to_owned()))
         }
 
+        fn publish_request(
+            &self,
+            window: &&'static str,
+            field: &str,
+            value: &str,
+        ) -> Result<(), BridgeError> {
+            self.call(window, &format!("request {field}={value}"), Value::Null)
+                .map(drop)
+        }
+
+        fn onboarding_window_closed(&self) {
+            let _ = self.call(&"onboarding", "onboarding.closed", Value::Null);
+        }
+
+        fn login_item_on(&self) -> bool {
+            self.state().login_item_on
+        }
+
         fn switch_login_item(&self, value: bool) -> Result<(), BridgeError> {
-            self.state().switched.push(value);
+            let mut state = self.state();
+            state.switched.push(value);
+            state.login_item_on = value;
             Ok(())
         }
 
         fn note_login_item(&self) {
             self.state().notes += 1;
             self.state.1.notify_all();
+        }
+
+        fn queue(&self, what: &'static str, job: Job) {
+            self.lane.queue(what, job);
         }
     }
 }

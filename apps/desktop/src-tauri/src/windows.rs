@@ -34,7 +34,8 @@ use tauri::{
 
 use crate::{
     bridge::{BridgeError, failed},
-    host, navigation,
+    host::{self, ShellHost},
+    navigation,
 };
 
 /// One window as the Swift app sizes it, in logical points. Its label is
@@ -170,7 +171,13 @@ pub fn open_requested(app: &AppHandle, params: &WindowParams) -> Result<(), Brid
         BridgeWindow::Main => {
             let window = open(app, BridgeWindow::Main, None, None).map_err(failed)?;
             if let Some(meeting_id) = params.meeting_id {
-                request(app, &pages, &window, Request::meeting(&meeting_id));
+                request(
+                    app,
+                    &pages,
+                    window.label(),
+                    window.clone(),
+                    Request::meeting(&meeting_id),
+                );
             }
         }
         BridgeWindow::Settings => {
@@ -179,7 +186,13 @@ pub fn open_requested(app: &AppHandle, params: &WindowParams) -> Result<(), Brid
             let window =
                 open(app, BridgeWindow::Settings, query.as_deref(), None).map_err(failed)?;
             if let (true, Some(section)) = (existed, section) {
-                request(app, &pages, &window, Request::section(section));
+                request(
+                    app,
+                    &pages,
+                    window.label(),
+                    window.clone(),
+                    Request::section(section),
+                );
             }
         }
     }
@@ -277,16 +290,23 @@ impl Pages {
     }
 }
 
-/// Publishes `request` to `window` when its page listens, else owes it
-/// to the page for its `page.ready`. The publish runs on Tauri's blocking
-/// pool and is not waited for (`host::call_in_background`): it selects
-/// the meeting, which reads the store, and the caller is a command worker
-/// or, for a deep link, the main thread.
-pub fn request(app: &AppHandle, pages: &Pages, window: &WebviewWindow, request: Request) {
-    if let Some(now) = pages.publish_or_owe(window.label(), request) {
-        let window = window.clone();
-        host::call_in_background(app.clone(), "a window request", move |app| {
-            host::host(app).publish_request(&window, now.field.as_str(), &now.value)
+/// Publishes `request` to `window`, of `label`, when its page listens,
+/// else owes it to the page for its `page.ready`. The publish is queued on
+/// the shell's ordered lane and not waited for (`host::call_in_order`): it
+/// selects the meeting, which reads the store, and the caller is a command
+/// worker or, for a deep link, the main thread. On the lane two requests
+/// go out in the order they came, so the later deep link is the one
+/// shown; a request waits there behind a tray Stop whose save waits.
+pub fn request<H: ShellHost>(
+    host: &H,
+    pages: &Pages,
+    label: &str,
+    window: H::Window,
+    request: Request,
+) {
+    if let Some(now) = pages.publish_or_owe(label, request) {
+        host::call_in_order(host.clone(), "a window request", move |host| {
+            host.publish_request(&window, now.field.as_str(), &now.value)
         });
     }
 }
@@ -577,5 +597,87 @@ mod tests {
                 value: "00000000-0000-0000-0000-00000000000C".into(),
             }
         );
+    }
+
+    /// A window request for a page that listens: the publish is queued on
+    /// the lane and the caller (a command worker, or the main thread for a
+    /// deep link) returns while it is held, as a meeting's selection that
+    /// waits on the store would be. A request for a page that does not
+    /// listen yet is owed instead, and reaches no host.
+    #[test]
+    fn a_window_request_is_published_off_the_callers_thread() {
+        use std::time::Duration;
+
+        use crate::host::gated::GatedHost;
+
+        let meeting = Request {
+            field: RequestField::MeetingId,
+            value: "m-1".to_owned(),
+        };
+        let held = "request requestedMeetingID=m-1";
+        assert_eq!(
+            format!("request {}={}", meeting.field.as_str(), meeting.value),
+            held
+        );
+        let host = GatedHost::holding(held);
+        let _opens = host.opens_on_drop();
+        let pages = std::sync::Arc::new(Pages::default());
+        request(&host, &pages, "settings", "settings", meeting.clone());
+        assert_eq!(
+            pages.ready("settings"),
+            Some(meeting.clone()),
+            "owed to the page"
+        );
+        assert!(pages.ready("main").is_none());
+        let (returned, done) = std::sync::mpsc::channel();
+        let (clicked, listening) = (host.clone(), pages.clone());
+        std::thread::spawn(move || {
+            request(&clicked, &listening, "main", "main", meeting);
+            let _ = returned.send(());
+        });
+        assert!(
+            done.recv_timeout(Duration::from_secs(1)).is_ok(),
+            "the caller waited for the publish"
+        );
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the publish reached the host"
+        );
+        host.open();
+        assert!(host.wait_answered(held, Duration::from_secs(5)));
+        assert_eq!(host.answered(), [held]);
+    }
+
+    /// Two quick window requests (two deep links) reach the host in the
+    /// order they came, so the later one is the meeting shown. Each is a
+    /// job on the lane; spawned one per request, as on Tauri's pools,
+    /// some pairs land reversed.
+    #[test]
+    fn two_window_requests_reach_the_host_in_the_order_they_came() {
+        use std::time::Duration;
+
+        use crate::host::gated::GatedHost;
+
+        let pages = Pages::default();
+        pages.ready("main");
+        let meeting = |value: &str| Request {
+            field: RequestField::MeetingId,
+            value: value.to_owned(),
+        };
+        let rounds = 300;
+        let reordered = (0..rounds)
+            .filter(|_| {
+                let host = GatedHost::holding("nothing is held");
+                request(&host, &pages, "main", "main", meeting("m-1"));
+                request(&host, &pages, "main", "main", meeting("m-2"));
+                assert!(host.wait_answers(2, Duration::from_secs(5)));
+                host.answered()
+                    != [
+                        "request requestedMeetingID=m-1",
+                        "request requestedMeetingID=m-2",
+                    ]
+            })
+            .count();
+        assert_eq!(reordered, 0, "{reordered} of {rounds} pairs were reordered");
     }
 }

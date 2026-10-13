@@ -52,17 +52,23 @@
 //! # Threads
 //!
 //! The crate doc says which thread the shell calls from: its blocking pool,
-//! for every command, page load, deep link, tray action and the onboarding
-//! window's close, and never the thread it marks with
-//! [`mark_ui_thread`](crate::mark_ui_thread). The services' event follower
-//! and their two-second poll ([`Host::apply_meeting_event`],
+//! for every command and page load, its ordered lane for each deep link,
+//! tray action and the onboarding window's close, and never the thread it
+//! marks with [`mark_ui_thread`](crate::mark_ui_thread). The services'
+//! event follower and their two-second poll ([`Host::apply_meeting_event`],
 //! [`Host::store_changed`], [`Host::refresh_pairing`]) call from their
 //! runtime's blocking pool, so a reload that waits never holds a runtime
-//! worker. One exemption: the launch (`steno_services::App::launch`, with
+//! worker. The update schedule's `Host::updates_changed` and the gated
+//! handover's `Host::phones_changed` still call from runtime workers;
+//! both only read, and P40's readers end their wait. One exemption: the
+//! launch (`steno_services::App::launch`, with
 //! [`Host::should_open_onboarding`] before it) runs on the shell's main
-//! thread during setup, before the event loop runs, and reloads once
-//! ([`Host::store_changed`]); it is not a shell entry point, so the mark
-//! does not assert there.
+//! thread during setup, once the main window is built and before the
+//! event loop runs. It reloads once ([`Host::store_changed`]), and there
+//! it also writes: it resumes the meetings and exports left unfinished
+//! (unless a keyring answer or the Swift import is pending) and runs the
+//! retention sweep (unless the import is pending). It is not a shell
+//! entry point, so the mark does not assert there.
 //!
 //! Locks are taken in one order: the publishing mutex, then the view
 //! models, then the sink slot. The dialogs (`confirm`, `choose_folder`) are called with no lock

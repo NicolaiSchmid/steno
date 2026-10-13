@@ -6,7 +6,7 @@
 //! So the shell marks that thread once ([`mark_ui_thread`], before its
 //! event loop starts), and each of its host entry points checks it
 //! ([`assert_off_ui_thread`]). The one host call the main thread makes is
-//! the launch, during setup, before any window shows; it does not go
+//! the launch, during setup, before the event loop runs; it does not go
 //! through those entry points (the host's `Threads` section).
 //!
 //! The mark is per thread, so a test marks a thread of its own and the

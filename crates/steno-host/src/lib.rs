@@ -22,13 +22,15 @@
 //!
 //! Every call blocks until it is done: for as long as a native prompt is
 //! up if it asks one, and for as long as the store waits for another
-//! process's write lock. So the shell runs each command, page load and
-//! tray action on Tauri's blocking pool (`call_blocking` in
-//! `apps/desktop/src-tauri/src/host.rs`), never on a runtime worker or the
-//! thread that runs its event loop, which it marks with
-//! [`mark_ui_thread`] so a call there fails a debug build
-//! ([`assert_off_ui_thread`]); the services' polls call from their
-//! runtime's blocking pool. [`host`]'s `Threads` section has the rest of
+//! process's write lock. So the shell runs each command and page load on
+//! Tauri's blocking pool (`call_blocking` in
+//! `apps/desktop/src-tauri/src/host.rs`), and each tray action, window
+//! request and the onboarding window's close on a thread of its own that
+//! takes them one at a time in the order they came (`call_in_order`
+//! there), never on a runtime worker or the thread that runs its event
+//! loop, which it marks with [`mark_ui_thread`] so a call there fails a
+//! debug build ([`assert_off_ui_thread`]); the services' polls call from
+//! their runtime's blocking pool. [`host`]'s `Threads` section has the rest of
 //! the rules, and the one exemption, the launch.
 //!
 //! The crate holds no UI framework and no I/O of its own beyond the store:

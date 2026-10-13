@@ -194,6 +194,7 @@ fn main() {
         .manage(smoke::Smoke::default())
         .manage(panels::Panels::default())
         .manage(windows::Pages::default())
+        .manage(host::Lane::start())
         .manage(windows::Kept::default())
         .manage(TrayAtClose::default())
         .manage(steno_services::app::ExitGate::default())
@@ -579,13 +580,19 @@ fn save_before_end(app: &tauri::AppHandle) {
 }
 
 /// The onboarding window closed, kept or destroyed: the host counts its
-/// pages as seen (`Host::onboarding_window_closed`), off the main thread
-/// since that reloads onboarding from the store, and a smoke run counts
-/// the close.
+/// pages as seen ([`count_onboarding_seen`]), and a smoke run counts the
+/// close.
 fn onboarding_closed(app: &tauri::AppHandle) {
     app.state::<smoke::Smoke>().note_onboarding_closed();
-    host::call_in_background(app.clone(), "the onboarding window's close", |app| {
-        host::host(app).onboarding_window_closed();
+    count_onboarding_seen(app.clone());
+}
+
+/// `Host::onboarding_window_closed`, queued on the shell's ordered lane
+/// (`host::call_in_order`): it reloads onboarding from the store, and the
+/// window's close arrives on the main thread.
+fn count_onboarding_seen<H: host::ShellHost>(host: H) {
+    host::call_in_order(host, "the onboarding window's close", |host| {
+        host.onboarding_window_closed();
         Ok(())
     });
 }
@@ -1301,5 +1308,34 @@ mod tests {
         } else {
             assert!(single_instance_available());
         }
+    }
+
+    /// The onboarding window's close counts the pages as seen on the lane:
+    /// the close (on the main thread) returns while the host's reload of
+    /// onboarding is held, and the host then hears of it.
+    #[test]
+    fn the_onboarding_close_reaches_the_host_off_the_closing_thread() {
+        use std::time::Duration;
+
+        use crate::host::gated::GatedHost;
+
+        let host = GatedHost::holding("onboarding.closed");
+        let _opens = host.opens_on_drop();
+        let (returned, done) = std::sync::mpsc::channel();
+        let closed = host.clone();
+        std::thread::spawn(move || {
+            count_onboarding_seen(closed);
+            let _ = returned.send(());
+        });
+        assert!(
+            done.recv_timeout(Duration::from_secs(1)).is_ok(),
+            "the close waited for the host"
+        );
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the host heard of the close"
+        );
+        host.open();
+        assert!(host.wait_answered("onboarding.closed", Duration::from_secs(5)));
     }
 }

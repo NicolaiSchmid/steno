@@ -9,11 +9,14 @@
 //!
 //! Menu events arrive on the main thread, which runs the event loop every
 //! window, the tray and the panels draw on, so nothing here calls the host
-//! there: the host's call goes to Tauri's blocking pool
-//! (`host::call_in_background`) and the handler returns. A Stop that waits
+//! there: the host's call is queued on the shell's ordered lane
+//! (`host::call_in_order`) and the handler returns. A Stop that waits
 //! (another process holds the store's write lock, and the save tries for
 //! up to 15 s) leaves the main thread free, so the recorder's own
-//! `Stopping` reaches the tray at once, as its `recording` snapshot.
+//! `Stopping` reaches the tray at once, as its `recording` snapshot. The
+//! lane keeps the clicks in order, as the main thread did: a Record
+//! clicked during that stop runs once it has ended, and Quit waits for it
+//! ([`quit_from_menu`]).
 //!
 //! Swift: `MenuBarView.swift` (the buttons), `AppCommands` in
 //! `StenoApp.swift` (the Record menu).
@@ -27,7 +30,6 @@ use tauri::{
 };
 
 use crate::{
-    autostart,
     bridge::{BridgeError, failed},
     host::{self, ShellHost},
     tray, updater,
@@ -105,19 +107,19 @@ pub fn host_window(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
 
 /// Starts (`Some(mode)`) or toggles (`None`) the recorder through the host:
 /// the host window is found (or made) here, on the main thread, and the
-/// call runs off it ([`record_through`]).
+/// call is queued off it ([`record_through`]).
 pub fn record(app: &AppHandle, mode: Option<CaptureMode>) -> Result<(), BridgeError> {
     let window = host_window(app)?;
     record_through(app.clone(), window, mode);
     Ok(())
 }
 
-/// The host's half of [`record`]: on Tauri's blocking pool, returning at
-/// once; a failure is logged from there, as a menu item has no one to
-/// report it to.
+/// The host's half of [`record`]: on the shell's ordered lane, after the
+/// clicks before it, returning at once; a failure is logged from there, as
+/// a menu item has no one to report it to.
 pub fn record_through<H: ShellHost>(host: H, window: H::Window, mode: Option<CaptureMode>) {
     let (method, params) = recorder_command(mode);
-    host::call_in_background(host, "menu", move |host| {
+    host::call_in_order(host, "menu", move |host| {
         host.call(&window, method, params).map(drop)
     });
 }
@@ -149,9 +151,8 @@ pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
         MenuAction::OpenMain => open(app, BridgeWindow::Main),
         MenuAction::OpenSettings => open(app, BridgeWindow::Settings),
         MenuAction::LaunchAtLogin => {
-            let wanted = !autostart::status(app).is_on();
             match host_window(app) {
-                Ok(window) => launch_at_login_through(app.clone(), window, wanted),
+                Ok(window) => launch_at_login_through(app.clone(), window),
                 Err(error) => {
                     report(Err(error));
                     // The check mark follows the system, even when the
@@ -161,7 +162,7 @@ pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
             }
         }
         MenuAction::CheckForUpdates => check_for_updates(app),
-        MenuAction::Quit => quit(app),
+        MenuAction::Quit => quit_from_menu(app),
     }
 }
 
@@ -185,9 +186,9 @@ pub fn launch_at_login_command(value: bool) -> (&'static str, Value) {
 /// the tray's check mark, for the tray's item and for Settings alike.
 /// The host hears of a failed switch too: it tries again and, failing,
 /// shows why in Settings > General. Blocking (the system's login item,
-/// then the host), so it runs on Tauri's blocking pool: from Settings
-/// through `bridge::host_command`, from the tray through
-/// [`launch_at_login_through`]. The check mark moves on the main thread,
+/// then the host), so it runs off the main thread: from Settings on
+/// Tauri's blocking pool (`bridge::host_command`), from the tray on the
+/// shell's ordered lane ([`launch_at_login_through`]). The check mark moves on the main thread,
 /// once the host has answered, even when the change failed.
 /// Swift: `MenuBarViewModel.setLaunchAtLogin`.
 pub fn set_launch_at_login<H: ShellHost>(
@@ -204,11 +205,14 @@ pub fn set_launch_at_login<H: ShellHost>(
     Ok(())
 }
 
-/// The tray's Launch at login: [`set_launch_at_login`] off the main thread,
-/// returning at once; a failure is logged from there.
-pub fn launch_at_login_through<H: ShellHost>(host: H, window: H::Window, value: bool) {
-    host::call_in_background(host, "menu", move |host| {
-        set_launch_at_login(host, &window, value)
+/// The tray's Launch at login: [`set_launch_at_login`] on the shell's
+/// ordered lane, returning at once; a failure is logged from there. The
+/// item switches what the system says once the clicks before it have
+/// landed, read there, so a second click undoes the first.
+pub fn launch_at_login_through<H: ShellHost>(host: H, window: H::Window) {
+    host::call_in_order(host, "menu", move |host| {
+        let wanted = !host.login_item_on();
+        set_launch_at_login(host, &window, wanted)
     });
 }
 
@@ -223,6 +227,45 @@ pub const QUIT_CODE: i32 = 0;
 /// and SIGTERM, SIGINT and SIGHUP all end here.
 pub fn quit(app: &AppHandle) {
     app.exit(QUIT_CODE);
+}
+
+/// The menus' Quit. The tray's Record rows read "Quitting…", disabled, at
+/// once (`tray::note_quitting`), so no click is taken that could not
+/// start a recording any more. The exit then waits for the actions
+/// clicked before it ([`exit_after_queued`]): a Stop whose save waits on
+/// the store finishes it, with its own end reason, as it did when the main
+/// thread ran the Stop and the Quit waited behind it. Past
+/// [`SHUTDOWN_PATIENCE`](steno_services::app::SHUTDOWN_PATIENCE) the exit
+/// goes ahead: its shutdown tries the stop's commit no more, and a save
+/// still waiting leaves the meeting `recording` for the next launch's
+/// recovery.
+pub fn quit_from_menu(app: &AppHandle) {
+    tray::note_quitting(app);
+    let exiting = app.clone();
+    exit_after_queued(app, steno_services::app::SHUTDOWN_PATIENCE, move || {
+        quit(&exiting);
+    });
+}
+
+/// Calls `exit` from a thread of its own once every job queued on `host`'s
+/// lane before this call has run, or once `patience` has passed, whichever
+/// comes first; returns at once.
+pub fn exit_after_queued<H: ShellHost>(
+    host: &H,
+    patience: std::time::Duration,
+    exit: impl FnOnce() + Send + 'static,
+) {
+    let (reached, queued_before) = std::sync::mpsc::channel::<()>();
+    host.queue(
+        "quit",
+        Box::new(move || {
+            let _ = reached.send(());
+        }),
+    );
+    std::thread::spawn(move || {
+        let _ = queued_before.recv_timeout(patience);
+        exit();
+    });
 }
 
 #[cfg(test)]
@@ -274,7 +317,7 @@ mod tests {
         let _opens = host.opens_on_drop();
         let clicked = host.clone();
         assert!(
-            returns_at_once(move || launch_at_login_through(clicked, "main", true)),
+            returns_at_once(move || launch_at_login_through(clicked, "main")),
             "the menu event waited for the host"
         );
         assert!(
@@ -306,7 +349,7 @@ mod tests {
     #[cfg(not(feature = "fixture-host"))]
     #[test]
     fn the_tray_reads_stopping_while_the_stop_still_runs() {
-        use std::sync::{Arc, Mutex, mpsc};
+        use std::sync::{Arc, mpsc};
 
         use steno_bridge::{BridgeEvent, BridgeTopic, EventSink as _};
 
@@ -316,12 +359,12 @@ mod tests {
 
         /// The main thread: runs what is posted to it in order; a
         /// `recording` snapshot delivered there retitles the Record row as
-        /// `tray::note_recording` does.
+        /// `tray::note_recording` does, and the row's text goes to `rows`.
         #[derive(Clone)]
         struct StandInMain {
             id: std::thread::ThreadId,
             tasks: mpsc::Sender<Task>,
-            record_row: Arc<Mutex<&'static str>>,
+            rows: mpsc::Sender<&'static str>,
         }
 
         impl MainThread for StandInMain {
@@ -337,7 +380,7 @@ mod tests {
                 if let Some(state) =
                     crate::bridge::recording_state_for_shell("main", event.topic, &event.payload)
                 {
-                    *self.record_row.lock().unwrap() = tray::record_label(state);
+                    let _ = self.rows.send(tray::record_label(state));
                 }
             }
         }
@@ -348,12 +391,11 @@ mod tests {
                 task();
             }
         });
+        let (rows, retitled) = mpsc::channel();
         let main = StandInMain {
             id: thread.thread().id(),
             tasks,
-            record_row: Arc::new(Mutex::new(tray::record_label(
-                crate::recording::RecordingState::Recording,
-            ))),
+            rows,
         };
         let sink = Arc::new(WindowSink::new(main.clone()));
         let host = GatedHost::holding("recording.toggle").before_hold(move || {
@@ -374,16 +416,9 @@ mod tests {
             host.wait_held(Duration::from_secs(5)),
             "the stop reached the host"
         );
-        let mut row = "";
-        for _ in 0..100 {
-            row = *main.record_row.lock().unwrap();
-            if row == "Stopping…" {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
         assert_eq!(
-            row, "Stopping…",
+            retitled.recv_timeout(Duration::from_secs(1)),
+            Ok("Stopping…"),
             "the tray reads Stopping while the save waits"
         );
         assert_eq!(
@@ -393,6 +428,124 @@ mod tests {
         );
         host.open();
         assert!(host.wait_answered("recording.toggle", Duration::from_secs(5)));
+    }
+
+    /// Two quick tray clicks, Record in person and then Record (a
+    /// toggle), reach the host in the order they were made, as they did
+    /// when the main thread ran them one after the other. Reordered, the
+    /// toggle would start a call recording and the in-person start be
+    /// refused; spawned one per click on Tauri's pools, some pairs are.
+    #[test]
+    fn two_quick_tray_clicks_reach_the_host_in_click_order() {
+        let rounds = 300;
+        let reordered = (0..rounds)
+            .filter(|_| {
+                let host = GatedHost::holding("nothing is held");
+                record_through(host.clone(), "main", Some(CaptureMode::InPerson));
+                record_through(host.clone(), "main", None);
+                assert!(host.wait_answers(2, Duration::from_secs(5)));
+                host.answered() != ["recording.start", "recording.toggle"]
+            })
+            .count();
+        assert_eq!(
+            reordered, 0,
+            "{reordered} of {rounds} click pairs were reordered"
+        );
+    }
+
+    /// A Record clicked while the Stop before it waits on the store (the
+    /// recorder reads `Stopping`, where a start is ignored) runs once that
+    /// stop has ended, so it starts a recording rather than being dropped.
+    #[test]
+    fn a_record_clicked_during_a_held_stop_runs_after_it() {
+        let host = GatedHost::holding("recording.toggle");
+        let _opens = host.opens_on_drop();
+        record_through(host.clone(), "main", None);
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the stop reached the host"
+        );
+        record_through(host.clone(), "main", Some(CaptureMode::InPerson));
+        assert!(
+            !host.wait_answered("recording.start", Duration::from_millis(500)),
+            "the Record ran beside the held stop"
+        );
+        host.open();
+        assert!(host.wait_answered("recording.start", Duration::from_secs(5)));
+        assert_eq!(host.answered(), ["recording.toggle", "recording.start"]);
+    }
+
+    /// Two quick Launch at login clicks, made while the Stop clicked before
+    /// them still waits on the store, switch the item on and then off: the
+    /// second reads what the system says once the first has landed, where
+    /// reading it at the click would repeat the first.
+    #[test]
+    fn a_second_launch_at_login_click_undoes_the_first() {
+        let host = GatedHost::holding("recording.toggle");
+        let _opens = host.opens_on_drop();
+        record_through(host.clone(), "main", None);
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the stop reached the host"
+        );
+        launch_at_login_through(host.clone(), "main");
+        launch_at_login_through(host.clone(), "main");
+        host.open();
+        assert!(host.wait_noted(2, Duration::from_secs(5)));
+        assert_eq!(host.switched(), [true, false]);
+    }
+
+    /// The menus' Quit while the Stop clicked before it waits on the
+    /// store: the exit waits for that stop, so its save finishes with its
+    /// own end reason, as when the main thread ran the Stop and the Quit
+    /// waited behind it; then the exit comes.
+    #[test]
+    fn a_quit_waits_for_the_stop_clicked_before_it() {
+        let host = GatedHost::holding("recording.toggle");
+        let _opens = host.opens_on_drop();
+        record_through(host.clone(), "main", None);
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the stop reached the host"
+        );
+        let (exited, exit) = std::sync::mpsc::channel();
+        let seen = host.clone();
+        exit_after_queued(&host, Duration::from_secs(5), move || {
+            let _ = exited.send(seen.answered());
+        });
+        assert!(
+            exit.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the exit came while the stop was held"
+        );
+        host.open();
+        assert_eq!(
+            exit.recv_timeout(Duration::from_secs(5)),
+            Ok(vec!["recording.toggle".to_owned()]),
+            "the exit comes once the stop has answered"
+        );
+    }
+
+    /// A stop that still waits once the patience has passed does not hold
+    /// the exit: it goes ahead, and the shutdown takes over the stop.
+    #[test]
+    fn a_quit_goes_ahead_once_its_patience_has_passed() {
+        let host = GatedHost::holding("recording.toggle");
+        let _opens = host.opens_on_drop();
+        record_through(host.clone(), "main", None);
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the stop reached the host"
+        );
+        let (exited, exit) = std::sync::mpsc::channel();
+        exit_after_queued(&host, Duration::from_millis(200), move || {
+            let _ = exited.send(());
+        });
+        assert!(exit.recv_timeout(Duration::from_secs(5)).is_ok());
+        assert_eq!(
+            host.answered(),
+            Vec::<String>::new(),
+            "the stop is still held"
+        );
     }
 
     #[test]

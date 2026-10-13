@@ -30,6 +30,9 @@
 //! Swift: `MenuBarView.swift`, `MenuBarLabel` and `MenuBarLabelPresentation`
 //! in `StenoApp.swift` and `FloatingContent.swift`.
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::{
     AppHandle, Manager, Wry,
     image::Image,
@@ -71,6 +74,34 @@ pub const fn in_person_enabled(state: RecordingState) -> bool {
     matches!(state, RecordingState::Idle)
 }
 
+/// What both Record rows read once Quit was chosen (`note_quitting`).
+pub const QUITTING: &str = "Quitting…";
+
+/// The two Record rows: Record (or Stop) and "Record in person", each
+/// with its text and whether it is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordRows {
+    pub record: (&'static str, bool),
+    pub in_person: (&'static str, bool),
+}
+
+/// The Record rows for the recorder's `state`: once quitting, both read
+/// "Quitting…", disabled, whatever the recorder does next, since no start
+/// is taken any more (Rust only: the Swift app's Quit ended its menu).
+pub const fn record_rows(state: RecordingState, quitting: bool) -> RecordRows {
+    if quitting {
+        RecordRows {
+            record: (QUITTING, false),
+            in_person: (QUITTING, false),
+        }
+    } else {
+        RecordRows {
+            record: (record_label(state), record_enabled(state)),
+            in_person: (MenuAction::RecordInPerson.label(), in_person_enabled(state)),
+        }
+    }
+}
+
 /// The icon's tooltip, the Swift label's accessibility text: "Steno" or
 /// "Steno, recording" (the elapsed time is the bubble's, not the tray's).
 pub fn tooltip(state: RecordingState) -> &'static str {
@@ -87,6 +118,11 @@ pub struct Tray {
     record: MenuItem<Wry>,
     in_person: MenuItem<Wry>,
     launch_at_login: CheckMenuItem<Wry>,
+    /// Set once by `note_quitting`.
+    quitting: AtomicBool,
+    /// The Record rows as last set, so a `recording` snapshot that moved
+    /// only the levels (20 a second) sets nothing.
+    shown: Mutex<Option<RecordRows>>,
 }
 
 /// A menu item's shortcut hint, on the Mac only: the menu bar extra's
@@ -174,6 +210,8 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         record,
         in_person,
         launch_at_login,
+        quitting: AtomicBool::new(false),
+        shown: Mutex::new(None),
     });
     Ok(())
 }
@@ -183,11 +221,40 @@ pub fn note_recording(app: &AppHandle, state: RecordingState) {
     let Some(tray) = app.try_state::<Tray>() else {
         return;
     };
-    let _ = tray.record.set_text(record_label(state));
-    let _ = tray.record.set_enabled(record_enabled(state));
-    let _ = tray.in_person.set_enabled(in_person_enabled(state));
+    set_record_rows(
+        &tray,
+        record_rows(state, tray.quitting.load(Ordering::Acquire)),
+    );
     if let Some(icon) = app.tray_by_id(TRAY_ID) {
         let _ = icon.set_tooltip(Some(tooltip(state)));
+    }
+}
+
+/// Quit was chosen: both Record rows read "Quitting…", disabled, from now
+/// on ([`record_rows`]), so a Record that could not start a recording any
+/// more is never clicked unseen. On the main thread, before the exit.
+pub fn note_quitting(app: &AppHandle) {
+    let Some(tray) = app.try_state::<Tray>() else {
+        return;
+    };
+    tray.quitting.store(true, Ordering::Release);
+    set_record_rows(&tray, record_rows(RecordingState::Idle, true));
+}
+
+fn set_record_rows(tray: &Tray, rows: RecordRows) {
+    let mut shown = tray
+        .shown
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if shown.replace(rows) == Some(rows) {
+        return;
+    }
+    for (item, (text, enabled)) in [
+        (&tray.record, rows.record),
+        (&tray.in_person, rows.in_person),
+    ] {
+        let _ = item.set_text(text);
+        let _ = item.set_enabled(enabled);
     }
 }
 
@@ -265,6 +332,28 @@ mod tests {
         assert!(record_enabled(RecordingState::Recording));
         assert!(!record_enabled(RecordingState::Starting));
         assert!(!record_enabled(RecordingState::Stopping));
+    }
+
+    /// Once quitting, the Record rows read "Quitting…", disabled, for
+    /// every state the recorder moves through on the way out.
+    #[test]
+    fn the_record_rows_read_quitting_once_quit_was_chosen() {
+        for state in [
+            RecordingState::Idle,
+            RecordingState::Starting,
+            RecordingState::Recording,
+            RecordingState::Stopping,
+        ] {
+            let quitting = record_rows(state, true);
+            assert_eq!(quitting.record, ("Quitting…", false), "{state:?}");
+            assert_eq!(quitting.in_person, ("Quitting…", false), "{state:?}");
+            let rows = record_rows(state, false);
+            assert_eq!(rows.record, (record_label(state), record_enabled(state)));
+            assert_eq!(
+                rows.in_person,
+                ("Record in person", in_person_enabled(state))
+            );
+        }
     }
 
     #[test]

@@ -6,7 +6,10 @@
 //! host, on Tauri's blocking pool ([`host_command`]): a host call can wait
 //! for seconds (the store behind another process's write lock, a stop), and
 //! on a command worker it would hold that worker, so a few such calls would
-//! leave the page's other commands unanswered.
+//! leave the page's other commands unanswered. The commands stay concurrent
+//! on that pool, each awaited by its own command, and do not take the
+//! tray's ordered lane (`host::call_in_order`): a command behind a Stop
+//! whose save waits would wait too, as every one did on a held worker.
 //!
 //! Swift: `BridgeRequestParams.swift`, `WindowRequests.swift`.
 
@@ -787,5 +790,24 @@ mod tests {
         assert!(finishes_onboarding(BridgeTopic::Onboarding, &finished));
         assert!(!finishes_onboarding(BridgeTopic::App, &finished));
         assert!(!finishes_onboarding(BridgeTopic::Onboarding, &Value::Null));
+    }
+
+    /// A panic in a host call resumes in the command that awaits it
+    /// (`host::call_blocking`), where Tauri reports it, rather than
+    /// turning into a `failed` answer as if the host had refused.
+    #[test]
+    fn a_panic_in_a_host_call_resumes_in_the_awaiting_command() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(crate::host::call_blocking(
+                (),
+                |(): &()| -> Result<(), BridgeError> { panic!("the host panicked") },
+            ))
+        }));
+        let payload = outcome.expect_err("the panic resumes in the awaiting command");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"the host panicked"));
     }
 }
