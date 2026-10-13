@@ -1118,13 +1118,18 @@ still has to draw the window side. `[ ]` is not ported yet.
   Swift app loads the recorded one. With nothing recorded (an upgrade from a build
   without the record, or a lost record), the rewrite from the identity found is refined
   by the `pairedAt` rule: a phone paired before a certificate's `notValidBefore` cannot
-  know that identity, so the Swift app records the newest identity that no paired phone
-  predates. Both times come from the Mac's clock, and a minted certificate starts a
-  minute before its mint. With none, the launch is `replaced`; when only some phones
-  predate its one identity, it says "Some paired phones were paired before this Mac's
-  current identity and can't connect." Rust still records the identity it finds with
-  nothing recorded; a follow-up PR, the one for the Rust import's choice among several
-  Swift certificates, gives `load_or_create` and the import the same rule.
+  know that identity, so each paired phone knows the newest identity whose
+  `notValidBefore` is at or before its `pairedAt`. When every phone knows the same one,
+  the Swift app records it; with no phone paired, the newest. Both times come from the
+  Mac's clock, and a minted certificate starts a minute before its mint. When no phone
+  knows any identity, the launch is `replaced`; when some do but the phones know
+  different ones or some know none, it is `partlyReplaced`, which asks the same question
+  and says "some of your phones were paired before this Mac's pairing changed and can't
+  connect. Choose Pair Again the next time Steno opens to reconnect them." Neither
+  records anything, and a certificate whose `notValidBefore` cannot be read is
+  unreadable. Rust still records the identity it finds with nothing recorded; a
+  follow-up PR, the one for the Rust import's choice among several Swift certificates,
+  gives `load_or_create` and the import the same rule.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
