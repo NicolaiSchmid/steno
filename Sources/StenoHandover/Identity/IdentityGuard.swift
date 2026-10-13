@@ -6,12 +6,16 @@ import StenoCore
 /// beside the current one and takes its place last, so a refused write
 /// changes nothing.
 public protocol HandoverIdentityKeychain: Sendable {
-  /// The current identity, nil when none is stored; throws when the
-  /// keychain cannot be read. Of several under its label (one per keychain
-  /// in the search list, an old login keychain added back), the one whose
-  /// fingerprint is `recorded`, else the keychain's first; with nothing
-  /// recorded, throws `IdentityUnavailability.replaced` rather than choose.
-  func load(preferring recorded: String?) throws -> HandoverIdentity?
+  /// The identity whose fingerprint is `recorded`, else the keychain's
+  /// first, of several under its label (one per keychain in the search
+  /// list, an old login keychain added back); nil when none is stored;
+  /// throws when the keychain cannot be read or that identity has no
+  /// private key.
+  func load(preferring recorded: String) throws -> HandoverIdentity?
+  /// Every identity under its label, in the keychain's order, for a launch
+  /// with nothing recorded; throws when the keychain cannot be read or one
+  /// has no private key.
+  func identities() throws -> [HandoverIdentity]
   /// The staged identity, nil when none is staged; throws when it cannot
   /// be read.
   func staged() throws -> HandoverIdentity?
@@ -24,7 +28,9 @@ public protocol HandoverIdentityKeychain: Sendable {
 }
 
 /// Why the identity is unavailable rather than minted.
-/// Rust: `Unavailability` in `crates/steno-handover/src/identity.rs`.
+/// Rust: `Unavailability` in `crates/steno-handover/src/identity.rs`, which
+/// has no `partlyReplaced` and no `pairedAt` rule yet (the plan's Handover
+/// note).
 public enum IdentityUnavailability: Error, CustomStringConvertible, Equatable, Sendable {
   /// The keychain's read failed (a locked or denied keychain).
   case unreadable(String)
@@ -32,14 +38,22 @@ public enum IdentityUnavailability: Error, CustomStringConvertible, Equatable, S
   /// phone is paired.
   case missing
   /// The keychain's identity is not the one whose fingerprint is recorded,
-  /// or it holds several and none is recorded.
+  /// or, with nothing recorded, a paired phone predates every identity it
+  /// holds.
   case replaced
+  /// With nothing recorded, the keychain's only identity is newer than
+  /// some paired phones but not all: those phones cannot know it. A
+  /// `replaced` in all but its words, so the launch asks the same question.
+  case partlyReplaced
 
   public var description: String {
     switch self {
     case .unreadable(let reason): "this Mac's phone pairing could not be read (\(reason))"
     case .missing: "the pairing your phones know is no longer in this Mac's keychain"
     case .replaced: "this Mac's keychain holds a different pairing from the one your phones know"
+    case .partlyReplaced:
+      "Some paired phones were paired before this Mac's current identity and can't connect. "
+        + "Pair Again to reconnect them."
     }
   }
 }
@@ -62,11 +76,12 @@ public struct HandoverIdentityGuard: Sendable {
     self.store = store
   }
 
-  /// The current identity; the only identity, without a record, has its
-  /// fingerprint recorded. Throws `IdentityUnavailability` when the
-  /// keychain cannot be read, holds no identity while a fingerprint is
-  /// recorded or a phone is paired, holds one whose fingerprint is not the
-  /// recorded one, or holds several with nothing recorded. A staged
+  /// The current identity. With nothing recorded, the newest identity no
+  /// paired phone predates has its fingerprint recorded (`adoptable`).
+  /// Throws `IdentityUnavailability` when the keychain cannot be read,
+  /// holds no identity while a fingerprint is recorded or a phone is
+  /// paired, holds one whose fingerprint is not the recorded one, or, with
+  /// nothing recorded, only identities a paired phone predates. A staged
   /// identity is a mint or a Pair Again cut short: when it is the recorded
   /// one it becomes the current one, and with no record, no identity and
   /// no paired phone it is installed. Only then, with nothing staged, is a
@@ -74,12 +89,10 @@ public struct HandoverIdentityGuard: Sendable {
   public func loadOrCreate(commonName: String) async throws -> HandoverIdentity {
     let recorded = try record.recorded()
     let current: HandoverIdentity?
-    do {
-      current = try keychain.load(preferring: recorded)
-    } catch let refusal as IdentityUnavailability {
-      throw refusal
-    } catch {
-      throw IdentityUnavailability.unreadable(String(describing: error))
+    if let recorded {
+      current = try read { try keychain.load(preferring: recorded) }
+    } else {
+      current = try await adoptable(read { try keychain.identities() })
     }
     if let current {
       let fingerprint = ContentHash.hex(current.fingerprint)
@@ -103,8 +116,8 @@ public struct HandoverIdentityGuard: Sendable {
   }
 
   /// `loadOrCreate(commonName:)`, and when the identity is missing or
-  /// replaced, `askToPairAgain` decides: yes is `pairAgain(commonName:)`,
-  /// no rethrows and changes nothing.
+  /// replaced, in full or in part, `askToPairAgain` decides: yes is
+  /// `pairAgain(commonName:)`, no rethrows and changes nothing.
   public func loadOrPairAgain(
     commonName: String, askToPairAgain: () async -> Bool
   ) async throws -> HandoverIdentity {
@@ -146,6 +159,37 @@ public struct HandoverIdentityGuard: Sendable {
       try await store.delete(deviceID: device.id)
     }
     return try install(staged)
+  }
+
+  /// Of the identities under the label with nothing recorded (an upgrade
+  /// from a build without the record, or a lost record), the one to
+  /// record: the newest that no paired phone predates, since a phone
+  /// paired before an identity's `notValidBefore` cannot know it. A phone
+  /// paired at that instant counts as paired after it. Both times come from
+  /// this Mac's clock, and a minted certificate starts a minute before its
+  /// mint, the margin for a pairing right after it. Nil when the keychain
+  /// holds none. Throws `partlyReplaced` when its only identity is newer
+  /// than some phones but not all, else `replaced` when a phone predates
+  /// every one; with no phone paired, the newest is chosen.
+  private func adoptable(_ identities: [HandoverIdentity]) async throws -> HandoverIdentity? {
+    guard !identities.isEmpty else { return nil }
+    let paired = try await store.pairedDevices().map(\.pairedAt)
+    let starts = try identities.map { identity in try read { try identity.notValidBefore() } }
+    let earliest = paired.min() ?? .distantFuture
+    if let newest = zip(identities, starts).filter({ $0.1 <= earliest }).max(by: { $0.1 < $1.1 }) {
+      return newest.0
+    }
+    if identities.count == 1, let latest = paired.max(), latest >= starts[0] {
+      throw IdentityUnavailability.partlyReplaced
+    }
+    throw IdentityUnavailability.replaced
+  }
+
+  /// `body`'s keychain read, any failure as `unreadable`.
+  private func read<T>(_ body: () throws -> T) throws -> T {
+    do { return try body() } catch {
+      throw IdentityUnavailability.unreadable(String(describing: error))
+    }
   }
 
   /// Records the staged identity, then makes it the current one.

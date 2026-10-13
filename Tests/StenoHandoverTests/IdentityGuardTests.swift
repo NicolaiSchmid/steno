@@ -7,9 +7,10 @@ import Testing
 
 /// The identity guard over a fake keychain, the Mac's Create New Keychain
 /// case among them: nothing is minted while a fingerprint is recorded or a
-/// phone is paired, another identity is not adopted, a read that fails is
-/// no reason to ask, and Pair Again stages the new identity before it
-/// removes the phones, so a refused write or a run cut short mints nothing.
+/// phone is paired, another identity is not adopted, nor one a paired phone
+/// predates, a read that fails is no reason to ask, and Pair Again stages
+/// the new identity before it removes the phones, so a refused write or a
+/// run cut short mints nothing.
 /// The record is the Swift app's own file; the Rust app's is never touched.
 /// Rust: `crates/steno-handover/tests/identity.rs` and
 /// `crates/steno-services/src/keychain_reset_tests.rs`.
@@ -34,9 +35,13 @@ import Testing
       self.next = next
     }
 
-    func load(preferring _: String?) throws -> HandoverIdentity? {
+    func load(preferring _: String) throws -> HandoverIdentity? {
       if let readError { throw readError }
       return identity
+    }
+    func identities() throws -> [HandoverIdentity] {
+      if let readError { throw readError }
+      return identity.map { [$0] } ?? []
     }
     func staged() throws -> HandoverIdentity? {
       if let stagedError { throw stagedError }
@@ -84,6 +89,17 @@ import Testing
         tokenHash: Data(repeating: UInt8(index), count: 32))
     }
     return HandoverIdentityGuard(keychain: keychain, record: record, store: store)
+  }
+
+  /// Pairs one phone at each of `dates`, as `identityGuard(phones:)` does;
+  /// the guard reads the store at launch, so this may follow it.
+  func pair(at dates: [Date]) async throws {
+    let paired = try await store.pairedDevices().count
+    for (index, date) in dates.enumerated() {
+      try await store.save(
+        PairedDevice(id: UUID(), name: "Phone at \(date)", pairedAt: date),
+        tokenHash: Data(repeating: UInt8(paired + index), count: 32))
+    }
   }
 
   func hex(_ identity: HandoverIdentity) -> String { ContentHash.hex(identity.fingerprint) }
@@ -205,14 +221,95 @@ import Testing
     #expect(keychain.stages == 1 && keychain.promotes == 1 && keychain.stagedIdentity == nil)
   }
 
-  /// The identity of a build from before the guard has its fingerprint
-  /// recorded, not replaced.
-  @Test func anIdentityWithoutARecordIsRecordedNotMinted() async throws {
+  /// The identity of a build from before the guard, older than every
+  /// paired phone, has its fingerprint recorded, not replaced.
+  @Test func anUnrecordedIdentityOlderThanEveryPhoneIsRecorded() async throws {
     let keychain = FakeKeychain(known, next: other)
-    let identityGuard = try await identityGuard(keychain, phones: 1)
-    #expect(hex(try await identityGuard.loadOrCreate(commonName: "A")) == hex(known))
+    let identityGuard = try await identityGuard(keychain)
+    let start = try known.notValidBefore()
+    try await pair(at: [start.addingTimeInterval(3600), start.addingTimeInterval(86400)])
+    var asked = false
+    let identity = try await identityGuard.loadOrPairAgain(commonName: "A") {
+      asked = true
+      return true
+    }
+    #expect(hex(identity) == hex(known) && !asked)
     #expect(try identityGuard.record.recorded() == hex(known))
     #expect(keychain.stages == 0)
+    #expect(try await store.pairedDevices().count == 2)
+  }
+
+  /// An identity newer than every paired phone, as a shipping build's
+  /// silent mint after a keychain reset left it, is not recorded: the
+  /// phones cannot know it. Not Now keeps everything, and Pair Again
+  /// installs a new one.
+  @Test func anUnrecordedIdentityNewerThanEveryPhoneIsReplaced() async throws {
+    let keychain = FakeKeychain(known, next: other)
+    let identityGuard = try await identityGuard(keychain)
+    let start = try known.notValidBefore()
+    try await pair(at: [start.addingTimeInterval(-86400), start.addingTimeInterval(-3600)])
+    var asked = false
+    await #expect(throws: IdentityUnavailability.replaced) {
+      try await identityGuard.loadOrPairAgain(commonName: "A") {
+        asked = true
+        return false
+      }
+    }
+    #expect(asked)
+    #expect(try identityGuard.record.recorded() == nil)
+    #expect(keychain.stages == 0 && keychain.identity.map(hex) == hex(known))
+    #expect(try await store.pairedDevices().count == 2)
+
+    #expect(hex(try await identityGuard.loadOrPairAgain(commonName: "A") { true }) == hex(other))
+    #expect(try identityGuard.record.recorded() == hex(other))
+    #expect(try await store.pairedDevices().isEmpty)
+  }
+
+  /// One identity newer than some phones but not all: refused in part, in
+  /// the words the startup warning shows, and nothing changes.
+  @Test func anUnrecordedIdentityNewerThanSomePhonesIsPartlyReplaced() async throws {
+    let keychain = FakeKeychain(known, next: other)
+    let identityGuard = try await identityGuard(keychain)
+    let start = try known.notValidBefore()
+    try await pair(at: [start.addingTimeInterval(-86400), start.addingTimeInterval(3600)])
+    var asked = false
+    await #expect(throws: IdentityUnavailability.partlyReplaced) {
+      try await identityGuard.loadOrPairAgain(commonName: "A") {
+        asked = true
+        return false
+      }
+    }
+    #expect(asked)
+    #expect(try identityGuard.record.recorded() == nil)
+    #expect(keychain.stages == 0 && keychain.identity.map(hex) == hex(known))
+    #expect(try await store.pairedDevices().count == 2)
+    #expect(
+      String(describing: IdentityUnavailability.partlyReplaced)
+        == "Some paired phones were paired before this Mac's current identity and can't "
+        + "connect. Pair Again to reconnect them.")
+  }
+
+  /// A minted certificate starts a minute before its mint
+  /// (`IdentityTests` pins it), so a phone paired 59 or 60 seconds before
+  /// the mint counts as paired after the start and the identity is
+  /// recorded, and one paired 61 seconds before it predates the identity.
+  @Test(arguments: [(59.0, true), (60.0, true), (61.0, false)])
+  func aPhonePairedAtTheIdentitysStartCountsAsPairedAfterIt(
+    secondsBeforeTheMint: TimeInterval, recorded: Bool
+  ) async throws {
+    let keychain = FakeKeychain(known, next: other)
+    let identityGuard = try await identityGuard(keychain)
+    let mint = try known.notValidBefore().addingTimeInterval(60)
+    try await pair(at: [mint.addingTimeInterval(-secondsBeforeTheMint)])
+    if recorded {
+      #expect(hex(try await identityGuard.loadOrCreate(commonName: "A")) == hex(known))
+      #expect(try identityGuard.record.recorded() == hex(known))
+    } else {
+      await #expect(throws: IdentityUnavailability.replaced) {
+        try await identityGuard.loadOrCreate(commonName: "A")
+      }
+      #expect(try identityGuard.record.recorded() == nil)
+    }
   }
 
   /// The record of an identity neither test identity is, so Pair Again

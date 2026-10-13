@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import X509
 
 #if canImport(Security)
   import Security
@@ -45,6 +46,13 @@ public struct HandoverIdentity: @unchecked Sendable {
   /// is a new Mac to every phone, which matches "losing the identity means
   /// re-pairing".
   public var macID: UUID { Self.macID(forFingerprint: fingerprint) }
+
+  /// When the certificate starts to be valid, a minute before its mint
+  /// (`MintedIdentity.mint`): a phone paired before it cannot know this
+  /// identity.
+  func notValidBefore() throws -> Date {
+    try Certificate(derEncoded: Array(certificateDER)).notValidBefore
+  }
 
   /// SHA-256 of a certificate's DER, the same bytes `SecCertificateCopyData`
   /// yields on the phone (`PinnedTrustEvaluator.fingerprint(of:)`).

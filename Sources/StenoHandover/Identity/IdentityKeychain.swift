@@ -98,7 +98,8 @@
     /// a half-deleted identity is reported instead of silently replaced
     /// (which would re-pair every phone). The guard's `Store` prefers the
     /// recorded one of several (`IdentityItems.identity(labelled:preferring:)`)
-    /// and, with none recorded, refuses (`LabelledIdentityKeychain.load`).
+    /// and, with none recorded, lists them all for the guard to choose
+    /// (`LabelledIdentityKeychain.identities`).
     public static func load(label: String) throws -> SecIdentity? {
       try Items().certificate(labelled: label).map { try secIdentity(of: $0, labelled: label) }
     }
@@ -167,9 +168,11 @@
       /// Over `keychain` in place of the login keychain's items.
       init(keychain: any HandoverIdentityKeychain) { self.keychain = keychain }
 
-      public func load(preferring recorded: String?) throws -> HandoverIdentity? {
+      public func load(preferring recorded: String) throws -> HandoverIdentity? {
         try keychain.load(preferring: recorded)
       }
+
+      public func identities() throws -> [HandoverIdentity] { try keychain.identities() }
 
       public func staged() throws -> HandoverIdentity? { try keychain.staged() }
 

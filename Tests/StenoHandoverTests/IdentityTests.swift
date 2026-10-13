@@ -19,7 +19,8 @@ import X509
     #expect(certificate.signatureAlgorithm == .ecdsaWithSHA256)
     #expect(P256.Signing.PublicKey(certificate.publicKey) != nil)
     #expect(certificate.publicKey == Certificate.PublicKey(minted.privateKey.publicKey))
-    #expect(certificate.notValidBefore <= now)
+    // A minute back, the guard's margin for a phone paired right after.
+    #expect(certificate.notValidBefore == now.addingTimeInterval(-60))
     let years =
       certificate.notValidAfter.timeIntervalSince(certificate.notValidBefore) / (365 * 24 * 3600)
     #expect(years == 10)
