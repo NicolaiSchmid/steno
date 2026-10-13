@@ -783,7 +783,7 @@ Every package is written in parallel except where a dependency is named:
       it: each phone knows the newest identity whose certificate starts
       (`notValidBefore`, a minute before its mint) at or before its
       `pairedAt`, both from this computer's clock, and with no phone paired
-      the newest is recorded (`HandoverIdentity::adoptable`, whose doc
+      the newest is recorded (`HandoverIdentity::known_by_every_phone`, whose doc
       tables the cases; `swift_import::choose_certificate`). A recorded
       fingerprint is never judged by this rule. A Swift identity minted
       silently after a keychain reset, which every phone predates, waits as

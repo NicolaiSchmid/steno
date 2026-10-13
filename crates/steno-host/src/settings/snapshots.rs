@@ -424,11 +424,13 @@ pub fn waiting_message(reason: PhoneWaitingReason, platform: Platform) -> String
              connect. To reconnect them, choose Pair again in Settings > iPhone."
         ),
         // The clock, not the pairing: Pair again would lose pairings the
-        // phones still know.
+        // phones still know. The first sentence is the Swift app's
+        // (`IdentityUnavailability.clockBehind`, #284).
         PhoneWaitingReason::ClockBehind => format!(
-            "This {computer}'s clock reads earlier than when its phone pairing was made, so Steno \
-             cannot tell which pairing your phones know. Check this {computer}'s date and time, \
-             then choose Try again."
+            "This {computer}'s date and time are earlier than when its phone pairing was made, \
+             so Steno can't tell which pairing your phones know. Check the date and time{}, then \
+             choose Try again.",
+            platform.mac_or(" in System Settings", "")
         ),
         // Pair again cannot open the file either.
         PhoneWaitingReason::FileNotOpened => format!(

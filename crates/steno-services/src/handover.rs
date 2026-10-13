@@ -18,7 +18,7 @@
 //!
 //! | Event | Plain handover | Gated handover | Read or written |
 //! |-------|----------------|----------------|-----------------|
-//! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read; a mint only where the guard allows; an identity found unrecorded is recorded only where the pairing-time rule adopts it ([`HandoverIdentity::adoptable`]), else waiting with the rule's reason (replaced, partly replaced, the clock) |
+//! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read; a mint only where the guard allows; an identity found unrecorded is recorded only where the pairing-time rule adopts it ([`HandoverIdentity::known_by_every_phone`]), else waiting with the rule's reason (replaced, partly replaced, the clock) |
 //! | Try again while waiting | the listener once the read succeeds, else the new reason | the gate waits: the import's step runs again; a listener adopted: its Try again | the identity read (or the import's export) |
 //! | Try again with a listener | nothing | the adopted listener's: nothing | nothing |
 //! | Pair again while waiting | the listener over a new identity | the gate waits: the import ends with a new identity and the gate opens; a listener adopted: its Pair again | the marker, then the next fingerprint noted (a record that does not parse set aside first), then the new identity, then the paired phones removed, then its fingerprint recorded (dropping the note); a stop leaves the note |
@@ -437,10 +437,11 @@ pub(crate) fn identity_failure(error: &IdentityError) -> String {
                  can't connect. To reconnect them, choose Pair again in Settings > iPhone."
             )
         }
+        // The Swift app's first sentence (`IdentityUnavailability.clockBehind`).
         IdentityError::Unavailable(Unavailability::ClockBehind) => {
             format!(
-                "This {COMPUTER}'s clock reads earlier than when its phone pairing was made, so \
-                 Steno cannot tell which pairing your phones know."
+                "This {COMPUTER}'s date and time are earlier than when its phone pairing was \
+                 made, so Steno can't tell which pairing your phones know."
             )
         }
         IdentityError::Secrets(source) => {
@@ -1395,8 +1396,9 @@ mod tests {
         assert_eq!(
             handover.state(),
             ListenerState::Failed(format!(
-                "Phone handover is unavailable: This {COMPUTER}'s clock reads earlier than when \
-                 its phone pairing was made, so Steno cannot tell which pairing your phones know."
+                "Phone handover is unavailable: This {COMPUTER}'s date and time are earlier than \
+                 when its phone pairing was made, so Steno can't tell which pairing your phones \
+                 know."
             ))
         );
         let card = steno_host::settings::snapshots::waiting_message(

@@ -1090,7 +1090,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   `swift-handover-identity.json`.
   - With nothing recorded (a lost record, or an upgrade from a build without it), the
     identity found is recorded only where the `pairedAt` rule adopts it
-    (`HandoverIdentity::adoptable`, whose doc tables the cases): each paired phone
+    (`HandoverIdentity::known_by_every_phone`, whose doc tables the cases): each paired phone
     knows the newest identity whose `notValidBefore` is at or before its `pairedAt`,
     as a phone paired before a certificate starts cannot know it; with no phone
     paired the newest is recorded. Both times come from the computer's clock, and a

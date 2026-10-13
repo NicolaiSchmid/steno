@@ -2253,9 +2253,15 @@ fn the_waiting_reasons_are_plain_sentences() {
     // The clock went back: the fix is the clock, then Try again.
     assert_eq!(
         waiting_message(PhoneWaitingReason::ClockBehind, Platform::Macos),
-        "This Mac's clock reads earlier than when its phone pairing was made, so Steno cannot \
-         tell which pairing your phones know. Check this Mac's date and time, then choose Try \
-         again."
+        "This Mac's date and time are earlier than when its phone pairing was made, so Steno \
+         can't tell which pairing your phones know. Check the date and time in System Settings, \
+         then choose Try again."
+    );
+    assert_eq!(
+        waiting_message(PhoneWaitingReason::ClockBehind, Platform::Windows),
+        "This computer's date and time are earlier than when its phone pairing was made, so \
+         Steno can't tell which pairing your phones know. Check the date and time, then choose \
+         Try again."
     );
     // Pair again cannot help with a file or the clock.
     for platform in Platform::ALL {

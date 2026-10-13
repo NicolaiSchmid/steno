@@ -519,7 +519,7 @@ pub struct CertificateChoice {
 /// of each in the keychain's order), the one to import, or `None` when
 /// there is none. Copies of one certificate count once. The Swift app's
 /// record ([`SwiftRecord::fingerprint`]) decides first, then the
-/// pairing-time rule ([`HandoverIdentity::adoptable`], whose table gives
+/// pairing-time rule ([`HandoverIdentity::known_by_every_phone`], whose table gives
 /// its outcomes):
 ///
 /// | Swift certificates | The Swift app's record | Result |
@@ -585,14 +585,15 @@ pub fn choose_certificate(
         .into_iter()
         .map(|device| device.paired_at)
         .collect();
-    let (line, reason) = match HandoverIdentity::adoptable(&starts, &paired, (choice.now)()) {
-        Ok(known) => return Ok(Some(certificates.swap_remove(known))),
-        Err(Unavailability::PartlyReplaced) => {
-            (PARTLY_REPLACED_PAIRING, WaitReason::PartlyReplaced)
-        }
-        Err(Unavailability::ClockBehind) => (CLOCK_BEHIND_PAIRING, WaitReason::ClockBehind),
-        Err(_) => (REPLACED_PAIRING, WaitReason::Replaced),
-    };
+    let (line, reason) =
+        match HandoverIdentity::known_by_every_phone(&starts, &paired, (choice.now)()) {
+            Ok(known) => return Ok(Some(certificates.swap_remove(known))),
+            Err(Unavailability::PartlyReplaced) => {
+                (PARTLY_REPLACED_PAIRING, WaitReason::PartlyReplaced)
+            }
+            Err(Unavailability::ClockBehind) => (CLOCK_BEHIND_PAIRING, WaitReason::ClockBehind),
+            Err(_) => (REPLACED_PAIRING, WaitReason::Replaced),
+        };
     Err(NotImported { line, reason })
 }
 
@@ -997,9 +998,9 @@ pub const PARTLY_REPLACED_PAIRING: &str = "Some of your phones were paired befor
 /// The step's line when a pairing or a certificate's start is after now
 /// ([`WaitReason::ClockBehind`]): the iPhone section's sentence for that
 /// reason on the Mac.
-pub const CLOCK_BEHIND_PAIRING: &str = "This Mac's clock reads earlier than when its phone \
-     pairing was made, so Steno cannot tell which pairing your phones know. Check this Mac's \
-     date and time, then choose Try again.";
+pub const CLOCK_BEHIND_PAIRING: &str = "This Mac's date and time are earlier than when its \
+     phone pairing was made, so Steno can't tell which pairing your phones know. Check the date \
+     and time in System Settings, then choose Try again.";
 
 impl ImportStep {
     fn state(&self) -> MutexGuard<'_, StepState> {
