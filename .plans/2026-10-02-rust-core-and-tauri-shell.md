@@ -1085,30 +1085,39 @@ still has to draw the window side. `[ ]` is not ported yet.
   record of the Swift import's store), after setting it aside
   (`files::set_aside`, kept as `handover-identity.json.corrupt-<time>`); a record that
   cannot be opened is neither moved nor replaced, and the read waits as
-  `fileNotOpened`. A rollback to the Swift app leaves the file alone. With nothing
-  recorded (a lost record, or an upgrade from a build without it), the identity found
-  is recorded only when every paired phone knows it, by the `pairedAt` rule
-  (`HandoverIdentity::known_by_every_phone`): a phone paired before a certificate's
-  `notValidBefore` cannot know that identity, so each paired phone knows the newest
-  identity whose `notValidBefore` is at or before its `pairedAt`, and with no phone
-  paired the newest is recorded. Both times come from the computer's clock, and a
-  minted certificate starts a minute before its mint. When no phone knows it, the
-  handover waits as replaced; when some do and the others know another identity or
-  none, it waits as `partlyReplaced`, saying "Phone handover is unavailable: some of
-  your phones were paired before this Mac's pairing changed and can't connect. To
-  reconnect them, choose Pair Again in Settings." ("this computer's" off the Mac), and
-  Settings > iPhone's card says the same and offers Pair again first. A certificate
-  start or a pairing time that cannot be read waits too, and nothing is recorded or
-  minted in any of these. The Swift import chooses its certificate by the same rule
-  (`swift_import::choose_certificate`). Of several under the Swift label (one per
-  keychain in the search list, after an old login keychain was added back beside a
-  new one), the one the Swift app's own record names comes over first; with one, or
-  with no record that names one, the rule decides, and when it settles nothing the
-  import waits, as replaced or partly replaced, never picking the first. The guards
-  never read each other's file. The Rust import reads the Swift record read-only,
-  only to choose among several Swift certificates. Swift keeps its own identity in
-  the Keychain; its guard (#284) records it in `swift-handover-identity.json`, which
-  the import never writes, moves or deletes.
+  `fileNotOpened`. A rollback to the Swift app leaves the file alone. Swift keeps its
+  own identity in the Keychain; its guard (#284) records it in
+  `swift-handover-identity.json`.
+  - With nothing recorded (a lost record, or an upgrade from a build without it), the
+    identity found is recorded only where the `pairedAt` rule adopts it
+    (`HandoverIdentity::adoptable`, whose doc tables the cases): each paired phone
+    knows the newest identity whose `notValidBefore` is at or before its `pairedAt`,
+    as a phone paired before a certificate starts cannot know it; with no phone
+    paired the newest is recorded. Both times come from the computer's clock, and a
+    minted certificate starts a minute before its mint. No phone knowing it waits as
+    replaced; some phones knowing it and the others another identity or none waits as
+    `partlyReplaced`, with "Phone handover is unavailable: some of your phones were
+    paired before this Mac's pairing changed and can't connect. To reconnect them,
+    choose Pair again in Settings > iPhone." ("this computer's" off the Mac; the first
+    sentence is the Swift app's, the second names this app's button), and Settings >
+    iPhone's card says the same and offers Pair again first. Two certificates that
+    start in the same second are no newest one, so the order never decides. A
+    `pairedAt` or `notValidBefore` more than a second after now (the clock went back)
+    waits as `clockBehind`, whose card says to check the date and time, then Try
+    again. A start or a pairing time that cannot be read waits too. Nothing is
+    recorded or minted in any of these, and a recorded fingerprint is never judged by
+    the rule.
+  - The Swift import chooses its certificate by the same rule
+    (`swift_import::choose_certificate`, whose doc tables the cases). Of several under
+    the Swift label (one per keychain in the search list, after an old login keychain
+    was added back beside a new one), the one the Swift app's own record names comes
+    over without the rule. A record naming a certificate the keychain no longer holds
+    waits as replaced, with one certificate or several. With one certificate, a
+    record naming it, or no record that names a fingerprint, the rule decides, and
+    when it settles nothing the import waits, never picking the first.
+  - The guards never read each other's file. The Rust import reads the Swift record
+    read-only, only to choose the Swift certificate it brings over, and never writes,
+    moves or deletes it.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
@@ -3490,7 +3499,7 @@ PR off `main`.
 | WP9b import of the Swift app's preferences, API key and handover identity on the Mac's first launch after the update, behind an onboarding step; `steno-macos` for the PKCS#12 export (S6 of `.plans/2026-10-07-stable-promotion.md`) | `feat/swift-import` | #236 | merged |
 | S7, release mechanics: `v*` tags release the Tauri app as "Steno <version>", the build number (the commit count, above the `appcast` branch's) in `CFBundleVersion`, `check-bundle.sh --signed --handoff`, the signed Sparkle handoff item on tag runs, a stable release as "latest" with `appcast.xml`, the cask and AUR bumps and the flake lines, the `handoff` job behind the `appcast` environment, the 0.11.0 release notes, `release.yml` removed (S7 of `.plans/2026-10-07-stable-promotion.md`; `desktop-release.yml`, `apps/desktop/scripts`) | `ci/desktop-stable-release` | #274 | open |
 | Phone handover waits instead of minting over the identity the paired phones know (a refused or locked read, a missing or replaced identity, the Swift import's export not through): Settings > iPhone says why, Try again reads it again (behind the import's gate, the export) without a restart, and Pair again, after the warning that every phone must pair again, writes the `swift-import-done` marker first and then mints (a Pair again that stopped is finished at the next launch); the gated handover's closed latch keeps a listener built after the shutdown from starting; P30's re-export through a summary re-run after the key is saved (S6 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-services`, `steno-host`, `steno-bridge`, web) | `feat/handover-waiting` | #281 | open |
-| The Swift import's choice among several Swift certificates and the identity's age against the paired phones: of several certificates under the Swift label, the one the Swift app's `swift-handover-identity.json` names (read only), else the one every paired phone knows by the `pairedAt` rule, which `HandoverIdentity::load_or_create` applies too to an identity found with nothing recorded; a choice the phones do not settle waits as replaced or with the new `partlyReplaced` reason, never picking the first; the Swift import's record refuses a file that cannot be opened; the `fileNotOpened` card names disk space (S6 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-services`, `steno-host`, `steno-bridge`, web) | `fix/swift-certificate-choice` | #289 | open |
+| The Swift import's choice among several Swift certificates and the identity's age against the paired phones: of several certificates under the Swift label, the one the Swift app's `swift-handover-identity.json` names (read only; one naming a certificate that is gone waits as replaced), else the one every paired phone knows by the `pairedAt` rule, which `HandoverIdentity::load_or_create` applies too to an identity found with nothing recorded; a choice the phones do not settle waits as replaced or with the new `partlyReplaced` reason, a time after now with the new `clockBehind` reason, never picking the first; the Swift import's record refuses a file that cannot be opened; the `fileNotOpened` card names disk space (S6 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-services`, `steno-host`, `steno-bridge`, web) | `fix/swift-certificate-choice` | #289 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
