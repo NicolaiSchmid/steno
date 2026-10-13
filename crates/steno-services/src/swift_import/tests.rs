@@ -2980,19 +2980,9 @@ fn swift_identity_starting(step: &Step, days: i64) -> Vec<u8> {
 
 /// Pairs one phone at each of `days` after the committed identity's start
 /// (before it when negative).
-fn pair_phones_at(store: &Store, days: &[f64]) {
-    for (id, days) in (1u128..).zip(days) {
-        #[allow(clippy::cast_possible_truncation)]
-        let offset = chrono::TimeDelta::seconds((days * 86_400.0) as i64);
-        let device = steno_core::PairedDevice {
-            id: uuid::Uuid::from_u128(id),
-            name: format!("Phone {id}"),
-            paired_at: fixture_start() + offset,
-            last_seen_at: None,
-        };
-        store
-            .save_paired_device(&device, &id.to_le_bytes().repeat(2))
-            .unwrap();
+fn pair_phones_at(store: &Store, days: &[i64]) {
+    for days in days {
+        crate::testing::pair_a_phone_at(store, fixture_start() + chrono::TimeDelta::days(*days));
     }
 }
 
@@ -3007,7 +2997,7 @@ fn write_swift_record(step: &Step, bytes: &[u8]) -> PathBuf {
 fn swift_record_naming(der: &[u8]) -> Vec<u8> {
     format!(
         "{{\n  \"steno.handoverIdentityFingerprint\": \"{}\"\n}}",
-        hex(&HandoverIdentity::fingerprint_of_der(der))
+        fingerprint_of(der)
     )
     .into_bytes()
 }
@@ -3024,6 +3014,21 @@ fn fingerprint_of(der: &[u8]) -> String {
     hex(&HandoverIdentity::fingerprint_of_der(der))
 }
 
+/// Two Swift certificates under the label (an old login keychain added
+/// back beside a new one): the committed identity's and a newer one
+/// starting 30 days after it, the newer first in the keychain's order when
+/// `newer_first`; `(newer, older)`.
+fn two_swift_certificates(step: &Step, newer_first: bool) -> (Vec<u8>, Vec<u8>) {
+    let newer = swift_identity_starting(step, 30);
+    let older = identity_der();
+    *step.keychain.certificates.lock().unwrap() = if newer_first {
+        vec![newer.clone(), older.clone()]
+    } else {
+        vec![older.clone(), newer.clone()]
+    };
+    (newer, older)
+}
+
 /// Of two Swift certificates (an old login keychain added back beside a
 /// new one), in both orders, the one the Swift app's record names comes
 /// over, whatever the paired phones would choose: the older with no phone
@@ -3035,16 +3040,10 @@ fn of_two_swift_certificates_the_one_the_swift_record_names_comes_over() {
         for named_newer in [false, true] {
             let case = format!("newer first {newer_first}, named the newer {named_newer}");
             let step = step(FakeKeychain::swift_app(), None);
-            let newer = swift_identity_starting(&step, 30);
-            let older = identity_der();
-            *step.keychain.certificates.lock().unwrap() = if newer_first {
-                vec![newer.clone(), older.clone()]
-            } else {
-                vec![older.clone(), newer.clone()]
-            };
+            let (newer, older) = two_swift_certificates(&step, newer_first);
             let named = if named_newer { &newer } else { &older };
             if named_newer {
-                pair_phones_at(&step.store, &[10.0]);
+                pair_phones_at(&step.store, &[10]);
             }
             let record = swift_record_naming(named);
             let path = write_swift_record(&step, &record);
@@ -3084,21 +3083,15 @@ fn of_two_swift_certificates_without_a_record_naming_one_the_phones_choose() {
     for (record, bytes) in records {
         for newer_first in [false, true] {
             for (phones, expected) in [
-                (&[1.0, 29.0][..], Ok(false)),
+                (&[1, 29][..], Ok(false)),
                 (&[][..], Ok(true)),
-                (&[1.0, 31.0][..], Err(WaitReason::PartlyReplaced)),
-                (&[-1.0, 1.0][..], Err(WaitReason::PartlyReplaced)),
-                (&[-2.0, -1.0][..], Err(WaitReason::Replaced)),
+                (&[1, 31][..], Err(WaitReason::PartlyReplaced)),
+                (&[-1, 1][..], Err(WaitReason::PartlyReplaced)),
+                (&[-2, -1][..], Err(WaitReason::Replaced)),
             ] {
                 let case = format!("{record}, newer first {newer_first}, phones {phones:?}");
                 let step = step(FakeKeychain::swift_app(), None);
-                let newer = swift_identity_starting(&step, 30);
-                let older = identity_der();
-                *step.keychain.certificates.lock().unwrap() = if newer_first {
-                    vec![newer.clone(), older.clone()]
-                } else {
-                    vec![older.clone(), newer.clone()]
-                };
+                let (newer, older) = two_swift_certificates(&step, newer_first);
                 let path = step.dir.path().join(SwiftRecord::FILE_NAME);
                 match (record, bytes) {
                     ("unreadable", _) => std::fs::create_dir(&path).unwrap(),
@@ -3152,7 +3145,7 @@ fn one_swift_certificate_ignores_the_swift_record() {
         let other = swift_identity_starting(&step, 30);
         let record = swift_record_naming(&other);
         let path = write_swift_record(&step, &record);
-        pair_phones_at(&step.store, &[1.0]);
+        pair_phones_at(&step.store, &[1]);
         assert_eq!(step.import.run().stage, SwiftImportStage::Done);
         assert_eq!(
             exported_and_stored(&step),
@@ -3164,7 +3157,7 @@ fn one_swift_certificate_ignores_the_swift_record() {
     // that predates it.
     let step = step(FakeKeychain::swift_app(), None);
     let path = write_swift_record(&step, &swift_record_naming(&identity_der()));
-    pair_phones_at(&step.store, &[-1.0]);
+    pair_phones_at(&step.store, &[-1]);
     assert_eq!(step.import.run().stage, SwiftImportStage::Waiting);
     assert_eq!(
         step.graph.gate.handover(),
@@ -3182,7 +3175,7 @@ fn one_swift_certificate_ignores_the_swift_record() {
 #[test]
 fn a_swift_certificate_the_phones_predate_waits_and_the_old_one_comes_over_once_it_is_back() {
     let step = step(FakeKeychain::swift_app(), None);
-    pair_phones_at(&step.store, &[-20.0, -10.0]);
+    pair_phones_at(&step.store, &[-20, -10]);
     let status = step.import.run();
     assert_eq!(status.stage, SwiftImportStage::Waiting);
     assert_eq!(status.error.as_deref(), Some(REPLACED_PAIRING));
@@ -3211,7 +3204,7 @@ fn a_swift_certificate_the_phones_predate_waits_and_the_old_one_comes_over_once_
     assert!(step.preferences.flag(IMPORT_RAN_KEY));
 
     let step = super::tests::step(FakeKeychain::swift_app(), None);
-    pair_phones_at(&step.store, &[-10.0, 10.0]);
+    pair_phones_at(&step.store, &[-10, 10]);
     let status = step.import.run();
     assert_eq!(status.error.as_deref(), Some(PARTLY_REPLACED_PAIRING));
     assert_eq!(
@@ -3242,7 +3235,7 @@ fn a_start_or_a_pairing_time_that_cannot_be_read_waits_as_a_failed_lookup() {
     assert_eq!(exported_and_stored(&step), (vec![], None));
 
     let step = super::tests::step(FakeKeychain::swift_app(), None);
-    pair_phones_at(&step.store, &[1.0]);
+    pair_phones_at(&step.store, &[1]);
     step.store
         .write(|transaction| {
             Ok(transaction.execute_batch("UPDATE pairedDevice SET pairedAt = 'yesterday';")?)

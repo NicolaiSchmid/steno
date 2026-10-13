@@ -19,7 +19,7 @@
 
 #![cfg(target_os = "macos")]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use security_framework::certificate::SecCertificate;
 use security_framework::item::{
@@ -106,17 +106,7 @@ fn the_swift_identity_exports_from_a_keychain_and_keeps_its_fingerprint_and_mac_
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let path: PathBuf = dir.path().join("steno-import-test.keychain-db");
-    let password = "steno-keychain-test";
-    let mut keychain = CreateOptions::new()
-        .password(password)
-        .prompt_user(false)
-        .create(&path)
-        .unwrap();
-    let _delete = Throwaway(Some(keychain.clone()));
-    let mut opened = SecKeychain::open(&path).unwrap();
-    opened.unlock(Some(password)).unwrap();
-    keychain.unlock(Some(password)).unwrap();
+    let (opened, _delete) = throwaway_keychain(&dir.path().join("steno-import-test.keychain-db"));
     // Any prompt now fails the call instead of waiting for a person.
     let _no_prompts = SecKeychain::disable_user_interaction().unwrap();
 

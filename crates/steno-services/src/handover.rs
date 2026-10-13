@@ -1329,18 +1329,7 @@ mod tests {
         let paired = Paired::new(true).await;
         std::fs::remove_file(paired.dir.path().join("handover-identity.json")).unwrap();
         let start = paired.identity.not_valid_before().unwrap();
-        paired
-            .store
-            .save_paired_device(
-                &steno_core::PairedDevice {
-                    id: Uuid::new_v4(),
-                    name: "Older phone".to_owned(),
-                    paired_at: start - chrono::TimeDelta::days(1),
-                    last_seen_at: None,
-                },
-                &[9; 32],
-            )
-            .unwrap();
+        crate::testing::pair_a_phone_at(&paired.store, start - chrono::TimeDelta::days(1));
         let handover = ListenerHandover::read(paired.source());
         assert_eq!(handover.waiting(), Some(PhoneWaitingReason::PartlyReplaced));
         assert_eq!(
