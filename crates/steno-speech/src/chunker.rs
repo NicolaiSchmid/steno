@@ -25,6 +25,7 @@
 //! up to it.
 //! Swift: none; `FluidAudio`'s `ChunkProcessor` cuts at fixed 15 s strides.
 
+use std::iter;
 use std::ops::Range;
 
 use crate::backend::{SAMPLE_RATE, sample_count};
@@ -258,27 +259,25 @@ pub const MIN_GAP_SECONDS: f32 = 2.5;
 /// no sound to decode: on the calibration corpus two windows in three.
 #[must_use]
 pub fn gap_windows(audio: &[f32], chunks: &[Chunk], config: &ChunkerConfig) -> Vec<Range<usize>> {
-    let mut windows = Vec::new();
     if !config.decode_gaps {
-        return windows;
+        return Vec::new();
     }
     let total = audio.len();
     let max = sample_count(config.max_seconds).max(1);
     let overlap = sample_count(config.overlap_seconds).min(max - 1);
     let shortest = sample_count(MIN_GAP_SECONDS);
-    let mut stretches = Vec::new();
+    let mut windows = Vec::new();
     let mut covered = 0;
-    for chunk in chunks {
-        if chunk.range.start > covered {
-            stretches.push(covered..chunk.range.start);
+    // The empty range at the end closes the tail.
+    for next in chunks
+        .iter()
+        .map(|c| c.range.clone())
+        .chain(iter::once(total..total))
+    {
+        if next.start >= covered + shortest {
+            split(covered..next.start, max, overlap, &mut windows);
         }
-        covered = covered.max(chunk.range.end);
-    }
-    if total > covered {
-        stretches.push(covered..total);
-    }
-    for stretch in stretches.into_iter().filter(|s| s.len() >= shortest) {
-        split(stretch, max, overlap, &mut windows);
+        covered = covered.max(next.end);
     }
     windows.retain(|window| audio[window.clone()].iter().any(|&x| x != 0.0));
     windows
