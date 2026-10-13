@@ -71,9 +71,16 @@ impl HeldOutages {
         backend
     }
 
-    /// Lets the next held outage of every backend kept go.
+    /// Lets the next held outage of every backend kept go. Call it once
+    /// the start built the capture: a release saves nothing for a backend
+    /// built later.
     pub fn release(&self) {
-        for backend in self.0.lock().unwrap().iter() {
+        let backends = self.0.lock().unwrap();
+        assert!(
+            !backends.is_empty(),
+            "released before the start built the capture"
+        );
+        for backend in backends.iter() {
             backend.release_outage();
         }
     }

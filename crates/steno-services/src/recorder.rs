@@ -3865,7 +3865,10 @@ mod tests {
         );
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        eventually("the writer died", || died.load(Ordering::SeqCst)).await;
+        eventually_within(HANG_GUARD, "the writer died", || {
+            died.load(Ordering::SeqCst)
+        })
+        .await;
         stop(&harness.recorder);
 
         let status = harness.recorder.status();
@@ -3913,7 +3916,10 @@ mod tests {
             );
             start(&harness.recorder);
             let meeting_id = harness.recorder.status().meeting_id.unwrap();
-            eventually("the writer died", || died.load(Ordering::SeqCst)).await;
+            eventually_within(HANG_GUARD, "the writer died", || {
+                died.load(Ordering::SeqCst)
+            })
+            .await;
             let audio = harness.dir.path().join("audio");
             let unmounted = harness.dir.path().join("unmounted");
             let meeting_folder = steno_core::RecordingLayout::new(&audio, meeting_id).directory;
