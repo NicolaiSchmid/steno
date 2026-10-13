@@ -1540,72 +1540,111 @@ async fn settings_try_again_or_pair_again_ends_a_denied_export() {
 /// denied export writes the marker and the new identity, then stops while
 /// the phones are removed (the database refuses to delete the last phone,
 /// with one paired or with two), the window in which the phones would stay
-/// listed beside an identity they do not know. The next
-/// launch finds the marker, so no import runs, and the handover's read
-/// finishes the Pair again: no phone listed, the new fingerprint recorded
-/// and the note dropped, no mint, no export, and the admission ledger as
-/// it was.
+/// listed beside an identity they do not know.
+///
+/// The next launch finds the marker, so no import runs, and the
+/// handover's read finishes the Pair again: no phone listed, the new
+/// fingerprint recorded and the note dropped, no mint, no export, and the
+/// admission ledger as it was. Try again in the same launch, where the
+/// gate still waits, runs the import instead: the export brings the Swift
+/// pairing back over the new identity and records it, which drops the
+/// note, and the listener comes up over it with the phone still listed,
+/// which knows it; the admission ledger is as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_import_pair_again_that_stopped_is_finished_at_the_next_launch() {
+async fn an_import_pair_again_that_stopped_is_decided_by_the_next_read() {
     use steno_handover::FingerprintRecord as _;
     use steno_host::services::Handover as _;
 
+    const SWIFT_MAC_ID: &str = "FCF0D2A1-D2CE-48F7-BAFF-E17FD2E9C814";
     for stop in ["after the write", "after phone 1 of 2"] {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = steno_core::StenoPaths::new(dir.path().join("support"));
-        let record = record_in(&paths.support_directory);
-        let keychain = Arc::new(FakeKeychain::swift_app());
-        keychain.deny_export();
-        let app = build_over(paths.clone(), keychain.clone());
-        crate::testing::pair_a_phone(&app.store);
-        if stop == "after phone 1 of 2" {
+        for read in ["the next launch", "Try again"] {
+            let case = format!("{stop}, {read}");
+            let dir = tempfile::tempdir().unwrap();
+            let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+            let record = record_in(&paths.support_directory);
+            let keychain = Arc::new(FakeKeychain::swift_app());
+            keychain.deny_export();
+            let app = build_over(paths.clone(), keychain.clone());
             crate::testing::pair_a_phone(&app.store);
-        }
-        let admitted = crate::testing::admit_a_recording(&app.store);
-        let step = app.services.swift_import.clone().unwrap();
-        let status = tokio::task::spawn_blocking(move || step.run())
-            .await
-            .unwrap();
-        assert_eq!(status.stage, SwiftImportStage::Waiting);
-        assert_eq!(record.recorded().unwrap(), None, "{stop}: nothing recorded");
+            if stop == "after phone 1 of 2" {
+                crate::testing::pair_a_phone(&app.store);
+            }
+            let admitted = crate::testing::admit_a_recording(&app.store);
+            let step = app.services.swift_import.clone().unwrap();
+            let status = tokio::task::spawn_blocking(move || step.run())
+                .await
+                .unwrap();
+            assert_eq!(status.stage, SwiftImportStage::Waiting);
+            assert_eq!(record.recorded().unwrap(), None, "{case}: nothing recorded");
 
-        crate::testing::keep_the_last_phone(&app.store, true);
-        let gated = app.gated_handover.clone().unwrap();
-        tokio::task::block_in_place(|| gated.pair_again()).unwrap_err();
-        assert_eq!(*keychain.marker.lock().unwrap(), Ok(true), "{stop}");
-        let next = record.next().unwrap().expect("the note");
-        assert_eq!(record.recorded().unwrap(), None, "{stop}");
-        assert_eq!(app.store.paired_devices().unwrap().len(), 1, "{stop}");
-        crate::testing::keep_the_last_phone(&app.store, false);
-        app.shutdown();
-        drop(app);
+            crate::testing::keep_the_last_phone(&app.store);
+            let gated = app.gated_handover.clone().unwrap();
+            tokio::task::block_in_place(|| gated.pair_again()).unwrap_err();
+            assert_eq!(*keychain.marker.lock().unwrap(), Ok(true), "{case}");
+            let next = record.next().unwrap().expect("the note");
+            assert_eq!(record.recorded().unwrap(), None, "{case}");
+            assert_eq!(app.store.paired_devices().unwrap().len(), 1, "{case}");
+            crate::testing::let_the_last_phone_go(&app.store);
 
-        let app =
-            crate::build_with_import(test_options(paths), |preferences| {
+            if read == "Try again" {
+                let follow = tokio::spawn(gated.clone().follow(|| {}));
+                keychain.allow_export();
+                tokio::task::block_in_place(|| gated.try_again()).unwrap();
+                tokio::time::timeout(crate::testing::PATIENCE, follow)
+                    .await
+                    .expect("the listener comes up")
+                    .unwrap();
+                assert_eq!(gated.waiting(), None, "{case}: the gate opened");
+                assert_eq!(gated.mac_id(), SWIFT_MAC_ID, "{case}: the Swift pairing");
+                assert_eq!(
+                    record.recorded().unwrap().as_deref(),
+                    Some(FIXTURE_FINGERPRINT),
+                    "{case}: the Swift fingerprint recorded"
+                );
+                assert_eq!(record.next().unwrap(), None, "{case}: the note dropped");
+                assert_eq!(
+                    tokio::task::block_in_place(|| gated.paired_devices())
+                        .unwrap()
+                        .len(),
+                    1,
+                    "{case}: the phone left, which knows the Swift pairing"
+                );
+                assert_eq!(keychain.count("export"), 2, "{case}: exported again");
+                assert!(
+                    admitted.is_unchanged(&app.store),
+                    "{case}: the ledger as it was"
+                );
+                app.shutdown();
+                continue;
+            }
+            app.shutdown();
+            drop(app);
+
+            let app = crate::build_with_import(test_options(paths), |preferences| {
                 match launch_at_home(preferences, keychain.clone()) {
                     Launch::Pending(pending) => Some(pending),
                     Launch::Done | Launch::Skipped(_) => None,
                 }
             })
             .unwrap();
-        assert!(app.gated_handover.is_none(), "{stop}: the import is over");
-        let handover = app.handover.clone().expect("the listener at the launch");
-        assert_eq!(handover.waiting(), None, "{stop}: finished");
-        assert!(
-            tokio::task::block_in_place(|| handover.paired_devices())
-                .unwrap()
-                .is_empty(),
-            "{stop}: no phone listed"
-        );
-        assert_eq!(record.recorded().unwrap(), Some(next), "{stop}: no mint");
-        assert_eq!(record.next().unwrap(), None, "{stop}: the note dropped");
-        assert_eq!(keychain.count("export"), 1, "{stop}: no export");
-        assert_eq!(
-            app.store.admitted_meeting(admitted.0, 4, &[7; 32]).unwrap(),
-            Some(admitted.1),
-            "{stop}: the ledger as it was"
-        );
-        app.shutdown();
+            assert!(app.gated_handover.is_none(), "{case}: the import is over");
+            let handover = app.handover.clone().expect("the listener at the launch");
+            assert_eq!(handover.waiting(), None, "{case}: finished");
+            assert!(
+                tokio::task::block_in_place(|| handover.paired_devices())
+                    .unwrap()
+                    .is_empty(),
+                "{case}: no phone listed"
+            );
+            assert_eq!(record.recorded().unwrap(), Some(next), "{case}: no mint");
+            assert_eq!(record.next().unwrap(), None, "{case}: the note dropped");
+            assert_eq!(keychain.count("export"), 1, "{case}: no export");
+            assert!(
+                admitted.is_unchanged(&app.store),
+                "{case}: the ledger as it was"
+            );
+            app.shutdown();
+        }
     }
 }
 

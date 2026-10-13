@@ -127,17 +127,31 @@ impl HandoverIdentity {
     /// fingerprint and no identity is one minted.
     ///
     /// An unfinished Pair again ([`HandoverIdentity::mint_anew`] stopped or
-    /// crashed after it noted the next fingerprint) is decided here, so
-    /// every read applies the same rule (the launch, Try again, the import's
-    /// gate opening and the reread after an unlock):
+    /// crashed after it noted the next fingerprint, so its note,
+    /// [`FingerprintRecord::next`], is still in `record`) is decided here,
+    /// so every read applies the same rule: the launch, a plain handover's
+    /// Try again, the import's gate opening and the reread after an unlock.
+    /// Behind the import's waiting gate, Try again runs the import instead;
+    /// its store records the Swift identity, which ends the note like every
+    /// record.
     ///
     /// | The secret store holds | Case | The load |
     /// |------------------------|------|----------|
     /// | the identity whose fingerprint is the next one | finished | removes the paired phones, records the fingerprint (which drops the note) and answers the identity; no mint, the admission ledger untouched |
     /// | the identity whose fingerprint is the recorded one, or no identity | abandoned | drops the note, then reads as it does without one (the identity, [`Unavailability::Missing`], or a mint where the guard allows) |
-    /// | another identity | unknown | keeps the note and refuses it as [`Unavailability::Replaced`]; writes nothing |
-    /// | cannot be read | undecided | keeps the note and refuses as [`Unavailability::Unreadable`]; writes nothing, the next read decides |
+    /// | any other identity, which is every identity but the next one while nothing is recorded | unknown | keeps the note and refuses it as [`Unavailability::Replaced`]; writes nothing |
+    /// | cannot be read | undecided | keeps the note and refuses as [`Unavailability::Unreadable`]; writes nothing |
     ///
+    /// Where each stop of a Pair again lands:
+    /// - A stop before the write, or a write the secret store refused, is
+    ///   abandoned. It is unknown instead where nothing is recorded and an
+    ///   identity is stored, as after Pair again set an unreadable record
+    ///   aside.
+    /// - A write reported as refused that landed after all, and every stop
+    ///   after the write, is finished.
+    ///
+    /// Undecided is the read's error, abandoned with no identity is the
+    /// half before the match, and without a note the guard above applies.
     /// A note that cannot be dropped in the abandoned case is logged and
     /// left: the next read finds the same case.
     pub async fn load_or_create(
@@ -167,18 +181,18 @@ impl HandoverIdentity {
         let identity = Self::from_pem(&stored)?;
         let fingerprint = hex(&identity.fingerprint());
         match (next, recorded) {
-            // Finished: the identity an unfinished Pair again wrote.
+            // Finished.
             (Some(next), _) if next == fingerprint => {
                 remove_paired_phones(store)?;
                 identity.record_fingerprint(record)?;
             }
-            // The recorded identity; a note beside it was abandoned.
+            // The recorded identity: abandoned when noted.
             (next, Some(recorded)) if recorded == fingerprint => {
                 if next.is_some() {
                     drop_the_note(record);
                 }
             }
-            // Unknown, or another identity than the recorded one.
+            // Unknown when noted, replaced when not.
             (Some(_), None) | (_, Some(_)) => return Err(Unavailability::Replaced.into()),
             // Found without a record: recorded again.
             (None, None) => identity.record_fingerprint(record)?,
@@ -188,18 +202,25 @@ impl HandoverIdentity {
 
     /// Pair again's identity step, the user's choice when the identity the
     /// paired phones know cannot be read or is gone (stable plan S6): a new
-    /// identity is minted with `common_name`, its fingerprint noted as the
-    /// next one in `record`, the identity written to `secrets`, every
-    /// paired phone removed from `store`, then the fingerprint recorded,
-    /// which drops the note in the same write. Every phone must pair again.
-    /// The one mint over an identity that may exist. A step that fails
-    /// stops the rest, and the order keeps what it leaves safe: a note that
-    /// cannot be written stops before the write; a write that `secrets`
-    /// refuses changes nothing (the note is dropped again, and the phones,
-    /// the fingerprint and the old identity stay); a stop or a crash after
-    /// the write, before or after the phones go, is finished by the next
-    /// load ([`HandoverIdentity::load_or_create`]), whether or not a
-    /// fingerprint was recorded before.
+    /// identity is minted with `common_name`. Then:
+    /// 1. Its fingerprint is noted as the next one in `record`. Over a
+    ///    record that does not parse, the record is set aside first
+    ///    ([`FingerprintRecord::note_next`]).
+    /// 2. The identity is written to `secrets`.
+    /// 3. Every paired phone is removed from `store`.
+    /// 4. Its fingerprint is recorded, which drops the note in the same
+    ///    write.
+    ///
+    /// Every phone must pair again. This is the one mint over an identity
+    /// that may exist. A step that fails stops the rest and leaves the note
+    /// where it is. A note that cannot be written stops before the write
+    /// ([`IdentityError::Note`]). Every later stop, a refused write
+    /// included, is decided by the next load
+    /// ([`HandoverIdentity::load_or_create`]):
+    /// - a write that did not land is abandoned there;
+    /// - a write that landed, even one the store reported as refused, and
+    ///   every stop after it, is finished;
+    /// - this holds whether or not a fingerprint was recorded before.
     pub async fn mint_anew(
         secrets: &dyn SecretStore,
         record: &dyn FingerprintRecord,
@@ -210,11 +231,8 @@ impl HandoverIdentity {
         let minted = Self::mint(common_name, now)?;
         record
             .note_next(Some(&hex(&minted.fingerprint())))
-            .map_err(IdentityError::Record)?;
-        if let Err(error) = minted.write_secret(secrets).await {
-            drop_the_note(record);
-            return Err(error);
-        }
+            .map_err(IdentityError::Note)?;
+        minted.write_secret(secrets).await?;
         remove_paired_phones(store)?;
         minted.record_fingerprint(record)?;
         Ok(minted)
@@ -357,9 +375,9 @@ fn remove_paired_phones(store: &Store) -> Result<(), IdentityError> {
     Ok(())
 }
 
-/// Drops the next fingerprint where the Pair again it stood for changed
-/// nothing; one that cannot be dropped is logged and left, as the next
-/// load finds it abandoned again.
+/// Drops the note where the Pair again it stood for changed nothing (the
+/// load's abandoned case); one that cannot be dropped is logged and left,
+/// as the next load finds it abandoned again.
 fn drop_the_note(record: &dyn FingerprintRecord) {
     if let Err(error) = record.note_next(None) {
         tracing::warn!(%error, "the note of an unfinished Pair again was not dropped");
@@ -375,13 +393,17 @@ pub trait FingerprintRecord: Send + Sync {
     /// The recorded fingerprint, `None` when nothing is recorded.
     fn recorded(&self) -> Result<Option<String>, BoxError>;
     /// Records `fingerprint`, replacing what was recorded, and drops the
-    /// next fingerprint in the same write.
+    /// note in the same write.
     fn record(&self, fingerprint: &str) -> Result<(), BoxError>;
-    /// The next fingerprint: that of the identity an unfinished Pair again
-    /// is writing ([`HandoverIdentity::mint_anew`]); `None` when none is.
+    /// The next fingerprint, kept in the note of an unfinished Pair again:
+    /// that of the identity it is writing ([`HandoverIdentity::mint_anew`]);
+    /// `None` when there is no note.
     fn next(&self) -> Result<Option<String>, BoxError>;
-    /// `Some` notes the next fingerprint and keeps the recorded one;
-    /// `None` drops it.
+    /// Pair again's note. `Some` notes the next fingerprint beside the
+    /// recorded one. Over a record that does not parse, it starts a new
+    /// record and keeps the old one where the user can find it, so nothing
+    /// is recorded after it. `None` drops the note and never replaces
+    /// anything.
     fn note_next(&self, fingerprint: Option<&str>) -> Result<(), BoxError>;
 }
 
@@ -434,6 +456,10 @@ pub enum IdentityError {
     Store(#[from] StoreError),
     #[error("the identity's fingerprint record: {0}")]
     Record(BoxError),
+    /// Pair again could not note the next fingerprint, so it stopped
+    /// before it wrote anything ([`HandoverIdentity::mint_anew`]).
+    #[error("noting the next fingerprint in the identity's record: {0}")]
+    Note(BoxError),
     /// Not minted ([`Unavailability`] says why).
     #[error(transparent)]
     Unavailable(#[from] Unavailability),

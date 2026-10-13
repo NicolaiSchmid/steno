@@ -66,15 +66,18 @@
 //! | Run: export or store denied or failed | | Waiting (Try again) | nothing |
 //! | Run: identity stored, its fingerprint not recorded | | Waiting (Try again repeats the store) | the identity; no marker, no `IMPORT_RAN` |
 //! | Settings' Try again while Waiting | | as a run | as a run |
-//! | Settings' Pair again while Waiting | | Ready | the marker, then the next fingerprint noted, then the new identity, then the paired phones removed, then its fingerprint recorded (dropping the note), then `IMPORT_RAN` |
+//! | Settings' Pair again while Waiting | | Ready | the marker, then the next fingerprint noted (a record that does not parse set aside first), then the new identity, then the paired phones removed, then its fingerprint recorded (dropping the note), then `IMPORT_RAN`; a stop leaves the note |
 //! | Not now, or the window closed | withheld (open when no key item) | Waiting | nothing: the step returns at the next launch |
 //! | A key saved in Settings | open | | the key; `KEY_DENIED` cleared |
 //! | Later launch with `KEY_DENIED` | withheld until a key is saved | | nothing |
 //!
 //! A later launch finds the marker, so a Pair again that stopped is
-//! finished by the handover's read
+//! decided by the handover's read
 //! ([`HandoverIdentity::load_or_create`](steno_handover::HandoverIdentity::load_or_create)),
-//! not by the import.
+//! not by the import. In the same launch the gate still waits, and Try
+//! again runs the import again: it stores the Swift pairing over what Pair
+//! again wrote and records it, which ends the note. Phones the stopped
+//! Pair again already removed pair again.
 //!
 //! The pipeline reloads whenever the key gate changes, before the
 //! handover gate is published, so a launch's held work runs on the

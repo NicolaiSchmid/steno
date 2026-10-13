@@ -357,18 +357,25 @@ pub fn pair_a_phone(store: &Store) {
         .unwrap();
 }
 
-/// While `keep`, keeps the last paired phone in `store` whatever deletes
-/// it, as a disk that refuses the write would: Pair again stops right
-/// after the write with one phone paired, and after the first phone with
-/// two.
-pub fn keep_the_last_phone(store: &Store, keep: bool) {
-    let sql = if keep {
+/// Keeps the last paired phone in `store` whatever deletes it, as a disk
+/// that refuses the write would, until [`let_the_last_phone_go`]: Pair
+/// again stops right after the write with one phone paired, and after the
+/// first phone with two.
+pub fn keep_the_last_phone(store: &Store) {
+    execute(
+        store,
         "CREATE TRIGGER keep_the_last_phone BEFORE DELETE ON pairedDevice \
          WHEN (SELECT COUNT(*) FROM pairedDevice) = 1 \
-         BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;"
-    } else {
-        "DROP TRIGGER keep_the_last_phone;"
-    };
+         BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;",
+    );
+}
+
+/// Lets the phone [`keep_the_last_phone`] kept go again.
+pub fn let_the_last_phone_go(store: &Store) {
+    execute(store, "DROP TRIGGER keep_the_last_phone;");
+}
+
+fn execute(store: &Store, sql: &str) {
     store
         .write(|transaction| {
             transaction.execute_batch(sql)?;
@@ -377,10 +384,25 @@ pub fn keep_the_last_phone(store: &Store, keep: bool) {
         .unwrap();
 }
 
+/// A recording [`admit_a_recording`] delivered into a meeting.
+pub struct Admitted {
+    pub recording: uuid::Uuid,
+    pub meeting: uuid::Uuid,
+}
+
+impl Admitted {
+    /// The recording still reads as delivered into its meeting, which is
+    /// still there.
+    pub fn is_unchanged(&self, store: &Store) -> bool {
+        store.admitted_meeting(self.recording, 4, &[7; 32]).unwrap() == Some(self.meeting)
+            && store.meeting(self.meeting).unwrap().is_some()
+    }
+}
+
 /// Admits a recording of the first paired phone in `store` as a meeting,
 /// with its `complete` receipt and its row in the admission ledger (4
-/// bytes, SHA-256 `[7; 32]`): the recording's and the meeting's ids.
-pub fn admit_a_recording(store: &Store) -> (uuid::Uuid, uuid::Uuid) {
+/// bytes, SHA-256 `[7; 32]`).
+pub fn admit_a_recording(store: &Store) -> Admitted {
     let now = chrono::Utc::now();
     let meeting = steno_core::Meeting {
         id: uuid::Uuid::new_v4(),
@@ -414,7 +436,10 @@ pub fn admit_a_recording(store: &Store) -> (uuid::Uuid, uuid::Uuid) {
     store
         .save_admission_durably(&receipt, &meeting, &asset)
         .unwrap();
-    (recording, meeting.id)
+    Admitted {
+        recording,
+        meeting: meeting.id,
+    }
 }
 
 /// Waits until `done` holds, failing the test with `what` after

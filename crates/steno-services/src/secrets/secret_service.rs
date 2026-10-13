@@ -847,6 +847,17 @@ impl Keyring {
 /// record that cannot be read, or a file identity that does not parse,
 /// leaves the record as it is (the load refuses over the first, and the
 /// second pins nothing).
+///
+/// Its record drops the note of an unfinished Pair again. The move runs
+/// inside the first Secret Service choice, which settles before the
+/// handover's first read, so the only window in which it can meet a note
+/// is a Pair again chosen while the move's unlock prompt is up. That Pair
+/// again's write is refused because the keyring is unlocking, and the next
+/// read waits as replaced (the pinned fingerprint against the service's
+/// identity); it never mints. A note written over a pin that landed
+/// between the note's read and its write leaves the note with nothing
+/// recorded beside the service's identity, which reads as unknown and
+/// waits as replaced too.
 fn pin_file_identity(record: &FingerprintFile, pem: &str) -> Result<(), ServiceError> {
     if !matches!(record.recorded(), Ok(None)) {
         return Ok(());

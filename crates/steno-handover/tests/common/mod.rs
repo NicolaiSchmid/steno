@@ -1323,15 +1323,15 @@ pub async fn engine_hello(test: &TestService) -> HandoverResponse {
 /// is.
 #[derive(Default)]
 pub struct MemoryRecord {
-    pub value: Mutex<Option<String>>,
+    pub recorded: Mutex<Option<String>>,
     pub next: Mutex<Option<String>>,
     pub refuse: AtomicBool,
     pub refuse_note: AtomicBool,
 }
 
 impl MemoryRecord {
-    pub fn get(&self) -> Option<String> {
-        self.value.lock().unwrap().clone()
+    pub fn get_recorded(&self) -> Option<String> {
+        self.recorded.lock().unwrap().clone()
     }
 
     pub fn get_next(&self) -> Option<String> {
@@ -1341,14 +1341,14 @@ impl MemoryRecord {
 
 impl steno_handover::FingerprintRecord for MemoryRecord {
     fn recorded(&self) -> BoundaryResult<Option<String>> {
-        Ok(self.get())
+        Ok(self.get_recorded())
     }
 
     fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
         if self.refuse.load(Ordering::SeqCst) {
             return Err("No space left on device".into());
         }
-        *self.value.lock().unwrap() = Some(fingerprint.to_owned());
+        *self.recorded.lock().unwrap() = Some(fingerprint.to_owned());
         *self.next.lock().unwrap() = None;
         Ok(())
     }

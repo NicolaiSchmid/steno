@@ -122,13 +122,16 @@ fn the_swift_test_identity_hashes_to_its_recorded_fingerprint() {
 }
 
 /// A secret store in memory that refuses reads or writes while
-/// `refuse_reads` or `refuse_writes` is set.
+/// `refuse_reads` or `refuse_writes` is set; while `keep_and_refuse` is,
+/// it takes a write and then reports it refused, as a reply lost after the
+/// save does.
 #[derive(Default)]
 struct MemorySecrets {
     values: Mutex<Vec<(SecretKey, String)>>,
     reads: Mutex<u32>,
     refuse_reads: AtomicBool,
     refuse_writes: AtomicBool,
+    keep_and_refuse: AtomicBool,
 }
 
 #[steno_core::async_trait]
@@ -155,6 +158,9 @@ impl SecretStore for MemorySecrets {
         values.retain(|(stored, _)| stored != key);
         if let Some(value) = value {
             values.push((key.clone(), value.to_owned()));
+        }
+        if self.keep_and_refuse.load(Ordering::SeqCst) {
+            return Err("the keyring did not answer".into());
         }
         Ok(())
     }
@@ -209,18 +215,22 @@ impl Places {
         }
     }
 
-    /// While `keep`, keeps the last paired phone whatever deletes it, as a
-    /// disk that refuses the write would: Pair again stops right after the
-    /// write with one phone paired, and after the first phone with two.
-    fn keep_the_last_phone(&self, keep: bool) {
-        let sql = if keep {
+    /// Keeps the last paired phone whatever deletes it, as a disk that
+    /// refuses the write would, until [`Places::let_the_last_phone_go`]:
+    /// Pair again stops right after the write with one phone paired, and
+    /// after the first phone with two.
+    fn keep_the_last_phone(&self) {
+        common::execute_batch(
+            self.store(),
             "CREATE TRIGGER keep_the_last_phone BEFORE DELETE ON pairedDevice \
              WHEN (SELECT COUNT(*) FROM pairedDevice) = 1 \
-             BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;"
-        } else {
-            "DROP TRIGGER keep_the_last_phone;"
-        };
-        common::execute_batch(self.store(), sql);
+             BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;",
+        );
+    }
+
+    /// Lets the phone [`Places::keep_the_last_phone`] kept go again.
+    fn let_the_last_phone_go(&self) {
+        common::execute_batch(self.store(), "DROP TRIGGER keep_the_last_phone;");
     }
 
     /// The stored identity, the recorded fingerprint, the next fingerprint
@@ -235,7 +245,7 @@ impl Places {
     ) {
         (
             self.stored_pem(),
-            self.record.get(),
+            self.record.get_recorded(),
             self.record.get_next(),
             self.store()
                 .paired_devices()
@@ -278,7 +288,7 @@ async fn load_or_create_mints_once_and_reloads_the_same_identity() {
     assert!(stored.starts_with("-----BEGIN CERTIFICATE-----"));
     assert_eq!(HandoverIdentity::secret_key().as_str(), "handover-identity");
     assert_eq!(
-        places.record.get(),
+        places.record.get_recorded(),
         Some(hex(&first.fingerprint())),
         "the mint records the fingerprint"
     );
@@ -319,7 +329,7 @@ async fn with_a_phone_paired_a_missing_identity_is_unavailable_not_minted() {
         "the reason says what a mint would cost: {error}"
     );
     assert_eq!(places.stored_pem(), None, "nothing minted");
-    assert_eq!(places.record.get(), None);
+    assert_eq!(places.record.get_recorded(), None);
 }
 
 #[tokio::test]
@@ -332,7 +342,7 @@ async fn with_a_fingerprint_recorded_a_missing_identity_is_unavailable_not_minte
         "{error}"
     );
     assert_eq!(places.stored_pem(), None, "nothing minted");
-    assert_eq!(places.record.get().as_deref(), Some("ab12"));
+    assert_eq!(places.record.get_recorded().as_deref(), Some("ab12"));
 }
 
 #[tokio::test]
@@ -359,7 +369,10 @@ async fn an_identity_with_another_fingerprint_is_unavailable_and_both_stay() {
             .ends_with("a new identity would make every phone pair again"),
         "{error}"
     );
-    assert_eq!(places.record.get(), Some(hex(&paired.fingerprint())));
+    assert_eq!(
+        places.record.get_recorded(),
+        Some(hex(&paired.fingerprint()))
+    );
     assert_eq!(places.stored_pem(), Some(other_pem), "neither is replaced");
 }
 
@@ -380,7 +393,10 @@ async fn an_identity_found_without_a_record_is_kept_and_recorded_again() {
     places.pair_a_phone();
     let loaded = places.load("x").await.unwrap();
     assert_eq!(loaded.fingerprint(), identity.fingerprint());
-    assert_eq!(places.record.get(), Some(hex(&identity.fingerprint())));
+    assert_eq!(
+        places.record.get_recorded(),
+        Some(hex(&identity.fingerprint()))
+    );
 }
 
 /// A secret store that cannot be read (a locked keyring) is unavailable,
@@ -410,7 +426,7 @@ async fn an_unreadable_secret_store_is_unavailable_not_minted() {
         "{error}"
     );
     assert!(error.to_string().contains("locked"), "{error}");
-    assert_eq!(places.record.get(), None);
+    assert_eq!(places.record.get_recorded(), None);
 }
 
 #[tokio::test]
@@ -421,7 +437,10 @@ async fn store_writes_the_identity_and_records_its_fingerprint() {
         .store(&places.secrets, &places.record)
         .await
         .unwrap();
-    assert_eq!(places.record.get(), Some(hex(&identity.fingerprint())));
+    assert_eq!(
+        places.record.get_recorded(),
+        Some(hex(&identity.fingerprint()))
+    );
     assert_eq!(places.stored_pem(), Some(identity.to_pem().unwrap()));
     places.pair_a_phone();
     let loaded = places.load("x").await.unwrap();
@@ -441,7 +460,10 @@ async fn store_replaces_an_identity_and_a_fingerprint_recorded_before() {
         .await
         .unwrap();
     assert_ne!(first.fingerprint(), replacement.fingerprint());
-    assert_eq!(places.record.get(), Some(hex(&replacement.fingerprint())));
+    assert_eq!(
+        places.record.get_recorded(),
+        Some(hex(&replacement.fingerprint()))
+    );
     assert_eq!(places.stored_pem(), Some(replacement.to_pem().unwrap()));
     let loaded = places.load("x").await.unwrap();
     assert_eq!(loaded.fingerprint(), replacement.fingerprint());
@@ -505,7 +527,7 @@ async fn a_mint_whose_write_fails_records_nothing() {
     .await
     .unwrap_err();
     assert!(matches!(error, IdentityError::Secrets(_)), "{error}");
-    assert_eq!(places.record.get(), None);
+    assert_eq!(places.record.get_recorded(), None);
 }
 
 /// Pair again replaces the identity the phones know, which a load never
@@ -519,18 +541,21 @@ async fn pair_again_removes_the_phones_and_mints_a_new_identity() {
     let new = places.mint_anew("y").await.unwrap();
     assert_ne!(new.fingerprint(), old.fingerprint());
     assert!(places.store().paired_devices().unwrap().is_empty());
-    assert_eq!(places.record.get(), Some(hex(&new.fingerprint())));
+    assert_eq!(places.record.get_recorded(), Some(hex(&new.fingerprint())));
     assert_eq!(places.stored_pem(), Some(new.to_pem().unwrap()));
     let loaded = places.load("x").await.unwrap();
     assert_eq!(loaded.fingerprint(), new.fingerprint());
 }
 
-/// A Pair again whose write the secret store refuses changes nothing, for
-/// each reason a load refuses the identity: the paired phone, the recorded
-/// fingerprint and the stored identity stay, and the next load refuses it
-/// for the same reason.
+/// A Pair again whose write the secret store refuses changes nothing the
+/// phones rely on, for each reason a load refuses the identity: the paired
+/// phone, the recorded fingerprint and the stored identity stay, and the
+/// next load refuses it for the same reason. The note stays for that load
+/// to decide: it drops it where no identity is stored (abandoned) and
+/// keeps it where the read is refused (undecided) or another identity is
+/// stored (unknown).
 #[tokio::test]
-async fn a_pair_again_whose_write_is_refused_changes_nothing() {
+async fn a_refused_write_keeps_the_note_and_the_next_load_decides_it() {
     for reason in ["unreadable", "missing", "replaced"] {
         let places = Places::new();
         places.load("x").await.unwrap();
@@ -545,14 +570,21 @@ async fn a_pair_again_whose_write_is_refused_changes_nothing() {
             }
             _ => places.secrets.refuse_reads.store(true, Ordering::SeqCst),
         }
-        let before = places.places();
+        let (stored, recorded, _, phones) = places.places();
         places.secrets.refuse_writes.store(true, Ordering::SeqCst);
         let error = places.mint_anew("y").await.unwrap_err();
         assert!(
             matches!(error, IdentityError::Secrets(_)),
             "{reason}: {error}"
         );
-        assert_eq!(places.places(), before, "{reason}: nothing changed");
+        let after = places.places();
+        assert_eq!(
+            (&after.0, &after.1, &after.3),
+            (&stored, &recorded, &phones),
+            "{reason}: nothing the phones rely on changed"
+        );
+        let note = after.2;
+        assert!(note.is_some(), "{reason}: the note stays");
         let next = places.load("x").await.unwrap_err();
         let same = match reason {
             "unreadable" => matches!(
@@ -563,7 +595,49 @@ async fn a_pair_again_whose_write_is_refused_changes_nothing() {
             _ => matches!(next, IdentityError::Unavailable(Unavailability::Replaced)),
         };
         assert!(same, "{reason}: {next}");
-        assert_eq!(places.places(), before, "{reason}: the load minted nothing");
+        let note = if reason == "missing" { None } else { note };
+        assert_eq!(
+            places.places(),
+            (stored, recorded, note, phones),
+            "{reason}: the load minted nothing and decided the note"
+        );
+    }
+}
+
+/// A write the secret store reports refused although it kept the identity
+/// leaves the note, so the next load finishes the Pair again like any stop
+/// after the write, whether or not a fingerprint was recorded before: the
+/// phone goes, the new fingerprint is recorded and nothing is minted.
+#[tokio::test]
+async fn a_write_reported_refused_that_landed_is_finished_by_the_next_load() {
+    for recorded_before in [true, false] {
+        let places = Places::new();
+        places.load("x").await.unwrap();
+        places.set_stored(None).await;
+        if !recorded_before {
+            *places.record.recorded.lock().unwrap() = None;
+        }
+        places.pair_a_phone();
+        places.secrets.keep_and_refuse.store(true, Ordering::SeqCst);
+        let error = places.mint_anew("y").await.unwrap_err();
+        assert!(matches!(error, IdentityError::Secrets(_)), "{error}");
+        places
+            .secrets
+            .keep_and_refuse
+            .store(false, Ordering::SeqCst);
+        let (stored, recorded, next, phones) = places.places();
+        let new = HandoverIdentity::from_pem(stored.as_deref().unwrap()).unwrap();
+        assert_eq!(recorded.is_some(), recorded_before);
+        assert_eq!(next, Some(hex(&new.fingerprint())), "the note stays");
+        assert_eq!(phones.len(), 1);
+
+        let loaded = places.load("x").await.unwrap();
+        assert_eq!(loaded.fingerprint(), new.fingerprint());
+        assert_eq!(
+            places.places(),
+            (stored, Some(hex(&new.fingerprint())), None, Vec::new()),
+            "recorded before {recorded_before}: finished, nothing minted"
+        );
     }
 }
 
@@ -586,7 +660,7 @@ async fn a_pair_again_stopped_after_the_write_is_finished_by_the_next_load() {
             }
             let phones = if stop == "after phone 1 of 2" { 2 } else { 1 };
             places.pair_phones(phones);
-            let old = places.record.get();
+            let old = places.record.get_recorded();
             assert_eq!(old.is_some(), recorded_before, "{case}");
             assert!(
                 matches!(
@@ -600,7 +674,7 @@ async fn a_pair_again_stopped_after_the_write_is_finished_by_the_next_load() {
             if refuse_record {
                 places.record.refuse.store(true, Ordering::SeqCst);
             } else {
-                places.keep_the_last_phone(true);
+                places.keep_the_last_phone();
             }
             let error = places.mint_anew("y").await.unwrap_err();
             if refuse_record {
@@ -608,7 +682,7 @@ async fn a_pair_again_stopped_after_the_write_is_finished_by_the_next_load() {
                 places.record.refuse.store(false, Ordering::SeqCst);
             } else {
                 assert!(matches!(error, IdentityError::Store(_)), "{case}: {error}");
-                places.keep_the_last_phone(false);
+                places.let_the_last_phone_go();
             }
             let (stored, recorded, next, listed) = places.places();
             let new = HandoverIdentity::from_pem(stored.as_deref().unwrap()).unwrap();
@@ -639,7 +713,7 @@ async fn a_note_that_cannot_be_written_stops_pair_again_before_the_write() {
     let before = places.places();
     places.record.refuse_note.store(true, Ordering::SeqCst);
     let error = places.mint_anew("y").await.unwrap_err();
-    assert!(matches!(error, IdentityError::Record(_)), "{error}");
+    assert!(matches!(error, IdentityError::Note(_)), "{error}");
     assert_eq!(places.places(), before, "nothing written");
 }
 
@@ -674,7 +748,7 @@ async fn an_unfinished_pair_again_is_decided_by_what_the_secret_store_holds() {
             places.set_stored(Some(&other)).await;
         }
         if case.ends_with("nothing recorded") {
-            *places.record.value.lock().unwrap() = None;
+            *places.record.recorded.lock().unwrap() = None;
         }
         places.record.note_next(Some(&next)).unwrap();
         if case.starts_with("undecided") {
