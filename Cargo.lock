@@ -5234,6 +5234,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "steno-audio",
  "steno-core",
  "symphonia",
  "tempfile",

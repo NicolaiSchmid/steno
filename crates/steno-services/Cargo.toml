@@ -68,6 +68,9 @@ futures-util.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]
+# The recorder and auto-stop tests hold a device change or a stall until
+# they saw what comes before it (`SyntheticOptions::hold_outages`).
+steno-audio = { path = "../steno-audio", features = ["test-support"] }
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-llm = { path = "../steno-llm", features = ["testing"] }
 steno-pipeline = { path = "../steno-pipeline", features = ["testing"] }

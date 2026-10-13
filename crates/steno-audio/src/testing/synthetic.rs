@@ -39,6 +39,14 @@
 //! session watches the backend only with `delivers_continuously` (which
 //! `stall_after` sets): by default a producer whose `seconds` ran out is
 //! the end of a test's audio, not a stall.
+//!
+//! Held outages, behind the `test-support` feature (Rust only):
+//! `hold_outages` makes every device change, and the first start's
+//! stall, wait for its own `SyntheticCaptureBackend::release_outage`
+//! (one that came first lets it go at its time), the producer delivering
+//! on meanwhile, so a test that waits for audio before the outage sees
+//! it however late the session's threads run. A restart's stall is not
+//! held: it is how the restarts fail.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -149,6 +157,10 @@ pub struct SyntheticOptions {
     /// Seconds into every restart after which its producer delivers
     /// nothing until `resume_delivery` or the stop.
     pub restarts_stall_after: Option<f64>,
+    /// Every change and the first start's stall wait for a
+    /// `release_outage` each, delivering on meanwhile.
+    #[cfg(feature = "test-support")]
+    pub hold_outages: bool,
 }
 
 impl SyntheticOptions {
@@ -190,6 +202,8 @@ impl SyntheticOptions {
             stall_after: None,
             restarts_do_not_run: false,
             restarts_stall_after: None,
+            #[cfg(feature = "test-support")]
+            hold_outages: false,
         }
     }
 
@@ -292,6 +306,15 @@ impl SyntheticOptions {
         self.restarts_stall_after = Some(seconds);
         self
     }
+
+    /// Hold every change and the first start's stall until
+    /// `release_outage` lets it go.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn hold_outages(mut self) -> Self {
+        self.hold_outages = true;
+        self
+    }
 }
 
 /// The test double for the live backend; see the module doc.
@@ -306,6 +329,7 @@ pub struct SyntheticCaptureBackend {
     completion: Arc<Completion>,
     /// Raised by `resume_delivery` for a stalled producer.
     resumed: Arc<AtomicBool>,
+    hold: OutageHold,
 }
 
 struct State {
@@ -333,6 +357,7 @@ impl SyntheticCaptureBackend {
                 start_count: 0,
             }),
             changes_remaining: Arc::new(AtomicUsize::new(options.changes)),
+            hold: OutageHold::new(&options),
             options,
             stop_requested: Arc::new(AtomicBool::new(false)),
             frames_delivered: Arc::new(AtomicUsize::new(0)),
@@ -378,6 +403,13 @@ impl SyntheticCaptureBackend {
     pub fn resume_delivery(&self) {
         self.completion.reset();
         self.resumed.store(true, Ordering::Release);
+    }
+
+    /// Lets the next outage `hold_outages` holds go: at once when the
+    /// producer is past its frame, at that frame when it is not there yet.
+    #[cfg(feature = "test-support")]
+    pub fn release_outage(&self) {
+        self.hold.release();
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -455,6 +487,12 @@ impl CaptureBackend for SyntheticCaptureBackend {
             self.options.stall_after
         }
         .map(|s| (s * rate) as usize);
+        let change_hold = self.hold.clone();
+        let stall_hold = if is_restart {
+            OutageHold::default()
+        } else {
+            self.hold.clone()
+        };
         let resumed = Arc::clone(&self.resumed);
         let changes_remaining = Arc::clone(&self.changes_remaining);
         let change_reason = self.options.change_reason;
@@ -478,6 +516,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
                 while delivered < total_frames && !stop.load(Ordering::Acquire) {
                     if let Some(change) = change_frame
                         && delivered >= change
+                        && change_hold.lets_go()
                     {
                         changes_remaining.fetch_sub(1, Ordering::Relaxed);
                         // Before the report: its handler takes the lock
@@ -486,7 +525,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         sink.report_device_change(change_reason);
                         break;
                     }
-                    if stall_frame == Some(delivered) {
+                    if stall_frame.is_some_and(|stall| delivered >= stall) && stall_hold.lets_go() {
                         stall_frame = None;
                         first_offered.finish();
                         completion.finish();
@@ -497,9 +536,10 @@ impl CaptureBackend for SyntheticCaptureBackend {
                     }
                     // The callback before a change or a stall is clipped to
                     // it, so it lands on the exact frame and a test can
-                    // count what each start delivered.
+                    // count what each start delivered; one held past it
+                    // goes on in whole callbacks.
                     let mut frames = callback_frames.min(total_frames - delivered);
-                    if let Some(change) = change_frame {
+                    if let Some(change) = change_frame.filter(|change| *change > delivered) {
                         frames = frames.min(change - delivered);
                     }
                     if let Some(stall) = stall_frame.filter(|stall| *stall > delivered) {
@@ -559,6 +599,55 @@ impl CaptureBackend for SyntheticCaptureBackend {
 
     fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
         self.options.delivers_continuously
+    }
+}
+
+/// Whether an outage may begin (`SyntheticOptions::hold_outages`):
+/// always, unless the outages are held, and then once a release is left
+/// for it. Without the `test-support` feature nothing is held.
+#[derive(Debug, Clone, Default)]
+struct OutageHold {
+    /// `None` when not held.
+    #[cfg(feature = "test-support")]
+    releases: Option<Arc<Releases>>,
+}
+
+/// What the test let go and what began of it.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Default)]
+struct Releases {
+    granted: AtomicUsize,
+    begun: AtomicUsize,
+}
+
+impl OutageHold {
+    #[cfg_attr(not(feature = "test-support"), allow(unused_variables))]
+    fn new(options: &SyntheticOptions) -> Self {
+        Self {
+            #[cfg(feature = "test-support")]
+            releases: options.hold_outages.then(Arc::default),
+        }
+    }
+
+    /// Whether the outage at hand begins now, spending its release.
+    #[cfg_attr(not(feature = "test-support"), allow(clippy::unused_self))]
+    fn lets_go(&self) -> bool {
+        #[cfg(feature = "test-support")]
+        if let Some(releases) = &self.releases {
+            // The producer alone spends a release, so none is spent twice.
+            if releases.begun.load(Ordering::Acquire) >= releases.granted.load(Ordering::Acquire) {
+                return false;
+            }
+            releases.begun.fetch_add(1, Ordering::AcqRel);
+        }
+        true
+    }
+
+    #[cfg(feature = "test-support")]
+    fn release(&self) {
+        if let Some(releases) = &self.releases {
+            releases.granted.fetch_add(1, Ordering::AcqRel);
+        }
     }
 }
 
