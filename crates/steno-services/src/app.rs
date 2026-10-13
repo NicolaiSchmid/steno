@@ -2490,6 +2490,33 @@ mod tests {
         assert_eq!(store.all_meetings().unwrap(), []);
     }
 
+    /// The page's Record and Record in person while a menu Quit waits for
+    /// the actions clicked before it (the starts refused,
+    /// [`Recorder::refuse_starts`](steno_host::services::Recorder::refuse_starts)):
+    /// each returns, records nothing, and the page's `recording` snapshot
+    /// says why.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_pages_record_during_a_menu_quit_is_refused_and_says_why() {
+        use steno_bridge::BridgeMethod;
+        use steno_host::services::{QUITTING_REFUSAL, Recorder as _};
+        let (dir, store) = temp_store();
+        let app = recording_app(&dir, &store);
+        let host = wired_host(&app);
+        app.recorder.refuse_starts();
+        let start = serde_json::json!({ "mode": "inPerson" });
+        for (method, params) in [
+            (BridgeMethod::RecordingStart, Some(start)),
+            (BridgeMethod::RecordingToggle, None),
+        ] {
+            call(&host, method, params);
+            let status = app.recorder.status();
+            assert_eq!(status.state, steno_bridge::RecordingState::Idle, "{method}");
+            let shown = host.snapshot(steno_bridge::BridgeTopic::Recording).unwrap();
+            assert_eq!(shown["error"], QUITTING_REFUSAL, "{method}");
+        }
+        assert_eq!(store.all_meetings().unwrap(), []);
+    }
+
     /// [`recording_app`] whose host runs the app's own pipeline and the
     /// real file system, over a failed meeting (`reason`) with a two-lane
     /// call on disk, selected on a ready page; the meeting's id.

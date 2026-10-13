@@ -64,6 +64,7 @@
 //! Rust only.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
@@ -78,8 +79,8 @@ use steno_audio::{
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
 use steno_host::services::{
-    INSTALLING_UPDATE, LaneLevels, LeftRecording, Permissions, Recorder, RecorderStatus,
-    SpeechModels, StartHold,
+    INSTALLING_UPDATE, LaneLevels, LeftRecording, Permissions, QUITTING_REFUSAL, Recorder,
+    RecorderStatus, SpeechModels, StartHold,
 };
 use steno_host::speech::ModelAsset;
 use steno_pipeline::{Attendee, LocalRecordingIntake, LocalRecordingIntakeError, RecordingResult};
@@ -969,6 +970,12 @@ pub struct CaptureRecorder {
     /// Where the known audio folders are listed ([`crate::audio_folders`]).
     support_directory: PathBuf,
     inner: Mutex<Inner>,
+    /// Set by [`Recorder::refuse_starts`] at a menu Quit: a start is
+    /// refused with [`QUITTING_REFUSAL`]. Outside `inner`, so the shell's
+    /// main thread sets it without waiting for the status lock; `start`
+    /// reads it under that lock. Apart from `quitting`, which the
+    /// shutdown sets and which also ends a stop's retries of its save.
+    starts_refused: AtomicBool,
     /// Signalled with every status change, for [`Self::settle`].
     changes: Condvar,
     /// Called after every status change so the host republishes.
@@ -1027,6 +1034,7 @@ impl CaptureRecorder {
                     patience: TONE_TEST_PATIENCE,
                 },
             }),
+            starts_refused: AtomicBool::new(false),
             changes: Condvar::new(),
             changed: Mutex::new(None),
             disk: Mutex::new(DiskWatch::system(None)),
@@ -2042,6 +2050,12 @@ impl Recorder for CaptureRecorder {
             if inner.quitting || inner.status.state != RecordingState::Idle {
                 return;
             }
+            if self.starts_refused.load(Ordering::Acquire) {
+                inner.status.error = Some(QUITTING_REFUSAL.to_owned());
+                drop(inner);
+                self.notify();
+                return;
+            }
             if inner.start_holds > 0 {
                 inner.status.error = Some(INSTALLING_UPDATE.to_owned());
                 drop(inner);
@@ -2073,6 +2087,10 @@ impl Recorder for CaptureRecorder {
     fn hold_starts(&self) -> StartHold {
         self.inner().start_holds += 1;
         Box::new(HeldStarts(self.this.clone()))
+    }
+
+    fn refuse_starts(&self) {
+        self.starts_refused.store(true, Ordering::Release);
     }
 
     fn stop(&self) {
@@ -3933,6 +3951,82 @@ mod tests {
         drop(hold);
         manual.join().unwrap();
         assert_eq!(BUSY.tries(), 1, "one try");
+        assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
+    }
+
+    /// After a menu Quit refused the starts, a start and a toggle from
+    /// any surface (the tray's Record queued behind a stop, the page's
+    /// Record during the exit's wait, the prompt's) record nothing and say
+    /// why, and no meeting is left behind; the recording under way when
+    /// the Quit came still stops through its own Stop, with its own end
+    /// reason.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_after_a_menu_quit_is_refused_with_a_message() {
+        let harness = harness(&[]);
+        start(&harness.recorder);
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        harness.recorder.refuse_starts();
+        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+        stop(&harness.recorder);
+        let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(meeting.end_reason, Some(RecordingEndReason::Manual));
+
+        let changes = Arc::new(AtomicUsize::new(0));
+        let counted = changes.clone();
+        harness.recorder.on_change(Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }));
+        for refused in [
+            Box::new(|recorder: &CaptureRecorder| recorder.start(CaptureMode::InPerson, None))
+                as Box<dyn Fn(&CaptureRecorder) + Send>,
+            Box::new(|recorder: &CaptureRecorder| recorder.toggle()),
+            Box::new(|recorder: &CaptureRecorder| recorder.start(CaptureMode::Call, Some("Call"))),
+        ] {
+            let before = changes.load(Ordering::SeqCst);
+            let starter = harness.recorder.clone();
+            on_own_thread(HANG_GUARD, "the start returned", move || {
+                refused(starter.as_ref());
+            });
+            let status = harness.recorder.status();
+            assert_eq!(status.state, RecordingState::Idle);
+            assert_eq!(status.error.as_deref(), Some(QUITTING_REFUSAL));
+            assert!(
+                changes.load(Ordering::SeqCst) > before,
+                "the host hears of the refusal"
+            );
+        }
+        assert_eq!(
+            harness.store.all_meetings().unwrap().len(),
+            1,
+            "no junk meeting"
+        );
+    }
+
+    /// The menu Quit's refusal is not the shutdown's quit: a Stop whose
+    /// save finds the store held keeps trying its commit after the starts
+    /// were refused, where the shutdown's quit ends with the try in
+    /// progress, and the meeting is kept for the next launch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_under_way_at_a_menu_quit_still_tries_its_commit_again() {
+        static BUSY: BusyTries = BusyTries::new();
+        let harness = harness(&[]);
+        start(&harness.recorder);
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let hold = held_with_counted_tries(&harness, |waits| BUSY.on_busy(waits));
+        let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
+        let stopper = harness.recorder.clone();
+        let manual = std::thread::spawn(move || stopper.stop());
+        stop_seen.recv_timeout(PATIENCE).expect("the stop began");
+        harness.recorder.refuse_starts();
+        eventually("the first try found the store held", || BUSY.tries() == 1).await;
+        // Every try from here on ends at once, still held.
+        BUSY.open();
+        manual.join().unwrap();
+        drop(hold);
+        assert!(
+            BUSY.tries() > 1,
+            "the stop tried its commit once, as a quit's does"
+        );
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 

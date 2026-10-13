@@ -249,6 +249,16 @@ pub trait Recorder: Send + Sync {
     /// the last hold clears the refusal's error. Rust only: Sparkle
     /// installed at quit.
     fn hold_starts(&self) -> StartHold;
+    /// Refuses every recording start from now on, the status's error
+    /// saying [`QUITTING_REFUSAL`]: the shell's menu Quit calls it before
+    /// its exit waits for the actions clicked before it, so a Record from
+    /// any surface (the tray, the page, the detection prompt, one queued
+    /// behind a stop) leaves no recording to save on the way out. A
+    /// recording already starting, running or stopping goes on, and its
+    /// stop still retries its save until the shutdown's own quit. Takes
+    /// no lock a command holds while it waits, so the shell's main thread
+    /// may call it. Rust only: Swift's Quit ended its menu.
+    fn refuse_starts(&self);
     fn stop(&self);
     fn toggle(&self);
     /// "Keep recording": disarms the auto-stop.
@@ -300,6 +310,10 @@ pub type StartHold = Box<dyn Send>;
 /// (`steno_services::updates`).
 pub const INSTALLING_UPDATE: &str =
     "Steno is relaunching to finish installing an update. You can record again in a moment.";
+
+/// The error a start refused after [`Recorder::refuse_starts`] leaves in
+/// the status: the app is quitting.
+pub const QUITTING_REFUSAL: &str = "Steno is quitting. Open it again to record.";
 
 /// A meeting about to be deleted, as [`Recorder::left_recording`] finds it
 /// on disk.
