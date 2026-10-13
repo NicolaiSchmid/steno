@@ -393,7 +393,9 @@ pub trait FingerprintRecord: Send + Sync {
     /// The recorded fingerprint, `None` when nothing is recorded.
     fn recorded(&self) -> Result<Option<String>, BoxError>;
     /// Records `fingerprint`, replacing what was recorded, and drops the
-    /// note in the same write.
+    /// note in the same write. Over a record that does not parse, it keeps
+    /// the old one where the user can find it first, as `note_next(Some)`
+    /// does.
     fn record(&self, fingerprint: &str) -> Result<(), BoxError>;
     /// The next fingerprint, kept in the note of an unfinished Pair again:
     /// that of the identity it is writing ([`HandoverIdentity::mint_anew`]);

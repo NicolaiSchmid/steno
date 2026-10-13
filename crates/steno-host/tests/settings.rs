@@ -2234,6 +2234,17 @@ fn the_waiting_reasons_are_plain_sentences() {
         waiting_message(PhoneWaitingReason::Missing, Platform::Linux),
         "This computer's phone pairing is no longer saved. Choose Pair again to start over."
     );
+    // A file Steno cannot open: the fix is outside the app, and Pair again
+    // cannot open it either.
+    assert_eq!(
+        waiting_message(PhoneWaitingReason::FileNotOpened, Platform::Linux),
+        "Steno cannot open a file in the folder it keeps its data in, so it cannot check this \
+         computer's phone pairing. Check that folder's permissions, then choose Try again."
+    );
+    for platform in Platform::ALL {
+        let message = waiting_message(PhoneWaitingReason::FileNotOpened, *platform);
+        assert!(!message.contains("Pair again"), "{platform}: {message}");
+    }
 }
 
 /// Pair again asks first, with the warning that every phone must pair
@@ -2278,10 +2289,7 @@ fn phones_waiting_pair_again_after_the_warning() {
     *handover.pair_again_failure.lock().unwrap() = Some("the keychain refused the write".into());
     assert!(harness.host.settings_phone_pair_again().unwrap().confirmed);
     let phone = harness.snapshot(BridgeTopic::SettingsPhone);
-    assert_eq!(
-        phone["error"],
-        "Steno could not finish the new pairing. Choose Pair again."
-    );
+    assert_eq!(phone["error"], "Steno could not finish the new pairing.");
     assert_eq!(phone["errorDetails"], "the keychain refused the write");
     assert_eq!(phone["waiting"]["reason"], "missing");
 

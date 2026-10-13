@@ -703,7 +703,13 @@ export const phoneSettingsSnapshot = z
 		// Rust only: phone handover waits for Try again or Pair again.
 		waiting: z
 			.object({
-				reason: z.enum(["importDenied", "unreadable", "missing", "replaced"]),
+				reason: z.enum([
+					"importDenied",
+					"unreadable",
+					"missing",
+					"replaced",
+					"fileNotOpened",
+				]),
 				message: z.string(),
 				busy: z.boolean(),
 			})

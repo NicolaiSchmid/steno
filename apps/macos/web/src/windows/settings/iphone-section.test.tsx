@@ -115,7 +115,13 @@ describe("PhoneSection", () => {
 		expect(screen.queryByTestId("listener-failed")).not.toBeInTheDocument();
 	});
 
-	it.each(["importDenied", "unreadable", "missing", "replaced"] as const)(
+	it.each([
+		"importDenied",
+		"unreadable",
+		"missing",
+		"replaced",
+		"fileNotOpened",
+	] as const)(
 		"offers Try again and Pair again while it waits: %s",
 		async (reason) => {
 			const waiting = (await loadFixtureSnapshots())[

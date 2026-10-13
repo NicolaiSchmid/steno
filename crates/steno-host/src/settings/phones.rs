@@ -42,8 +42,9 @@ pub struct PhonesSettingsViewModel {
 
 /// The section's line when Try again left the handover waiting.
 pub const TRY_AGAIN_FAILED: &str = "Your phones still can't send recordings.";
-/// The section's line when Pair again did not finish.
-pub const PAIR_AGAIN_FAILED: &str = "Steno could not finish the new pairing. Choose Pair again.";
+/// The section's line when Pair again did not finish; the details say
+/// what to do, as choosing it again does not always help.
+pub const PAIR_AGAIN_FAILED: &str = "Steno could not finish the new pairing.";
 
 impl PhonesSettingsViewModel {
     #[must_use]

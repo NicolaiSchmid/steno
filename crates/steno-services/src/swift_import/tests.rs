@@ -615,6 +615,48 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
     );
 }
 
+/// An import over a `handover-identity.json` that does not parse (an
+/// earlier desktop build's record, damaged, or a value that is not a
+/// string) keeps it as `handover-identity.json.corrupt-<time>` with its
+/// bytes, then records the Swift identity's fingerprint: no write replaces
+/// such a file without a kept copy.
+#[test]
+fn an_import_over_a_record_that_does_not_parse_keeps_it_aside() {
+    let desktop =
+        HandoverIdentity::mint("Steno on a desktop-id build", chrono::Utc::now()).unwrap();
+    let damaged = format!(
+        r#"{{"steno.handoverIdentityFingerprint": "{}", "other": 7}}"#,
+        hex(&desktop.fingerprint())
+    );
+    for bad in [b"not json".to_vec(), damaged.into_bytes()] {
+        let case = String::from_utf8_lossy(&bad).into_owned();
+        let step = step(FakeKeychain::swift_app(), Some(&desktop));
+        std::fs::write(step.dir.path().join("handover-identity.json"), &bad).unwrap();
+
+        let status = step.import.run();
+        assert_eq!(status.stage, SwiftImportStage::Done, "{case}");
+        assert_eq!(status.error, None, "{case}");
+        assert_eq!(
+            step.record.recorded().unwrap().as_deref(),
+            Some(FIXTURE_FINGERPRINT),
+            "{case}"
+        );
+        let aside: Vec<Vec<u8>> = std::fs::read_dir(step.dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("handover-identity.json.corrupt-")
+            })
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        assert_eq!(aside, [bad], "{case}: kept with its bytes");
+        assert_eq!(step.graph.gate.handover(), HandoverGate::Ready, "{case}");
+    }
+}
+
 #[test]
 fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_again_works() {
     let desktop =

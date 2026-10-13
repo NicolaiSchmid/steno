@@ -415,6 +415,12 @@ pub fn waiting_message(reason: PhoneWaitingReason, platform: Platform) -> String
             "Steno found a different phone pairing on this {computer} than the one your phones \
              know. Choose Try again if you put the old one back, or Pair again to start over."
         ),
+        // Pair again cannot open the file either.
+        PhoneWaitingReason::FileNotOpened => format!(
+            "Steno cannot open a file in the folder it keeps its data in, so it cannot check \
+             this {computer}'s phone pairing. Check that folder's permissions, then choose Try \
+             again."
+        ),
     }
 }
 

@@ -472,6 +472,10 @@ string_enum! {
         Missing = "missing",
         /// Another pairing is stored than the one the phones know.
         Replaced = "replaced",
+        /// A file in the folder Steno keeps its data in could not be
+        /// opened (its permissions, a disk error): only a fix outside the
+        /// app helps, then Try again.
+        FileNotOpened = "fileNotOpened",
     }
 }
 
