@@ -13,8 +13,8 @@
 //! loader never mints one while phones are paired or after one was in use
 //! ([`HandoverIdentity::load_or_create`], over the identity's fingerprint
 //! in a [`FingerprintRecord`]), and adopts one found without a record only
-//! when every paired phone can know it ([`HandoverIdentity::known_by_every_phone`]).
-//! Only the user's Pair again
+//! when every paired phone can know it
+//! ([`HandoverIdentity::known_by_every_phone`]). Only the user's Pair again
 //! mints over one ([`HandoverIdentity::mint_anew`]); one that stopped is
 //! finished by the next load.
 
@@ -123,16 +123,17 @@ impl HandoverIdentity {
     /// load is [`IdentityError::Unavailable`], and mints nothing, when the
     /// secret store cannot be read; when it holds no identity while a
     /// fingerprint is recorded or a phone is paired; and when the
-    /// identity's fingerprint is not the recorded one. The paired phones are the
-    /// anchor a rollback keeps: an identity found without a recorded
+    /// identity's fingerprint is not the recorded one. The paired phones are
+    /// the anchor a rollback keeps: an identity found without a recorded
     /// fingerprint (an upgrade from a build without the record, or a lost
     /// record) has it recorded again only where the pairing-time rule
-    /// ([`Self::known_by_every_phone`], judged at `now`) adopts it; otherwise the load
-    /// is the rule's [`Unavailability`] and records nothing. A start that
-    /// cannot be read is [`IdentityError::Malformed`], paired phones that
-    /// cannot be read [`IdentityError::Store`]. A recorded fingerprint is
-    /// never judged by the rule: the identity it names loads as it is. Only
-    /// with no phone paired, no fingerprint and no identity is one minted.
+    /// ([`Self::known_by_every_phone`], judged at `now`) adopts it; otherwise
+    /// the load is the rule's [`Unavailability`] and records nothing. A
+    /// start that cannot be read is [`IdentityError::Malformed`], paired
+    /// phones that cannot be read [`IdentityError::Store`]. A recorded
+    /// fingerprint is never judged by the rule: the identity it names loads
+    /// as it is. Only with no phone paired, no fingerprint and no identity
+    /// is one minted.
     ///
     /// An unfinished Pair again ([`HandoverIdentity::mint_anew`] stopped or
     /// crashed after it noted the next fingerprint, so its note,
@@ -268,7 +269,7 @@ impl HandoverIdentity {
         paired: &[DateTime<Utc>],
         now: DateTime<Utc>,
     ) -> Result<usize, Unavailability> {
-        let latest = now + chrono::TimeDelta::seconds(1);
+        let latest = now + CLOCK_SLACK;
         if starts.iter().chain(paired).any(|instant| *instant > latest) {
             return Err(Unavailability::ClockBehind);
         }
@@ -543,34 +544,42 @@ pub enum Unavailability {
     Missing,
     /// The secret store's identity is not the one whose fingerprint is
     /// recorded, or, with nothing recorded, no paired phone knows it
-    /// ([`HandoverIdentity::known_by_every_phone`]). Not adopted, as the phones would
-    /// refuse it.
+    /// ([`HandoverIdentity::known_by_every_phone`]). Not adopted, as the
+    /// phones would refuse it.
     #[error(
         "the secret store holds another identity than the one this computer's phones paired \
          with; a new identity would make every phone pair again"
     )]
     Replaced,
     /// With nothing recorded, the paired phones do not all know one
-    /// identity, but some know one ([`HandoverIdentity::known_by_every_phone`]). Not
-    /// adopted, as the others could not connect; a
-    /// [`Unavailability::Replaced`] in all but its words. Swift, with
-    /// #284: `IdentityUnavailability.partlyReplaced`.
+    /// identity, but some know one
+    /// ([`HandoverIdentity::known_by_every_phone`]). Not adopted, as the
+    /// others could not connect; a [`Unavailability::Replaced`] in all but
+    /// its words. Swift, with #284: `IdentityUnavailability.partlyReplaced`.
     #[error(
         "some of this computer's phones were paired before the identity the secret store holds; \
          a new identity would make every phone pair again"
     )]
     PartlyReplaced,
     /// With nothing recorded, a pairing time or a certificate's start is
-    /// after now on this computer's clock ([`HandoverIdentity::known_by_every_phone`]):
-    /// the clock reads earlier than when it was set, so which identity the
-    /// phones know cannot be told. Not adopted and not minted; Try again
-    /// decides once the clock has passed both.
+    /// after now on this computer's clock
+    /// ([`HandoverIdentity::known_by_every_phone`]): the clock reads earlier
+    /// than when it was set, so which identity the phones know cannot be
+    /// told. Not adopted and not minted; Try again decides once the clock
+    /// has passed both.
     #[error(
         "this computer's clock reads earlier than a phone's pairing or the identity's start, so \
          which identity the phones know cannot be told"
     )]
     ClockBehind,
 }
+
+/// How far after now a start or a pairing may be before the pairing-time
+/// rule waits for the clock ([`HandoverIdentity::known_by_every_phone`]): a
+/// second, as the database rounds a pairing time to the millisecond, half
+/// up, so a phone paired just now can read a little after now. The Swift
+/// guard (#284) has none: it waits for any time after now.
+const CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
 
 /// Lowercase hex, for logs and tests.
 #[must_use]

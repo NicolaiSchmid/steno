@@ -549,22 +549,18 @@ pub fn choose_certificate(
         return Ok(None);
     }
     if let Some(recorded) = choice.swift_record.fingerprint() {
-        let named = certificates.iter().position(|certificate| {
+        let Some(named) = certificates.iter().position(|certificate| {
             steno_handover::identity::hex(&HandoverIdentity::fingerprint_of_der(certificate))
                 == recorded
-        });
-        match named {
-            None => {
-                tracing::warn!("the Swift app's record names a certificate the keychain lacks");
-                return Err(NotImported {
-                    line: REPLACED_PAIRING,
-                    reason: WaitReason::Replaced,
-                });
-            }
-            Some(named) if certificates.len() > 1 => {
-                return Ok(Some(certificates.swap_remove(named)));
-            }
-            Some(_) => {}
+        }) else {
+            tracing::warn!("the Swift app's record names a certificate the keychain lacks");
+            return Err(NotImported {
+                line: REPLACED_PAIRING,
+                reason: WaitReason::Replaced,
+            });
+        };
+        if certificates.len() > 1 {
+            return Ok(Some(certificates.swap_remove(named)));
         }
     }
     let starts = certificates

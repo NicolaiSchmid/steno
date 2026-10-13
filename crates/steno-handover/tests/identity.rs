@@ -822,6 +822,11 @@ async fn unrecorded_identity_with_phones(seconds: &[i64]) -> (Places, HandoverId
     (places, identity)
 }
 
+/// The ids [`Places::pair_phones_at`] gives `count` phones.
+fn phone_ids(count: usize) -> Vec<uuid::Uuid> {
+    (1..=count as u128).map(uuid::Uuid::from_u128).collect()
+}
+
 /// With nothing recorded, the identity found is recorded when every phone
 /// was paired after its certificate starts, and when no phone is paired.
 #[tokio::test]
@@ -987,9 +992,7 @@ async fn a_recorded_identity_the_phones_predate_loads_without_the_rule() {
                 Some(identity.to_pem().unwrap()),
                 Some(hex(&identity.fingerprint())),
                 None,
-                (1..=phones.len() as u128)
-                    .map(uuid::Uuid::from_u128)
-                    .collect()
+                phone_ids(phones.len())
             ),
             "{case}: nothing written, the phones stay"
         );
@@ -1030,9 +1033,7 @@ async fn an_unrecorded_identity_or_pairing_after_now_waits_for_the_clock() {
                 Some(identity.to_pem().unwrap()),
                 None,
                 None,
-                (1..=phones.len() as u128)
-                    .map(uuid::Uuid::from_u128)
-                    .collect()
+                phone_ids(phones.len())
             ),
             "{case}: nothing written"
         );
