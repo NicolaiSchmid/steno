@@ -1477,7 +1477,9 @@ mod tests {
     use steno_speech::SpeechRuntime;
 
     use super::*;
-    use crate::testing::{PATIENCE, built, fake_dependencies, on_own_thread, temp_store};
+    use crate::testing::{
+        HANG_GUARD, PATIENCE, built, fake_dependencies, on_own_thread, temp_store,
+    };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_phone_intake_commits_durably_and_enqueues_on_the_current_pipeline() {
@@ -2216,11 +2218,13 @@ mod tests {
         host
     }
 
-    /// Calls `method` through `host` on a thread of its own, failing the
-    /// test unless it returns, and returns success, within [`PATIENCE`].
+    /// Calls `method` through `host` on a thread of its own and asserts
+    /// that it succeeded, failing the test as hung after [`HANG_GUARD`]: a
+    /// recording's start and stop through the host are the capture's real
+    /// work.
     fn call(host: &Host, method: steno_bridge::BridgeMethod, params: Option<serde_json::Value>) {
         let dispatcher = steno_bridge::Dispatcher::new(host.clone());
-        let reply = on_own_thread(PATIENCE, &format!("{method} returned"), move || {
+        let reply = on_own_thread(HANG_GUARD, &format!("{method} returned"), move || {
             dispatcher.call(method, params)
         });
         assert!(reply.is_ok(), "{method}: {reply:?}");

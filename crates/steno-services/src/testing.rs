@@ -1,8 +1,10 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
-//! old, a paired phone, the waits that fail a test instead of hanging it,
-//! and [`warnings`], what a call logs at `warn` and above.
+//! old, a paired phone, the waits that fail a test instead of hanging it
+//! ([`PATIENCE`] for the tests' own fakes and gates, [`HANG_GUARD`] for
+//! real capture work), and [`warnings`], what a call logs at `warn` and
+//! above.
 //!
 //! A test that writes models gives the app an explicit models directory in
 //! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
@@ -17,14 +19,33 @@ use steno_adapters::DeliveryCoordinator;
 use steno_audio::SymphoniaAudioCodec;
 use steno_core::Store;
 use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory};
+use steno_host::services::Recorder as _;
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
 use steno_speech::SpeechRuntime;
 
 use crate::pipeline::{BuiltEngine, BuiltPipeline, CurrentPipeline, MakeDependencies};
 use crate::recorder::MakeCaptureSession;
 
-/// How long a test waits for background work before it fails.
+/// How long a test waits for work driven by its own fakes, gates and
+/// manual clock, or for the synthetic capture's first audio once it
+/// records (a level, frames in the files), before it fails. That work
+/// takes milliseconds, so this bound only turns a hang into a failure;
+/// for real capture work see [`HANG_GUARD`].
 pub const PATIENCE: Duration = Duration::from_secs(5);
+
+/// How long a test waits for real work over the synthetic capture before
+/// it fails as hung: a start, a stop and save, a quit, a rebuild or
+/// restart, a recording that ends on its own. A loaded runner stretches
+/// that work past [`PATIENCE`]. A gate that waits while such work runs,
+/// before the test can open it, takes this bound too, and so does a call
+/// that does the work only when the behaviour under test is broken (a
+/// refused start accepted after all), so the break fails on its
+/// assertion. A gate the test opens after only its own checks keeps
+/// [`PATIENCE`], so a claim can be timed against it. No verdict rests on
+/// how long the work took: a test about how often something happens
+/// counts it, and a product patience a test passes in takes this bound
+/// unless that patience is what it checks.
+pub const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// A fresh store; the directory lives as long as the guard.
 pub fn temp_store() -> (tempfile::TempDir, Arc<Store>) {
@@ -135,14 +156,18 @@ pub fn synthetic_tone(
 
 /// A capture recorder over [`synthetic_capture`] and fakes, recording
 /// into a temp audio folder, for the tests that drive it from outside
-/// (the auto-stop, the detection prompt). Dropped, it stops a recording
-/// still running and waits for the pipeline's runs, so no file of a
-/// test's processing is left behind; that needs a multi-threaded runtime.
+/// (the auto-stop, the detection prompt). Dropped after a test that
+/// passed, it stops a recording still running; after a failed one it
+/// leaves the recording, since a stop stuck on the recorder's lock would
+/// hang the test binary. Either way it then waits for the pipeline's
+/// runs, so no file of a test's processing is left behind; that needs a
+/// multi-threaded runtime. The temp directory is dropped last, after the
+/// store, the pipeline and the recorder.
 pub struct SyntheticRecorder {
-    _dir: tempfile::TempDir,
     pub store: Arc<Store>,
     pipeline: Arc<CurrentPipeline>,
     pub recorder: Arc<crate::recorder::CaptureRecorder>,
+    _dir: tempfile::TempDir,
 }
 
 /// A [`SyntheticRecorder`] on the current runtime.
@@ -170,20 +195,48 @@ pub fn synthetic_recorder_over(make_session: MakeCaptureSession) -> SyntheticRec
         dir.path().join("support"),
     );
     SyntheticRecorder {
-        _dir: dir,
         store,
         pipeline,
         recorder,
+        _dir: dir,
+    }
+}
+
+impl SyntheticRecorder {
+    /// Starts a recording in `mode` for `call_app` on a thread of its own,
+    /// as the host calls it, and returns once the start returned, refused
+    /// or not, failing the test as hung after [`HANG_GUARD`].
+    pub fn start(&self, mode: steno_bridge::CaptureMode, call_app: Option<&str>) {
+        let (recorder, call_app) = (self.recorder.clone(), call_app.map(str::to_owned));
+        on_own_thread(HANG_GUARD, "the start returned", move || {
+            recorder.start(mode, call_app.as_deref());
+        });
+    }
+
+    /// Stops the recording on a thread of its own, as the host calls it,
+    /// and returns once the stop saved it, failing the test as hung after
+    /// [`HANG_GUARD`].
+    pub fn stop(&self) {
+        let recorder = self.recorder.clone();
+        on_own_thread(HANG_GUARD, "the stop returned", move || recorder.stop());
+    }
+
+    /// Waits until the recorder is idle again: a stop it began on its own
+    /// (a grace that ran out, say) saved the recording.
+    pub async fn idle(&self, what: &str) {
+        eventually_within(HANG_GUARD, what, || {
+            self.recorder.status().state == steno_bridge::RecordingState::Idle
+        })
+        .await;
     }
 }
 
 impl Drop for SyntheticRecorder {
     fn drop(&mut self) {
-        use steno_host::services::Recorder as _;
-
-        if self.recorder.is_busy() {
-            let recorder = self.recorder.clone();
-            on_own_thread(PATIENCE, "the stop returned", move || recorder.stop());
+        // Panicking first: `is_busy` takes the recorder's lock, which a
+        // stop that failed the test may still hold.
+        if !std::thread::panicking() && self.recorder.is_busy() {
+            self.stop();
         }
         let pipeline = self.pipeline.current();
         tokio::task::block_in_place(|| {
