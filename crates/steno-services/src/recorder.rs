@@ -1,8 +1,16 @@
 //! The host's `Recorder` over the capture session and the Mac recording
 //! intake. Swift: `apps/macos/Steno/Recording/RecordingController.swift`.
-//! The calendar lookup is not here yet (the recorder's item in the parity
-//! list of `.plans/2026-10-02-rust-core-and-tauri-shell.md`); the status
-//! carries what the capture session reports. The auto-stop after a call
+//! The status carries what the capture session reports.
+//!
+//! A start looks the calendar up ([`crate::calendar`]) on a thread of its
+//! own before it opens the devices. The event under way (or the next
+//! within fifteen minutes) names the meeting, and its attendees but the
+//! calendar's owner become its `them` participants, as in Swift's
+//! `RecordingController.start`. Without calendar access, without an
+//! event, or while the calendar has not answered when the row is written,
+//! the meeting starts with the default title; an answer that comes later
+//! names the row while it still records under that title. So the lookup
+//! never holds a start up or fails one. Rust only: Swift awaited it. The auto-stop after a call
 //! ends is [`crate::auto_stop`]'s policy, fed by
 //! [`CaptureRecorder::microphone_activity`]; its stop is the Stop button's.
 //!
@@ -65,12 +73,13 @@ use steno_host::services::{
     SpeechModels, StartHold,
 };
 use steno_host::speech::ModelAsset;
-use steno_pipeline::{LocalRecordingIntake, LocalRecordingIntakeError, RecordingResult};
+use steno_pipeline::{Attendee, LocalRecordingIntake, LocalRecordingIntakeError, RecordingResult};
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
 
 use crate::auto_stop::{AUTO_STOP_GRACE, CallWatch, Countdown, MicrophoneActivity};
 use crate::block_on;
+use crate::calendar::{Calendar, CalendarLookups, Lookup, NoCalendar};
 use crate::pipeline::CurrentPipeline;
 use crate::recovery::{RecoveryError, Unrecoverable};
 
@@ -939,6 +948,9 @@ pub struct CaptureRecorder {
     /// The clock the auto-stop's grace runs on; the system's, or a
     /// test's ([`Self::count_down_on`]).
     clock: Mutex<Arc<dyn steno_audio::Clock>>,
+    /// The calendar a start reads ([`Self::name_meetings_from`]; none
+    /// until the app names one).
+    calendar: CalendarLookups,
     /// This recorder, for the watcher threads.
     this: Weak<CaptureRecorder>,
 }
@@ -982,8 +994,15 @@ impl CaptureRecorder {
             changed: Mutex::new(None),
             disk: Mutex::new(DiskWatch::system(None)),
             clock: Mutex::new(Arc::new(steno_audio::SystemClock::new())),
+            calendar: CalendarLookups::new(Arc::new(NoCalendar)),
             this: this.clone(),
         })
+    }
+
+    /// Names each recording after the event `calendar` has under way when
+    /// it starts, from the next start on (see the module doc).
+    pub fn name_meetings_from(&self, calendar: Arc<dyn Calendar>) {
+        self.calendar.read_from(calendar);
     }
 
     /// Replaces how recordings watch the disk, for the next recording on.
@@ -1299,6 +1318,8 @@ impl CaptureRecorder {
     /// Starts the session and the meeting; the error says why not in plain
     /// words, for after [`COULD_NOT_START`].
     fn start_inner(&self, mode: CaptureMode) -> Result<(), String> {
+        // First, so the calendar answers while the devices open.
+        let lookup = self.calendar.start(Utc::now());
         let (configuration, audio_folder) = self.configuration(mode)?;
         let disk = self.disk();
         let rate = bytes_per_second(&configuration);
@@ -1318,10 +1339,7 @@ impl CaptureRecorder {
         self.record_audio_folder(meeting_id, &audio_folder);
         let started_at = Utc::now();
         let intake = self.intake();
-        if intake
-            .begin(meeting_id, source(mode), None, None, &[], started_at)
-            .is_err()
-        {
+        if !self.begin_meeting(&intake, meeting_id, source(mode), started_at, lookup) {
             // Nothing was recorded. An entry that stays is forgotten by a
             // later launch, once the failed row is durable or the folder
             // provably holds no master.
@@ -1403,6 +1421,59 @@ impl CaptureRecorder {
             tracing::error!(%error, "the recording runs without its watcher");
         }
         Ok(())
+    }
+
+    /// Writes the `recording` row of `meeting_id` through `intake`, named
+    /// after the event the calendar's `lookup` found when it has already
+    /// answered; a lookup still reading names the row once it answers
+    /// ([`Self::name_when_answered`]). `false` when the row could not be
+    /// written.
+    fn begin_meeting(
+        &self,
+        intake: &LocalRecordingIntake,
+        meeting_id: Uuid,
+        source: MeetingSource,
+        started_at: chrono::DateTime<Utc>,
+        lookup: Option<Lookup>,
+    ) -> bool {
+        let (event, pending) = match lookup.map(Lookup::take) {
+            Some(Ok(event)) => (event, None),
+            Some(Err(pending)) => (None, Some(pending)),
+            None => (None, None),
+        };
+        let event = event.as_ref();
+        let begun = intake.begin(
+            meeting_id,
+            source,
+            event.map(|event| event.title.as_str()),
+            event.map(|event| event.id.as_str()),
+            &event.map(attendees_of).unwrap_or_default(),
+            started_at,
+        );
+        if begun.is_err() {
+            return false;
+        }
+        if let Some(pending) = pending {
+            self.name_when_answered(pending, meeting_id);
+        }
+        true
+    }
+
+    /// Names the recording `meeting_id`, whose row was written before the
+    /// calendar answered, after the event `pending` finds, if any, while
+    /// it still records under its default title (see the module doc).
+    fn name_when_answered(&self, pending: Lookup, meeting_id: Uuid) {
+        let (store, pipeline, zone) = (self.store.clone(), self.pipeline.clone(), self.zone);
+        pending.then(move |event| {
+            let Some(event) = event else { return };
+            let intake = LocalRecordingIntake::over(store, pipeline.current(), zone);
+            match intake.name_after_event(meeting_id, &event.title, &event.id, &attendees_of(&event)) {
+                Ok(named) => tracing::debug!(%meeting_id, named, "the calendar answered after the start"),
+                Err(error) => {
+                    tracing::debug!(%meeting_id, %error, "the calendar event did not name the recording");
+                }
+            }
+        });
     }
 
     /// The watcher of the recording of `meeting_id` (see the module doc),
@@ -2058,6 +2129,21 @@ fn log_dropped_frames(meeting_id: Uuid, statistics: &CaptureStatistics) {
             "the recording lost frames"
         );
     }
+}
+
+/// The attendees of `event` that become the meeting's `them`
+/// participants: everyone but the calendar's owner, who is the recording's
+/// "me". Swift: the filter in `RecordingController.start`.
+fn attendees_of(event: &steno_core::CalendarEvent) -> Vec<Attendee> {
+    event
+        .attendees
+        .iter()
+        .filter(|attendee| !attendee.is_current_user)
+        .map(|attendee| Attendee {
+            display_name: attendee.name.clone(),
+            email: attendee.email.clone(),
+        })
+        .collect()
 }
 
 /// The required permissions `permissions` reports denied, among the ones
@@ -5196,5 +5282,147 @@ mod tests {
         assert_eq!(bytes_per_second(&in_person), 224_000);
         in_person.keep_raw_mic_lane = true;
         assert_eq!(bytes_per_second(&in_person), 416_000);
+    }
+
+    /// The event "event-42" under way at the start, with an attendee and
+    /// the calendar's owner. Swift:
+    /// `testCalendarEventNamesTheMeetingAndWritesAttendees`.
+    fn roadmap_sync() -> steno_core::CalendarEvent {
+        let now = Utc::now();
+        steno_core::CalendarEvent {
+            id: "event-42".to_owned(),
+            title: "Roadmap sync".to_owned(),
+            start: now - chrono::TimeDelta::minutes(5),
+            end: now + chrono::TimeDelta::minutes(30),
+            attendees: vec![
+                steno_core::CalendarAttendee {
+                    name: "Jérôme".to_owned(),
+                    email: Some("jerome@example.com".to_owned()),
+                    is_current_user: false,
+                },
+                steno_core::CalendarAttendee {
+                    name: "Nicolai".to_owned(),
+                    email: Some("nicolai@example.com".to_owned()),
+                    is_current_user: true,
+                },
+            ],
+        }
+    }
+
+    /// Waits until the meeting `meeting_id` is named after
+    /// [`roadmap_sync`] with its one attendee, and checks it.
+    async fn until_named_after_the_event(harness: &Harness, meeting_id: Uuid) {
+        eventually("the event named the recording", || {
+            harness
+                .store
+                .meeting(meeting_id)
+                .unwrap()
+                .is_some_and(|meeting| meeting.calendar_event_id.is_some())
+        })
+        .await;
+        let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(meeting.title, "Roadmap sync");
+        assert_eq!(meeting.title_origin, steno_core::TitleOrigin::Calendar);
+        assert_eq!(meeting.calendar_event_id.as_deref(), Some("event-42"));
+        let participants = harness.store.participants(meeting_id).unwrap();
+        let names: Vec<_> = participants
+            .iter()
+            .map(|participant| participant.display_name.as_str())
+            .collect();
+        assert_eq!(names, ["Jérôme"], "the owner is not an attendee row");
+        assert_eq!(participants[0].role, steno_core::ParticipantRole::Them);
+        assert_eq!(participants[0].email.as_deref(), Some("jerome@example.com"));
+    }
+
+    /// The event under way at the start names the meeting, and its
+    /// attendees but the calendar's owner are its participants, whether
+    /// the answer was in when the row was written or came after.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_event_under_way_names_the_recording_and_its_attendees() {
+        let harness = harness(&[]);
+        let calendar = crate::calendar::testing::FakeCalendar::with(vec![roadmap_sync()]);
+        harness.recorder.name_meetings_from(calendar.clone());
+        start(&harness.recorder);
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        until_named_after_the_event(&harness, meeting_id).await;
+        stop(&harness.recorder);
+        let stopped = harness.store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(stopped.title, "Roadmap sync", "the stop keeps the name");
+        assert_eq!(calendar.reads(), 1);
+    }
+
+    /// A calendar that has not answered never holds the start up: the
+    /// recording runs under its default title, and the answer names it
+    /// once the calendar gives it, while it still records.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_calendar_never_holds_a_start_up() {
+        let harness = harness(&[]);
+        let calendar = crate::calendar::testing::FakeCalendar::with(vec![roadmap_sync()]);
+        calendar.hold();
+        harness.recorder.name_meetings_from(calendar.clone());
+        // Returns although the calendar is held: a start that waited for
+        // it would hang here until the guard fails the test.
+        start(&harness.recorder);
+        assert!(calendar.wait_for_a_held_read(PATIENCE), "the lookup ran");
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(meeting.title_origin, steno_core::TitleOrigin::Default);
+        assert!(meeting.title.starts_with("Meeting "), "{}", meeting.title);
+        assert_eq!(meeting.calendar_event_id, None);
+        assert_eq!(harness.store.participants(meeting_id).unwrap(), Vec::new());
+
+        calendar.release();
+        until_named_after_the_event(&harness, meeting_id).await;
+        stop(&harness.recorder);
+    }
+
+    /// A calendar that still has not answered the previous start is not
+    /// asked again: the next recording starts unnamed and no second
+    /// thread waits on the calendar. Once it answers, starts read it
+    /// again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_calendar_that_hangs_is_read_by_one_start_at_a_time() {
+        let harness = harness(&[]);
+        let calendar = crate::calendar::testing::FakeCalendar::with(vec![roadmap_sync()]);
+        calendar.hold();
+        harness.recorder.name_meetings_from(calendar.clone());
+        start(&harness.recorder);
+        assert!(calendar.wait_for_a_held_read(PATIENCE));
+        let first = harness.recorder.status().meeting_id.unwrap();
+        stop(&harness.recorder);
+        start(&harness.recorder);
+        let second = harness.recorder.status().meeting_id.unwrap();
+        assert_eq!(calendar.reads(), 1, "the second start did not read");
+        calendar.release();
+        stop(&harness.recorder);
+        for meeting_id in [first, second] {
+            let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+            assert_eq!(meeting.calendar_event_id, None, "stopped before the answer");
+        }
+        eventually("the calendar's thread ended", || {
+            harness.recorder.calendar.start(Utc::now()).is_some()
+        })
+        .await;
+    }
+
+    /// A calendar that fails, or lists no event, starts the recording as
+    /// before: the default title, no participants.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failing_or_empty_calendar_starts_as_before() {
+        let failing = crate::calendar::testing::FakeCalendar::with(vec![roadmap_sync()]);
+        failing.fail();
+        let empty = crate::calendar::testing::FakeCalendar::with(Vec::new());
+        for calendar in [failing, empty] {
+            let harness = harness(&[]);
+            harness.recorder.name_meetings_from(calendar.clone());
+            start(&harness.recorder);
+            let meeting_id = harness.recorder.status().meeting_id.unwrap();
+            eventually("the calendar was read", || calendar.reads() == 1).await;
+            stop(&harness.recorder);
+            let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+            assert_eq!(meeting.title_origin, steno_core::TitleOrigin::Default);
+            assert_eq!(meeting.calendar_event_id, None);
+            assert_eq!(harness.store.participants(meeting_id).unwrap(), Vec::new());
+        }
     }
 }

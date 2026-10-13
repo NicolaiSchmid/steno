@@ -1780,6 +1780,8 @@ fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
         make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
         lock_patience: std::time::Duration::ZERO,
         update_source: None,
+        permissions: None,
+        calendar: None,
         detection: None,
         installed_bundle: false,
         import_marker: None,

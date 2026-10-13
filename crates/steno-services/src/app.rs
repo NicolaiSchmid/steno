@@ -16,7 +16,9 @@ use steno_handover::HandoverService;
 use steno_host::fakes::{
     FakeClipPlayer, FakeFileSystem, FakeLoginItem, FakePermissions, FakeUpdater,
 };
-use steno_host::services::{LoginItem, LoginItemStatus, Opener, Preferences, Services};
+use steno_host::services::{
+    LoginItem, LoginItemStatus, Opener, Permissions, Preferences, Services,
+};
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
@@ -25,10 +27,12 @@ use steno_pipeline::{
 };
 
 use crate::block_on;
+use crate::calendar::Calendar;
 use crate::detection::{DetectionController, DetectionOptions};
 use crate::handover::{GatedHandover, IdentitySource, ListenerHandover, start_if_paired};
 use crate::llm::{ClientLlmService, codex_store};
 use crate::model_gate::ResumingSpeechModels;
+use crate::permissions::SystemPermissions;
 use crate::pipeline::{
     BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
 };
@@ -74,6 +78,16 @@ pub struct AppOptions {
     /// The updater the update schedule drives; the shell's (`updater.rs`),
     /// `None` for a fake that never checks (the CLI, the tests).
     pub update_source: Option<Arc<dyn UpdateSource>>,
+    /// What the system says of each permission; the shell's
+    /// (`permissions.rs`), which the graph's
+    /// [`SystemPermissions`](crate::permissions::SystemPermissions) gives
+    /// the Mac's system audio probe. `None` for a fake that grants
+    /// everything (the CLI, the tests).
+    pub permissions: Option<Arc<dyn Permissions>>,
+    /// The calendar a recording's start is named from; the shell passes
+    /// [`system_calendar`](crate::calendar::system_calendar). `None` reads
+    /// no calendar (the CLI, the tests).
+    pub calendar: Option<Arc<dyn Calendar>>,
     /// The runtime the host's synchronous service calls block on.
     pub runtime: tokio::runtime::Handle,
     /// `CFBundleShortVersionString`'s equivalent.
@@ -120,6 +134,8 @@ impl AppOptions {
             opener,
             login_item: None,
             update_source: None,
+            permissions: None,
+            calendar: None,
             runtime,
             version: version.to_owned(),
             make_capture_session: Arc::new(|configuration| {
@@ -619,9 +635,12 @@ fn retire_the_engine(store: &Store, preferences: &FilePreferences, warnings: &mu
 /// models, folder usage, preferences, and the login item when the shell
 /// passes its own ([`AppOptions::login_item`]), the update schedule over
 /// the shell's update source ([`AppOptions::update_source`]), the QR
-/// encoder. Fakes where no platform side exists yet (the plan's "Pipeline
-/// and services (WP6b)" list says why for each): permissions (all
-/// granted), clip player, the updater when the shell passes no source;
+/// encoder, the shell's permissions with the system audio probe
+/// ([`AppOptions::permissions`]) and the calendar it passes
+/// ([`AppOptions::calendar`]). Fakes where no platform side exists yet
+/// (the plan's "Pipeline and services (WP6b)" list says why for each):
+/// clip player, the permissions (all granted) when the shell passes none,
+/// the updater when the shell passes no source;
 /// the audio device list is empty off the Mac until the `PipeWire` and
 /// WASAPI backends enumerate devices.
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
@@ -702,7 +721,10 @@ pub fn build_with_import(
     let sweep = RetentionSweep::new(store.clone());
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
 
-    let permissions = Arc::new(FakePermissions::all_granted());
+    let permissions: Arc<dyn Permissions> = match options.permissions {
+        Some(system) => Arc::new(SystemPermissions::new(system, preferences.clone())),
+        None => Arc::new(FakePermissions::all_granted()),
+    };
     // Settings and onboarding install the models; the pipeline never does
     // (`model_gate`), so an install resumes the meetings waiting for it.
     let speech_models = Arc::new(ResumingSpeechModels::resuming(
@@ -721,6 +743,9 @@ pub fn build_with_import(
     );
     // The save writes to the database's volume too.
     recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
+    if let Some(calendar) = options.calendar {
+        recorder.name_meetings_from(calendar);
+    }
     let detection = options
         .detection
         .map(|detection| detection.controller(recorder.clone(), store.clone()));
@@ -2154,6 +2179,114 @@ mod tests {
         );
     }
 
+    /// The permissions the shell passes are the host's, through the
+    /// services' system audio probe: a microphone the system reports
+    /// denied opens onboarding whatever the completed flag says, and on
+    /// the Mac system audio is what the last probe found. Without the
+    /// shell's (the CLI, the tests) every permission is granted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_permissions_the_shell_passes_are_the_hosts() {
+        use steno_bridge::{PermissionKind, PermissionState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let shells = Arc::new(FakePermissions::all(PermissionState::Granted));
+        shells.set_state(PermissionKind::Microphone, PermissionState::Denied);
+        let app = build(AppOptions {
+            permissions: Some(shells.clone() as Arc<dyn Permissions>),
+            ..options_under(&dir.path().join("support"))
+        })
+        .unwrap();
+        app.services.preferences.set_flag(
+            steno_host::onboarding::OnboardingViewModel::COMPLETED_KEY,
+            true,
+        );
+        let permissions = &app.services.permissions;
+        assert_eq!(
+            permissions.state(PermissionKind::Microphone),
+            PermissionState::Denied
+        );
+        assert!(app.host().unwrap().should_open_onboarding());
+        let system_audio = if cfg!(target_os = "macos") {
+            PermissionState::Unknown
+        } else {
+            PermissionState::Granted
+        };
+        assert_eq!(permissions.state(PermissionKind::SystemAudio), system_audio);
+        app.services
+            .preferences
+            .set_flag(crate::permissions::SYSTEM_AUDIO_GRANTED_KEY, true);
+        assert_eq!(
+            permissions.state(PermissionKind::SystemAudio),
+            PermissionState::Granted
+        );
+        drop(app);
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = build(options_under(&dir.path().join("support"))).unwrap();
+        for &kind in PermissionKind::ALL {
+            assert_eq!(
+                app.services.permissions.state(kind),
+                PermissionState::Granted
+            );
+        }
+    }
+
+    /// The calendar the shell passes names the graph's recordings: a
+    /// recording started during an event takes its title and attendee.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_calendar_the_shell_passes_names_the_graphs_recordings() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        let calendar =
+            crate::calendar::testing::FakeCalendar::with(vec![steno_core::CalendarEvent {
+                id: "event-7".to_owned(),
+                title: "Planning".to_owned(),
+                start: now - chrono::TimeDelta::minutes(1),
+                end: now + chrono::TimeDelta::minutes(30),
+                attendees: vec![steno_core::CalendarAttendee {
+                    name: "Ada".to_owned(),
+                    email: None,
+                    is_current_user: false,
+                }],
+            }]);
+        let app = build(AppOptions {
+            calendar: Some(calendar.clone()),
+            make_capture_session: crate::testing::synthetic_capture(),
+            ..options_under(&dir.path().join("support"))
+        })
+        .unwrap();
+        let mut settings = app.store.settings().unwrap();
+        settings.audio_folder = steno_core::paths::file_url(&dir.path().join("audio"), true);
+        app.store.save_settings(&settings).unwrap();
+        let recorder = app.recorder.clone();
+        crate::testing::on_own_thread(HANG_GUARD, "the start returned", move || {
+            steno_host::services::Recorder::start(
+                &*recorder,
+                steno_bridge::CaptureMode::InPerson,
+                None,
+            );
+        });
+        let meeting_id = steno_host::services::Recorder::status(&*app.recorder)
+            .meeting_id
+            .expect("recording");
+        crate::testing::eventually("the event named the recording", || {
+            app.store
+                .meeting(meeting_id)
+                .unwrap()
+                .is_some_and(|meeting| meeting.title == "Planning")
+        })
+        .await;
+        let participants = app.store.participants(meeting_id).unwrap();
+        assert_eq!(participants.len(), 1);
+        assert_eq!(participants[0].display_name, "Ada");
+        let recorder = app.recorder.clone();
+        crate::testing::on_own_thread(HANG_GUARD, "the stop returned", move || {
+            steno_host::services::Recorder::stop(&*recorder);
+        });
+        let pipeline = app.pipeline.current();
+        pipeline.wait_until_idle().await;
+    }
+
     /// The shell's word on its bundle reaches the host: on the Mac only a
     /// graph built for an installed bundle registers the login item at its
     /// first launch; off the Mac both do.
@@ -2754,6 +2887,8 @@ mod tests {
             opener: Arc::new(steno_host::fakes::FakeOpener::default()),
             login_item: None,
             update_source: None,
+            permissions: None,
+            calendar: None,
             runtime: tokio::runtime::Handle::current(),
             version: "0.0.0".to_owned(),
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
