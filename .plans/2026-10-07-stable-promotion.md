@@ -311,7 +311,7 @@ why and the alternative.
   the audio processing is stable and ideally the final version before we
   cutover to the tauri version."
   - **Reading:** no change to the audio and speech path is planned after the
-    cutover. A1 to A10 land before `0.11.0-rc.1`, so the rehearsals run on the
+    cutover. A1 to A10 and A12 to A17 land before `0.11.0-rc.1`, so the rehearsals run on the
     final pipeline. A fix found during the candidates becomes a new candidate
     and restarts the stability count (G2).
   - **The remaining differences, each made final.** Confirmed 2026-10-07.
@@ -458,6 +458,9 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A12 | An undecodable AAC packet becomes silence of its length, counted and shown on the meeting | audio (#264) |
 | A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
+| A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio, after #263 |
+| A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
+| A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured; a durable working marker, and quarantine at launch ("Steno stopped while reading this recording") with the file kept and Process again offered; kill tests; the allocations bounded only if a real trigger exists | audio, after #263 |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -928,10 +931,12 @@ Each lands before `0.11.0-rc.1`.
   2026-10-12): FLEURS German `cat/` through CoreML at or below 5.0 % mean WER,
   a hard limit (`scripts/coreml-parity-forge.sh` prints PASS or FAIL against it
   and exits 1 above it). The Swift corpus tracks drift, with a limit of 10 %.
-  The audio the CoreML chunks leave out (the lead-in, the tail, the rest of a
-  pause a chunk's start moves past) is decoded in extra windows, unchanged
-  FLEURS and corpus, at +13 % cost on FLEURS. Known limit: a stretch shorter
-  than 2.5 s is not decoded, the edges of a longer pause included, because
+  The gaps the CoreML chunks leave (the lead-in, the tail, the rest of a
+  pause a chunk's start moves past) are decoded in extra windows: FLEURS and
+  the corpus are unchanged, and the cost is +13 % on FLEURS, +9 % on the
+  corpus and +10 % on a 15-minute meeting's two lanes (+21 % on its
+  microphone lane alone). Known limit: a gap shorter than 2.5 s is not
+  decoded, even where it is the uncovered edge of a longer pause, because
   windows that short insert words.
   Measured with A13 (#279) in: FLEURS German `cat/` through CoreML 4.87 % mean
   WER, from 5.46 % (the ONNX engine 4.88 %). The parity test against the Swift
@@ -1410,6 +1415,44 @@ Each lands before `0.11.0-rc.1`.
     untouched too; under "delete after processing" the salvaged recording
     stays unstamped through the sweep and its detail reads kept
     incomplete, while its finished twin is stamped.
+  - Owner: audio. It blocks stable (D3).
+- **A15 The CoreML IOSurface abort.** Found by A13's testing (#279): in a
+  release build with debug assertions, the CoreML parity test aborted on the
+  second corpus file ("Failed to allocate memory IOSurface object", then
+  "Rust cannot catch foreign exceptions"); a plain release build passed. If
+  CoreML's resources build up across runs, a plain build would meet the same
+  wall later. Its own PR, after #263 merges, since it measures #263's code.
+  - Gates: IOSurface and memory growth measured per file, and fixed if it
+    leaks; an Objective-C exception from CoreML is caught at the FFI boundary
+    (the crate's `coreml` module), so the meeting fails retryably with its
+    audio kept; Nicolai runs a debug build of the app over several meetings
+    and checks that nothing aborts and memory stays flat.
+  - Owner: audio. It blocks stable (D3).
+- **A16 Extra windows for the ONNX engine.** A2's design (#263) on the ONNX
+  engine: every gap of 2.5 s or more (`MIN_GAP_SECONDS`) decoded in extra
+  windows, the long-pause skip kept for the cuts. After #263 merges.
+  - Gates, against ONNX's own numbers: FLEURS German `cat/` at or below
+    4.882 % mean WER; the corpus not worse; no word added where the Swift
+    transcripts have none, and none from silence or room noise; at most
+    +15 % runtime. If it misses them, the measured lead/tail switch instead
+    (the lead-in and the tail only, the long-pause skip kept; measured at
+    FLEURS 4.865 % and corpus 9.794 %, no runtime cost).
+  - Owner: audio.
+- **A17 No crash loop from a file that aborts the process.** Found by A14's
+  testing (#280): symphonia sizes some allocations straight from file
+  fields, and a failed allocation aborts the process, which `catch_unwind`
+  cannot catch. A corrupt or crafted phone file could stop the app on
+  decode and again at every launch through recovery: a crash loop, which is
+  data loss under D3. Its own PR, after #263 merges, designed with A15's
+  containment.
+  - Gates: the allocation abort measured (which fields and paths can trigger
+    it); a durable "working on" marker around every read of an asset (the
+    decode, recovery's duration, the mixdown, Process again, the CLI); an
+    asset whose marker survives into a launch is quarantined: its meeting
+    fails with "Steno stopped while reading this recording", the file is
+    kept and never touched again automatically, and Process again is
+    offered; kill tests (a child killed or aborted with the marker written);
+    the allocations bounded only if the measurement finds a real trigger.
   - Owner: audio. It blocks stable (D3).
 
 ### P: no data lost (D3)

@@ -276,20 +276,21 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   - [x] Chunking: the VAD layout, under the CoreML engine's 15 s window. With the energy
     detector, skipping long pauses cost words at chunk starts after them (at 1.5 s
     overlap 5.86 % against 5.09 % without the skip, 5.13 % with 1 s of padding instead
-    of 0.25 s; at 2 s 5.9 % against 4.87 %), so the CoreML engine skips none. The chunks
+    of 0.25 s; at 2 s 5.9 % against 4.87 %), so the CoreML engine skips no long pause. The chunks
     still leave out the audio before the first chunk (0.25 s before the first speech the
     detector finds), after the last (0.25 s after the last speech) and the rest of a pause
-    a chunk's start moves past. Each such stretch of 2.5 s or more
+    a chunk's start moves past: the gaps. Each gap of 2.5 s or more
     (`steno_speech::chunker::MIN_GAP_SECONDS`) is decoded in extra windows that stay
     inside it (`gap_windows`), and their words go in between the chunks' without changing
-    one (`splice_gaps`); a window of digital silence is left out. FLEURS and the corpus
+    one (`splice_gaps`; chunk words a recovery kept inside a gap cover it from the first
+    to the last); a window of digital silence is left out. FLEURS and the corpus
     are unchanged (4.874 %, 8.46 %, no word added), quiet speech at -20 and -26 dB comes
     through as the lead-in, a 9.1 s gap and the tail (14, 19 and 14 words, main's level),
-    and the cost is +13 % on FLEURS, +4 % on the corpus and +9 % on a 15-minute meeting's
-    two lanes. Known limit: a stretch under 2.5 s is not decoded, the uncovered edge of a
-    longer pause included, because windows that short inserted words (eight on FLEURS,
-    all wrong); a 6.65 s gap the chunks cover but 1.3 s of keeps 12 of 14 words at
-    -26 dB. Windows reaching 2 s into the neighbouring chunks replaced their words at the
+    and the cost is +13 % on FLEURS, +9 % on the corpus and +10 % on a 15-minute meeting's
+    two lanes (+21 % on its microphone lane alone). Known limit: a gap shorter than 2.5 s is not decoded, even where it is the
+    uncovered edge of a longer pause, because windows that short inserted words (eight on
+    FLEURS, all wrong); so a 6.65 s pause that the chunks cover except for 1.3 s keeps 12
+    of 14 words at -26 dB. Windows reaching 2 s into the neighbouring chunks replaced their words at the
     merge (5.50 %); chunks laid over all of that audio moved every later cut (5.74 %).
     Its detector follows the
     recording's level (`AdaptiveEnergyVad`; the fixed 0.01 RMS detector 5.2 % at the
