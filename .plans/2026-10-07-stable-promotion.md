@@ -603,8 +603,8 @@ Every package is written in parallel except where a dependency is named:
       handed to the store's rule (`Store::name_recording_after_event`): it
       names only the meeting that asked, only while it still records, only
       under its default title, only before any event named it. An answer the
-      rule drops (after Stop, after a rename) is logged at debug, without the
-      event. A calendar that has not answered the previous start is not asked
+      rule drops (once the stop is saved, after a rename) is logged at debug,
+      without the event. A calendar that has not answered the previous start is not asked
       again, so a hung calendar holds one thread and never a start. No log
       line carries a title or a name.
     - Prompt: the lookup reads EventKit only with full access, so neither a
