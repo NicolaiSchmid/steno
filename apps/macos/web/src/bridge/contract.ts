@@ -552,7 +552,7 @@ export const recordingSettingsSnapshot = z
 					kind: permissionKind,
 					state: permissionState,
 					isRequesting: z.boolean(),
-					/** Rust host only: the system audio test waits for the recording to end. */
+					/** Rust host only: the system audio test was refused, or stopped, for a recording; cleared once the recorder is idle. */
 					waitsForRecording: z.boolean().optional(),
 				})
 				.strict(),
@@ -733,7 +733,7 @@ export const onboardingSnapshot = z
 					isRequired: z.boolean(),
 					isRequesting: z.boolean(),
 					isSkipped: z.boolean(),
-					/** Rust host only: the system audio test waits for the recording to end. */
+					/** Rust host only: the system audio test was refused, or stopped, for a recording; cleared once the recorder is idle. */
 					waitsForRecording: z.boolean().optional(),
 				})
 				.strict(),

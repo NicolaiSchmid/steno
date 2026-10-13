@@ -558,8 +558,9 @@ pub struct OnboardingPermissionStep {
     pub is_skipped: bool,
     /// As the Recording section's
     /// [`waits_for_recording`](crate::RecordingPermission::waits_for_recording):
-    /// the system audio test waits until no recording starts, runs or
-    /// stops. Left out when false. Rust only.
+    /// the system audio test was refused, or stopped, because a recording
+    /// is starting, running or stopping; cleared once the recorder is idle
+    /// again. Left out when false. Rust only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub waits_for_recording: bool,
 }

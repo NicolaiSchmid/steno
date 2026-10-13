@@ -76,9 +76,10 @@ pub struct OnboardingViewModel {
     pub platform: Platform,
     pub steps: Vec<Step>,
     pub requesting: Option<PermissionKind>,
-    /// The permission whose last request waited for the recording (the
-    /// system audio test, which the host refuses while a recording
-    /// starts, runs or stops); cleared by the next request.
+    /// The permission whose last request was refused, or stopped, for the
+    /// recording (the system audio test, which the host refuses while a
+    /// recording starts, runs or stops); cleared when the recorder is idle
+    /// again, or by the next request.
     pub waits_for_recording: Option<PermissionKind>,
     pub skipped: BTreeSet<PermissionKind>,
     pub page: OnboardingPage,

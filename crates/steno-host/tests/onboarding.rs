@@ -943,12 +943,12 @@ fn not_now_while_the_import_runs_leaves_the_step_to_the_run() {
 /// The system audio test plays a tone a recording would pick up. While a
 /// recording starts, runs or stops, neither onboarding nor Settings >
 /// Recording runs it: no request reaches the services, the row never
-/// shows Asking, and it says it waits for the recording. Once the
-/// recorder is idle the next press runs the test and clears the line. A
-/// start during the test stops it (the services answer the state as it
-/// was), and the row says so too.
+/// shows Asking, and it says the test was refused for the recording.
+/// Once the recorder is idle the line goes, and the next press runs the
+/// test. A start during the test stops it (the services answer the state
+/// as it was), and the row says so too.
 #[test]
-fn the_system_audio_test_waits_for_the_recording() {
+fn the_system_audio_test_is_refused_while_recording() {
     use steno_bridge::RecordingState;
     use steno_host::services::RecorderStatus;
 
@@ -998,7 +998,15 @@ fn the_system_audio_test_waits_for_the_recording() {
         }
     }
 
+    // The recording ends: both rows drop the line before any press.
     harness.fakes.recorder.set_status(RecorderStatus::idle());
+    harness.sink.clear();
+    harness.host.recorder_changed();
+    for topic in [BridgeTopic::Onboarding, BridgeTopic::SettingsRecording] {
+        let published = harness.sink.all(topic);
+        let row = &published.last().expect("published")["permissions"][1];
+        assert!(row.get("waitsForRecording").is_none(), "{topic:?}: {row}");
+    }
     harness.host.onboarding_request(system_audio()).unwrap();
     assert_eq!(
         *harness.fakes.permissions.requests.lock().unwrap(),

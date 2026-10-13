@@ -856,12 +856,23 @@ impl Host {
     /// show it, since the web app tells a live row from one left
     /// `recording` by the recorder's state. Rust only: the Swift app's list
     /// observes the meeting table (`observeMeetings`).
+    ///
+    /// Once the recorder is idle, the system audio rows no longer say the
+    /// test was refused for the recording (`Host::waits_for_recording`).
     pub fn recorder_changed(&self) {
         let status = self.shared.services.recorder.status();
         let seen = Some((status.state, status.meeting_id));
         let moved = {
             let mut inner = self.lock();
             inner.publisher.schedule(BridgeTopic::Recording);
+            if status.state == RecordingState::Idle {
+                if inner.audio.waits_for_recording.take().is_some() {
+                    inner.publisher.schedule(BridgeTopic::SettingsRecording);
+                }
+                if inner.onboarding.waits_for_recording.take().is_some() {
+                    inner.publisher.schedule(BridgeTopic::Onboarding);
+                }
+            }
             std::mem::replace(&mut inner.recorder_seen, seen) != seen
         };
         if moved {
@@ -1288,9 +1299,9 @@ impl Host {
         self.publish();
     }
 
-    /// Whether a request for `kind` waits for the recording: the system
-    /// audio test plays a tone, and a recording that is starting, running
-    /// or stopping would pick it up. Asked before the request, so the row
+    /// Whether a request for `kind` is refused for the recording: the
+    /// system audio test plays a tone, and a recording that is starting,
+    /// running or stopping would pick it up. Asked before the request, so the row
     /// never shows Asking for a test that cannot run. The services keep
     /// the two apart as well, for a start that comes while the test runs
     /// (`steno_services::permissions`).
