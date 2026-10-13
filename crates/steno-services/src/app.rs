@@ -3968,27 +3968,9 @@ mod tests {
     /// every task there: the pipeline's runs, the handover, the timers.
     #[test]
     fn the_poll_and_the_events_task_never_block_a_worker() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = one_worker_runtime();
         let dir = tempfile::tempdir().unwrap();
-        let support = dir.path().join("support");
-        let mut app = runtime.block_on(async { build(options_under(&support)).unwrap() });
-        let pipeline = Arc::new(GatedPipeline::default());
-        app.services.pipeline = pipeline.clone();
-        let mut meeting = steno_core::testing::sample_data::meeting();
-        meeting.state = steno_core::MeetingState::Ready;
-        app.store.save_meeting(&meeting).unwrap();
-        let host = Arc::new(app.host().unwrap());
-        host.request_meeting(meeting.id);
-        assert!(pipeline.gate.reloads() > 0, "the meeting's detail is shown");
-        {
-            let _inside = runtime.enter();
-            app.launch(&host);
-        }
-        runtime.block_on(app.launch_finished());
+        let (app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
         let ticked = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
         let ticks = ticked.clone();
         runtime.spawn(async move {
@@ -4036,5 +4018,126 @@ mod tests {
         assert_live(&ticked, std::time::Duration::from_millis(600), "the poll");
         drop(armed);
         runtime.shutdown_background();
+    }
+
+    /// A services runtime with one worker, so a wait on it shows.
+    fn one_worker_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// The launch on `runtime`, under `dir`, over a [`GatedPipeline`],
+    /// with one meeting's detail shown, so each reload asks the gate.
+    fn launched_over_a_gated_pipeline(
+        runtime: &tokio::runtime::Runtime,
+        dir: &std::path::Path,
+    ) -> (App, Arc<GatedPipeline>, Arc<Host>) {
+        let mut app =
+            runtime.block_on(async { build(options_under(&dir.join("support"))).unwrap() });
+        let pipeline = Arc::new(GatedPipeline::default());
+        app.services.pipeline = pipeline.clone();
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = steno_core::MeetingState::Ready;
+        app.store.save_meeting(&meeting).unwrap();
+        let host = Arc::new(app.host().unwrap());
+        host.request_meeting(meeting.id);
+        assert!(pipeline.gate.reloads() > 0, "the meeting's detail is shown");
+        {
+            let _inside = runtime.enter();
+            app.launch(&host);
+        }
+        runtime.block_on(app.launch_finished());
+        (app, pipeline, host)
+    }
+
+    /// The event follower takes one event at a time, in the bus's order:
+    /// while the first event's reload is held, the next events wait in the
+    /// bus. The host's own lock would hold a second reload back before the
+    /// gate, so the gate alone cannot tell; the runtime's tasks can: a
+    /// follower that spawned per event would leave one task per waiting
+    /// event.
+    #[test]
+    fn the_event_follower_takes_one_event_at_a_time() {
+        let runtime = one_worker_runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let (app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let gate = &pipeline.gate;
+        let patience = std::time::Duration::from_secs(5);
+        let before = gate.reloads();
+        assert!(
+            gate.wait_for(patience, |state| state.reloads > before),
+            "the poll reloads"
+        );
+        let armed = gate.arm();
+        app.events.post(MeetingEvent::Deleted {
+            meeting_id: uuid::Uuid::new_v4(),
+        });
+        assert!(
+            gate.wait_for(std::time::Duration::from_secs(1), |state| state.entered
+                == 1),
+            "the first event's reload reaches the gate"
+        );
+        let tasks = runtime.metrics().num_alive_tasks();
+        for _ in 0..4 {
+            app.events.post(MeetingEvent::Deleted {
+                meeting_id: uuid::Uuid::new_v4(),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let waiting = runtime.metrics().num_alive_tasks();
+        let second = gate.wait_for(std::time::Duration::from_millis(200), |state| {
+            state.entered >= 2
+        });
+        drop(armed);
+        runtime.shutdown_background();
+        assert!(
+            !second,
+            "the second event's reload ran beside the first one's"
+        );
+        assert_eq!(
+            waiting, tasks,
+            "the follower took the next events while one was held"
+        );
+    }
+
+    /// A poll tick that waited is followed by one overdue tick, then the
+    /// next a full interval later, never by a burst of the ticks it
+    /// missed (`MissedTickBehavior::Delay`). The poll's reload is held for
+    /// two intervals and a half.
+    #[test]
+    fn a_held_poll_is_not_followed_by_a_burst() {
+        let runtime = one_worker_runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let (_app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let gate = &pipeline.gate;
+        let patience = std::time::Duration::from_secs(5);
+        // How many passes one tick makes, unheld.
+        let before = gate.reloads();
+        assert!(
+            gate.wait_for(patience, |state| state.reloads > before),
+            "the poll reloads"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let per_tick = gate.reloads() - before;
+        let armed = gate.arm();
+        assert!(
+            gate.wait_for(patience, |state| state.entered == 1),
+            "the poll's reload is held"
+        );
+        std::thread::sleep(POLL_INTERVAL * 5 / 2);
+        let released = gate.reloads();
+        drop(armed);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        let after = gate.reloads() - released;
+        runtime.shutdown_background();
+        // The held tick's own passes after the held one, then one overdue
+        // tick; a burst adds another.
+        assert!(
+            after < 2 * per_tick,
+            "the held tick was followed by a burst: {after} passes, {per_tick} per tick"
+        );
     }
 }
