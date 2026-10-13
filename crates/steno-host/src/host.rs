@@ -71,14 +71,15 @@
 //! entry point, so the mark does not assert there.
 //!
 //! Locks are taken in one order: the publishing mutex, then the view
-//! models, then the sink slot. The dialogs (`confirm`, `choose_folder`) are called with no lock
-//! held, on the command's thread. The services are called with the
-//! view-model lock held, so they must not call back into the host (the
-//! `services` module doc has the rule), except for the calls that run with
-//! it released: the recorder's commands, whose changes re-enter the host
-//! (`Host::recorder_changed`), the permission prompts, the LLM probe, the
-//! Codex calls and the model download, the prompts and the probe with
-//! their busy flag published first. `settings.transcription.download`
+//! models, then the sink slot. The dialogs (`confirm`, `choose_folder`)
+//! are called with no lock held, on the command's thread. The services are
+//! called with the view-model lock held, so they must not call back into
+//! the host (the `services` module doc has the rule), except for the calls
+//! that run with it released: the recorder's commands, whose changes
+//! re-enter the host (`Host::recorder_changed`), the permission prompts,
+//! the LLM probe, the Codex calls and the model download, the prompts and
+//! the probe with their busy flag published first.
+//! `settings.transcription.download`
 //! replies after its first publish and keeps publishing from its own
 //! thread until the download ends; a second download of the asset
 //! reattaches to that thread instead of starting one. The flush thread

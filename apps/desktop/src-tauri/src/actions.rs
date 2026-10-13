@@ -188,8 +188,9 @@ pub fn launch_at_login_command(value: bool) -> (&'static str, Value) {
 /// shows why in Settings > General. Blocking (the system's login item,
 /// then the host), so it runs off the main thread: from Settings on
 /// Tauri's blocking pool (`bridge::host_command`), from the tray on the
-/// shell's ordered lane ([`launch_at_login_through`]). The check mark moves on the main thread,
-/// once the host has answered, even when the change failed.
+/// shell's ordered lane ([`launch_at_login_through`]). The check mark
+/// moves on the main thread, once the host has answered, even when the
+/// change failed.
 /// Swift: `MenuBarViewModel.setLaunchAtLogin`.
 pub fn set_launch_at_login<H: ShellHost>(
     host: &H,
