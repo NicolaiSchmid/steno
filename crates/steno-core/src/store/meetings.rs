@@ -89,6 +89,21 @@ pub(super) fn fetch(connection: &Connection, id: Uuid) -> Result<Option<Meeting>
         .optional()?)
 }
 
+/// Saves `participants` for the meeting `meeting_id`, each re-pointed at
+/// it.
+fn save_participants(
+    connection: &Connection,
+    meeting_id: Uuid,
+    participants: &[Participant],
+) -> Result<()> {
+    for participant in participants {
+        let mut participant = participant.clone();
+        participant.meeting_id = meeting_id;
+        people::save_participant(connection, &participant)?;
+    }
+    Ok(())
+}
+
 /// Whether a row has the meeting id `id`.
 fn has_row(connection: &Connection, id: Uuid) -> Result<bool> {
     Ok(connection
@@ -235,12 +250,7 @@ impl Store {
     ) -> Result<()> {
         self.write(|transaction| {
             save(transaction, meeting)?;
-            for participant in participants {
-                let mut participant = participant.clone();
-                participant.meeting_id = meeting.id;
-                people::save_participant(transaction, &participant)?;
-            }
-            Ok(())
+            save_participants(transaction, meeting.id, participants)
         })
     }
 
@@ -278,11 +288,7 @@ impl Store {
             }
             stored.updated_at = now;
             save(transaction, &stored)?;
-            for participant in participants {
-                let mut participant = participant.clone();
-                participant.meeting_id = id;
-                people::save_participant(transaction, &participant)?;
-            }
+            save_participants(transaction, id, participants)?;
             Ok(true)
         })
     }

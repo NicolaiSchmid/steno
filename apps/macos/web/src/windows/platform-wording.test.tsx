@@ -318,9 +318,7 @@ describe("onboarding", () => {
 						},
 					],
 				);
-			}
-			// The local network row keeps its own wording and Got it.
-			if (os === "windows") {
+				// The local network row keeps its own wording and Got it.
 				expect(
 					screen.getByTestId("permission-localNetwork-skip"),
 				).toHaveTextContent("Got it");

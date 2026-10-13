@@ -368,6 +368,8 @@ pub(crate) mod testing {
         reads: usize,
         /// Reads that wait at the gate now.
         waiting: usize,
+        /// While true every read fails.
+        failing: bool,
     }
 
     /// The fake: `events` for any day, or an error while `failing`.
@@ -375,7 +377,6 @@ pub(crate) mod testing {
     pub(crate) struct FakeCalendar {
         state: Mutex<State>,
         changed: Condvar,
-        failing: std::sync::atomic::AtomicBool,
     }
 
     impl FakeCalendar {
@@ -400,8 +401,7 @@ pub(crate) mod testing {
         }
 
         pub(crate) fn fail(&self) {
-            self.failing
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.lock().failing = true;
         }
 
         pub(crate) fn reads(&self) -> usize {
@@ -430,7 +430,7 @@ pub(crate) mod testing {
                 .wait_while(state, |state| state.held)
                 .unwrap_or_else(PoisonError::into_inner);
             state.waiting -= 1;
-            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            if state.failing {
                 return Err("the calendar failed".to_owned());
             }
             Ok(state.events.clone())

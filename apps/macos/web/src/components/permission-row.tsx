@@ -116,6 +116,16 @@ export function PermissionRow({
 		description = "Listening for the test tone, up to 30 seconds…";
 	}
 	const action = prominent && !optional ? "primary" : "outline";
+	const openSettings = (variant: typeof action) => (
+		<Button
+			data-testid={`permission-${kind}-open`}
+			onClick={onOpenSystemSettings}
+			size="sm"
+			variant={variant}
+		>
+			Open {words.systemSettings}
+		</Button>
+	);
 
 	let control: ReactNode;
 	if (state === "granted") {
@@ -126,14 +136,7 @@ export function PermissionRow({
 		control = (
 			<>
 				{words.opensSystemSettings ? (
-					<Button
-						data-testid={`permission-${kind}-open`}
-						onClick={onOpenSystemSettings}
-						size="sm"
-						variant={action}
-					>
-						Open {words.systemSettings}
-					</Button>
+					openSettings(action)
 				) : (
 					<Badge variant="warning">Not allowed</Badge>
 				)}
@@ -151,14 +154,7 @@ export function PermissionRow({
 		);
 	} else if (untilRecording) {
 		control = words.opensSystemSettings ? (
-			<Button
-				data-testid={`permission-${kind}-open`}
-				onClick={onOpenSystemSettings}
-				size="sm"
-				variant="outline"
-			>
-				Open {words.systemSettings}
-			</Button>
+			openSettings("outline")
 		) : (
 			<Badge data-testid={`permission-${kind}-at-recording`}>
 				Checked when you record

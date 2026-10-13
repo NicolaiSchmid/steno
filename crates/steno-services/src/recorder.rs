@@ -10,9 +10,11 @@
 //! event, or while the calendar has not answered when the row is written,
 //! the meeting starts with the default title; an answer that comes later
 //! names the row while it still records under that title. So the lookup
-//! never holds a start up or fails one. Rust only: Swift awaited it. The auto-stop after a call
-//! ends is [`crate::auto_stop`]'s policy, fed by
-//! [`CaptureRecorder::microphone_activity`]; its stop is the Stop button's.
+//! never holds a start up or fails one. Rust only: Swift awaited it.
+//!
+//! The auto-stop after a call ends is [`crate::auto_stop`]'s policy, fed
+//! by [`CaptureRecorder::microphone_activity`]; its stop is the Stop
+//! button's.
 //!
 //! A stop that cannot store its meeting (the database still busy after the
 //! intake's tries, a full disk) keeps the recording on disk and the meeting
@@ -1467,10 +1469,17 @@ impl CaptureRecorder {
         pending.then(move |event| {
             let Some(event) = event else { return };
             let intake = LocalRecordingIntake::over(store, pipeline.current(), zone);
-            match intake.name_after_event(meeting_id, &event.title, &event.id, &attendees_of(&event)) {
-                Ok(named) => tracing::debug!(%meeting_id, named, "the calendar answered after the start"),
+            let attendees = attendees_of(&event);
+            match intake.name_after_event(meeting_id, &event.title, &event.id, &attendees) {
+                Ok(named) => {
+                    tracing::debug!(%meeting_id, named, "the calendar answered after the start");
+                }
                 Err(error) => {
-                    tracing::debug!(%meeting_id, %error, "the calendar event did not name the recording");
+                    tracing::debug!(
+                        %meeting_id,
+                        %error,
+                        "the calendar event did not name the recording"
+                    );
                 }
             }
         });
