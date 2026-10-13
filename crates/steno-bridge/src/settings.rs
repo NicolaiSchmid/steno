@@ -477,12 +477,22 @@ string_enum! {
         /// The pairing the phones know is no longer stored, though a phone
         /// is paired or its fingerprint is recorded.
         Missing = "missing",
-        /// Another pairing is stored than the one the phones know.
+        /// Another pairing is stored than the one the phones know, or, with
+        /// none recorded, one no paired phone knows.
         Replaced = "replaced",
+        /// With no pairing recorded, the paired phones do not all know one
+        /// pairing, but some know one. Rust mirrors the Swift app's
+        /// `partlyReplaced` (#284) as a reason of its own, because the
+        /// card's text comes from the reason alone.
+        PartlyReplaced = "partlyReplaced",
         /// A file in the folder Steno keeps its data in could not be
         /// opened (its permissions, a disk error): only a fix outside the
         /// app helps, then Try again.
         FileNotOpened = "fileNotOpened",
+        /// With no pairing recorded, a phone's pairing or the pairing's
+        /// start is after now on this computer's clock, so which pairing
+        /// the phones know cannot be told until the clock is right.
+        ClockBehind = "clockBehind",
     }
 }
 

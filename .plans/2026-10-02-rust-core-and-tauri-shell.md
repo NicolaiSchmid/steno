@@ -1094,16 +1094,36 @@ still has to draw the window side. `[ ]` is not ported yet.
   answered). It mints only with no phone paired, no fingerprint and no identity. A
   record that does not parse is replaced only by a write (Pair again's note, or the
   record of the Swift import's store), after setting it aside
-  (`files::set_aside`, kept as `handover-identity.json.corrupt-<time>`). A rollback to the Swift app leaves the file alone; a lost record is
-  rewritten from the identity found while the paired phones, which the Swift app keeps,
-  hold the guard. Swift keeps its own identity in the Keychain and has no guard
-  until #284, which records its fingerprint in its own `swift-handover-identity.json`.
+  (`files::set_aside`, kept as `handover-identity.json.corrupt-<time>`); a record that
+  cannot be opened is neither moved nor replaced, and the read waits as
+  `fileNotOpened`. A rollback to the Swift app leaves the file alone. Swift keeps its
+  own identity in the Keychain; its guard (#284) records it in
+  `swift-handover-identity.json`.
   A keychain that comes back empty (the Mac's Create New Keychain) or holding
   another identity, at the next launch, with Try again and Pair again, is
   tested end to end in `steno-services`' `keychain_reset_tests`, over the
   secrets file, the Keychain's stand-in; so are the launch over an
   unfinished Pair again's note, in each of its four cases, and a record
   that does not parse, which waits until Pair again sets it aside.
+  - With nothing recorded (a lost record, or an upgrade from a build without it), the
+    identity found is recorded only where the `pairedAt` rule adopts it: each paired
+    phone knows the newest identity whose `notValidBefore` is at or before its
+    `pairedAt`, and with no phone paired the newest is recorded. Nothing is recorded
+    or minted otherwise, and a recorded fingerprint is never judged by the rule. The
+    cases and their waiting reasons are tabled on
+    `HandoverIdentity::known_by_every_phone`; the words are S6's in
+    `.plans/2026-10-07-stable-promotion.md`.
+  - The Swift import chooses its certificate by the same rule
+    (`swift_import::choose_certificate`, whose doc tables the cases). Of several under
+    the Swift label (one per keychain in the search list, after an old login keychain
+    was added back beside a new one), the one the Swift app's own record names comes
+    over without the rule. A record naming a certificate the keychain no longer holds
+    waits as replaced, with one certificate or several. With one certificate, a
+    record naming it, or no record that names a fingerprint, the rule decides, and
+    when it settles nothing the import waits, never picking the first.
+  - The guards never read each other's file. The Rust import reads the Swift record
+    read-only, only to choose the Swift certificate it brings over, and never writes,
+    moves or deletes it.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
@@ -3490,6 +3510,7 @@ PR off `main`.
 | Phone handover waits instead of minting over the identity the paired phones know (a refused or locked read, a missing or replaced identity, the Swift import's export not through): Settings > iPhone says why, Try again reads it again (behind the import's gate, the export) without a restart, and Pair again, after the warning that every phone must pair again, writes the `swift-import-done` marker first and then mints (a Pair again that stopped is finished at the next launch); the gated handover's closed latch keeps a listener built after the shutdown from starting; P30's re-export through a summary re-run after the key is saved (S6 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-services`, `steno-host`, `steno-bridge`, web) | `feat/handover-waiting` | #281 | open |
 | S3, calendar and permissions: the event under way at a recording's start (or the next within fifteen minutes, Swift's `CalendarMatch.pick`) names it and its attendees, read on a thread of its own over EventKit on the Mac (`steno_macos::calendar`, `steno_services::calendar`) and never holding a start up, a later answer going to the store's rule; the host's `Permissions` over the shell's (`permissions::ShellPermissions`: the microphone and calendar status and prompts) with the Mac's system audio probe (`steno_audio::capture::permission`, `steno_services::permissions`); `unknown` missing on the Mac only (`permission_is_missing`), so a missing grant opens onboarding on its permissions page whatever `steno.onboardingCompleted` says, and off the Mac an `unknown` row says when the system decides (S3 of `.plans/2026-10-07-stable-promotion.md`; `steno-core`, `steno-macos`, `steno-audio`, `steno-host`, `steno-services`, desktop shell, web) | `feat/rust-calendar-permissions` | #288 | open |
 | P35's test of a reset Mac keychain, over the secrets file standing in for the Keychain: a keychain that comes back empty (Create New Keychain after a password reset) or holding another identity makes the handover wait, mint nothing and keep the record and the paired phones, end to end through the graph and Settings' iPhone section, with Try again and Pair again; a launch over an unfinished Pair again's note decides it by what the keychain holds, and a record with a value that is not a string waits until Pair again sets it aside (stable plan P35; `steno-services`) | `fix/handover-keychain-reset` | #282 | open |
+| The Swift import's choice among several Swift certificates and the identity's age against the paired phones: of several certificates under the Swift label, the one the Swift app's `swift-handover-identity.json` names (read only; one naming a certificate that is gone waits as replaced), else the one every paired phone knows by the `pairedAt` rule, which `HandoverIdentity::load_or_create` applies too to an identity found with nothing recorded; a choice the phones do not settle waits as replaced or with the new `partlyReplaced` reason, a time after now with the new `clockBehind` reason, never picking the first; the Swift import's record refuses a file that cannot be opened; the `fileNotOpened` card names disk space (S6 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-services`, `steno-host`, `steno-bridge`, web) | `fix/swift-certificate-choice` | #289 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

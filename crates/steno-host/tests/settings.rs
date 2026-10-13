@@ -2239,11 +2239,39 @@ fn the_waiting_reasons_are_plain_sentences() {
     assert_eq!(
         waiting_message(PhoneWaitingReason::FileNotOpened, Platform::Linux),
         "Steno cannot open a file in the folder it keeps its data in, so it cannot check this \
-         computer's phone pairing. Check that folder's permissions, then choose Try again."
+         computer's phone pairing. Check that folder's permissions and that the disk has space, \
+         then choose Try again."
     );
+    // Some phones paired before the pairing changed: the Swift app's words
+    // up to what to do, and Pair again, the button below, as it reads, is
+    // what reconnects them.
+    assert_eq!(
+        waiting_message(PhoneWaitingReason::PartlyReplaced, Platform::Macos),
+        "Some of your phones were paired before this Mac's pairing changed and can't connect. \
+         To reconnect them, choose Pair again."
+    );
+    // The clock went back: the fix is the clock, then Try again.
+    assert_eq!(
+        waiting_message(PhoneWaitingReason::ClockBehind, Platform::Macos),
+        "This Mac's date and time are earlier than when its phone pairing was made, so Steno \
+         can't tell which pairing your phones know. Check the date and time in System Settings, \
+         then choose Try again."
+    );
+    assert_eq!(
+        waiting_message(PhoneWaitingReason::ClockBehind, Platform::Windows),
+        "This computer's date and time are earlier than when its phone pairing was made, so \
+         Steno can't tell which pairing your phones know. Check the date and time, then choose \
+         Try again."
+    );
+    // Pair again cannot help with a file or the clock.
     for platform in Platform::ALL {
-        let message = waiting_message(PhoneWaitingReason::FileNotOpened, *platform);
-        assert!(!message.contains("Pair again"), "{platform}: {message}");
+        for reason in [
+            PhoneWaitingReason::FileNotOpened,
+            PhoneWaitingReason::ClockBehind,
+        ] {
+            let message = waiting_message(reason, *platform);
+            assert!(!message.contains("Pair again"), "{platform}: {message}");
+        }
     }
 }
 

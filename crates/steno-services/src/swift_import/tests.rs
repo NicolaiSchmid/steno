@@ -56,6 +56,61 @@ fn identity_pkcs12(passphrase: &str) -> Vec<u8> {
     again.writer(passphrase).write().unwrap()
 }
 
+/// `identity` as PKCS#12 under `passphrase`, as `SecItemExport` hands
+/// over a minted one.
+fn pkcs12_of(identity: &HandoverIdentity, passphrase: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let pem = identity.to_pem().unwrap();
+    let key = pem
+        .split("-----BEGIN PRIVATE KEY-----\n")
+        .nth(1)
+        .and_then(|rest| rest.split("-----END PRIVATE KEY-----").next())
+        .unwrap()
+        .replace('\n', "");
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(key)
+        .unwrap();
+    let chain = p12_keystore::PrivateKeyChain::new(
+        identity.fingerprint().to_vec(),
+        p12_keystore::PrivateKey::from_der(&key).unwrap(),
+        [p12_keystore::Certificate::from_der(identity.certificate_der()).unwrap()],
+    );
+    let mut store = KeyStore::new();
+    store.add_entry("identity", KeyStoreEntry::PrivateKeyChain(chain));
+    store.writer(passphrase).write().unwrap()
+}
+
+/// What a step chooses the certificate by: the Swift record under
+/// `support` and the phones paired in `store`, judged at `now`.
+fn choice_at(
+    support: &Path,
+    store: &Arc<Store>,
+    now: fn() -> chrono::DateTime<chrono::Utc>,
+) -> CertificateChoice {
+    CertificateChoice {
+        swift_record: SwiftRecord::in_support_directory(support),
+        store: store.clone(),
+        now,
+    }
+}
+
+/// [`choice_at`] on [`test_clock`].
+fn choice_in(support: &Path, store: &Arc<Store>) -> CertificateChoice {
+    choice_at(support, store, test_clock)
+}
+
+/// The tests' clock: a year after the committed identity's certificate
+/// starts, past every start and pairing the tests set from it, or the
+/// real clock once that is later, past every phone paired now.
+fn test_clock() -> chrono::DateTime<chrono::Utc> {
+    (fixture_start() + chrono::TimeDelta::days(365)).max(chrono::Utc::now())
+}
+
+/// [`choice_in`] with no phone paired.
+fn no_phones(support: &Path) -> CertificateChoice {
+    choice_in(support, &Arc::new(Store::in_memory().unwrap()))
+}
+
 /// The user's account, as the product sees it outside a test.
 fn at_home() -> LaunchContext {
     LaunchContext {
@@ -91,8 +146,12 @@ type OnCall = Arc<dyn Fn(&'static str) + Send + Sync>;
 
 /// The Swift keychain items a test sets; records every call.
 struct FakeKeychain {
-    certificate: Mutex<Option<Vec<u8>>>,
-    /// The certificate query's failure, which wins over `certificate`.
+    /// The certificates under the Swift label, in the keychain's order.
+    certificates: Mutex<Vec<Vec<u8>>>,
+    /// Identities whose certificates the export hands over as themselves;
+    /// any other certificate exports as the committed test identity.
+    identities: Mutex<Vec<HandoverIdentity>>,
+    /// The certificate query's failure, which wins over `certificates`.
     certificate_error: Mutex<Option<String>>,
     key_item: Result<ApiKeyItem, String>,
     /// A `handover-identity` entry is filed (a desktop-id build's).
@@ -115,7 +174,8 @@ struct FakeKeychain {
 impl FakeKeychain {
     fn swift_app() -> Self {
         FakeKeychain {
-            certificate: Mutex::new(Some(identity_der())),
+            certificates: Mutex::new(vec![identity_der()]),
+            identities: Mutex::new(Vec::new()),
             certificate_error: Mutex::new(None),
             key_item: Ok(ApiKeyItem::Swift),
             stored_identity: Ok(false),
@@ -192,12 +252,12 @@ impl ImportMarker for FakeKeychain {
 }
 
 impl SwiftKeychain for FakeKeychain {
-    fn swift_certificate(&self) -> Result<Option<Vec<u8>>, String> {
+    fn swift_certificates(&self) -> Result<Vec<Vec<u8>>, String> {
         self.record("certificate");
         if let Some(error) = self.certificate_error.lock().unwrap().clone() {
             return Err(error);
         }
-        Ok(self.certificate.lock().unwrap().clone())
+        Ok(self.certificates.lock().unwrap().clone())
     }
 
     fn api_key_item(&self) -> Result<ApiKeyItem, String> {
@@ -227,10 +287,17 @@ impl SwiftKeychain for FakeKeychain {
     ) -> Result<Vec<u8>, KeychainRefusal> {
         self.record("export");
         self.exported.lock().unwrap().push(certificate_der.to_vec());
-        match self.export_refusal.lock().unwrap().clone() {
-            Some(refusal) => Err(refusal),
-            None => Ok(identity_pkcs12(passphrase)),
+        if let Some(refusal) = self.export_refusal.lock().unwrap().clone() {
+            return Err(refusal);
         }
+        let identities = self.identities.lock().unwrap();
+        Ok(identities
+            .iter()
+            .find(|identity| identity.certificate_der() == certificate_der)
+            .map_or_else(
+                || identity_pkcs12(passphrase),
+                |identity| pkcs12_of(identity, passphrase),
+            ))
     }
 }
 
@@ -339,7 +406,7 @@ fn without_a_swift_certificate_the_import_is_over_at_launch_and_a_second_launch_
     let preferences = preferences(&dir);
     let defaults = FakeDefaults::new(fixture("swift-domain.plist"));
     let keychain = Arc::new(FakeKeychain::swift_app());
-    *keychain.certificate.lock().unwrap() = None;
+    keychain.certificates.lock().unwrap().clear();
     assert!(matches!(
         launch(&at_home(), preferences.clone(), &defaults, keychain.clone()),
         Launch::Done
@@ -349,7 +416,7 @@ fn without_a_swift_certificate_the_import_is_over_at_launch_and_a_second_launch_
 
     // The next launch: the import ran, so nothing is read or written,
     // even with a certificate now in the keychain.
-    *keychain.certificate.lock().unwrap() = Some(identity_der());
+    *keychain.certificates.lock().unwrap() = vec![identity_der()];
     keychain.calls.lock().unwrap().clear();
     let fresh = Arc::new(FilePreferences::in_support_directory(dir.path()));
     let before = std::fs::read(dir.path().join("preferences.json")).unwrap();
@@ -478,6 +545,8 @@ struct Step {
     dir: tempfile::TempDir,
     preferences: Arc<FilePreferences>,
     keychain: Arc<FakeKeychain>,
+    /// The database the step reads the paired phones from.
+    store: Arc<Store>,
     raw: Arc<CountingSecrets>,
     record: Arc<crate::handover::FingerprintFile>,
     graph: GraphImport,
@@ -486,6 +555,15 @@ struct Step {
 }
 
 fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) -> Step {
+    step_at(keychain, existing_identity, test_clock)
+}
+
+/// [`step`] with the certificate chosen at `now`.
+fn step_at(
+    keychain: FakeKeychain,
+    existing_identity: Option<&HandoverIdentity>,
+    now: fn() -> chrono::DateTime<chrono::Utc>,
+) -> Step {
     let dir = tempfile::tempdir().unwrap();
     let preferences = preferences(&dir);
     let keychain = Arc::new(FakeKeychain {
@@ -516,8 +594,10 @@ fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) ->
     let graph = GraphImport::new(pending, raw.clone(), record.clone());
     let reloads = Arc::new(AtomicUsize::new(0));
     let counted = reloads.clone();
+    let store = Arc::new(Store::in_memory().unwrap());
     let import = Arc::new(graph.step(
         RUNTIME.handle().clone(),
+        choice_at(dir.path(), &store, now),
         Box::new(move || {
             counted.fetch_add(1, Ordering::SeqCst);
         }),
@@ -526,6 +606,7 @@ fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) ->
         dir,
         preferences,
         keychain,
+        store,
         raw,
         record,
         graph,
@@ -811,7 +892,11 @@ fn a_fingerprint_not_recorded_after_the_store_is_surfaced_and_try_again_records_
         raw.clone(),
         record.clone(),
     );
-    let step = graph.step(RUNTIME.handle().clone(), Box::new(|| {}));
+    let step = graph.step(
+        RUNTIME.handle().clone(),
+        no_phones(dir.path()),
+        Box::new(|| {}),
+    );
 
     let status = step.run();
     assert_eq!(status.stage, SwiftImportStage::Waiting);
@@ -881,7 +966,7 @@ fn a_failed_certificate_query_leaves_the_import_pending() {
 fn an_export_of_another_certificate_is_refused() {
     let step = step(FakeKeychain::swift_app(), None);
     let other = HandoverIdentity::mint("Another", chrono::Utc::now()).unwrap();
-    *step.keychain.certificate.lock().unwrap() = Some(other.certificate_der().to_vec());
+    *step.keychain.certificates.lock().unwrap() = vec![other.certificate_der().to_vec()];
     let status = step.import.run();
     assert_eq!(status.stage, SwiftImportStage::Waiting);
     assert_eq!(status.error.as_deref(), Some(FAILED_EXPORT));
@@ -1060,7 +1145,11 @@ fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
     first.raw.reads.lock().unwrap().clear();
     let key = SecretKey::llm_api_key();
     assert_eq!(read(&*graph.secrets, &key), None);
-    let step = graph.step(RUNTIME.handle().clone(), Box::new(|| {}));
+    let step = graph.step(
+        RUNTIME.handle().clone(),
+        no_phones(first.dir.path()),
+        Box::new(|| {}),
+    );
     assert_eq!(step.status().prompts, 1, "the identity alone");
     assert_eq!(step.run().stage, SwiftImportStage::Done);
     assert_eq!(read(&*graph.secrets, &key), None);
@@ -1384,7 +1473,7 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
         let app = build_over(paths, keychain.clone());
         crate::testing::pair_a_phone(&app.store);
         std::fs::remove_file(dir.path().join("support/preferences.json")).unwrap();
-        *keychain.certificate.lock().unwrap() = None;
+        keychain.certificates.lock().unwrap().clear();
         let step = app.services.swift_import.clone().unwrap();
         let status = tokio::task::spawn_blocking(move || step.run())
             .await
@@ -1851,7 +1940,7 @@ async fn the_update_schedule_reads_the_flags_the_launch_half_copied() {
         let paths = steno_core::StenoPaths::new(dir.path().join("support"));
         let keychain = Arc::new(FakeKeychain::swift_app());
         if !certificate {
-            *keychain.certificate.lock().unwrap() = None;
+            keychain.certificates.lock().unwrap().clear();
         }
         let options = crate::AppOptions {
             update_source: Some(Arc::new(NoUpdates)),
@@ -2110,7 +2199,11 @@ fn failed_attribute_queries_count_as_items_that_may_prompt() {
         Arc::new(CountingSecrets::default()),
         record_in(dir.path()),
     );
-    let step = graph.step(RUNTIME.handle().clone(), Box::new(|| {}));
+    let step = graph.step(
+        RUNTIME.handle().clone(),
+        no_phones(dir.path()),
+        Box::new(|| {}),
+    );
     assert_eq!(
         step.status().prompts,
         3,
@@ -2169,7 +2262,11 @@ fn the_marker_comes_after_the_identity_and_a_crash_between_them_stores_the_same_
         raw.clone(),
         record_in(dir.path()),
     );
-    let rerun = graph.step(RUNTIME.handle().clone(), Box::new(|| {}));
+    let rerun = graph.step(
+        RUNTIME.handle().clone(),
+        no_phones(dir.path()),
+        Box::new(|| {}),
+    );
     assert_eq!(rerun.run().stage, SwiftImportStage::Done);
     assert_eq!(stored_fingerprint(&*raw), FIXTURE_FINGERPRINT);
     assert_eq!(*keychain.marker.lock().unwrap(), Ok(true));
@@ -2337,7 +2434,11 @@ async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
         passes(&built_over(&store, &paths, &secrets)),
         (false, false)
     );
-    let step = graph.step(tokio::runtime::Handle::current(), Box::new(|| {}));
+    let step = graph.step(
+        tokio::runtime::Handle::current(),
+        no_phones(&paths.support_directory),
+        Box::new(|| {}),
+    );
     let step = Arc::new(step);
     let skipping = step.clone();
     tokio::task::spawn_blocking(move || skipping.skip())
@@ -2767,6 +2868,7 @@ async fn app_behind_a_pending_import(
     let reloaded = app.pipeline.clone();
     let step = Arc::new(graph.step(
         tokio::runtime::Handle::current(),
+        choice_in(&support, store),
         Box::new(move || reloaded.reload().unwrap()),
     ));
 
@@ -2885,4 +2987,555 @@ async fn meetings_left_at_the_first_launch_wait_for_the_step_and_run_with_its_ke
     app.pipeline.current().wait_until_idle().await;
     assert_eq!(state(&keyless), MeetingState::Ready);
     app.shutdown();
+}
+
+/// When the committed test identity's certificate starts.
+fn fixture_start() -> chrono::DateTime<chrono::Utc> {
+    HandoverIdentity::not_valid_before_of_der(&identity_der()).unwrap()
+}
+
+/// A Swift identity whose certificate starts `days` after the committed
+/// one's (before it when negative), which the fake keychain exports as
+/// itself; its certificate's DER.
+fn swift_identity_starting(step: &Step, days: i64) -> Vec<u8> {
+    // A mint back-dates its start a minute.
+    let mint = fixture_start() + chrono::TimeDelta::days(days) + chrono::TimeDelta::minutes(1);
+    let identity = HandoverIdentity::mint("Steno on a Mac", mint).unwrap();
+    let der = identity.certificate_der().to_vec();
+    step.keychain.identities.lock().unwrap().push(identity);
+    der
+}
+
+/// Pairs one phone at each of `days` after the committed identity's start
+/// (before it when negative).
+fn pair_phones_at(store: &Store, days: &[i64]) {
+    for days in days {
+        crate::testing::pair_a_phone_at(store, fixture_start() + chrono::TimeDelta::days(*days));
+    }
+}
+
+/// The Swift app's record in `step`'s support directory, as `bytes`.
+fn write_swift_record(step: &Step, bytes: &[u8]) -> PathBuf {
+    let path = step.dir.path().join(SwiftRecord::FILE_NAME);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// The Swift app's record naming `der`'s fingerprint, in its bytes.
+fn swift_record_naming(der: &[u8]) -> Vec<u8> {
+    format!(
+        "{{\n  \"steno.handoverIdentityFingerprint\": \"{}\"\n}}",
+        fingerprint_of(der)
+    )
+    .into_bytes()
+}
+
+/// The run's outcome: the certificates it exported, and the stored
+/// identity's fingerprint, if any.
+fn exported_and_stored(step: &Step) -> (Vec<Vec<u8>>, Option<String>) {
+    let stored = read(&*step.raw, &HandoverIdentity::secret_key())
+        .map(|pem| hex(&HandoverIdentity::from_pem(&pem).unwrap().fingerprint()));
+    (step.keychain.exported.lock().unwrap().clone(), stored)
+}
+
+fn fingerprint_of(der: &[u8]) -> String {
+    hex(&HandoverIdentity::fingerprint_of_der(der))
+}
+
+/// Two Swift certificates under the label (an old login keychain added
+/// back beside a new one): the committed identity's and a newer one
+/// starting 30 days after it, the newer first in the keychain's order when
+/// `newer_first`; `(newer, older)`.
+fn two_swift_certificates(step: &Step, newer_first: bool) -> (Vec<u8>, Vec<u8>) {
+    let newer = swift_identity_starting(step, 30);
+    let older = identity_der();
+    *step.keychain.certificates.lock().unwrap() = if newer_first {
+        vec![newer.clone(), older.clone()]
+    } else {
+        vec![older.clone(), newer.clone()]
+    };
+    (newer, older)
+}
+
+/// Of two Swift certificates (an old login keychain added back beside a
+/// new one), in both orders, the one the Swift app's record names comes
+/// over, whatever the paired phones would choose: the older with no phone
+/// paired (the rule would take the newer), the newer with a phone paired
+/// between them (the rule would take the older). The record is read only.
+#[test]
+fn of_two_swift_certificates_the_one_the_swift_record_names_comes_over() {
+    for newer_first in [false, true] {
+        for named_newer in [false, true] {
+            let case = format!("newer first {newer_first}, named the newer {named_newer}");
+            let step = step(FakeKeychain::swift_app(), None);
+            let (newer, older) = two_swift_certificates(&step, newer_first);
+            let named = if named_newer { &newer } else { &older };
+            if named_newer {
+                pair_phones_at(&step.store, &[10]);
+            }
+            let record = swift_record_naming(named);
+            let path = write_swift_record(&step, &record);
+            assert_eq!(step.import.run().stage, SwiftImportStage::Done, "{case}");
+            assert_eq!(
+                exported_and_stored(&step),
+                (vec![named.clone()], Some(fingerprint_of(named))),
+                "{case}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), record, "{case}: untouched");
+        }
+    }
+}
+
+/// Of two Swift certificates with no record that names a fingerprint
+/// (none, one that does not parse, one with no fingerprint, one that
+/// cannot be read), in both orders, the paired phones choose by the
+/// pairing-time rule, and nothing is picked silently: the older when every
+/// phone was paired between them, the newer with no phone; with one phone
+/// between them and one after the newer the run waits as partly replaced,
+/// and with every phone before both as replaced, exporting nothing and
+/// recording no fingerprint.
+#[test]
+fn of_two_swift_certificates_without_a_record_naming_one_the_phones_choose() {
+    let records: [(&str, Option<&[u8]>); 4] = [
+        ("no record", None),
+        ("malformed", Some(b"{")),
+        (
+            "no fingerprint",
+            Some(b"{\"steno.handoverIdentityFingerprint\": 5}"),
+        ),
+        ("unreadable", Some(b"")),
+    ];
+    for (record, bytes) in records {
+        for newer_first in [false, true] {
+            for (phones, expected) in [
+                (&[1, 29][..], Ok(false)),
+                (&[][..], Ok(true)),
+                (&[1, 31][..], Err(WaitReason::PartlyReplaced)),
+                (&[-1, 1][..], Err(WaitReason::PartlyReplaced)),
+                (&[-2, -1][..], Err(WaitReason::Replaced)),
+            ] {
+                let case = format!("{record}, newer first {newer_first}, phones {phones:?}");
+                let step = step(FakeKeychain::swift_app(), None);
+                let (newer, older) = two_swift_certificates(&step, newer_first);
+                let path = step.dir.path().join(SwiftRecord::FILE_NAME);
+                match (record, bytes) {
+                    ("unreadable", _) => std::fs::create_dir(&path).unwrap(),
+                    (_, Some(bytes)) => std::fs::write(&path, bytes).unwrap(),
+                    (_, None) => {}
+                }
+                pair_phones_at(&step.store, phones);
+                let status = step.import.run();
+                match expected {
+                    Ok(newest) => {
+                        let chosen = if newest { &newer } else { &older };
+                        assert_eq!(status.stage, SwiftImportStage::Done, "{case}");
+                        assert_eq!(
+                            exported_and_stored(&step),
+                            (vec![chosen.clone()], Some(fingerprint_of(chosen))),
+                            "{case}"
+                        );
+                    }
+                    Err(reason) => {
+                        assert_eq!(status.stage, SwiftImportStage::Waiting, "{case}");
+                        assert_eq!(
+                            step.graph.gate.handover(),
+                            HandoverGate::Waiting(reason),
+                            "{case}"
+                        );
+                        assert_eq!(exported_and_stored(&step), (vec![], None), "{case}");
+                        assert_eq!(step.record.recorded().unwrap(), None, "{case}");
+                        assert!(!step.preferences.flag(IMPORT_RAN_KEY), "{case}");
+                        assert_eq!(step.keychain.count("mark done"), 0, "{case}");
+                    }
+                }
+                match (record, bytes) {
+                    ("unreadable", _) => assert!(path.is_dir(), "{case}"),
+                    (_, Some(bytes)) => {
+                        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{case}");
+                    }
+                    (_, None) => assert!(!path.exists(), "{case}: nothing written"),
+                }
+            }
+        }
+    }
+}
+
+/// With one Swift certificate, a Swift record naming it changes nothing
+/// (copies of the certificate count once): the pairing-time rule decides,
+/// so it comes over for a phone paired after it and not over one that
+/// predates it.
+#[test]
+fn one_swift_certificate_the_swift_record_names_is_judged_by_the_rule() {
+    for copies in [1, 2] {
+        for (phones, imported) in [(&[1][..], true), (&[-1][..], false)] {
+            let case = format!("{copies} copies, phones {phones:?}");
+            let step = step(FakeKeychain::swift_app(), None);
+            *step.keychain.certificates.lock().unwrap() = vec![identity_der(); copies];
+            let record = swift_record_naming(&identity_der());
+            let path = write_swift_record(&step, &record);
+            pair_phones_at(&step.store, phones);
+            let status = step.import.run();
+            if imported {
+                assert_eq!(status.stage, SwiftImportStage::Done, "{case}");
+                assert_eq!(
+                    exported_and_stored(&step),
+                    (vec![identity_der()], Some(FIXTURE_FINGERPRINT.to_owned())),
+                    "{case}"
+                );
+            } else {
+                assert_eq!(status.stage, SwiftImportStage::Waiting, "{case}");
+                assert_eq!(
+                    step.graph.gate.handover(),
+                    HandoverGate::Waiting(WaitReason::Replaced),
+                    "{case}"
+                );
+                assert_eq!(exported_and_stored(&step), (vec![], None), "{case}");
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), record, "{case}: untouched");
+        }
+    }
+}
+
+/// Two copies of one Swift certificate (one identity in two keychains)
+/// with no Swift record count once: they do not tie as two certificates
+/// of one second, so the rule brings it over, with no phone or a phone
+/// paired after it.
+#[test]
+fn two_copies_of_one_swift_certificate_without_a_record_count_once() {
+    for phones in [&[][..], &[1][..]] {
+        let step = step(FakeKeychain::swift_app(), None);
+        *step.keychain.certificates.lock().unwrap() = vec![identity_der(); 2];
+        pair_phones_at(&step.store, phones);
+        assert_eq!(
+            step.import.run().stage,
+            SwiftImportStage::Done,
+            "{phones:?}"
+        );
+        assert_eq!(
+            exported_and_stored(&step),
+            (vec![identity_der()], Some(FIXTURE_FINGERPRINT.to_owned())),
+            "{phones:?}"
+        );
+    }
+}
+
+/// A Swift record naming a certificate the keychain no longer holds means
+/// the phones know an identity that is gone: with one certificate or two,
+/// whatever the pairing-time rule would choose, the run waits as replaced,
+/// exports, stores and records nothing and writes no marker. Once the
+/// named one is back (its keychain added again), Try again brings it over.
+#[test]
+fn a_swift_record_naming_a_certificate_the_keychain_lacks_waits_until_it_is_back() {
+    for two in [false, true] {
+        let case = format!("two certificates {two}");
+        let step = step(FakeKeychain::swift_app(), None);
+        if two {
+            two_swift_certificates(&step, true);
+        }
+        // The rule alone would bring the committed one over.
+        pair_phones_at(&step.store, &[1, 29]);
+        let gone = swift_identity_starting(&step, -30);
+        let record = swift_record_naming(&gone);
+        let path = write_swift_record(&step, &record);
+        let status = step.import.run();
+        assert_eq!(status.stage, SwiftImportStage::Waiting, "{case}");
+        assert_eq!(status.error.as_deref(), Some(REPLACED_PAIRING), "{case}");
+        assert_eq!(
+            step.graph.gate.handover(),
+            HandoverGate::Waiting(WaitReason::Replaced),
+            "{case}"
+        );
+        assert_eq!(exported_and_stored(&step), (vec![], None), "{case}");
+        assert_eq!(step.record.recorded().unwrap(), None, "{case}");
+        assert_eq!(step.keychain.count("mark done"), 0, "{case}");
+        assert!(!step.preferences.flag(IMPORT_RAN_KEY), "{case}");
+
+        step.keychain
+            .certificates
+            .lock()
+            .unwrap()
+            .push(gone.clone());
+        assert_eq!(
+            crate::handover::WaitingImport::try_again(&*step.import),
+            Ok(()),
+            "{case}"
+        );
+        assert_eq!(
+            exported_and_stored(&step),
+            (vec![gone.clone()], Some(fingerprint_of(&gone))),
+            "{case}"
+        );
+        assert_eq!(step.graph.gate.handover(), HandoverGate::Ready, "{case}");
+        assert_eq!(std::fs::read(&path).unwrap(), record, "{case}: untouched");
+    }
+}
+
+/// An import the Swift record decided against the pairing-time rule (the
+/// newer named, a phone paired between the two) leaves a handover whose
+/// first load adopts it, as a recorded fingerprint is never judged by the
+/// rule: it writes nothing and keeps the phone.
+#[test]
+fn an_import_the_swift_record_decided_loads_as_recorded() {
+    let step = step(FakeKeychain::swift_app(), None);
+    let (newer, _older) = two_swift_certificates(&step, true);
+    pair_phones_at(&step.store, &[10]);
+    write_swift_record(&step, &swift_record_naming(&newer));
+    assert_eq!(step.import.run().stage, SwiftImportStage::Done);
+    let stored = read(&*step.raw, &HandoverIdentity::secret_key());
+    let loaded = RUNTIME
+        .block_on(HandoverIdentity::load_or_create(
+            &*step.raw,
+            &*step.record,
+            &step.store,
+            "x",
+            test_clock(),
+        ))
+        .expect("the recorded identity loads");
+    assert_eq!(hex(&loaded.fingerprint()), fingerprint_of(&newer));
+    assert_eq!(
+        step.record.recorded().unwrap(),
+        Some(fingerprint_of(&newer))
+    );
+    assert_eq!(read(&*step.raw, &HandoverIdentity::secret_key()), stored);
+    assert_eq!(step.store.paired_devices().unwrap().len(), 1);
+}
+
+/// A run that waits for the phones (replaced, partly replaced, the clock)
+/// records no fingerprint and writes no record file, no marker and no
+/// flag, so the next load finds nothing it would have to undo.
+#[test]
+fn a_waiting_choice_records_nothing() {
+    for (phones, reason) in [
+        (&[-2, -1][..], WaitReason::Replaced),
+        (&[-1, 1][..], WaitReason::PartlyReplaced),
+        (&[1, 36_500][..], WaitReason::ClockBehind),
+    ] {
+        let step = step(FakeKeychain::swift_app(), None);
+        pair_phones_at(&step.store, phones);
+        assert_eq!(step.import.run().stage, SwiftImportStage::Waiting);
+        assert_eq!(step.graph.gate.handover(), HandoverGate::Waiting(reason));
+        assert_eq!(
+            step.record.recorded().unwrap(),
+            None,
+            "{reason:?}: no fingerprint recorded"
+        );
+        assert!(
+            !step.dir.path().join("handover-identity.json").exists(),
+            "{reason:?}"
+        );
+        assert_eq!(step.keychain.count("mark done"), 0, "{reason:?}");
+        assert!(!step.preferences.flag(IMPORT_RAN_KEY), "{reason:?}");
+    }
+}
+
+/// The Swift app's record is only ever opened for reading: one this
+/// account cannot write still decides, and its bytes and modification time
+/// stay as they were.
+#[cfg(unix)]
+#[test]
+fn a_read_only_swift_record_still_decides_and_is_untouched() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let step = step(FakeKeychain::swift_app(), None);
+    let (newer, _older) = two_swift_certificates(&step, false);
+    pair_phones_at(&step.store, &[10]);
+    let record = swift_record_naming(&newer);
+    let path = write_swift_record(&step, &record);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+        eprintln!("this account writes any file (root): nothing to check");
+        return;
+    }
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(step.import.run().stage, SwiftImportStage::Done);
+    assert_eq!(
+        exported_and_stored(&step),
+        (vec![newer.clone()], Some(fingerprint_of(&newer)))
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), record);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
+}
+
+/// Two Swift certificates that start in the same second (two mints in one
+/// second) are no newest one, so the keychain's order never decides: with
+/// no phone, or a phone paired after both, the run waits as replaced, in
+/// either order; beside an older certificate a phone paired between them
+/// still brings the older over, and a Swift record naming one of the two
+/// brings that one over.
+#[test]
+fn two_swift_certificates_that_start_in_the_same_second_are_never_chosen_by_order() {
+    for first_first in [false, true] {
+        for phones in [&[][..], &[31][..]] {
+            let case = format!("first first {first_first}, phones {phones:?}");
+            let step = step(FakeKeychain::swift_app(), None);
+            let (first, second) = (
+                swift_identity_starting(&step, 30),
+                swift_identity_starting(&step, 30),
+            );
+            assert_eq!(
+                HandoverIdentity::not_valid_before_of_der(&first).unwrap(),
+                HandoverIdentity::not_valid_before_of_der(&second).unwrap()
+            );
+            *step.keychain.certificates.lock().unwrap() = if first_first {
+                vec![first.clone(), second.clone()]
+            } else {
+                vec![second.clone(), first.clone()]
+            };
+            pair_phones_at(&step.store, phones);
+            assert_eq!(step.import.run().stage, SwiftImportStage::Waiting, "{case}");
+            assert_eq!(
+                step.graph.gate.handover(),
+                HandoverGate::Waiting(WaitReason::Replaced),
+                "{case}"
+            );
+            assert_eq!(exported_and_stored(&step), (vec![], None), "{case}");
+
+            // The Swift app's record names one of the two.
+            write_swift_record(&step, &swift_record_naming(&second));
+            assert_eq!(
+                crate::handover::WaitingImport::try_again(&*step.import),
+                Ok(()),
+                "{case}"
+            );
+            assert_eq!(
+                exported_and_stored(&step),
+                (vec![second.clone()], Some(fingerprint_of(&second))),
+                "{case}"
+            );
+        }
+    }
+    // Beside the older committed one, a phone between them knows the older.
+    let step = step(FakeKeychain::swift_app(), None);
+    let tie = [
+        swift_identity_starting(&step, 30),
+        swift_identity_starting(&step, 30),
+    ];
+    *step.keychain.certificates.lock().unwrap() =
+        vec![tie[0].clone(), identity_der(), tie[1].clone()];
+    pair_phones_at(&step.store, &[10]);
+    assert_eq!(step.import.run().stage, SwiftImportStage::Done);
+    assert_eq!(
+        exported_and_stored(&step),
+        (vec![identity_der()], Some(FIXTURE_FINGERPRINT.to_owned()))
+    );
+}
+
+/// A Swift certificate that starts after now, or a phone paired after now,
+/// means this Mac's clock went back: the run waits for the clock, with
+/// phones or without, says so in the iPhone section's words, and exports,
+/// stores and records nothing.
+#[test]
+fn a_swift_certificate_or_pairing_after_now_waits_for_the_clock() {
+    let ten_days_in = || fixture_start() + chrono::TimeDelta::days(10);
+    for (newer, phones) in [(true, &[][..]), (true, &[1][..]), (false, &[1, 20][..])] {
+        let case = format!("newer {newer}, phones {phones:?}");
+        let step = step_at(FakeKeychain::swift_app(), None, ten_days_in);
+        if newer {
+            two_swift_certificates(&step, false);
+        }
+        pair_phones_at(&step.store, phones);
+        let status = step.import.run();
+        assert_eq!(status.stage, SwiftImportStage::Waiting, "{case}");
+        assert_eq!(
+            status.error.as_deref(),
+            Some(CLOCK_BEHIND_PAIRING),
+            "{case}"
+        );
+        assert_eq!(
+            step.graph.gate.handover(),
+            HandoverGate::Waiting(WaitReason::ClockBehind),
+            "{case}"
+        );
+        assert_eq!(exported_and_stored(&step), (vec![], None), "{case}");
+        assert_eq!(step.record.recorded().unwrap(), None, "{case}");
+        assert_eq!(step.keychain.count("mark done"), 0, "{case}");
+    }
+    let reason = steno_bridge::PhoneWaitingReason::from(WaitReason::ClockBehind);
+    assert_eq!(reason, steno_bridge::PhoneWaitingReason::ClockBehind);
+    assert_eq!(
+        steno_host::settings::snapshots::waiting_message(reason, steno_core::Platform::Macos),
+        CLOCK_BEHIND_PAIRING
+    );
+}
+
+/// A Swift certificate every paired phone predates is one the Swift app
+/// minted after a keychain reset, which the phones cannot know: the run
+/// waits as replaced, exports and stores nothing, and the iPhone section
+/// says so; some phones before it and some after wait as partly replaced,
+/// with the section's first sentence. Once the old login keychain is added back,
+/// Try again brings over the identity the phones know.
+#[test]
+fn a_swift_certificate_the_phones_predate_waits_and_the_old_one_comes_over_once_it_is_back() {
+    let step = step(FakeKeychain::swift_app(), None);
+    pair_phones_at(&step.store, &[-20, -10]);
+    let status = step.import.run();
+    assert_eq!(status.stage, SwiftImportStage::Waiting);
+    assert_eq!(status.error.as_deref(), Some(REPLACED_PAIRING));
+    assert_eq!(
+        step.graph.gate.handover(),
+        HandoverGate::Waiting(WaitReason::Replaced)
+    );
+    assert_eq!(
+        steno_bridge::PhoneWaitingReason::from(WaitReason::Replaced),
+        steno_bridge::PhoneWaitingReason::Replaced
+    );
+    assert_eq!(exported_and_stored(&step), (vec![], None));
+    assert!(!step.preferences.flag(IMPORT_RAN_KEY));
+
+    let old = swift_identity_starting(&step, -30);
+    step.keychain.certificates.lock().unwrap().push(old.clone());
+    assert_eq!(
+        crate::handover::WaitingImport::try_again(&*step.import),
+        Ok(())
+    );
+    assert_eq!(
+        exported_and_stored(&step),
+        (vec![old.clone()], Some(fingerprint_of(&old)))
+    );
+    assert_eq!(step.graph.gate.handover(), HandoverGate::Ready);
+    assert!(step.preferences.flag(IMPORT_RAN_KEY));
+
+    let step = super::tests::step(FakeKeychain::swift_app(), None);
+    pair_phones_at(&step.store, &[-10, 10]);
+    let status = step.import.run();
+    assert_eq!(status.error.as_deref(), Some(PARTLY_REPLACED_PAIRING));
+    assert_eq!(
+        step.graph.gate.handover(),
+        HandoverGate::Waiting(WaitReason::PartlyReplaced)
+    );
+    let reason = steno_bridge::PhoneWaitingReason::from(WaitReason::PartlyReplaced);
+    let card =
+        steno_host::settings::snapshots::waiting_message(reason, steno_core::Platform::Macos);
+    let (first, _) = PARTLY_REPLACED_PAIRING.split_once(" To reconnect").unwrap();
+    assert!(card.starts_with(first), "{card}");
+    assert_eq!(exported_and_stored(&step), (vec![], None));
+}
+
+/// A certificate whose start cannot be read, and paired phones the
+/// database cannot read, are no reason to bring a certificate over: the
+/// run waits as for a failed lookup and exports nothing.
+#[test]
+fn a_start_or_a_pairing_time_that_cannot_be_read_waits_as_a_failed_lookup() {
+    let step = step(FakeKeychain::swift_app(), None);
+    *step.keychain.certificates.lock().unwrap() = vec![vec![0x30, 0x00], identity_der()];
+    let status = step.import.run();
+    assert_eq!(status.error.as_deref(), Some(FAILED_EXPORT));
+    assert_eq!(
+        step.graph.gate.handover(),
+        HandoverGate::Waiting(WaitReason::ImportDenied)
+    );
+    assert_eq!(exported_and_stored(&step), (vec![], None));
+
+    let step = super::tests::step(FakeKeychain::swift_app(), None);
+    pair_phones_at(&step.store, &[1]);
+    step.store
+        .write(|transaction| {
+            Ok(transaction.execute_batch("UPDATE pairedDevice SET pairedAt = 'yesterday';")?)
+        })
+        .unwrap();
+    let status = step.import.run();
+    assert_eq!(status.error.as_deref(), Some(FAILED_EXPORT));
+    assert_eq!(exported_and_stored(&step), (vec![], None));
 }

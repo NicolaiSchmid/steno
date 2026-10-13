@@ -1,7 +1,11 @@
 //! Where the import reads from: the Swift app's defaults domain and its
-//! keychain items, each behind a trait so the tests use fakes. The real
-//! sources are the Mac's (`DefaultsCommand`, `LoginKeychain`); off the Mac
-//! nothing implements them, as nothing is imported there.
+//! keychain items, each behind a trait so the tests use fakes, and the
+//! Swift app's record of its identity ([`SwiftRecord`]), read only. The
+//! real keychain and defaults are the Mac's (`DefaultsCommand`,
+//! `LoginKeychain`); off the Mac nothing implements them, as nothing is
+//! imported there.
+
+use std::path::{Path, PathBuf};
 
 /// The Swift app's `UserDefaults` domain.
 pub trait SwiftDefaults: Send + Sync {
@@ -26,10 +30,14 @@ pub trait ImportMarker: Send + Sync {
 /// and the import's own marker ([`IMPORT_DONE_ENTRY`](super::IMPORT_DONE_ENTRY)),
 /// the one item it writes here ([`ImportMarker`]).
 pub trait SwiftKeychain: ImportMarker {
-    /// The DER of the certificate labelled
-    /// [`SWIFT_IDENTITY_LABEL`](super::SWIFT_IDENTITY_LABEL), or `None`.
-    /// A certificate query reads no secret, so macOS asks nothing.
-    fn swift_certificate(&self) -> Result<Option<Vec<u8>>, String>;
+    /// The DER of every certificate labelled
+    /// [`SWIFT_IDENTITY_LABEL`](super::SWIFT_IDENTITY_LABEL), in the
+    /// keychain's order; empty when there is none. There may be several,
+    /// one per keychain in the search list (an old login keychain added
+    /// back beside a new one); the step chooses among them
+    /// ([`choose_certificate`](super::choose_certificate)). A certificate
+    /// query reads no secret, so macOS asks nothing.
+    fn swift_certificates(&self) -> Result<Vec<Vec<u8>>, String>;
     /// Whose API key item is filed under
     /// [`KEYRING_SERVICE`](crate::secrets::KEYRING_SERVICE) and the key's
     /// account: the Swift app's when it is labelled
@@ -49,13 +57,64 @@ pub trait SwiftKeychain: ImportMarker {
     /// gone.
     fn read_api_key(&self) -> Result<Option<String>, KeychainRefusal>;
     /// The identity of the certificate whose DER is `certificate_der` (the
-    /// one `swift_certificate` found), as PKCS#12 under `passphrase`;
-    /// macOS asks for the login password once.
+    /// one the step chose of `swift_certificates`), as PKCS#12 under
+    /// `passphrase`; macOS asks for the login password once.
     fn export_identity(
         &self,
         certificate_der: &[u8],
         passphrase: &str,
     ) -> Result<Vec<u8>, KeychainRefusal>;
+}
+
+/// The Swift app's own record of its handover identity's fingerprint,
+/// `swift-handover-identity.json` in the support directory both apps share
+/// (Swift: `IdentityRecordFile` in `Sources/StenoHandover/Identity/`), in
+/// [`FingerprintFile`](crate::handover::FingerprintFile)'s format under its
+/// key. The import reads it, and only to choose the Swift certificate
+/// ([`choose_certificate`](super::choose_certificate)). The type has no
+/// write: its one access is [`std::fs::read`], which opens the file read
+/// only, so it never writes, moves or deletes it, and a read-only file
+/// decides the same. Nothing else in this app reads it.
+#[derive(Debug, Clone)]
+pub struct SwiftRecord {
+    path: PathBuf,
+}
+
+impl SwiftRecord {
+    /// The file's name in the support directory.
+    pub const FILE_NAME: &'static str = "swift-handover-identity.json";
+
+    /// The record under `support_directory`.
+    #[must_use]
+    pub fn in_support_directory(support_directory: &Path) -> Self {
+        SwiftRecord {
+            path: support_directory.join(Self::FILE_NAME),
+        }
+    }
+
+    /// The recorded fingerprint. A missing file is no record, and so is
+    /// one that cannot be read or does not parse, or that holds no
+    /// fingerprint (logged): the step then chooses as without a record.
+    /// Opened read only, never for writing.
+    #[must_use]
+    pub fn fingerprint(&self) -> Option<String> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                tracing::warn!(%error, "the Swift app's pairing record could not be read");
+                return None;
+            }
+        };
+        let key = crate::handover::FingerprintFile::KEY;
+        let fingerprint = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|record| record.get(key)?.as_str().map(str::to_owned));
+        if fingerprint.is_none() {
+            tracing::warn!("the Swift app's pairing record holds no fingerprint");
+        }
+        fingerprint
+    }
 }
 
 /// The API key item in the keychain, by who stored it.
@@ -231,8 +290,12 @@ mod mac {
     }
 
     impl SwiftKeychain for LoginKeychain {
-        fn swift_certificate(&self) -> Result<Option<Vec<u8>>, String> {
-            Ok(self.certificates()?.first().map(SecCertificate::to_der))
+        fn swift_certificates(&self) -> Result<Vec<Vec<u8>>, String> {
+            Ok(self
+                .certificates()?
+                .iter()
+                .map(SecCertificate::to_der)
+                .collect())
         }
 
         fn api_key_item(&self) -> Result<ApiKeyItem, String> {
@@ -286,7 +349,7 @@ mod mac {
                 .find(|certificate| certificate.to_der() == certificate_der)
                 .ok_or_else(|| {
                     failed(format!(
-                        "no certificate labelled \"{SWIFT_IDENTITY_LABEL}\" is the one found"
+                        "no certificate labelled \"{SWIFT_IDENTITY_LABEL}\" is the one chosen"
                     ))
                 })?;
             // The first argument is the search list for the private key:

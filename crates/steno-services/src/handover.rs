@@ -18,7 +18,7 @@
 //!
 //! | Event | Plain handover | Gated handover | Read or written |
 //! |-------|----------------|----------------|-----------------|
-//! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read; a mint only where the guard allows |
+//! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read; a mint only where the guard allows; an identity found unrecorded is recorded only where the pairing-time rule adopts it ([`HandoverIdentity::known_by_every_phone`]), else waiting with the rule's reason (replaced, partly replaced, the clock) |
 //! | Try again while waiting | the listener once the read succeeds, else the new reason | the gate waits: the import's step runs again; a listener adopted: its Try again | the identity read (or the import's export) |
 //! | Try again with a listener | nothing | the adopted listener's: nothing | nothing |
 //! | Pair again while waiting | the listener over a new identity | the gate waits: the import ends with a new identity and the gate opens; a listener adopted: its Pair again | the marker, then the next fingerprint noted (a record that does not parse set aside first), then the new identity, then the paired phones removed, then its fingerprint recorded (dropping the note); a stop leaves the note |
@@ -77,7 +77,8 @@ use crate::swift_import::{HandoverGate, ImportMarker};
 ///   `handover-identity.json.corrupt-<time>` ([`files::set_aside`]), which
 ///   is kept, then write as over nothing recorded; a move that fails stops
 ///   the write. `note_next(None)` leaves it and fails. A file that cannot
-///   be opened stays an error and is never moved. No read ever replaces
+///   be opened stays an error for every read and write, and is never moved
+///   or replaced. No read ever replaces
 ///   the file: a read that meets one that does not parse waits as
 ///   unreadable, and one that cannot open it waits as
 ///   [`PhoneWaitingReason::FileNotOpened`].
@@ -102,7 +103,10 @@ use crate::swift_import::{HandoverGate, ImportMarker};
 /// Not `preferences.json`: that file holds only flags, is rewritten in
 /// place, and a build that reads it as flags would drop every flag over a
 /// text value. The Swift app never reads or writes this file, so a
-/// rollback to it leaves the record alone. No Swift counterpart.
+/// rollback to it leaves the record alone. With #284 the Swift app keeps
+/// its own record in this format, `swift-handover-identity.json`
+/// ([`SwiftRecord`](crate::swift_import::SwiftRecord)), which in this app
+/// only the import reads, read only.
 ///
 #[derive(Debug, Clone)]
 pub struct FingerprintFile {
@@ -183,9 +187,12 @@ impl FingerprintRecord for FingerprintFile {
     }
 
     /// Over a file that does not parse (the Swift import's store meets
-    /// one), it sets the file aside first, as Pair again's note does.
+    /// one), it sets the file aside first, as Pair again's note does. A
+    /// file that cannot be opened is neither moved nor replaced: the record
+    /// fails, and the read after it waits as
+    /// [`PhoneWaitingReason::FileNotOpened`].
     fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
-        if let Ok(Err(_)) = self.parsed() {
+        if self.parsed()?.is_err() {
             self.set_aside("a record")?;
         }
         self.write(Some(fingerprint), None)
@@ -404,9 +411,11 @@ const COMPUTER: &str = if cfg!(target_os = "macos") {
 /// in plain words: the keyring's own sentence when it was not opened at
 /// start, as that one already names the pairing; the waiting card's first
 /// sentence when the guard refused the identity or the record could not be
-/// opened; a sentence of its own when the database failed or the record
-/// does not parse, and when Pair again could not note the next fingerprint
-/// (the caller logs the error); the read's error otherwise.
+/// opened, followed by where to choose Pair again when some phones were
+/// paired before the pairing changed; a sentence of its own when the database
+/// failed or the record does not parse, and when Pair again could not note
+/// the next fingerprint (the caller logs the error); the read's error
+/// otherwise.
 pub(crate) fn identity_failure(error: &IdentityError) -> String {
     match error {
         IdentityError::Unavailable(Unavailability::Missing) => {
@@ -416,6 +425,22 @@ pub(crate) fn identity_failure(error: &IdentityError) -> String {
             format!(
                 "Steno found a different phone pairing on this {COMPUTER} than the one your \
                  phones know."
+            )
+        }
+        // The first sentence is the Swift app's
+        // (`IdentityUnavailability.partlyReplaced`, #284), the second names
+        // this app's button.
+        IdentityError::Unavailable(Unavailability::PartlyReplaced) => {
+            format!(
+                "Some of your phones were paired before this {COMPUTER}'s pairing changed and \
+                 can't connect. To reconnect them, choose Pair again in Settings > iPhone."
+            )
+        }
+        // The Swift app's first sentence (`IdentityUnavailability.clockBehind`).
+        IdentityError::Unavailable(Unavailability::ClockBehind) => {
+            format!(
+                "This {COMPUTER}'s date and time are earlier than when its phone pairing was \
+                 made, so Steno can't tell which pairing your phones know."
             )
         }
         IdentityError::Secrets(source) => {
@@ -475,6 +500,10 @@ fn wait_reason(error: &IdentityError) -> PhoneWaitingReason {
         error if file_not_opened(error) => PhoneWaitingReason::FileNotOpened,
         IdentityError::Unavailable(Unavailability::Missing) => PhoneWaitingReason::Missing,
         IdentityError::Unavailable(Unavailability::Replaced) => PhoneWaitingReason::Replaced,
+        IdentityError::Unavailable(Unavailability::PartlyReplaced) => {
+            PhoneWaitingReason::PartlyReplaced
+        }
+        IdentityError::Unavailable(Unavailability::ClockBehind) => PhoneWaitingReason::ClockBehind,
         _ => PhoneWaitingReason::Unreadable,
     }
 }
@@ -1307,6 +1336,114 @@ mod tests {
         assert_eq!(set_aside().len(), 2);
     }
 
+    /// A record over a file that cannot be opened but could be replaced
+    /// (here one without read permission in a folder Steno may write) is
+    /// refused, as the Swift import's store would otherwise replace it
+    /// without a kept copy: the error is the file's, so the read after it
+    /// waits as [`PhoneWaitingReason::FileNotOpened`], and the bytes stay,
+    /// unmoved.
+    #[cfg(unix)]
+    #[test]
+    fn a_record_over_a_file_that_cannot_be_opened_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("handover-identity.json");
+        std::fs::write(&path, OLDER_FILE).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            eprintln!("this account reads any file (root): nothing to check");
+            return;
+        }
+        let file = FingerprintFile::in_support_directory(dir.path());
+        let error = file.record("ef56").unwrap_err();
+        assert!(error.is::<std::io::Error>(), "{error}");
+        assert!(file_not_opened(&IdentityError::Record(error)));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), OLDER_FILE, "not replaced");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "nothing set aside"
+        );
+    }
+
+    /// With nothing recorded, an identity some paired phones predate and
+    /// others do not waits with the mixed words and its own reason, whose card in Settings offers Pair
+    /// again first; Pair again reconnects every phone over a new identity.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_identity_some_phones_predate_waits_with_the_mixed_words_until_pair_again() {
+        let paired = Paired::new(true).await;
+        std::fs::remove_file(paired.dir.path().join("handover-identity.json")).unwrap();
+        let start = paired.identity.not_valid_before().unwrap();
+        crate::testing::pair_a_phone_at(&paired.store, start - chrono::TimeDelta::days(1));
+        let handover = ListenerHandover::read(paired.source());
+        assert_eq!(handover.waiting(), Some(PhoneWaitingReason::PartlyReplaced));
+        assert_eq!(
+            handover.state(),
+            ListenerState::Failed(format!(
+                "Phone handover is unavailable: Some of your phones were paired before this \
+                 {COMPUTER}'s pairing changed and can't connect. To reconnect them, choose Pair \
+                 again in Settings > iPhone."
+            ))
+        );
+        let card = steno_host::settings::snapshots::waiting_message(
+            PhoneWaitingReason::PartlyReplaced,
+            steno_core::Platform::CURRENT,
+        );
+        assert!(
+            card.starts_with("Some of your phones were paired before"),
+            "{card}"
+        );
+        let (_, recorded, _, phones) = paired.places().await;
+        assert_eq!((recorded, phones), (None, 2), "nothing written");
+        assert_eq!(paired.listens.load(Ordering::SeqCst), 0);
+
+        tokio::task::block_in_place(|| handover.pair_again()).unwrap();
+        assert_eq!(handover.waiting(), None);
+        let (stored, recorded, _, phones) = paired.places().await;
+        assert_eq!(recorded, Paired::fingerprint_of(stored.as_ref()));
+        assert_ne!(
+            recorded,
+            Some(steno_handover::identity::hex(
+                &paired.identity.fingerprint()
+            ))
+        );
+        assert_eq!(phones, 0, "every phone pairs again");
+    }
+
+    /// With nothing recorded, a phone paired after now on this computer's
+    /// clock (the clock went back since) waits for the clock with its own
+    /// reason and words, writes nothing, and its words do not ask for Pair
+    /// again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_identity_with_a_pairing_after_now_waits_for_the_clock() {
+        let paired = Paired::new(true).await;
+        std::fs::remove_file(paired.dir.path().join("handover-identity.json")).unwrap();
+        crate::testing::pair_a_phone_at(
+            &paired.store,
+            chrono::Utc::now() + chrono::TimeDelta::days(1),
+        );
+        let handover = ListenerHandover::read(paired.source());
+        assert_eq!(handover.waiting(), Some(PhoneWaitingReason::ClockBehind));
+        assert_eq!(
+            handover.state(),
+            ListenerState::Failed(format!(
+                "Phone handover is unavailable: This {COMPUTER}'s date and time are earlier than \
+                 when its phone pairing was made, so Steno can't tell which pairing your phones \
+                 know."
+            ))
+        );
+        let card = steno_host::settings::snapshots::waiting_message(
+            PhoneWaitingReason::ClockBehind,
+            steno_core::Platform::CURRENT,
+        );
+        assert!(card.ends_with("then choose Try again."), "{card}");
+        assert!(!card.contains("Pair again"), "{card}");
+        let (_, recorded, _, phones) = paired.places().await;
+        assert_eq!((recorded, phones), (None, 2), "nothing written");
+        assert_eq!(paired.listens.load(Ordering::SeqCst), 0);
+    }
+
     /// A set-aside that fails stops the write: here the support folder's
     /// path is 4050 bytes long, so the record (+23 bytes) and the write's
     /// temporary (+39) fit under Linux's 4095, and
@@ -1357,8 +1494,8 @@ mod tests {
 
     /// The answers Try again and Pair again give, pinned as text, as the
     /// tests compare against the constants: each in plain words, with no
-    /// developer word in it, and Missing and Replaced in the waiting card's
-    /// words.
+    /// developer word in it, and each identity reason's details line
+    /// opening with its waiting card's first sentence.
     #[test]
     fn the_handover_s_answers_are_plain_sentences() {
         assert_eq!(
@@ -1370,6 +1507,8 @@ mod tests {
         let failures = [
             IdentityError::Unavailable(Unavailability::Missing),
             IdentityError::Unavailable(Unavailability::Replaced),
+            IdentityError::Unavailable(Unavailability::PartlyReplaced),
+            IdentityError::Unavailable(Unavailability::ClockBehind),
             IdentityError::Record(Box::new(std::io::Error::from(
                 std::io::ErrorKind::PermissionDenied,
             ))),
@@ -1404,6 +1543,8 @@ mod tests {
         for (reason, failure) in [
             PhoneWaitingReason::Missing,
             PhoneWaitingReason::Replaced,
+            PhoneWaitingReason::PartlyReplaced,
+            PhoneWaitingReason::ClockBehind,
             PhoneWaitingReason::FileNotOpened,
         ]
         .into_iter()
@@ -1413,7 +1554,8 @@ mod tests {
                 reason,
                 steno_core::Platform::CURRENT,
             );
-            assert!(card.starts_with(failure.as_str()), "{card} / {failure}");
+            let first = failure.split(". ").next().unwrap();
+            assert!(card.starts_with(first), "{card} / {failure}");
         }
     }
 
@@ -2151,7 +2293,9 @@ mod tests {
             PhoneWaitingReason::FileNotOpened,
             steno_core::Platform::CURRENT,
         );
-        assert!(card.contains("Check that folder's permissions, then choose Try again."));
+        assert!(card.contains(
+            "Check that folder's permissions and that the disk has space, then choose Try again."
+        ));
 
         let read = tokio::task::block_in_place(|| handover.try_again())
             .unwrap_err()

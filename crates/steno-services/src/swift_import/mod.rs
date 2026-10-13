@@ -21,20 +21,23 @@
 //!   ([`PendingImport`]): the graph reads no API key and builds no handover
 //!   listener until the step ends.
 //! - **[`ImportStep`]**, the onboarding step's half, reads the Swift API key,
-//!   exports the handover identity and stores it as the `handover-identity`
-//!   entry, replacing a desktop-id build's, with its fingerprint recorded
-//!   (`handover-identity.json`, [`crate::handover::FingerprintFile`]) so
-//!   the handover's guard accepts it. A denied or failed export or store
-//!   never mints an identity and never replaces one: the handover waits
-//!   ([`HandoverGate`]), and the step and Settings' iPhone section offer
-//!   Try again and, in Settings, Pair again.
+//!   chooses the Swift certificate the paired phones know
+//!   ([`choose_certificate`]), exports its identity and stores it as the
+//!   `handover-identity` entry, replacing a desktop-id build's, with its
+//!   fingerprint recorded (`handover-identity.json`,
+//!   [`crate::handover::FingerprintFile`]) so the handover's guard accepts
+//!   it. A choice the phones do not settle, and a denied or failed export or
+//!   store, never mint an identity and never replace one: the handover
+//!   waits ([`HandoverGate`]), and the step and Settings' iPhone section
+//!   offer Try again and, in Settings, Pair again.
 //!
 //! | Part | Items |
 //! |------|-------|
 //! | Launch half | [`launch`], [`launch_on_this_mac`], [`LaunchContext`] with [`SkipReason`], [`Launch`], [`LaunchKey`], [`PendingImport`] |
 //! | The graph | [`GraphImport`] (the gated secret store and the step), [`ImportGate`], [`HandoverGate`] with [`WaitReason`], [`key_denied_secrets`] |
-//! | The step | [`ImportStep`], [`DENIED_EXPORT`], [`FAILED_EXPORT`] |
-//! | Sources (`sources.rs`) | [`SwiftDefaults`], [`SwiftKeychain`] with [`ImportMarker`], [`ApiKeyItem`], [`KeychainRefusal`]; on the Mac `DefaultsCommand` and `LoginKeychain`, and [`marker_on_this_mac`] |
+//! | The step | [`ImportStep`], [`NotImported`], [`DENIED_EXPORT`], [`FAILED_EXPORT`], [`REPLACED_PAIRING`], [`PARTLY_REPLACED_PAIRING`], [`CLOCK_BEHIND_PAIRING`] |
+//! | The certificate | [`choose_certificate`], [`CertificateChoice`] |
+//! | Sources (`sources.rs`) | [`SwiftDefaults`], [`SwiftKeychain`] with [`ImportMarker`], [`ApiKeyItem`], [`KeychainRefusal`], [`SwiftRecord`]; on the Mac `DefaultsCommand` and `LoginKeychain`, and [`marker_on_this_mac`] |
 //! | Identity (`identity.rs`) | [`decode_pkcs12`], [`store_imported_identity`], [`ImportedIdentityError`] |
 //! | Flags in `preferences.json` | [`IMPORT_RAN_KEY`], [`KEY_READ_KEY`], [`KEY_DENIED_KEY`]; Sparkle's two flags are copied into the update schedule's [`AUTOMATIC_CHECKS_KEY`] and [`AUTOMATIC_DOWNLOAD_KEY`] |
 //! | In the keychain | [`IMPORT_DONE_ENTRY`], the marker Pair again keeps |
@@ -63,6 +66,7 @@
 //! | Run: the key read | read | | `KEY_READ` |
 //! | Run: the key refused | withheld | | `KEY_READ`, `KEY_DENIED` (unless a key was saved meanwhile) |
 //! | Run: identity stored | | Ready | the identity and its fingerprint, then the marker, then `IMPORT_RAN` |
+//! | Run: no one Swift certificate is chosen ([`choose_certificate`]) | | Waiting, replaced, partly replaced or the clock (Try again, Pair again) | nothing |
 //! | Run: export or store denied or failed | | Waiting (Try again) | nothing |
 //! | Run: identity stored, its fingerprint not recorded | | Waiting (Try again repeats the store) | the identity; no marker, no `IMPORT_RAN` |
 //! | Settings' Try again while Waiting | | as a run | as a run |
@@ -103,14 +107,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use steno_core::protocols::BoundaryResult;
-use steno_core::{SecretKey, SecretPlace, SecretStore, Settings, async_trait};
-use steno_handover::FingerprintRecord;
+use steno_core::{SecretKey, SecretPlace, SecretStore, Settings, Store, async_trait};
+use steno_handover::{FingerprintRecord, HandoverIdentity, Unavailability};
 use steno_host::onboarding::OnboardingViewModel;
 use steno_host::services::{Preferences as _, SwiftImport, SwiftImportStage, SwiftImportStatus};
 use tokio::sync::watch;
 
 pub use identity::{ImportedIdentityError, decode_pkcs12, store_imported_identity};
-pub use sources::{ApiKeyItem, ImportMarker, KeychainRefusal, SwiftDefaults, SwiftKeychain};
+pub use sources::{
+    ApiKeyItem, ImportMarker, KeychainRefusal, SwiftDefaults, SwiftKeychain, SwiftRecord,
+};
 #[cfg(target_os = "macos")]
 pub use sources::{DefaultsCommand, LoginKeychain};
 
@@ -291,9 +297,10 @@ pub struct PendingImport {
 /// registers its own login item; the floating panel's anchor stays behind,
 /// so the panel opens at its default place.
 ///
-/// Then, when the keychain holds the Swift handover certificate
+/// Then, when the keychain holds a Swift handover certificate
 /// ([`SWIFT_IDENTITY_LABEL`], found by a certificate query that asks
-/// nothing, [`SwiftKeychain`]), or the query failed, the import is pending.
+/// nothing, [`SwiftKeychain`]), or the query failed, the import is pending;
+/// the step chooses among several ([`choose_certificate`]).
 /// A key alone does not make it pending, since a desktop-id build files its
 /// key under the same service and account. Attribute queries, which ask
 /// nothing either, tell the Swift key ([`SWIFT_API_KEY_LABEL`]) from a
@@ -326,8 +333,8 @@ pub fn launch(
         preferences.set_flag(IMPORT_RAN_KEY, true);
         return Launch::Done;
     }
-    match keychain.swift_certificate() {
-        Ok(None) => {
+    match keychain.swift_certificates() {
+        Ok(certificates) if certificates.is_empty() => {
             preferences.set_flag(IMPORT_RAN_KEY, true);
             Launch::Done
         }
@@ -470,8 +477,19 @@ impl HandoverGate {
 /// Why the handover waits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitReason {
-    /// The export of the Swift identity was denied, failed or skipped.
+    /// The export of the Swift identity was denied, failed or skipped, or
+    /// a certificate's start or the paired phones could not be read.
     ImportDenied,
+    /// No paired phone knows any Swift certificate, or the Swift app's
+    /// record names one the keychain no longer holds
+    /// ([`choose_certificate`]).
+    Replaced,
+    /// The paired phones do not all know one Swift certificate, but some
+    /// know one ([`choose_certificate`]).
+    PartlyReplaced,
+    /// A pairing or a certificate's start is after now on this Mac's clock
+    /// ([`choose_certificate`]).
+    ClockBehind,
 }
 
 /// The iPhone section's reason for the gate's.
@@ -479,6 +497,129 @@ impl From<WaitReason> for steno_bridge::PhoneWaitingReason {
     fn from(reason: WaitReason) -> Self {
         match reason {
             WaitReason::ImportDenied => steno_bridge::PhoneWaitingReason::ImportDenied,
+            WaitReason::Replaced => steno_bridge::PhoneWaitingReason::Replaced,
+            WaitReason::PartlyReplaced => steno_bridge::PhoneWaitingReason::PartlyReplaced,
+            WaitReason::ClockBehind => steno_bridge::PhoneWaitingReason::ClockBehind,
+        }
+    }
+}
+
+/// What the step chooses the Swift certificate by ([`choose_certificate`]).
+pub struct CertificateChoice {
+    /// The Swift app's record, read only.
+    pub swift_record: SwiftRecord,
+    /// The database, for the paired phones' pairing times.
+    pub store: Arc<Store>,
+    /// This Mac's clock, which the pairing-time rule judges by
+    /// (`chrono::Utc::now` in the product).
+    pub now: fn() -> chrono::DateTime<chrono::Utc>,
+}
+
+/// Of the Swift certificates the keychain holds (`certificates`, the DER
+/// of each in the keychain's order), the one to import, or `None` when
+/// there is none. Copies of one certificate count once. The Swift app's
+/// record ([`SwiftRecord::fingerprint`]) decides among several, and a
+/// record naming none waits; otherwise the pairing-time rule decides
+/// ([`HandoverIdentity::known_by_every_phone`], whose table gives its
+/// outcomes):
+///
+/// | Swift certificates | The Swift app's record | Result |
+/// |--------------------|------------------------|--------|
+/// | none | any | `None`: nothing to import |
+/// | several | names one of them | that one, without the rule |
+/// | one | names it | the rule over it, as without a record |
+/// | one or several | names none of them | waits as [`WaitReason::Replaced`]: the phones know a certificate that is gone |
+/// | one or several | none, unreadable, not parsing, or no fingerprint | the rule over them |
+///
+/// A record naming the identity a Swift Pair Again staged and did not
+/// promote (labelled `Steno handover identity (new)`, which the keychain
+/// query does not match) names none of them; Pair Again had removed the
+/// phones by then, so Pair again here loses nothing.
+///
+/// | The rule | Result |
+/// |----------|--------|
+/// | adopts one | that one |
+/// | [`Unavailability::Replaced`] | waits as [`WaitReason::Replaced`], [`REPLACED_PAIRING`] |
+/// | [`Unavailability::PartlyReplaced`] | waits as [`WaitReason::PartlyReplaced`], [`PARTLY_REPLACED_PAIRING`] |
+/// | [`Unavailability::ClockBehind`] | waits as [`WaitReason::ClockBehind`], [`CLOCK_BEHIND_PAIRING`] |
+/// | a start or the paired phones cannot be read | waits as a failed lookup ([`FAILED_EXPORT`]) |
+///
+/// A certificate is never chosen by the keychain's order.
+pub fn choose_certificate(
+    mut certificates: Vec<Vec<u8>>,
+    choice: &CertificateChoice,
+) -> Result<Option<Vec<u8>>, NotImported> {
+    let mut seen = std::collections::HashSet::new();
+    certificates.retain(|certificate| seen.insert(certificate.clone()));
+    if certificates.is_empty() {
+        return Ok(None);
+    }
+    if let Some(recorded) = choice.swift_record.fingerprint() {
+        let Some(named) = certificates.iter().position(|certificate| {
+            steno_handover::identity::hex(&HandoverIdentity::fingerprint_of_der(certificate))
+                == recorded
+        }) else {
+            tracing::warn!("the Swift app's record names a certificate the keychain lacks");
+            return Err(NotImported {
+                line: REPLACED_PAIRING,
+                reason: WaitReason::Replaced,
+            });
+        };
+        if certificates.len() > 1 {
+            return Ok(Some(certificates.swap_remove(named)));
+        }
+    }
+    let starts = certificates
+        .iter()
+        .map(|certificate| HandoverIdentity::not_valid_before_of_der(certificate))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            tracing::warn!(%error, "a Swift handover certificate's start could not be read");
+            NotImported::failed()
+        })?;
+    let paired: Vec<_> = choice
+        .store
+        .paired_devices()
+        .map_err(|error| {
+            tracing::warn!(%error, "the paired phones could not be read");
+            NotImported::failed()
+        })?
+        .into_iter()
+        .map(|device| device.paired_at)
+        .collect();
+    let (line, reason) =
+        match HandoverIdentity::known_by_every_phone(&starts, &paired, (choice.now)()) {
+            Ok(known) => return Ok(Some(certificates.swap_remove(known))),
+            Err(Unavailability::PartlyReplaced) => {
+                (PARTLY_REPLACED_PAIRING, WaitReason::PartlyReplaced)
+            }
+            Err(Unavailability::ClockBehind) => (CLOCK_BEHIND_PAIRING, WaitReason::ClockBehind),
+            Err(_) => (REPLACED_PAIRING, WaitReason::Replaced),
+        };
+    Err(NotImported { line, reason })
+}
+
+/// Why a run brought no identity over: the step's line and the reason the
+/// handover waits with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotImported {
+    /// What the step says ([`SwiftImportStatus::error`]).
+    pub line: &'static str,
+    /// What the handover waits with ([`HandoverGate::Waiting`]).
+    pub reason: WaitReason,
+}
+
+impl NotImported {
+    /// A lookup or an export that failed another way than a refusal.
+    fn failed() -> Self {
+        Self::export(false)
+    }
+
+    /// An export or store that macOS refused (`denied`) or that failed.
+    fn export(denied: bool) -> Self {
+        NotImported {
+            line: if denied { DENIED_EXPORT } else { FAILED_EXPORT },
+            reason: WaitReason::ImportDenied,
         }
     }
 }
@@ -739,16 +880,19 @@ impl GraphImport {
         }
     }
 
-    /// The step, with `reload` run whenever the key gate opened (the
-    /// pipeline rebuilds its passes with the key).
+    /// The step, which chooses the certificate by `choice`, with `reload`
+    /// run whenever the key gate opened (the pipeline rebuilds its passes
+    /// with the key).
     #[must_use]
     pub fn step(
         &self,
         runtime: tokio::runtime::Handle,
+        choice: CertificateChoice,
         reload: Box<dyn Fn() + Send + Sync>,
     ) -> ImportStep {
         ImportStep {
             keychain: self.keychain.clone(),
+            choice,
             preferences: self.preferences.clone(),
             secrets: self.raw_secrets.clone(),
             record: self.record.clone(),
@@ -799,7 +943,8 @@ struct StepState {
 /// rollback), or lets the graph read a desktop-id build's key (one prompt at
 /// most). A key the user saved in Settings before the run wins: the Swift
 /// key is then not read. The run then exports the handover identity (the
-/// certificate by label, `SecIdentityCreateWithCertificate`, `SecItemExport`
+/// certificate by label, chosen among several by [`choose_certificate`],
+/// `SecIdentityCreateWithCertificate`, `SecItemExport`
 /// as PKCS#12 through `steno-macos`, one prompt), decodes it
 /// ([`decode_pkcs12`]) and stores it as the PEM entry `handover-identity`
 /// ([`store_imported_identity`]), replacing a desktop-id build's entry (one
@@ -821,6 +966,8 @@ struct StepState {
 /// waits on a keychain prompt.
 pub struct ImportStep {
     keychain: Arc<dyn SwiftKeychain>,
+    /// What the run chooses the certificate by.
+    choice: CertificateChoice,
     preferences: Arc<FilePreferences>,
     /// The store behind the gate: the identity is written here.
     secrets: Arc<dyn SecretStore>,
@@ -839,12 +986,23 @@ pub const DENIED_EXPORT: &str =
     "macOS did not let Steno read this Mac's phone pairing. Choose Try again, then Always Allow.";
 /// The step's line when the export failed another way.
 pub const FAILED_EXPORT: &str = "Steno could not bring over this Mac's phone pairing.";
-
-/// The step's line for an export or store that macOS refused (`denied`)
-/// or that failed another way.
-fn export_error(denied: bool) -> &'static str {
-    if denied { DENIED_EXPORT } else { FAILED_EXPORT }
-}
+/// The step's line when no paired phone knows a Swift certificate, or the
+/// Swift app's record names one that is gone ([`WaitReason::Replaced`]).
+pub const REPLACED_PAIRING: &str = "Steno found a different phone pairing on this Mac than the \
+     one your phones know. Choose Try again if you put the old one back, or Pair again in \
+     Settings > iPhone to start over.";
+/// The step's line when the paired phones do not all know one Swift
+/// certificate ([`WaitReason::PartlyReplaced`]): the iPhone section's
+/// first sentence for that reason on the Mac, then where Pair again is.
+pub const PARTLY_REPLACED_PAIRING: &str = "Some of your phones were paired before this Mac's \
+     pairing changed and can't connect. To reconnect them, choose Pair again in Settings > \
+     iPhone.";
+/// The step's line when a pairing or a certificate's start is after now
+/// ([`WaitReason::ClockBehind`]): the iPhone section's sentence for that
+/// reason on the Mac.
+pub const CLOCK_BEHIND_PAIRING: &str = "This Mac's date and time are earlier than when its \
+     phone pairing was made, so Steno can't tell which pairing your phones know. Check the date \
+     and time in System Settings, then choose Try again.";
 
 impl ImportStep {
     fn state(&self) -> MutexGuard<'_, StepState> {
@@ -897,15 +1055,15 @@ impl ImportStep {
 
     /// Exports and decodes the Swift identity into its PEM bundle; `None`
     /// when the certificate is gone by now (nothing is left to import).
-    /// The export is of the certificate this lookup found.
-    fn export(&self) -> Result<Option<String>, &'static str> {
-        let certificate = match self.keychain.swift_certificate() {
-            Ok(Some(certificate)) => certificate,
-            Ok(None) => return Ok(None),
-            Err(error) => {
-                tracing::warn!(%error, "the Swift handover certificate could not be looked up");
-                return Err(FAILED_EXPORT);
-            }
+    /// The export is of the certificate this lookup found and
+    /// [`choose_certificate`] chose.
+    fn export(&self) -> Result<Option<String>, NotImported> {
+        let certificates = self.keychain.swift_certificates().map_err(|error| {
+            tracing::warn!(%error, "the Swift handover certificate could not be looked up");
+            NotImported::failed()
+        })?;
+        let Some(certificate) = choose_certificate(certificates, &self.choice)? else {
+            return Ok(None);
         };
         let passphrase = uuid::Uuid::new_v4().to_string();
         let pkcs12 = self
@@ -913,11 +1071,11 @@ impl ImportStep {
             .export_identity(&certificate, &passphrase)
             .map_err(|refusal| {
                 tracing::warn!(%refusal, "the Swift handover identity was not exported");
-                export_error(refusal.denied)
+                NotImported::export(refusal.denied)
             })?;
         let (_, bundle) = decode_pkcs12(&pkcs12, &passphrase, &certificate).map_err(|error| {
             tracing::warn!(%error, "the exported Swift handover identity was refused");
-            FAILED_EXPORT
+            NotImported::failed()
         })?;
         Ok(Some(bundle))
     }
@@ -929,7 +1087,7 @@ impl ImportStep {
     /// not recorded; while a stored entry is being replaced a failed write
     /// counts as the prompt for that entry denied (the `keyring` crate
     /// keeps the status in its text only), which Always Allow fixes.
-    fn import_identity(&self) -> Result<(), &'static str> {
+    fn import_identity(&self) -> Result<(), NotImported> {
         if self.state().marker_unknown {
             // Only a clean not-found is a first run: a marker that cannot
             // be read may stand for an identity stored since, which a
@@ -940,7 +1098,7 @@ impl ImportStep {
                 Ok(false) => self.state().marker_unknown = false,
                 Err(error) => {
                     tracing::warn!(%error, "the import's marker could not be looked up");
-                    return Err(FAILED_EXPORT);
+                    return Err(NotImported::failed());
                 }
             }
         }
@@ -960,8 +1118,8 @@ impl ImportStep {
             // the handover refuses the stored identity until Try again
             // stores it with its fingerprint.
             match error {
-                ImportedIdentityError::Record(_) => FAILED_EXPORT,
-                _ => export_error(state.items.replaces_identity),
+                ImportedIdentityError::Record(_) => NotImported::failed(),
+                _ => NotImported::export(state.items.replaces_identity),
             }
         })?;
         // Second, after the identity: a crash between the two leaves a
@@ -1047,22 +1205,24 @@ impl ImportStep {
             let other_key = std::mem::take(&mut self.state().items.other_key);
             self.open_key(other_key);
         }
-        let error = self.import_identity().err();
+        let failure = self.import_identity().err();
         {
             let mut state = self.state();
-            state.stage = if error.is_none() {
+            state.stage = if failure.is_none() {
                 SwiftImportStage::Done
             } else {
                 SwiftImportStage::Waiting
             };
-            state.error = error;
+            state.error = failure.map(|failure| failure.line);
         }
-        if error.is_none() {
-            self.preferences.set_flag(IMPORT_RAN_KEY, true);
-            self.gate.set_handover(HandoverGate::Ready);
-        } else {
-            self.gate
-                .set_handover(HandoverGate::Waiting(WaitReason::ImportDenied));
+        match failure {
+            None => {
+                self.preferences.set_flag(IMPORT_RAN_KEY, true);
+                self.gate.set_handover(HandoverGate::Ready);
+            }
+            Some(failure) => self
+                .gate
+                .set_handover(HandoverGate::Waiting(failure.reason)),
         }
         self.status()
     }

@@ -416,11 +416,32 @@ pub fn waiting_message(reason: PhoneWaitingReason, platform: Platform) -> String
             "Steno found a different phone pairing on this {computer} than the one your phones \
              know. Choose Try again if you put the old one back, or Pair again to start over."
         ),
+        // Some phones know another pairing or none: Pair again is the way
+        // on. The first sentence is the Swift app's
+        // (`IdentityUnavailability.partlyReplaced`, #284), the second names
+        // this app's button, just below; the import step and the details
+        // line add the section (`PARTLY_REPLACED_PAIRING` in
+        // `steno-services`).
+        PhoneWaitingReason::PartlyReplaced => format!(
+            "Some of your phones were paired before this {computer}'s pairing changed and can't \
+             connect. To reconnect them, choose Pair again."
+        ),
+        // The clock, not the pairing: Try again leads, and the words do not
+        // ask for Pair again, which would drop pairings the phones may still
+        // know. It stays the second button, the way out when a time was
+        // saved while the clock ran ahead. The first sentence is the Swift
+        // app's (`IdentityUnavailability.clockBehind`, #284).
+        PhoneWaitingReason::ClockBehind => format!(
+            "This {computer}'s date and time are earlier than when its phone pairing was made, \
+             so Steno can't tell which pairing your phones know. Check the date and time{}, then \
+             choose Try again.",
+            platform.mac_or(" in System Settings", "")
+        ),
         // Pair again cannot open the file either.
         PhoneWaitingReason::FileNotOpened => format!(
             "Steno cannot open a file in the folder it keeps its data in, so it cannot check \
-             this {computer}'s phone pairing. Check that folder's permissions, then choose Try \
-             again."
+             this {computer}'s phone pairing. Check that folder's permissions and that the disk \
+             has space, then choose Try again."
         ),
     }
 }

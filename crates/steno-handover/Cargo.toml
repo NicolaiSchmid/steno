@@ -38,6 +38,7 @@ tracing.workspace = true
 unicode-segmentation.workspace = true
 uuid.workspace = true
 whoami.workspace = true
+x509-parser.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Additive on the workspace line: the file id of the partial during a verify.
@@ -51,7 +52,8 @@ flume.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
-x509-parser.workspace = true
+# Additive on the workspace line: the minted certificate's signature check.
+x509-parser = { workspace = true, features = ["verify"] }
 
 [lints]
 workspace = true

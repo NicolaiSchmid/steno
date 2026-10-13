@@ -224,10 +224,13 @@ unicode-segmentation = "1.13.3"
 # `Win32_Security_Credentials`: the services' credential store).
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
 # Test only: the pinned phone-like client (reqwest, the LLM line above,
-# with a preconfigured rustls config) and the X.509 checks on the minted
-# certificate; `wire_contract.rs` reads the phone's TypeScript.
+# with a preconfigured rustls config); `wire_contract.rs` reads the phone's
+# TypeScript.
 regex = "1"
-x509-parser = { version = "0.18", features = ["verify"] }
+# The handover identity's start (`notValidBefore`), which the guard compares
+# with the phones' pairing times; the tests add `verify` for the X.509
+# checks on the minted certificate.
+x509-parser = "0.18"
 # The pairing QR code in Settings (`steno-services`' `qr`): the code's
 # modules (`qrcode`, without its `image` and `svg` renderers) written as a
 # greyscale PNG (`png`, the version already in the lock through Tauri);

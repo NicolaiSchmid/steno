@@ -12,9 +12,11 @@
 //! Losing the identity means re-pairing every phone, on both sides, so the
 //! loader never mints one while phones are paired or after one was in use
 //! ([`HandoverIdentity::load_or_create`], over the identity's fingerprint
-//! in a [`FingerprintRecord`]). Only the user's Pair again mints over one
-//! ([`HandoverIdentity::mint_anew`]); one that stopped is finished by the
-//! next load.
+//! in a [`FingerprintRecord`]), and adopts one found without a record only
+//! when every paired phone can know it
+//! ([`HandoverIdentity::known_by_every_phone`]). Only the user's Pair again
+//! mints over one ([`HandoverIdentity::mint_anew`]); one that stopped is
+//! finished by the next load.
 
 use std::sync::Arc;
 
@@ -121,10 +123,17 @@ impl HandoverIdentity {
     /// load is [`IdentityError::Unavailable`], and mints nothing, when the
     /// secret store cannot be read; when it holds no identity while a
     /// fingerprint is recorded or a phone is paired; and when the
-    /// identity's fingerprint is not the recorded one. The paired phones are the
-    /// anchor a rollback keeps: an identity found without a recorded
-    /// fingerprint has it recorded again. Only with no phone paired, no
-    /// fingerprint and no identity is one minted.
+    /// identity's fingerprint is not the recorded one. The paired phones are
+    /// the anchor a rollback keeps: an identity found without a recorded
+    /// fingerprint (an upgrade from a build without the record, or a lost
+    /// record) has it recorded again only where the pairing-time rule
+    /// ([`Self::known_by_every_phone`], judged at `now`) adopts it; otherwise
+    /// the load is the rule's [`Unavailability`] and records nothing. A
+    /// start that cannot be read is [`IdentityError::Malformed`], paired
+    /// phones that cannot be read [`IdentityError::Store`]. A recorded
+    /// fingerprint is never judged by the rule: the identity it names loads
+    /// as it is. Only with no phone paired, no fingerprint and no identity
+    /// is one minted.
     ///
     /// An unfinished Pair again ([`HandoverIdentity::mint_anew`] stopped or
     /// crashed after it noted the next fingerprint, so its note,
@@ -194,10 +203,115 @@ impl HandoverIdentity {
             }
             // Unknown when noted, replaced when not.
             (Some(_), None) | (_, Some(_)) => return Err(Unavailability::Replaced.into()),
-            // Found without a record: recorded again.
-            (None, None) => identity.record_fingerprint(record)?,
+            // Found without a record: recorded again where the rule
+            // adopts it.
+            (None, None) => {
+                let paired: Vec<_> = store
+                    .paired_devices()?
+                    .into_iter()
+                    .map(|device| device.paired_at)
+                    .collect();
+                Self::known_by_every_phone(&[identity.not_valid_before()?], &paired, now)?;
+                identity.record_fingerprint(record)?;
+            }
         }
         Ok(identity)
+    }
+
+    /// The pairing-time rule for identities found with nothing recorded,
+    /// the one statement of it: of the identities whose certificates start
+    /// at `starts` ([`Self::not_valid_before`]), the index of the one every
+    /// phone paired at `paired` knows, judged at `now`. A phone knows the
+    /// newest identity whose start is at or before its pairing, as a phone
+    /// paired before an identity's start cannot know it. All three times
+    /// come from this computer's clock, and a minted certificate starts a
+    /// minute before its mint ([`Self::mint`]), the margin for a pairing
+    /// right after it. A time at most a second after `now` still counts as
+    /// not after it, a margin for the database's rounding of a pairing
+    /// time. Swift, with #284: `HandoverIdentityGuard.knownByEveryPhone` in
+    /// `Sources/StenoHandover/Identity/IdentityGuard.swift`, whose caller
+    /// `adoptable` checks the clock; here the rule checks it.
+    ///
+    /// | Starts and pairings | Result |
+    /// |---------------------|--------|
+    /// | a start or a pairing more than a second after `now` (the clock reads earlier than when it was set) | [`Unavailability::ClockBehind`], whatever else holds |
+    /// | no phone paired | the newest identity |
+    /// | every phone's newest start is the same identity's, a pairing at the start itself included | that identity |
+    /// | some phones' newest start is one identity's, the others' another's or none | [`Unavailability::PartlyReplaced`] |
+    /// | every phone paired before every start, or no identity at all | [`Unavailability::Replaced`] |
+    /// | two identities start in the same second, and that start is a phone's newest (or, with no phone, the newest) | that phone knows neither, so the rows above decide as if it knew none: nothing is chosen by order |
+    ///
+    /// ```
+    /// use chrono::{TimeZone as _, Utc};
+    /// use steno_handover::{HandoverIdentity, Unavailability};
+    ///
+    /// let at = |seconds| Utc.timestamp_opt(seconds, 0).unwrap();
+    /// let (old, new, now) = (at(1_000), at(2_000), at(5_000));
+    /// // Both phones paired between the two starts know the old identity.
+    /// assert_eq!(
+    ///     HandoverIdentity::known_by_every_phone(&[new, old], &[at(1_500), at(1_999)], now).unwrap(),
+    ///     1
+    /// );
+    /// // One between them and one after the new start: no one identity.
+    /// assert!(matches!(
+    ///     HandoverIdentity::known_by_every_phone(&[old, new], &[at(1_500), at(2_000)], now),
+    ///     Err(Unavailability::PartlyReplaced)
+    /// ));
+    /// // A pairing after now: the clock went back.
+    /// assert!(matches!(
+    ///     HandoverIdentity::known_by_every_phone(&[old], &[at(6_000)], now),
+    ///     Err(Unavailability::ClockBehind)
+    /// ));
+    /// ```
+    pub fn known_by_every_phone(
+        starts: &[DateTime<Utc>],
+        paired: &[DateTime<Utc>],
+        now: DateTime<Utc>,
+    ) -> Result<usize, Unavailability> {
+        let latest = now + CLOCK_SLACK;
+        if starts.iter().chain(paired).any(|instant| *instant > latest) {
+            return Err(Unavailability::ClockBehind);
+        }
+        // The index of the one newest start at or before `instant`.
+        let newest = |instant: DateTime<Utc>| {
+            let start = starts.iter().filter(|start| **start <= instant).max()?;
+            let mut at = (0..starts.len()).filter(|index| starts[*index] == *start);
+            match (at.next(), at.next()) {
+                (Some(index), None) => Some(index),
+                _ => None,
+            }
+        };
+        let known: Vec<Option<usize>> = if paired.is_empty() {
+            vec![newest(DateTime::<Utc>::MAX_UTC)]
+        } else {
+            paired.iter().map(|instant| newest(*instant)).collect()
+        };
+        match known[0] {
+            Some(only) if known.iter().all(|index| *index == Some(only)) => Ok(only),
+            _ if known.iter().any(Option::is_some) => Err(Unavailability::PartlyReplaced),
+            _ => Err(Unavailability::Replaced),
+        }
+    }
+
+    /// When the certificate starts to be valid (`notValidBefore`), on this
+    /// computer's clock: a minute before its mint ([`Self::mint`]; the
+    /// Swift app's mint back-dates it the same), so a phone paired before
+    /// it cannot know this identity. Swift, with #284:
+    /// `HandoverIdentity.notValidBefore()`.
+    pub fn not_valid_before(&self) -> Result<DateTime<Utc>, IdentityError> {
+        Self::not_valid_before_of_der(&self.certificate_der)
+    }
+
+    /// [`Self::not_valid_before`] of a certificate's DER: a certificate
+    /// that does not parse, or a start this computer's clock cannot hold,
+    /// is [`IdentityError::Malformed`].
+    pub fn not_valid_before_of_der(der: &[u8]) -> Result<DateTime<Utc>, IdentityError> {
+        let (_, certificate) = x509_parser::parse_x509_certificate(der)
+            .map_err(|error| IdentityError::Malformed(format!("certificate: {error}")))?;
+        let seconds = certificate.validity().not_before.timestamp();
+        DateTime::from_timestamp(seconds, 0).ok_or_else(|| {
+            IdentityError::Malformed(format!("the certificate's start ({seconds} s) is no date"))
+        })
     }
 
     /// Pair again's identity step, the user's choice when the identity the
@@ -388,7 +502,9 @@ fn drop_the_note(record: &dyn FingerprintRecord) {
 /// hex) is recorded, and, while a Pair again is unfinished, the next one:
 /// outside the secret store, which may be the thing that lost the
 /// identity, and outside the settings, which the Swift app's save
-/// rewrites. Not a secret. No Swift counterpart.
+/// rewrites. Not a secret. Swift, with #284, keeps its own record in the
+/// same format (`IdentityRecordFile`, `swift-handover-identity.json`); the
+/// guards never read each other's file.
 pub trait FingerprintRecord: Send + Sync {
     /// The recorded fingerprint, `None` when nothing is recorded.
     fn recorded(&self) -> Result<Option<String>, BoxError>;
@@ -409,8 +525,8 @@ pub trait FingerprintRecord: Send + Sync {
     fn note_next(&self, fingerprint: Option<&str>) -> Result<(), BoxError>;
 }
 
-/// Why the identity is unavailable rather than minted. No Swift
-/// counterpart.
+/// Why the identity is unavailable rather than minted. Swift, with #284:
+/// `IdentityUnavailability`.
 #[derive(Debug, Error)]
 pub enum Unavailability {
     /// The secret store's read failed (a locked keyring, a keyring still
@@ -426,13 +542,45 @@ pub enum Unavailability {
     )]
     Missing,
     /// The secret store's identity is not the one whose fingerprint is
-    /// recorded. Not adopted, as the phones would refuse it.
+    /// recorded, or, with nothing recorded, no paired phone knows it
+    /// ([`HandoverIdentity::known_by_every_phone`]). Not adopted, as the
+    /// phones would refuse it.
     #[error(
         "the secret store holds another identity than the one this computer's phones paired \
          with; a new identity would make every phone pair again"
     )]
     Replaced,
+    /// With nothing recorded, the paired phones do not all know one
+    /// identity, but some know one
+    /// ([`HandoverIdentity::known_by_every_phone`]). Not adopted, as the
+    /// others could not connect; a [`Unavailability::Replaced`] in all but
+    /// its words. Swift, with #284: `IdentityUnavailability.partlyReplaced`.
+    #[error(
+        "some of this computer's phones were paired before the identity the secret store holds; \
+         a new identity would make every phone pair again"
+    )]
+    PartlyReplaced,
+    /// With nothing recorded, a pairing time or a certificate's start is
+    /// after now on this computer's clock
+    /// ([`HandoverIdentity::known_by_every_phone`]): the clock reads earlier
+    /// than when it was set, so which identity the phones know cannot be
+    /// told. Not adopted and not minted; Try again decides once the clock
+    /// has passed both.
+    #[error(
+        "this computer's clock reads earlier than a phone's pairing or the identity's start, so \
+         which identity the phones know cannot be told"
+    )]
+    ClockBehind,
 }
+
+/// How far after now a start or a pairing may be before the pairing-time
+/// rule waits for the clock ([`HandoverIdentity::known_by_every_phone`]).
+/// The database stores a pairing time rounded half up to the millisecond,
+/// so a phone paired in the instant the rule runs can read up to half a
+/// millisecond after now; a second is a round margin over that. Starts are
+/// never rounded but share it, so the check stays one comparison. The
+/// Swift guard (#284) has none: it waits for any time after now.
+const CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
 
 /// Lowercase hex, for logs and tests.
 #[must_use]
@@ -482,6 +630,73 @@ mod tests {
             "steno-on-nicolai-s-macbook-pro.local"
         );
         assert_eq!(HandoverIdentity::san_label("---"), "steno.local");
+    }
+
+    /// The pairing-time rule over several identities: each phone knows
+    /// the newest identity that starts at or before its pairing, and a
+    /// time after now waits for the clock.
+    #[test]
+    fn every_phone_knows_the_newest_identity_started_before_its_pairing() {
+        use chrono::TimeZone as _;
+        let at = |seconds| Utc.timestamp_opt(seconds, 0).unwrap();
+        let (a, b, c) = (at(1_000), at(2_000), at(3_000));
+        let known_at = |starts: &[DateTime<Utc>], paired: &[i64], now: i64| {
+            let paired: Vec<_> = paired.iter().map(|seconds| at(*seconds)).collect();
+            HandoverIdentity::known_by_every_phone(starts, &paired, at(now))
+        };
+        let known = |starts: &[DateTime<Utc>], paired: &[i64]| known_at(starts, paired, 10_000);
+        let replaced = |result| matches!(result, Err(Unavailability::Replaced));
+        let partly = |result| matches!(result, Err(Unavailability::PartlyReplaced));
+        let clock = |result| matches!(result, Err(Unavailability::ClockBehind));
+        for starts in [[a, b, c], [c, a, b], [b, c, a]] {
+            let index = |start| starts.iter().position(|s| *s == start).unwrap();
+            // No phone: the newest.
+            assert_eq!(known(&starts, &[]).unwrap(), index(c));
+            // Every phone between A and B, at A's start included: A.
+            assert_eq!(known(&starts, &[1_000, 1_999]).unwrap(), index(a));
+            // Every phone between B and C: B, not the newest.
+            assert_eq!(known(&starts, &[2_000, 2_500]).unwrap(), index(b));
+            assert_eq!(known(&starts, &[3_000, 9_000]).unwrap(), index(c));
+            // A phone before every start.
+            assert!(replaced(known(&starts, &[999])));
+            assert!(replaced(known(&starts, &[0, 999])));
+            // One between A and B, one after B: no one identity.
+            assert!(partly(known(&starts, &[1_500, 2_500])));
+            assert!(partly(known(&starts, &[999, 1_500])));
+            assert!(partly(known(&starts, &[999, 3_500])));
+            // A start or a pairing more than a second after now: the
+            // clock, with phones or none, and whatever the others say.
+            assert!(clock(known_at(&starts, &[], 2_998)));
+            assert!(clock(known_at(&starts, &[1_500], 2_998)));
+            assert!(clock(known_at(&starts, &[3_500, 10_002], 10_000)));
+            assert!(clock(known_at(&starts, &[999, 10_002], 10_000)));
+            // Within a second of now is not after it.
+            assert_eq!(known_at(&starts, &[3_000], 2_999).unwrap(), index(c));
+            assert_eq!(known_at(&starts, &[], 2_999).unwrap(), index(c));
+            assert_eq!(known_at(&starts, &[10_001], 10_000).unwrap(), index(c));
+            // A millisecond past the second waits: the slack is a second,
+            // not more.
+            let past = at(10_001) + chrono::TimeDelta::milliseconds(1);
+            for (starts, paired) in [(vec![a], vec![past]), (vec![past], vec![])] {
+                assert!(clock(HandoverIdentity::known_by_every_phone(
+                    &starts,
+                    &paired,
+                    at(10_000)
+                )));
+            }
+        }
+        // No identity at all: no phone knows one.
+        assert!(replaced(known(&[], &[])));
+        assert!(replaced(known(&[], &[1_000])));
+        // Two that start in the same second are no newest one, in either
+        // order and with no phone.
+        assert!(replaced(known(&[a, a], &[])));
+        assert!(replaced(known(&[a, a], &[1_500])));
+        assert_eq!(known(&[a, a, b], &[2_500]).unwrap(), 2);
+        assert_eq!(known(&[b, a, a], &[2_500]).unwrap(), 0);
+        assert!(replaced(known(&[a, b, b], &[])));
+        assert!(partly(known(&[a, a, b], &[1_500, 2_500])));
+        assert!(partly(known(&[a, b, b], &[1_500, 2_500])));
     }
 
     #[test]

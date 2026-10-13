@@ -407,6 +407,11 @@ impl steno_handover::FingerprintRecord for RefusingRecord {
 /// Saves a paired phone in `store`, the evidence that an identity existed;
 /// each call another phone, with a token of its own.
 pub fn pair_a_phone(store: &Store) {
+    pair_a_phone_at(store, chrono::Utc::now());
+}
+
+/// [`pair_a_phone`], paired at `paired_at`.
+pub fn pair_a_phone_at(store: &Store, paired_at: chrono::DateTime<chrono::Utc>) {
     let id = uuid::Uuid::new_v4();
     let token = [id.as_bytes().as_slice(), id.as_bytes()].concat();
     store
@@ -414,7 +419,7 @@ pub fn pair_a_phone(store: &Store) {
             &steno_core::PairedDevice {
                 id,
                 name: "Phone".to_owned(),
-                paired_at: chrono::Utc::now(),
+                paired_at,
                 last_seen_at: None,
             },
             &token,
