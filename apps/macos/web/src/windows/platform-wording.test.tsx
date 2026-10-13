@@ -281,6 +281,64 @@ describe("onboarding", () => {
 		);
 	});
 
+	it.each([
+		[
+			"linux",
+			"Your system allows it when a recording starts.",
+			"permission-microphone-at-recording",
+			"Checked when you record",
+		],
+		[
+			"windows",
+			"Windows allows it in its privacy settings.",
+			"permission-microphone-open",
+			"Open Windows Settings",
+		],
+	] as const)(
+		"on %s says an unknown permission is checked at the recording, with no Allow",
+		async (os, sentence, control, label) => {
+			const user = userEvent.setup();
+			const harness = await createBridgeHarness("scenario=onboarding-unknown");
+			renderWithBridge(<OnboardingWindow />, harness, platformFor(os));
+			const row = screen.getByTestId("permission-microphone");
+			expect(row).toHaveTextContent(
+				`Steno records your side of a meeting from the microphone. Required. ${sentence}`,
+			);
+			expect(
+				screen.queryByTestId("permission-microphone-request"),
+			).not.toBeInTheDocument();
+			expect(screen.getByTestId(control)).toHaveTextContent(label);
+			if (os === "windows") {
+				await user.click(screen.getByTestId(control));
+				expect(callsTo(harness.transport, "system.openSystemSettings")).toEqual(
+					[
+						{
+							method: "system.openSystemSettings",
+							params: { kind: "microphone" },
+						},
+					],
+				);
+			}
+			// The local network row keeps its own wording and Got it.
+			if (os === "windows") {
+				expect(
+					screen.getByTestId("permission-localNetwork-skip"),
+				).toHaveTextContent("Got it");
+			}
+		},
+	);
+
+	it("on the Mac offers Allow for a permission not asked yet", async () => {
+		const harness = await createBridgeHarness("scenario=onboarding-unknown");
+		renderWithBridge(<OnboardingWindow />, harness, SWIFT_MAC);
+		expect(
+			screen.getByTestId("permission-microphone-request"),
+		).toHaveTextContent("Allow");
+		expect(screen.getByTestId("permission-microphone")).not.toHaveTextContent(
+			"allows it",
+		);
+	});
+
 	it("offers no System Settings on Linux for a denied permission, only Check again", async () => {
 		const harness = await createBridgeHarness("scenario=onboarding-denied");
 		renderWithBridge(<OnboardingWindow />, harness, platformFor("linux"));

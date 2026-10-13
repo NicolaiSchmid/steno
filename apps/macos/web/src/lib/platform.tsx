@@ -79,6 +79,13 @@ export interface PlatformWords {
 	 * lists no local network step.
 	 */
 	localNetworkPrompt?: string;
+	/**
+	 * What a permission the system says nothing of before a recording
+	 * (the host's `unknown`) means, where Steno has no prompt to raise:
+	 * Windows and Linux. A row in that state says this instead of offering
+	 * Allow. None on the Mac, where `unknown` means not asked yet.
+	 */
+	unknownUntilRecording?: string;
 }
 
 const WORDS: Record<PlatformOS, PlatformWords> = {
@@ -113,6 +120,7 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
 		codexSignInFile: "%USERPROFILE%\\.codex\\auth.json",
 		localNetworkPrompt:
 			"Windows may ask to let Steno through the firewall when you pair the first phone.",
+		unknownUntilRecording: "Windows allows it in its privacy settings.",
 	},
 	linux: {
 		computer: "computer",
@@ -125,6 +133,7 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
 		systemSettings: "your system settings",
 		opensSystemSettings: false,
 		codexSignInFile: "~/.codex/auth.json",
+		unknownUntilRecording: "Your system allows it when a recording starts.",
 	},
 };
 

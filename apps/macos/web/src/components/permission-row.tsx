@@ -103,6 +103,15 @@ export function PermissionRow({
 	if (state !== "granted" && !skipped) {
 		description = copy.explanation;
 	}
+	// Off the Mac the system says nothing before a recording opens the
+	// device, and Steno has no prompt to raise.
+	const untilRecording =
+		state === "unknown" && !acknowledgeOnly
+			? words.unknownUntilRecording
+			: undefined;
+	if (untilRecording && description) {
+		description = `${description} ${untilRecording}`;
+	}
 	if (isRequesting && kind === "systemAudio") {
 		description = "Listening for the test tone, up to 30 seconds…";
 	}
@@ -139,6 +148,21 @@ export function PermissionRow({
 					</Button>
 				) : null}
 			</>
+		);
+	} else if (untilRecording) {
+		control = words.opensSystemSettings ? (
+			<Button
+				data-testid={`permission-${kind}-open`}
+				onClick={onOpenSystemSettings}
+				size="sm"
+				variant="outline"
+			>
+				Open {words.systemSettings}
+			</Button>
+		) : (
+			<Badge data-testid={`permission-${kind}-at-recording`}>
+				Checked when you record
+			</Badge>
 		);
 	} else if (acknowledgeOnly && onSkip) {
 		control = (
