@@ -586,6 +586,39 @@ Every package is written in parallel except where a dependency is named:
   - Tests: the opener rule over the four states and three platforms.
     **Nicolai**, in a fresh account: onboarding asks for each permission, and a
     denied system-audio grant shows as missing.
+  - As built (`steno_services::calendar`, `steno_services::permissions`,
+    `steno_macos::calendar`, `steno_audio::capture::permission`): the event
+    is Swift's `CalendarMatch.pick` (`steno_core::pick_event`): of the local
+    day's timed events, the one under way at the start, the one that started
+    last when several are, else the next that starts within fifteen minutes,
+    ties to the smaller id; all-day events never count. Its title names the
+    meeting with the origin `calendar`, and its attendees but the calendar's
+    owner become `them` participants, people only, the email from a `mailto:`
+    URL. The lookup reads EventKit only with full access, so it never
+    prompts; the prompt is the calendar row's Allow in onboarding and
+    Settings > General, as in the Swift app. Off the Mac there is no
+    calendar. The lookup starts on a thread of its own before the devices
+    open; the row takes its answer when it is in, and otherwise starts under
+    the default title and is named once the answer comes, while it still
+    records under that title (`Store::name_recording_after_event`). A
+    calendar that has not answered the previous start is not asked again,
+    so a hung calendar holds one thread and never a start. No log line
+    carries a title or a name. The permissions: the shell answers the
+    microphone and the calendar from TCC (not determined `unknown`,
+    restricted and denied `denied`, authorized `granted`; the calendar's
+    write-only access `denied`), and `unknown` for system audio and the local
+    network; on the Mac the services answer system audio from the probe,
+    which runs the tap while `afplay` plays a tone for up to 30 s and
+    remembers a heard tone as `steno.systemAudioGranted` in
+    `preferences.json` (never copied from the Swift app; a probe that hears
+    nothing answers `denied` and forgets it). `permission_is_missing`:
+    `denied` on every platform, `unknown` on the Mac only. A missing grant
+    opens onboarding on its permissions page (after the import step when it
+    is pending) whatever `steno.onboardingCompleted` says, and holds its
+    Continue. Off the Mac a permission row in `unknown` says when the system
+    decides ("Your system allows it when a recording starts." on Linux,
+    "Windows allows it in its privacy settings." with Open Windows Settings)
+    instead of offering an Allow that could do nothing.
 - **S4 Update schedule and QR** (`feat/rust-update-schedule`).
   - The host's `Updater` over `updater.rs`:
     - a daily automatic check, as `SUScheduledCheckInterval` 86400 did;
