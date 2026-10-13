@@ -1471,7 +1471,8 @@ The table above names each package and its owner. Their tests:
   another connection's `BEGIN IMMEDIATE` for 7 s, on a runtime with one worker:
   the levels, the `recording` snapshot and the device notices reach the host
   within 200 ms; the UI's commands answer; the tray's Record and Launch at
-  login return before the host answers; a stop shows `Stopping` at once and
+  login return before the host answers, reach it in click order, and a Quit
+  waits for the stop clicked before it; a stop shows `Stopping` at once and
   saves within 1 s of the lock's release; a start is refused after the
   timeout; a read never waits for a write; the handover's admit leaves its
   worker free; #278's `store_waits` pass on one worker; a host write, a

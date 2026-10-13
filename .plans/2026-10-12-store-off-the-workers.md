@@ -162,18 +162,49 @@ files at 1502. Today the hook is not safe there:
   on the stop's thread, before it returns.
 
 So a stop can wait behind a reload before its files finish. Readers make that
-wait short, not zero: a reload still waits for a free reader. In WP2 the hook
-changes:
+wait short, not zero: a reload still waits for a free reader. The `recording`
+topic reads nothing but the recorder's status (`host.rs:617-618`), so in WP2
+the hook builds that snapshot from the status alone and hands the list work to
+a thread of its own. Six rules, in the order an emit runs them:
 
-- It builds the `recording` snapshot from the recorder's status alone (the
-  topic reads nothing else, `host.rs:617-618`) and emits it under a lock of its
-  own, never the view-model lock or the publishing mutex. The status carries
-  a sequence number, so an older `recording` snapshot is never emitted after
-  a newer one. Levels stay on the 20 Hz throttle.
-- When the state or the meeting moved, it hands the list reload to a reload
-  thread the host owns, and returns. A request that arrives while a reload
-  runs marks one more reload. The hook never runs the reload on the caller's
-  thread, and never waits for one in flight.
+1. **One `recording` emitter, owned by the host.** A `RecordingEmitter` in
+   `crates/steno-host/src/host.rs` holds the 20 Hz throttle that
+   `TopicPublisher` holds for this topic today (`RECORDING_INTERVAL`,
+   `publisher.rs`), behind a leaf lock of its own. The host flush thread
+   (`steno-host-flush`) flushes a held `recording` through the emitter, and
+   that flush takes only the leaf, never the publishing mutex or the view
+   models (`publish`, `host.rs:706-740` at PR 1's head, takes both). Invariant: no
+   `recording` snapshot waits behind a reload. Proved by checks 16 and 1.
+2. **A state change skips the throttle.** A status whose state, meeting or
+   message differs from the last one emitted goes out at once and restarts
+   the interval; only a status that moved nothing but the levels waits for
+   it. Owner: the emitter, under its leaf. Proved by check 16 (`Stopping`
+   within 100 ms).
+3. **The page-ready flag lives in the emitter.** `page_ready` sets it under
+   the leaf beside the publisher's own (`publisher.is_page_ready()`,
+   `host.rs:720` at PR 1's head, which sits under the view models), so the hook reads it
+   without them. Nothing goes out before it, as today. Proved by check 1 and
+   by check 18, which also guards the order of `page.ready` against the first
+   command.
+4. **One sequence, two emitters, one order.** The recorder bumps a sequence
+   number in its status under its status lock. The hook, and `build` for
+   `recording` (from `page_ready` and from a publish), read the status with
+   its number, take the leaf, compare the number with the last one emitted,
+   and emit only a newer one, while still holding the leaf. So an older
+   `recording` snapshot never goes out after a newer one, whichever path
+   built it. Proved by checks 16 and 2.
+5. **The reload thread.** The host starts it when it is built, beside the
+   flush thread, with a coalescing flag: a request while a pass runs marks one
+   more pass, and the hook only sets the flag and returns. The thread ends at
+   the host's shutdown; the stop's thread and the quit's thread never join
+   it. A panic inside a pass is caught (`catch_unwind`), logged, and the next
+   request runs a pass. Proved by check 16 (the files finish while a reload
+   is held) and check 2.
+6. **The recorder never calls the hook while it holds its status lock.**
+   Every `notify()` follows the guard's drop (`recorder.rs:1189-1194` and its
+   callers), so the emitter can take the leaf and then the status lock. Owner:
+   `CaptureRecorder`. Proved by check 14, which runs every lock holder at
+   once, and check 2.
 
 A stop's `Stopping` reaches the page and the tray before any list work, and
 the files finish without waiting for a reload (check 16).
@@ -184,14 +215,13 @@ the files finish without waiting for a reload (check 16).
 2. the publishing mutex;
 3. the view models;
 4. the leaf locks, taken briefly and never while waiting on another lock:
-   - the recorder's status lock (`build` reads `recorder.status()`,
-     `host.rs:617-618`, `recorder.rs:1724`);
+   - the `recording` emitter's leaf (WP2, rules 1 to 4), then the recorder's
+     status lock (`build` reads `recorder.status()`, `host.rs:617-618`,
+     `recorder.rs:1724`), then the sink slot, in that order, as an emit takes
+     them;
    - the secret store's read in `reload_sections` (the secret store must not
      call back into the host);
-   - a reader's checkout;
-   - the recorder hook's own `recording` lock (WP2), which takes only the
-     recorder's status lock and the sink slot inside it;
-   - the sink slot.
+   - a reader's checkout.
 
 The store's writer mutex is taken only with none of 2 to 4 held. Code holding
 the view-model lock never calls `store_changed`, `recorder_changed` or a
@@ -250,10 +280,8 @@ P15's lock is unchanged.
   so its review is about the lock order in decision 3, the debug assert and
   the deadlock test (check 14).
 
-**The plan's own commit.** This plan and the P40 row are not pushed before
-#278. After #278 merges, the branch is rebased onto `main`, so the table reads
-P39 then P40. If PR 1 is ready before #278 merges, PR 1 carries the plan, and
-#278 takes the trivial conflict instead.
+**The plan's own commit.** #278 merged first; PR 1 was rebased onto it and
+carries this plan and the P40 row, so the table reads P39 then P40.
 
 ## Work packages
 
@@ -281,10 +309,14 @@ P39 then P40. If PR 1 is ready before #278 merges, PR 1 carries the plan, and
   `main` marks its thread with a new `steno_host::mark_ui_thread()` before the
   builder, and `Host::call` `debug_assert!`s that it does not run on the
   marked thread.
-- **The exemption.** The launch's `host.store_changed()`
-  (`crates/steno-services/src/app.rs:1261`) runs during setup, before any
-  window shows, and only reads once PR 2's readers land. It is named in the
-  host's `# Threads` doc.
+- **The exemption.** The launch runs on the main thread during setup, once
+  the main window is built and before the event loop runs. Its
+  `host.store_changed()` (`crates/steno-services/src/app.rs:1261`) only reads
+  once PR 2's readers land. It also writes there: `recover_unfinished`'s
+  resume and re-export and the retention sweep (`run_sweep`,
+  `app.rs:1355-1357`), when no keyring answer or Swift import is pending. Both
+  are named in the host's `# Threads` doc, and WP2 keeps them where they are
+  (see WP2).
 - **The polls** (`crates/steno-services/src/app.rs:1207-1252`): the events
   task and the 2 s poll run `apply_meeting_event`, `store_changed` and
   `refresh_pairing` through `tokio::task::spawn_blocking` and await them. The
@@ -299,22 +331,49 @@ above, and PR 1 moves them too:
 
 - `window.open`'s window request, from `bridge_call` and from a deep link on
   the main thread (`windows::request`, `windows.rs:286-297`), selects the
-  meeting, and so reads the store. Its publish now runs in the background
-  (`host::call_in_background`) after the window opens.
+  meeting, and so reads the store. Its publish is now queued on the shell's
+  ordered lane (`host::call_in_order`) after the window opens.
 - The onboarding window's close (`main.rs:580-583`) reloads onboarding from
-  the store on the main thread. It also runs in the background now.
+  the store on the main thread. It is queued on the lane too.
 - The event follower's retention sweep (`run_sweep`, `app.rs:1218`) writes the
   store. It runs inside the follower's blocking call.
 
 The seam is `host::ShellHost`, implemented for `AppHandle` and for the tests'
-gated fake. `host::call_blocking` is awaited by `bridge::host_command`, and
-`host::call_in_background` starts it for callers that have no one to answer
-(the tray, a window request, the onboarding close). The assert is
-`steno_host::assert_off_ui_thread`. It sits in the shell's `Host::call`,
-`page_ready`, `publish_request` and `onboarding_window_closed`. The
-`Stopping…` check is `the_tray_reads_stopping_while_the_stop_still_runs`,
-through the real `WindowSink` and a stand-in main thread. The smoke reads the
-save from the store's row, not the log: no log line marks a save.
+gated fake; only the `AppHandle` side reaches the managed host. The bridge's
+commands await `host::call_blocking` (`bridge::host_command`) and stay
+concurrent on Tauri's blocking pool, as check 5 needs. The callers that have
+no one to answer (the tray's actions, a window request, the onboarding close)
+queue their call on one ordered lane instead, `host::call_in_order` over
+`host::Lane`: one `std::thread` of the shell's own, fed by an `mpsc` channel,
+each job under `catch_unwind` (a panic is logged at error, as the job's name
+alone, and the lane goes on), never joined at exit. Tauri's pools cannot keep
+click order, and the main thread used to:
+
+- two quick clicks reach the host in the order they were made;
+- a Record clicked while a Stop's save waits (the recorder reads `Stopping`,
+  where a start is ignored) runs once that stop has ended, and starts a
+  recording;
+- the tray's Launch at login reads the system's state inside its job, so a
+  second click undoes the first;
+- the later of two deep links is the meeting shown. The cost: a deep link's or
+  `window.open`'s request waits behind a tray Stop whose save waits.
+
+The menus' Quit (`actions::quit_from_menu`) retitles both Record rows
+"Quitting…", disabled (`tray::note_quitting`), so a Record that could no
+longer start a recording is never clicked unseen. The exit then waits for the
+lane's jobs queued before it, for at most `SHUTDOWN_PATIENCE`
+(`actions::exit_after_queued`), so a Stop whose save waits finishes with its
+own end reason, as when the main thread ran the Stop and the Quit waited
+behind it. The signals, a logout and the last window's close still exit at
+once.
+
+The assert is `steno_host::assert_off_ui_thread`. It sits in the shell's
+`Host::call`, `page_ready`, `publish_request` and `onboarding_window_closed`,
+which take any `host::HostWindow` so a fixture-host test can call each on a
+marked thread. The `Stopping…` check is
+`the_tray_reads_stopping_while_the_stop_still_runs`, through the real
+`WindowSink` and a stand-in main thread. The smoke reads the save from the
+store's row, not the log: no log line marks a save.
 
 ### WP2: the store's readers and the facade (PR 2, after #278)
 
@@ -350,13 +409,23 @@ save from the store's row, not the log: no log line marks a save.
   - `crates/steno-services/src`: the async callers in `app.rs`, `recovery.rs`,
     `handover.rs` and `pipeline.rs`. The synchronous recorder path stays
     (decision 4).
+- **The launch's writes stay synchronous.** `recover_unfinished`'s resume and
+  re-export and the retention sweep run on the main thread during setup
+  (`app.rs:1355-1357`), before the event loop, with no page to freeze yet.
+  WP2 keeps them there by design, unless it finds a reason to move them
+  (into the launch's existing `spawn_blocking(reconcile)`).
+- **The two host calls left on workers.** `Host::updates_changed`, from the
+  update schedule's `on_change` (`app.rs:1312`), and `Host::phones_changed`,
+  from the gated handover's follow (`app.rs:1331`), still call the host from
+  runtime workers. They only read, so WP2's readers end their wait; WP2 moves
+  them to the blocking pool if its checks show a wait there.
 - **`crates/steno-pipeline/tests/store_waits.rs`:** back to one worker, and the
   P40 comment goes.
 - **The lint.** Workspace clippy already denies `await_holding_lock`
   (`clippy::all` with `-D warnings`), so a std guard held across the facade's
   await fails the build.
 - **Tests:** checks 1, 2 and 6 (a pipeline write that waits), and checks 3, 4,
-  8, 10, 11, 13, 15 and 16.
+  8, 10, 11, 13, 15, 16 and 18.
 
 ### WP3: the host's writes leave the view-model lock (PR 3, before rc.1)
 
@@ -397,17 +466,18 @@ is the exception, a guard for an order that is right today.
 | 4 | Stop and save | `a_stop_under_a_held_lock_shows_stopping_at_once_and_saves_once_the_lock_goes` (`Stopping` within 100 ms, `queued` within 1 s of the release), and `a_stop_saves_while_every_runtime_worker_is_blocked`, which pins decision 4 | `crates/steno-services/src/recorder.rs` tests | 2 |
 | 5 | UI Stop button and command workers | `a_held_host_call_leaves_the_command_workers_free`: while a gated fake's call is held, another command on the same one-worker runtime answers | `apps/desktop/src-tauri/src/bridge.rs` tests | 1 |
 | 6 | The UI's commands answer | `a_command_answers_while_a_write_waits`: `meetings.select` and a Settings read answer live during a pipeline write's wait (WP2), and during another window's settings save (WP3) | `locked_store_tests.rs` | 2, 3 |
-| 7 | Tray and menu Record, Stop and Launch at login on the main thread | `the_trays_record_returns_before_the_stop_ends`, `the_trays_launch_at_login_returns_before_the_host_answers` and `the_tray_reads_stopping_while_the_stop_still_runs` (gated fakes); `a_host_call_on_the_marked_ui_thread_asserts`, the debug assert in the shell's `Host::call`; and the measured smoke `apps/desktop/scripts/locked-store-linux.sh` (about 26 s on atlas), in `rust-ci.yml`'s Linux job as "Desktop stop under a locked store" | `actions.rs` tests, `crates/steno-host/src/ui_thread.rs` (the assert), the script | 1 |
+| 7 | Tray and menu Record, Stop and Launch at login on the main thread | `the_trays_record_returns_before_the_stop_ends`, `the_trays_launch_at_login_returns_before_the_host_answers` and `the_tray_reads_stopping_while_the_stop_still_runs` (gated fakes); in click order on the lane, `two_quick_tray_clicks_reach_the_host_in_click_order`, `a_record_clicked_during_a_held_stop_runs_after_it`, `a_second_launch_at_login_click_undoes_the_first`, `two_window_requests_reach_the_host_in_the_order_they_came` and `the_lane_runs_its_jobs_in_order_and_past_a_panic`; the Quit, `a_quit_waits_for_the_stop_clicked_before_it`, `a_quit_goes_ahead_once_its_patience_has_passed` and `the_record_rows_read_quitting_once_quit_was_chosen`; off the caller's thread, `a_window_request_is_published_off_the_callers_thread` and `the_onboarding_close_reaches_the_host_off_the_closing_thread`; `a_host_call_on_the_marked_ui_thread_asserts`, and one fixture-host test per shell entry point that fails without its assert (`a_command_…`, `a_page_load_…`, `a_window_request_…`, `the_onboarding_close_on_the_ui_thread_asserts`); and the measured smoke `apps/desktop/scripts/locked-store-linux.sh` (about 25 s on atlas), in `rust-ci.yml`'s Linux job as "Desktop stop under a locked store" | `actions.rs`, `windows.rs`, `main.rs`, `tray.rs` and the shell's `host.rs` tests, `crates/steno-host/src/ui_thread.rs` (the assert), the script | 1 |
 | 8 | Start under the lock | `a_start_under_a_held_lock_is_refused_and_the_ui_stays_live`: after about 5 s the start is refused with "Steno could not create the meeting.", no capture opened, and checks 1 and 6 hold meanwhile | `recorder.rs` tests | 2 |
 | 9 | A host write of the user's own | `a_settings_save_under_a_held_lock_leaves_the_view_models_free`: the save waits and then reports the busy error, while the list, the levels and another command stay live; the same for a delete, whose checkpoint waits | `locked_store_tests.rs` | 3 |
 | 10 | Detection's settings poll | `a_read_does_not_wait_behind_a_write_that_waits_on_another_connection` (the store), and `the_detection_poll_reads_the_settings_while_a_write_waits` | `crates/steno-core/src/store/mod.rs` tests, `crates/steno-services/src/detection/tests.rs` | 2 |
 | 11 | Handover admit on a worker | `an_admit_under_a_held_lock_leaves_the_worker_free`: a timer ticks live during the wait, and the admit commits once the lock goes | `crates/steno-pipeline/tests/store_waits.rs` | 2 |
-| 12 | The 2 s poll and the events task | `the_poll_and_the_events_task_never_block_a_worker`: a timer task on the services runtime keeps ticking live while a reload is held at a gate (a gated fake pipeline's `export_keeps_failing`, which the detail's reload calls) | `crates/steno-services/src/app.rs` tests | 1 |
+| 12 | The 2 s poll and the events task | `the_poll_and_the_events_task_never_block_a_worker`: a timer task on the services runtime keeps ticking live while a reload is held at a gate (a gated fake pipeline's `export_keeps_failing`, which the detail's reload calls); `the_event_follower_takes_one_event_at_a_time` (no task per waiting event) and `a_held_poll_is_not_followed_by_a_burst` (`MissedTickBehavior::Delay`) | `crates/steno-services/src/app.rs` tests | 1 |
 | 13 | Pipeline runs on the workers | every `store_waits` test passes on one worker, including the quit during a run's wait | `store_waits.rs` | 2 |
 | 14 | Deadlocks in the new lock order | `host_writes_reloads_levels_flushes_and_commands_at_once_never_deadlock`: under `WriteLockHold`, a host write, a `store_changed`, a level update, a flush and a command run at once, and all finish within 5 s of the release; the "view models held" assert fires on a write planted under the lock | `locked_store_tests.rs`, `crates/steno-core/src/store/mod.rs` tests | 3 |
 | 15 | The readers' own rules | `a_write_through_read_fails_on_both_stores` (file and in-memory, `query_only`); `a_store_call_inside_a_store_closure_asserts`; `the_checkpoint_waits_for_reads_in_flight_and_holds_off_new_ones` | `crates/steno-core/src/store/mod.rs` tests | 2 |
 | 16 | The stop's hook behind a slow reload | `a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files`: a reload is held in flight with every reader busy (a held reader), then the recorder stops; `Stopping` reaches the sink within 100 ms, and the session's files finish while the reload is still held | `crates/steno-services/src/recorder.rs` tests | 2 |
 | 17 | The delete's files and rows off the lock | `a_kill_after_the_entry_is_forgotten_keeps_the_meeting`, `a_kill_after_the_delete_commits_never_brings_the_meeting_back` and `a_kill_before_a_kept_meetings_entry_is_restored_keeps_it`: a child process deletes through the host, is killed at a gate between two steps, and the next launch lists the meeting with its recording, or does not list it and adopts no master, exactly once. A guard, not a fix: it passes on `main` and fails on a WP3 that reorders the steps | `crates/steno-services/src/kill_tests.rs` | 3 |
+| 18 | `page.ready` against the page's first command | `page_ready_reaches_the_host_before_the_first_method`: on a runtime with four workers, as Tauri's is, the page sends `page.ready` and, without awaiting it, a command; across 300 runs the host sees `page.ready` first every time (0 failures). It fails today: the cycle 1 probe saw the command first in 29 of 300 runs before PR 1 and 42 of 300 at its head. Not a regression of PR 1; WP2 owns it, since rule 3 moves the page-ready flag into the emitter | `apps/desktop/src-tauri/src/bridge.rs` tests, PR 2 | 2 |
 
 **Check 7's smoke** runs on the `xvfb-recording-linux.sh` harness, with the
 stand-in tray host that `close-without-tray-linux.sh:142-189` uses. It records,
@@ -415,8 +485,11 @@ holds the lock for 8 s from `python3`'s `sqlite3`, and stops through the
 tray's menu (`tray-watcher-linux.py click <bus name> <path> "Stop recording"`).
 The page's Ctrl+Shift+R would go through `bridge_call` instead, and off the
 Mac the tray has no shortcut. It passes when the menu's row reads "Stopping…"
-within 1 s of the click, the meeting is `queued` within 2 s of the release (the
-store's row: no log line marks a save), and `require_saved` holds.
+within 3 s of the click, checked again once the read answered (each read starts
+Python, 0.13 to 0.45 s on a busy host, so 1 s failed one run in five; the old
+main-thread stop held the menu 8 s and more), the meeting is `queued` within 2
+s of the release (the store's row: no log line marks a save), and
+`require_saved` holds.
 
 - **Measured.** A whole run, the headless PipeWire's start included, took
   25.9 s on atlas (a debug build; the row read "Stopping…" 0.23 s after the
@@ -426,6 +499,18 @@ store's row: no log line marks a save), and `require_saved` holds.
   `close-without-tray-linux.sh`, as "Desktop stop under a locked store".
   It runs by hand with
   `scripts/pipewire-headless.sh apps/desktop/scripts/locked-store-linux.sh target/debug/steno-desktop`.
+- **Measured again with the lane and the 3 s bound** (cycle 1's fix, atlas at a
+  load of 17 to 21): five runs passed in 27.0 to 35.1 s, the row reading
+  "Stopping…" 0.49 to 1.67 s after the click and the meeting queued 0.16 to
+  0.38 s after the release; a sixth ended before its window showed, as GTK
+  could not open the Xvfb display, a harness flake. Against `main`'s binary,
+  before PR 1, the smoke fails as it should: the menu did not answer within
+  3 s of the click, as the main thread was waiting on the stop's save.
+- **The Quit during the held stop** (the cycle 1 probe, a Quit 0.5 s after
+  "Stopping…"): with the lock held 8 s the app exited 7.2 s after the Quit,
+  the meeting `queued` with the reason `manual`; held 13 s, past the Quit's
+  10 s patience, it exited 11.3 s after the Quit, and the stop's last try,
+  under way when the shutdown came, still saved it `manual`.
 
 Not changed, and covered by the tests that already exist: the quit save on its
 `ExitGate` thread, and the launch's recovery, which already runs on the
@@ -433,6 +518,37 @@ blocking pool (`kill_tests.rs`, and #278's quit tests).
 
 ## Risks
 
+- **A tray Quit during a stop that waits.** Before PR 1 the Quit could not
+  run until the Stop's save ended, both on the main thread, so the meeting was
+  saved with the reason `manual`. Now the Quit waits for the lane's jobs
+  queued before it, for at most `SHUTDOWN_PATIENCE` (10 s), and the save
+  finishes the same way (`a_quit_waits_for_the_stop_clicked_before_it`). When
+  another process holds the lock past that patience, the exit goes ahead and
+  its shutdown tries the stop's commit no more (`stop_for_quit`,
+  `crates/steno-services/src/recorder.rs`). The meeting stays `recording`,
+  its audio on disk, and the next launch's recovery queues it with the end
+  reason `failed`. No audio is lost; that is the designed path for a store
+  that stays busy.
+- **One ordered lane.** A job that waits holds up the jobs behind it. A deep
+  link's or `window.open`'s request, the onboarding close and the tray's next
+  action wait behind a tray Stop whose save waits (up to its three tries,
+  15 s). The page's own commands do not: they stay concurrent on Tauri's
+  blocking pool (check 5).
+- **`page.ready` against the first command (WP2, check 18).** The page sends
+  `page.ready` and does not await it (`apps/macos/web/src/bridge/hooks.ts:93`),
+  so on Tauri's multi-worker runtime a command sent right after it can reach
+  the host first; the race predates PR 1. Today a user sees nothing of it. The
+  page sends nothing else before its first snapshot (the main window's
+  `page.layout` only on a resize, `apps/macos/web/src/windows/main/main-window.tsx:32`),
+  and the flag is the host's, set once for every window. A command that does
+  win runs, its publish builds the snapshots but emits none
+  (`crates/steno-host/src/host.rs:720`), and `page_ready` then schedules
+  every topic (`host.rs:1611-1614`, `publisher.rs:76-79`), so the first
+  paint has the command's effect. The one trace: that early publish stamps
+  `recording`'s throttle (`publisher.rs:89-100`), so the first `recording`
+  snapshot, the Record control and the levels, can come one 50 ms interval
+  after the other topics, from the flush thread. WP2's rule 3 moves the flag
+  into the emitter and guards the order with check 18.
 - **Deadlocks with the host lock.** The order and its debug assert are in
   decision 3, and check 14 runs every lock holder at once under a held lock.
   The new waits are the host write mutex and a reader's checkout. A reader
