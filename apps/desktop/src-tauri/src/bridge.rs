@@ -287,9 +287,27 @@ pub async fn bridge_call(
                 }
                 Ok(dialogs::chosen_path_reply(chosen.as_deref()))
             }
+            // The worker hands its other tasks on while the call blocks.
+            None if blocks_for_long(&method) => {
+                tokio::task::block_in_place(|| host.call(&window, &method, params))
+            }
             None => host.call(&window, &method, params),
         },
     }
+}
+
+/// The host methods that block for long: a permission request waits for
+/// the user's answer to the system prompt, and the Mac's system audio test
+/// listens for up to 30 seconds. `bridge_call` runs them in
+/// `block_in_place`, so the async worker it runs on hands its other tasks
+/// to the rest of the pool instead of holding them up.
+pub fn blocks_for_long(method: &str) -> bool {
+    matches!(
+        method,
+        "onboarding.request"
+            | "settings.recording.requestPermission"
+            | "settings.general.requestCalendar"
+    )
 }
 
 /// The panels' own command, beside the bridge: the page reports its
@@ -357,6 +375,26 @@ mod tests {
 
     fn window_params(json: &str) -> Result<WindowParams, BridgeError> {
         parse("window.open", serde_json::from_str(json).unwrap())
+    }
+
+    /// The three permission requests, and nothing else, leave the async
+    /// worker while they wait.
+    #[test]
+    fn the_permission_requests_block_for_long() {
+        for method in [
+            "onboarding.request",
+            "settings.recording.requestPermission",
+            "settings.general.requestCalendar",
+        ] {
+            assert!(blocks_for_long(method), "{method}");
+            assert!(
+                method.parse::<steno_bridge::BridgeMethod>().is_ok(),
+                "{method} is a bridge method"
+            );
+        }
+        for method in ["onboarding.skip", "recording.start", "page.ready"] {
+            assert!(!blocks_for_long(method), "{method}");
+        }
     }
 
     #[test]
