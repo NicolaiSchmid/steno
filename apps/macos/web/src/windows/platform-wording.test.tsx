@@ -284,18 +284,18 @@ describe("onboarding", () => {
 	it.each([
 		[
 			"linux",
-			"Your system allows it when a recording starts.",
+			"Your system may ask when you start a recording.",
 			"permission-microphone-at-recording",
-			"Checked when you record",
+			"Not checked yet",
 		],
 		[
 			"windows",
-			"Windows allows it in its privacy settings.",
+			"Windows decides this in its privacy settings. Steno can't check it before you record.",
 			"permission-microphone-open",
 			"Open Windows Settings",
 		],
 	] as const)(
-		"on %s says an unknown permission is checked at the recording, with no Allow",
+		"on %s says the system decides an unknown permission, with no Allow and no claim it is allowed",
 		async (os, sentence, control, label) => {
 			const user = userEvent.setup();
 			const harness = await createBridgeHarness("scenario=onboarding-unknown");
@@ -304,6 +304,7 @@ describe("onboarding", () => {
 			expect(row).toHaveTextContent(
 				`Steno records your side of a meeting from the microphone. Required. ${sentence}`,
 			);
+			expect(row).not.toHaveTextContent(/allow/i);
 			expect(
 				screen.queryByTestId("permission-microphone-request"),
 			).not.toBeInTheDocument();
@@ -333,7 +334,28 @@ describe("onboarding", () => {
 			screen.getByTestId("permission-microphone-request"),
 		).toHaveTextContent("Allow");
 		expect(screen.getByTestId("permission-microphone")).not.toHaveTextContent(
-			"allows it",
+			"decides",
+		);
+		expect(screen.getByTestId("permission-systemAudio")).toHaveTextContent(
+			"macOS asks once, during a short test recording that plays a tone.",
+		);
+	});
+
+	it("on the Mac says the system audio test waits for the recording, in place of its explanation", async () => {
+		const harness = await createBridgeHarness(
+			"scenario=onboarding-waits-for-recording",
+		);
+		renderWithBridge(<OnboardingWindow />, harness, SWIFT_MAC);
+		const row = screen.getByTestId("permission-systemAudio");
+		expect(row).toHaveTextContent(
+			"Stop the recording first. The test plays a short tone, and the recording would pick it up.",
+		);
+		expect(row).not.toHaveTextContent("macOS asks once");
+		expect(
+			screen.getByTestId("permission-systemAudio-request"),
+		).toHaveTextContent("Run the test recording");
+		expect(screen.getByTestId("permission-microphone")).not.toHaveTextContent(
+			"Stop the recording first",
 		);
 	});
 

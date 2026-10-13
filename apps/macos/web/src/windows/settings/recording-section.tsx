@@ -154,6 +154,7 @@ export function RecordingSection() {
 							})
 						}
 						state={permission.state}
+						waitsForRecording={permission.waitsForRecording}
 					/>
 				))}
 			</FormCard>

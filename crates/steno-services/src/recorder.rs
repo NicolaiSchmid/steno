@@ -4,13 +4,20 @@
 //!
 //! A start looks the calendar up ([`crate::calendar`]) on a thread of its
 //! own before it opens the devices. The event under way (or the next
-//! within fifteen minutes) names the meeting, and its attendees but the
-//! calendar's owner become its `them` participants, as in Swift's
+//! within fifteen minutes) names the meeting, and its attendees, except
+//! the calendar's owner, become its `them` participants, as in Swift's
 //! `RecordingController.start`. Without calendar access, without an
 //! event, or while the calendar has not answered when the row is written,
 //! the meeting starts with the default title; an answer that comes later
-//! names the row while it still records under that title. So the lookup
-//! never holds a start up or fails one. Rust only: Swift awaited it.
+//! names it under the store's rule (`Store::name_recording_after_event`)
+//! or is dropped. So the lookup never holds a start up or fails one. Rust
+//! only: Swift awaited it.
+//!
+//! A start never asks for a permission: the calendar is read only with
+//! the access the user already gave. The system audio test plays a tone,
+//! so it runs only while no recording starts, runs or stops, and a start
+//! stops one under way before it opens a device
+//! ([`CaptureRecorder::test_system_audio`]).
 //!
 //! The auto-stop after a call ends is [`crate::auto_stop`]'s policy, fed
 //! by [`CaptureRecorder::microphone_activity`]; its stop is the Stop
@@ -681,7 +688,27 @@ struct Inner {
     launch_note: Option<String>,
     /// The auto-stop after a call ends, for the recording in progress.
     calls: CallWatch,
+    /// The system audio tests running ([`CaptureRecorder::test_system_audio`]).
+    tone_tests: ToneTests,
 }
+
+/// The system audio tests that play their tone now, and the cancel a
+/// start raises to stop them ([`CaptureRecorder::test_system_audio`]).
+struct ToneTests {
+    running: usize,
+    /// Shared by every test running; a fresh one for the first test after
+    /// none ran.
+    cancel: steno_audio::clock::Cancel,
+    /// How long a start waits for the stopped tests to end; a test
+    /// shortens it.
+    patience: Duration,
+}
+
+/// How long a start waits for a system audio test it stopped to end: the
+/// test looks at its cancel every 100 ms, then stops its player and its
+/// tap, so this is a bound for a test stuck inside the system, after which
+/// the recording starts all the same.
+const TONE_TEST_PATIENCE: Duration = Duration::from_secs(5);
 
 /// [`CaptureRecorder`]'s [`StartHold`]: the last one dropped clears the
 /// refusal's error.
@@ -991,6 +1018,11 @@ impl CaptureRecorder {
                 start_holds: 0,
                 launch_note: None,
                 calls: CallWatch::default(),
+                tone_tests: ToneTests {
+                    running: 0,
+                    cancel: steno_audio::clock::Cancel::new(),
+                    patience: TONE_TEST_PATIENCE,
+                },
             }),
             changes: Condvar::new(),
             changed: Mutex::new(None),
@@ -1041,6 +1073,63 @@ impl CaptureRecorder {
     /// Whether a recording is starting, running or stopping.
     pub(crate) fn is_busy(&self) -> bool {
         self.inner().status.state != RecordingState::Idle
+    }
+
+    /// Runs `test`, the system audio test, unless a recording is starting,
+    /// running or stopping, or the app quits: the test plays a tone, and
+    /// a recording would pick it up. `None` then, and `test` never runs. A
+    /// start while it runs raises the `Cancel` it gets and waits for it to
+    /// return before it opens a device ([`Self::stop_tone_tests`]). Rust
+    /// only: Swift ran its test whatever the recorder did.
+    pub(crate) fn test_system_audio<T>(
+        &self,
+        test: impl FnOnce(&steno_audio::clock::Cancel) -> T,
+    ) -> Option<T> {
+        /// Counts the test out, also by a panic, and wakes a start that
+        /// waits for it.
+        struct Ended<'a>(&'a CaptureRecorder);
+        impl Drop for Ended<'_> {
+            fn drop(&mut self) {
+                self.0.inner().tone_tests.running -= 1;
+                self.0.changes.notify_all();
+            }
+        }
+
+        let cancel = {
+            let mut inner = self.inner();
+            if inner.quitting || inner.status.state != RecordingState::Idle {
+                tracing::debug!("the system audio test waits for the recording to end");
+                return None;
+            }
+            let tests = &mut inner.tone_tests;
+            if tests.running == 0 {
+                tests.cancel = steno_audio::clock::Cancel::new();
+            }
+            tests.running += 1;
+            tests.cancel.clone()
+        };
+        let _ended = Ended(self);
+        Some(test(&cancel))
+    }
+
+    /// Stops the system audio tests a start found running and waits, for
+    /// up to [`TONE_TEST_PATIENCE`], until they returned, so no tone plays
+    /// into the recording. The recorder is already `Starting`, so no new
+    /// test begins meanwhile.
+    fn stop_tone_tests(&self) {
+        let inner = self.inner();
+        if inner.tone_tests.running == 0 {
+            return;
+        }
+        inner.tone_tests.cancel.cancel();
+        let patience = inner.tone_tests.patience;
+        let (_inner, waited) = self
+            .changes
+            .wait_timeout_while(inner, patience, |inner| inner.tone_tests.running > 0)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if waited.timed_out() {
+            tracing::warn!("the system audio test did not stop; the recording starts anyway");
+        }
     }
 
     /// Another app's microphone activity while Steno records ([`crate::auto_stop`]):
@@ -1429,7 +1518,10 @@ impl CaptureRecorder {
     /// after the event the calendar's `lookup` found when it has already
     /// answered; a lookup still reading names the row once it answers
     /// ([`Self::name_when_answered`]). `false` when the row could not be
-    /// written.
+    /// written. Never waits for the calendar, not even briefly: a start
+    /// must not depend on how fast it answers. A wait added here would
+    /// have to run on the recorder's clock (`count_down_on` in the tests) so
+    /// that a test with a frozen clock catches it.
     fn begin_meeting(
         &self,
         intake: &LocalRecordingIntake,
@@ -1462,8 +1554,11 @@ impl CaptureRecorder {
     }
 
     /// Names the recording `meeting_id`, whose row was written before the
-    /// calendar answered, after the event `pending` finds, if any, while
-    /// it still records under its default title (see the module doc).
+    /// calendar answered, after the event `pending` finds, if any, under
+    /// the store's rule (`Store::name_recording_after_event`). `meeting_id`
+    /// is the start's own, captured here, never the recorder's current
+    /// meeting, so a late answer never reaches the next recording. An
+    /// answer the rule drops is logged at debug, without the event.
     fn name_when_answered(&self, pending: Lookup, meeting_id: Uuid) {
         let (store, pipeline, zone) = (self.store.clone(), self.pipeline.clone(), self.zone);
         pending.then(move |event| {
@@ -1471,8 +1566,15 @@ impl CaptureRecorder {
             let intake = LocalRecordingIntake::over(store, pipeline.current(), zone);
             let attendees = attendees_of(&event);
             match intake.name_after_event(meeting_id, &event.title, &event.id, &attendees) {
-                Ok(named) => {
-                    tracing::debug!(%meeting_id, named, "the calendar answered after the start");
+                Ok(true) => {
+                    tracing::debug!(%meeting_id, "the calendar answered after the start");
+                }
+                Ok(false) => {
+                    tracing::debug!(
+                        %meeting_id,
+                        "the calendar answered after the recording stopped or was renamed; \
+                         its event is dropped"
+                    );
                 }
                 Err(error) => {
                     tracing::debug!(
@@ -1950,6 +2052,7 @@ impl Recorder for CaptureRecorder {
         // ([`BegunMeeting`]).
         let unwinding = Unwinding::of(self, RecordingState::Starting, START_PANICKED);
         self.notify();
+        self.stop_tone_tests();
         match self.start_inner(mode) {
             Ok(()) => self.warm_up_if_installed(),
             Err(error) => {
@@ -5344,7 +5447,7 @@ mod tests {
     }
 
     /// The event under way at the start names the meeting, and its
-    /// attendees but the calendar's owner are its participants, whether
+    /// attendees, except the calendar's owner, are its participants, whether
     /// the answer was in when the row was written or came after.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_event_under_way_names_the_recording_and_its_attendees() {
@@ -5433,5 +5536,239 @@ mod tests {
             assert_eq!(meeting.calendar_event_id, None);
             assert_eq!(harness.store.participants(meeting_id).unwrap(), Vec::new());
         }
+    }
+
+    /// Waits until the calendar handed `count` answers over, so a test
+    /// can tell "the late answer ran and wrote nothing" from "it has not
+    /// run yet".
+    async fn until_answered(harness: &Harness, count: usize) {
+        eventually("the late answer was handed over", || {
+            harness.recorder.calendar.answered.load(Ordering::SeqCst) == count
+        })
+        .await;
+    }
+
+    /// The store's rule, case "under its default title": a user who
+    /// renamed the recording before the calendar answered keeps the
+    /// title; the late answer writes nothing, also not at the stop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_late_answer_never_overwrites_a_users_title() {
+        let harness = harness(&[]);
+        let calendar = crate::calendar::testing::FakeCalendar::with(vec![roadmap_sync()]);
+        calendar.hold();
+        harness.recorder.name_meetings_from(calendar.clone());
+        start(&harness.recorder);
+        assert!(calendar.wait_for_a_held_read(PATIENCE));
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        harness
+            .store
+            .rename(meeting_id, "Typed", Utc::now())
+            .unwrap();
+        calendar.release();
+        until_answered(&harness, 1).await;
+        let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(meeting.title, "Typed");
+        assert_eq!(meeting.title_origin, steno_core::TitleOrigin::User);
+        assert_eq!(meeting.calendar_event_id, None);
+        assert_eq!(harness.store.participants(meeting_id).unwrap(), Vec::new());
+        stop(&harness.recorder);
+        let stopped = harness.store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(stopped.title, "Typed", "the stop keeps the user's title");
+    }
+
+    /// The store's rule, cases "only the meeting that asked" and "while
+    /// it still records": stop, then a quick start of the next recording
+    /// while the first one's lookup is still out. The late answer names
+    /// neither, not the stopped one that asked, not the newer one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_late_answer_never_touches_another_meeting() {
+        let harness = harness(&[]);
+        let calendar = crate::calendar::testing::FakeCalendar::with(vec![roadmap_sync()]);
+        calendar.hold();
+        harness.recorder.name_meetings_from(calendar.clone());
+        start(&harness.recorder);
+        assert!(calendar.wait_for_a_held_read(PATIENCE));
+        let first = harness.recorder.status().meeting_id.unwrap();
+        stop(&harness.recorder);
+        start(&harness.recorder);
+        let second = harness.recorder.status().meeting_id.unwrap();
+        assert_ne!(first, second);
+        calendar.release();
+        until_answered(&harness, 1).await;
+        for meeting_id in [first, second] {
+            let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+            assert_eq!(meeting.title_origin, steno_core::TitleOrigin::Default);
+            assert_eq!(meeting.calendar_event_id, None);
+            assert_eq!(harness.store.participants(meeting_id).unwrap(), Vec::new());
+        }
+        assert_eq!(
+            harness.recorder.status().meeting_id,
+            Some(second),
+            "the newer one still records"
+        );
+        stop(&harness.recorder);
+    }
+
+    use steno_audio::capture::permission::ProbeAnswer;
+    use steno_host::services::Preferences as _;
+
+    /// What the fake system audio test saw: its runs, and the order of
+    /// its tone's end and of the capture sessions the recorder made.
+    #[derive(Default)]
+    struct ToneLog {
+        runs: AtomicUsize,
+        events: Mutex<Vec<&'static str>>,
+    }
+
+    impl ToneLog {
+        fn note(&self, event: &'static str) {
+            self.events.lock().unwrap().push(event);
+        }
+
+        fn events(&self) -> Vec<&'static str> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    /// The Mac's permissions over the recorder of `harness`, their system
+    /// audio test `probe` (logged to the returned log) and flags kept in
+    /// memory.
+    fn tone_tested(
+        harness: &Harness,
+        probe: impl Fn(&steno_audio::clock::Cancel, &ToneLog) -> ProbeAnswer + Send + Sync + 'static,
+    ) -> (
+        Arc<crate::permissions::SystemPermissions>,
+        Arc<ToneLog>,
+        Arc<steno_host::fakes::FakePreferences>,
+    ) {
+        let log = Arc::new(ToneLog::default());
+        let preferences = Arc::new(steno_host::fakes::FakePreferences::default());
+        let probed = log.clone();
+        let permissions = Arc::new(crate::permissions::SystemPermissions::with_probe(
+            Arc::new(FakePermissions::all(steno_bridge::PermissionState::Unknown)),
+            preferences.clone(),
+            Arc::new(move |cancel| {
+                probed.runs.fetch_add(1, Ordering::SeqCst);
+                probe(cancel, &probed)
+            }),
+            steno_bridge::Platform::Macos,
+        ));
+        permissions.keep_out_of_recordings(&harness.recorder);
+        (permissions, log, preferences)
+    }
+
+    /// The system audio test plays a tone a recording would pick up: while
+    /// a recording starts or runs, a request plays nothing and answers the
+    /// state as it was, and what the last test found stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_tone_test_never_plays_while_a_recording_starts_or_runs() {
+        let harness = harness(&[]);
+        let (permissions, log, preferences) = tone_tested(&harness, |_, _| ProbeAnswer::Heard);
+
+        // Starting: the capture is held until the request was answered.
+        let (entered, entering) = std::sync::mpsc::channel::<()>();
+        let (opened, open) = std::sync::mpsc::channel::<()>();
+        let (entered, open) = (Mutex::new(entered), Mutex::new(open));
+        let held = synthetic_capture();
+        harness.capture_with(Arc::new(move |configuration| {
+            entered.lock().unwrap().send(()).unwrap();
+            open.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
+            held(configuration)
+        }));
+        let starting = harness.recorder.clone();
+        let start = std::thread::spawn(move || starting.start(CaptureMode::InPerson, None));
+        entering.recv_timeout(HANG_GUARD).unwrap();
+        assert_eq!(harness.recorder.status().state, RecordingState::Starting);
+        assert_eq!(
+            permissions.request(PermissionKind::SystemAudio),
+            steno_bridge::PermissionState::Unknown
+        );
+        opened.send(()).unwrap();
+        start.join().unwrap();
+        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+
+        // Recording, after an earlier test heard the tone.
+        preferences.set_flag(crate::permissions::SYSTEM_AUDIO_GRANTED_KEY, true);
+        assert_eq!(
+            permissions.request(PermissionKind::SystemAudio),
+            steno_bridge::PermissionState::Granted
+        );
+        assert_eq!(log.runs.load(Ordering::SeqCst), 0, "no tone played");
+        assert!(preferences.flag(crate::permissions::SYSTEM_AUDIO_GRANTED_KEY));
+        stop(&harness.recorder);
+
+        // Idle again: the test runs.
+        assert_eq!(
+            permissions.request(PermissionKind::SystemAudio),
+            steno_bridge::PermissionState::Granted
+        );
+        assert_eq!(log.runs.load(Ordering::SeqCst), 1);
+    }
+
+    /// A start while the system audio test plays its tone stops the test
+    /// first and opens its devices only once the test returned, so the
+    /// tone never reaches the recording. The stopped test found nothing:
+    /// the request answers the state as it was and stores no answer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_stops_the_tone_test_before_it_opens_a_device() {
+        let harness = harness(&[]);
+        let (began, beginning) = std::sync::mpsc::channel::<()>();
+        let began = Mutex::new(began);
+        let (permissions, log, preferences) = tone_tested(&harness, move |cancel, log| {
+            began.lock().unwrap().send(()).unwrap();
+            // Plays until stopped; a start that did not stop it would
+            // open its devices meanwhile.
+            if cancel.sleep(HANG_GUARD) {
+                return ProbeAnswer::Silent;
+            }
+            log.note("the tone stopped");
+            ProbeAnswer::Stopped
+        });
+        let capture = synthetic_capture();
+        let noted = log.clone();
+        harness.capture_with(Arc::new(move |configuration| {
+            noted.note("a device opened");
+            capture(configuration)
+        }));
+        let requesting = permissions.clone();
+        let request = std::thread::spawn(move || requesting.request(PermissionKind::SystemAudio));
+        beginning.recv_timeout(PATIENCE).unwrap();
+
+        start(&harness.recorder);
+        assert_eq!(log.events(), ["the tone stopped", "a device opened"]);
+        assert_eq!(
+            request.join().unwrap(),
+            steno_bridge::PermissionState::Unknown
+        );
+        assert_eq!(
+            preferences.stored_flag(crate::permissions::SYSTEM_AUDIO_GRANTED_KEY),
+            None,
+            "nothing found, nothing stored"
+        );
+        stop(&harness.recorder);
+    }
+
+    /// A test that does not stop when asked (stuck inside the system)
+    /// holds a start up for [`TONE_TEST_PATIENCE`] at most: the recording
+    /// starts all the same.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tone_test_that_does_not_stop_never_keeps_a_recording_from_starting() {
+        let harness = harness(&[]);
+        harness.recorder.inner().tone_tests.patience = Duration::ZERO;
+        let (began, beginning) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (began, released) = (Mutex::new(began), Mutex::new(released));
+        let (permissions, _, _) = tone_tested(&harness, move |_, _| {
+            began.lock().unwrap().send(()).unwrap();
+            released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
+            ProbeAnswer::Stopped
+        });
+        let requesting = permissions.clone();
+        let request = std::thread::spawn(move || requesting.request(PermissionKind::SystemAudio));
+        beginning.recv_timeout(PATIENCE).unwrap();
+        start(&harness.recorder);
+        release.send(()).unwrap();
+        request.join().unwrap();
+        stop(&harness.recorder);
     }
 }

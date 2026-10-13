@@ -469,10 +469,10 @@ impl LocalRecordingIntake {
     /// Names the recording `meeting_id`, begun without an event, after the
     /// calendar event `calendar_event_id` that came in since, as
     /// [`Self::begin`] would have: a title that is not blank with the
-    /// origin `calendar`, and the attendees as `them` participants.
-    /// Only while the row still records under its default title
-    /// ([`Store::name_recording_after_event`]); returns whether it wrote.
-    /// Rust only: the recorder never waits for the calendar.
+    /// origin `calendar`, and the attendees as `them` participants, under
+    /// the store's rule ([`Store::name_recording_after_event`]); returns
+    /// whether it wrote. Rust only: the recorder never waits for the
+    /// calendar.
     pub fn name_after_event(
         &self,
         meeting_id: Uuid,

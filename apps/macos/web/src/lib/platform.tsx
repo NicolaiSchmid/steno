@@ -102,7 +102,8 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
 		runsIn: "in the menu bar",
 		trayItem: "menu bar item",
 		codexSignInFile: "~/.codex/auth.json",
-		systemAudioPrompt: "macOS asks once, during a short test recording.",
+		systemAudioPrompt:
+			"macOS asks once, during a short test recording that plays a tone.",
 		localNetworkPrompt: "macOS asks when you pair the first phone.",
 	},
 	windows: {
@@ -120,7 +121,8 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
 		codexSignInFile: "%USERPROFILE%\\.codex\\auth.json",
 		localNetworkPrompt:
 			"Windows may ask to let Steno through the firewall when you pair the first phone.",
-		unknownUntilRecording: "Windows allows it in its privacy settings.",
+		unknownUntilRecording:
+			"Windows decides this in its privacy settings. Steno can't check it before you record.",
 	},
 	linux: {
 		computer: "computer",
@@ -133,7 +135,7 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
 		systemSettings: "your system settings",
 		opensSystemSettings: false,
 		codexSignInFile: "~/.codex/auth.json",
-		unknownUntilRecording: "Your system allows it when a recording starts.",
+		unknownUntilRecording: "Your system may ask when you start a recording.",
 	},
 };
 

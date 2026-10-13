@@ -11,9 +11,11 @@
 //! user has already granted full access, so a lookup never prompts.
 //!
 //! Every call goes through `objc2-event-kit`'s bindings, which mark all of
-//! `EventKit` `unsafe`; each block below says what it relies on. The event
-//! store is made for the call and released on the thread that made it, so
-//! no `EventKit` object crosses a thread.
+//! `EventKit` `unsafe`, except the object getters of an event and a
+//! participant: those are sent with `msg_send!` so that a `nil` reads as
+//! `None` (the generated getters assume non-null). Each block below says
+//! what it relies on. The event store is made for the call and released on
+//! the thread that made it, so no `EventKit` object crosses a thread.
 #![allow(unsafe_code)]
 
 use std::sync::Mutex;
@@ -192,9 +194,17 @@ fn new_store() -> Retained<EKEventStore> {
 
 fn read_event(event: &EKEvent) -> Event {
     // SAFETY: getters on a valid `EKEvent` that `eventsMatchingPredicate:`
-    // returned on this thread. Each object return is read as optional:
-    // the headers leave their nullability unspecified, and a `nil` read
-    // as non-optional would panic. `isAllDay` returns a plain `BOOL`.
+    // returned on this thread. `msg_send!` is sound only when the selector
+    // exists on the receiver and the Rust return type matches the
+    // Objective-C one (a mismatch is undefined behaviour in a release
+    // build). Each selector is a property `EKEvent.h` (or `EKCalendarItem.h`,
+    // its superclass) declares, and each Rust type is the property's:
+    // `eventIdentifier` and `title` are `NSString *`, `startDate` and
+    // `endDate` `NSDate *`, `attendees` `NSArray<EKParticipant *> *`, all
+    // object returns retained by `Retained`. Each is read as optional: the
+    // headers leave their nullability unspecified, and a `nil` read as
+    // non-optional would panic. `isAllDay` goes through the binding and
+    // returns a plain `BOOL`.
     unsafe {
         let id: Option<Retained<NSString>> = msg_send![event, eventIdentifier];
         let title: Option<Retained<NSString>> = msg_send![event, title];
@@ -217,8 +227,11 @@ fn read_event(event: &EKEvent) -> Event {
 
 fn read_participant(participant: &EKParticipant) -> Participant {
     // SAFETY: getters on a valid `EKParticipant` from the event's
-    // `attendees` array, read on the thread that fetched it; the object
-    // returns are read as optional, as in `read_event`.
+    // `attendees` array, read on the thread that fetched it. As in
+    // `read_event`, each selector is a property `EKParticipant.h` declares
+    // and each Rust type is the property's: `name` is `NSString *` and
+    // `URL` is `NSURL *`; both are read as optional. `participantType` and
+    // `isCurrentUser` go through the bindings.
     unsafe {
         let name: Option<Retained<NSString>> = msg_send![participant, name];
         let url: Option<Retained<NSURL>> = msg_send![participant, URL];

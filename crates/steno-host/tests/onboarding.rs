@@ -939,3 +939,96 @@ fn not_now_while_the_import_runs_leaves_the_step_to_the_run() {
     assert_eq!(onboarding["page"], "import");
     assert_eq!(onboarding["swiftImport"]["state"], "waiting");
 }
+
+/// The system audio test plays a tone a recording would pick up. While a
+/// recording starts, runs or stops, neither onboarding nor Settings >
+/// Recording runs it: no request reaches the services, the row never
+/// shows Asking, and it says it waits for the recording. Once the
+/// recorder is idle the next press runs the test and clears the line. A
+/// start during the test stops it (the services answer the state as it
+/// was), and the row says so too.
+#[test]
+fn the_system_audio_test_waits_for_the_recording() {
+    use steno_bridge::RecordingState;
+    use steno_host::services::RecorderStatus;
+
+    let harness = Harness::builder()
+        .seed(permissions(
+            PermissionState::Unknown,
+            PermissionState::Unknown,
+            PermissionState::Unknown,
+        ))
+        .build();
+    let system_audio = || PermissionKindParams {
+        kind: PermissionKind::SystemAudio,
+    };
+    for state in [
+        RecordingState::Starting,
+        RecordingState::Recording,
+        RecordingState::Stopping,
+    ] {
+        harness.fakes.recorder.set_status(RecorderStatus {
+            state,
+            ..RecorderStatus::idle()
+        });
+        harness.sink.clear();
+        harness.host.onboarding_request(system_audio()).unwrap();
+        harness
+            .host
+            .settings_recording_request_permission(system_audio())
+            .unwrap();
+        assert_eq!(
+            *harness.fakes.permissions.requests.lock().unwrap(),
+            Vec::new(),
+            "{state:?}: no test ran"
+        );
+        for topic in [BridgeTopic::Onboarding, BridgeTopic::SettingsRecording] {
+            let row = &harness.snapshot(topic)["permissions"][1];
+            assert_eq!(row["kind"], "systemAudio");
+            assert_eq!(row["state"], "unknown", "{state:?} {topic:?}");
+            assert_eq!(row["waitsForRecording"], true, "{state:?} {topic:?}");
+            assert!(
+                harness
+                    .sink
+                    .all(topic)
+                    .iter()
+                    .all(|snapshot| snapshot["permissions"][1]["isRequesting"] == false),
+                "{state:?} {topic:?}: never Asking"
+            );
+        }
+    }
+
+    harness.fakes.recorder.set_status(RecorderStatus::idle());
+    harness.host.onboarding_request(system_audio()).unwrap();
+    assert_eq!(
+        *harness.fakes.permissions.requests.lock().unwrap(),
+        [PermissionKind::SystemAudio]
+    );
+    let row = &harness.snapshot(BridgeTopic::Onboarding)["permissions"][1];
+    assert_eq!(row["state"], "granted");
+    assert!(row.get("waitsForRecording").is_none(), "{row}");
+
+    // A start while the test runs: the services stop it and answer the
+    // state as it was.
+    harness
+        .fakes
+        .permissions
+        .set_answer(PermissionKind::SystemAudio, PermissionState::Unknown);
+    harness.fakes.permissions.set_on_request({
+        let recorder = harness.fakes.recorder.clone();
+        move |_| {
+            recorder.set_status(RecorderStatus {
+                state: RecordingState::Starting,
+                ..RecorderStatus::idle()
+            });
+        }
+    });
+    harness
+        .host
+        .settings_recording_request_permission(system_audio())
+        .unwrap();
+    let row = &harness.snapshot(BridgeTopic::SettingsRecording)["permissions"][1];
+    assert_eq!(row["state"], "unknown");
+    assert_eq!(row["waitsForRecording"], true);
+    assert_eq!(row["isRequesting"], false);
+}

@@ -78,11 +78,10 @@ pub struct AppOptions {
     /// The updater the update schedule drives; the shell's (`updater.rs`),
     /// `None` for a fake that never checks (the CLI, the tests).
     pub update_source: Option<Arc<dyn UpdateSource>>,
-    /// What the system says of each permission; the shell's
-    /// (`permissions.rs`), which the graph's
-    /// [`SystemPermissions`] gives
-    /// the Mac's system audio probe. `None` for a fake that grants
-    /// everything (the CLI, the tests).
+    /// What the system says of each permission: the shell's
+    /// (`permissions.rs`), wrapped in [`SystemPermissions`] with the Mac's
+    /// system audio probe. `None` for a fake that grants everything (the
+    /// CLI, the tests).
     pub permissions: Option<Arc<dyn Permissions>>,
     /// The calendar a recording's start is named from; the shell passes
     /// [`system_calendar`](crate::calendar::system_calendar). `None` reads
@@ -721,8 +720,11 @@ pub fn build_with_import(
     let sweep = RetentionSweep::new(store.clone());
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
 
-    let permissions: Arc<dyn Permissions> = match options.permissions {
-        Some(system) => Arc::new(SystemPermissions::new(system, preferences.clone())),
+    let system_permissions = options
+        .permissions
+        .map(|system| Arc::new(SystemPermissions::new(system, preferences.clone())));
+    let permissions: Arc<dyn Permissions> = match &system_permissions {
+        Some(system) => system.clone(),
         None => Arc::new(FakePermissions::all_granted()),
     };
     // Settings and onboarding install the models; the pipeline never does
@@ -743,6 +745,9 @@ pub fn build_with_import(
     );
     // The save writes to the database's volume too.
     recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
+    if let Some(system_permissions) = &system_permissions {
+        system_permissions.keep_out_of_recordings(&recorder);
+    }
     if let Some(calendar) = options.calendar {
         recorder.name_meetings_from(calendar);
     }
@@ -2285,6 +2290,60 @@ mod tests {
         });
         let pipeline = app.pipeline.current();
         pipeline.wait_until_idle().await;
+    }
+
+    /// A recording's start reads the calendar but asks for no permission:
+    /// with every grant still `unknown`, a start during an event names the
+    /// meeting and no request reaches the shell.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_never_asks_for_a_permission() {
+        use steno_bridge::PermissionState;
+
+        let dir = tempfile::tempdir().unwrap();
+        let shells = Arc::new(FakePermissions::all(PermissionState::Unknown));
+        let now = chrono::Utc::now();
+        let calendar =
+            crate::calendar::testing::FakeCalendar::with(vec![steno_core::CalendarEvent {
+                id: "event-7".to_owned(),
+                title: "Planning".to_owned(),
+                start: now - chrono::TimeDelta::minutes(1),
+                end: now + chrono::TimeDelta::minutes(30),
+                attendees: Vec::new(),
+            }]);
+        let app = build(AppOptions {
+            permissions: Some(shells.clone() as Arc<dyn Permissions>),
+            calendar: Some(calendar.clone()),
+            make_capture_session: crate::testing::synthetic_capture(),
+            ..options_under(&dir.path().join("support"))
+        })
+        .unwrap();
+        let mut settings = app.store.settings().unwrap();
+        settings.audio_folder = steno_core::paths::file_url(&dir.path().join("audio"), true);
+        app.store.save_settings(&settings).unwrap();
+        let recorder = app.recorder.clone();
+        crate::testing::on_own_thread(HANG_GUARD, "the start returned", move || {
+            steno_host::services::Recorder::start(
+                &*recorder,
+                steno_bridge::CaptureMode::InPerson,
+                None,
+            );
+        });
+        let meeting_id = steno_host::services::Recorder::status(&*app.recorder)
+            .meeting_id
+            .expect("recording");
+        crate::testing::eventually("the event named the recording", || {
+            app.store
+                .meeting(meeting_id)
+                .unwrap()
+                .is_some_and(|meeting| meeting.title == "Planning")
+        })
+        .await;
+        let recorder = app.recorder.clone();
+        crate::testing::on_own_thread(HANG_GUARD, "the stop returned", move || {
+            steno_host::services::Recorder::stop(&*recorder);
+        });
+        assert_eq!(*shells.requests.lock().unwrap(), Vec::new(), "no prompt");
+        app.pipeline.current().wait_until_idle().await;
     }
 
     /// The shell's word on its bundle reaches the host: on the Mac only a

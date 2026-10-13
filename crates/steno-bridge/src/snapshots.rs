@@ -545,6 +545,10 @@ pub struct OnboardingImport {
 /// Swift: `OnboardingSnapshot.PermissionStep`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the wire format's flags, one key each, as the contract has them"
+)]
 pub struct OnboardingPermissionStep {
     pub kind: PermissionKind,
     pub state: PermissionState,
@@ -552,6 +556,12 @@ pub struct OnboardingPermissionStep {
     pub is_required: bool,
     pub is_requesting: bool,
     pub is_skipped: bool,
+    /// As the Recording section's
+    /// [`waits_for_recording`](crate::RecordingPermission::waits_for_recording):
+    /// the system audio test waits until no recording starts, runs or
+    /// stops. Left out when false. Rust only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waits_for_recording: bool,
 }
 
 string_enum! {

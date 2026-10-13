@@ -29,8 +29,9 @@ pub struct CalendarEvent {
 }
 
 /// How far ahead [`pick_event`] looks for an event about to start: fifteen
-/// minutes. Swift: `CalendarMatch.pick`'s `lookahead` default.
-pub const CALENDAR_LOOKAHEAD: TimeDelta = TimeDelta::seconds(900);
+/// minutes, the end included, so an event 15:00 out counts and one 15:01
+/// out does not. Swift: `CalendarMatch.pick`'s `lookahead` default.
+pub const CALENDAR_LOOKAHEAD: TimeDelta = TimeDelta::minutes(15);
 
 /// The event a recording starting at `now` most likely belongs to. An
 /// event under way wins (`start <= now < end`), the one that started most
@@ -137,13 +138,19 @@ mod tests {
                 Some("starts"),
             ),
             (
+                "an event 14:59 out counts",
+                vec![event("soon", 899, 1200)],
+                default,
+                Some("soon"),
+            ),
+            (
                 "an event exactly fifteen minutes out still counts",
                 vec![event("edge", 900, 1200)],
                 default,
                 Some("edge"),
             ),
             (
-                "one a second later does not",
+                "one 15:01 out does not",
                 vec![event("late", 901, 1200)],
                 default,
                 None,

@@ -255,16 +255,21 @@ impl Store {
     }
 
     /// Names a recording after its calendar event once the event is known,
-    /// which may be after the recording started: in one transaction, and
-    /// only while the stored row is still `recording`, still has its
-    /// default title and names no event, the row takes
-    /// `calendar_event_id`, and `title` with the origin `calendar` when
-    /// there is one, and `participants` are saved for it. Returns whether
-    /// it wrote; a row that moved on, was renamed or already names an
-    /// event is left alone, and one that is gone is
-    /// [`StoreError::MeetingNotFound`]. Rust only: Swift named the row when
-    /// it wrote it (`LocalRecordingIntake.begin`), after waiting for the
-    /// calendar.
+    /// which may be after the recording started. This is the one rule for
+    /// a late calendar answer; it names the row `id` only:
+    ///
+    /// - while that row still records (state `recording`, not stopped);
+    /// - under its default title (the user has not renamed it);
+    /// - before any event named it.
+    ///
+    /// Then, in one transaction, the row takes `calendar_event_id`, and
+    /// `title` with the origin `calendar` when there is one, and
+    /// `participants` are saved for it. Returns whether it wrote; a row
+    /// the rule leaves alone answers `false`, and one that is gone is
+    /// [`StoreError::MeetingNotFound`]. The caller passes the id of the
+    /// recording that asked, never another. Rust only: Swift named the row
+    /// when it wrote it (`LocalRecordingIntake.begin`), after waiting for
+    /// the calendar.
     pub fn name_recording_after_event(
         &self,
         id: Uuid,

@@ -64,13 +64,15 @@ pub fn permission_is_required(kind: PermissionKind) -> bool {
     )
 }
 
-/// Whether a required permission in `state` keeps Steno from recording
-/// on `platform`, which opens onboarding at launch and holds its page 1
-/// open: `denied` everywhere, and `unknown` on the Mac, where it means not
-/// asked yet (the microphone) or not probed yet (system audio). Off the
-/// Mac `unknown` is all the system says before a recording (the portal
-/// asks when the stream opens, Windows follows its privacy switch), so it
-/// counts as not required. Stable plan S3
+/// Whether a required permission in `state` still needs the user on
+/// `platform`: it opens onboarding at launch, holds page 1's Continue and
+/// sets Settings > Recording's subtitle. `denied` everywhere, and
+/// `unknown` on the Mac, where it means not asked yet (the microphone) or
+/// not probed yet (system audio). Off the Mac `unknown` is all the system
+/// says before a recording (the portal asks when the stream opens,
+/// Windows follows its privacy switch), so it counts as not required. The
+/// recorder's warning is a separate rule: it names only the permissions
+/// the system reports `denied`. Stable plan S3
 /// (`.plans/2026-10-07-stable-promotion.md`). Swift, Mac only: every state
 /// but `granted` was missing (`OnboardingViewModel.shouldOpen`).
 #[must_use]

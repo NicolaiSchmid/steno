@@ -76,6 +76,10 @@ pub struct OnboardingViewModel {
     pub platform: Platform,
     pub steps: Vec<Step>,
     pub requesting: Option<PermissionKind>,
+    /// The permission whose last request waited for the recording (the
+    /// system audio test, which the host refuses while a recording
+    /// starts, runs or stops); cleared by the next request.
+    pub waits_for_recording: Option<PermissionKind>,
     pub skipped: BTreeSet<PermissionKind>,
     pub page: OnboardingPage,
     pub setup_states: BTreeMap<OnboardingSetupStepKind, SetupState>,
@@ -117,6 +121,7 @@ impl OnboardingViewModel {
                 })
                 .collect(),
             requesting: None,
+            waits_for_recording: None,
             skipped: BTreeSet::new(),
             page: OnboardingPage::Permissions,
             setup_states: SETUP_STEPS
@@ -336,6 +341,7 @@ impl OnboardingViewModel {
     /// did the three in one `async` method.
     pub fn begin_request(&mut self, kind: PermissionKind) {
         self.requesting = Some(kind);
+        self.waits_for_recording = None;
     }
 
     pub fn finish_request(&mut self, kind: PermissionKind, state: PermissionState) {
@@ -559,6 +565,7 @@ pub fn snapshot(model: &OnboardingViewModel) -> OnboardingSnapshot {
                 is_required: step.is_required(),
                 is_requesting: model.requesting == Some(step.kind),
                 is_skipped: model.skipped.contains(&step.kind),
+                waits_for_recording: model.waits_for_recording == Some(step.kind),
             })
             .collect(),
         permissions_complete: model.is_complete(),

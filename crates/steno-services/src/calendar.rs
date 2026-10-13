@@ -14,12 +14,12 @@
 //! - The lookup runs on a thread of its own, started before the capture
 //!   opens its devices. The recorder takes the answer if it is there when
 //!   it writes the meeting's row, and otherwise writes the row as it would
-//!   without a calendar and names it once the answer comes, while it still
-//!   records under its default title (`Store::name_recording_after_event`).
-//!   So a slow or hung calendar never holds a start up and never fails
-//!   one. While a lookup has not returned no other starts, so a calendar
-//!   that hangs holds one thread, never one per recording. Rust only:
-//!   Swift awaited the lookup before it wrote the row.
+//!   without a calendar and hands a late answer to the store, which names
+//!   the row under its rule (`Store::name_recording_after_event`) or drops
+//!   the answer. So a slow or hung calendar never holds a start up and
+//!   never fails one. While a lookup has not returned, no other starts, so
+//!   a calendar that hangs holds one thread, never one per recording. Rust
+//!   only: Swift awaited the lookup before it wrote the row.
 //!
 //! Titles and attendee names are the user's data: no log line here
 //! carries them, at any level.
@@ -275,6 +275,10 @@ impl Lookup {
 pub(crate) struct CalendarLookups {
     calendar: Mutex<Arc<dyn Calendar>>,
     running: Arc<AtomicBool>,
+    /// Lookups whose answer was handed over (`then` ran, or the answer
+    /// waits for `take`): a test's signal that a late answer is done.
+    #[cfg(test)]
+    pub(crate) answered: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Clears the running flag when the lookup's thread ends, also by a
@@ -292,6 +296,8 @@ impl CalendarLookups {
         Self {
             calendar: Mutex::new(calendar),
             running: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            answered: Arc::default(),
         }
     }
 
@@ -317,6 +323,8 @@ impl CalendarLookups {
             .clone();
         let answer = Arc::new(Mutex::new(Answer::Pending));
         let handed = answer.clone();
+        #[cfg(test)]
+        let answered = self.answered.clone();
         let spawned = std::thread::Builder::new()
             .name("steno-calendar".into())
             .spawn(move || {
@@ -336,6 +344,8 @@ impl CalendarLookups {
                     }
                     Answer::Pending | Answer::Done(_) => *answer = Answer::Done(event),
                 }
+                #[cfg(test)]
+                answered.fetch_add(1, Ordering::SeqCst);
             });
         match spawned {
             Ok(_) => Some(Lookup { answer }),
@@ -562,6 +572,24 @@ mod tests {
         if !cfg!(target_os = "macos") {
             assert_eq!(system_calendar().events_on(now()), Ok(Vec::new()));
         }
+    }
+
+    /// On the Mac the system calendar reads without asking: without full
+    /// access it lists nothing, and the access stays what it was. (A test
+    /// process has no grant on CI or over SSH, so this is the denied or
+    /// not-determined path; the granted one is a step for a person.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_system_calendar_reads_without_asking() {
+        use steno_macos::calendar::{CalendarAccess, access};
+        let before = access();
+        let read = system_calendar().events_on(now());
+        if before == CalendarAccess::FullAccess {
+            assert!(read.is_ok(), "{read:?}");
+        } else {
+            assert_eq!(read, Ok(Vec::new()));
+        }
+        assert_eq!(access(), before, "the read asked for nothing");
     }
 
     /// The lookup answers the event the rule picks among the day's.

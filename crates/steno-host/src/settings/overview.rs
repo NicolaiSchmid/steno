@@ -109,7 +109,7 @@ pub fn refresh(
     version: &str,
 ) -> BTreeMap<SettingsSection, String> {
     let settings = store.settings().ok();
-    let granted = |kind| !permission_is_missing(platform, services.permissions.state(kind));
+    let in_place = |kind| !permission_is_missing(platform, services.permissions.state(kind));
     let engine: SpeechEngineId = settings
         .as_ref()
         .and_then(|settings| settings.speech_engine_id.parse().ok())
@@ -125,7 +125,7 @@ pub fn refresh(
     let mut result = subtitles(
         platform,
         settings.as_ref(),
-        recording_permissions(platform).all(granted),
+        recording_permissions(platform).all(in_place),
         models_installed,
         paired_count,
         &services.updater.last_outcome(),

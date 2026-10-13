@@ -58,6 +58,10 @@ pub struct AudioSettingsViewModel {
     pub kept_forever: Option<i64>,
     pub permissions: BTreeMap<PermissionKind, PermissionState>,
     pub requesting: Option<PermissionKind>,
+    /// The permission whose last request waited for the recording (the
+    /// system audio test, which the host refuses while a recording
+    /// starts, runs or stops); cleared by the next request.
+    pub waits_for_recording: Option<PermissionKind>,
     pub errors: SectionError,
 }
 
@@ -76,6 +80,7 @@ impl AudioSettingsViewModel {
             kept_forever: None,
             permissions: BTreeMap::new(),
             requesting: None,
+            waits_for_recording: None,
             errors: SectionError::default(),
         }
     }
@@ -237,6 +242,7 @@ impl AudioSettingsViewModel {
             return false;
         }
         self.requesting = Some(kind);
+        self.waits_for_recording = None;
         true
     }
 
