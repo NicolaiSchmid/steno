@@ -16,8 +16,8 @@
 //! answers a key it lacks. Any other Keychain error (access denied, a
 //! cancelled prompt, a locked keychain) is an `Err`, which waits as
 //! `unreadable`; `handover.rs` and `app.rs` test that answer. The Mac
-//! shell's import marker is a fake that counts its writes. The Swift app's
-//! guard is its own change, with its own record file.
+//! shell's import marker is a fake that counts its writes. The Swift app,
+//! whose guard keeps its own record file, is not covered here.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -201,9 +201,9 @@ impl Paired {
         self.record_file().next().unwrap()
     }
 
-    /// Notes `next` as an unfinished Pair again does; the record the guard
-    /// keeps is then the file with the note, and the one before it is
-    /// answered.
+    /// Notes `next` as an unfinished Pair again does: the record the guard
+    /// keeps is now the file with the note; returns the bytes from before
+    /// the note.
     fn note_next(&mut self, next: &str) -> Vec<u8> {
         self.record_file().note_next(Some(next)).unwrap();
         let noted = std::fs::read(self.record_path()).unwrap();
@@ -556,7 +556,8 @@ async fn an_unfinished_pair_again_is_decided_by_the_keychain_at_the_launch() {
             "next" => paired.put(&next.to_pem().unwrap()).await,
             "none" => paired.empty_the_keychain(),
             "other" => paired.put(&other).await,
-            _ => {}
+            "recorded" | "unreadable" => {}
+            _ => unreachable!(),
         }
         let unnoted = paired.note_next(&next_fingerprint);
         if case == "unreadable" {
@@ -619,37 +620,22 @@ async fn an_unfinished_pair_again_is_decided_by_the_keychain_at_the_launch() {
     }
 }
 
-/// A record file that does not parse is no "nothing recorded", and a
-/// value that is not a string makes it one that does not parse, under the
-/// fingerprint's key (with another identity in the keychain, which a
+/// A record file that does not parse is never read as nothing recorded.
+/// A value that is not a string makes it one that does not parse, under
+/// the fingerprint's key (with another identity in the keychain, which a
 /// missing record would adopt) as under a key the app does not know
 /// (beside the right fingerprint). The launch waits as unreadable, and
 /// neither Try again nor the next launch writes the file or sets it
 /// aside. Pair again, once the user confirms, moves it aside as
 /// `handover-identity.json.corrupt-<time>` with its bytes and records the
 /// new identity alone; the launch after it loads that identity and leaves
-/// both files as they are.
+/// both files as they are. Over the same file mended instead, with the
+/// identity the phones know back in the keychain, Try again starts the
+/// listener on it without a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_with_a_value_that_is_not_a_string_waits_until_pair_again_sets_it_aside() {
     for case in ["fingerprint", "unknown key"] {
-        let mut paired = Paired::new().await;
-        let other = another_identity();
-        let (bad, stored) = if case == "fingerprint" {
-            paired.put(&other).await;
-            (format!("{{\"{}\": 7}}", FingerprintFile::KEY), other)
-        } else {
-            let bad = format!(
-                "{{\"{}\": \"{}\", \"steno.handoverIdentityLabel\": 7}}",
-                FingerprintFile::KEY,
-                paired.fingerprint
-            );
-            (bad, paired.pem.clone())
-        };
-        std::fs::write(paired.record_path(), &bad).unwrap();
-        paired.record = bad.into_bytes();
-        assert!(paired.record_file().recorded().is_err(), "{case}: recorded");
-        assert!(paired.record_file().next().is_err(), "{case}: next");
-
+        let (paired, stored) = unparsable_record(case).await;
         let launched = paired.launch();
         paired
             .waits_untouched(&launched, "unreadable", Some(&stored))
@@ -658,6 +644,8 @@ async fn a_record_with_a_value_that_is_not_a_string_waits_until_pair_again_sets_
         paired
             .waits_untouched(&launched, "unreadable", Some(&stored))
             .await;
+        let phone = launched.phone();
+        assert_eq!(phone["error"], TRY_AGAIN_FAILED, "{case}: {phone}");
         drop(launched);
         let launched = paired.launch();
         paired
@@ -694,5 +682,49 @@ async fn a_record_with_a_value_that_is_not_a_string_waits_until_pair_again_sets_
             record,
             "{case}: the record as Pair again wrote it"
         );
+        drop(again);
+
+        let (mut paired, stored) = unparsable_record(case).await;
+        let launched = paired.launch();
+        paired
+            .waits_untouched(&launched, "unreadable", Some(&stored))
+            .await;
+        paired.record = record_of(&paired.fingerprint).into_bytes();
+        std::fs::write(paired.record_path(), &paired.record).unwrap();
+        paired.put(&paired.pem).await;
+        launched.try_again();
+        paired.listens_on_the_known_identity(&launched).await;
+        assert_eq!(paired.set_aside(), [], "{case}: nothing set aside");
     }
+}
+
+/// A paired computer whose record holds a value that is not a string,
+/// under the fingerprint's key with another identity in the keychain
+/// (`fingerprint`), or under a key the app does not know beside the right
+/// fingerprint (`unknown key`); and the identity the keychain holds.
+async fn unparsable_record(case: &str) -> (Paired, String) {
+    let mut paired = Paired::new().await;
+    let (bad, stored) = if case == "fingerprint" {
+        let other = another_identity();
+        paired.put(&other).await;
+        (format!("{{\"{}\": 7}}", FingerprintFile::KEY), other)
+    } else {
+        let bad = format!(
+            "{{\"{}\": \"{}\", \"steno.later\": 7}}",
+            FingerprintFile::KEY,
+            paired.fingerprint
+        );
+        (bad, paired.pem.clone())
+    };
+    std::fs::write(paired.record_path(), &bad).unwrap();
+    paired.record = bad.into_bytes();
+    assert!(
+        paired.record_file().recorded().is_err(),
+        "{case}: recorded() is an error"
+    );
+    assert!(
+        paired.record_file().next().is_err(),
+        "{case}: next() is an error"
+    );
+    (paired, stored)
 }

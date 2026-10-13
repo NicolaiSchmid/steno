@@ -1103,7 +1103,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   tested end to end in `steno-services`' `keychain_reset_tests`, over the
   secrets file, the Keychain's stand-in; so are the launch over an
   unfinished Pair again's note, in each of its four cases, and a record
-  that does not parse until Pair again sets it aside.
+  that does not parse, which waits until Pair again sets it aside.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and

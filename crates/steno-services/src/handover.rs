@@ -1198,8 +1198,8 @@ mod tests {
         ] {
             let case = String::from_utf8_lossy(bad);
             std::fs::write(&path, bad).unwrap();
-            assert!(file.recorded().is_err(), "{case}: recorded");
-            assert!(file.next().is_err(), "{case}: next");
+            assert!(file.recorded().is_err(), "{case}: recorded() is an error");
+            assert!(file.next().is_err(), "{case}: next() is an error");
         }
     }
 
