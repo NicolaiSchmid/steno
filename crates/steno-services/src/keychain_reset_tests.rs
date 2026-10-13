@@ -175,9 +175,13 @@ impl Paired {
             .unwrap();
     }
 
+    fn secrets_path(&self) -> std::path::PathBuf {
+        self.support().join("secrets.json")
+    }
+
     /// Create New Keychain: the new keychain holds none of the old items.
     fn empty_the_keychain(&self) {
-        std::fs::remove_file(self.support().join("secrets.json")).unwrap();
+        std::fs::remove_file(self.secrets_path()).unwrap();
     }
 
     fn record_path(&self) -> std::path::PathBuf {
@@ -296,20 +300,41 @@ impl Paired {
         self.kept(launched);
     }
 
-    /// A restart after the identity came back: the launch loads it and
-    /// waits for nothing, and the record, the phones and the marker are as
+    /// The launch loaded the identity the phones paired with and waits for
+    /// nothing, and the record, the phones and the marker are as
     /// [`Self::kept`] says.
-    async fn relaunch_loads_the_known_identity(&self) {
-        let again = self.launch();
-        again.loaded(&self.mac_id);
-        let phone = again.phone();
+    async fn loads_the_known_identity(&self, launched: &Launched) {
+        launched.loaded(&self.mac_id);
+        let phone = launched.phone();
         assert_eq!(phone["waiting"], Value::Null, "{phone}");
         assert_eq!(
             self.stored().await.as_deref(),
             Some(self.pem.as_str()),
             "the known identity, unchanged"
         );
-        self.kept(&again);
+        self.kept(launched);
+    }
+
+    /// Pair again went through, now or at this launch: no phone is paired
+    /// or found by its token, the card waits for nothing and lists none, and
+    /// the admission ledger keeps the delivered recording.
+    fn forgot_the_phones(&self, launched: &Launched, case: &str) {
+        let store = &launched.app.store;
+        assert_eq!(store.paired_devices().unwrap(), [], "{case}: no phone");
+        for (token, _) in &self.tokens {
+            assert_eq!(
+                store.paired_device_for_token_hash(token).unwrap(),
+                None,
+                "{case}: no phone for its token"
+            );
+        }
+        assert!(
+            self.admitted.is_unchanged(store),
+            "{case}: the admission ledger"
+        );
+        let phone = launched.phone();
+        assert_eq!(phone["waiting"], Value::Null, "{case}: {phone}");
+        assert_eq!(phone["devices"], json!([]), "{case}: {phone}");
     }
 
     /// The record file is the one the phones' pairing left, byte for byte
@@ -390,6 +415,19 @@ impl Drop for Launched {
     }
 }
 
+/// The record's text when `fingerprint` alone is recorded.
+fn record_of(fingerprint: &str) -> String {
+    format!("{{\n  \"{}\": \"{fingerprint}\"\n}}", FingerprintFile::KEY)
+}
+
+/// An identity minted elsewhere, as a PEM bundle.
+fn another_identity() -> String {
+    HandoverIdentity::mint("Steno on another computer", chrono::Utc::now())
+        .unwrap()
+        .to_pem()
+        .unwrap()
+}
+
 /// The identity is gone from the store: the launch waits with `missing`,
 /// and so does Try again while the store is still empty. Pair again that
 /// the user declines changes nothing. Once the item is back, Try again
@@ -415,7 +453,7 @@ async fn an_emptied_keychain_waits_until_the_identity_is_back() {
     launched.try_again();
     paired.listens_on_the_known_identity(&launched).await;
     drop(launched);
-    paired.relaunch_loads_the_known_identity().await;
+    paired.loads_the_known_identity(&paired.launch()).await;
 }
 
 /// Pair again over an emptied store, once the user confirms the warning,
@@ -443,22 +481,10 @@ async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
         Some(&fingerprint),
         "the new fingerprint"
     );
-    let store = &launched.app.store;
-    assert_eq!(store.paired_devices().unwrap(), [], "no paired phone");
-    for (token, _) in &paired.tokens {
-        assert_eq!(
-            store.paired_device_for_token_hash(token).unwrap(),
-            None,
-            "no phone for its token"
-        );
-    }
-    assert!(paired.admitted.is_unchanged(store), "the admission ledger");
+    paired.forgot_the_phones(&launched, "Pair again");
     let handover = launched.handover();
     assert_eq!(handover.mac_id(), mac_id, "the new identity");
     assert_eq!(handover.state(), ListenerState::Stopped, "no phone paired");
-    let phone = launched.phone();
-    assert_eq!(phone["waiting"], Value::Null, "{phone}");
-    assert_eq!(phone["devices"], json!([]), "{phone}");
     drop(launched);
 
     let again = paired.launch();
@@ -480,10 +506,7 @@ async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn another_identity_in_the_keychain_waits_until_the_known_one_is_back() {
     let paired = Paired::new().await;
-    let other = HandoverIdentity::mint("Steno on another computer", chrono::Utc::now())
-        .unwrap()
-        .to_pem()
-        .unwrap();
+    let other = another_identity();
     paired.put(&other).await;
 
     let launched = paired.launch();
@@ -505,19 +528,7 @@ async fn another_identity_in_the_keychain_waits_until_the_known_one_is_back() {
     launched.try_again();
     paired.listens_on_the_known_identity(&launched).await;
     drop(launched);
-    paired.relaunch_loads_the_known_identity().await;
-}
-
-/// The record's text when `fingerprint` alone is recorded.
-fn record_of(fingerprint: &str) -> String {
-    format!("{{\n  \"{}\": \"{fingerprint}\"\n}}", FingerprintFile::KEY)
-}
-
-fn another_identity() -> String {
-    HandoverIdentity::mint("Steno on another computer", chrono::Utc::now())
-        .unwrap()
-        .to_pem()
-        .unwrap()
+    paired.loads_the_known_identity(&paired.launch()).await;
 }
 
 /// A launch that finds the note of an unfinished Pair again decides it by
@@ -548,9 +559,8 @@ async fn an_unfinished_pair_again_is_decided_by_the_keychain_at_the_launch() {
             _ => {}
         }
         let unnoted = paired.note_next(&next_fingerprint);
-        let secrets = paired.support().join("secrets.json");
         if case == "unreadable" {
-            std::fs::write(&secrets, b"{").unwrap();
+            std::fs::write(paired.secrets_path(), b"{").unwrap();
         }
 
         let launched = paired.launch();
@@ -567,30 +577,13 @@ async fn an_unfinished_pair_again_is_decided_by_the_keychain_at_the_launch() {
                     record_of(&next_fingerprint),
                     "{case}: its fingerprint recorded, the note dropped"
                 );
-                let store = &launched.app.store;
-                assert_eq!(store.paired_devices().unwrap(), [], "{case}: no phone");
-                for (token, _) in &paired.tokens {
-                    assert_eq!(
-                        store.paired_device_for_token_hash(token).unwrap(),
-                        None,
-                        "{case}: no phone for its token"
-                    );
-                }
-                assert!(
-                    paired.admitted.is_unchanged(store),
-                    "{case}: the admission ledger"
-                );
+                paired.forgot_the_phones(&launched, case);
                 assert_eq!(paired.marker.writes(), 0, "{case}: no marker");
-                let phone = launched.phone();
-                assert_eq!(phone["waiting"], Value::Null, "{case}: {phone}");
-                assert_eq!(phone["devices"], json!([]), "{case}: {phone}");
             }
             "recorded" => {
                 paired.record = unnoted;
-                launched.loaded(&paired.mac_id);
                 assert_eq!(paired.noted(), None, "{case}: the note goes");
-                assert_eq!(paired.stored().await, Some(paired.pem.clone()), "{case}");
-                paired.kept(&launched);
+                paired.loads_the_known_identity(&launched).await;
             }
             "none" => {
                 paired.record = unnoted;
@@ -607,7 +600,7 @@ async fn an_unfinished_pair_again_is_decided_by_the_keychain_at_the_launch() {
                     .waits_untouched(&launched, "replaced", Some(&other))
                     .await;
             }
-            _ => {
+            "unreadable" => {
                 assert_eq!(
                     paired.noted(),
                     Some(next_fingerprint),
@@ -615,12 +608,13 @@ async fn an_unfinished_pair_again_is_decided_by_the_keychain_at_the_launch() {
                 );
                 paired.waits(&launched, "unreadable");
                 assert_eq!(
-                    std::fs::read(&secrets).unwrap(),
+                    std::fs::read(paired.secrets_path()).unwrap(),
                     b"{",
                     "{case}: nothing written"
                 );
                 paired.kept(&launched);
             }
+            _ => unreachable!(),
         }
     }
 }
@@ -652,7 +646,7 @@ async fn a_record_with_a_value_that_is_not_a_string_waits_until_pair_again_sets_
             (bad, paired.pem.clone())
         };
         std::fs::write(paired.record_path(), &bad).unwrap();
-        paired.record = bad.clone().into_bytes();
+        paired.record = bad.into_bytes();
         assert!(paired.record_file().recorded().is_err(), "{case}: recorded");
         assert!(paired.record_file().next().is_err(), "{case}: next");
 
@@ -683,21 +677,13 @@ async fn a_record_with_a_value_that_is_not_a_string_waits_until_pair_again_sets_
         );
         let aside = paired.set_aside();
         assert_eq!(aside.len(), 1, "{case}: {aside:?}");
-        assert_eq!(aside[0].1, bad.as_bytes(), "{case}: its bytes, kept aside");
+        assert_eq!(aside[0].1, paired.record, "{case}: its bytes, kept aside");
         assert_eq!(
             std::fs::read_to_string(paired.record_path()).unwrap(),
             record,
             "{case}: a fresh record"
         );
-        assert_eq!(
-            launched.app.store.paired_devices().unwrap(),
-            [],
-            "{case}: no phone"
-        );
-        assert!(
-            paired.admitted.is_unchanged(&launched.app.store),
-            "{case}: the admission ledger"
-        );
+        paired.forgot_the_phones(&launched, case);
         drop(launched);
 
         let again = paired.launch();
