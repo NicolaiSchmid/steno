@@ -120,6 +120,7 @@ describe("PhoneSection", () => {
 		"unreadable",
 		"missing",
 		"replaced",
+		"partlyReplaced",
 		"fileNotOpened",
 	] as const)(
 		"offers Try again and Pair again while it waits: %s",
@@ -137,9 +138,11 @@ describe("PhoneSection", () => {
 			renderWithBridge(<PhoneSection />, harness);
 			expect(screen.getByTestId("try-again")).toBeEnabled();
 			expect(screen.getByTestId("pair-again")).toBeEnabled();
-			// Pair again leads only when the pairing is gone.
-			const primary = reason === "missing" ? "pair-again" : "try-again";
-			const other = reason === "missing" ? "try-again" : "pair-again";
+			// Pair again leads only when the pairing is gone or some phones
+			// predate it.
+			const startOver = reason === "missing" || reason === "partlyReplaced";
+			const primary = startOver ? "pair-again" : "try-again";
+			const other = startOver ? "try-again" : "pair-again";
 			expect(screen.getByTestId(primary)).toHaveClass("bg-primary");
 			expect(screen.getByTestId(other)).not.toHaveClass("bg-primary");
 			expect(screen.queryByTestId("begin-pairing")).not.toBeInTheDocument();

@@ -64,9 +64,9 @@ function PairingCard({
 /**
  * Phone handover waits: the host's sentence on what happened, Try again,
  * and Pair again with what it costs. The host asks before Pair again goes
- * ahead; both are off while one of them runs. When the pairing is gone,
- * Pair again is the way on, so it is the primary action, as the host's
- * sentence says.
+ * ahead; both are off while one of them runs. When the pairing is gone, or
+ * some phones were paired before it changed, Pair again is the way on, so
+ * it is the primary action, as the host's sentence says.
  */
 function WaitingCard({
 	waiting,
@@ -75,7 +75,8 @@ function WaitingCard({
 }) {
 	const client = useBridge();
 	const { words } = usePlatform();
-	const startOver = waiting.reason === "missing";
+	const startOver =
+		waiting.reason === "missing" || waiting.reason === "partlyReplaced";
 	return (
 		<div className="flex flex-col gap-3" data-testid="phone-waiting">
 			<Callout

@@ -573,16 +573,27 @@ fn host_handover(
     listener.map(|listener| listener.clone() as Arc<dyn steno_host::services::Handover>)
 }
 
-/// The import's onboarding step, which reloads the pipeline whenever the
-/// key gate opens, so the passes get the key it read.
+/// The import's onboarding step, which chooses the Swift certificate by
+/// the Swift app's record in the support directory of `paths` and the
+/// phones paired in `store`, and reloads the pipeline whenever the key gate
+/// opens, so the passes get the key it read.
 fn import_step(
     import: &GraphImport,
     pipeline: &Arc<CurrentPipeline>,
+    store: &Arc<Store>,
+    paths: &StenoPaths,
     runtime: &tokio::runtime::Handle,
 ) -> Arc<ImportStep> {
     let pipeline = pipeline.clone();
+    let choice = crate::swift_import::CertificateChoice {
+        swift_record: crate::swift_import::SwiftRecord::in_support_directory(
+            &paths.support_directory,
+        ),
+        store: store.clone(),
+    };
     Arc::new(import.step(
         runtime.clone(),
+        choice,
         Box::new(move || {
             if let Err(error) = pipeline.reload() {
                 tracing::warn!(%error, "the pipeline did not reload with the imported key");
@@ -736,7 +747,7 @@ pub fn build_with_import(
     );
     let step = import
         .as_ref()
-        .map(|import| import_step(import, &pipeline, &runtime));
+        .map(|import| import_step(import, &pipeline, &store, &paths, &runtime));
     let gated_handover = import
         .as_ref()
         .zip(step.as_ref())

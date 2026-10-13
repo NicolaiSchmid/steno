@@ -7,7 +7,10 @@
 //! through `kSecMatchSearchList` with that keychain as
 //! `SecIdentityCreateWithCertificate`'s search list, and decodes it to the
 //! fingerprint and Mac id `IdentityFixtureTests` (Swift) computes from the
-//! same fixture. Nothing touches the default keychain.
+//! same fixture. A second test puts a second Swift identity into a second
+//! throwaway keychain, as an old login keychain added back beside a new one
+//! does: the lookup lists both certificates, and the export hands over the
+//! one asked for. Nothing touches the default keychain.
 //!
 //! With `STENO_WRITE_EXPORT_FIXTURE=<path>` the test also writes the
 //! export under the passphrase the platform-independent decode test uses
@@ -128,8 +131,8 @@ fn the_swift_identity_exports_from_a_keychain_and_keeps_its_fingerprint_and_mac_
         keychains: vec![opened.clone()],
     };
     assert_eq!(
-        swift.swift_certificate().unwrap().as_deref(),
-        Some(&certificate_der[..]),
+        swift.swift_certificates().unwrap(),
+        std::slice::from_ref(&certificate_der),
         "found by label"
     );
     assert_eq!(
@@ -196,4 +199,106 @@ fn the_swift_identity_exports_from_a_keychain_and_keeps_its_fingerprint_and_mac_
         Some(SWIFT_API_KEY_LABEL),
     );
     assert_eq!(swift.api_key_item().unwrap(), ApiKeyItem::Swift);
+}
+
+/// A throwaway keychain at `path`, unlocked, deleted when the returned
+/// guard drops.
+fn throwaway_keychain(path: &Path) -> (SecKeychain, Throwaway) {
+    let password = "steno-keychain-test";
+    let mut keychain = CreateOptions::new()
+        .password(password)
+        .prompt_user(false)
+        .create(path)
+        .unwrap();
+    let delete = Throwaway(Some(keychain.clone()));
+    let mut opened = SecKeychain::open(path).unwrap();
+    opened.unlock(Some(password)).unwrap();
+    keychain.unlock(Some(password)).unwrap();
+    (opened, delete)
+}
+
+/// The P-256 key of a minted identity as SEC1 (RFC 5915) DER with its
+/// curve named, the form `IdentityKeychain.store` imports: the private
+/// scalar and the public point taken from ring's PKCS#8, whose layout is
+/// fixed.
+fn sec1_of(identity: &steno_handover::HandoverIdentity) -> Vec<u8> {
+    use base64::Engine as _;
+    let pem = identity.to_pem().unwrap();
+    let body: String = pem
+        .split("-----BEGIN PRIVATE KEY-----")
+        .nth(1)
+        .and_then(|rest| rest.split("-----END PRIVATE KEY-----").next())
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    let pkcs8 = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .unwrap();
+    let after = |marker: &[u8], length: usize| {
+        let at = pkcs8
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap()
+            + marker.len();
+        pkcs8[at..at + length].to_vec()
+    };
+    let scalar = after(&[0x02, 0x01, 0x01, 0x04, 0x20], 32);
+    let point = after(&[0xa1, 0x44, 0x03, 0x42, 0x00], 65);
+    let mut sec1 = vec![0x30, 0x77, 0x02, 0x01, 0x01, 0x04, 0x20];
+    sec1.extend(scalar);
+    sec1.extend([
+        0xa0, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0xa1, 0x44, 0x03,
+        0x42, 0x00,
+    ]);
+    sec1.extend(point);
+    sec1
+}
+
+/// Two Swift identities, one per keychain in the search list (an old
+/// login keychain added back beside a new one), in either order: the
+/// lookup lists both certificates, which the step chooses among
+/// (`swift_import::choose_certificate`), and the export of either hands
+/// over that one, with its key found in its own keychain.
+#[test]
+fn two_swift_identities_in_two_keychains_are_both_listed_and_each_exports() {
+    if std::env::var("STENO_KEYCHAIN_TESTS").as_deref() != Ok("1") {
+        eprintln!("set STENO_KEYCHAIN_TESTS=1 to run the keychain test");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (new, _delete_new) = throwaway_keychain(&dir.path().join("steno-new.keychain-db"));
+    let (old, _delete_old) = throwaway_keychain(&dir.path().join("steno-old.keychain-db"));
+    let _no_prompts = SecKeychain::disable_user_interaction().unwrap();
+
+    let fixture_der = handover_fixture("test-identity.der");
+    store_as_swift_does(
+        &old,
+        &fixture_der,
+        &handover_fixture("test-identity.key.der"),
+    );
+    let minted = steno_handover::HandoverIdentity::mint(
+        "Steno test identity, minted",
+        chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
+    )
+    .unwrap();
+    let minted_der = minted.certificate_der().to_vec();
+    store_as_swift_does(&new, &minted_der, &sec1_of(&minted));
+
+    for (keychains, order) in [
+        (vec![new.clone(), old.clone()], [&minted_der, &fixture_der]),
+        (vec![old.clone(), new.clone()], [&fixture_der, &minted_der]),
+    ] {
+        let swift = LoginKeychain { keychains };
+        let mut listed = swift.swift_certificates().unwrap();
+        listed.sort();
+        let mut both = order.map(Clone::clone).to_vec();
+        both.sort();
+        assert_eq!(listed, both, "both listed");
+        for der in order {
+            let passphrase = "a passphrase for this export";
+            let exported = swift.export_identity(der, passphrase).unwrap();
+            let (identity, _) = decode_pkcs12(&exported, passphrase, der).unwrap();
+            assert_eq!(identity.certificate_der(), &der[..], "the one asked for");
+        }
+    }
 }

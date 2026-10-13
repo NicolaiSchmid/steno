@@ -708,6 +708,7 @@ export const phoneSettingsSnapshot = z
 					"unreadable",
 					"missing",
 					"replaced",
+					"partlyReplaced",
 					"fileNotOpened",
 				]),
 				message: z.string(),

@@ -470,8 +470,12 @@ string_enum! {
         /// The pairing the phones know is no longer stored, though a phone
         /// is paired or its fingerprint is recorded.
         Missing = "missing",
-        /// Another pairing is stored than the one the phones know.
+        /// Another pairing is stored than the one the phones know, or, with
+        /// none recorded, one every paired phone predates.
         Replaced = "replaced",
+        /// With no pairing recorded, some paired phones were paired before
+        /// the stored one and cannot connect, the others after it.
+        PartlyReplaced = "partlyReplaced",
         /// A file in the folder Steno keeps its data in could not be
         /// opened (its permissions, a disk error): only a fix outside the
         /// app helps, then Try again.

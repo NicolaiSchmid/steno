@@ -2239,7 +2239,15 @@ fn the_waiting_reasons_are_plain_sentences() {
     assert_eq!(
         waiting_message(PhoneWaitingReason::FileNotOpened, Platform::Linux),
         "Steno cannot open a file in the folder it keeps its data in, so it cannot check this \
-         computer's phone pairing. Check that folder's permissions, then choose Try again."
+         computer's phone pairing. Check that folder's permissions and that the disk has space, \
+         then choose Try again."
+    );
+    // Some phones paired before the pairing changed: the Swift app's words
+    // up to what to do, and Pair again in Settings is what reconnects them.
+    assert_eq!(
+        waiting_message(PhoneWaitingReason::PartlyReplaced, Platform::Macos),
+        "Some of your phones were paired before this Mac's pairing changed and can't connect. \
+         To reconnect them, choose Pair Again in Settings."
     );
     for platform in Platform::ALL {
         let message = waiting_message(PhoneWaitingReason::FileNotOpened, *platform);

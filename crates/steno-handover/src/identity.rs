@@ -12,9 +12,11 @@
 //! Losing the identity means re-pairing every phone, on both sides, so the
 //! loader never mints one while phones are paired or after one was in use
 //! ([`HandoverIdentity::load_or_create`], over the identity's fingerprint
-//! in a [`FingerprintRecord`]). Only the user's Pair again mints over one
-//! ([`HandoverIdentity::mint_anew`]); one that stopped is finished by the
-//! next load.
+//! in a [`FingerprintRecord`]), and adopts one found without a record only
+//! when every paired phone can know it
+//! ([`HandoverIdentity::known_by_every_phone`]). Only the user's Pair again
+//! mints over one ([`HandoverIdentity::mint_anew`]); one that stopped is
+//! finished by the next load.
 
 use std::sync::Arc;
 
@@ -123,8 +125,16 @@ impl HandoverIdentity {
     /// fingerprint is recorded or a phone is paired; and when the
     /// identity's fingerprint is not the recorded one. The paired phones are the
     /// anchor a rollback keeps: an identity found without a recorded
-    /// fingerprint has it recorded again. Only with no phone paired, no
-    /// fingerprint and no identity is one minted.
+    /// fingerprint (an upgrade from a build without the record, or a lost
+    /// record) has it recorded again only when every paired phone was paired
+    /// at or after the identity's certificate starts
+    /// ([`Self::known_by_every_phone`]), as a phone paired before it cannot
+    /// know it. Otherwise the load is [`Unavailability::Replaced`], or
+    /// [`Unavailability::PartlyReplaced`] when only some phones predate it,
+    /// and records nothing; a start that cannot be read is
+    /// [`IdentityError::Malformed`], paired phones that cannot be read
+    /// [`IdentityError::Store`]. Only with no phone paired, no fingerprint
+    /// and no identity is one minted.
     ///
     /// An unfinished Pair again ([`HandoverIdentity::mint_anew`] stopped or
     /// crashed after it noted the next fingerprint, so its note,
@@ -194,10 +204,101 @@ impl HandoverIdentity {
             }
             // Unknown when noted, replaced when not.
             (Some(_), None) | (_, Some(_)) => return Err(Unavailability::Replaced.into()),
-            // Found without a record: recorded again.
-            (None, None) => identity.record_fingerprint(record)?,
+            // Found without a record: recorded again where every phone
+            // knows it.
+            (None, None) => {
+                let paired: Vec<_> = store
+                    .paired_devices()?
+                    .into_iter()
+                    .map(|device| device.paired_at)
+                    .collect();
+                Self::known_by_every_phone(&[identity.not_valid_before()?], &paired)?;
+                identity.record_fingerprint(record)?;
+            }
         }
         Ok(identity)
+    }
+
+    /// The pairing-time rule for identities found with nothing recorded:
+    /// of the identities whose certificates start at `starts`
+    /// ([`Self::not_valid_before`]), the index of the one every phone
+    /// paired at `paired` knows. A phone knows the newest identity whose
+    /// start is at or before its pairing, as a phone paired before an
+    /// identity's start cannot know it; one paired at that instant counts
+    /// as paired after it. Both times come from this computer's clock, and
+    /// a minted certificate starts a minute before its mint
+    /// ([`Self::mint`]), the margin for a pairing right after it. With no
+    /// phone paired, the newest identity.
+    ///
+    /// [`Unavailability::Replaced`] when no phone knows any of them (and
+    /// with no identity at all), [`Unavailability::PartlyReplaced`] when
+    /// some phones know one and the others another one or none. Two
+    /// identities that start in the same second are no newest one: a phone
+    /// whose newest start they share knows neither, so nothing is chosen
+    /// silently. Swift: `HandoverIdentityGuard.adoptable` in
+    /// `Sources/StenoHandover/Identity/IdentityGuard.swift`.
+    ///
+    /// ```
+    /// use chrono::{TimeZone as _, Utc};
+    /// use steno_handover::{HandoverIdentity, Unavailability};
+    ///
+    /// let at = |seconds| Utc.timestamp_opt(seconds, 0).unwrap();
+    /// let (old, new) = (at(1_000), at(2_000));
+    /// // Both phones paired between the two starts know the old identity.
+    /// assert_eq!(
+    ///     HandoverIdentity::known_by_every_phone(&[new, old], &[at(1_500), at(1_999)]).unwrap(),
+    ///     1
+    /// );
+    /// // One between them and one after the new start: no one identity.
+    /// assert!(matches!(
+    ///     HandoverIdentity::known_by_every_phone(&[old, new], &[at(1_500), at(2_000)]),
+    ///     Err(Unavailability::PartlyReplaced)
+    /// ));
+    /// ```
+    pub fn known_by_every_phone(
+        starts: &[DateTime<Utc>],
+        paired: &[DateTime<Utc>],
+    ) -> Result<usize, Unavailability> {
+        // The index of the one newest start at or before `instant`.
+        let newest = |instant: DateTime<Utc>| {
+            let start = starts.iter().filter(|start| **start <= instant).max()?;
+            let mut at = (0..starts.len()).filter(|index| starts[*index] == *start);
+            match (at.next(), at.next()) {
+                (Some(index), None) => Some(index),
+                _ => None,
+            }
+        };
+        let known: Vec<Option<usize>> = if paired.is_empty() {
+            vec![newest(DateTime::<Utc>::MAX_UTC)]
+        } else {
+            paired.iter().map(|instant| newest(*instant)).collect()
+        };
+        match known[0] {
+            Some(only) if known.iter().all(|index| *index == Some(only)) => Ok(only),
+            _ if known.iter().any(Option::is_some) => Err(Unavailability::PartlyReplaced),
+            _ => Err(Unavailability::Replaced),
+        }
+    }
+
+    /// When the certificate starts to be valid (`notValidBefore`), on this
+    /// computer's clock: a minute before its mint ([`Self::mint`]; the
+    /// Swift app's mint back-dates it the same), so a phone paired before
+    /// it cannot know this identity. Swift:
+    /// `HandoverIdentity.notValidBefore()`.
+    pub fn not_valid_before(&self) -> Result<DateTime<Utc>, IdentityError> {
+        Self::not_valid_before_of_der(&self.certificate_der)
+    }
+
+    /// [`Self::not_valid_before`] of a certificate's DER: a certificate
+    /// that does not parse, or a start this computer's clock cannot hold,
+    /// is [`IdentityError::Malformed`].
+    pub fn not_valid_before_of_der(der: &[u8]) -> Result<DateTime<Utc>, IdentityError> {
+        let (_, certificate) = x509_parser::parse_x509_certificate(der)
+            .map_err(|error| IdentityError::Malformed(format!("certificate: {error}")))?;
+        let seconds = certificate.validity().not_before.timestamp();
+        DateTime::from_timestamp(seconds, 0).ok_or_else(|| {
+            IdentityError::Malformed(format!("the certificate's start ({seconds} s) is no date"))
+        })
     }
 
     /// Pair again's identity step, the user's choice when the identity the
@@ -426,12 +527,24 @@ pub enum Unavailability {
     )]
     Missing,
     /// The secret store's identity is not the one whose fingerprint is
-    /// recorded. Not adopted, as the phones would refuse it.
+    /// recorded, or, with nothing recorded, every paired phone was paired
+    /// before it ([`HandoverIdentity::known_by_every_phone`]). Not adopted,
+    /// as the phones would refuse it.
     #[error(
         "the secret store holds another identity than the one this computer's phones paired \
          with; a new identity would make every phone pair again"
     )]
     Replaced,
+    /// With nothing recorded, some paired phones know the identity found
+    /// and the others another one or none
+    /// ([`HandoverIdentity::known_by_every_phone`]). Not adopted, as those
+    /// phones could not connect; a [`Unavailability::Replaced`] in all but
+    /// its words. Swift: `IdentityUnavailability.partlyReplaced`.
+    #[error(
+        "some of this computer's phones were paired before the identity the secret store holds; \
+         a new identity would make every phone pair again"
+    )]
+    PartlyReplaced,
 }
 
 /// Lowercase hex, for logs and tests.
@@ -482,6 +595,46 @@ mod tests {
             "steno-on-nicolai-s-macbook-pro.local"
         );
         assert_eq!(HandoverIdentity::san_label("---"), "steno.local");
+    }
+
+    /// The pairing-time rule over several identities: each phone knows
+    /// the newest identity that starts at or before its pairing.
+    #[test]
+    fn every_phone_knows_the_newest_identity_started_before_its_pairing() {
+        use chrono::TimeZone as _;
+        let at = |seconds| Utc.timestamp_opt(seconds, 0).unwrap();
+        let (a, b, c) = (at(1_000), at(2_000), at(3_000));
+        let known = |starts: &[DateTime<Utc>], paired: &[i64]| {
+            let paired: Vec<_> = paired.iter().map(|seconds| at(*seconds)).collect();
+            HandoverIdentity::known_by_every_phone(starts, &paired)
+        };
+        let replaced = |result| matches!(result, Err(Unavailability::Replaced));
+        let partly = |result| matches!(result, Err(Unavailability::PartlyReplaced));
+        for starts in [[a, b, c], [c, a, b], [b, c, a]] {
+            let index = |start| starts.iter().position(|s| *s == start).unwrap();
+            // No phone: the newest.
+            assert_eq!(known(&starts, &[]).unwrap(), index(c));
+            // Every phone between A and B, at A's start included: A.
+            assert_eq!(known(&starts, &[1_000, 1_999]).unwrap(), index(a));
+            // Every phone between B and C: B, not the newest.
+            assert_eq!(known(&starts, &[2_000, 2_500]).unwrap(), index(b));
+            assert_eq!(known(&starts, &[3_000, 9_000]).unwrap(), index(c));
+            // A phone before every start.
+            assert!(replaced(known(&starts, &[999])));
+            assert!(replaced(known(&starts, &[0, 999])));
+            // One between A and B, one after B: no one identity.
+            assert!(partly(known(&starts, &[1_500, 2_500])));
+            assert!(partly(known(&starts, &[999, 1_500])));
+            assert!(partly(known(&starts, &[999, 3_500])));
+        }
+        // No identity at all: no phone knows one.
+        assert!(replaced(known(&[], &[])));
+        assert!(replaced(known(&[], &[1_000])));
+        // Two that start in the same second are no newest one.
+        assert!(replaced(known(&[a, a], &[])));
+        assert!(replaced(known(&[a, a], &[1_500])));
+        assert_eq!(known(&[a, a, b], &[2_500]).unwrap(), 2);
+        assert!(partly(known(&[a, a, b], &[1_500, 2_500])));
     }
 
     #[test]

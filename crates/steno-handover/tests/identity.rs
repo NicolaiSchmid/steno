@@ -201,12 +201,17 @@ impl Places {
         self.pair_phones(1);
     }
 
-    fn pair_phones(&self, count: u128) {
-        for id in 1..=count {
+    fn pair_phones(&self, count: usize) {
+        self.pair_phones_at(&vec![Utc::now(); count]);
+    }
+
+    /// Pairs one phone at each of `times`, as the database records it.
+    fn pair_phones_at(&self, times: &[chrono::DateTime<Utc>]) {
+        for (id, paired_at) in (1u128..).zip(times) {
             let device = PairedDevice {
                 id: uuid::Uuid::from_u128(id),
                 name: format!("Phone {id}"),
-                paired_at: Utc::now(),
+                paired_at: *paired_at,
                 last_seen_at: None,
             };
             self.store()
@@ -794,4 +799,165 @@ async fn an_unfinished_pair_again_is_decided_by_what_the_secret_store_holds() {
             ),
         }
     }
+}
+
+/// The mint time of the identities below; their certificates start a
+/// minute before it.
+const MINT: i64 = 1_790_000_000;
+
+/// An identity minted at [`MINT`] and stored with nothing recorded (an
+/// upgrade from a build without the record, or a lost record), with phones
+/// paired at `seconds` after the mint (negative: before).
+async fn unrecorded_identity_with_phones(seconds: &[i64]) -> (Places, HandoverIdentity) {
+    let places = Places::new();
+    let identity = HandoverIdentity::mint("x", common::date(MINT)).unwrap();
+    places.set_stored(Some(&identity)).await;
+    let times: Vec<_> = seconds
+        .iter()
+        .map(|offset| common::date(MINT + offset))
+        .collect();
+    places.pair_phones_at(&times);
+    (places, identity)
+}
+
+/// With nothing recorded, the identity found is recorded when every phone
+/// was paired after its certificate starts, and when no phone is paired.
+#[tokio::test]
+async fn an_unrecorded_identity_every_phone_knows_is_recorded() {
+    for phones in [&[][..], &[0, 3600, 86_400][..]] {
+        let (places, identity) = unrecorded_identity_with_phones(phones).await;
+        let loaded = places.load("x").await.unwrap();
+        assert_eq!(loaded.fingerprint(), identity.fingerprint(), "{phones:?}");
+        assert_eq!(
+            places.record.get_recorded(),
+            Some(hex(&identity.fingerprint())),
+            "{phones:?}"
+        );
+        assert_eq!(
+            places.store().paired_devices().unwrap().len(),
+            phones.len(),
+            "{phones:?}: the phones stay"
+        );
+    }
+}
+
+/// An identity every paired phone predates, as a silent mint after a
+/// keychain reset left it, is no identity they know: the load waits as
+/// replaced, records nothing and mints nothing, and the phones and the
+/// identity stay for the user's Pair again.
+#[tokio::test]
+async fn an_unrecorded_identity_every_phone_predates_is_replaced() {
+    let (places, identity) = unrecorded_identity_with_phones(&[-86_400, -3600]).await;
+    let error = places.load("x").await.unwrap_err();
+    assert!(
+        matches!(error, IdentityError::Unavailable(Unavailability::Replaced)),
+        "{error}"
+    );
+    assert_eq!(
+        places.places(),
+        (
+            Some(identity.to_pem().unwrap()),
+            None,
+            None,
+            vec![uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)]
+        ),
+        "nothing written"
+    );
+}
+
+/// Some phones paired before the identity and some after it, among them
+/// one a second before its start beside one at it: partly replaced,
+/// nothing recorded or minted.
+#[tokio::test]
+async fn an_unrecorded_identity_some_phones_predate_is_partly_replaced() {
+    for phones in [[-86_400, 3600], [-61, -60]] {
+        let (places, identity) = unrecorded_identity_with_phones(&phones).await;
+        let error = places.load("x").await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                IdentityError::Unavailable(Unavailability::PartlyReplaced)
+            ),
+            "{phones:?}: {error}"
+        );
+        assert_eq!(places.record.get_recorded(), None, "{phones:?}");
+        assert_eq!(places.stored_pem(), Some(identity.to_pem().unwrap()));
+        assert_eq!(places.store().paired_devices().unwrap().len(), 2);
+    }
+}
+
+/// A minted certificate starts a minute before its mint, so a phone paired
+/// 59 or 60 seconds before the mint counts as paired after the start and
+/// the identity is recorded, and one paired 61 seconds before predates it.
+#[tokio::test]
+async fn a_phone_paired_at_the_identity_s_start_counts_as_paired_after_it() {
+    for (before_the_mint, recorded) in [(59, true), (60, true), (61, false)] {
+        let (places, identity) = unrecorded_identity_with_phones(&[-before_the_mint]).await;
+        assert_eq!(
+            identity.not_valid_before().unwrap(),
+            common::date(MINT - 60),
+            "back-dated a minute"
+        );
+        let loaded = places.load("x").await;
+        if recorded {
+            assert_eq!(
+                loaded.unwrap().fingerprint(),
+                identity.fingerprint(),
+                "{before_the_mint} s"
+            );
+            assert_eq!(
+                places.record.get_recorded(),
+                Some(hex(&identity.fingerprint()))
+            );
+        } else {
+            assert!(
+                matches!(
+                    loaded,
+                    Err(IdentityError::Unavailable(Unavailability::Replaced))
+                ),
+                "{before_the_mint} s"
+            );
+            assert_eq!(places.record.get_recorded(), None);
+        }
+    }
+}
+
+/// With nothing recorded, a certificate whose start cannot be read and a
+/// pairing time that cannot be read are no reason to record the identity,
+/// nor to mint: the load fails, and nothing is written.
+#[tokio::test]
+async fn an_unrecorded_identity_whose_times_cannot_be_read_is_not_recorded() {
+    use base64::Engine as _;
+    // A certificate that does not parse, beside a key that does.
+    let places = Places::new();
+    let key = HandoverIdentity::mint("x", common::date(MINT))
+        .unwrap()
+        .to_pem()
+        .unwrap();
+    let key = &key[key.find("-----BEGIN PRIVATE KEY-----").unwrap()..];
+    let broken = format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n{key}",
+        base64::engine::general_purpose::STANDARD.encode([0x30, 0x00])
+    );
+    places
+        .secrets
+        .set_secret(&HandoverIdentity::secret_key(), Some(&broken))
+        .await
+        .unwrap();
+    places.pair_a_phone();
+    let error = places.load("x").await.unwrap_err();
+    assert!(matches!(error, IdentityError::Malformed(_)), "{error}");
+    assert_eq!(places.record.get_recorded(), None);
+    assert_eq!(places.stored_pem(), Some(broken), "nothing minted");
+
+    // A pairing time the database holds but cannot read.
+    let (places, identity) = unrecorded_identity_with_phones(&[3600]).await;
+    common::execute_batch(
+        places.store(),
+        "UPDATE pairedDevice SET pairedAt = 'yesterday';",
+    );
+    let error = places.load("x").await.unwrap_err();
+    assert!(matches!(error, IdentityError::Store(_)), "{error}");
+    assert_eq!(places.record.get_recorded(), None);
+    assert_eq!(places.stored_pem(), Some(identity.to_pem().unwrap()));
 }
