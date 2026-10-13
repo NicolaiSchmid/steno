@@ -328,7 +328,6 @@ impl Drop for StopOnPanic<'_> {
 /// One decode: a chunk of the layout, retried with more audio when it
 /// looks empty, or an extra window over audio no chunk covers, decoded as
 /// it is (the detector found no speech there to judge it by).
-#[derive(Debug, Clone, PartialEq)]
 struct Job {
     range: Range<usize>,
     recover: bool,
@@ -383,7 +382,7 @@ fn splice_gaps(
                 stretch.pop();
             }
         }
-        if let Some(previous) = at.checked_sub(1).map(|i| tokens[i]) {
+        if let Some(&previous) = tokens[..at].last() {
             let skip = stretch
                 .iter()
                 .take_while(|t| {
@@ -1035,13 +1034,9 @@ mod tests {
 
     /// Quiet words (pieces 1 to 3, under the detector's 0.01) in the
     /// lead-in, in a 13 s pause and in the tail, around loud words (11 to
-    /// 16); the chunks skip the pause as a long one.
-    fn quiet_stretches(decode_gaps: bool) -> (Transcriber<FrameTokenBackend>, Vec<f32>) {
-        quiet_stretches_with(decode_gaps, &[])
-    }
-
-    /// [`quiet_stretches`] with more quiet words, `(piece, seconds)`.
-    fn quiet_stretches_with(
+    /// 16), and the quiet words of `more`, `(piece, seconds)`; the chunks
+    /// skip the pause as a long one.
+    fn quiet_stretches(
         decode_gaps: bool,
         more: &[(u32, f32)],
     ) -> (Transcriber<FrameTokenBackend>, Vec<f32>) {
@@ -1084,11 +1079,11 @@ mod tests {
 
     #[test]
     fn extra_windows_decode_the_lead_in_the_skipped_pauses_and_the_tail() {
-        let (mut t, samples) = quiet_stretches(false);
+        let (mut t, samples) = quiet_stretches(false, &[]);
         let skipped = t.transcribe(&samples, None).unwrap();
         assert_eq!(skipped.text(), "w11 w12 w13 w14 w15 w16");
         assert!(skipped.gaps.is_empty());
-        let (mut t, samples) = quiet_stretches(true);
+        let (mut t, samples) = quiet_stretches(true, &[]);
         let transcript = t.transcribe(&samples, None).unwrap();
         assert_eq!(transcript.chunks, skipped.chunks);
         assert_eq!(transcript.text(), "w1 w11 w12 w13 w2 w14 w15 w16 w3");
@@ -1108,7 +1103,7 @@ mod tests {
         for (at, seconds) in [(0.3, 1.0), (13.8, 1.0), (32.8, 1.0)] {
             silent[sample_count(at)..sample_count(at + seconds)].fill(0.0);
         }
-        let (mut t, _) = quiet_stretches(true);
+        let (mut t, _) = quiet_stretches(true, &[]);
         assert_eq!(t.transcribe(&silent, None).unwrap().text(), skipped.text());
     }
 
@@ -1119,10 +1114,10 @@ mod tests {
         // window each hear the word, the window at its own first frame or
         // the chunk at its; the chunk's stays, the window's falls away.
         let more = [(4, 7.52), (5, 20.56)];
-        let (mut t, samples) = quiet_stretches_with(false, &more);
+        let (mut t, samples) = quiet_stretches(false, &more);
         let chunked = t.transcribe(&samples, None).unwrap();
         assert_eq!(chunked.text(), "w11 w12 w13 w4 w5 w14 w15 w16");
-        let (mut t, samples) = quiet_stretches_with(true, &more);
+        let (mut t, samples) = quiet_stretches(true, &more);
         let transcript = t.transcribe(&samples, None).unwrap();
         assert_eq!(transcript.chunks, chunked.chunks);
         assert_eq!(transcript.text(), "w1 w11 w12 w13 w4 w2 w5 w14 w15 w16 w3");
