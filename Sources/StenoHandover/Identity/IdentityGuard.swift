@@ -198,7 +198,7 @@ public struct HandoverIdentityGuard: Sendable {
     guard !identities.isEmpty else { return nil }
     let paired = try await store.pairedDevices().map(\.pairedAt)
     let starts = try identities.map { identity in try read { try identity.notValidBefore() } }
-    let now = now()
+    let now = self.now()
     if (paired + starts).contains(where: { $0 > now }) { throw IdentityUnavailability.clockBehind }
     return identities[try Self.knownByEveryPhone(starts: starts, paired: paired)]
   }

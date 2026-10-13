@@ -146,16 +146,14 @@ import Testing
     let store: MeetingStore
 
     /// A launch: a fresh guard over the same keychain, record and store.
-    var launch: HandoverIdentityGuard { launching { Date() } }
+    var launch: HandoverIdentityGuard { launch(at: Date()) }
 
     /// The same, with this Mac's clock reading `now`.
-    func launch(at now: Date) -> HandoverIdentityGuard { launching { now } }
-
-    private func launching(_ now: @escaping @Sendable () -> Date) -> HandoverIdentityGuard {
+    func launch(at now: Date) -> HandoverIdentityGuard {
       HandoverIdentityGuard(
         keychain: LabelledIdentityKeychain(
           items: items, label: IdentityItemsTests.label, stagingLabel: IdentityItemsTests.staging),
-        record: record, store: store, now: now)
+        record: record, store: store, now: { now })
     }
   }
 
@@ -679,20 +677,17 @@ import Testing
   /// Mac, a launch a day and an hour later decides by the rule, a load or
   /// a question.
   @Test(arguments: [
-    (phonesAfterNow[3], 90000.0, Launch.Outcome.loads(.third)),
-    (startsAfterNow[1], 90000.0, .loads(.startsTomorrow)),
-    (startsAfterNow[2], 90000.0, .refused(.replaced)),
+    (phonesAfterNow[3], Launch.Outcome.loads(.third)),
+    (startsAfterNow[1], .loads(.startsTomorrow)),
+    (startsAfterNow[2], .refused(.replaced)),
   ])
-  func onceTheClockPassesThemTheRuleDecides(
-    _ launch: Launch, secondsLater: TimeInterval, later: Launch.Outcome
-  ) async throws {
+  func onceTheClockPassesThemTheRuleDecides(_ launch: Launch, later: Launch.Outcome) async throws {
     let held = launch.held.map(identity)
     let mac = try await mac(
       holding: held.map { ($0, Self.label) }, recorded: nil,
       pairedAt: try launch.paired.map(date))
     try await expect(launch.outcome, on: mac, holding: held, at: Self.now, "\(launch)")
-    try await expect(
-      later, on: mac, holding: held, at: Self.now + secondsLater, "\(launch), later")
+    try await expect(later, on: mac, holding: held, at: Self.now + 90000, "\(launch), later")
   }
 
   /// A recorded identity loads by its fingerprint, whatever the clock says
