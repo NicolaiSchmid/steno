@@ -666,8 +666,9 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [x] `settings.general.setLaunchAtLogin`, `.setDetectionEnabled`,
   `.setDefaultTemplate`, `.requestCalendar`, `.setAutomaticUpdates`, `.openLoginItems`:
   through the `LoginItem`, `Permissions` and `Updater` traits; WP6b implements
-  `LoginItem` over WP8's `autostart`, `Permissions` and `Updater` stay the services'
-  fakes (see "Pipeline and services (WP6b)").
+  `LoginItem` over WP8's `autostart`, S4 the `Updater` over the update schedule, and
+  S3 the `Permissions` over the shell's `permissions` with the system audio probe
+  (see "Pipeline and services (WP6b)").
 - [x] `settings.recording.setInputDevice`, `.refreshDevices`, `.chooseFolder` (the
   shell's chooser), `.revealFolder`, `.setRetention` (Forever keeps every recording on
   disk through `Pipeline::keep_all_recordings`), `.requestPermission`.
@@ -787,8 +788,15 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [x] Login item: registered on the first launch when the setting says so
   (`Host::register_login_item_on_first_launch`), toggled from General, the pane opened;
   the `LoginItem` trait over WP8's `autostart` (`autostart::ShellLoginItem`, WP6b).
-- [ ] Calendar: the event that names a recording and its attendees, looked up at
-  recording start: the recorder, WP5.
+- [x] Calendar: the event that names a recording and its attendees, looked up at
+  recording start (S3 of `.plans/2026-10-07-stable-promotion.md`): `steno_services::calendar`
+  over EventKit on the Mac (`steno_macos::calendar`), no calendar elsewhere; the rule
+  is Swift's `CalendarMatch.pick` (`steno_core::pick_event`: the event under way, the
+  one that started last, else the next within fifteen minutes, ties to the smaller
+  id). Difference: the lookup runs on a thread of its own and never holds a start up;
+  an answer that comes after the row was written goes to the store's rule
+  (`Store::name_recording_after_event`), where Swift awaited the lookup before it
+  wrote the row.
 - [x] Phone pairing: a phone's arrival closing the code, a code running out, revoke,
   the listener stopping when no phone is left; the `Handover` trait, WP7 implements.
 - [x] QR encoder: `steno_services::qr::PngQrEncoder` draws the pairing URL at
@@ -797,7 +805,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   "Pipeline and services (WP6b)").
 - [x] Onboarding opener rule (`Host::should_open_onboarding`): a missing required
   permission, or the flag unset; an install already configured writes the flag and
-  stays closed.
+  stays closed. Missing is `permission_is_missing` (S3): `denied` everywhere, `unknown`
+  on the Mac only; off the Mac `unknown` counts as not required, where Swift (Mac only)
+  counted every state but `granted`.
 - Known differences, settled in WP6a. Fixture values the view models never compute
   are listed, with the host's value and the reason, in
   `crates/steno-host/tests/parity.rs`.
@@ -831,10 +841,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   Swift app had GRDB observation; a row written by the pipeline shows within that
   interval. Observation inside the Rust store, or a change hook on `Store::write`,
   removes the poll.
-- The recorder starts without the calendar lookup (title and attendees stay the
-  defaults). The auto-stop grace after a call ends and the meeting detection prompt
-  came with S2 of `.plans/2026-10-07-stable-promotion.md` (`steno_services::auto_stop`,
-  `steno_services::detection`).
+- The recorder starts with the calendar lookup (S3 of
+  `.plans/2026-10-07-stable-promotion.md`), on a thread of its own so it never holds a
+  start up (see the parity list's calendar item). The auto-stop grace after a call ends
+  and the meeting detection prompt came with S2 of `.plans/2026-10-07-stable-promotion.md`
+  (`steno_services::auto_stop`, `steno_services::detection`).
 - The recorder watches each recording on its own thread (the stable plan's P18 and
   P20): a session that fails on its own (a device that stayed lost, a write that
   failed, a rebuild that panicked, which ends as a lost device) is saved and queued at
@@ -1598,12 +1609,15 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The shell's seams WP6b leaves open, each with the package that closes it: (1) closed
   by S2: the services' `DetectionController` raises and clears the prompt through
   `panels::set_prompt` (`host::ShellPromptPanel`) and hears of its X and its Record
-  (`panels::dismiss_prompt`, `panels::record_from_prompt`); (2) the host's
-  `Permissions` stay the services' fake (all granted): WP8's `permissions` answers
-  `unknown` off the Mac and for the Mac's system audio, and the host's onboarding
-  opener counts anything but `granted` as missing, so wiring it would open onboarding
-  at every launch on Linux and Windows; it waits for the audio crate's tap probe (WP5)
-  and a rule for what `unknown` means, which WP5 sets with the probe; (3) closed by
+  (`panels::dismiss_prompt`, `panels::record_from_prompt`); (2) closed by S3: the
+  host's `Permissions` are the shell's `permissions::ShellPermissions` (the microphone
+  and calendar status and prompts on the Mac, `unknown` elsewhere) under
+  `steno_services::permissions::SystemPermissions`, which answers the Mac's system
+  audio from the tap probe (`steno_audio::capture::permission`) and remembers what it
+  last heard (`steno.systemAudioGranted` in `preferences.json`); the opener counts
+  `unknown` as missing on the Mac only (`permission_is_missing`), and off the Mac a
+  permission row in that state says when the system decides instead of offering
+  Allow; (3) closed by
   S4: the host's `Updater` is the update schedule over the shell's updater, and
   `updates.check` stays the shell's, whose check records through the schedule; (4)
   the clip player is a fake, so a speaker's sample clip does not play: it needs new
@@ -3250,9 +3264,9 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   release, and which follow it, is the blocking list of
   `.plans/2026-10-07-stable-promotion.md` (D3), which replaces the rule that all must
   be ticked before the cutover opens. The lines: the menu bar's queue and recent
-  meetings, the calendar lookup, the permissions probe, the macOS menu
-  bar's Record and Find Meetings items. Several name WP5 or WP8, which merged without
-  them. The other unticked "Speech" line, `SpeechSettings`, covers Rust-only settings
+  meetings, the macOS menu bar's Record and Find Meetings items. Several name WP5
+  or WP8, which merged without them. The other unticked "Speech" line,
+  `SpeechSettings`, covers Rust-only settings
   with no Swift behaviour to match: it does not gate the cutover and has its own
   **Unowned.** item. Where:
   the unticked lines under "Beyond the bridge" and "Speech" and the open items under
@@ -3467,6 +3481,7 @@ PR off `main`.
 | WP9b import of the Swift app's preferences, API key and handover identity on the Mac's first launch after the update, behind an onboarding step; `steno-macos` for the PKCS#12 export (S6 of `.plans/2026-10-07-stable-promotion.md`) | `feat/swift-import` | #236 | merged |
 | S7, release mechanics: `v*` tags release the Tauri app as "Steno <version>", the build number (the commit count, above the `appcast` branch's) in `CFBundleVersion`, `check-bundle.sh --signed --handoff`, the signed Sparkle handoff item on tag runs, a stable release as "latest" with `appcast.xml`, the cask and AUR bumps and the flake lines, the `handoff` job behind the `appcast` environment, the 0.11.0 release notes, `release.yml` removed (S7 of `.plans/2026-10-07-stable-promotion.md`; `desktop-release.yml`, `apps/desktop/scripts`) | `ci/desktop-stable-release` | #274 | open |
 | Phone handover waits instead of minting over the identity the paired phones know (a refused or locked read, a missing or replaced identity, the Swift import's export not through): Settings > iPhone says why, Try again reads it again (behind the import's gate, the export) without a restart, and Pair again, after the warning that every phone must pair again, writes the `swift-import-done` marker first and then mints (a Pair again that stopped is finished at the next launch); the gated handover's closed latch keeps a listener built after the shutdown from starting; P30's re-export through a summary re-run after the key is saved (S6 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-services`, `steno-host`, `steno-bridge`, web) | `feat/handover-waiting` | #281 | open |
+| S3, calendar and permissions: the event under way at a recording's start (or the next within fifteen minutes, Swift's `CalendarMatch.pick`) names it and its attendees, read on a thread of its own over EventKit on the Mac (`steno_macos::calendar`, `steno_services::calendar`) and never holding a start up, a later answer going to the store's rule; the host's `Permissions` over the shell's (`permissions::ShellPermissions`: the microphone and calendar status and prompts) with the Mac's system audio probe (`steno_audio::capture::permission`, `steno_services::permissions`); `unknown` missing on the Mac only (`permission_is_missing`), so a missing grant opens onboarding on its permissions page whatever `steno.onboardingCompleted` says, and off the Mac an `unknown` row says when the system decides (S3 of `.plans/2026-10-07-stable-promotion.md`; `steno-core`, `steno-macos`, `steno-audio`, `steno-host`, `steno-services`, desktop shell, web) | `feat/rust-calendar-permissions` | #288 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

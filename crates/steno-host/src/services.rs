@@ -44,7 +44,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use steno_bridge::{
-    BridgeWindow, CaptureMode, PermissionKind, PermissionState, PhoneWaitingReason, RecordingState,
+    BridgeWindow, CaptureMode, PermissionKind, PermissionState, PhoneWaitingReason, Platform,
+    RecordingState,
 };
 use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, HandoverReceipt, ObsidianSettings, PairedDevice, Settings};
@@ -61,6 +62,26 @@ pub fn permission_is_required(kind: PermissionKind) -> bool {
         kind,
         PermissionKind::Microphone | PermissionKind::SystemAudio
     )
+}
+
+/// Whether a required permission in `state` still needs the user on
+/// `platform`: it opens onboarding at launch, holds page 1's Continue and
+/// sets Settings > Recording's subtitle. `denied` everywhere, and
+/// `unknown` on the Mac, where it means not asked yet (the microphone) or
+/// not probed yet (system audio). Off the Mac `unknown` is all the system
+/// says before a recording (the portal asks when the stream opens,
+/// Windows follows its privacy switch), so it counts as not required. The
+/// recorder's warning is a separate rule: it names only the permissions
+/// the system reports `denied`. Stable plan S3
+/// (`.plans/2026-10-07-stable-promotion.md`). Swift, Mac only: every state
+/// but `granted` was missing (`OnboardingViewModel.shouldOpen`).
+#[must_use]
+pub fn permission_is_missing(platform: Platform, state: PermissionState) -> bool {
+    match state {
+        PermissionState::Granted => false,
+        PermissionState::Denied => true,
+        PermissionState::Unknown => platform == Platform::Macos,
+    }
 }
 
 /// The sentence a control shows when this permission is denied.

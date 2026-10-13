@@ -4,6 +4,7 @@
 //!
 //! | Module | What it wraps |
 //! |--------|---------------|
+//! | `calendar` | `EventKit`: the calendar permission's status and prompt, and the timed events around a recording's start, read as plain values (the meeting's title and attendees, S3) |
 //! | `keychain` | `SecItemExport` of an identity as PKCS#12 with a passphrase (the import of the Swift app's handover identity, S6), and behind the `testing` feature the keychain test's fixture calls: `SecItemImport` of a SEC1 key into a given keychain, `SecItemUpdate` of an item's label, `SecKeychainDelete` |
 //! | `volume` | A volume's free space for important use and its size, read on an `NSURL` (the recorder's disk floor, P20) |
 //!
@@ -15,6 +16,8 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(target_os = "macos")]
+pub mod calendar;
 #[cfg(target_os = "macos")]
 pub mod keychain;
 #[cfg(target_os = "macos")]

@@ -96,6 +96,66 @@ fn only_the_platforms_own_permissions_gate_onboarding_and_recording() {
     );
 }
 
+/// The opener rule (stable plan S3), one row per platform, state of the
+/// required permissions and completed flag: `denied` is missing
+/// everywhere, `unknown` only on the Mac (not asked or not probed yet);
+/// off the Mac `unknown` is all the system says before a recording, so it
+/// counts as not required. A missing permission opens onboarding on its
+/// permissions page whatever the flag says; with none missing the flag
+/// decides. Page 1's Continue (`permissionsComplete`) and the Recording
+/// subtitle follow the same rule.
+#[test]
+fn the_opener_counts_a_permission_missing_by_platform() {
+    use PermissionState::{Denied, Granted, Unknown};
+    // (platform, state, missing)
+    let rows = [
+        (Platform::Macos, Granted, false),
+        (Platform::Macos, Denied, true),
+        (Platform::Macos, Unknown, true),
+        (Platform::Windows, Granted, false),
+        (Platform::Windows, Denied, true),
+        (Platform::Windows, Unknown, false),
+        (Platform::Linux, Granted, false),
+        (Platform::Linux, Denied, true),
+        (Platform::Linux, Unknown, false),
+    ];
+    for (platform, state, missing) in rows {
+        for completed in [false, true] {
+            let what = format!("{platform} {state} completed={completed}");
+            let harness = Harness::builder()
+                .platform(platform)
+                .seed(move |_, fakes| {
+                    for &kind in PermissionKind::ALL {
+                        fakes.permissions.set_state(kind, state);
+                    }
+                    fakes
+                        .preferences
+                        .set_flag(OnboardingViewModel::COMPLETED_KEY, completed);
+                })
+                .build();
+            assert_eq!(
+                harness.host.should_open_onboarding(),
+                missing || !completed,
+                "{what}"
+            );
+            let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+            assert_eq!(onboarding["permissionsComplete"], !missing, "{what}");
+            if missing {
+                assert_eq!(onboarding["page"], "permissions", "{what}");
+            }
+            assert_eq!(
+                harness.snapshot(BridgeTopic::SettingsRecording)["subtitle"],
+                if missing {
+                    "Permission needed"
+                } else {
+                    "Ready"
+                },
+                "{what}"
+            );
+        }
+    }
+}
+
 #[test]
 fn the_local_presets_run_on_this_computer_off_the_mac() {
     let titles = |platform| {

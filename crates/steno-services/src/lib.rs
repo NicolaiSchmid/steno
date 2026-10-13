@@ -13,6 +13,8 @@
 //! | [`app`] | [`AppOptions`], [`build`], [`build_with_import`], [`App`] with `host()`, `launch()`, `launch_finished()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`], [`open_store`], [`lock_database`] with [`LOCK_PATIENCE`](app::LOCK_PATIENCE), [`GraphSecrets`](app::GraphSecrets), the graph's secret store in its three layers (the platform store, `KeepsApiKey`, the import's gate) |
 //! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) with the [`BuiltEngine`](pipeline::BuiltEngine) it was built with and the retry of the meetings waiting for the store ([`StoreRetry`](pipeline::StoreRetry)), and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
+//! | [`calendar`] | The calendar event that names a recording and its attendees: the [`Calendar`](calendar::Calendar) seam, `EventKit` on the Mac ([`system_calendar`](calendar::system_calendar)), and the lookup that never holds a start up |
+//! | [`permissions`] | The host's `Permissions` over the shell's: [`SystemPermissions`](permissions::SystemPermissions) adds the Mac's system audio probe and its remembered answer |
 //! | [`auto_stop`] | The auto-stop after a call ends, the recorder's policy: the 90-second grace ([`AUTO_STOP_GRACE`](auto_stop::AUTO_STOP_GRACE)), "Keep recording" and the `callEnded` end reason, fed with [`MicrophoneActivity`](auto_stop::MicrophoneActivity) |
 //! | [`detection`] | [`DetectionController`](detection::DetectionController): the meeting detector's events into one prompt at a time through the shell's [`PromptPanel`](detection::PromptPanel), and into the recorder's auto-stop while recording |
 //! | [`audio_folders`] | Where recordings were written, beside the database: each recording's and phone upload's folder, for crash recovery and the adoption of a master with no meeting, and the known folders |
@@ -31,10 +33,10 @@
 //! | [`swift_import`] | The Mac's import of the Swift app's preferences, API key and handover identity, at the first launch after the update: the launch half, the onboarding step's half and the handover gate |
 //!
 //! What stays a fake here is named in [`build`]'s doc: the platform
-//! services the shell does not supply yet (permissions, clip player; the
-//! updater and the login item when the shell passes none), each
-//! with its reason and owner in the plan's "Pipeline and services (WP6b)"
-//! list.
+//! services the shell does not supply yet (the clip player; the
+//! permissions, the updater and the login item when the shell passes
+//! none), each with its reason and owner in the plan's "Pipeline and
+//! services (WP6b)" list.
 //!
 //! Off the Mac, and on the Mac when the speech settings choose it, Parakeet
 //! runs in the speech sidecar ([`speech::SpeechSetup::runtime`]); a stored
@@ -94,6 +96,7 @@
 pub mod app;
 pub mod audio_folders;
 pub mod auto_stop;
+pub mod calendar;
 pub mod detection;
 pub mod export;
 pub mod handover;
@@ -102,6 +105,7 @@ mod kill_tests;
 pub mod llm;
 pub mod logs;
 pub mod model_gate;
+pub mod permissions;
 pub mod pipeline;
 pub mod platform;
 pub mod qr;

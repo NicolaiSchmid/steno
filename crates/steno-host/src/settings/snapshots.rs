@@ -222,6 +222,7 @@ pub fn recording(
                 kind,
                 state: audio.state_of(kind),
                 is_requesting: audio.requesting == Some(kind),
+                waits_for_recording: audio.waits_for_recording == Some(kind),
             })
             .collect(),
         error: audio.errors.error.clone(),
