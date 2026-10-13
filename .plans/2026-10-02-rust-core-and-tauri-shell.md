@@ -1080,8 +1080,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   when the identity's fingerprint is not the recorded one; the handover then waits
   with the reason (Settings > iPhone, Try again and Pair again; `Handover::waiting`;
   an identity read while the Linux keyring asked the user is read again once it
-  answered). It mints only with no phone paired, no fingerprint and no identity. Pair
-  again alone replaces a record that does not parse, after setting it aside
+  answered). It mints only with no phone paired, no fingerprint and no identity. A
+  record that does not parse is replaced only by a write (Pair again's note, or the
+  record of the Swift import's store), after setting it aside
   (`files::set_aside`, kept as `handover-identity.json.corrupt-<time>`). A rollback to the Swift app leaves the file alone; a lost record is
   rewritten from the identity found while the paired phones, which the Swift app keeps,
   hold the guard. Swift keeps its own identity in the Keychain and has no guard.

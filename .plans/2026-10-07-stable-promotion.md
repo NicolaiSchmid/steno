@@ -738,12 +738,15 @@ Every package is written in parallel except where a dependency is named:
       whose write the store reported as refused, finishes the Pair again
       without a new mint, whether or not a fingerprint was
       recorded before; the recorded identity, or none, abandons it, which is
-      where a refused write ends; any other identity waits as replaced. Behind
-      the import's waiting gate, Try again in the same launch brings the Swift
-      pairing back instead. A `handover-identity.json` that does not parse is
-      replaced only by Pair again, which keeps it as
-      `handover-identity.json.corrupt-<time>`; a launch or Try again waits as
-      unreadable.
+      where a refused write ends (where nothing was recorded and an identity
+      is stored, a refused write waits as replaced instead); any other
+      identity waits as replaced. Behind the import's waiting gate, Try again
+      in the same launch brings the Swift pairing back instead. A `handover-identity.json` that does not parse is
+      never replaced without a kept copy: Pair again and the Swift import's
+      store first keep it as `handover-identity.json.corrupt-<time>`; a launch
+      or Try again waits as unreadable. One that cannot be opened is never
+      moved, and Settings says to check the permissions of the folder Steno
+      keeps its data in, then choose Try again.
       That waiting state in Settings, with both bridge methods
       (`settings.iphone.tryAgain`, `settings.iphone.pairAgain`), its fixture
       and a test that a refused read mints nothing, came with
