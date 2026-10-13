@@ -4817,13 +4817,12 @@ fn sampling_goes_on_while_an_ask_is_held() {
     let backend = Arc::new(ChosenOrDefault::watched(60.0));
     backend.probes.store(true, Ordering::Relaxed);
     backend.opens.store(false, Ordering::Relaxed);
-    let (began, asks) = channel();
-    let (release, released) = channel();
-    *backend.ask_hold.lock().unwrap() = Some((began, released));
     let session = backend.session(directory.path(), clock.clone());
     // Declared after the session, so a failing test drops the sender
     // first and a held probe lets go before the session's drop waits.
-    let release = release;
+    let (release, released) = channel();
+    let (began, asks) = channel();
+    *backend.ask_hold.lock().unwrap() = Some((began, released));
     let notices = session.notices();
     let delivered = || backend.inner.frames_delivered();
     session.start(Uuid::new_v4()).unwrap();
