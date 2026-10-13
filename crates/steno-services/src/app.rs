@@ -4130,6 +4130,68 @@ mod tests {
         );
     }
 
+    /// A retention applied sweeps on the blocking pool too: while the
+    /// sweep's write waits on a store another process holds, a timer task
+    /// on the services runtime, which has one worker, keeps ticking, and
+    /// the sweep goes through once the lock goes. Run inline in the
+    /// follower's task, the wait would stop that worker. (The test reads
+    /// the store only after the release: until P40's readers land, a read
+    /// waits behind the sweep's write.)
+    #[test]
+    fn the_event_followers_sweep_never_blocks_a_worker() {
+        let runtime = one_worker_runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.id = uuid::Uuid::new_v4();
+        meeting.state = steno_core::MeetingState::Ready;
+        let asset = steno_core::AudioAsset {
+            id: uuid::Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: file_url(&dir.path().join("audio").join("master.wav"), false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: vec![steno_core::AudioLane::Mixed],
+            sidecars_16k: std::collections::BTreeMap::new(),
+            mixdown_url: None,
+            retention: steno_core::AudioRetention::KeepDays(1),
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+        };
+        app.store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        let ticked = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let ticks = ticked.clone();
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                *ticks.lock().unwrap() = std::time::Instant::now();
+            }
+        });
+
+        let hold =
+            steno_core::testing::WriteLockHold::new(&dir.path().join("support/steno.sqlite"));
+        app.events.post(MeetingEvent::RetentionApplied {
+            meeting_id: meeting.id,
+        });
+        assert_live(
+            &ticked,
+            std::time::Duration::from_millis(800),
+            "the event follower's sweep",
+        );
+        drop(hold);
+        let swept = std::time::Instant::now();
+        while app
+            .store
+            .asset(meeting.id)
+            .unwrap()
+            .unwrap()
+            .expires_at
+            .is_some()
+        {
+            assert!(swept.elapsed() < PATIENCE, "the sweep never went through");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        runtime.shutdown_background();
+    }
+
     /// A poll tick that waited is followed by one overdue tick, then the
     /// next a full interval later, never by a burst of the ticks it
     /// missed (`MissedTickBehavior::Delay`). The poll's reload is held for
