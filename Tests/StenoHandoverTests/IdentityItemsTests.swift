@@ -10,9 +10,9 @@ import Testing
 /// until the record names the new identity, or loads the new one; none is
 /// stuck unable to read the keychain, and none mints. Of two identities
 /// under the current label, the recorded one loads, and with nothing
-/// recorded the launch asks. The fake keeps
-/// certificates and keys as separate items, as the file keychain does, and
-/// runs the product's order and choice (`IdentityItems`' extension).
+/// recorded the launch asks. The fake keeps certificates and keys as
+/// separate items, as the file keychain does, and runs the product's order
+/// and choice (`IdentityItems`' extension).
 @Suite final class IdentityItemsTests {
   /// Certificates and keys, each labelled, a key found by its certificate's
   /// fingerprint as the keychain finds it by hash. A write cut short throws
@@ -110,7 +110,8 @@ import Testing
 
   let known: HandoverIdentity
   let other: HandoverIdentity
-  /// A third identity, for two under the current label beside a staged one.
+  /// A third identity, so two can sit under the current label while `other`
+  /// is the staged or the minted one.
   let third: HandoverIdentity
   let directory: URL
 
@@ -123,8 +124,7 @@ import Testing
 
   deinit { try? FileManager.default.removeItem(at: directory) }
 
-  /// One Mac: a keychain, a record and a store with one paired phone or
-  /// none.
+  /// One Mac: a keychain, a record and a store with one paired phone or none.
   struct Mac {
     let items: FakeItems
     let record: IdentityRecordFile
