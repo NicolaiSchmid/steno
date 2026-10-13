@@ -2083,8 +2083,8 @@ mod tests {
     use crate::app::BuildError;
     use crate::pipeline::{BuiltEngine, BuiltPipeline, MakeDependencies};
     use crate::testing::{
-        HANG_GUARD, PATIENCE, eventually, eventually_within, fake_dependencies, on_own_thread,
-        synthetic_capture, temp_store,
+        HANG_GUARD, HeldOutages, PATIENCE, eventually, eventually_within, fake_dependencies,
+        on_own_thread, synthetic_capture, temp_store,
     };
     use steno_audio::testing::synthetic::SyntheticOptions;
     use steno_audio::writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
@@ -2694,6 +2694,22 @@ mod tests {
     /// speed and the wall clock, set up by `options` (a stall or a change
     /// `BEFORE_THE_OUTAGE` in, and the restarts after it), under a recorder.
     fn stalling_harness(options: fn(SyntheticOptions) -> SyntheticOptions) -> Harness {
+        stalling_harness_over(options, None)
+    }
+
+    /// [`stalling_harness`] whose outage waits until the test releases it.
+    fn held_stalling_harness(
+        options: fn(SyntheticOptions) -> SyntheticOptions,
+    ) -> (Harness, HeldOutages) {
+        let held = HeldOutages::default();
+        (stalling_harness_over(options, Some(held.clone())), held)
+    }
+
+    /// [`stalling_harness`], its outages held by `held` when given.
+    fn stalling_harness_over(
+        options: fn(SyntheticOptions) -> SyntheticOptions,
+        held: Option<HeldOutages>,
+    ) -> Harness {
         let capture: MakeCaptureSession = Arc::new(move |configuration: CaptureConfiguration| {
             let tone = SyntheticOptions::tones(
                 &configuration.lanes(),
@@ -2708,9 +2724,12 @@ mod tests {
             let tone = tone.stream(on_usb.clone()).stream_after_restart(on_usb);
             CaptureSession::with_backend(
                 configuration,
-                Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options(
-                    tone,
-                ))),
+                match &held {
+                    Some(held) => held.backend(options(tone)),
+                    None => Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options(
+                        tone,
+                    ))),
+                },
                 None,
                 CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
                 Arc::new(steno_audio::SystemClock::new()),
@@ -2725,31 +2744,39 @@ mod tests {
         )
     }
 
-    /// Records over `harness` until `warning` shows ([`until_the_warning`]),
-    /// and checks the meter reads silence then and the warning stands for
-    /// `holds` more; stops, checks the note after the stop names the
-    /// `stalled` device, or none, and returns the seconds it says are
-    /// missing.
+    /// Records over `harness`, holding its `outage` until the meter shows
+    /// the tone (first audio, so under [`HANG_GUARD`]; the outage's
+    /// rebuild would silence the meter), then releases it and records
+    /// until `warning` shows ([`until_the_warning`]); checks the meter
+    /// reads silence then and the warning stands for `holds` more; stops,
+    /// checks the note after the stop names the `stalled` device, or none,
+    /// and returns the seconds it says are missing.
     async fn until_still_trying(
         harness: &Harness,
+        outage: &HeldOutages,
         warning: &str,
         stalled: Option<&str>,
         holds: Duration,
     ) -> u64 {
         let status = || harness.recorder.status();
+        let starting = std::time::Instant::now();
         start(&harness.recorder);
-        eventually("a level from the tone", || {
+        // The master holds what came before the start returned, which the
+        // note's wall time leaves out: the warning stands that long more.
+        let start_took = starting.elapsed();
+        eventually_within(HANG_GUARD, "a level from the tone", || {
             status().levels.is_some_and(|levels| levels.mic > 0.1)
         })
         .await;
         assert_eq!(status().warning, None);
+        outage.release();
         until_the_warning(harness, warning).await;
         let mic = status().levels.map(|levels| levels.mic);
         assert!(
             mic.is_some_and(|mic| mic < 1e-6),
             "the meter reads silence: {mic:?}"
         );
-        let held = std::time::Instant::now() + holds;
+        let held = std::time::Instant::now() + holds + start_took;
         while std::time::Instant::now() < held {
             assert_eq!(status().warning.as_deref(), Some(warning), "it stands");
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2816,8 +2843,8 @@ mod tests {
         }
     }
 
-    /// Seconds of tone before the device stops delivering: long enough for
-    /// the meter to show a level on a loaded host first.
+    /// Seconds of tone before the device stops delivering, or more: a test
+    /// that waits for the meter's level first holds the outage until then.
     const BEFORE_THE_OUTAGE: f64 = 3.0;
     const STILL_TRYING_ON_USB: &str = "No audio from USB Microphone. Still trying.";
     const USB_MICROPHONE: &str = "USB Microphone";
@@ -2830,7 +2857,7 @@ mod tests {
     /// which device.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_device_that_stops_delivering_is_named_while_steno_keeps_trying() {
-        let harness = stalling_harness(|options| {
+        let (harness, outage) = held_stalling_harness(|options| {
             options
                 .stall_after(BEFORE_THE_OUTAGE)
                 .restarts_that_fail(usize::MAX)
@@ -2838,6 +2865,7 @@ mod tests {
         });
         let seconds = until_still_trying(
             &harness,
+            &outage,
             STILL_TRYING_ON_USB,
             Some(USB_MICROPHONE),
             Duration::ZERO,
@@ -2853,13 +2881,14 @@ mod tests {
     /// comes about ten seconds after the stall.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn restarts_that_start_but_deliver_nothing_show_the_warning() {
-        let harness = stalling_harness(|options| {
+        let (harness, outage) = held_stalling_harness(|options| {
             options
                 .stall_after(BEFORE_THE_OUTAGE)
                 .restarts_stall_after(0.0)
         });
         let seconds = until_still_trying(
             &harness,
+            &outage,
             STILL_TRYING_ON_USB,
             Some(USB_MICROPHONE),
             Duration::ZERO,
@@ -2900,7 +2929,7 @@ mod tests {
     /// no device: nothing says the one recorded is the one that is silent.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn restarts_after_another_change_blame_no_device() {
-        let harness = stalling_harness(|options| {
+        let (harness, outage) = held_stalling_harness(|options| {
             options
                 .change_device_after(BEFORE_THE_OUTAGE)
                 .restarts_that_fail(usize::MAX)
@@ -2908,6 +2937,7 @@ mod tests {
         });
         let seconds = until_still_trying(
             &harness,
+            &outage,
             "No audio is arriving. Still trying.",
             None,
             Duration::ZERO,
@@ -3839,7 +3869,10 @@ mod tests {
         );
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        eventually("the writer died", || died.load(Ordering::SeqCst)).await;
+        eventually_within(HANG_GUARD, "the writer died", || {
+            died.load(Ordering::SeqCst)
+        })
+        .await;
         stop(&harness.recorder);
 
         let status = harness.recorder.status();
@@ -3887,7 +3920,10 @@ mod tests {
             );
             start(&harness.recorder);
             let meeting_id = harness.recorder.status().meeting_id.unwrap();
-            eventually("the writer died", || died.load(Ordering::SeqCst)).await;
+            eventually_within(HANG_GUARD, "the writer died", || {
+                died.load(Ordering::SeqCst)
+            })
+            .await;
             let audio = harness.dir.path().join("audio");
             let unmounted = harness.dir.path().join("unmounted");
             let meeting_folder = steno_core::RecordingLayout::new(&audio, meeting_id).directory;
@@ -4428,7 +4464,8 @@ mod tests {
         let harness = harness(&[]);
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        eventually("frames reached the files", || {
+        // First audio: real capture work.
+        eventually_within(HANG_GUARD, "frames reached the files", || {
             harness.recorder.status().levels.is_some()
         })
         .await;
