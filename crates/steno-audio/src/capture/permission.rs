@@ -80,13 +80,44 @@ pub fn wait_for_signal(
     }
 }
 
+/// The probe's tone, apart from `afplay`, so a test sees when it plays and
+/// when it stops.
+#[cfg(any(target_os = "macos", test))]
+trait Tone {
+    /// Plays the tone again unless it still plays.
+    fn keep_playing(&mut self);
+    /// Stops the tone and returns once it no longer plays.
+    fn stop(&mut self);
+}
+
+/// [`wait_for_signal`] over a started tap, then the probe's end: the tone
+/// stops before `stop_tap` closes the tap, so a tap stop stuck in the
+/// system never leaves the tone playing into a recording that starts
+/// meanwhile.
+#[cfg(any(target_os = "macos", test))]
+fn listen(
+    timeout: Duration,
+    clock: &dyn Clock,
+    cancel: &Cancel,
+    sample: impl FnMut() -> Vec<f32>,
+    tone: &mut dyn Tone,
+    stop_tap: impl FnOnce(),
+) -> ProbeAnswer {
+    let heard = wait_for_signal(timeout, POLL_INTERVAL, clock, cancel, sample, || {
+        tone.keep_playing();
+    });
+    tone.stop();
+    stop_tap();
+    heard
+}
+
 /// Runs the probe for up to `timeout` (the product passes
 /// [`PROBE_TIMEOUT`]) and answers what the tap heard: the tap first, where
 /// the prompt appears, then the tone through `/usr/bin/afplay`, played
 /// again whenever it ended. A tap or a tone that cannot start answers
 /// [`ProbeAnswer::Silent`]. Blocks for as long as it listens, or until
-/// `cancel` is raised; it returns only once the player is stopped and the
-/// tap closed. Swift: `SystemAudioPermission.request`.
+/// `cancel` is raised; it returns only once the player is stopped, then
+/// the tap closed. Swift: `SystemAudioPermission.request`.
 #[cfg(target_os = "macos")]
 pub fn probe_system_audio(timeout: Duration, cancel: &Cancel) -> ProbeAnswer {
     use std::process::{Child, Command, Stdio};
@@ -97,17 +128,39 @@ pub fn probe_system_audio(timeout: Duration, cancel: &Cancel) -> ProbeAnswer {
     use crate::capture::{CaptureBackend as _, LiveCaptureBackend};
     use crate::realtime::LaneFrameSink;
 
-    /// Stops the player and removes the tone file however the probe ends.
-    struct Cleanup {
+    /// The tone through `afplay`; stops the player and removes the tone
+    /// file however the probe ends.
+    struct Player {
         tone: std::path::PathBuf,
         player: Option<Child>,
     }
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            if let Some(player) = self.player.as_mut() {
+    impl Tone for Player {
+        fn keep_playing(&mut self) {
+            let playing = self
+                .player
+                .as_mut()
+                .is_some_and(|player| matches!(player.try_wait(), Ok(None)));
+            if !playing {
+                self.player = Command::new("/usr/bin/afplay")
+                    .arg(&self.tone)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .ok();
+            }
+        }
+
+        fn stop(&mut self) {
+            if let Some(mut player) = self.player.take() {
                 let _ = player.kill();
                 let _ = player.wait();
             }
+        }
+    }
+    impl Drop for Player {
+        fn drop(&mut self) {
+            self.stop();
             let _ = std::fs::remove_file(&self.tone);
         }
     }
@@ -121,39 +174,21 @@ pub fn probe_system_audio(timeout: Duration, cancel: &Cancel) -> ProbeAnswer {
         tracing::warn!(%error, "the system audio probe could not write its tone");
         return ProbeAnswer::Silent;
     }
-    let mut cleanup = Cleanup { tone, player: None };
+    let mut player = Player { tone, player: None };
     let sink = Arc::new(LaneFrameSink::new(&[AudioLane::System]));
     let backend = LiveCaptureBackend::new();
     if let Err(error) = backend.start(&[AudioLane::System], None, sink.clone()) {
         tracing::warn!(%error, "the system audio probe could not start the tap");
         return ProbeAnswer::Silent;
     }
-    let clock = crate::clock::SystemClock::new();
-    let heard = wait_for_signal(
+    listen(
         timeout,
-        POLL_INTERVAL,
-        &clock,
+        &crate::clock::SystemClock::new(),
         cancel,
         || sink.ring(0).drain_all(),
-        || {
-            let playing = cleanup
-                .player
-                .as_mut()
-                .is_some_and(|player| matches!(player.try_wait(), Ok(None)));
-            if !playing {
-                cleanup.player = Command::new("/usr/bin/afplay")
-                    .arg(&cleanup.tone)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .ok();
-            }
-        },
-    );
-    backend.stop();
-    drop(cleanup);
-    heard
+        &mut player,
+        || backend.stop(),
+    )
 }
 
 /// One second of a 1 kHz tone at half scale, as a 48 kHz mono 16-bit WAV
@@ -281,6 +316,61 @@ mod tests {
             || plays += 1,
         );
         assert_eq!((answer, plays), (ProbeAnswer::Stopped, 0));
+    }
+
+    /// The probe's end, however it ends: the tone stops first, then the
+    /// tap, so a tap stop stuck in the system never leaves the tone
+    /// playing.
+    #[test]
+    fn the_tone_stops_before_the_tap() {
+        use std::cell::RefCell;
+
+        struct FakeTone<'a>(&'a RefCell<Vec<&'static str>>);
+        impl Tone for FakeTone<'_> {
+            fn keep_playing(&mut self) {
+                self.0.borrow_mut().push("tone played");
+            }
+            fn stop(&mut self) {
+                self.0.borrow_mut().push("tone stopped");
+            }
+        }
+
+        for (heard_at, cancel_at, answer) in [
+            (Some(2), None, ProbeAnswer::Heard),
+            (None, None, ProbeAnswer::Silent),
+            (None, Some(2), ProbeAnswer::Stopped),
+        ] {
+            let events = RefCell::new(Vec::new());
+            let clock = SteppingClock::default();
+            let cancel = Cancel::new();
+            let mut polls = 0;
+            let found = listen(
+                Duration::from_millis(500),
+                &clock,
+                &cancel,
+                || {
+                    polls += 1;
+                    if cancel_at == Some(polls) {
+                        cancel.cancel();
+                    }
+                    if heard_at == Some(polls) {
+                        vec![0.5]
+                    } else {
+                        vec![0.0]
+                    }
+                },
+                &mut FakeTone(&events),
+                || events.borrow_mut().push("tap stopped"),
+            );
+            assert_eq!(found, answer);
+            let events = events.into_inner();
+            assert_eq!(
+                events[events.len() - 2..],
+                ["tone stopped", "tap stopped"],
+                "{answer:?}"
+            );
+            assert_eq!(events[0], "tone played", "{answer:?}");
+        }
     }
 
     /// The tone is one second of 1 kHz at half scale, 48 kHz mono 16-bit.
