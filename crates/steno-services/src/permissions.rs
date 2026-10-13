@@ -159,25 +159,11 @@ fn system_probe() -> SystemAudioProbe {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use steno_host::fakes::FakePermissions;
+    use steno_host::fakes::{FakePermissions, FakePreferences};
 
     use super::*;
-
-    #[derive(Default)]
-    struct Flags(Mutex<BTreeMap<String, bool>>);
-
-    impl Preferences for Flags {
-        fn stored_flag(&self, key: &str) -> Option<bool> {
-            self.0.lock().unwrap().get(key).copied()
-        }
-        fn set_flag(&self, key: &str, value: bool) {
-            self.0.lock().unwrap().insert(key.to_owned(), value);
-        }
-    }
 
     struct Probe {
         hears: AtomicBool,
@@ -190,11 +176,11 @@ mod tests {
     ) -> (
         SystemPermissions,
         Arc<FakePermissions>,
-        Arc<Flags>,
+        Arc<FakePreferences>,
         Arc<Probe>,
     ) {
         let system = Arc::new(FakePermissions::all(PermissionState::Unknown));
-        let flags = Arc::new(Flags::default());
+        let flags = Arc::new(FakePreferences::default());
         let probe = Arc::new(Probe {
             hears: AtomicBool::new(hears),
             runs: AtomicUsize::new(0),
