@@ -4727,8 +4727,12 @@ fn wait_for_probes(backend: &ChosenOrDefault, count: usize) {
 /// that can ask one on a stream of its own: the session records the
 /// default in its place and asks after `CHOSEN_INPUT_RECHECK`, then twice
 /// as long after each ask. Asks that find it still not delivering cost the
-/// recording nothing (no restart, no gap, every frame, the master as long
-/// as wall time); nothing else is asked of the backend.
+/// recording nothing (no restart, no gap, no drop, every whole frame
+/// delivered in the master, the duration exactly those frames); nothing
+/// else is asked of the backend. No wall-clock bound: the backend paces
+/// itself on its own thread, which the asks cannot hold, and each step
+/// waits until it delivered, so a wall bound would measure only this
+/// host's scheduling and the stop's latency.
 #[test]
 fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing() {
     let directory = tempfile::tempdir().unwrap();
@@ -4739,7 +4743,6 @@ fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing(
     let session = backend.session(directory.path(), clock.clone());
     let notices = session.notices();
     let delivered = || backend.inner.frames_delivered();
-    let started = Instant::now();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
         session.stream().and_then(|stream| stream.input),
@@ -4764,7 +4767,6 @@ fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing(
         past_the_ask = step;
         wait *= 2;
     }
-    let wall = started.elapsed().as_secs_f64();
     let result = session.stop().unwrap();
     assert_eq!(
         backend.asked(),
@@ -4777,15 +4779,17 @@ fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing(
     assert_eq!(statistics.gap_seconds, 0.0);
     assert!(statistics.dropped_frames.is_empty());
     let delivered = backend.inner.frames_delivered();
+    let whole = delivered - delivered % FRAME_SIZE;
+    let master = master_of(&result);
     assert_eq!(
-        master_of(&result).frame_count(),
-        delivered - delivered % FRAME_SIZE,
+        (master.frame_count(), master.sample_rate),
+        (whole, SAMPLE_RATE),
         "every whole frame delivered, nothing else"
     );
-    assert!(
-        (statistics.duration - wall).abs() < 0.1,
-        "the master: {} s against {wall} s of wall time",
-        statistics.duration
+    assert_eq!(
+        statistics.duration,
+        whole as f64 / SAMPLE_RATE,
+        "the master as long as what was delivered"
     );
 }
 
