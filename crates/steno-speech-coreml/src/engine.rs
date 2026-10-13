@@ -48,7 +48,9 @@ pub const WORKERS: usize = 4;
 ///   each gap those leave is decoded in windows of at most 15 s that stay
 ///   inside it; their words go in between the chunks' and never replace
 ///   one ([`steno_speech::pipeline`]). Quiet speech the detector takes for
-///   silence there is kept.
+///   silence there is kept. A word sounding across a gap's edge, heard by
+///   the chunk and the window at starts more than two frames apart, comes
+///   out twice: the merge cannot tell it from the word said again.
 ///
 /// The limit: a gap shorter than 2.5 s
 /// ([`MIN_GAP_SECONDS`](steno_speech::chunker::MIN_GAP_SECONDS)) is not
