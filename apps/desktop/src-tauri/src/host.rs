@@ -620,6 +620,13 @@ impl Host {
             app: app.clone(),
         }));
         options.installed_bundle = crate::autostart::installed_bundle();
+        // The system's permissions (the services add the Mac's system
+        // audio probe) and, on the Mac, the calendar that names a
+        // recording (stable plan S3).
+        options.permissions = Some(Arc::new(crate::permissions::ShellPermissions {
+            app: app.clone(),
+        }));
+        options.calendar = Some(steno_services::calendar::system_calendar());
         // A smoke run checks for no update, so it neither reaches the
         // network nor raises the update alert over the windows it shows,
         // and detects no meeting, so no prompt comes up over them either.

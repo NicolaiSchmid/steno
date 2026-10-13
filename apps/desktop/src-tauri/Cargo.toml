@@ -74,6 +74,8 @@ block2.workspace = true
 rustix.workspace = true
 # The login item (`autostart`).
 smappservice-rs.workspace = true
+# The calendar permission's status and prompt (`permissions`).
+steno-macos = { path = "../../../crates/steno-macos" }
 
 [dev-dependencies]
 # The temporary Nix layout and autostart entries of `packaged`'s tests, and
