@@ -1106,24 +1106,13 @@ still has to draw the window side. `[ ]` is not ported yet.
   unfinished Pair again's note, in each of its four cases, and a record
   that does not parse, which waits until Pair again sets it aside.
   - With nothing recorded (a lost record, or an upgrade from a build without it), the
-    identity found is recorded only where the `pairedAt` rule adopts it
-    (`HandoverIdentity::known_by_every_phone`, whose doc tables the cases): each paired phone
-    knows the newest identity whose `notValidBefore` is at or before its `pairedAt`,
-    as a phone paired before a certificate starts cannot know it; with no phone
-    paired the newest is recorded. Both times come from the computer's clock, and a
-    minted certificate starts a minute before its mint. No phone knowing it waits as
-    replaced; some phones knowing it and the others another identity or none waits as
-    `partlyReplaced`, with "Phone handover is unavailable: some of your phones were
-    paired before this Mac's pairing changed and can't connect. To reconnect them,
-    choose Pair again in Settings > iPhone." ("this computer's" off the Mac; the first
-    sentence is the Swift app's, the second names this app's button), and Settings >
-    iPhone's card says the same and offers Pair again first. Two certificates that
-    start in the same second are no newest one, so the order never decides. A
-    `pairedAt` or `notValidBefore` more than a second after now (the clock went back)
-    waits as `clockBehind`, whose card says to check the date and time, then Try
-    again. A start or a pairing time that cannot be read waits too. Nothing is
-    recorded or minted in any of these, and a recorded fingerprint is never judged by
-    the rule.
+    identity found is recorded only where the `pairedAt` rule adopts it: each paired
+    phone knows the newest identity whose `notValidBefore` is at or before its
+    `pairedAt`, and with no phone paired the newest is recorded. Nothing is recorded
+    or minted otherwise, and a recorded fingerprint is never judged by the rule. The
+    cases and their waiting reasons are tabled on
+    `HandoverIdentity::known_by_every_phone`; the words are S6's in
+    `.plans/2026-10-07-stable-promotion.md`.
   - The Swift import chooses its certificate by the same rule
     (`swift_import::choose_certificate`, whose doc tables the cases). Of several under
     the Swift label (one per keychain in the search list, after an old login keychain

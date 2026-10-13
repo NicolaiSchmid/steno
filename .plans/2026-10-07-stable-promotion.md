@@ -775,10 +775,10 @@ Every package is written in parallel except where a dependency is named:
       Then it reads the API key through `keyring` (one prompt; the item stays as
       it is, shared with the Swift app, which still reads it after a rollback),
       and exports the handover identity: the certificate by label (of
-      several, one per keychain in the search list as after an old login
-      keychain was added back, the one the Swift app's own record names,
-      `swift-handover-identity.json`, read only; else the one the paired
-      phones know, below), `SecIdentityCreateWithCertificate` through
+      several, which there are one per keychain in the search list, as
+      after an old login keychain was added back: the one the Swift app's
+      own record names, `swift-handover-identity.json`, read only, else the
+      one the paired phones know, below), `SecIdentityCreateWithCertificate` through
       `security-framework`,
       `SecItemExport` as PKCS#12 through `steno-macos` (one prompt), decoded by a
       PKCS#12 crate (for example `p12-keystore`, which reads Apple's legacy
@@ -834,34 +834,38 @@ Every package is written in parallel except where a dependency is named:
       locked keychain), `handover_listener` waits with Try again and never mints
       over it; it mints only where #221's guard allows (no identity, no recorded
       fingerprint and no paired phone), or when the user chooses Pair again.
-      An identity found with nothing recorded (by the import, or by a read
-      after a lost record) is recorded only when every paired phone knows
-      it: each phone knows the newest identity whose certificate starts
-      (`notValidBefore`, a minute before its mint) at or before its
-      `pairedAt`, both from this computer's clock, and with no phone paired
-      the newest is recorded (`HandoverIdentity::known_by_every_phone`, whose doc
-      tables the cases; `swift_import::choose_certificate`). A recorded
-      fingerprint is never judged by this rule. A Swift identity minted
-      silently after a keychain reset, which every phone predates, waits as
-      replaced; where some phones know it and the others another identity
-      or none, the handover waits with "Phone handover is unavailable: some
-      of your phones were paired before this Mac's pairing changed and can't
-      connect. To reconnect them, choose Pair again in Settings > iPhone.",
-      and Settings > iPhone offers Pair again first. The first sentence is
-      the Swift app's word for word; the second names the Rust app's button,
-      because the Swift app asks at launch instead. Two certificates that
-      start in the same second are no newest one and wait the same way. A
-      `pairedAt` or a start more than a second after now (the clock went
-      back) waits as `clockBehind`: Settings says to check the date and
-      time, then Try again, and Pair again is not offered first. A start or a
-      pairing time that cannot be read waits too. Of several Swift
-      certificates, the one the Swift app's record names comes over without
-      the rule; a record naming a certificate the keychain no longer holds
-      waits as replaced, with one certificate or several; otherwise the
-      rule decides, and the import never takes the first. The guards never
-      read each other's file. The Rust import reads the Swift record
-      read-only, only to choose the Swift certificate it brings over, and
-      never writes, moves or deletes it (`fix/swift-certificate-choice`).
+      - An identity found with nothing recorded (by the import, or by a
+        read after a lost record) is recorded only when every paired phone
+        knows it: each phone knows the newest identity whose certificate
+        starts (`notValidBefore`, a minute before its mint) at or before its
+        `pairedAt`, both from this computer's clock, and with no phone
+        paired the newest is recorded. A recorded fingerprint is never
+        judged by this rule. A Swift identity minted silently after a
+        keychain reset, which every phone predates, waits as replaced. The
+        other cases (some phones knowing another identity, a time more than
+        a second after now, two starts in one second, a time that cannot be
+        read) and their waiting reasons are tabled on
+        `HandoverIdentity::known_by_every_phone`.
+      - The words. Where some phones know the identity and the others
+        another or none, the handover waits with "Phone handover is
+        unavailable: Some of your phones were paired before this Mac's
+        pairing changed and can't connect. To reconnect them, choose Pair
+        again in Settings > iPhone." The card in Settings > iPhone ends at
+        "choose Pair again." and offers Pair again first. The first sentence
+        is the Swift app's word for word; the second names the Rust app's
+        button, because the Swift app asks at launch instead. Where the
+        clock went back (`clockBehind`), Settings says to check the date
+        and time, then Try again; Try again leads, and Pair again stays the
+        second button.
+      - The import's choice (`swift_import::choose_certificate`). Of several
+        Swift certificates, the one the Swift app's record names comes over
+        without the rule; a record naming a certificate the keychain no
+        longer holds waits as replaced, with one certificate or several;
+        otherwise the rule decides, and the import never takes the first.
+        The guards never read each other's file. The Rust import reads the
+        Swift record read-only, only to choose the Swift certificate it
+        brings over, and never writes, moves or deletes it
+        (`fix/swift-certificate-choice`).
   - **Login item** (D4). On macOS, `autostart.rs` uses `SMAppService.mainApp`.
     At the first launch after the handoff the new app registers its own
     identifier explicitly when the stored `launch_at_login` setting (shared
