@@ -30,10 +30,19 @@ pub use synthetic::{SyntheticCaptureBackend, SyntheticEcho, SyntheticLane};
 /// returns. That work takes milliseconds, but it runs on real threads at
 /// the host's pace, and a loaded runner has stalled a test binary for
 /// longer than ten seconds, so this bound only turns a hang into a
-/// failure and no verdict rests on it. A claim that nothing arrives (no
-/// notice, no restart) waits a short window instead and fails only by an
-/// extra event, so that window stays short; a claim about when something
-/// happens steps a [`ManualClock`] or counts, and reads no wall time.
+/// failure and no verdict rests on it. A claim about when something
+/// happens steps a [`ManualClock`] or counts. Three kinds of claim still
+/// read wall time:
+///
+/// - That nothing arrives (no notice, no restart, no second timer): a
+///   short window, which fails only by an extra event, so it stays short.
+/// - The capture session tests' `stop_at_the_gate`, which holds the gate
+///   for 200 ms so that a `stop()` that does not wait is caught returning;
+///   it is a detection window of the same kind.
+/// - One measurement outside a measurement test: a capture session test
+///   checks that the master is within 0.1 s of the wall time the test
+///   ran, which a stall of the test thread before its `stop()` can break.
+///
 /// `steno_services::testing::HANG_GUARD` takes this value. Rust only.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
 

@@ -56,18 +56,30 @@ impl ManualClock {
         self.lock().sleepers.len()
     }
 
-    /// Polls until exactly `count` sleeps are in progress, for up to
-    /// [`HANG_GUARD`] of wall time (a loaded CI host can take seconds to
-    /// schedule the thread that arms a timer); `true` when they are.
+    /// Polls until exactly `count` sleeps are in progress and returns
+    /// `true`, so a caller can `assert!` it with a message that names the
+    /// sleeper. A loaded CI host can take seconds to schedule the thread
+    /// that arms a timer, so the poll lasts up to [`HANG_GUARD`] of wall
+    /// time.
+    ///
+    /// # Panics
+    ///
+    /// When the count is still not `count` after [`HANG_GUARD`]: the code
+    /// under test hung, and the message says how many sleepers it found.
+    #[track_caller]
     pub fn wait_for_sleepers(&self, count: usize) -> bool {
         let deadline = Instant::now() + HANG_GUARD;
-        while Instant::now() < deadline {
-            if self.pending_sleepers() == count {
+        loop {
+            let found = self.pending_sleepers();
+            if found == count {
                 return true;
             }
+            assert!(
+                Instant::now() < deadline,
+                "hung: {count} sleepers expected on the clock, found {found} after {HANG_GUARD:?}"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
-        self.pending_sleepers() == count
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
