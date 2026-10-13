@@ -466,6 +466,31 @@ impl LocalRecordingIntake {
         Ok(meeting)
     }
 
+    /// Names the recording `meeting_id`, begun without an event, after the
+    /// calendar event `calendar_event_id` that came in since, as
+    /// [`Self::begin`] would have: a title that is not blank with the
+    /// origin `calendar`, and the attendees as `them` participants.
+    /// Only while the row still records under its default title
+    /// ([`Store::name_recording_after_event`]); returns whether it wrote.
+    /// Rust only: the recorder never waits for the calendar.
+    pub fn name_after_event(
+        &self,
+        meeting_id: Uuid,
+        title: &str,
+        calendar_event_id: &str,
+        attendees: &[Attendee],
+    ) -> Result<bool, LocalRecordingIntakeError> {
+        let trimmed = title.trim();
+        let participants = participants_from(attendees, meeting_id);
+        Ok(self.store.name_recording_after_event(
+            meeting_id,
+            (!trimmed.is_empty()).then_some(trimmed),
+            calendar_event_id,
+            &participants,
+            (self.now)(),
+        )?)
+    }
+
     /// How many times [`Self::complete`] tries its commit while another
     /// connection holds the database: each try already waits out the
     /// store's five-second busy timeout.

@@ -244,6 +244,49 @@ impl Store {
         })
     }
 
+    /// Names a recording after its calendar event once the event is known,
+    /// which may be after the recording started: in one transaction, and
+    /// only while the stored row is still `recording`, still has its
+    /// default title and names no event, the row takes
+    /// `calendar_event_id`, and `title` with the origin `calendar` when
+    /// there is one, and `participants` are saved for it. Returns whether
+    /// it wrote; a row that moved on, was renamed or already names an
+    /// event is left alone, and one that is gone is
+    /// [`StoreError::MeetingNotFound`]. Rust only: Swift named the row when
+    /// it wrote it (`LocalRecordingIntake.begin`), after waiting for the
+    /// calendar.
+    pub fn name_recording_after_event(
+        &self,
+        id: Uuid,
+        title: Option<&str>,
+        calendar_event_id: &str,
+        participants: &[Participant],
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.write(|transaction| {
+            let mut stored = current(transaction, id)?;
+            if stored.state != MeetingState::Recording
+                || stored.title_origin != TitleOrigin::Default
+                || stored.calendar_event_id.is_some()
+            {
+                return Ok(false);
+            }
+            stored.calendar_event_id = Some(calendar_event_id.to_owned());
+            if let Some(title) = title {
+                title.clone_into(&mut stored.title);
+                stored.title_origin = TitleOrigin::Calendar;
+            }
+            stored.updated_at = now;
+            save(transaction, &stored)?;
+            for participant in participants {
+                let mut participant = participant.clone();
+                participant.meeting_id = id;
+                people::save_participant(transaction, &participant)?;
+            }
+            Ok(true)
+        })
+    }
+
     /// The meeting with `id`.
     pub fn meeting(&self, id: Uuid) -> Result<Option<Meeting>> {
         self.read(|connection| fetch(connection, id))
