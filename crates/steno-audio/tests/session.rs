@@ -4046,8 +4046,10 @@ fn restarts_that_never_offer_a_frame_back_off_up_to_the_longest_wait() {
 }
 
 /// A stop while a restart waits for its first frame, or while the rebuild
-/// waits out the backoff, cancels the wait and returns the recording at
-/// once, well within one start's deadline, leaving nothing asleep.
+/// waits out the backoff, cancels the wait and returns the recording
+/// without a further start, leaving nothing asleep. The clock stands still
+/// meanwhile, so a wait the stop did not cancel would keep it from
+/// returning; the starts are counted rather than the stop timed.
 #[test]
 fn a_stop_during_the_wait_for_a_first_frame_or_the_backoff_returns_at_once() {
     for in_the_backoff in [false, true] {
@@ -4079,18 +4081,16 @@ fn a_stop_during_the_wait_for_a_first_frame_or_the_backoff_returns_at_once() {
             assert!(clock.wait_for_sleepers(2), "the backoff");
         }
         let stopping = Arc::clone(&session);
-        let began = Instant::now();
         let result = within_deadline("the stop", move || stopping.stop()).unwrap();
-        assert!(
-            began.elapsed() < Duration::from_secs(3),
-            "within one start's deadline: {:?}",
-            began.elapsed()
+        assert_eq!(
+            backend.starts(),
+            2,
+            "no further start, in the backoff: {in_the_backoff}"
         );
         assert!(clock.wait_for_sleepers(0), "nothing left asleep");
         assert_eq!(session.state(), CaptureState::Idle);
         assert_eq!(result.statistics.duration, 0.5);
         assert!(!result.statistics.ended_on_device_loss);
-        assert_eq!(backend.starts(), 2, "in the backoff: {in_the_backoff}");
     }
 }
 
