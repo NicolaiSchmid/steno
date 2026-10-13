@@ -1203,7 +1203,7 @@ mod tests {
             "dropping a note replaces nothing"
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"{");
-        assert!(set_aside().is_empty());
+        assert_eq!(set_aside(), Vec::<Vec<u8>>::new());
 
         file.note_next(Some("ef56")).unwrap();
         assert_eq!(
@@ -1957,7 +1957,11 @@ mod tests {
                 bad,
                 "{case}: kept by the reads"
             );
-            assert!(set_aside().is_empty(), "{case}: no read sets it aside");
+            assert_eq!(
+                set_aside(),
+                Vec::<PathBuf>::new(),
+                "{case}: no read sets it aside"
+            );
 
             tokio::task::block_in_place(|| handover.pair_again()).unwrap();
             assert_eq!(handover.waiting(), None, "{case}: Pair again ends the wait");
