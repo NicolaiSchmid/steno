@@ -33,8 +33,8 @@ pub use synthetic::{SyntheticCaptureBackend, SyntheticEcho, SyntheticLane};
 /// failure and no verdict rests on it. A claim that nothing arrives (no
 /// notice, no restart) waits a short window instead and fails only by an
 /// extra event, so that window stays short; a claim about when something
-/// happens steps a [`ManualClock`] or counts, and reads no wall time. The
-/// same bound as `steno_services::testing::HANG_GUARD`. Rust only.
+/// happens steps a [`ManualClock`] or counts, and reads no wall time.
+/// `steno_services::testing::HANG_GUARD` takes this value. Rust only.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// Whether a backend's `start` or `stop` on this thread logs its own lines
