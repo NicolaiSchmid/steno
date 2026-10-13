@@ -230,6 +230,8 @@ bridge_host! {
     SettingsPhoneBeginPairing => fn settings_phone_begin_pairing() -> ();
     SettingsPhoneCancelPairing => fn settings_phone_cancel_pairing() -> ();
     SettingsPhoneRevoke => fn settings_phone_revoke(params: DeviceIdParams) -> ();
+    SettingsPhoneTryAgain => fn settings_phone_try_again() -> ();
+    SettingsPhonePairAgain => fn settings_phone_pair_again() -> ConfirmReply;
 
     OnboardingRequest => fn onboarding_request(params: PermissionKindParams) -> ();
     OnboardingSkip => fn onboarding_skip(params: PermissionKindParams) -> ();

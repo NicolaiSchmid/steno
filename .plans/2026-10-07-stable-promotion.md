@@ -729,13 +729,30 @@ Every package is written in parallel except where a dependency is named:
       iPhone section says that Steno could not bring over this Mac's phone
       pairing, with Try again, which repeats the export and its prompt. Only
       when the user chooses Pair again there, which says that every phone must
-      pair again, is a new identity minted: Pair again removes the paired phones
-      and the recorded fingerprint, then mints through `HandoverIdentity::store`.
-      That waiting state in Settings, with both bridge methods, its fixtures
-      and a test that a refused read mints nothing, is the follow-up
-      `feat/handover-waiting`; until it lands, Try again is on the onboarding
-      step. Then the pipeline starts, and the listener once the identity is in
-      place: the meetings the Swift app left queued or interrupted are resumed
+      pair again, is a new identity minted: Pair again writes the import's
+      `swift-import-done` marker first, then notes the new identity's
+      fingerprint, writes the identity to the secret store, removes the paired
+      phones and records the fingerprint, which drops the note
+      (`HandoverIdentity::mint_anew`). A stop leaves the note, and the next
+      read decides by what the secret store holds: the noted identity, even one
+      whose write the store reported as refused, finishes the Pair again
+      without a new mint, whether or not a fingerprint was
+      recorded before; the recorded identity, or none, abandons it, which is
+      where a refused write ends (where nothing was recorded and an identity
+      is stored, a refused write waits as replaced instead); any other
+      identity waits as replaced. Behind the import's waiting gate, Try again
+      in the same launch brings the Swift pairing back instead. A `handover-identity.json` that does not parse is
+      never replaced without a kept copy: Pair again and the Swift import's
+      store first keep it as `handover-identity.json.corrupt-<time>`; a launch
+      or Try again waits as unreadable. One that cannot be opened is never
+      moved, and Settings says to check the permissions of the folder Steno
+      keeps its data in, then choose Try again.
+      That waiting state in Settings, with both bridge methods
+      (`settings.iphone.tryAgain`, `settings.iphone.pairAgain`), its fixture
+      and a test that a refused read mints nothing, came with
+      `feat/handover-waiting` (#281); until then Try again was on the
+      onboarding step alone. Then the pipeline starts, and the listener once
+      the identity is in place: the meetings the Swift app left queued or interrupted are resumed
       and recovered only once the step ran or was skipped, on the pipeline
       reloaded with what it read. Not now leaves both unread for that launch
       (handover waits), writes no flag, and the step returns at the next
@@ -1567,7 +1584,7 @@ an install needs a newer build installed by hand (Rollback).
       login keychain password once per stored secret (choose Always Allow);
     - an old "Steno" entry in Login Items may need removing (S6);
     - phones stay paired; if macOS's export prompt is denied, Steno keeps the
-      phones waiting and offers Try again in Settings > Phones, and phones pair
+      phones waiting and offers Try again in Settings > iPhone, and phones pair
       again only where D5 says so or the user chooses Pair again;
     - the optional mixdown is now WAV;
     - Whisper, Ultra and DE now transcribe with Parakeet v3;

@@ -15,6 +15,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -1314,4 +1315,53 @@ pub async fn engine_hello(test: &TestService) -> HandoverResponse {
         .engine
         .handle(HandoverRequest::new(Route::Hello, Principal::Anonymous))
         .await
+}
+
+/// A fingerprint record in memory, as the app's `handover-identity.json`:
+/// the recorded fingerprint and the next one of an unfinished Pair again.
+/// It refuses records while `refuse` is set and notes while `refuse_note`
+/// is.
+#[derive(Default)]
+pub struct MemoryRecord {
+    pub recorded: Mutex<Option<String>>,
+    pub next: Mutex<Option<String>>,
+    pub refuse: AtomicBool,
+    pub refuse_note: AtomicBool,
+}
+
+impl MemoryRecord {
+    pub fn get_recorded(&self) -> Option<String> {
+        self.recorded.lock().unwrap().clone()
+    }
+
+    pub fn get_next(&self) -> Option<String> {
+        self.next.lock().unwrap().clone()
+    }
+}
+
+impl steno_handover::FingerprintRecord for MemoryRecord {
+    fn recorded(&self) -> BoundaryResult<Option<String>> {
+        Ok(self.get_recorded())
+    }
+
+    fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err("No space left on device".into());
+        }
+        *self.recorded.lock().unwrap() = Some(fingerprint.to_owned());
+        *self.next.lock().unwrap() = None;
+        Ok(())
+    }
+
+    fn next(&self) -> BoundaryResult<Option<String>> {
+        Ok(self.get_next())
+    }
+
+    fn note_next(&self, fingerprint: Option<&str>) -> BoundaryResult<()> {
+        if self.refuse_note.load(Ordering::SeqCst) {
+            return Err("No space left on device".into());
+        }
+        *self.next.lock().unwrap() = fingerprint.map(str::to_owned);
+        Ok(())
+    }
 }

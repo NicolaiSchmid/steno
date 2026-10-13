@@ -20,7 +20,7 @@ describe("ImportPage", () => {
 			"Choose Always Allow in each prompt.",
 		);
 		expect(screen.getByTestId("import-always-allow")).toHaveTextContent(
-			"Not now leaves phone uploads waiting until this step comes back at the next launch. If your summaries use an API key, new meetings get no summary until then, or until you enter the key in Settings.",
+			"Not now leaves phone uploads waiting until you choose Try again in Settings > iPhone, or this step comes back at the next launch. If your summaries use an API key, new meetings get no summary until then, or until you enter the key in Settings.",
 		);
 		expect(screen.queryByTestId("import-waiting")).not.toBeInTheDocument();
 		await user.click(screen.getByTestId("import-run"));
@@ -81,7 +81,7 @@ describe("ImportPage", () => {
 			"Continue for now",
 		);
 		expect(screen.getByTestId("import-always-allow")).toHaveTextContent(
-			"Continue for now leaves phone uploads waiting until this step comes back at the next launch.",
+			"Continue for now leaves phone uploads waiting until you choose Try again in Settings > iPhone, or this step comes back at the next launch.",
 		);
 		expect(screen.getByTestId("import-always-allow")).not.toHaveTextContent(
 			"summaries",

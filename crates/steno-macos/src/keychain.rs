@@ -6,7 +6,7 @@
 //! [`export_pkcs12`] is the product's one call: the Swift identity leaves
 //! the keychain once, as PKCS#12 under a passphrase, which macOS lets
 //! through only after the user typed the login password and allowed the
-//! export. The [`fixture`] calls (feature `testing`) store an identity
+//! export. The `fixture` calls (feature `testing`) store an identity
 //! the way `IdentityKeychain.store` does, so the keychain test exports
 //! what the Swift app would have stored.
 #![allow(unsafe_code)]

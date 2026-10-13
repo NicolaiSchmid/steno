@@ -1,0 +1,23 @@
+{
+  "devices" : [
+    {
+      "id" : "00000000-0000-0000-0000-000000000028",
+      "lastSeenAt" : "2026-09-29T12:48:00.000Z",
+      "name" : "Nicolai's iPhone",
+      "pairedAt" : "2026-09-24T12:50:00.000Z"
+    }
+  ],
+  "listener" : {
+    "state" : "stopped"
+  },
+  "macID" : "steno-mac-7f3a",
+  "receipts" : [
+
+  ],
+  "subtitle" : "Phones waiting",
+  "waiting" : {
+    "busy" : false,
+    "message" : "Steno could not bring over this Mac's phone pairing from the previous version. Choose Try again, then Always Allow when macOS asks.",
+    "reason" : "importDenied"
+  }
+}

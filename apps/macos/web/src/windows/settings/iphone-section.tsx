@@ -62,8 +62,70 @@ function PairingCard({
 }
 
 /**
+ * Phone handover waits: the host's sentence on what happened, Try again,
+ * and Pair again with what it costs. The host asks before Pair again goes
+ * ahead; both are off while one of them runs. When the pairing is gone,
+ * Pair again is the way on, so it is the primary action, as the host's
+ * sentence says.
+ */
+function WaitingCard({
+	waiting,
+}: {
+	waiting: NonNullable<PhoneSettingsSnapshot["waiting"]>;
+}) {
+	const client = useBridge();
+	const { words } = usePlatform();
+	const startOver = waiting.reason === "missing";
+	return (
+		<div className="flex flex-col gap-3" data-testid="phone-waiting">
+			<Callout
+				description={waiting.message}
+				icon={<CircleAlertIcon aria-hidden="true" />}
+				title="Your phones can't send recordings right now."
+				variant="warning"
+			/>
+			<FormCard title="Phone pairing">
+				<FormRow
+					control={
+						<Button
+							data-testid="try-again"
+							disabled={waiting.busy}
+							onClick={() => send(client, "settings.iphone.tryAgain")}
+							size="sm"
+							variant={startOver ? "outline" : "primary"}
+						>
+							Try again
+						</Button>
+					}
+					description={`Steno reads this ${words.computer}'s phone pairing again.`}
+					label="Keep your pairing"
+				/>
+				<FormRow
+					control={
+						<Button
+							data-testid="pair-again"
+							disabled={waiting.busy}
+							onClick={() => send(client, "settings.iphone.pairAgain")}
+							size="sm"
+							variant={startOver ? "primary" : "outline"}
+						>
+							Pair again…
+						</Button>
+					}
+					data-testid="pair-again-row"
+					description="Every phone must pair again. Steno removes them from the list, and each one scans a new code."
+					label="Start over"
+				/>
+			</FormCard>
+		</div>
+	);
+}
+
+/**
  * iPhone: the paired phones, the pairing code, transfers arriving, and the
- * listener's failure when it has one.
+ * listener's failure when it has one. While phone handover waits, Try again
+ * and Pair again take the place of a new pairing, and the paired phones are
+ * listed without Remove.
  */
 export function PhoneSection() {
 	const client = useBridge();
@@ -72,6 +134,7 @@ export function PhoneSection() {
 	if (!phone) {
 		return <SectionPage id="iphone" />;
 	}
+	const waiting = phone.waiting;
 	if (phone.listener.state === "unavailable") {
 		return (
 			<SectionPage
@@ -96,7 +159,10 @@ export function PhoneSection() {
 			errorDetails={phone.errorDetails}
 			id="iphone"
 		>
-			{phone.pairing ? <PairingCard pairing={phone.pairing} /> : null}
+			{waiting ? <WaitingCard waiting={waiting} /> : null}
+			{phone.pairing && !waiting ? (
+				<PairingCard pairing={phone.pairing} />
+			) : null}
 
 			<FormCard
 				footer={`The first pairing asks for local network access. Recordings travel over your Wi-Fi only, encrypted to this ${words.computer}.`}
@@ -112,19 +178,21 @@ export function PhoneSection() {
 				{phone.devices.map((device) => (
 					<FormRow
 						control={
-							<Button
-								aria-label={`Remove ${device.name}`}
-								data-testid={`revoke-${device.id}`}
-								onClick={() =>
-									send(client, "settings.iphone.revoke", {
-										deviceID: device.id,
-									})
-								}
-								size="sm"
-								variant="ghost"
-							>
-								Remove
-							</Button>
+							waiting ? undefined : (
+								<Button
+									aria-label={`Remove ${device.name}`}
+									data-testid={`revoke-${device.id}`}
+									onClick={() =>
+										send(client, "settings.iphone.revoke", {
+											deviceID: device.id,
+										})
+									}
+									size="sm"
+									variant="ghost"
+								>
+									Remove
+								</Button>
+							)
 						}
 						data-testid={`device-${device.id}`}
 						description={pairedText(device)}
@@ -133,20 +201,22 @@ export function PhoneSection() {
 						label={device.name}
 					/>
 				))}
-				<FormRow
-					control={
-						<Button
-							data-testid="begin-pairing"
-							disabled={phone.pairing !== undefined}
-							onClick={() => send(client, "settings.iphone.beginPairing")}
-							size="sm"
-							variant="primary"
-						>
-							Pair an iPhone…
-						</Button>
-					}
-					label="Add a phone"
-				/>
+				{waiting ? null : (
+					<FormRow
+						control={
+							<Button
+								data-testid="begin-pairing"
+								disabled={phone.pairing !== undefined}
+								onClick={() => send(client, "settings.iphone.beginPairing")}
+								size="sm"
+								variant="primary"
+							>
+								Pair an iPhone…
+							</Button>
+						}
+						label="Add a phone"
+					/>
+				)}
 			</FormCard>
 
 			{phone.receipts.length > 0 ? (
@@ -174,7 +244,7 @@ export function PhoneSection() {
 				</FormCard>
 			) : null}
 
-			{phone.listener.state === "failed" ? (
+			{phone.listener.state === "failed" && !waiting ? (
 				<div className="flex flex-col gap-1.5" data-testid="listener-failed">
 					<Callout
 						icon={<CircleAlertIcon aria-hidden="true" />}

@@ -699,6 +699,28 @@ fn settings_iphone_pairing() {
     );
 }
 
+/// `settings.iphone.waiting` has no Swift sample (the Swift app's handover
+/// never waits); it is written in the recorder's format, and this proves
+/// the host produces it: the paired phone while the previous version's
+/// pairing did not come over.
+#[test]
+fn settings_iphone_waiting() {
+    let harness = Harness::builder()
+        .with_handover("steno-mac-7f3a", 52_431)
+        .seed(|_, fakes| {
+            let handover = fakes.handover.as_ref().unwrap();
+            handover.pair(paired_phone());
+            *handover.waiting.lock().unwrap() =
+                Some(steno_bridge::PhoneWaitingReason::ImportDenied);
+        })
+        .build();
+    assert_parity(
+        "settings.iphone.waiting",
+        &harness.snapshot(BridgeTopic::SettingsPhone),
+        &[],
+    );
+}
+
 const RETENTION_SENTENCE: &str = "Each recording is deleted 30 days after it was processed and exported. Transcripts, summaries and exports are never deleted by this rule. Change this any time in Settings > Recording.";
 
 #[test]

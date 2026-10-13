@@ -4,12 +4,12 @@
 use steno_bridge::{
     ExportSettingsSnapshot, GeneralAcknowledgement, GeneralAcknowledgementGroup, GeneralLoginItem,
     GeneralSettingsSnapshot, GeneralTemplate, GeneralUpdates, GeneralUpdatesOutcome, PhoneDevice,
-    PhoneListener, PhoneListenerState, PhonePairing, PhoneReceipt, PhoneSettingsSnapshot, Platform,
-    RecordingDevice, RecordingFolderUsage, RecordingPermission, RecordingRetention,
-    RecordingSettingsSnapshot, SummariesCodex, SummariesCodexModel, SummariesCodexSignIn,
-    SummariesKeyStore, SummariesPreset, SummariesSettingsSnapshot, SummariesTestResult,
-    TranscriptionAsset, TranscriptionAssetState, TranscriptionEngine,
-    TranscriptionSettingsSnapshot,
+    PhoneListener, PhoneListenerState, PhonePairing, PhoneReceipt, PhoneSettingsSnapshot,
+    PhoneWaiting, PhoneWaitingReason, Platform, RecordingDevice, RecordingFolderUsage,
+    RecordingPermission, RecordingRetention, RecordingSettingsSnapshot, SummariesCodex,
+    SummariesCodexModel, SummariesCodexSignIn, SummariesKeyStore, SummariesPreset,
+    SummariesSettingsSnapshot, SummariesTestResult, TranscriptionAsset, TranscriptionAssetState,
+    TranscriptionEngine, TranscriptionSettingsSnapshot,
 };
 use steno_core::{HandoverReceipt, SecretPlace, SummaryTemplate};
 
@@ -382,11 +382,54 @@ pub fn export(obsidian: &ObsidianSettingsViewModel, subtitle: &str) -> ExportSet
     }
 }
 
+/// What the iPhone section says while phone handover waits for `reason`,
+/// in the words of `platform`. Rust only.
+#[must_use]
+pub fn waiting_message(reason: PhoneWaitingReason, platform: Platform) -> String {
+    let computer = platform.mac_or("Mac", "computer");
+    match reason {
+        // Only the Mac brings a pairing over from the Swift app.
+        PhoneWaitingReason::ImportDenied => "Steno could not bring over this Mac's phone \
+             pairing from the previous version. Choose Try again, then Always Allow when macOS \
+             asks."
+            .to_owned(),
+        PhoneWaitingReason::Unreadable => match platform {
+            Platform::Macos => {
+                "Steno could not read this Mac's phone pairing. Choose Try again, then Always \
+                 Allow when macOS asks."
+            }
+            Platform::Linux => {
+                "Steno could not read this computer's phone pairing. If your system asks you \
+                 to unlock your keyring, unlock it, then choose Try again."
+            }
+            Platform::Windows => {
+                "Steno could not read this computer's phone pairing. Choose Try again."
+            }
+        }
+        .to_owned(),
+        PhoneWaitingReason::Missing => format!(
+            "This {computer}'s phone pairing is no longer saved. Choose Pair again to start \
+             over."
+        ),
+        PhoneWaitingReason::Replaced => format!(
+            "Steno found a different phone pairing on this {computer} than the one your phones \
+             know. Choose Try again if you put the old one back, or Pair again to start over."
+        ),
+        // Pair again cannot open the file either.
+        PhoneWaitingReason::FileNotOpened => format!(
+            "Steno cannot open a file in the folder it keeps its data in, so it cannot check \
+             this {computer}'s phone pairing. Check that folder's permissions, then choose Try \
+             again."
+        ),
+    }
+}
+
 #[must_use]
 pub fn phone(
     phones: &PhonesSettingsViewModel,
     services: &Services,
     subtitle: &str,
+    platform: Platform,
 ) -> PhoneSettingsSnapshot {
     let listener = if PhonesSettingsViewModel::is_available(services) {
         match &phones.listener {
@@ -445,6 +488,11 @@ pub fn phone(
                 total_bytes: Some(receipt.byte_count),
             })
             .collect(),
+        waiting: phones.waiting.map(|reason| PhoneWaiting {
+            reason,
+            message: waiting_message(reason, platform),
+            busy: phones.busy,
+        }),
         error: phones.errors.error.clone(),
         error_details: phones.errors.details.clone(),
     }

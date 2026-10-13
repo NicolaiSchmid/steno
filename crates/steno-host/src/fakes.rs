@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Utc};
-use steno_bridge::{BridgeWindow, CaptureMode, PermissionKind, PermissionState, RecordingState};
+use steno_bridge::{
+    BridgeWindow, CaptureMode, PermissionKind, PermissionState, PhoneWaitingReason, RecordingState,
+};
 use steno_core::protocols::BoundaryResult;
 use steno_core::testing::InMemorySecretStore;
 use steno_core::{AudioRetention, HandoverReceipt, ObsidianSettings, PairedDevice, Settings};
@@ -795,6 +797,14 @@ pub struct FakeHandover {
     pub stops: Mutex<usize>,
     /// Set to make `start` fail with this text.
     pub start_failure: Mutex<Option<String>>,
+    /// Why the listener waits; `try_again` and `pair_again` clear it.
+    pub waiting: Mutex<Option<PhoneWaitingReason>>,
+    /// Set to make `try_again` fail with this text, still waiting.
+    pub try_again_failure: Mutex<Option<String>>,
+    /// Set to make `pair_again` fail with this text, still waiting.
+    pub pair_again_failure: Mutex<Option<String>>,
+    pub tries: Mutex<usize>,
+    pub pairings_again: Mutex<usize>,
     clock: Arc<dyn Clock>,
 }
 
@@ -821,6 +831,11 @@ impl FakeHandover {
             starts: Mutex::new(0),
             stops: Mutex::new(0),
             start_failure: Mutex::new(None),
+            waiting: Mutex::new(None),
+            try_again_failure: Mutex::new(None),
+            pair_again_failure: Mutex::new(None),
+            tries: Mutex::new(0),
+            pairings_again: Mutex::new(0),
             clock,
         }
     }
@@ -880,6 +895,29 @@ impl Handover for FakeHandover {
 
     fn receipts(&self) -> Vec<HandoverReceipt> {
         lock(&self.receipts).clone()
+    }
+
+    fn waiting(&self) -> Option<PhoneWaitingReason> {
+        *lock(&self.waiting)
+    }
+
+    fn try_again(&self) -> BoundaryResult<()> {
+        *lock(&self.tries) += 1;
+        if let Some(failure) = lock(&self.try_again_failure).clone() {
+            return Err(failure.into());
+        }
+        *lock(&self.waiting) = None;
+        Ok(())
+    }
+
+    fn pair_again(&self) -> BoundaryResult<()> {
+        *lock(&self.pairings_again) += 1;
+        if let Some(failure) = lock(&self.pair_again_failure).clone() {
+            return Err(failure.into());
+        }
+        lock(&self.devices).clear();
+        *lock(&self.waiting) = None;
+        Ok(())
     }
 }
 

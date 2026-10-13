@@ -1,10 +1,11 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
 //! frames for a recording writer, a live check that counts every master
-//! old, a paired phone, the waits that fail a test instead of hanging it
-//! ([`PATIENCE`] for the tests' own fakes and gates, [`HANG_GUARD`] for
-//! real capture work), and [`warnings`], what a call logs at `warn` and
-//! above.
+//! old, a paired phone, a recording it delivered, a store that keeps the
+//! last phone, a fingerprint record that refuses writes, the waits that
+//! fail a test instead of hanging it ([`PATIENCE`] for the tests' own
+//! fakes and gates, [`HANG_GUARD`] for real capture work), and
+//! [`warnings`], what a call logs at `warn` and above.
 //!
 //! A test that writes models gives the app an explicit models directory in
 //! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
@@ -309,19 +310,136 @@ pub fn an_hour_later() -> crate::recovery::LiveRecordingCheck {
     }
 }
 
-/// Saves a paired phone in `store`, the evidence that an identity existed.
+/// A fingerprint record over the app's file that refuses every record of
+/// a fingerprint while `refuse` is set, as a full disk does, so a Pair
+/// again stops at its last step; the next fingerprint's note is written.
+pub struct RefusingRecord {
+    pub file: Arc<crate::handover::FingerprintFile>,
+    pub refuse: std::sync::atomic::AtomicBool,
+}
+
+impl steno_handover::FingerprintRecord for RefusingRecord {
+    fn recorded(&self) -> steno_core::BoundaryResult<Option<String>> {
+        self.file.recorded()
+    }
+
+    fn record(&self, fingerprint: &str) -> steno_core::BoundaryResult<()> {
+        if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("No space left on device".into());
+        }
+        self.file.record(fingerprint)
+    }
+
+    fn next(&self) -> steno_core::BoundaryResult<Option<String>> {
+        self.file.next()
+    }
+
+    fn note_next(&self, fingerprint: Option<&str>) -> steno_core::BoundaryResult<()> {
+        self.file.note_next(fingerprint)
+    }
+}
+
+/// Saves a paired phone in `store`, the evidence that an identity existed;
+/// each call another phone, with a token of its own.
 pub fn pair_a_phone(store: &Store) {
+    let id = uuid::Uuid::new_v4();
+    let token = [id.as_bytes().as_slice(), id.as_bytes()].concat();
     store
         .save_paired_device(
             &steno_core::PairedDevice {
-                id: uuid::Uuid::new_v4(),
+                id,
                 name: "Phone".to_owned(),
                 paired_at: chrono::Utc::now(),
                 last_seen_at: None,
             },
-            &[1; 32],
+            &token,
         )
         .unwrap();
+}
+
+/// Keeps the last paired phone in `store` whatever deletes it, as a disk
+/// that refuses the write would, until [`let_the_last_phone_go`]: Pair
+/// again stops right after the write with one phone paired, and after the
+/// first phone with two.
+pub fn keep_the_last_phone(store: &Store) {
+    execute(
+        store,
+        "CREATE TRIGGER keep_the_last_phone BEFORE DELETE ON pairedDevice \
+         WHEN (SELECT COUNT(*) FROM pairedDevice) = 1 \
+         BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;",
+    );
+}
+
+/// Lets the phone [`keep_the_last_phone`] kept go again.
+pub fn let_the_last_phone_go(store: &Store) {
+    execute(store, "DROP TRIGGER keep_the_last_phone;");
+}
+
+fn execute(store: &Store, sql: &str) {
+    store
+        .write(|transaction| {
+            transaction.execute_batch(sql)?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// A recording [`admit_a_recording`] delivered into a meeting.
+pub struct Admitted {
+    pub recording: uuid::Uuid,
+    pub meeting: uuid::Uuid,
+}
+
+impl Admitted {
+    /// The recording still reads as delivered into its meeting, which is
+    /// still there.
+    pub fn is_unchanged(&self, store: &Store) -> bool {
+        store.admitted_meeting(self.recording, 4, &[7; 32]).unwrap() == Some(self.meeting)
+            && store.meeting(self.meeting).unwrap().is_some()
+    }
+}
+
+/// Admits a recording of the first paired phone in `store` as a meeting,
+/// with its `complete` receipt and its row in the admission ledger (4
+/// bytes, SHA-256 `[7; 32]`).
+pub fn admit_a_recording(store: &Store) -> Admitted {
+    let now = chrono::Utc::now();
+    let meeting = steno_core::Meeting {
+        id: uuid::Uuid::new_v4(),
+        ..steno_core::testing::sample_data::meeting()
+    };
+    let asset = steno_core::AudioAsset {
+        id: uuid::Uuid::new_v4(),
+        meeting_id: meeting.id,
+        url: format!("file:///tmp/Audio/{}/master.m4a", meeting.id),
+        format: steno_core::AudioFormat::M4aAac,
+        lanes: vec![steno_core::AudioLane::Mixed],
+        sidecars_16k: std::collections::BTreeMap::new(),
+        mixdown_url: None,
+        retention: steno_core::AudioRetention::KeepForever,
+        expires_at: None,
+    };
+    let recording = uuid::Uuid::new_v4();
+    let receipt = steno_core::HandoverReceipt {
+        recording_id: recording,
+        device_id: store.paired_devices().unwrap()[0].id,
+        state: steno_core::HandoverState::Complete {
+            meeting_id: meeting.id,
+        },
+        byte_count: 4,
+        sha256: vec![7; 32],
+        chunk_size: 4,
+        received_chunks: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    store
+        .save_admission_durably(&receipt, &meeting, &asset)
+        .unwrap();
+    Admitted {
+        recording,
+        meeting: meeting.id,
+    }
 }
 
 /// Waits until `done` holds, failing the test with `what` after

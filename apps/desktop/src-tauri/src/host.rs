@@ -634,6 +634,9 @@ impl Host {
                 Arc::new(app_name),
             ));
         }
+        // Pair again writes the Swift import's marker here first (macOS).
+        options.import_marker =
+            steno_services::swift_import::marker_on_this_mac(crate::smoke::SECONDS_VARIABLE);
         // The Swift import's launch half (macOS), under the database's
         // lock and before the graph reads a preference or a secret.
         let graph = runtime.block_on(async {

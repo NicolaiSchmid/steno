@@ -1071,14 +1071,19 @@ still has to draw the window side. `[ ]` is not ported yet.
 - Handover identity guard, every platform: the identity's SHA-256 fingerprint is
   recorded outside the secret store and the settings, in `handover-identity.json`
   under the support directory (`steno.handoverIdentityFingerprint`, written
-  atomically; `FingerprintFile`), and every write of the identity goes through
-  `HandoverIdentity::store`, which records it. `HandoverIdentity::load_or_create`
-  returns `IdentityError::Unavailable` and mints nothing when the secret store cannot
-  be read, when it holds no identity while a fingerprint is recorded or a phone is
-  paired, or when the identity's fingerprint is not the recorded one; the handover is
-  then off for the run (an identity read while the Linux keyring asked the user is read
-  again once it answered). It mints only with no phone paired, no fingerprint and no
-  identity. A rollback to the Swift app leaves the file alone; a lost record is
+  atomically; `FingerprintFile`; while a Pair again is unfinished also
+  `steno.handoverIdentityNextFingerprint`), and every write of the identity goes through
+  `HandoverIdentity::store` or Pair again's `HandoverIdentity::mint_anew`, both of
+  which record it. `HandoverIdentity::load_or_create` returns
+  `IdentityError::Unavailable` and mints nothing when the secret store cannot be read,
+  when it holds no identity while a fingerprint is recorded or a phone is paired, or
+  when the identity's fingerprint is not the recorded one; the handover then waits
+  with the reason (Settings > iPhone, Try again and Pair again; `Handover::waiting`;
+  an identity read while the Linux keyring asked the user is read again once it
+  answered). It mints only with no phone paired, no fingerprint and no identity. A
+  record that does not parse is replaced only by a write (Pair again's note, or the
+  record of the Swift import's store), after setting it aside
+  (`files::set_aside`, kept as `handover-identity.json.corrupt-<time>`). A rollback to the Swift app leaves the file alone; a lost record is
   rewritten from the identity found while the paired phones, which the Swift app keeps,
   hold the guard. Swift keeps its own identity in the Keychain and has no guard.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
@@ -3461,6 +3466,7 @@ PR off `main`.
 | S6, the identifier half: `com.nicolaischmid.steno.desktop` on every platform, the Swift `SUPublicEDKey` in `Info.plist` (checked in the built bundle), `panel-anchor.json` in the support directory and read once from the earlier identifier's config directory, and the macOS login item on `SMAppService.mainApp`, which removes the earlier build's Launch Agent at each launch and registers itself once, at the first launch with `launch_at_login` on (`steno.mainAppRegistered`; S6 of `.plans/2026-10-07-stable-promotion.md`; desktop shell) | `feat/desktop-identifier` | #268 | merged |
 | WP9b import of the Swift app's preferences, API key and handover identity on the Mac's first launch after the update, behind an onboarding step; `steno-macos` for the PKCS#12 export (S6 of `.plans/2026-10-07-stable-promotion.md`) | `feat/swift-import` | #236 | merged |
 | S7, release mechanics: `v*` tags release the Tauri app as "Steno <version>", the build number (the commit count, above the `appcast` branch's) in `CFBundleVersion`, `check-bundle.sh --signed --handoff`, the signed Sparkle handoff item on tag runs, a stable release as "latest" with `appcast.xml`, the cask and AUR bumps and the flake lines, the `handoff` job behind the `appcast` environment, the 0.11.0 release notes, `release.yml` removed (S7 of `.plans/2026-10-07-stable-promotion.md`; `desktop-release.yml`, `apps/desktop/scripts`) | `ci/desktop-stable-release` | #274 | open |
+| Phone handover waits instead of minting over the identity the paired phones know (a refused or locked read, a missing or replaced identity, the Swift import's export not through): Settings > iPhone says why, Try again reads it again (behind the import's gate, the export) without a restart, and Pair again, after the warning that every phone must pair again, writes the `swift-import-done` marker first and then mints (a Pair again that stopped is finished at the next launch); the gated handover's closed latch keeps a listener built after the shutdown from starting; P30's re-export through a summary re-run after the key is saved (S6 of `.plans/2026-10-07-stable-promotion.md`; `steno-handover`, `steno-services`, `steno-host`, `steno-bridge`, web) | `feat/handover-waiting` | #281 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

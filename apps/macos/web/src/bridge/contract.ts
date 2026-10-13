@@ -113,6 +113,8 @@ export const bridgeMethods = [
 	"settings.iphone.beginPairing",
 	"settings.iphone.cancelPairing",
 	"settings.iphone.revoke",
+	"settings.iphone.tryAgain",
+	"settings.iphone.pairAgain",
 	"onboarding.request",
 	"onboarding.skip",
 	"onboarding.refresh",
@@ -698,6 +700,21 @@ export const phoneSettingsSnapshot = z
 				})
 				.strict(),
 		),
+		// Rust only: phone handover waits for Try again or Pair again.
+		waiting: z
+			.object({
+				reason: z.enum([
+					"importDenied",
+					"unreadable",
+					"missing",
+					"replaced",
+					"fileNotOpened",
+				]),
+				message: z.string(),
+				busy: z.boolean(),
+			})
+			.strict()
+			.optional(),
 		...errorFields,
 	})
 	.strict();
@@ -921,6 +938,8 @@ export const methodParams = {
 	"settings.iphone.beginPairing": null,
 	"settings.iphone.cancelPairing": null,
 	"settings.iphone.revoke": deviceIDParams,
+	"settings.iphone.tryAgain": null,
+	"settings.iphone.pairAgain": null,
 	"onboarding.request": permissionKindParams,
 	"onboarding.skip": permissionKindParams,
 	"onboarding.refresh": null,
@@ -949,6 +968,7 @@ export const methodReplies = {
 	"meeting.deleteRecordingNow": confirmReply,
 	"meeting.setKeepAudio": confirmReply,
 	"settings.recording.chooseFolder": chosenPathReply,
+	"settings.iphone.pairAgain": confirmReply,
 	"settings.export.chooseVault": chosenPathReply,
 	"onboarding.chooseVault": chosenPathReply,
 	"ui.confirmDestructive": confirmReply,
@@ -1011,7 +1031,8 @@ export const fixtureSchemas = {
 	"reply.confirm": confirmReply,
 	"reply.chosenPath": chosenPathReply,
 	// Written by the Rust bridge alone (the Swift app has no import step,
-	// and never withholds the API key).
+	// never withholds the API key, and its phone handover never waits).
 	"onboarding.import": onboardingSnapshot,
 	"meeting.detail.keyWithheld": meetingDetailSnapshot,
+	"settings.iphone.waiting": phoneSettingsSnapshot,
 } as const satisfies Record<string, z.ZodTypeAny>;

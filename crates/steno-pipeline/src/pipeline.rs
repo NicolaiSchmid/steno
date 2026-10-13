@@ -1567,13 +1567,12 @@ impl ProcessingPipeline {
     /// puts back for models those it could not start. Those include any it
     /// started before a later meeting's write the store refused: such a
     /// meeting waits for models again while its run goes on, and
-    /// [`claim_start`](Self::claim_start) keeps the next resume from
-    /// running it twice. The services call it
-    /// on a timer while anything waits for the store; the next launch's
-    /// [`resume_unfinished`](Self::resume_unfinished) takes the meetings
-    /// too, as they are `queued`. Returns the meetings started, none once
-    /// the pipeline [quits](Self::quit). Needs a `tokio` runtime. Rust
-    /// only: Swift's pipeline failed the meeting.
+    /// `claim_start` keeps the next resume from running it twice. The
+    /// services call it on a timer while anything waits for the store; the
+    /// next launch's [`resume_unfinished`](Self::resume_unfinished) takes
+    /// the meetings too, as they are `queued`. Returns the meetings
+    /// started, none once the pipeline [quits](Self::quit). Needs a `tokio`
+    /// runtime. Rust only: Swift's pipeline failed the meeting.
     pub fn resume_waiting_for_store(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());

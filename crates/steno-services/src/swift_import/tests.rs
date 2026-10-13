@@ -103,6 +103,8 @@ struct FakeKeychain {
     marker: Mutex<Result<bool, String>>,
     /// The export's refusal; `None` exports the test identity.
     export_refusal: Mutex<Option<KeychainRefusal>>,
+    /// The marker write's failure; `None` writes it.
+    mark_refusal: Mutex<Option<String>>,
     /// The certificate each export was asked for.
     exported: Mutex<Vec<Vec<u8>>>,
     calls: Mutex<Vec<&'static str>>,
@@ -120,6 +122,7 @@ impl FakeKeychain {
             key: Ok(Some("sk-swift".to_owned())),
             marker: Mutex::new(Ok(false)),
             export_refusal: Mutex::new(None),
+            mark_refusal: Mutex::new(None),
             exported: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             on_call: Mutex::new(None),
@@ -177,6 +180,17 @@ fn user_canceled() -> KeychainRefusal {
     }
 }
 
+impl ImportMarker for FakeKeychain {
+    fn mark_import_done(&self) -> Result<(), String> {
+        self.record("mark done");
+        if let Some(refusal) = self.mark_refusal.lock().unwrap().clone() {
+            return Err(refusal);
+        }
+        *self.marker.lock().unwrap() = Ok(true);
+        Ok(())
+    }
+}
+
 impl SwiftKeychain for FakeKeychain {
     fn swift_certificate(&self) -> Result<Option<Vec<u8>>, String> {
         self.record("certificate");
@@ -199,12 +213,6 @@ impl SwiftKeychain for FakeKeychain {
     fn import_done(&self) -> Result<bool, String> {
         self.record("marker");
         self.marker.lock().unwrap().clone()
-    }
-
-    fn mark_import_done(&self) -> Result<(), String> {
-        self.record("mark done");
-        *self.marker.lock().unwrap() = Ok(true);
-        Ok(())
     }
 
     fn read_api_key(&self) -> Result<Option<String>, KeychainRefusal> {
@@ -607,6 +615,48 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
     );
 }
 
+/// An import over a `handover-identity.json` that does not parse (an
+/// earlier desktop build's record, damaged, or a value that is not a
+/// string) keeps it as `handover-identity.json.corrupt-<time>` with its
+/// bytes, then records the Swift identity's fingerprint: no write replaces
+/// such a file without a kept copy.
+#[test]
+fn an_import_over_a_record_that_does_not_parse_keeps_it_aside() {
+    let desktop =
+        HandoverIdentity::mint("Steno on a desktop-id build", chrono::Utc::now()).unwrap();
+    let damaged = format!(
+        r#"{{"steno.handoverIdentityFingerprint": "{}", "other": 7}}"#,
+        hex(&desktop.fingerprint())
+    );
+    for bad in [b"not json".to_vec(), damaged.into_bytes()] {
+        let case = String::from_utf8_lossy(&bad).into_owned();
+        let step = step(FakeKeychain::swift_app(), Some(&desktop));
+        std::fs::write(step.dir.path().join("handover-identity.json"), &bad).unwrap();
+
+        let status = step.import.run();
+        assert_eq!(status.stage, SwiftImportStage::Done, "{case}");
+        assert_eq!(status.error, None, "{case}");
+        assert_eq!(
+            step.record.recorded().unwrap().as_deref(),
+            Some(FIXTURE_FINGERPRINT),
+            "{case}"
+        );
+        let aside: Vec<Vec<u8>> = std::fs::read_dir(step.dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("handover-identity.json.corrupt-")
+            })
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        assert_eq!(aside, [bad], "{case}: kept with its bytes");
+        assert_eq!(step.graph.gate.handover(), HandoverGate::Ready, "{case}");
+    }
+}
+
 #[test]
 fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_again_works() {
     let desktop =
@@ -717,26 +767,6 @@ fn a_refused_replace_counts_as_denied_and_try_again_repeats_only_the_store() {
     }
 }
 
-/// A fingerprint record that refuses every write while `refuse` is set,
-/// over the app's file.
-struct RefusingRecord {
-    file: Arc<crate::handover::FingerprintFile>,
-    refuse: std::sync::atomic::AtomicBool,
-}
-
-impl FingerprintRecord for RefusingRecord {
-    fn recorded(&self) -> BoundaryResult<Option<String>> {
-        self.file.recorded()
-    }
-
-    fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
-        if self.refuse.load(Ordering::SeqCst) {
-            return Err("No space left on device".into());
-        }
-        self.file.record(fingerprint)
-    }
-}
-
 /// The handover's own load, as the listener does it, over `secrets` and
 /// `record` with no phone paired.
 fn load_identity(
@@ -772,7 +802,7 @@ fn a_fingerprint_not_recorded_after_the_store_is_surfaced_and_try_again_records_
         ..FakeKeychain::swift_app()
     });
     let preferences = preferences(&dir);
-    let record = Arc::new(RefusingRecord {
+    let record = Arc::new(crate::testing::RefusingRecord {
         file: file.clone(),
         refuse: std::sync::atomic::AtomicBool::new(true),
     });
@@ -1335,10 +1365,13 @@ async fn a_swift_identity_that_replaced_a_desktop_id_one_is_the_one_the_listener
 
 /// A paired phone proves that an identity existed: with `preferences.json`
 /// gone, the Swift certificate gone before the step and the stored
-/// identity missing or unreadable, the gate opens but no listener is built
-/// and no identity is minted.
+/// identity missing or unreadable, the gate opens but the listener it
+/// brings waits, saying why, and no identity is minted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
+    use steno_bridge::PhoneWaitingReason;
+    use steno_host::services::Handover as _;
+
     for unreadable in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let paths = steno_core::StenoPaths::new(dir.path().join("support"));
@@ -1362,25 +1395,298 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
             "nothing left to import"
         );
         let gated = app.gated_handover.clone().unwrap();
-        let mut failure = gated.failure();
-        let mut follow = tokio::spawn(gated.clone().follow(|| panic!("no listener opens")));
-        // A listener that opens panics inside `follow`: the test fails on
-        // the ended task instead of waiting for a failure that never comes.
-        tokio::select! {
-            failed = failure.wait_for(Option::is_some) => {
-                failed.unwrap();
-            }
-            ended = &mut follow => panic!("follow ended: {ended:?}"),
-        }
+        tokio::time::timeout(crate::testing::PATIENCE, gated.clone().follow(|| {}))
+            .await
+            .expect("the listener is adopted, waiting");
         assert!(gated.service().is_none(), "unreadable: {unreadable}");
-        assert!(!follow.is_finished(), "follow waits for the next ready");
-        follow.abort();
+        assert_eq!(
+            app.store.paired_devices().unwrap().len(),
+            1,
+            "the phone stays (unreadable: {unreadable})"
+        );
+        assert_eq!(
+            gated.waiting(),
+            Some(if unreadable {
+                PhoneWaitingReason::Unreadable
+            } else {
+                PhoneWaitingReason::Missing
+            })
+        );
         let secrets = std::fs::read(&secrets_path).unwrap_or_default();
         assert!(
             !String::from_utf8_lossy(&secrets).contains(HandoverIdentity::SECRET_KEY),
             "no identity minted (unreadable: {unreadable})"
         );
         app.shutdown();
+    }
+}
+
+/// Settings' Pair again while the import waits: the marker first, then
+/// the mint, under the run's lock; then the import is over (`IMPORT_RAN`,
+/// the gate ready, the step done) and no later run exports the Swift
+/// identity over the new one. The marker stays.
+#[test]
+fn pair_again_ends_a_waiting_import_with_the_marker_written_first() {
+    use crate::handover::WaitingImport as _;
+
+    let step = step(FakeKeychain::swift_app(), None);
+    step.keychain.deny_export();
+    assert_eq!(step.import.run().stage, SwiftImportStage::Waiting);
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let marked = order.clone();
+    step.keychain.on_call(move |call| {
+        if call == "mark done" {
+            marked.lock().unwrap().push("marker");
+        }
+    });
+    let minted = order.clone();
+    step.import
+        .pair_again(&|| {
+            minted.lock().unwrap().push("mint");
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(*order.lock().unwrap(), ["marker", "mint"]);
+    assert_eq!(*step.keychain.marker.lock().unwrap(), Ok(true), "kept");
+    assert!(step.preferences.flag(IMPORT_RAN_KEY));
+    assert_eq!(step.graph.gate.handover(), HandoverGate::Ready);
+    assert_eq!(step.import.status().stage, SwiftImportStage::Done);
+    step.keychain.allow_export();
+    assert_eq!(step.import.run().stage, SwiftImportStage::Done);
+    assert_eq!(
+        step.keychain.count("export"),
+        1,
+        "no export after Pair again"
+    );
+}
+
+/// A marker that cannot be written stops Pair again before the mint: the
+/// import still waits, with Try again.
+#[test]
+fn a_marker_that_cannot_be_written_stops_the_import_s_pair_again() {
+    use crate::handover::WaitingImport as _;
+
+    let step = step(FakeKeychain::swift_app(), None);
+    step.keychain.deny_export();
+    step.import.run();
+    *step.keychain.mark_refusal.lock().unwrap() = Some("errSecInteractionNotAllowed".to_owned());
+    let (error, logged) = crate::testing::warnings(|| {
+        step.import
+            .pair_again(&|| panic!("nothing is minted"))
+            .unwrap_err()
+    });
+    assert_eq!(error, crate::handover::MARKER_NOT_WRITTEN, "plain words");
+    assert!(
+        logged.contains("errSecInteractionNotAllowed"),
+        "the reason goes to the log: {logged}"
+    );
+    assert!(!step.preferences.flag(IMPORT_RAN_KEY));
+    assert_eq!(
+        step.graph.gate.handover(),
+        HandoverGate::Waiting(WaitReason::ImportDenied)
+    );
+    assert_eq!(step.import.status().stage, SwiftImportStage::Waiting);
+}
+
+/// Settings' Try again while the onboarding window runs the step answers
+/// that the step is under way, not the last run's line, and runs no second
+/// export; Pair again then says the same, and once the step is over says
+/// that the phones can send recordings.
+#[test]
+fn settings_meets_a_run_under_way_or_over_with_its_own_answer() {
+    use crate::handover::WaitingImport as _;
+
+    let step = step(FakeKeychain::swift_app(), None);
+    step.keychain.deny_export();
+    assert_eq!(step.import.run().stage, SwiftImportStage::Waiting);
+    step.keychain.allow_export();
+    {
+        let _onboarding = step.import.running.lock().unwrap();
+        assert_eq!(step.import.try_again(), Err(STEP_UNDER_WAY.to_owned()));
+        assert_eq!(
+            step.import.pair_again(&|| panic!("nothing is minted")),
+            Err(STEP_UNDER_WAY.to_owned())
+        );
+    }
+    assert_eq!(step.keychain.count("export"), 1, "no second export");
+    step.import.try_again().unwrap();
+    assert_eq!(step.import.status().stage, SwiftImportStage::Done);
+    assert_eq!(step.import.try_again(), Ok(()), "nothing left to do");
+    assert_eq!(
+        step.import.pair_again(&|| panic!("nothing is minted")),
+        Err(crate::handover::NOT_WAITING.to_owned())
+    );
+}
+
+/// The graph after a denied export, a phone paired with the Swift
+/// identity: Settings' iPhone section says the pairing did not come over.
+/// Try again repeats the export without a restart and the listener comes
+/// up on the Swift identity; Pair again instead mints a new one after the
+/// marker, removes the phone, and the listener comes up on the new one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_try_again_or_pair_again_ends_a_denied_export() {
+    use steno_bridge::PhoneWaitingReason;
+    use steno_host::services::Handover as _;
+
+    const SWIFT_MAC_ID: &str = "FCF0D2A1-D2CE-48F7-BAFF-E17FD2E9C814";
+    for pair_again in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+        let keychain = Arc::new(FakeKeychain::swift_app());
+        keychain.deny_export();
+        let app = build_over(paths, keychain.clone());
+        crate::testing::pair_a_phone(&app.store);
+        let step = app.services.swift_import.clone().unwrap();
+        let status = tokio::task::spawn_blocking(move || step.run())
+            .await
+            .unwrap();
+        assert_eq!(status.stage, SwiftImportStage::Waiting);
+        let gated = app.gated_handover.clone().unwrap();
+        assert_eq!(gated.waiting(), Some(PhoneWaitingReason::ImportDenied));
+        let follow = tokio::spawn(gated.clone().follow(|| {}));
+
+        let answer = if pair_again {
+            tokio::task::block_in_place(|| gated.pair_again())
+        } else {
+            keychain.allow_export();
+            tokio::task::block_in_place(|| gated.try_again())
+        };
+        answer.unwrap();
+        tokio::time::timeout(crate::testing::PATIENCE, follow)
+            .await
+            .expect("the listener comes up")
+            .unwrap();
+        assert_eq!(gated.waiting(), None);
+        assert!(app.services.preferences.flag(IMPORT_RAN_KEY));
+        assert_eq!(*keychain.marker.lock().unwrap(), Ok(true));
+        let phones = app.store.paired_devices().unwrap().len();
+        if pair_again {
+            assert_ne!(gated.mac_id(), SWIFT_MAC_ID);
+            assert_ne!(gated.mac_id(), "");
+            assert_eq!(phones, 0, "every phone pairs again");
+            assert_eq!(keychain.count("export"), 1, "no second export");
+        } else {
+            assert_eq!(gated.mac_id(), SWIFT_MAC_ID);
+            assert_eq!(phones, 1);
+            assert!(matches!(
+                gated.state(),
+                steno_host::services::ListenerState::Listening(_)
+            ));
+        }
+        app.shutdown();
+    }
+}
+
+/// The first launch after the Swift app records no fingerprint and lists
+/// the phones from the shared database. Settings' Pair again after a
+/// denied export writes the marker and the new identity, then stops while
+/// the phones are removed (the database refuses to delete the last phone,
+/// with one paired or with two), the window in which the phones would stay
+/// listed beside an identity they do not know.
+///
+/// The next launch finds the marker, so no import runs, and the
+/// handover's read finishes the Pair again: no phone listed, the new
+/// fingerprint recorded and the note dropped, no mint, no export, and the
+/// admission ledger as it was. Try again in the same launch, where the
+/// gate still waits, runs the import instead: the export brings the Swift
+/// pairing back over the new identity and records it, which drops the
+/// note, and the listener comes up over it with the phone still listed,
+/// which knows it; the admission ledger is as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_import_pair_again_that_stopped_is_decided_by_the_next_read() {
+    use steno_handover::FingerprintRecord as _;
+    use steno_host::services::Handover as _;
+
+    const SWIFT_MAC_ID: &str = "FCF0D2A1-D2CE-48F7-BAFF-E17FD2E9C814";
+    for stop in ["after the write", "after phone 1 of 2"] {
+        for read in ["the next launch", "Try again"] {
+            let case = format!("{stop}, {read}");
+            let dir = tempfile::tempdir().unwrap();
+            let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+            let record = record_in(&paths.support_directory);
+            let keychain = Arc::new(FakeKeychain::swift_app());
+            keychain.deny_export();
+            let app = build_over(paths.clone(), keychain.clone());
+            crate::testing::pair_a_phone(&app.store);
+            if stop == "after phone 1 of 2" {
+                crate::testing::pair_a_phone(&app.store);
+            }
+            let admitted = crate::testing::admit_a_recording(&app.store);
+            let step = app.services.swift_import.clone().unwrap();
+            let status = tokio::task::spawn_blocking(move || step.run())
+                .await
+                .unwrap();
+            assert_eq!(status.stage, SwiftImportStage::Waiting);
+            assert_eq!(record.recorded().unwrap(), None, "{case}: nothing recorded");
+
+            crate::testing::keep_the_last_phone(&app.store);
+            let gated = app.gated_handover.clone().unwrap();
+            tokio::task::block_in_place(|| gated.pair_again()).unwrap_err();
+            assert_eq!(*keychain.marker.lock().unwrap(), Ok(true), "{case}");
+            let next = record.next().unwrap().expect("the note");
+            assert_eq!(record.recorded().unwrap(), None, "{case}");
+            assert_eq!(app.store.paired_devices().unwrap().len(), 1, "{case}");
+            crate::testing::let_the_last_phone_go(&app.store);
+
+            if read == "Try again" {
+                let follow = tokio::spawn(gated.clone().follow(|| {}));
+                keychain.allow_export();
+                tokio::task::block_in_place(|| gated.try_again()).unwrap();
+                tokio::time::timeout(crate::testing::PATIENCE, follow)
+                    .await
+                    .expect("the listener comes up")
+                    .unwrap();
+                assert_eq!(gated.waiting(), None, "{case}: the gate opened");
+                assert_eq!(gated.mac_id(), SWIFT_MAC_ID, "{case}: the Swift pairing");
+                assert_eq!(
+                    record.recorded().unwrap().as_deref(),
+                    Some(FIXTURE_FINGERPRINT),
+                    "{case}: the Swift fingerprint recorded"
+                );
+                assert_eq!(record.next().unwrap(), None, "{case}: the note dropped");
+                assert_eq!(
+                    tokio::task::block_in_place(|| gated.paired_devices())
+                        .unwrap()
+                        .len(),
+                    1,
+                    "{case}: the phone left, which knows the Swift pairing"
+                );
+                assert_eq!(keychain.count("export"), 2, "{case}: exported again");
+                assert!(
+                    admitted.is_unchanged(&app.store),
+                    "{case}: the ledger as it was"
+                );
+                app.shutdown();
+                continue;
+            }
+            app.shutdown();
+            drop(app);
+
+            let app = crate::build_with_import(test_options(paths), |preferences| {
+                match launch_at_home(preferences, keychain.clone()) {
+                    Launch::Pending(pending) => Some(pending),
+                    Launch::Done | Launch::Skipped(_) => None,
+                }
+            })
+            .unwrap();
+            assert!(app.gated_handover.is_none(), "{case}: the import is over");
+            let handover = app.handover.clone().expect("the listener at the launch");
+            assert_eq!(handover.waiting(), None, "{case}: finished");
+            assert!(
+                tokio::task::block_in_place(|| handover.paired_devices())
+                    .unwrap()
+                    .is_empty(),
+                "{case}: no phone listed"
+            );
+            assert_eq!(record.recorded().unwrap(), Some(next), "{case}: no mint");
+            assert_eq!(record.next().unwrap(), None, "{case}: the note dropped");
+            assert_eq!(keychain.count("export"), 1, "{case}: no export");
+            assert!(
+                admitted.is_unchanged(&app.store),
+                "{case}: the ledger as it was"
+            );
+            app.shutdown();
+        }
     }
 }
 
@@ -1476,6 +1782,7 @@ fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
         update_source: None,
         detection: None,
         installed_bundle: false,
+        import_marker: None,
     }
 }
 
@@ -2168,6 +2475,210 @@ async fn a_meeting_under_a_withheld_key_stays_raw_and_its_summary_runs_later_wit
         "the summary read the stored transcript"
     );
     server.stop();
+}
+
+/// A meeting processed behind a pending import whose key is withheld,
+/// with an endpoint at `server` and the vault under `dir`: ready without a
+/// summary and exported into the vault. The graph's secrets, through which
+/// a test saves the key, and the folder note the export wrote.
+struct ExportedWithoutAKey {
+    store: Arc<steno_core::Store>,
+    paths: steno_core::StenoPaths,
+    graph: GraphImport,
+    secrets: crate::app::GraphSecrets,
+    meeting: steno_core::Meeting,
+    folder: PathBuf,
+    stem: String,
+}
+
+impl ExportedWithoutAKey {
+    async fn new(dir: &tempfile::TempDir, server: &steno_llm::testing::StubChatServer) -> Self {
+        use steno_core::{AudioRetention, DeliveryStatus, MeetingState};
+
+        let store = Arc::new(steno_core::Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let mut settings = store.settings().unwrap();
+        summaries_from_endpoint(&mut settings, server.base_url().as_str());
+        settings.obsidian = Some(steno_core::ObsidianSettings {
+            vault_path: vault.to_string_lossy().into_owned(),
+            people_folder: None,
+            include_audio: false,
+            task_tag: None,
+            extra: serde_json::Map::new(),
+        });
+        store.save_settings(&settings).unwrap();
+        let (graph, secrets) = wired(
+            dir.path(),
+            FakeKeychain::swift_app(),
+            Arc::new(InMemorySecretStore::new()),
+        );
+        assert!(graph.gate.key_withheld());
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = MeetingState::Recording;
+        meeting.summary = None;
+        let asset = steno_pipeline::fixtures::two_lane_call(
+            &dir.path().join("recordings"),
+            meeting.id,
+            AudioRetention::KeepForever,
+        )
+        .unwrap();
+        let mut exported = ExportedWithoutAKey {
+            store,
+            paths,
+            graph,
+            secrets,
+            meeting,
+            folder: PathBuf::new(),
+            stem: String::new(),
+        };
+        let pipeline = exported.pipeline();
+        pipeline.enqueue(&exported.meeting, &asset).unwrap();
+        pipeline.wait_until_idle().await;
+        let stored = exported
+            .store
+            .meeting(exported.meeting.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, MeetingState::Ready, "{:?}", stored.state);
+        assert!(stored.summary.is_none());
+        let delivery = exported.delivery();
+        assert_eq!(delivery.status, DeliveryStatus::Delivered);
+        let folder = vault.join(&delivery.receipt.unwrap().folder);
+        exported.stem = folder.file_name().unwrap().to_string_lossy().into_owned();
+        exported.folder = folder;
+        exported.meeting = stored;
+        exported
+    }
+
+    /// The pipeline the graph builds now, on core's fakes for the rest.
+    fn pipeline(&self) -> steno_pipeline::ProcessingPipeline {
+        let built = built_over(&self.store, &self.paths, &self.secrets).dependencies;
+        steno_pipeline::ProcessingPipeline::new(
+            crate::testing::fake_dependencies(&self.store, "fake-engine")
+                .with_llm(built.cleaner, built.summarizer),
+        )
+    }
+
+    fn delivery(&self) -> steno_core::Delivery {
+        self.store.deliveries(self.meeting.id).unwrap().remove(0)
+    }
+
+    fn note(&self) -> PathBuf {
+        self.folder.join(format!("{}.md", self.stem))
+    }
+
+    /// The copies Steno wrote beside the note, by name.
+    fn copies(&self) -> Vec<String> {
+        let prefix = format!("{} (Steno ", self.stem);
+        let mut copies: Vec<String> = std::fs::read_dir(&self.folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&prefix))
+            .collect();
+        copies.sort();
+        copies
+    }
+}
+
+/// P30 (D13) behind the withheld key: a meeting processed while the key
+/// was withheld is exported without a summary. Once a key is saved, the
+/// summary runs again and the re-run exports the note again, through the
+/// pipeline's delivery and the Obsidian folder. A note the user edited in
+/// the vault since Steno wrote it stays byte for byte as the user left it:
+/// the new version, with the summary, goes beside it as
+/// `<name> (Steno <date>).md` and the delivery warns. Export again then
+/// rewrites that copy rather than add one. An unedited note is replaced in
+/// place, with no copy and no warning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_summary_run_after_the_key_is_saved_keeps_an_edited_note_and_writes_beside_it() {
+    use steno_llm::testing::{Scripts, StubChatServer};
+
+    /// A bullet of the e2e summary fixture, which only a note with the
+    /// summary holds.
+    const SUMMARY_LINE: &str = "Die zwölf Testsegmente wurden der Reihe nach besprochen.";
+    let has_summary = |bytes: &[u8]| String::from_utf8_lossy(bytes).contains(SUMMARY_LINE);
+    for edited in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = StubChatServer::start().await.unwrap();
+        let summary = std::fs::read_to_string(
+            repository().join("Tests/Fixtures/llm/responses/e2e-summary.json"),
+        )
+        .unwrap();
+        server.respond(Arc::new(move |_| Some(Scripts.text(&summary))));
+        let exported = ExportedWithoutAKey::new(&dir, &server).await;
+        let note = exported.note();
+        let first = std::fs::read(&note).unwrap();
+        assert!(!has_summary(&first), "exported without the summary");
+        let mine = [first.as_slice(), b"\nMy own notes.\n"].concat();
+        if edited {
+            std::fs::write(&note, &mine).unwrap();
+        }
+
+        exported
+            .graph
+            .secrets
+            .set_secret(&SecretKey::llm_api_key(), Some("sk-saved"))
+            .await
+            .unwrap();
+        // Dated in the destination's zone, the machine's: the day before
+        // and after the run, so a run over midnight finds its copy too.
+        let today = || chrono::Local::now().format("%Y-%m-%d").to_string();
+        let before = today();
+        exported
+            .pipeline()
+            .rerun_summary(exported.meeting.id, &exported.meeting.template_id)
+            .await
+            .unwrap();
+        let after = today();
+        let stored = exported
+            .store
+            .meeting(exported.meeting.id)
+            .unwrap()
+            .unwrap();
+        assert!(stored.summary.is_some(), "the summary ran again");
+        let delivery = exported.delivery();
+        assert_eq!(delivery.status, steno_core::DeliveryStatus::Delivered);
+        let warnings = delivery.receipt.unwrap().warnings;
+        if !edited {
+            assert!(
+                has_summary(&std::fs::read(&note).unwrap()),
+                "replaced, with the summary"
+            );
+            assert_eq!(exported.copies(), Vec::<String>::new());
+            assert_eq!(warnings, Vec::<String>::new());
+            server.stop();
+            continue;
+        }
+        assert_eq!(std::fs::read(&note).unwrap(), mine, "the edited note stays");
+        let copy = exported.copies();
+        assert_eq!(copy.len(), 1, "{copy:?}");
+        let stem = &exported.stem;
+        assert!(
+            [&before, &after]
+                .iter()
+                .any(|day| copy[0] == format!("{stem} (Steno {day}).md")),
+            "{copy:?}"
+        );
+        let beside = std::fs::read(exported.folder.join(&copy[0])).unwrap();
+        assert!(has_summary(&beside), "the copy has the summary");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with(&format!("Kept your changes to {stem}.md")),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains(&copy[0]), "{warnings:?}");
+
+        exported
+            .pipeline()
+            .redeliver(exported.meeting.id)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&note).unwrap(), mine);
+        assert_eq!(exported.copies(), copy, "Export again rewrites the copy");
+        server.stop();
+    }
 }
 
 /// The pipeline the M1 test builds: core's fakes, with a cleaner that

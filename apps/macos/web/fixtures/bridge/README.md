@@ -17,14 +17,17 @@ Playwright screens read the same files through the mock transport
 become command replies). A drift between the two contracts fails both sides.
 Do not edit these files by hand, and do not format them: Biome skips them.
 
-Two fixtures have no Swift sample: `onboarding.import.json`, the Tauri
-app's import step, which the Swift app never shows, and
+Three fixtures have no Swift sample: `onboarding.import.json`, the Tauri
+app's import step, which the Swift app never shows;
 `meeting.detail.keyWithheld.json`, a meeting whose summary was skipped while
-that import withheld the API key, which the Swift app never skips. They were
-written in the recorder's format, so they are the exception to the rule
-above: edit them by hand, keeping that format.
+that import withheld the API key, which the Swift app never skips; and
+`settings.iphone.waiting.json`, the iPhone section while phone handover
+waits for Try again or Pair again, which the Swift app never shows. They
+were written in the recorder's format, so they are the exception to the
+rule above: edit them by hand, keeping that format.
 `crates/steno-host/tests/parity.rs` (`onboarding_import`,
-`meeting_detail_key_withheld`) proves the host produces them, and
+`meeting_detail_key_withheld`, `settings_iphone_waiting`) proves the host
+produces them, and
 `crates/steno-bridge/tests/fixtures.rs` pins their bytes. They are listed
 last in `index.json`, and `BridgeFixturesTests.rustOnly` keeps them there
 when the Swift side records.
