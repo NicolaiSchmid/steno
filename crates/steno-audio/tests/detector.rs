@@ -25,7 +25,7 @@ use std::time::Duration;
 use steno_audio::detection::{
     ActivityError, MeetingDetector, MeetingEvent, ProcessAudioActivity, ProcessAudioActivitySource,
 };
-use steno_audio::testing::{FakeProcessAudioActivity, ManualClock};
+use steno_audio::testing::{FakeProcessAudioActivity, HANG_GUARD, ManualClock};
 
 fn face_time() -> ProcessAudioActivity {
     ProcessAudioActivity::new(4_242, Some("com.apple.FaceTime"), true)
@@ -48,9 +48,7 @@ fn make_detector(source: &FakeProcessAudioActivity, clock: &Arc<ManualClock>) ->
 }
 
 fn next(events: &Receiver<MeetingEvent>) -> MeetingEvent {
-    events
-        .recv_timeout(Duration::from_secs(5))
-        .expect("an event")
+    events.recv_timeout(HANG_GUARD).expect("an event")
 }
 
 #[test]
@@ -271,7 +269,7 @@ fn a_stale_poll_snapshot_does_not_cancel_a_pending_release() {
     clock.advance(Duration::from_secs(2));
     // The poller has read "Zoom is recording" and is held there.
     entered_receiver
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(HANG_GUARD)
         .expect("the poll reads its snapshot");
     assert!(matches!(
         next(&events),
@@ -319,7 +317,7 @@ fn a_poll_in_flight_during_stop_leaves_no_holder() {
     source.armed.store(true, Ordering::SeqCst);
     clock.advance(Duration::from_secs(1));
     entered_receiver
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(HANG_GUARD)
         .expect("the poll reads its snapshot");
     let stopper = {
         let detector = Arc::clone(&detector);
@@ -369,7 +367,7 @@ impl ProcessAudioActivitySource for HeldStart {
         let release = self.release.lock().unwrap().take();
         if let Some(release) = release {
             let _ = self.entered.send(());
-            let _ = release.recv_timeout(Duration::from_secs(5));
+            let _ = release.recv_timeout(HANG_GUARD);
         }
         self.inner.changes()
     }
@@ -401,7 +399,7 @@ fn a_stop_during_start_waits_for_it_and_stops_it() {
         std::thread::spawn(move || detector.start())
     };
     entered_receiver
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(HANG_GUARD)
         .expect("start read its first snapshot");
     let stopper = {
         let detector = Arc::clone(&detector);
@@ -414,7 +412,7 @@ fn a_stop_during_start_waits_for_it_and_stops_it() {
     );
     release.send(()).unwrap();
     assert_eq!(
-        events.recv_timeout(Duration::from_secs(5)),
+        events.recv_timeout(HANG_GUARD),
         Err(RecvTimeoutError::Disconnected),
         "the stop ran once the start was done"
     );
@@ -444,7 +442,7 @@ fn a_second_start_during_start_waits_for_it_and_starts_nothing() {
         std::thread::spawn(move || detector.start())
     };
     entered_receiver
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(HANG_GUARD)
         .expect("start read its first snapshot");
     let second = {
         let detector = Arc::clone(&detector);
@@ -467,10 +465,7 @@ fn a_second_start_during_start_waits_for_it_and_starts_nothing() {
             let _ = done.send(());
         })
     };
-    assert!(
-        returned.recv_timeout(Duration::from_secs(5)).is_ok(),
-        "stop() returned"
-    );
+    assert!(returned.recv_timeout(HANG_GUARD).is_ok(), "stop() returned");
     stopper.join().unwrap();
     assert!(
         clock.wait_for_sleepers(0),

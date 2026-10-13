@@ -49,8 +49,10 @@ pub const PATIENCE: Duration = Duration::from_secs(5);
 /// takes this bound unless that patience is what it checks. An outage
 /// that can end a wait's condition (a device change whose rebuild
 /// silences the meter) is held by the test until that wait is over
-/// ([`HeldOutages`]): once the outage began, no bound would help.
-pub const HANG_GUARD: Duration = Duration::from_secs(120);
+/// ([`HeldOutages`]): once the outage began, no bound would help. The
+/// value is steno-audio's, which its capture tests and
+/// `ManualClock::wait_for_sleepers` wait too.
+pub const HANG_GUARD: Duration = steno_audio::testing::HANG_GUARD;
 
 /// The synthetic backends a test's capture built with their outages held
 /// (`SyntheticOptions::hold_outages`), so that the test lets each outage

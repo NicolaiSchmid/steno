@@ -2433,10 +2433,8 @@ mod tests {
 
     use super::*;
     use crate::capture::CaptureMode;
-    use crate::testing::SyntheticCaptureBackend;
+    use crate::testing::{HANG_GUARD, SyntheticCaptureBackend};
     use crate::writer::{LaneFrames, RecordingFiles};
-
-    const RECV: Duration = Duration::from_secs(10);
 
     /// The production writer, except that every write fails as a full disk
     /// does and `finish()` waits for `release`, which holds the writer
@@ -2458,7 +2456,7 @@ mod tests {
         }
         fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
             // Bounded, so a failed test cannot hang its session's drop.
-            let _ = self.release.recv_timeout(RECV);
+            let _ = self.release.recv_timeout(HANG_GUARD);
             self.inner.finish()
         }
     }
@@ -2466,7 +2464,7 @@ mod tests {
     /// Receives from `states` until a state matches `want`.
     fn wait_for(states: &Receiver<CaptureState>, want: impl Fn(&CaptureState) -> bool) {
         loop {
-            let state = states.recv_timeout(RECV).expect("the state changes");
+            let state = states.recv_timeout(HANG_GUARD).expect("the state changes");
             if want(&state) {
                 return;
             }
@@ -2512,12 +2510,16 @@ mod tests {
         let (resume, resumed) = channel::<()>();
         session.core.lock().before_stop_waits = Some(Box::new(move || {
             paused.send(()).unwrap();
-            resumed.recv_timeout(RECV).unwrap();
+            resumed.recv_timeout(HANG_GUARD).unwrap();
         }));
         let stopped = std::thread::scope(|scope| {
+            // Owned here, so a failing step drops both before the scope
+            // joins the stopper: the finalise and the paused `stop()` go
+            // at once instead of waiting out their bound.
+            let (release, resume) = (release, resume);
             let stopper = scope.spawn(|| session.stop());
             pause
-                .recv_timeout(RECV)
+                .recv_timeout(HANG_GUARD)
                 .expect("the stop() finds the finalise in Stopping");
             release.send(()).unwrap();
             wait_for(&states, |state| {

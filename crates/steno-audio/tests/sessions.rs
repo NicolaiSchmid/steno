@@ -16,7 +16,7 @@ use steno_audio::detection::{
     AudioSessionRecord, EndpointFlow, MeetingDetector, MeetingEvent, ProcessAudioActivity,
     SessionState, processes_from_sessions,
 };
-use steno_audio::testing::{FakeProcessAudioActivity, ManualClock};
+use steno_audio::testing::{FakeProcessAudioActivity, HANG_GUARD, ManualClock};
 
 fn session(pid: u32, flow: EndpointFlow, state: SessionState, image: &str) -> AudioSessionRecord {
     AudioSessionRecord {
@@ -131,7 +131,7 @@ fn sessions_drive_the_meeting_detector() {
     assert!(clock.wait_for_sleepers(2), "the open debounce is armed");
     clock.advance(Duration::from_secs(2));
     assert_eq!(
-        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        events.recv_timeout(HANG_GUARD).unwrap(),
         MeetingEvent::MicrophoneOpened {
             bundle_id: Some("Teams.exe".into()),
             pid: 7_100
@@ -142,7 +142,7 @@ fn sessions_drive_the_meeting_detector() {
     assert!(clock.wait_for_sleepers(2), "the release debounce is armed");
     clock.advance(Duration::from_secs(2));
     assert_eq!(
-        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        events.recv_timeout(HANG_GUARD).unwrap(),
         MeetingEvent::MicrophoneReleased
     );
     detector.stop();
