@@ -49,4 +49,25 @@ enum TestIdentity {
         certificateDER: try Data(contentsOf: Fixtures.url("handover/\(name).der")))
     #endif
   }
+
+  /// An identity whose certificate starts at `start`, a whole second: a
+  /// fresh mint from a minute after it, beside the test identity's key on
+  /// Apple platforms (the guard reads only the certificate's start and
+  /// fingerprint). Two of them, or one and a fixture, can start in the same
+  /// second, or after a pinned now. A mint encodes its start in whole
+  /// seconds, so a fractional `start` is refused rather than rounded.
+  static func minted(startingAt start: Date) throws -> HandoverIdentity {
+    let der = try MintedIdentity.mint(
+      commonName: "Steno minted test identity", now: start.addingTimeInterval(60)
+    ).certificateDER
+    #if canImport(Security)
+      let identity = HandoverIdentity(secIdentity: try load().secIdentity, certificateDER: der)
+    #else
+      let identity = HandoverIdentity(certificateDER: der)
+    #endif
+    guard try identity.notValidBefore() == start else {
+      throw IdentityError.malformed("a certificate minted to start at \(start) starts otherwise")
+    }
+    return identity
+  }
 }

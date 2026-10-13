@@ -10,7 +10,8 @@ import Testing
 /// until the record names the new identity, or loads the new one; none is
 /// stuck unable to read the keychain, and none mints. Of two identities
 /// under the current label, the recorded one loads, and with nothing
-/// recorded the newest that no paired phone predates. The fake keeps
+/// recorded the one every paired phone knows, unless a tie or the clock
+/// leaves the phones' pairings unclear. The fake keeps
 /// certificates and keys as separate items, as the file keychain does, and
 /// runs the product's order and choice (`IdentityItems`' extension).
 @Suite final class IdentityItemsTests {
@@ -105,6 +106,10 @@ import Testing
 
   static let label = "current"
   static let staging = "staged"
+  /// The clock of the launches that place phones by date: after every
+  /// fixture's start and every pairing placed after them, so only a time
+  /// placed after it is a clock error, whatever the day the tests run.
+  static let now = Date(timeIntervalSince1970: 1_791_936_000)
   /// The record of an identity neither test identity is.
   static let previous = String(repeating: "ab", count: 32)
 
@@ -113,12 +118,22 @@ import Testing
   /// A third identity, so two can sit under the current label while `other`
   /// is the staged or the minted one.
   let third: HandoverIdentity
+  /// Minted to start in the same second as `known`, and as `third`.
+  let tiedWithKnown: HandoverIdentity
+  let tiedWithThird: HandoverIdentity
+  /// Minted to start at `now`, and a day after it.
+  let startsNow: HandoverIdentity
+  let startsTomorrow: HandoverIdentity
   let directory: URL
 
   init() throws {
     known = try TestIdentity.load()
     other = try TestIdentity.load("other-identity")
     third = try TestIdentity.load("third-identity")
+    tiedWithKnown = try TestIdentity.minted(startingAt: try known.notValidBefore())
+    tiedWithThird = try TestIdentity.minted(startingAt: try third.notValidBefore())
+    startsNow = try TestIdentity.minted(startingAt: Self.now)
+    startsTomorrow = try TestIdentity.minted(startingAt: Self.now.addingTimeInterval(86400))
     directory = try Fixtures.temporaryDirectory("steno-identity-items")
   }
 
@@ -131,11 +146,16 @@ import Testing
     let store: MeetingStore
 
     /// A launch: a fresh guard over the same keychain, record and store.
-    var launch: HandoverIdentityGuard {
+    var launch: HandoverIdentityGuard { launching { Date() } }
+
+    /// The same, with this Mac's clock reading `now`.
+    func launch(at now: Date) -> HandoverIdentityGuard { launching { now } }
+
+    private func launching(_ now: @escaping @Sendable () -> Date) -> HandoverIdentityGuard {
       HandoverIdentityGuard(
         keychain: LabelledIdentityKeychain(
           items: items, label: IdentityItemsTests.label, stagingLabel: IdentityItemsTests.staging),
-        record: record, store: store)
+        record: record, store: store, now: now)
     }
   }
 
@@ -357,7 +377,7 @@ import Testing
     switch pairing.outcome {
     case .refused(let refusal):
       await #expect(throws: refusal) {
-        try await mac.launch.loadOrPairAgain(commonName: "A") {
+        try await mac.launch(at: Self.now).loadOrPairAgain(commonName: "A") {
           asked = true
           return false
         }
@@ -368,13 +388,15 @@ import Testing
       #expect(try mac.record.recorded() == nil)
       #expect(try await mac.store.pairedDevices().count == pairedAt.count)
 
-      #expect(hex(try await mac.launch.loadOrPairAgain(commonName: "A") { true }) == hex(other))
+      #expect(
+        hex(try await mac.launch(at: Self.now).loadOrPairAgain(commonName: "A") { true })
+          == hex(other))
       expectOnlyTheNewIdentity(mac.items)
       #expect(try mac.record.recorded() == hex(other))
       #expect(try await mac.store.pairedDevices().isEmpty)
     case .loadsOlder, .loadsNewer:
       let chosen = pairing.outcome == .loadsOlder ? known : third
-      let identity = try await mac.launch.loadOrPairAgain(commonName: "A") {
+      let identity = try await mac.launch(at: Self.now).loadOrPairAgain(commonName: "A") {
         asked = true
         return true
       }
@@ -435,6 +457,262 @@ import Testing
     #expect(try await mac.store.pairedDevices().count == 1)
   }
 
+  /// A launch with nothing recorded, at `now`: the identities under the
+  /// label, when the phones were paired, and what the launch does, in every
+  /// order of the identities.
+  struct Launch: Sendable, CustomTestStringConvertible {
+    enum Held: Sendable {
+      case known, third, tiedWithKnown, tiedWithThird, startsNow, startsTomorrow
+    }
+    /// A pairing, seconds after an identity's start or after `now`.
+    enum Point: Sendable {
+      case after(Held, TimeInterval)
+      case afterNow(TimeInterval)
+    }
+    enum Outcome: Equatable, Sendable {
+      case loads(Held)
+      case refused(IdentityUnavailability)
+    }
+
+    let testDescription: String
+    let held: [Held]
+    let paired: [Point]
+    let outcome: Outcome
+
+    init(_ description: String, _ held: [Held], _ paired: [Point], _ outcome: Outcome) {
+      testDescription = description
+      self.held = held
+      self.paired = paired
+      self.outcome = outcome
+    }
+  }
+
+  func identity(_ held: Launch.Held) -> HandoverIdentity {
+    switch held {
+    case .known: known
+    case .third: third
+    case .tiedWithKnown: tiedWithKnown
+    case .tiedWithThird: tiedWithThird
+    case .startsNow: startsNow
+    case .startsTomorrow: startsTomorrow
+    }
+  }
+
+  func date(_ point: Launch.Point) throws -> Date {
+    switch point {
+    case .after(let held, let seconds): try identity(held).notValidBefore() + seconds
+    case .afterNow(let seconds): Self.now + seconds
+    }
+  }
+
+  /// `launch` in every order of its identities, each on a fresh Mac.
+  func check(_ launch: Launch) async throws {
+    for order in orders(launch.held) {
+      let held = order.map(identity)
+      let mac = try await mac(
+        holding: held.map { ($0, Self.label) }, recorded: nil,
+        pairedAt: try launch.paired.map(date))
+      try await expect(launch.outcome, on: mac, holding: held, at: Self.now, "\(launch) \(order)")
+    }
+  }
+
+  /// One launch on `mac`, whose keychain holds `held` in that order, with
+  /// the clock at `now`. A load records the identity and asks nothing. A
+  /// refusal records nothing and asks, declined, except the clock's, which
+  /// asks nothing even where the answer would be yes. None writes to the
+  /// keychain or removes a phone. After a refusal that asks, a confirmed
+  /// Pair Again leaves only the new identity.
+  func expect(
+    _ outcome: Launch.Outcome, on mac: Mac, holding held: [HandoverIdentity], at now: Date,
+    _ comment: Comment
+  ) async throws {
+    let phones = try await mac.store.pairedDevices().count
+    var asked = false
+    switch outcome {
+    case .loads(let chosen):
+      let identity = try await mac.launch(at: now).loadOrPairAgain(commonName: "A") {
+        asked = true
+        return true
+      }
+      #expect(hex(identity) == hex(self.identity(chosen)) && !asked, comment)
+      #expect(try mac.record.recorded() == hex(self.identity(chosen)), comment)
+    case .refused(let refusal):
+      await #expect(throws: refusal, comment) {
+        try await mac.launch(at: now).loadOrPairAgain(commonName: "A") {
+          asked = true
+          return refusal == .clockBehind
+        }
+      }
+      #expect(asked == (refusal != .clockBehind), comment)
+      #expect(try mac.record.recorded() == nil, comment)
+    }
+    #expect(mac.items.writes.isEmpty, comment)
+    #expect(mac.items.certificateItems.map { hex($0.identity) } == held.map(hex), comment)
+    #expect(try await mac.store.pairedDevices().count == phones, comment)
+    guard case .refused(let refusal) = outcome, refusal != .clockBehind else { return }
+    #expect(
+      hex(try await mac.launch(at: now).loadOrPairAgain(commonName: "A") { true }) == hex(other),
+      comment)
+    expectOnlyTheNewIdentity(mac.items)
+    #expect(try mac.record.recorded() == hex(other), comment)
+    #expect(try await mac.store.pairedDevices().isEmpty, comment)
+  }
+
+  static let ties: [Launch] = [
+    Launch("a tie, no phone", [.third, .tiedWithThird], [], .refused(.replaced)),
+    Launch(
+      "a tie, a phone after it", [.third, .tiedWithThird], [.after(.third, 3600)],
+      .refused(.replaced)),
+    Launch(
+      "a tie, a phone at its start", [.third, .tiedWithThird], [.after(.third, 0)],
+      .refused(.replaced)),
+    Launch(
+      "a tie above an older one, a phone between them", [.known, .third, .tiedWithThird],
+      [.after(.known, 3600)], .loads(.known)),
+    Launch(
+      "a tie above an older one, a phone after the tie", [.known, .third, .tiedWithThird],
+      [.after(.third, 3600)], .refused(.replaced)),
+    Launch(
+      "a tie above an older one, phones between them and after the tie",
+      [.known, .third, .tiedWithThird], [.after(.known, 3600), .after(.third, 3600)],
+      .refused(.partlyReplaced)),
+    Launch(
+      "a tie above an older one, phones before both and after the tie",
+      [.known, .third, .tiedWithThird], [.after(.known, -3600), .after(.third, 3600)],
+      .refused(.replaced)),
+    Launch(
+      "a tie below a newer one, a phone after the newer one", [.known, .tiedWithKnown, .third],
+      [.after(.third, 3600)], .loads(.third)),
+    Launch(
+      "a tie below a newer one, no phone", [.known, .tiedWithKnown, .third], [], .loads(.third)),
+    Launch(
+      "a tie below a newer one, a phone between them", [.known, .tiedWithKnown, .third],
+      [.after(.known, 1)], .refused(.replaced)),
+  ]
+
+  /// Two identities that start in the same second are no newest one: a
+  /// phone whose newest start they share knows neither, and with no phone
+  /// neither is the newest. The launch refuses as the phones dictate,
+  /// whichever comes first, so the keychain's order never chooses.
+  @Test(arguments: ties)
+  func twoIdentitiesThatStartInTheSameSecondAreNeitherRecorded(_ launch: Launch) async throws {
+    #expect(try tiedWithThird.notValidBefore() == third.notValidBefore())
+    #expect(hex(tiedWithThird) != hex(third))
+    try await check(launch)
+  }
+
+  static let copies: [Launch] = [
+    Launch("a copy, a phone after it", [.known, .known], [.after(.known, 3600)], .loads(.known)),
+    Launch("a copy, no phone", [.known, .known], [], .loads(.known)),
+    Launch(
+      "a copy beside a newer one, a phone between them", [.known, .third, .known],
+      [.after(.known, 3600)], .loads(.known)),
+    Launch(
+      "a copy beside a newer one, a phone after both", [.known, .third, .known],
+      [.after(.third, 3600)], .loads(.third)),
+  ]
+
+  /// A certificate in two keychains of the search list (an old login
+  /// keychain restored and added back) is one identity, not a tie: the
+  /// launch records it and asks nothing, so no Pair Again removes phones
+  /// that know it.
+  @Test(arguments: copies)
+  func aCertificateInTwoKeychainsIsOneIdentity(_ launch: Launch) async throws {
+    try await check(launch)
+  }
+
+  static let phonesAfterNow: [Launch] = [
+    Launch("one identity, a phone at now", [.known], [.afterNow(0)], .loads(.known)),
+    Launch(
+      "one identity, a phone a second after now", [.known], [.afterNow(1)],
+      .refused(.clockBehind)),
+    Launch(
+      "one identity, a phone a day after now", [.known], [.afterNow(86400)],
+      .refused(.clockBehind)),
+    Launch(
+      "two identities, a phone a day after now", [.known, .third], [.afterNow(86400)],
+      .refused(.clockBehind)),
+    Launch(
+      "two identities, a phone between them and one a day after now", [.known, .third],
+      [.after(.known, 3600), .afterNow(86400)], .refused(.clockBehind)),
+  ]
+
+  /// A phone paired after now: this Mac's clock is behind, now or when the
+  /// phone paired, so the dates cannot say which identity it knows. The
+  /// launch asks nothing, records nothing and keeps the phones; a phone
+  /// paired at now is no clock error.
+  @Test(arguments: phonesAfterNow)
+  func aPhonePairedAfterNowWaitsAndAsksNothing(_ launch: Launch) async throws {
+    try await check(launch)
+  }
+
+  static let startsAfterNow: [Launch] = [
+    Launch("an identity started at now, no phone", [.startsNow], [], .loads(.startsNow)),
+    Launch(
+      "an identity started a day after now, no phone", [.startsTomorrow], [],
+      .refused(.clockBehind)),
+    Launch(
+      "an identity started a day after now, a phone at now", [.startsTomorrow], [.afterNow(0)],
+      .refused(.clockBehind)),
+    Launch(
+      "an identity started a day after now, a phone after it", [.startsTomorrow],
+      [.after(.startsTomorrow, 3600)], .refused(.clockBehind)),
+    Launch(
+      "beside an older one, no phone", [.known, .startsTomorrow], [], .refused(.clockBehind)),
+    Launch(
+      "beside an older one, a phone between them", [.known, .startsTomorrow],
+      [.after(.known, 3600)], .refused(.clockBehind)),
+    Launch(
+      "beside an older one, a phone before both", [.known, .startsTomorrow],
+      [.after(.known, -3600)], .refused(.clockBehind)),
+  ]
+
+  /// An identity started after now: the same clock error, so the launch
+  /// neither records it nor asks to replace it; one started at now is no
+  /// clock error.
+  @Test(arguments: startsAfterNow)
+  func anIdentityStartedAfterNowWaitsAndAsksNothing(_ launch: Launch) async throws {
+    try await check(launch)
+  }
+
+  /// The wait lasts only until the clock passes those times: on the same
+  /// Mac, a launch a day and an hour later decides by the rule, a load or
+  /// a question.
+  @Test(arguments: [
+    (phonesAfterNow[3], 90000.0, Launch.Outcome.loads(.third)),
+    (startsAfterNow[1], 90000.0, .loads(.startsTomorrow)),
+    (startsAfterNow[2], 90000.0, .refused(.replaced)),
+  ])
+  func onceTheClockPassesThemTheRuleDecides(
+    _ launch: Launch, secondsLater: TimeInterval, later: Launch.Outcome
+  ) async throws {
+    let held = launch.held.map(identity)
+    let mac = try await mac(
+      holding: held.map { ($0, Self.label) }, recorded: nil,
+      pairedAt: try launch.paired.map(date))
+    try await expect(launch.outcome, on: mac, holding: held, at: Self.now, "\(launch)")
+    try await expect(
+      later, on: mac, holding: held, at: Self.now + secondsLater, "\(launch), later")
+  }
+
+  /// A recorded identity loads by its fingerprint, whatever the clock says
+  /// of the phones or of its start: no question and no write.
+  @Test(arguments: [Launch.Held.known, .startsTomorrow])
+  func aRecordedIdentityIgnoresTheClock(_ held: Launch.Held) async throws {
+    let recorded = identity(held)
+    let mac = try await mac(
+      holding: [(recorded, Self.label)], recorded: hex(recorded),
+      pairedAt: [Self.now + 86400])
+    var asked = false
+    let loaded = try await mac.launch(at: Self.now).loadOrPairAgain(commonName: "A") {
+      asked = true
+      return true
+    }
+    #expect(hex(loaded) == hex(recorded) && !asked)
+    #expect(mac.items.writes.isEmpty)
+    #expect(try await mac.store.pairedDevices().count == 1)
+  }
+
   #if canImport(Security)
     /// The product's keychain hands the record on: of two identities under
     /// the label it loads the recorded one, and with nothing recorded it
@@ -454,3 +732,13 @@ import Testing
 }
 
 private func hex(_ identity: HandoverIdentity) -> String { ContentHash.hex(identity.fingerprint) }
+
+/// Every order of `items`.
+private func orders<T>(_ items: [T]) -> [[T]] {
+  guard items.count > 1 else { return [items] }
+  return items.indices.flatMap { index in
+    var rest = items
+    let first = rest.remove(at: index)
+    return orders(rest).map { [first] + $0 }
+  }
+}

@@ -35,7 +35,8 @@ public struct HandoverIdentity: @unchecked Sendable {
     }
 
     /// `secIdentity` with `certificateDER` as its certificate, for a test of
-    /// a certificate that does not parse.
+    /// a certificate that does not parse or of one minted to start at a
+    /// chosen second.
     init(secIdentity: SecIdentity, certificateDER: Data) {
       self.secIdentity = secIdentity
       self.certificateDER = certificateDER

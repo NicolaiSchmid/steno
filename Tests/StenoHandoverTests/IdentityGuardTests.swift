@@ -347,6 +347,73 @@ import Testing
     }
   }
 
+  /// One case of the pairing-time rule: identities that start at `starts`
+  /// and phones paired at `paired`, in seconds after a whole second, and the
+  /// index of the identity every phone knows or the refusal.
+  struct Rule: Sendable, CustomTestStringConvertible {
+    enum Known: Equatable, Sendable {
+      case index(Int)
+      case refused(IdentityUnavailability)
+    }
+    let testDescription: String
+    let starts: [TimeInterval]
+    let paired: [TimeInterval]
+    let known: Known
+
+    init(_ description: String, _ starts: [TimeInterval], _ paired: [TimeInterval], _ known: Known)
+    {
+      testDescription = description
+      self.starts = starts
+      self.paired = paired
+      self.known = known
+    }
+  }
+
+  static let rules: [Rule] = [
+    Rule("no phone: the newest", [0, 1000], [], .index(1)),
+    Rule("a phone between them knows the older", [1000, 0], [500], .index(1)),
+    Rule("a phone at a start counts as after it", [0, 1000], [1000], .index(1)),
+    Rule("a phone a fraction before a start predates it", [0, 1000], [999.9], .index(0)),
+    Rule("a phone before every start", [0, 1000], [-1], .refused(.replaced)),
+    Rule("phones that know different ones", [0, 1000], [500, 1500], .refused(.partlyReplaced)),
+    Rule("starts in one whole second tie", [0.3, 0.8], [], .refused(.replaced)),
+    Rule("a phone after a tie knows neither", [0.3, 0.8], [3600], .refused(.replaced)),
+    Rule("starts a second apart do not tie", [0, 1], [], .index(1)),
+    Rule("a phone between starts a second apart", [0, 1], [0.5], .index(0)),
+    Rule("a tie below a newer start, no phone", [1000, 1000.5, 2000], [], .index(2)),
+    Rule("a tie below a newer start, a phone after it", [1000, 1000.5, 2000], [2500], .index(2)),
+    Rule(
+      "a tie below a newer start, a phone between", [1000, 1000.5, 2000], [1500],
+      .refused(.replaced)),
+    Rule(
+      "a phone between, one after a tie", [0, 1000, 1000.5], [500, 1500],
+      .refused(.partlyReplaced)),
+    Rule(
+      "a phone before all, one after a tie", [0, 1000, 1000.5], [-500, 1500],
+      .refused(.replaced)),
+    Rule("a start counts from its whole second, as in Rust", [1000.9], [1000.2], .index(0)),
+  ]
+
+  /// The pairing-time rule alone (`knownByEveryPhone`), with starts in
+  /// whole seconds: two in one second tie, and a phone whose newest start
+  /// they share knows neither. Rust: the doctest of
+  /// `HandoverIdentity::known_by_every_phone`.
+  @Test(arguments: rules)
+  func thePairingTimeRuleDecidesInWholeSeconds(_ rule: Rule) {
+    let base = Date(timeIntervalSince1970: 1_800_000_000)
+    let starts = rule.starts.map { base + $0 }
+    let paired = rule.paired.map { base + $0 }
+    switch rule.known {
+    case .index(let index):
+      #expect(
+        (try? HandoverIdentityGuard.knownByEveryPhone(starts: starts, paired: paired)) == index)
+    case .refused(let refusal):
+      #expect(throws: refusal) {
+        try HandoverIdentityGuard.knownByEveryPhone(starts: starts, paired: paired)
+      }
+    }
+  }
+
   /// The record of an identity neither test identity is, so Pair Again
   /// over another identity can install `other` in place of `known`.
   static let previous = String(repeating: "ab", count: 32)
