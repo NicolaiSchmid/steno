@@ -17,7 +17,7 @@
 //! the access the user already gave. The system audio test plays a tone,
 //! so it runs only while no recording starts, runs or stops, and a start
 //! stops one under way before it opens a device
-//! ([`CaptureRecorder::test_system_audio`]).
+//! (`CaptureRecorder::test_system_audio`).
 //!
 //! The auto-stop after a call ends is [`crate::auto_stop`]'s policy, fed
 //! by [`CaptureRecorder::microphone_activity`]; its stop is the Stop

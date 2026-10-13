@@ -23,9 +23,8 @@
 //! identifier starts without it.
 //!
 //! The probe plays a tone that a recording would pick up, so it runs only
-//! while the recorder is idle
-//! ([`CaptureRecorder::test_system_audio`](crate::recorder::CaptureRecorder)),
-//! and a start stops a probe under way before it opens a device. Either
+//! while the recorder is idle (`CaptureRecorder::test_system_audio`), and
+//! a start stops a probe under way before it opens a device. Either
 //! way the probe found nothing: the request answers the state as it was
 //! and the flag stays.
 
