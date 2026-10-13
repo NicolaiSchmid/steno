@@ -27,7 +27,7 @@ use steno_core::{AudioRetention, Settings, Store};
 use crate::labels::retention_footnote;
 use crate::services::{
     CodexModel, CodexModelsError, Services, SwiftImportStage, SwiftImportStatus,
-    permission_is_required,
+    permission_is_missing, permission_is_required,
 };
 use crate::settings::llm::{CodexStatus, KeyRead, LlmPreset, LlmSettingsViewModel, url_host};
 use crate::settings::obsidian::ObsidianSettingsViewModel;
@@ -76,6 +76,11 @@ pub struct OnboardingViewModel {
     pub platform: Platform,
     pub steps: Vec<Step>,
     pub requesting: Option<PermissionKind>,
+    /// The permission whose last request was refused, or stopped, for the
+    /// recording (the system audio test, which the host refuses while a
+    /// recording starts, runs or stops); cleared when the recorder is idle
+    /// again, or by the next request.
+    pub waits_for_recording: Option<PermissionKind>,
     pub skipped: BTreeSet<PermissionKind>,
     pub page: OnboardingPage,
     pub setup_states: BTreeMap<OnboardingSetupStepKind, SetupState>,
@@ -117,6 +122,7 @@ impl OnboardingViewModel {
                 })
                 .collect(),
             requesting: None,
+            waits_for_recording: None,
             skipped: BTreeSet::new(),
             page: OnboardingPage::Permissions,
             setup_states: SETUP_STEPS
@@ -134,12 +140,17 @@ impl OnboardingViewModel {
     }
 
     /// Whether the opener shows the window: a required permission is
-    /// missing, or this install has not finished the two pages yet. An
-    /// install with the flag unset whose endpoint and vault are already in
-    /// the settings has nothing left to ask: the flag is written and the
-    /// window stays closed. Swift: `OnboardingViewModel.shouldOpen`. The
-    /// import step opens it too, whatever the flag says, until the
-    /// identity came over (Rust only).
+    /// missing ([`permission_is_missing`]), or this install has not
+    /// finished the two pages yet. A missing permission opens it whatever
+    /// the completed flag says, so after the update from the Swift app,
+    /// whose flag the import copies but whose grants macOS keeps for the
+    /// Swift app alone, onboarding opens on its permissions page (stable
+    /// plan S3). An install with the flag unset whose endpoint and vault
+    /// are already in the settings has nothing left to ask: the flag is
+    /// written and the window stays closed. Swift:
+    /// `OnboardingViewModel.shouldOpen`, where every state but `granted`
+    /// was missing. The import step opens it too, whatever the flag says,
+    /// until the identity came over (Rust only).
     pub fn should_open(store: &Store, services: &Services, platform: Platform) -> bool {
         if import_open(services).is_some() {
             return true;
@@ -147,7 +158,7 @@ impl OnboardingViewModel {
         if PermissionKind::for_platform(platform)
             .iter()
             .filter(|kind| permission_is_required(**kind))
-            .any(|kind| services.permissions.state(*kind) != PermissionState::Granted)
+            .any(|kind| permission_is_missing(platform, services.permissions.state(*kind)))
         {
             return true;
         }
@@ -285,12 +296,15 @@ impl OnboardingViewModel {
             .map_or(PermissionKind::Microphone, |step| step.kind)
     }
 
+    /// No required step is missing on this platform
+    /// ([`permission_is_missing`]): page 1's Continue, and where a
+    /// launch with the permissions in place starts.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.steps
             .iter()
             .filter(|step| step.is_required())
-            .all(|step| step.state == PermissionState::Granted)
+            .all(|step| !permission_is_missing(self.platform, step.state))
     }
 
     /// Every permission step handled: required ones granted, optional ones
@@ -328,6 +342,7 @@ impl OnboardingViewModel {
     /// did the three in one `async` method.
     pub fn begin_request(&mut self, kind: PermissionKind) {
         self.requesting = Some(kind);
+        self.waits_for_recording = None;
     }
 
     pub fn finish_request(&mut self, kind: PermissionKind, state: PermissionState) {
@@ -551,6 +566,7 @@ pub fn snapshot(model: &OnboardingViewModel) -> OnboardingSnapshot {
                 is_required: step.is_required(),
                 is_requesting: model.requesting == Some(step.kind),
                 is_skipped: model.skipped.contains(&step.kind),
+                waits_for_recording: model.waits_for_recording == Some(step.kind),
             })
             .collect(),
         permissions_complete: model.is_complete(),

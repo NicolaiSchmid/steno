@@ -591,6 +591,62 @@ Every package is written in parallel except where a dependency is named:
   - Tests: the opener rule over the four states and three platforms.
     **Nicolai**, in a fresh account: onboarding asks for each permission, and a
     denied system-audio grant shows as missing.
+  - As built (#288; `steno_services::calendar`, `steno_services::permissions`,
+    `steno_macos::calendar`, `steno_audio::capture::permission`):
+    - Calendar: the event is Swift's `CalendarMatch.pick`
+      (`steno_core::pick_event`). Of the local day's timed events, the one
+      under way at the start wins, the one that started last when several
+      are; else the next that starts within fifteen minutes
+      (`CALENDAR_LOOKAHEAD`: 15:00 out counts, 15:01 does not); ties go to the
+      smaller id; all-day events never count. Its title names the meeting with
+      the origin `calendar`, and its attendees, except the calendar's owner,
+      become `them` participants: people only, the email from a `mailto:` URL.
+      Off the Mac there is no calendar.
+    - Timing: the lookup starts on a thread of its own before the devices
+      open, and the start never waits for it. The row takes the answer when it
+      is in; otherwise it starts under the default title and a late answer is
+      handed to the store's rule (`Store::name_recording_after_event`): it
+      names only the meeting that asked, only while it still records, only
+      under its default title, only before any event named it. An answer the
+      rule drops (once the stop is saved, after a rename) is logged at debug,
+      without the event. A calendar that has not answered the previous start is not asked
+      again, so a hung calendar holds one thread and never a start. No log
+      line carries a title or a name.
+    - Prompt: the lookup reads EventKit only with full access, so neither a
+      launch nor a start ever prompts; the prompt is the calendar row's Allow
+      in onboarding and Settings > General, as in the Swift app.
+    - Permissions: three bridge states from four TCC statuses. The shell
+      answers the microphone and the calendar from TCC (not determined
+      `unknown`, restricted and denied `denied`, authorized `granted`; the
+      calendar's write-only access `denied`), and `unknown` for system audio
+      and the local network. On the Mac the services answer system audio from
+      the probe, which runs the tap while `afplay` plays a tone for up to
+      30 s, and remember a heard tone as `steno.systemAudioGranted` in
+      `preferences.json` (never copied from the Swift app; a probe that hears
+      nothing answers `denied` and forgets it).
+    - The probe and a recording: the tone would be in the recording, so the
+      probe runs only while no recording starts, runs or stops. A request
+      then plays nothing, and the row says "Stop the recording first. The
+      test plays a short tone, and the recording would pick it up." A start
+      while the probe runs stops it and opens its devices only once the tone
+      has stopped (at most 5 s for a probe stuck inside the system); the
+      stopped probe stores nothing. Rust only: Swift ran the probe whatever
+      the recorder did.
+    - Opener: `permission_is_missing` counts `denied` on every platform and
+      `unknown` on the Mac only. A missing grant opens onboarding on its
+      permissions page (after the import step when it is pending) whatever
+      `steno.onboardingCompleted` says, and holds its Continue. The tests run
+      three platforms by three bridge states by the flag.
+    - Off the Mac a permission row in `unknown` says that the system decides,
+      without claiming a grant, instead of offering an Allow that could do
+      nothing: "Your system may ask when you start a recording." with the
+      badge "Not checked yet" on Linux; "Windows decides this in its privacy
+      settings. Steno can't check it before you record." with Open Windows
+      Settings on Windows.
+    - Swift parity limits, kept: a recording at 23:55 does not see an event
+      at 00:05 the next day, because the read is the local day only; a probe
+      grant the user later revokes in System Settings stays `granted` until
+      the next probe, because only a probe clears the flag.
 - **S4 Update schedule and QR** (`feat/rust-update-schedule`).
   - The host's `Updater` over `updater.rs`:
     - a daily automatic check, as `SUScheduledCheckInterval` 86400 did;

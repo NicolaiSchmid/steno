@@ -1,6 +1,6 @@
 [package]
 name = "steno-macos"
-description = "Safe wrappers over the Mac frameworks that have no safe binding: the keychain's PKCS#12 export and a volume's free space for important use"
+description = "Safe wrappers over the Mac frameworks that have no safe binding: EventKit's calendar access and events, the keychain's PKCS#12 export and a volume's free space for important use"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,7 +17,10 @@ testing = []
 # Every item is macOS only; the other platforms build an empty crate.
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation.workspace = true
-objc2-foundation.workspace = true
+objc2-foundation = { workspace = true, features = ["NSDate"] }
+objc2-event-kit.workspace = true
+objc2.workspace = true
+block2.workspace = true
 security-framework.workspace = true
 security-framework-sys.workspace = true
 thiserror.workspace = true

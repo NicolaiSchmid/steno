@@ -2,10 +2,12 @@
 //! row encodings of `Sources/StenoCore/Storage/Records.swift`, plus the
 //! value types the pipeline boundaries exchange (`speech`, `stage_io`,
 //! `template`; the speech crate's intermediates come along from
-//! `Sources/StenoSpeech`).
+//! `Sources/StenoSpeech`), and the calendar events a recording is named
+//! after (`calendar`).
 
 mod audio;
 mod audio_buffer;
+mod calendar;
 mod delivery;
 mod derived_uuid;
 mod events;
@@ -28,6 +30,7 @@ pub use audio::{
     results_need_the_audio,
 };
 pub use audio_buffer::{AudioBuffer16k, AudioDamage};
+pub use calendar::{CALENDAR_LOOKAHEAD, CalendarAttendee, CalendarEvent, pick_event};
 pub use delivery::{
     DeliveredFile, Delivery, DeliveryReceipt, DeliveryStatus, DeliveryStatusKind, FileOwnership,
 };

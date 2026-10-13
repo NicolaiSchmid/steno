@@ -163,6 +163,7 @@ export const scenarios = [
 	"phone-waiting",
 	// Onboarding
 	"onboarding-unknown",
+	"onboarding-waits-for-recording",
 	"onboarding-denied",
 	"onboarding-granted",
 	"onboarding-setup",
@@ -405,7 +406,9 @@ export function applyScenario(
 
 /**
  * The onboarding states: `onboarding-unknown` (a fresh install, nothing
- * asked yet), `onboarding-denied` (the microphone refused),
+ * asked yet), `onboarding-waits-for-recording` (that, the system audio
+ * test refused while Steno records; Rust host only), `onboarding-denied`
+ * (the microphone refused),
  * `onboarding-granted` (every permission granted, Continue instead of Later),
  * `onboarding-setup` (page 2 from `onboarding.setup`: Summaries saved, a
  * vault chosen but refused), `onboarding-setup-open` (page 2 with both rows
@@ -459,6 +462,17 @@ function applyOnboardingScenario(
 		result.onboarding = {
 			...onboarding,
 			permissions: untouched,
+		} satisfies OnboardingSnapshot;
+	}
+
+	if (scenario === "onboarding-waits-for-recording") {
+		result.onboarding = {
+			...onboarding,
+			permissions: untouched.map((step) =>
+				step.kind === "systemAudio"
+					? { ...step, waitsForRecording: true }
+					: step,
+			),
 		} satisfies OnboardingSnapshot;
 	}
 

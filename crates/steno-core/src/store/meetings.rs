@@ -89,6 +89,21 @@ pub(super) fn fetch(connection: &Connection, id: Uuid) -> Result<Option<Meeting>
         .optional()?)
 }
 
+/// Saves `participants` for the meeting `meeting_id`, each re-pointed at
+/// it.
+fn save_participants(
+    connection: &Connection,
+    meeting_id: Uuid,
+    participants: &[Participant],
+) -> Result<()> {
+    for participant in participants {
+        let mut participant = participant.clone();
+        participant.meeting_id = meeting_id;
+        people::save_participant(connection, &participant)?;
+    }
+    Ok(())
+}
+
 /// Whether a row has the meeting id `id`.
 fn has_row(connection: &Connection, id: Uuid) -> Result<bool> {
     Ok(connection
@@ -235,12 +250,51 @@ impl Store {
     ) -> Result<()> {
         self.write(|transaction| {
             save(transaction, meeting)?;
-            for participant in participants {
-                let mut participant = participant.clone();
-                participant.meeting_id = meeting.id;
-                people::save_participant(transaction, &participant)?;
+            save_participants(transaction, meeting.id, participants)
+        })
+    }
+
+    /// Names a recording after its calendar event once the event is known,
+    /// which may be after the recording started. This is the one rule for
+    /// a late calendar answer; it names the row `id` only:
+    ///
+    /// - while that row still records (state `recording`, not stopped);
+    /// - under its default title (the user has not renamed it);
+    /// - before any event named it.
+    ///
+    /// Then, in one transaction, the row takes `calendar_event_id`, and
+    /// `title` with the origin `calendar` when there is one, and
+    /// `participants` are saved for it. Returns whether it wrote; a row
+    /// the rule leaves alone answers `false`, and one that is gone is
+    /// [`StoreError::MeetingNotFound`]. The caller passes the id of the
+    /// recording that asked, never another. Rust only: Swift named the row
+    /// when it wrote it (`LocalRecordingIntake.begin`), after waiting for
+    /// the calendar.
+    pub fn name_recording_after_event(
+        &self,
+        id: Uuid,
+        title: Option<&str>,
+        calendar_event_id: &str,
+        participants: &[Participant],
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        self.write(|transaction| {
+            let mut stored = current(transaction, id)?;
+            if stored.state != MeetingState::Recording
+                || stored.title_origin != TitleOrigin::Default
+                || stored.calendar_event_id.is_some()
+            {
+                return Ok(false);
             }
-            Ok(())
+            stored.calendar_event_id = Some(calendar_event_id.to_owned());
+            if let Some(title) = title {
+                title.clone_into(&mut stored.title);
+                stored.title_origin = TitleOrigin::Calendar;
+            }
+            stored.updated_at = now;
+            save(transaction, &stored)?;
+            save_participants(transaction, id, participants)?;
+            Ok(true)
         })
     }
 

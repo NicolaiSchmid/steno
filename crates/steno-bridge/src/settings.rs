@@ -148,6 +148,13 @@ pub struct RecordingPermission {
     pub kind: PermissionKind,
     pub state: PermissionState,
     pub is_requesting: bool,
+    /// The system audio test was refused, or stopped, because a recording
+    /// is starting, running or stopping: its tone would be in the
+    /// recording. Cleared once the recorder is idle again. Left out when
+    /// false. Rust only: the Swift app ran the test whatever the recorder
+    /// did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waits_for_recording: bool,
 }
 
 string_enum! {

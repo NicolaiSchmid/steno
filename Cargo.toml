@@ -140,6 +140,9 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware", "HostTime", "objc2", "objc2-core-audio-types", "objc2-foundation"] }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFString"] }
+# EventKit: the calendar event that names a recording and the calendar
+# permission (`steno-macos`' `calendar`, stable plan S3).
+objc2-event-kit = { version = "0.3", default-features = false, features = ["std", "block2", "EKCalendar", "EKCalendarItem", "EKEvent", "EKEventStore", "EKObject", "EKParticipant", "EKTypes"] }
 # Without `unsafe`: on macOS the plain `fsync` the recording writer falls
 # back to when a file system refuses `F_FULLFSYNC` (a WebDAV share answers
 # ENOTTY), and on Linux and macOS the `statfs` the pipeline reads a folder's

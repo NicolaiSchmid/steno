@@ -41,7 +41,8 @@ with its details, a login item awaiting approval, an update available),
 `codex` (from `settings.summaries.codex`), `export-on`, `pairing` (from
 `settings.iphone.pairing`), `phone-unavailable` and `phone-waiting` (from
 `settings.iphone.waiting`: Try again and Pair again). For onboarding:
-`onboarding-unknown` (a fresh install), `onboarding-denied`,
+`onboarding-unknown` (a fresh install), `onboarding-waits-for-recording`
+(the system audio test refused while Steno records), `onboarding-denied`,
 `onboarding-granted` (Continue instead of Later), `onboarding-setup` (page 2 from
 `onboarding.setup`: Summaries saved, a vault chosen but refused),
 `onboarding-setup-open`, `onboarding-codex` (the consent card),

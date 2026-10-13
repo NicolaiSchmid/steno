@@ -129,6 +129,138 @@ fn state_updates_touch_only_their_columns() {
     ));
 }
 
+/// A calendar event that arrives after the recording started names it,
+/// with its attendees, only while the row still records under its default
+/// title and names no event; anything the user or a stage did first wins.
+#[test]
+fn a_late_calendar_event_names_only_an_unnamed_recording() {
+    let store = Store::in_memory().unwrap();
+    let now = date("2026-09-30T09:00:00.000Z");
+    let recording = |id: &str| {
+        let mut meeting = common::meeting();
+        meeting.id = uuid(id);
+        meeting.state = MeetingState::Recording;
+        meeting.summary = None;
+        store.save_meeting(&meeting).unwrap();
+        meeting
+    };
+    let attendee = |meeting: &Meeting| Participant {
+        id: derived_uuid(meeting.id, "attendee-0"),
+        meeting_id: uuid::Uuid::nil(),
+        person_id: None,
+        display_name: "Ada".to_owned(),
+        role: ParticipantRole::Them,
+        email: Some("ada@example.com".to_owned()),
+    };
+
+    let named = recording("11111111-1111-4111-8111-111111111111");
+    let participants = [attendee(&named)];
+    assert!(
+        store
+            .name_recording_after_event(named.id, Some("Roadmap"), "event-1", &participants, now)
+            .unwrap()
+    );
+    let read = store.meeting(named.id).unwrap().unwrap();
+    assert_eq!(
+        (
+            read.title.as_str(),
+            read.title_origin,
+            read.calendar_event_id.as_deref()
+        ),
+        ("Roadmap", TitleOrigin::Calendar, Some("event-1"))
+    );
+    assert_eq!(read.updated_at, now);
+    assert_eq!(read.scratchpad, named.scratchpad);
+    let stored = store.participants(named.id).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].meeting_id, named.id);
+    assert_eq!(stored[0].email.as_deref(), Some("ada@example.com"));
+    // A second event finds the row named and changes nothing.
+    assert!(
+        !store
+            .name_recording_after_event(named.id, Some("Other"), "event-2", &[], now)
+            .unwrap()
+    );
+    assert_eq!(store.meeting(named.id).unwrap().unwrap().title, "Roadmap");
+
+    // An event without a title records the event and keeps the default.
+    let untitled = recording("22222222-2222-4222-8222-222222222222");
+    assert!(
+        store
+            .name_recording_after_event(untitled.id, None, "event-3", &[], now)
+            .unwrap()
+    );
+    let read = store.meeting(untitled.id).unwrap().unwrap();
+    assert_eq!(
+        (
+            read.title.as_str(),
+            read.title_origin,
+            read.calendar_event_id.as_deref()
+        ),
+        (
+            untitled.title.as_str(),
+            TitleOrigin::Default,
+            Some("event-3")
+        )
+    );
+
+    // Renamed, stopped: left alone, no participants written.
+    let renamed = recording("33333333-3333-4333-8333-333333333333");
+    store.rename(renamed.id, "Typed", now).unwrap();
+    let mut stopped = recording("44444444-4444-4444-8444-444444444444");
+    stopped.state = MeetingState::Queued;
+    store.save_meeting(&stopped).unwrap();
+    for meeting in [&renamed, &stopped] {
+        assert!(
+            !store
+                .name_recording_after_event(
+                    meeting.id,
+                    Some("Roadmap"),
+                    "event-4",
+                    &[attendee(meeting)],
+                    now
+                )
+                .unwrap()
+        );
+        let read = store.meeting(meeting.id).unwrap().unwrap();
+        assert_ne!(read.title, "Roadmap");
+        assert_eq!(read.calendar_event_id, None);
+        assert_eq!(store.participants(meeting.id).unwrap(), Vec::new());
+    }
+
+    let missing = uuid("00000000-0000-4000-8000-000000000000");
+    assert!(matches!(
+        store.name_recording_after_event(missing, Some("Roadmap"), "event-5", &[], now),
+        Err(StoreError::MeetingNotFound(id)) if id == missing
+    ));
+}
+
+/// A row an untitled event named keeps its event: a second answer finds
+/// the event id set and changes nothing, even under the default title.
+#[test]
+fn an_event_id_already_set_blocks_a_second_answer() {
+    let store = Store::in_memory().unwrap();
+    let now = date("2026-09-30T09:00:00.000Z");
+    let mut meeting = common::meeting();
+    meeting.id = uuid("55555555-5555-4555-8555-555555555555");
+    meeting.state = MeetingState::Recording;
+    meeting.summary = None;
+    store.save_meeting(&meeting).unwrap();
+    assert!(
+        store
+            .name_recording_after_event(meeting.id, None, "event-3", &[], now)
+            .unwrap()
+    );
+    assert!(
+        !store
+            .name_recording_after_event(meeting.id, Some("Roadmap"), "event-6", &[], now)
+            .unwrap()
+    );
+    let read = store.meeting(meeting.id).unwrap().unwrap();
+    assert_eq!(read.calendar_event_id.as_deref(), Some("event-3"));
+    assert_eq!(read.title_origin, TitleOrigin::Default);
+}
+
 /// Only the rows named, and only while they still record: a recording
 /// left alone, or one started since, keeps recording.
 #[test]

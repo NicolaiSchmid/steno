@@ -82,6 +82,7 @@ export function PermissionsPage({
 						requestDisabled={busy}
 						skipped={step.isSkipped}
 						state={step.state}
+						waitsForRecording={step.waitsForRecording}
 					/>
 				))}
 			</FormCard>

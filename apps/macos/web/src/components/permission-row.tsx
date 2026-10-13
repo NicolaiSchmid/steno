@@ -76,7 +76,16 @@ export interface PermissionRowProps {
 	 * every Allow waits while one runs (the test recording takes 30 s).
 	 */
 	requestDisabled?: boolean;
+	/**
+	 * The host did not run the system audio test, or stopped it, because a
+	 * recording is starting, running or stopping: the row says why.
+	 */
+	waitsForRecording?: boolean | undefined;
 }
+
+/** Why the system audio test did not run while Steno records. */
+export const TONE_TEST_WAITS =
+	"Stop the recording first. The test plays a short tone, and the recording would pick it up.";
 
 /**
  * One permission: its state glyph, title, the explanation while it is not
@@ -96,6 +105,7 @@ export function PermissionRow({
 	acknowledgeOnly = false,
 	prominent = false,
 	requestDisabled = false,
+	waitsForRecording = false,
 }: PermissionRowProps) {
 	const { words } = usePlatform();
 	const copy = permissionCopy(kind, words);
@@ -103,10 +113,31 @@ export function PermissionRow({
 	if (state !== "granted" && !skipped) {
 		description = copy.explanation;
 	}
+	// Off the Mac the system says nothing before a recording opens the
+	// device, and Steno has no prompt to raise.
+	const untilRecording =
+		state === "unknown" && !acknowledgeOnly
+			? words.unknownUntilRecording
+			: undefined;
+	if (untilRecording && description) {
+		description = `${description} ${untilRecording}`;
+	}
 	if (isRequesting && kind === "systemAudio") {
 		description = "Listening for the test tone, up to 30 seconds…";
+	} else if (waitsForRecording && state !== "granted") {
+		description = TONE_TEST_WAITS;
 	}
 	const action = prominent && !optional ? "primary" : "outline";
+	const openSettings = (variant: typeof action) => (
+		<Button
+			data-testid={`permission-${kind}-open`}
+			onClick={onOpenSystemSettings}
+			size="sm"
+			variant={variant}
+		>
+			Open {words.systemSettings}
+		</Button>
+	);
 
 	let control: ReactNode;
 	if (state === "granted") {
@@ -117,14 +148,7 @@ export function PermissionRow({
 		control = (
 			<>
 				{words.opensSystemSettings ? (
-					<Button
-						data-testid={`permission-${kind}-open`}
-						onClick={onOpenSystemSettings}
-						size="sm"
-						variant={action}
-					>
-						Open {words.systemSettings}
-					</Button>
+					openSettings(action)
 				) : (
 					<Badge variant="warning">Not allowed</Badge>
 				)}
@@ -139,6 +163,14 @@ export function PermissionRow({
 					</Button>
 				) : null}
 			</>
+		);
+	} else if (untilRecording) {
+		control = words.opensSystemSettings ? (
+			openSettings("outline")
+		) : (
+			<Badge data-testid={`permission-${kind}-at-recording`}>
+				Not checked yet
+			</Badge>
 		);
 	} else if (acknowledgeOnly && onSkip) {
 		control = (

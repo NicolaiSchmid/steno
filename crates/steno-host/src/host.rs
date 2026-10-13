@@ -83,12 +83,12 @@ use steno_bridge::{
     AppPhone, AssetIdParams, BridgeError, BridgeEvent, BridgeHost, BridgeTopic, BridgeWindow,
     ChosenPathReply, ConfirmDestructiveParams, ConfirmReply, DeviceIdParams, EventSink,
     ExportUpdateParams, MeetingIdParams, OpenUrlParams, Outcome, PageLayoutParams, PermissionKind,
-    PermissionKindParams, Platform, RecordingState, SaveNotesParams, SelectSpeakerParams,
-    SetAutomaticUpdatesParams, SetBoolParams, SetFilterParams, SetQueryParams, SetRetentionParams,
-    SetStringParams, SetTabParams, SetTagFilterParams, SetTagsParams, SetTemplateParams,
-    SettingsSection, SetupStepParams, SpeakerIdParams, SpeakerOption, SpeakerOptionKind,
-    SpeakerOptionsParams, SpeakerOptionsReply, StartRecordingParams, SummariesUpdateParams,
-    WindowParams,
+    PermissionKindParams, PermissionState, Platform, RecordingState, SaveNotesParams,
+    SelectSpeakerParams, SetAutomaticUpdatesParams, SetBoolParams, SetFilterParams, SetQueryParams,
+    SetRetentionParams, SetStringParams, SetTabParams, SetTagFilterParams, SetTagsParams,
+    SetTemplateParams, SettingsSection, SetupStepParams, SpeakerIdParams, SpeakerOption,
+    SpeakerOptionKind, SpeakerOptionsParams, SpeakerOptionsReply, StartRecordingParams,
+    SummariesUpdateParams, WindowParams,
 };
 use steno_core::paths::file_url_path;
 use steno_core::protocols::SecretKey;
@@ -856,12 +856,23 @@ impl Host {
     /// show it, since the web app tells a live row from one left
     /// `recording` by the recorder's state. Rust only: the Swift app's list
     /// observes the meeting table (`observeMeetings`).
+    ///
+    /// Once the recorder is idle, the system audio rows no longer say the
+    /// test was refused for the recording (`Host::waits_for_recording`).
     pub fn recorder_changed(&self) {
         let status = self.shared.services.recorder.status();
         let seen = Some((status.state, status.meeting_id));
         let moved = {
             let mut inner = self.lock();
             inner.publisher.schedule(BridgeTopic::Recording);
+            if status.state == RecordingState::Idle {
+                if inner.audio.waits_for_recording.take().is_some() {
+                    inner.publisher.schedule(BridgeTopic::SettingsRecording);
+                }
+                if inner.onboarding.waits_for_recording.take().is_some() {
+                    inner.publisher.schedule(BridgeTopic::Onboarding);
+                }
+            }
             std::mem::replace(&mut inner.recorder_seen, seen) != seen
         };
         if moved {
@@ -1286,6 +1297,26 @@ impl Host {
             }
         }
         self.publish();
+    }
+
+    /// Whether a request for `kind` is refused for the recording: the
+    /// system audio test plays a tone, and a recording that is starting,
+    /// running or stopping would pick it up. Asked before the request, so the row
+    /// never shows Asking for a test that cannot run. The services keep
+    /// the two apart as well, for a start that comes while the test runs
+    /// (`steno_services::permissions`).
+    fn waits_for_recording(&self, kind: PermissionKind) -> bool {
+        kind == PermissionKind::SystemAudio
+            && self.shared.services.recorder.status().state != RecordingState::Idle
+    }
+
+    /// Requests `kind`, and says whether the request waited for the
+    /// recording after all: a start during the system audio test stopped
+    /// it, so it found nothing and the state is still `unknown`.
+    fn request_unless_recording(&self, kind: PermissionKind) -> (PermissionState, bool) {
+        let state = self.shared.services.permissions.request(kind);
+        let waited = state == PermissionState::Unknown && self.waits_for_recording(kind);
+        (state, waited)
     }
 
     /// Marks a view model busy under the lock and publishes, runs `work`
@@ -2152,11 +2183,23 @@ impl BridgeHost for Host {
     }
 
     fn settings_recording_request_permission(&self, params: PermissionKindParams) -> Outcome<()> {
+        let kind = params.kind;
+        if self.waits_for_recording(kind) {
+            self.settings_command(BridgeTopic::SettingsRecording, |inner| {
+                inner.audio.waits_for_recording = Some(kind);
+            });
+            return Ok(());
+        }
         self.outside_lock(
             BridgeTopic::SettingsRecording,
-            |inner| inner.audio.begin_request(params.kind).then_some(()),
-            |()| self.shared.services.permissions.request(params.kind),
-            |inner, state| inner.audio.finish_request(params.kind, state),
+            |inner| inner.audio.begin_request(kind).then_some(()),
+            |()| self.request_unless_recording(kind),
+            |inner, (state, waited)| {
+                inner.audio.finish_request(kind, state);
+                if waited {
+                    inner.audio.waits_for_recording = Some(kind);
+                }
+            },
         );
         Ok(())
     }
@@ -2429,12 +2472,20 @@ impl BridgeHost for Host {
     // onboarding
 
     fn onboarding_request(&self, params: PermissionKindParams) -> Outcome<()> {
+        let kind = params.kind;
+        if self.waits_for_recording(kind) {
+            self.onboarding_command(|inner| inner.onboarding.waits_for_recording = Some(kind));
+            return Ok(());
+        }
         // Three steps so the page sees `isRequesting` while the prompt is
         // up, as it did with Swift's awaited request.
-        self.onboarding_command(|inner| inner.onboarding.begin_request(params.kind));
-        let state = self.shared.services.permissions.request(params.kind);
+        self.onboarding_command(|inner| inner.onboarding.begin_request(kind));
+        let (state, waited) = self.request_unless_recording(kind);
         self.onboarding_command(|inner| {
-            inner.onboarding.finish_request(params.kind, state);
+            inner.onboarding.finish_request(kind, state);
+            if waited {
+                inner.onboarding.waits_for_recording = Some(kind);
+            }
             self.advance_if_handled(inner);
         });
         Ok(())
