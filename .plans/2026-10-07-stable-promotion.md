@@ -311,9 +311,9 @@ why and the alternative.
   the audio processing is stable and ideally the final version before we
   cutover to the tauri version."
   - **Reading:** no change to the audio and speech path is planned after the
-    cutover. A1 to A10 and A12 to A17 land before `0.11.0-rc.1`, so the rehearsals run on the
-    final pipeline. A fix found during the candidates becomes a new candidate
-    and restarts the stability count (G2).
+    cutover. A1 to A10 and A12 to A17 land before `0.11.0-rc.1`, so the
+    rehearsals run on the final pipeline. A fix found during the candidates
+    becomes a new candidate and restarts the stability count (G2).
   - **The remaining differences, each made final.** Confirmed 2026-10-07.
 
     | Difference | Choice | Why |
