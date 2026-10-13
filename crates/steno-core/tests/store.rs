@@ -235,6 +235,32 @@ fn a_late_calendar_event_names_only_an_unnamed_recording() {
     ));
 }
 
+/// A row an untitled event named keeps its event: a second answer finds
+/// the event id set and changes nothing, even under the default title.
+#[test]
+fn an_event_id_already_set_blocks_a_second_answer() {
+    let store = Store::in_memory().unwrap();
+    let now = date("2026-09-30T09:00:00.000Z");
+    let mut meeting = common::meeting();
+    meeting.id = uuid("55555555-5555-4555-8555-555555555555");
+    meeting.state = MeetingState::Recording;
+    meeting.summary = None;
+    store.save_meeting(&meeting).unwrap();
+    assert!(
+        store
+            .name_recording_after_event(meeting.id, None, "event-3", &[], now)
+            .unwrap()
+    );
+    assert!(
+        !store
+            .name_recording_after_event(meeting.id, Some("Roadmap"), "event-6", &[], now)
+            .unwrap()
+    );
+    let read = store.meeting(meeting.id).unwrap().unwrap();
+    assert_eq!(read.calendar_event_id.as_deref(), Some("event-3"));
+    assert_eq!(read.title_origin, TitleOrigin::Default);
+}
+
 /// Only the rows named, and only while they still record: a recording
 /// left alone, or one started since, keeps recording.
 #[test]

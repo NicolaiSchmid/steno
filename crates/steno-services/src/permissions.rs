@@ -23,7 +23,7 @@
 //! identifier starts without it.
 //!
 //! The probe plays a tone that a recording would pick up, so it runs only
-//! while the recorder is idle (`CaptureRecorder::test_system_audio`), and
+//! while the recorder is idle (`CaptureRecorder::run_tone_test`), and
 //! a start stops a probe under way before it opens a device. Either
 //! way the probe found nothing: the request answers the state as it was
 //! and the flag stays.
@@ -97,7 +97,7 @@ impl SystemPermissions {
     /// The probe's answer, or `None` when the recorder refused it.
     fn probe(&self) -> Option<ProbeAnswer> {
         match self.recorder.get().and_then(Weak::upgrade) {
-            Some(recorder) => recorder.test_system_audio(|cancel| (self.probe)(cancel)),
+            Some(recorder) => recorder.run_tone_test(|cancel| (self.probe)(cancel)),
             None => Some((self.probe)(&Cancel::new())),
         }
     }

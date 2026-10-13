@@ -17,7 +17,7 @@
 //! the access the user already gave. The system audio test plays a tone,
 //! so it runs only while no recording starts, runs or stops, and a start
 //! stops one under way before it opens a device
-//! (`CaptureRecorder::test_system_audio`).
+//! (`CaptureRecorder::run_tone_test`).
 //!
 //! The auto-stop after a call ends is [`crate::auto_stop`]'s policy, fed
 //! by [`CaptureRecorder::microphone_activity`]; its stop is the Stop
@@ -688,26 +688,29 @@ struct Inner {
     launch_note: Option<String>,
     /// The auto-stop after a call ends, for the recording in progress.
     calls: CallWatch,
-    /// The system audio tests running ([`CaptureRecorder::test_system_audio`]).
+    /// The system audio tests running ([`CaptureRecorder::run_tone_test`]).
     tone_tests: ToneTests,
 }
 
 /// The system audio tests that play their tone now, and the cancel a
-/// start raises to stop them ([`CaptureRecorder::test_system_audio`]).
+/// start raises to stop them ([`CaptureRecorder::run_tone_test`]).
 struct ToneTests {
     running: usize,
     /// Shared by every test running; a fresh one for the first test after
     /// none ran.
     cancel: steno_audio::clock::Cancel,
-    /// How long a start waits for the stopped tests to end; a test
-    /// shortens it.
+    /// How long a start waits for the stopped tests to end; the
+    /// recorder's own tests set it.
     patience: Duration,
 }
 
-/// How long a start waits for a system audio test it stopped to end: the
-/// test looks at its cancel every 100 ms, then stops its player and its
-/// tap, so this is a bound for a test stuck inside the system, after which
-/// the recording starts all the same.
+/// How long a start waits for a system audio test it stopped to end,
+/// after which the recording starts all the same. The test looks at its
+/// cancel every 100 ms, never plays its tone again once the cancel is
+/// raised, and kills its player before it stops its tap
+/// (`steno_audio::capture::permission`), so the tone has ended before
+/// this bound matters: it covers a tap stuck inside the system, however
+/// long the tone.
 const TONE_TEST_PATIENCE: Duration = Duration::from_secs(5);
 
 /// [`CaptureRecorder`]'s [`StartHold`]: the last one dropped clears the
@@ -1081,7 +1084,7 @@ impl CaptureRecorder {
     /// start while it runs raises the `Cancel` it gets and waits for it to
     /// return before it opens a device ([`Self::stop_tone_tests`]). Rust
     /// only: Swift ran its test whatever the recorder did.
-    pub(crate) fn test_system_audio<T>(
+    pub(crate) fn run_tone_test<T>(
         &self,
         test: impl FnOnce(&steno_audio::clock::Cancel) -> T,
     ) -> Option<T> {
@@ -1098,7 +1101,9 @@ impl CaptureRecorder {
         let cancel = {
             let mut inner = self.inner();
             if inner.quitting || inner.status.state != RecordingState::Idle {
-                tracing::debug!("the system audio test waits for the recording to end");
+                tracing::debug!(
+                    "the system audio test is refused while a recording starts, runs or stops"
+                );
                 return None;
             }
             let tests = &mut inner.tone_tests;
@@ -5770,5 +5775,133 @@ mod tests {
         release.send(()).unwrap();
         request.join().unwrap();
         stop(&harness.recorder);
+    }
+
+    /// A start waits for the stopped tone test to return before it opens a
+    /// device, however slowly the test stops, within the patience. The
+    /// test, once cancelled, keeps its tone for a second unless a device
+    /// opens first: a start that does not wait, or waits for no time,
+    /// opens one meanwhile.
+    fn waits_for_a_slow_stopping_tone_test(patience: Option<Duration>) {
+        let harness = harness(&[]);
+        if let Some(patience) = patience {
+            harness.recorder.inner().tone_tests.patience = patience;
+        }
+        let (began, beginning) = std::sync::mpsc::channel::<()>();
+        let (opened, open) = std::sync::mpsc::channel::<()>();
+        let (began, open) = (Mutex::new(began), Mutex::new(open));
+        let (permissions, log, _) = tone_tested(&harness, move |cancel, log| {
+            began.lock().unwrap().send(()).unwrap();
+            if cancel.sleep(HANG_GUARD) {
+                return ProbeAnswer::Silent;
+            }
+            // Slow to stop: a device that opens now opens over the tone.
+            let _ = open.lock().unwrap().recv_timeout(Duration::from_secs(1));
+            log.note("the tone stopped");
+            ProbeAnswer::Stopped
+        });
+        let capture = synthetic_capture();
+        let noted = log.clone();
+        let opened = Mutex::new(opened);
+        harness.capture_with(Arc::new(move |configuration| {
+            noted.note("a device opened");
+            let _ = opened.lock().unwrap().send(());
+            capture(configuration)
+        }));
+        let requesting = permissions.clone();
+        let request = std::thread::spawn(move || requesting.request(PermissionKind::SystemAudio));
+        beginning.recv_timeout(PATIENCE).unwrap();
+        start(&harness.recorder);
+        assert_eq!(log.events(), ["the tone stopped", "a device opened"]);
+        request.join().unwrap();
+        stop(&harness.recorder);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_waits_for_a_slow_stopping_tone_test() {
+        waits_for_a_slow_stopping_tone_test(Some(HANG_GUARD));
+    }
+
+    /// The same under [`TONE_TEST_PATIENCE`], the product's bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_waits_for_a_slow_stopping_tone_test_within_the_patience() {
+        waits_for_a_slow_stopping_tone_test(None);
+    }
+
+    /// A request while the recording stops plays nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_tone_test_never_plays_while_a_recording_stops() {
+        let harness = harness(&[]);
+        let (permissions, log, _preferences) = tone_tested(&harness, |_, _| ProbeAnswer::Heard);
+        start(&harness.recorder);
+        let (reached, seen) = std::sync::mpsc::channel::<()>();
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        let (reached, gate) = (Mutex::new(reached), Mutex::new(gate));
+        let watched = Arc::downgrade(&harness.recorder);
+        harness.recorder.on_change(Arc::new(move || {
+            if watched
+                .upgrade()
+                .is_some_and(|recorder| recorder.status().state == RecordingState::Stopping)
+            {
+                let _ = reached.lock().unwrap().send(());
+                let _ = gate.lock().unwrap().recv_timeout(HANG_GUARD);
+            }
+        }));
+        let stopper = harness.recorder.clone();
+        let stopping = std::thread::spawn(move || stopper.stop());
+        seen.recv_timeout(HANG_GUARD).expect("the stop began");
+        assert_eq!(harness.recorder.status().state, RecordingState::Stopping);
+        assert_eq!(
+            permissions.request(PermissionKind::SystemAudio),
+            steno_bridge::PermissionState::Unknown
+        );
+        assert_eq!(log.runs.load(Ordering::SeqCst), 0, "no tone while stopping");
+        drop(go);
+        stopping.join().unwrap();
+    }
+
+    /// A system audio test after one a start stopped runs again (the
+    /// cancel is fresh), and one asked for while quitting never runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_test_after_a_stopped_one_runs_again_and_none_while_quitting() {
+        let harness = harness(&[]);
+        let (began, beginning) = std::sync::mpsc::channel::<()>();
+        let began = Mutex::new(began);
+        let calls = AtomicUsize::new(0);
+        let (permissions, log, _preferences) = tone_tested(&harness, move |cancel, _| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                began.lock().unwrap().send(()).unwrap();
+                if cancel.sleep(HANG_GUARD) {
+                    return ProbeAnswer::Silent;
+                }
+                return ProbeAnswer::Stopped;
+            }
+            if cancel.is_cancelled() {
+                ProbeAnswer::Stopped
+            } else {
+                ProbeAnswer::Heard
+            }
+        });
+        let requesting = permissions.clone();
+        let request = std::thread::spawn(move || requesting.request(PermissionKind::SystemAudio));
+        beginning.recv_timeout(PATIENCE).unwrap();
+        start(&harness.recorder);
+        assert_eq!(
+            request.join().unwrap(),
+            steno_bridge::PermissionState::Unknown
+        );
+        stop(&harness.recorder);
+        assert_eq!(
+            permissions.request(PermissionKind::SystemAudio),
+            steno_bridge::PermissionState::Granted,
+            "the next test runs with a fresh cancel"
+        );
+        assert_eq!(log.runs.load(Ordering::SeqCst), 2);
+        quit(&harness.recorder);
+        assert_eq!(
+            permissions.request(PermissionKind::SystemAudio),
+            steno_bridge::PermissionState::Granted
+        );
+        assert_eq!(log.runs.load(Ordering::SeqCst), 2, "no test while quitting");
     }
 }
