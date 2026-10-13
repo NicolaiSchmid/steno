@@ -503,6 +503,20 @@ mod tests {
         assert_eq!(host.checked(), [true, false]);
     }
 
+    /// A Launch at login whose switch the system refuses: the host still
+    /// hears of it, and the check mark shows what the system says, read
+    /// in the job once the host answered, not what was asked.
+    #[test]
+    fn a_refused_launch_at_login_leaves_the_check_mark_on_the_system() {
+        let (method, _) = launch_at_login_command(true);
+        let host = GatedHost::holding("nothing is held").failing_switch();
+        launch_at_login_through(host.clone(), "main");
+        assert!(host.wait_noted(1, Duration::from_secs(5)));
+        assert_eq!(host.switched(), [true]);
+        assert_eq!(host.answered(), [method]);
+        assert_eq!(host.checked(), [false]);
+    }
+
     /// The menus' Quit while the Stop clicked before it waits on the
     /// store: the exit waits for that stop, so its save finishes with its
     /// own end reason, as when the main thread ran the Stop and the Quit

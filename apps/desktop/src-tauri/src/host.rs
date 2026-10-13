@@ -1272,6 +1272,8 @@ pub mod gated {
         held: &'static str,
         before_hold: Option<Arc<dyn Fn() + Send + Sync>>,
         delayed: Option<(&'static str, Duration)>,
+        /// Every switch of the login item fails, leaving it as it was.
+        switch_fails: bool,
         state: Arc<(Mutex<State>, Condvar)>,
         lane: Arc<Lane>,
     }
@@ -1318,6 +1320,7 @@ pub mod gated {
                 held,
                 before_hold: None,
                 delayed: None,
+                switch_fails: false,
                 state: Arc::default(),
                 lane: Arc::new(Lane::start()),
             }
@@ -1332,6 +1335,13 @@ pub mod gated {
         /// start that opens the devices does.
         pub fn delaying(mut self, method: &'static str, delay: Duration) -> Self {
             self.delayed = Some((method, delay));
+            self
+        }
+
+        /// Every switch of the login item fails, as one the system
+        /// refuses does.
+        pub fn failing_switch(mut self) -> Self {
+            self.switch_fails = true;
             self
         }
 
@@ -1464,6 +1474,9 @@ pub mod gated {
         fn switch_login_item(&self, value: bool) -> Result<(), BridgeError> {
             let mut state = self.state();
             state.switched.push(value);
+            if self.switch_fails {
+                return Err(crate::bridge::failed("the system refused the login item"));
+            }
             state.login_item_on = value;
             Ok(())
         }
