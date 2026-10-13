@@ -5220,6 +5220,45 @@ fn a_held_change_waits_for_its_release() {
     backend.stop();
 }
 
+/// One release lets one held change go: the next start's change stays
+/// held past its frame until its own release. Rust only.
+#[test]
+fn one_release_lets_only_one_change_go() {
+    let (backend, sink, reports) = held_past_its_frame(
+        tones(&[AudioLane::Mixed], 10.0)
+            .change_device_after(0.1)
+            .changes(2),
+    );
+    backend.release_outage();
+    sink.ring(0).drain_all();
+    assert_eq!(
+        reports.recv_timeout(RECV).unwrap(),
+        DeviceChangeReason::DefaultInputChanged
+    );
+    backend.wait_until_finished();
+    backend.stop();
+
+    sink.clear();
+    sink.rearm_device_change();
+    let before = backend.frames_delivered();
+    backend
+        .start(&[AudioLane::Mixed], None, Arc::clone(&sink))
+        .unwrap();
+    let deadline = Instant::now() + RECV;
+    while backend.frames_delivered() - before <= HELD_AT {
+        assert!(Instant::now() < deadline, "it delivers past the outage");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(reports.try_recv().ok(), None, "the second change is held");
+    backend.release_outage();
+    sink.ring(0).drain_all();
+    assert_eq!(
+        reports.recv_timeout(RECV).unwrap(),
+        DeviceChangeReason::DefaultInputChanged
+    );
+    backend.stop();
+}
+
 /// A held stall goes on delivering until the test releases it, and then
 /// stalls. Rust only.
 #[test]

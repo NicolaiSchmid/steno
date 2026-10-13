@@ -308,7 +308,9 @@ impl SyntheticOptions {
     }
 
     /// Hold every change and the first start's stall until
-    /// `release_outage` lets it go.
+    /// `release_outage` lets it go. Each release lets one outage go: the
+    /// first one whose frame the producer reached, and the change when it
+    /// reached both, so a held change goes before a held first-start stall.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn hold_outages(mut self) -> Self {
