@@ -733,11 +733,17 @@ Every package is written in parallel except where a dependency is named:
       `swift-import-done` marker first, then notes the new identity's
       fingerprint, writes the identity to the secret store, removes the paired
       phones and records the fingerprint, which drops the note
-      (`HandoverIdentity::mint_anew`). A refused write changes nothing; a Pair
-      again that stopped after the write is finished by the next launch or Try
-      again without a new mint, whether or not a fingerprint was recorded
-      before, and a saved pairing that is neither the old nor the new one waits
-      as replaced.
+      (`HandoverIdentity::mint_anew`). A stop leaves the note, and the next
+      read decides by what the secret store holds: the noted identity, even one
+      whose write the store reported as refused, finishes the Pair again
+      without a new mint, whether or not a fingerprint was
+      recorded before; the recorded identity, or none, abandons it, which is
+      where a refused write ends; any other identity waits as replaced. Behind
+      the import's waiting gate, Try again in the same launch brings the Swift
+      pairing back instead. A `handover-identity.json` that does not parse is
+      replaced only by Pair again, which keeps it as
+      `handover-identity.json.corrupt-<time>`; a launch or Try again waits as
+      unreadable.
       That waiting state in Settings, with both bridge methods
       (`settings.iphone.tryAgain`, `settings.iphone.pairAgain`), its fixture
       and a test that a refused read mints nothing, came with

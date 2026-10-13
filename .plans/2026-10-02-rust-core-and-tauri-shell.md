@@ -1073,13 +1073,16 @@ still has to draw the window side. `[ ]` is not ported yet.
   under the support directory (`steno.handoverIdentityFingerprint`, written
   atomically; `FingerprintFile`; while a Pair again is unfinished also
   `steno.handoverIdentityNextFingerprint`), and every write of the identity goes through
-  `HandoverIdentity::store`, which records it. `HandoverIdentity::load_or_create`
-  returns `IdentityError::Unavailable` and mints nothing when the secret store cannot
-  be read, when it holds no identity while a fingerprint is recorded or a phone is
-  paired, or when the identity's fingerprint is not the recorded one; the handover is
-  then off for the run (an identity read while the Linux keyring asked the user is read
-  again once it answered). It mints only with no phone paired, no fingerprint and no
-  identity. A rollback to the Swift app leaves the file alone; a lost record is
+  `HandoverIdentity::store` or Pair again's `HandoverIdentity::mint_anew`, both of
+  which record it. `HandoverIdentity::load_or_create` returns
+  `IdentityError::Unavailable` and mints nothing when the secret store cannot be read,
+  when it holds no identity while a fingerprint is recorded or a phone is paired, or
+  when the identity's fingerprint is not the recorded one; the handover then waits
+  with the reason (Settings > iPhone, Try again and Pair again; `Handover::waiting`;
+  an identity read while the Linux keyring asked the user is read again once it
+  answered). It mints only with no phone paired, no fingerprint and no identity. Pair
+  again alone replaces a record that does not parse, after setting it aside
+  (`files::set_aside`, kept as `handover-identity.json.corrupt-<time>`). A rollback to the Swift app leaves the file alone; a lost record is
   rewritten from the identity found while the paired phones, which the Swift app keeps,
   hold the guard. Swift keeps its own identity in the Keychain and has no guard.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
