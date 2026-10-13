@@ -3,11 +3,11 @@
 //! the search window either side of the target, else at the quietest
 //! 100 ms frame there. A long pause that starts before the window's far
 //! edge, or within `min_chunk_seconds` past it, ends the chunk early, and
-//! no chunk decodes it. `overlap_seconds` of audio is shared with the next chunk
-//! for the merge. No chunk exceeds `max_seconds`: for ONNX a memory clamp
-//! (attention grows with the square of the window: 13 GB at 600 s, spike
-//! E), not the position table's 800 s cap; for `CoreML` the models' fixed
-//! 15 s window.
+//! no chunk decodes it. `overlap_seconds` of audio is shared with the next
+//! chunk for the merge. No chunk exceeds `max_seconds`: for ONNX a memory
+//! clamp (attention grows with the square of the window: 13 GB at 600 s,
+//! spike E), not the position table's 800 s cap; for `CoreML` the models'
+//! fixed 15 s window.
 //!
 //! A gap is a stretch of the recording no chunk covers: the lead-in before
 //! the first chunk, a long pause between two chunks, the rest of a pause a
@@ -243,10 +243,10 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
 }
 
 /// Gaps shorter than this are not decoded: on FLEURS German `cat/` the
-/// extra windows over such gaps (0.25 to 2.3 s) inserted words, eight,
-/// all wrong, and recovered none,
-/// and on the calibration corpus they inserted words the Swift transcripts
-/// do not have (A2 in `.plans/2026-10-07-stable-promotion.md`).
+/// extra windows over such gaps (0.25 to 2.3 s) inserted words, eight, all
+/// wrong, and recovered none, and on the calibration corpus they inserted
+/// words the Swift transcripts do not have (A2 in
+/// `.plans/2026-10-07-stable-promotion.md`).
 pub const MIN_GAP_SECONDS: f32 = 2.5;
 
 /// The extra windows over the gaps (see the module doc), in order, when
