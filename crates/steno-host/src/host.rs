@@ -79,15 +79,15 @@
 //! re-enter the host (`Host::recorder_changed`), the permission prompts,
 //! the LLM probe, the Codex calls, the model download and onboarding's
 //! vault check, the prompts, the probe and the check with their busy state
-//! published first. `settings.transcription.download`
-//! replies after its first publish and keeps publishing from its own
-//! thread until the download ends; a second download of the asset
-//! reattaches to that thread instead of starting one. The flush thread
-//! starts in [`Host::new`] and ends with the last clone. The core's async
-//! boundaries (the secret store) are awaited on the host's own runtime. A
-//! call that arrives inside a tokio runtime anyway (a `#[tokio::test]`, a
-//! command that skipped `spawn_blocking`) awaits the secret store on a
-//! helper thread instead of panicking, and still blocks that worker.
+//! published first. `settings.transcription.download` replies after its
+//! first publish and keeps publishing from its own thread until the
+//! download ends; a second download of the asset reattaches to that thread
+//! instead of starting one. The flush thread starts in [`Host::new`] and
+//! ends with the last clone. The core's async boundaries (the secret
+//! store) are awaited on the host's own runtime. A call that arrives
+//! inside a tokio runtime anyway (a `#[tokio::test]`, a command that
+//! skipped `spawn_blocking`) awaits the secret store on a helper thread
+//! instead of panicking, and still blocks that worker.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1492,10 +1492,18 @@ impl Host {
                     inner.speech.download_progress(asset, fraction, phase);
                 });
             });
-        self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
+        self.models_command(|inner| {
             inner
                 .speech
                 .finish_download(asset, outcome, &self.shared.services);
+        });
+    }
+
+    /// A settings command over the model states, which Settings'
+    /// Transcription section and onboarding's speech models row both read.
+    fn models_command(&self, body: impl FnOnce(&mut Inner)) {
+        self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
+            body(inner);
             inner.publisher.schedule(BridgeTopic::Onboarding);
         });
     }
@@ -2321,13 +2329,12 @@ impl BridgeHost for Host {
             .spawn(move || host.run_download(asset));
         if let Err(error) = spawned {
             let message = format!("The download could not start: {error}");
-            self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
+            self.models_command(|inner| {
                 inner.speech.finish_download(
                     asset,
                     Err(message.clone().into()),
                     &self.shared.services,
                 );
-                inner.publisher.schedule(BridgeTopic::Onboarding);
             });
             return Err(BridgeError::failed(message));
         }
@@ -2336,10 +2343,7 @@ impl BridgeHost for Host {
 
     fn settings_transcription_remove(&self, params: AssetIdParams) -> Outcome<()> {
         let asset = parse_asset(&params)?;
-        self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
-            inner.speech.remove(asset, &self.shared.services);
-            inner.publisher.schedule(BridgeTopic::Onboarding);
-        });
+        self.models_command(|inner| inner.speech.remove(asset, &self.shared.services));
         Ok(())
     }
 
