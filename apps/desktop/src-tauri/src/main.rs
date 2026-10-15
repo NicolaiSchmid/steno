@@ -240,6 +240,7 @@ fn setup(
             handle,
             refusal,
             &format_args!("{SWIFT_BUNDLE_ID} is running"),
+            None,
         );
         return Ok(false);
     }
@@ -247,7 +248,12 @@ fn setup(
     let host = match host::Host::real(handle, runtime) {
         Ok(host) => host,
         Err(error) => {
-            refuse_to_start(handle, Refusal::after(&error), &error);
+            refuse_to_start(
+                handle,
+                Refusal::after(&error),
+                &error,
+                error.setting_detail(),
+            );
             return Ok(false);
         }
     };
@@ -340,6 +346,20 @@ impl Refusal {
             }
         }
     }
+
+    /// The dialog's text: [`Self::text`], or, for a stored setting the
+    /// app cannot read (`detail`, which names the setting and the database
+    /// and never its value), what to fix, since opening Steno again does
+    /// not help there.
+    fn message(self, detail: Option<&str>) -> String {
+        match (self, detail) {
+            (Refusal::Unavailable, Some(detail)) => format!(
+                "Steno could not read one of its settings, so it did not open. \
+                 Your meetings are safe.\n\n{detail}"
+            ),
+            _ => self.text().to_owned(),
+        }
+    }
 }
 
 /// The refusal due before the host is built, with `running` answering
@@ -373,7 +393,8 @@ fn platform_app_running(bundle_id: &str) -> bool {
     }
 }
 
-/// Says why this app does not start ([`Refusal`]), logs `reason`, and ends
+/// Says why this app does not start ([`Refusal`], with `detail` for a
+/// setting it cannot read), logs `reason` at error level, and ends
 /// with [`REFUSED_CODE`] once the dialog is closed, before it opens a window:
 /// two apps on one database would fail each other's recordings at launch,
 /// and a host that could not be built writes nothing more. Its run loop has
@@ -382,10 +403,16 @@ fn platform_app_running(bundle_id: &str) -> bool {
 /// all the same, or after the wait of a smoke run (`STENO_SMOKE_SECONDS`,
 /// so the smoke sees the refusal end): it holds nothing to save. Rust only:
 /// the Swift app relied on macOS opening one copy per bundle id.
-fn refuse_to_start(handle: &tauri::AppHandle, refusal: Refusal, reason: &dyn std::fmt::Display) {
+fn refuse_to_start(
+    handle: &tauri::AppHandle,
+    refusal: Refusal,
+    reason: &dyn std::fmt::Display,
+    detail: Option<String>,
+) {
     use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 
     stderr_line!("[steno-desktop] not starting: {reason}");
+    tracing::error!("not starting: {reason}");
     let patience = match smoke::wait_from(std::env::var(smoke::SECONDS_VARIABLE).ok().as_deref()) {
         smoke::Wait::Seconds(seconds) => std::time::Duration::from_secs(seconds),
         smoke::Wait::NotASmokeRun | smoke::Wait::Invalid(_) => REFUSED_PATIENCE,
@@ -397,7 +424,7 @@ fn refuse_to_start(handle: &tauri::AppHandle, refusal: Refusal, reason: &dyn std
     let app = handle.clone();
     handle
         .dialog()
-        .message(refusal.text())
+        .message(refusal.message(detail.as_deref()))
         .title(refusal.title())
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::Ok)
@@ -977,6 +1004,29 @@ mod tests {
             steno_core::DatabaseLockError::Held("steno.sqlite.lock".into()),
         ));
         assert_eq!(Refusal::after(&held), Refusal::DatabaseHeld);
+    }
+
+    /// A stored setting the app cannot read says which one and where in
+    /// the dialog; every other refusal keeps its text.
+    #[test]
+    fn an_unreadable_setting_names_itself_in_the_dialog() {
+        let detail = "The setting llmBaseURL is not valid JSON. \
+                      It is stored in the database at /Users/n/Steno/steno.sqlite.";
+        assert_eq!(
+            Refusal::Unavailable.message(Some(detail)),
+            format!(
+                "Steno could not read one of its settings, so it did not open. \
+                 Your meetings are safe.\n\n{detail}"
+            )
+        );
+        assert_eq!(
+            Refusal::Unavailable.message(None),
+            Refusal::Unavailable.text()
+        );
+        assert_eq!(
+            Refusal::DatabaseHeld.message(Some(detail)),
+            Refusal::DatabaseHeld.text()
+        );
     }
 
     /// The Mac's query answers false for a bundle id no app carries.

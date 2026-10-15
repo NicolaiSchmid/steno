@@ -57,6 +57,36 @@ pub enum BuildError {
     Store(#[from] StoreError),
     #[error("Could not create the database folder: {0}")]
     DatabaseFolder(#[source] std::io::Error),
+    /// A stored setting cannot be read
+    /// ([`StoreError::UndecodableSetting`]), with the database it is in,
+    /// so whoever fixes the row knows where it is; never its value. The
+    /// app refuses to start rather than run on a default for it (a vault
+    /// path, a retention rule). Rust only.
+    #[error("{source}, in the database {}", database.display())]
+    Setting {
+        database: std::path::PathBuf,
+        source: StoreError,
+    },
+}
+
+impl BuildError {
+    /// The "could not start" dialog's lines for a stored setting that
+    /// cannot be read: its key, what is wrong with it and the database it
+    /// is in; `None` for every other failure.
+    #[must_use]
+    pub fn setting_detail(&self) -> Option<String> {
+        let BuildError::Setting {
+            database,
+            source: StoreError::UndecodableSetting { key, problem },
+        } = self
+        else {
+            return None;
+        };
+        Some(format!(
+            "The setting {key} {problem}. It is stored in the database at {}.",
+            database.display()
+        ))
+    }
 }
 
 /// What differs between the shell, the CLI and the tests.
@@ -713,10 +743,14 @@ pub fn build_with_import(
     // The speech settings and the models directory are read once, here:
     // the pipeline (and every reload, which keeps its engine when it runs
     // where the last one did) and the model service share them.
-    let engines = Arc::new(SpeechEngines::new(SpeechSetup::new(
-        &store.settings()?,
-        &paths,
-    )));
+    let settings = store.settings().map_err(|error| match error {
+        StoreError::UndecodableSetting { .. } => BuildError::Setting {
+            database: database_path.clone(),
+            source: error,
+        },
+        other => BuildError::Store(other),
+    })?;
+    let engines = Arc::new(SpeechEngines::new(SpeechSetup::new(&settings, &paths)));
     let speech = engines.setup();
     // What the decoder replaced by silence per meeting, in the support
     // directory, which the detail reads through `HostPipeline`; a deleted
@@ -1661,6 +1695,64 @@ mod tests {
                 .count(),
             1,
             "the transcribe rate was learned under the current engine's id"
+        );
+    }
+
+    /// One setting row the app cannot read stops the build (gap B3 of the
+    /// first launch after the Swift app, stable plan Rehearsal): the error
+    /// and the dialog's lines name the row's key, what is wrong and the
+    /// database, never the stored value, and the database keeps the row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_setting_names_its_key_and_the_database_and_not_its_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let database = StenoPaths::new(&support).database_path();
+        let value = "https://user:sk-secret@example.com";
+        {
+            let store = open_store(&database).unwrap();
+            store
+                .write(|transaction| {
+                    transaction.execute(
+                        "INSERT INTO setting (key, value) VALUES ('llmBaseURL', ?1)",
+                        [value],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let Err(error) = build(options_under(&support)) else {
+            panic!("the build went ahead over an unreadable setting");
+        };
+        let text = error.to_string();
+        let detail = error.setting_detail().expect("a setting's lines");
+        for line in [&text, &detail] {
+            assert!(line.contains("llmBaseURL"), "{line}");
+            assert!(line.contains(&database.display().to_string()), "{line}");
+            assert!(line.contains("is not valid JSON"), "{line}");
+            assert!(!line.contains("sk-secret"), "{line}");
+        }
+        assert_eq!(
+            detail,
+            format!(
+                "The setting llmBaseURL is not valid JSON. It is stored in the database at {}.",
+                database.display()
+            )
+        );
+        let kept: String = open_store(&database)
+            .unwrap()
+            .read(|connection| {
+                Ok(connection.query_row(
+                    "SELECT value FROM setting WHERE key = 'llmBaseURL'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(kept, value);
+        assert!(
+            BuildError::Store(StoreError::BlankPersonName)
+                .setting_detail()
+                .is_none()
         );
     }
 
