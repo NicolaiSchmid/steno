@@ -71,15 +71,15 @@ The cause:
   machine, the second rebuilt from notices. `microphone_is_the_master` mirrors
   `CaptureBackend::stall_may_be_the_microphone`; its doc says a change to
   either must go to the other.
-- **The lock order is prose.** Host, then recorder `inner`, then
-  `outage`, `fallback`, `levels`, `clock`; the hook runs on whichever thread
+- **The lock order is prose.** Host, then recorder `inner`, then `outage`,
+  `fallback`, `levels`, `clock`; the hook runs on whichever thread
   changed something, never under `inner` or `outage`. `recorder.rs` is 26 %
   comments before its tests, `session.rs` 35 %, much of it ordering rules.
 
-The policy itself is not the problem: `CallWatch` (`crates/steno-services/src/auto_stop.rs`)
-is pure and has a table test. What is missing is a seam between the recorder and
-the capture (`MakeCaptureSession` returns a concrete `CaptureSession`) and one
-owner for the state.
+The policy itself is not the problem: `CallWatch`
+(`crates/steno-services/src/auto_stop.rs`) is pure and has a table test. What is
+missing is a seam between the recorder and the capture (`MakeCaptureSession`
+returns a concrete `CaptureSession`) and one owner for the state.
 
 ## What this plan assumes
 
@@ -87,16 +87,15 @@ These land before `0.11.0-rc.1` under their own owners:
 
 - **#286** merges as is (Nicolai, 2026-10-15).
 - **P40** (added to the stable plan by #286) changes how the host takes the
-  recorder's hook. Whatever its final form, PR 2 needs nothing more from it
-  than to keep what it adds to the status (#286 proposes a sequence number),
-  bumped once per stored snapshot: the hook runs on its own notifier thread and
-  `status()` never waits.
+  recorder's hook. Whatever its final form, PR 2 only keeps what it adds to the
+  status (#286 proposes a sequence number), bumped once per stored snapshot,
+  since the hook runs on its own notifier thread and `status()` never waits.
 - **A15** (added to the stable plan by #263) catches CoreML's Objective-C
   exceptions at the FFI boundary (the crate's `coreml` module), which also
   covers the CoreML warm-up (`warm_up_if_installed`) that runs during a live
-  recording. PR 2 keeps the warm-up off the I/O worker: the start's effect
-  spawns it on the services runtime after `StartFinished`, as today, so no stop
-  waits for it, and the catch stays where A15 puts it.
+  recording. PR 2 keeps the warm-up off the I/O worker: as today, the start
+  spawns it on the services runtime after `StartFinished`, so no stop waits for
+  it and the catch stays where A15 puts it.
 
 ## Target design
 
@@ -135,11 +134,11 @@ arguments or commands (`WatchDisk`, `SetHook`), so no lock holds them.
   `MicrophoneActivity` the call detector's, `ToneTest` and `ToneTestEnded` the
   system audio test's (`run_tone_test`), `NoteAdopted` the launch's;
 - `Capture { epoch, State | Notice | StalledDevice | Input }` from thin
-  forwarders over the session's receivers, which decide nothing but whether to
-  read the stalled device, where `microphone_is_the_master` says, as the notice
-  thread does. They make both stream reads (the stalled device at a
-  `DeliveryStalled`, the input at a `DeviceResumed`) and send each as its own
-  event, so the actor calls no `CaptureControl` method;
+  forwarders over the session's receivers. They make both stream reads (the
+  stalled device at a `DeliveryStalled`, the input at a `DeviceResumed`) and
+  send each as its own event, so the actor calls no `CaptureControl` method;
+  they decide only whether to read the stalled device, by
+  `microphone_is_the_master`, as the notice thread does;
 - `Levels { epoch }`: the forwarder stores the newest levels in a slot and
   sends a wake only when the actor has read the last one, so 10 Hz levels never
   queue up behind a busy step;
@@ -151,20 +150,20 @@ arguments or commands (`WatchDisk`, `SetHook`), so no lock holds them.
 
 A stale `epoch` is dropped in one place, at the top of `step`. Events of the
 epoch that is stopping still apply: the I/O worker drops the session and joins
-its forwarders before it sends `StopFinished`, so everything they sent comes
-before it, and the stop's notes name the stalled device and the fallback input
-as `finish_stop` does today by joining the notice thread. The disk reader holds
+its forwarders before it sends `StopFinished`, so everything they sent arrives
+first and the stop's notes name the stalled device and the fallback input, as
+`finish_stop`'s join of the notice thread makes them today. The disk reader holds
 the session weakly and is never joined; a reading in flight at a stop is
 dropped by its epoch.
 
-**Replies keep today's timing.** `Start` replies after `StartFinished`, or at
-once when it is refused; `Stop` and `Toggle` after the `StopFinished` of the
-stop they began, `Quit` after the one it waits for, or at once when nothing
-records. `RefuseStarts` and `ToneTestEnded` are sent without a reply; every
-other command replies once its step's snapshot is stored (`Hold` included, so
-a `status()` read after it says what an install would stop, as `hold_starts`'
-doc promises). The `Recorder` trait's methods return when they return today,
-and a `status()` read after a reply sees that step.
+**Replies keep today's timing**, so the `Recorder` trait's methods return when
+they do today. `Start` replies after `StartFinished`, or at once when it is
+refused; `Stop` and `Toggle` after the `StopFinished` of the stop they began;
+`Quit` after the one it waits for, or at once when nothing records.
+`RefuseStarts` and `ToneTestEnded` get no reply. Every other command replies
+once its step's snapshot is stored, so a `status()` read after a reply sees
+that step; after `Hold` it says what an install would stop, as `hold_starts`'
+doc promises.
 
 **Effects run off the machine:** `OpenSession`, `CloseSession(reason)`, `Save`,
 `Publish`, `Log`, `ReadDisk`, `CancelToneTests`, `Arm(deadline)`. `ReadDisk`
@@ -193,10 +192,9 @@ state and decides nothing: it re-checks `clock.now()` against its deadline each
 time it wakes, and the machine compares the deadline with `now` when the event
 arrives, so a stale `Deadline` does nothing. This replaces the `steno-auto-stop`
 thread per armed countdown and the watch's own loop. Under `ManualClock` the
-alarm is one sleeper, and tests wait for it by its deadline before they
-`advance`: a test-only `ManualClock` helper beside `wait_for_sleepers` matches
-a sleeper's absolute deadline, so a cancelled sleeper still registered is not
-mistaken for the new one.
+alarm is one sleeper; before they `advance`, tests wait for it with a test-only
+helper beside `wait_for_sleepers` that matches a sleeper's absolute deadline,
+so a cancelled sleeper still registered is not mistaken for the new one.
 
 **A lock-free `status()`.** After each step that changes what the host shows,
 the actor builds an `Arc<RecorderStatus>` and stores it in an `ArcSwap`
@@ -224,11 +222,11 @@ become `Admission { holds, refused: Option<Refusal> }`. `Refusal` is
 `MenuQuit` (the menu's Quit, #286's `starts_refused`), which says
 `QUITTING_REFUSAL`, or `ShuttingDown` (`stop_for_quit`, today's `quitting`);
 a hold says `INSTALLING_UPDATE`. As in #286, `ShuttingDown` and a start while
-not idle refuse first and silently, then `MenuQuit`, then a hold. A tone test is admitted only while `Idle` and not
-`ShuttingDown`, so none begins once a start has set `Starting`, and the start
-waits for those already running (above); no tone reaches a recording.
-`RefuseStarts` is a non-blocking send, so the shell's main thread can make it,
-and channel order refuses every start sent after it.
+not idle refuse first, silently, then `MenuQuit`, then a hold. A tone test is
+admitted only while `Idle` and not `ShuttingDown`, so none begins once a start
+has set `Starting`, and a start waits for those already running (above): no
+tone reaches a recording. `RefuseStarts` is a non-blocking send the shell's
+main thread can make, and channel order refuses every start sent after it.
 
 **Quit is a command.** `stop_for_quit` raises the shutdown's `Cancel`, which
 the I/O worker's `retrying_while` reads, so a save under way stops retrying a
@@ -459,8 +457,8 @@ the D9 ruling is made.
   - One I/O worker serialises a start behind a stop whose save waits on a
     locked store. That is today's behaviour too (a start is refused until the
     recorder is idle); the test above pins that the status stays live.
-  - The host sees the hook on the notifier thread. It already runs on any
-    thread today, and the host's tests run unchanged.
+  - The host sees the hook on the notifier thread; it already runs on any
+    thread today (above), and the host's tests run unchanged.
 
 ### PR 3: the session's control loop and one events channel
 
@@ -468,8 +466,8 @@ the D9 ruling is made.
 
 - **Prerequisite.** The new D9 ruling below, and PR 2 merged.
 - **Scope.** `steno-audio`, about 600 lines of `session.rs`, and the recorder's
-  forwarders collapsing into one, as described under "The capture session"
-  above. `CaptureControl`, `ScriptedCapture` and PR 1's contract test move to
+  forwarders collapsing into one ("The capture session", above).
+  `CaptureControl`, `ScriptedCapture` and PR 1's contract test move to
   `events()`.
 - **Acceptance.**
   - `crates/steno-audio/tests/restarts.rs`, `tests/session.rs` and
