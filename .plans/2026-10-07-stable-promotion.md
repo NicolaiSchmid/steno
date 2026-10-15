@@ -447,7 +447,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P37 | A recording through a cancelled logout: a cancelled logout does not stop the recording; only where the app saves as soon as the logout is announced (Xfce on Wayland) and the session then goes on does it stop, and it says so and relaunches, ready to record. Xfce's Quit Program saves before xfce4-session's kill, and its Save Session never stops the recording (#220) | Linux desktop (#220) |
 | P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks write one `crash-<UTC>.log` file per panic in the support directory, with the message, the location and the backtrace; the newest 20 are kept | capture and recovery (`wp-cap-*`) |
 | P39 | A meeting whose run meets the store locked by another process (the Swift app during the rollback window, or any program with the database open for writing; a `steno` writing command refuses while the app runs, P15) for longer than the 5 s busy timeout: it ended `failed` with "database is locked", a speaker match the store refused dropped the match, and a resume the store refused was logged and never tried again. The run now leaves the meeting `queued` with what it committed, waiting for the store beside the meetings waiting for models (`ModelWaits`), and writes `queued` back only over its own `processing`, so the park does not wait on the lock again (a refused write leaves `processing`, which the resumes take too). The services try those meetings again on a timer, 15 s doubling to 4 minutes (from 15 s again after a quiet spell), for as long as any waits and the app runs, and keep a meeting waiting while the lock refuses the retry or another operation holds it (another failure leaves it `queued` for the next launch); an install's resume the store refused hands its meetings to that retry, and a launch's resume is owed to it. The card and the list say "Waiting for another app to finish with Steno's data", and so does a refused Process again; the CLI says the meeting stays queued. No stored value, no migration (`fix/pipeline-waits-for-a-locked-store`) | pipeline, store and export (`wp-pse-*`) |
-| P40 | Nothing is lost, so not a D3 blocker: a stability item from the P39 work, closing before `0.11.0-rc.1`. While another process holds SQLite's write lock, the busy wait of up to 5 s lands on the Tauri command workers (`bridge_call`), the main thread (the tray's Record, Stop and Launch at login), the services runtime's workers (the pipeline's store calls, the delivery, the handover's admit, the 2 s poll) and the host's view-model lock, so the UI, the levels and the tray freeze for the wait. Store calls in async code go through one facade over `spawn_blocking`; the store reads on two reader connections (`READERS`) beside its one writer, so a read never waits for a write (WAL is on in both apps); under the host's view-model lock only the readers are used, and the host's writes run with that lock released, in a debug-checked lock order; the recorder's stop keeps its synchronous path. No schema change (`.plans/2026-10-12-store-off-the-workers.md`) | the pipeline coordinator (`wp-pse-*`) |
+| P40 | Nothing is lost, so not a D3 blocker: a stability item from the P39 work, closing before `0.11.0-rc.1`. While another process holds SQLite's write lock, the busy wait of up to 5 s lands on the Tauri command workers (`bridge_call`), the main thread (the tray's Record, Stop and Launch at login), the services runtime's workers (the pipeline's store calls, the delivery, the handover's admit, the 2 s poll) and the host's view-model lock, so the UI, the levels and the tray freeze for the wait; and an idle app reloads and resends the meetings every 2 s. Smaller cut (Nicolai, 2026-10-15): store calls in async code go through one facade over `spawn_blocking`; the store reads on two reader connections (`READERS`), the host's own, held with its view models, and a shared one, beside its one writer, so a read never waits for a write (WAL is on in both apps); `recording` comes from a feed that reads only the recorder's status and takes no host lock, so the levels and a stop never wait for a reload; one owner runs the reloads, and a reload that nobody forced runs only when the store changed: the writer's commit hook counts this process's commits, and `PRAGMA data_version` sees the other processes' (the Swift app during the rollback window, the CLI); the delete already runs its forget with the view-model lock released, and the host's writes keep that lock until the host actor after stable (`.plans/2026-10-15-host-actor.md`, with the change feed and a pipeline scheduler driven by the meeting rows); so does the delete's undo, on purpose, for one small durable write of the folder record on a refused delete, with a checkpoint only when that write fails; the recorder's stop keeps its synchronous path. No schema change (`.plans/2026-10-12-store-off-the-workers.md`) | pipeline, store and export (`wp-pse-*`) |
 
 **The final audio path (D9), on every platform:**
 
@@ -1644,22 +1644,30 @@ The table above names each package and its owner. Their tests:
   `apps/macos/web/src/windows/main/`, `crates/steno-cli/src/commands/process.rs`;
   tests in `crates/steno-pipeline/tests/store_waits.rs` and
   `crates/steno-services/src/pipeline.rs`.
-- **P40.** Each check in the plan's Acceptance table that needs the lock holds
-  another connection's `BEGIN IMMEDIATE` for 7 s, on a runtime with one worker:
-  the levels, the `recording` snapshot and the device notices reach the host
-  within 200 ms; the UI's commands answer; the tray's Record and Launch at
-  login return before the host answers, reach it in click order, and a Quit
-  waits for the stop clicked before it; a stop shows `Stopping` at once and
-  saves within 1 s of the lock's release; a start is refused after the
-  timeout; a read never waits for a write; the handover's admit leaves its
-  worker free; #278's `store_waits` pass on one worker; a host write, a
-  reload, a level update, a flush and a command at once never deadlock; a
-  stop during a slow reload finishes its files at once; a kill between the
-  delete's steps never loses or brings back a recording.
+- **P40.** Smaller cut (Nicolai, 2026-10-15). Each check in the plan's
+  Acceptance table that needs the lock holds another connection's
+  `BEGIN IMMEDIATE` for 7 s, on a runtime with one worker: the levels, the
+  `recording` snapshot and the device notices reach the host within 200 ms,
+  during a pipeline write's wait and during the user's own settings save's;
+  the UI's commands answer during a pipeline write's wait; the tray's Record
+  and Launch at login return before the host answers, reach it in click
+  order, and a Quit waits for the stop clicked before it; a stop shows
+  `Stopping` at once and saves within 1 s of the lock's release; a start is
+  refused after the timeout; a read never waits for a write; the handover's
+  admit leaves its worker free; #278's `store_waits` pass on one worker; a
+  stop during a slow reload finishes its files at once; the `recording` feed
+  sends nothing before `page.ready` and keeps sending while the view-model
+  lock is held; an idle app sends no list, detail or progress; another
+  process's commit shows within one poll; a command that reaches the host
+  before `page.ready` loses no snapshot; a kill between the delete's steps
+  never loses or brings back a recording. A settings save that waits, and a
+  refused delete's undo whose checkpoint waits, still hold the other commands
+  until the host actor (`.plans/2026-10-15-host-actor.md`).
   Where: `crates/steno-services/src/locked_store_tests.rs`, the recorder,
   auto-stop, detection and app tests, the kill tests, the store's tests,
-  `store_waits.rs`, the shell's `bridge.rs` and `actions.rs` tests, and the
-  smoke `apps/desktop/scripts/locked-store-linux.sh`, which stops through the
+  `crates/steno-host/src/recording_feed.rs`'s tests, `store_waits.rs`, the
+  shell's `bridge.rs` and `actions.rs` tests, and the smoke
+  `apps/desktop/scripts/locked-store-linux.sh`, which stops through the
   tray's menu. The smoke took 26 s on atlas, under the 2 minutes, so it runs
   in `rust-ci.yml`'s Linux hosted job ("Desktop stop under a locked store").
 
