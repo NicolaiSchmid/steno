@@ -536,11 +536,9 @@ pub(crate) mod real {
     impl RealHost {
         /// For the window whose page is ready: the onboarding window's
         /// starts its vault check.
-        pub fn page_ready(&self, window: &WebviewWindow) -> Result<(), BridgeError> {
+        pub fn page_ready(&self, label: &str) -> Result<(), BridgeError> {
             use steno_bridge::BridgeHost as _;
-            self.host
-                .for_window(bridge_window(window.label()))
-                .page_ready()
+            self.host.for_window(bridge_window(label)).page_ready()
         }
 
         /// A command from the window of `label`.
@@ -1067,7 +1065,7 @@ impl Host {
         steno_host::assert_off_ui_thread("page.ready");
         #[cfg(not(feature = "fixture-host"))]
         {
-            self.inner.page_ready(window)
+            self.inner.page_ready(window.label())
         }
         #[cfg(feature = "fixture-host")]
         {
