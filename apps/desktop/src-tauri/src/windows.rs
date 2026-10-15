@@ -564,9 +564,6 @@ mod tests {
         );
     }
 
-    /// A request for a page that has not mounted waits for its
-    /// `page.ready`; one for a page that has goes out at once; a destroyed
-    /// window forgets both.
     /// What `ready` hands its publish, if anything.
     fn ready(pages: &Pages, label: &str) -> Option<Request> {
         let mut published = None;
@@ -581,6 +578,9 @@ mod tests {
         published
     }
 
+    /// A request for a page that has not mounted waits for its
+    /// `page.ready`; one for a page that has goes out at once; a destroyed
+    /// window forgets both.
     #[test]
     fn a_request_waits_for_the_page_then_goes_out() {
         let pages = Pages::default();

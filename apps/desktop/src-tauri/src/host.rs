@@ -95,6 +95,12 @@ pub trait ShellHost: Clone + Send + Sync + 'static {
     /// The tray's check mark follows the system's login item, `on` as the
     /// caller read it ([`Self::login_item_on`]), on the main thread
     /// (`tray::note_login_item`): posted there, never waited for.
+    /// The value is read on the calling worker, so two switches on
+    /// different threads (Settings on the blocking pool and the tray on the
+    /// lane, or two Settings calls) within microseconds can post in a
+    /// different order than they read. The check mark then shows the older
+    /// value until the next change; nothing is lost, and the Settings page
+    /// is unaffected.
     fn note_login_item(&self, on: bool);
 
     /// The menus' Quit, on the main thread: every recording start is
