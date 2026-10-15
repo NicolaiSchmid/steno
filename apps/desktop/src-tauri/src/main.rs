@@ -252,7 +252,7 @@ fn setup(
                 handle,
                 Refusal::after(&error),
                 &error,
-                error.setting_detail(),
+                error.setting_detail().as_deref(),
             );
             return Ok(false);
         }
@@ -407,7 +407,7 @@ fn refuse_to_start(
     handle: &tauri::AppHandle,
     refusal: Refusal,
     reason: &dyn std::fmt::Display,
-    detail: Option<String>,
+    detail: Option<&str>,
 ) {
     use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 
@@ -424,7 +424,7 @@ fn refuse_to_start(
     let app = handle.clone();
     handle
         .dialog()
-        .message(refusal.message(detail.as_deref()))
+        .message(refusal.message(detail))
         .title(refusal.title())
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::Ok)
