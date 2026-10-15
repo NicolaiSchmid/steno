@@ -1,10 +1,8 @@
-import { CircleAlertIcon } from "lucide-react";
 import type { TranscriptionSettingsSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
+import { DownloadFailure, downloadPercent } from "@/components/model-download";
 import {
 	Button,
-	Callout,
-	Disclosure,
 	FormCard,
 	FormRow,
 	ProgressBar,
@@ -20,6 +18,7 @@ function AssetRow({ asset }: { asset: Asset }) {
 	const client = useBridge();
 	const download = () =>
 		send(client, "settings.transcription.download", { assetID: asset.id });
+	const percent = downloadPercent(asset.downloadFraction);
 	let control: React.ReactNode;
 	switch (asset.state) {
 		case "absent":
@@ -40,9 +39,7 @@ function AssetRow({ asset }: { asset: Asset }) {
 					className="font-mono text-faint text-xs tabular-nums"
 					data-testid={`asset-${asset.id}-progress`}
 				>
-					{asset.downloadFraction !== undefined && asset.downloadFraction > 0
-						? `${Math.round(asset.downloadFraction * 100)}%`
-						: "…"}
+					{percent === null ? "…" : `${percent}%`}
 				</span>
 			);
 			break;
@@ -81,29 +78,13 @@ function AssetRow({ asset }: { asset: Asset }) {
 			label={asset.name}
 		>
 			{asset.state === "downloading" ? (
-				<ProgressBar
-					aria-label={`Downloading ${asset.name}`}
-					value={
-						asset.downloadFraction !== undefined && asset.downloadFraction > 0
-							? Math.round(asset.downloadFraction * 100)
-							: null
-					}
-				/>
+				<ProgressBar aria-label={`Downloading ${asset.name}`} value={percent} />
 			) : null}
 			{asset.state === "failed" ? (
-				<div className="flex flex-col gap-1.5">
-					<Callout
-						icon={<CircleAlertIcon aria-hidden="true" />}
-						size="sm"
-						title="The download did not finish."
-						variant="warning"
-					/>
-					{asset.failure ? (
-						<Disclosure data-testid={`asset-${asset.id}-failure`}>
-							{asset.failure}
-						</Disclosure>
-					) : null}
-				</div>
+				<DownloadFailure
+					failure={asset.failure}
+					testId={`asset-${asset.id}-failure`}
+				/>
 			) : null}
 		</FormRow>
 	);

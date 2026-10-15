@@ -1,19 +1,15 @@
-import {
-	CheckCircle2Icon,
-	CircleAlertIcon,
-	CircleIcon,
-	XCircleIcon,
-} from "lucide-react";
+import { CheckCircle2Icon, CircleIcon, XCircleIcon } from "lucide-react";
 import type { OnboardingSnapshot } from "@/bridge/contract";
 import { send, useBridge } from "@/bridge/hooks";
+import { DownloadFailure, downloadPercent } from "@/components/model-download";
 import { PermissionRow } from "@/components/permission-row";
 import {
 	Badge,
 	Button,
-	Callout,
 	Disclosure,
 	FormCard,
 	FormRow,
+	type FormRowProps,
 	ProgressBar,
 } from "@/components/ui";
 import { type PlatformWords, usePlatform } from "@/lib/platform";
@@ -47,10 +43,7 @@ function SpeechModelsRow({ models }: { models: SpeechModels }) {
 			send(client, "settings.transcription.download", { assetID });
 		}
 	};
-	const percent =
-		models.downloadFraction !== undefined && models.downloadFraction > 0
-			? Math.round(models.downloadFraction * 100)
-			: null;
+	const percent = downloadPercent(models.downloadFraction);
 	let control: React.ReactNode;
 	switch (models.state) {
 		case "absent":
@@ -121,19 +114,10 @@ function SpeechModelsRow({ models }: { models: SpeechModels }) {
 				/>
 			) : null}
 			{models.state === "failed" ? (
-				<div className="flex flex-col gap-1.5">
-					<Callout
-						icon={<CircleAlertIcon aria-hidden="true" />}
-						size="sm"
-						title="The download did not finish."
-						variant="warning"
-					/>
-					{models.failure ? (
-						<Disclosure data-testid="onboarding-models-failure">
-							{models.failure}
-						</Disclosure>
-					) : null}
-				</div>
+				<DownloadFailure
+					failure={models.failure}
+					testId="onboarding-models-failure"
+				/>
 			) : null}
 		</FormRow>
 	);
@@ -150,6 +134,8 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 	const { words } = usePlatform();
 	let description: string;
 	let control: React.ReactNode;
+	let icon = <CircleIcon aria-hidden="true" />;
+	let tone: FormRowProps["tone"] = "faint";
 	switch (vault.state) {
 		case "checking":
 			description = `Steno is checking that it can write your notes to ${vault.name}. If macOS asks for the folder, choose Allow.`;
@@ -160,8 +146,12 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 		case "writable":
 			description = `Steno writes your meeting notes to ${vault.name}.`;
 			control = <Badge variant="success">Allowed</Badge>;
+			icon = <CheckCircle2Icon aria-hidden="true" />;
+			tone = "success";
 			break;
 		case "refused":
+			icon = <XCircleIcon aria-hidden="true" />;
+			tone = "warning";
 			description = `Steno cannot write your notes to ${vault.name}. Turn on Steno under Files and Folders in ${words.systemSettings}, then choose Check again.`;
 			control = (
 				<>
@@ -190,23 +180,9 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 			control={control}
 			data-testid="onboarding-vault-access"
 			description={description}
-			icon={
-				vault.state === "writable" ? (
-					<CheckCircle2Icon aria-hidden="true" />
-				) : vault.state === "refused" ? (
-					<XCircleIcon aria-hidden="true" />
-				) : (
-					<CircleIcon aria-hidden="true" />
-				)
-			}
+			icon={icon}
 			label="Notes folder"
-			tone={
-				vault.state === "writable"
-					? "success"
-					: vault.state === "refused"
-						? "warning"
-						: "faint"
-			}
+			tone={tone}
 		>
 			{vault.state === "refused" && vault.error ? (
 				<Disclosure data-testid="onboarding-vault-access-error">
