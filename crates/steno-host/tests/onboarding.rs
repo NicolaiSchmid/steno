@@ -1326,21 +1326,29 @@ fn no_vault_no_mac_or_not_on_page_one_checks_nothing() {
     assert_eq!(vault_checks(&without), 0);
     assert!(without.snapshot(BridgeTopic::Onboarding)["vaultAccess"].is_null());
 
+    // Denied counts as missing on Linux too, so the page stays on page 1.
     let linux = builder()
         .platform(Platform::Linux)
         .seed(with_a_vault)
-        .seed(missing_microphone)
+        .seed(|_, fakes| {
+            fakes
+                .permissions
+                .set_state(PermissionKind::Microphone, PermissionState::Denied);
+        })
         .build();
     linux
         .host
         .for_window(BridgeWindow::Onboarding)
         .page_ready()
         .unwrap();
+    assert_eq!(linux.snapshot(BridgeTopic::Onboarding)["page"], "permissions");
     linux
         .host
         .for_window(BridgeWindow::Onboarding)
         .onboarding_open_files_and_folders()
         .unwrap();
+    // No row either: a check would mark it checking before its thread runs.
+    assert!(linux.snapshot(BridgeTopic::Onboarding)["vaultAccess"].is_null());
     assert_eq!(vault_checks(&linux), 0);
     assert!(linux.fakes.opener.opened.lock().unwrap().is_empty());
 
@@ -1351,6 +1359,7 @@ fn no_vault_no_mac_or_not_on_page_one_checks_nothing() {
         .page_ready()
         .unwrap();
     assert_eq!(page_two.snapshot(BridgeTopic::Onboarding)["page"], "setup");
+    assert!(page_two.snapshot(BridgeTopic::Onboarding)["vaultAccess"].is_null());
     assert_eq!(vault_checks(&page_two), 0);
 
     let import = builder()
@@ -1360,6 +1369,7 @@ fn no_vault_no_mac_or_not_on_page_one_checks_nothing() {
         .build();
     let onboarding = import.host.for_window(BridgeWindow::Onboarding);
     onboarding.page_ready().unwrap();
+    assert!(import.snapshot(BridgeTopic::Onboarding)["vaultAccess"].is_null());
     assert_eq!(vault_checks(&import), 0, "the import step comes first");
     onboarding.onboarding_import().unwrap();
     import.wait_for("the check after the step", vault_row_is("writable"));
