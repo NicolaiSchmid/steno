@@ -55,7 +55,7 @@ The cause:
 
 | Where | Threads that change state | Locks |
 |---|---|---|
-| Recorder (`crates/steno-services/src/recorder.rs`, 5 907 lines) | `steno-recording-levels`, `steno-notices`, `steno-recording-watch`, one `steno-auto-stop` per armed countdown, the host's callers, the shutdown's `stop_for_quit`, and with #286 the shell's main thread | `inner` and its `changes` condvar, `changed`, `disk`, `clock`, and per recording `levels`, `fallback`, `outage`; #286 adds an atomic and the tone tests' cancel lock outside them |
+| Recorder (`crates/steno-services/src/recorder.rs`, 5 907 lines) | `steno-recording-levels`, `steno-notices`, `steno-recording-watch`, one `steno-auto-stop` per armed countdown, the host's callers, the shutdown's `stop_for_quit`, and with #286 the shell's main thread | `inner` and its `changes` condvar, `changed`, `disk`, `clock`, and per recording `levels`, `fallback`, `outage`; #286 adds an atomic and the system audio tests' cancel lock outside them |
 | Capture session (`crates/steno-audio/src/capture/session.rs`, 2 585 lines) | `steno-watch`, `steno-rebuild`, `steno-wfail`, `steno-probe`, the caller of `stop()` | one `Core.inner` mutex (the session mutex) and its `state_changed` condvar, held across `backend.start()` for up to 10 s; the writer thread takes it to publish levels |
 
 - **A recording ends from many places.** In the recorder: user Stop, toggle,
@@ -124,7 +124,7 @@ struct RecorderMachine {
 }
 
 fn step(&mut self, now: Duration, event: Event) -> Vec<Effect>;
-fn next_deadline(&self) -> Option<Duration>;
+fn next_deadline(&self) -> Option<(Duration, Due)>; // the nearest and its kind
 ```
 
 `step` does no I/O, takes no lock and reads no clock: `now` is an argument.
@@ -172,7 +172,8 @@ forwarder. The disk watch, the clock and the hook (today's `disk`, `clock` and
   the session started on (`fallback_input` after `session.start`, as today)
   and the start's room, so a low-space warning shows from `Recording` on, as
   `Active::disk_warning` does today;
-- `Deadline` from the alarm;
+- `Deadline(Due)` from the alarm, `Due` being `Countdown`, `DiskReading` or
+  `TonePatience`;
 - `Dropped` when the last `CaptureRecorder` goes (below).
 
 A stale `epoch` is dropped in one place, at the top of `step`. Events of the
@@ -202,19 +203,21 @@ channel order and the reply now give that, not the lock the doc names.
 
 **Effects run off the machine:** `Publish`, `Log` and `CancelToneTests` on the
 actor, `ReadDisk` on the recording's disk reader (above), and `OpenSession`,
-`CloseSession(reason)` and `Save` in order on one I/O worker thread,
-`steno-recorder-io`. `OpenSession` is all of today's `start_inner` (session
-start, up to 10 s), `CloseSession` is `session.stop()`, and `Save` is
+`CloseSession(reason)`, `Save` and `UndoStart` in order on one I/O worker
+thread, `steno-recorder-io`. `OpenSession` is all of today's `start_inner`
+(session start, up to 10 s), `CloseSession` is `session.stop()`, and `Save` is
 `intake.complete`, whose busy commit waits out the 5 s busy timeout up to
-`COMMIT_ATTEMPTS` (3) times, or `recover_failed_stop`. A start while tone
-tests run emits `CancelToneTests` and holds `OpenSession` until the last
-`ToneTestEnded` or until `TONE_TEST_PATIENCE` passes, so the I/O worker waits
-on no test. The actor thread never blocks on I/O, so it answers a command, a
-notice or a status read while a start or a save waits. More threads run than
-today (above), but only `steno-recorder` changes state. Dropping the last
-`CaptureRecorder` sends `Dropped`: the actor cancels the alarm, ends the
-notifier and the I/O worker, and exits, so
-`a_dropped_recorder_lets_its_countdown_go` still passes, its
+`COMMIT_ATTEMPTS` (3) times, or `recover_failed_stop`. `UndoStart`, answered
+by a `StopFinished`, is today's `BegunMeeting` guard on a start that panics: it
+stops the session, removes its folder, fails the meeting with `START_PANICKED`
+and forgets the folder it recorded. A start while tone tests run emits
+`CancelToneTests` and holds `OpenSession` until the last `ToneTestEnded` or
+until `TONE_TEST_PATIENCE` passes, so the I/O worker waits on no test. The
+actor thread never blocks on I/O, so it answers a command, a notice or a status
+read while a start or a save waits. More threads run than today (above), but
+only `steno-recorder` changes state. Dropping the last `CaptureRecorder` sends
+`Dropped`: the actor cancels the alarm, ends the notifier and the I/O worker,
+and exits, so `a_dropped_recorder_lets_its_countdown_go` still passes, its
 `wait_for_sleepers(1)` replaced by the status check and the alarm wait below.
 
 **Deadlines on the injectable clock, not timer threads.** The auto-stop
@@ -279,14 +282,16 @@ that thread or call, and the recording goes on. The actor keeps both:
 
 - **The I/O worker** runs each effect inside `catch_unwind` and answers a panic
   with the effect's `Done`, carrying `START_PANICKED` (once `BegunMeeting` has
-  undone the start) or `SAVE_PANICKED`. A guard sends `Done(WorkerGone)` if the
-  thread ends, answered as a panicked start or stop, and the actor spawns a
-  fresh worker before the next effect.
+  undone the start) or `SAVE_PANICKED`; a panic in `CloseSession` skips its
+  stop's `Save` and drops the session before that stop's one `StopFinished`,
+  leaving the row `recording` as a panic in today's `session.stop()` does. A
+  guard sends `Done(WorkerGone)` if the thread ends, answered as a panicked
+  start or stop, and the actor spawns a fresh worker before the next effect.
 - **Before `step`** the actor applies what no panic may lose, so `step` finds
   it applied: the counts of `Hold`, `Release` and `ToneTestEnded`; the
   `Refusal` of `RefuseStarts` and `Quit` and the tone-test cancel they raise,
-  as today's `quitting` and `starts_refused` are plain stores; and a `Disk`
-  reading's in-flight mark.
+  as today's `quitting` and `starts_refused` are plain stores; and the
+  in-flight mark a `Disk` reading clears.
 - **A step that panics loses only its event:** it runs on a copy of the machine
   (a few small fields, cloned on the actor thread, never on the audio path)
   kept only if `step` returns, so the phase and its epoch stay and a start or a
@@ -294,17 +299,19 @@ that thread or call, and the recording goes on. The actor keeps both:
   `ToneTest`; while `Idle` it stores `START_PANICKED` for a `Start` or a
   `Toggle`. A `Quit` is the exception: it still waits for a stop under way, and
   with none it leaves a start or a recording to the next launch's recovery. A
-  lost `Deadline` is not sent again (the alarm re-arms only when the deadline
-  moves), so the disk readings and the countdown end, as when today's watch or
-  countdown thread panics.
+  `Countdown` or `DiskReading` deadline whose step panics is dropped, as today
+  only the panicking thread ends: the countdown is disarmed as `keep_recording`
+  does (today's answer to a countdown thread that cannot spawn), or the disk
+  readings and the write-failed check end, as when today's watch panics. The
+  other kind keeps firing, and no past deadline is left to fire again.
 - **A panic on what a start or a stop waits for ends it instead.** That is any
-  `Done`, whose effect has run, and a `ToneTestEnded` or `Deadline` while a
-  start waits for tone tests. The actor sets the phase outside `step`: `Idle`,
-  or `Stopping` on the same epoch after a `StartFinished` with a started
-  session, while the I/O worker undoes the start as `BegunMeeting` does. The
-  error is `START_PANICKED` for a start or its undo, else `SAVE_PANICKED`, as a
-  panic in `finish_stop` leaves it, and every held reply is sent at the next
-  `Idle`.
+  `Done`, whose effect has run, and a `ToneTestEnded` or `TonePatience`
+  deadline while a start waits for tone tests. The actor sets the phase
+  outside `step`: `Idle`, or `Stopping` on the same epoch after a
+  `StartFinished` with a started session, while the I/O worker runs
+  `UndoStart`. The error is `START_PANICKED` for a start or its undo, else
+  `SAVE_PANICKED`, as a panic in `finish_stop` leaves it, and every held reply
+  is sent at the next `Idle`.
 
 If the actor thread itself dies, every later command's send fails at once and
 returns, and a guard on the thread stores a status whose error is
