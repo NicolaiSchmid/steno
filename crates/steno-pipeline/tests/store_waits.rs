@@ -253,7 +253,7 @@ impl World {
     /// after five seconds, for the tests that are not about the wait.
     fn without_busy_timeout(&self) {
         self.store
-            .read(|connection| Ok(connection.busy_timeout(Duration::ZERO)?))
+            .on_writer(|connection| connection.busy_timeout(Duration::ZERO))
             .unwrap();
     }
 
@@ -631,7 +631,7 @@ async fn a_retry_the_lock_refuses_keeps_its_meetings_and_another_failure_leaves_
     drop(lock);
     world
         .store
-        .read(|connection| Ok(connection.pragma_update(None, "query_only", true)?))
+        .on_writer(|connection| connection.pragma_update(None, "query_only", true))
         .unwrap();
     let refused = pipeline.resume_waiting_for_store().unwrap_err();
     assert!(!refused.is_busy(), "{refused}");
@@ -644,7 +644,7 @@ async fn a_retry_the_lock_refuses_keeps_its_meetings_and_another_failure_leaves_
 
     world
         .store
-        .read(|connection| Ok(connection.pragma_update(None, "query_only", false)?))
+        .on_writer(|connection| connection.pragma_update(None, "query_only", false))
         .unwrap();
     pipeline.quit();
     let launch = world.launch();
@@ -1049,7 +1049,7 @@ async fn an_owed_launch_resume_another_failure_ends_keeps_the_meetings_waiting_f
 
     world
         .store
-        .read(|connection| Ok(connection.pragma_update(None, "query_only", true)?))
+        .on_writer(|connection| connection.pragma_update(None, "query_only", true))
         .unwrap();
     let refused = pipeline.resume_waiting_for_store().unwrap_err();
     assert!(!refused.is_busy(), "{refused}");
@@ -1057,7 +1057,7 @@ async fn an_owed_launch_resume_another_failure_ends_keeps_the_meetings_waiting_f
     assert_eq!(waits.waiting(), [models]);
     world
         .store
-        .read(|connection| Ok(connection.pragma_update(None, "query_only", false)?))
+        .on_writer(|connection| connection.pragma_update(None, "query_only", false))
         .unwrap();
     assert_eq!(
         pipeline.resume_waiting_for_store().unwrap(),

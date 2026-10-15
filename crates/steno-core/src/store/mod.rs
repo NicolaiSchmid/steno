@@ -23,8 +23,10 @@ mod tasks;
 mod timings;
 mod transcript;
 
-use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, ErrorCode, Params, Row, Transaction, TransactionBehavior};
@@ -129,6 +131,11 @@ pub enum StoreError {
     /// processes on one. The mode the pragma answered with is the payload.
     #[error("the database is in journal mode {0}, not wal")]
     JournalModeNotWal(String),
+    /// [`Store::with_own_reader`] while the handle an earlier call returned
+    /// is still alive: a process opens at most [`READERS`] readers. Rust
+    /// only.
+    #[error("the store's own reader is already open")]
+    OwnReaderOpen,
 }
 
 impl StoreError {
@@ -163,15 +170,51 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 /// `MeetingStore.onDisk`; GRDB's own default fails at once.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The one store over the database. One connection behind a mutex: SQLite
-/// serialises writes anyway, and the host reads on the same thread pool.
+/// The most reader connections a process opens: the shared reader, which
+/// [`Store::read`] uses on every handle but one, and the host's own
+/// ([`Store::with_own_reader`]). An upper bound: the CLI opens only the
+/// first, and an in-memory store none.
+pub const READERS: usize = 2;
+
+/// The shared reader's index in [`Connections::readers`].
+const SHARED_READER: usize = 0;
+
+/// The host's reader's index in [`Connections::readers`].
+const OWN_READER: usize = 1;
+
+/// The store over the database: one writer connection and up to
+/// [`READERS`] reader connections, as the Swift app's `DatabasePool` has
+/// one writer and a set of readers.
 ///
-/// Every method blocks on the lock and on SQLite; an async host calls them
-/// from `spawn_blocking`. The mutex is `std`'s and not reentrant: a `Store`
-/// method called from inside a [`Store::read`] or [`Store::write`] closure
-/// deadlocks. Query the connection the closure was given instead: inside
-/// the crate through the submodules' free functions, outside it with the
-/// [`convert`] codecs.
+/// - **The writer** runs the migrations at open and every
+///   [`Store::write`], [`Store::write_durably`] and
+///   [`Store::checkpoint_durably`]; SQLite serialises writes anyway. A
+///   write that waits out the busy timeout holds the writer, so the next
+///   write waits behind it.
+/// - **A reader** runs [`Store::read`] and every method built on it, and
+///   is `query_only`, so a write through it fails loudly. It keeps no
+///   transaction open between calls, and a read never falls back to the
+///   writer: in WAL mode it reads its snapshot while another connection
+///   writes, so a read never waits for a write. Each reader is one mutex,
+///   held only for its closure, with nothing taken under it but by the
+///   checkpoint. The handle [`Store::open`] returns reads on the shared
+///   reader (the detection poll, the pipeline, the handover, the delivery,
+///   the CLI); the host's handle ([`Store::with_own_reader`]) reads on a
+///   connection of its own, so its reads never queue behind theirs.
+/// - **The checkpoint** takes the writer, then the shared reader, then
+///   the host's: a read in flight ends first, and no new one starts until
+///   it returns.
+/// - **In memory** one connection serves every role, since separate
+///   connections to `:memory:` do not share a database. Every handle locks
+///   it, and [`Store::read`] turns `query_only` on for its closure only.
+///
+/// Every method blocks on its connection's lock and on SQLite; an async
+/// host calls them from `spawn_blocking`. The mutexes are `std`'s
+/// and not reentrant: a `Store` method called from inside a
+/// [`Store::read`] or [`Store::write`] closure waits on its own lock, and
+/// a debug build asserts instead. Query the connection the closure was
+/// given: inside the crate through the submodules' free functions,
+/// outside it with the [`convert`] codecs.
 ///
 /// The five-second busy timeout is a margin, not a guarantee. Measured
 /// against the Swift app rebuilding its FTS index over 600,000 segments,
@@ -180,7 +223,22 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`StoreError::is_busy`] recognises and the host (WP6) treats as
 /// retryable.
 pub struct Store {
-    connection: Mutex<Connection>,
+    connections: Arc<Connections>,
+    /// The index in [`Connections::readers`] this handle reads on.
+    reader: usize,
+}
+
+/// What every handle on one database shares.
+struct Connections {
+    writer: Mutex<Connection>,
+    /// The database file, which a reader opens; `None` in memory, where the
+    /// writer's connection serves every role.
+    path: Option<PathBuf>,
+    /// The shared reader, then the host's; `None` until opened, and always
+    /// in memory.
+    readers: [Mutex<Option<Connection>>; READERS],
+    /// Whether the handle [`Store::with_own_reader`] returned is alive.
+    own_reader_open: AtomicBool,
     /// [`Store::probe_commits`].
     #[cfg(any(test, feature = "testing"))]
     commit_probe: std::sync::OnceLock<CommitProbe>,
@@ -192,7 +250,21 @@ type CommitProbe = Box<dyn Fn(&Connection) + Send + Sync>;
 
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Store").finish_non_exhaustive()
+        f.debug_struct("Store")
+            .field("own_reader", &(self.reader == OWN_READER))
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Store {
+    /// The host's handle closes its reader, so a new host can open one.
+    fn drop(&mut self) {
+        if self.reader == OWN_READER {
+            drop(lock(&self.connections.readers[OWN_READER]).take());
+            self.connections
+                .own_reader_open
+                .store(false, Ordering::Release);
+        }
     }
 }
 
@@ -223,7 +295,7 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        Self::new(set_up(Connection::open(path)?)?)
+        Self::new(set_up(Connection::open(path)?)?, Some(path))
     }
 
     /// Opens the existing database at `path` as [`Store::open`] does, but
@@ -237,44 +309,77 @@ impl Store {
     /// migrated.
     pub fn open_without_migrating(path: impl AsRef<Path>) -> Result<Store> {
         use rusqlite::OpenFlags;
+        let path = path.as_ref();
         let flags = OpenFlags::default().difference(OpenFlags::SQLITE_OPEN_CREATE);
         let connection = set_up(Connection::open_with_flags(path, flags)?)?;
         connection.pragma_update(None, "foreign_keys", true)?;
         migrator::check(&connection)?;
-        Ok(Self::over(connection))
+        Self::over(connection, Some(path))
     }
 
-    /// A private in-memory database; tests use this.
+    /// A private in-memory database; tests use this. Its one connection is
+    /// the writer and every reader.
     pub fn in_memory() -> Result<Store> {
-        Self::new(Connection::open_in_memory()?)
+        Self::new(Connection::open_in_memory()?, None)
     }
 
     /// The store over `connection`, migrated, with the admission ledger
-    /// backfilled ([`Store::backfill_handover_admissions`]).
-    fn new(mut connection: Connection) -> Result<Store> {
+    /// backfilled ([`Store::backfill_handover_admissions`]); `path` is the
+    /// file's, `None` in memory.
+    fn new(mut connection: Connection, path: Option<&Path>) -> Result<Store> {
         connection.pragma_update(None, "foreign_keys", true)?;
         migrator::migrate(&mut connection)?;
-        let store = Self::over(connection);
+        let store = Self::over(connection, path)?;
         store.backfill_handover_admissions()?;
         Ok(store)
     }
 
-    /// The store over a connection that is set up and at the current
-    /// schema.
-    fn over(connection: Connection) -> Store {
-        Store {
-            connection: Mutex::new(connection),
-            #[cfg(any(test, feature = "testing"))]
-            commit_probe: std::sync::OnceLock::new(),
-        }
+    /// The store over a writer that is set up and at the current schema,
+    /// with the shared reader opened on `path`.
+    fn over(writer: Connection, path: Option<&Path>) -> Result<Store> {
+        let shared = path.map(open_reader).transpose()?;
+        Ok(Store {
+            connections: Arc::new(Connections {
+                writer: Mutex::new(writer),
+                path: path.map(Path::to_owned),
+                readers: [Mutex::new(shared), Mutex::new(None)],
+                own_reader_open: AtomicBool::new(false),
+                #[cfg(any(test, feature = "testing"))]
+                commit_probe: std::sync::OnceLock::new(),
+            }),
+            reader: SHARED_READER,
+        })
     }
 
-    /// A panic while a caller held the connection has already rolled its
+    /// A second handle on the same database, whose reads use a reader
+    /// connection of its own; its writes and its checkpoint are the same
+    /// writer's. The host holds it with its view models, so only the holder
+    /// of the host's lock reads on it, and those reads never wait for a
+    /// read elsewhere in the process. One at a time: while its handle is
+    /// alive, a second call fails with [`StoreError::OwnReaderOpen`]; once
+    /// it is dropped, its connection closes and a new host can open
+    /// another. In memory the handle reads on the one connection. Rust
+    /// only: the Swift host read through the pool's readers.
+    pub fn with_own_reader(&self) -> Result<Store> {
+        let connections = &self.connections;
+        if connections.own_reader_open.swap(true, Ordering::AcqRel) {
+            return Err(StoreError::OwnReaderOpen);
+        }
+        // Built first, so its drop closes the flag again on a failed open.
+        let own = Store {
+            connections: connections.clone(),
+            reader: OWN_READER,
+        };
+        if let Some(path) = &connections.path {
+            *lock(&connections.readers[OWN_READER]) = Some(open_reader(path)?);
+        }
+        Ok(own)
+    }
+
+    /// The writer. A panic while a caller held it has already rolled its
     /// transaction back, so a poisoned lock is reused, not an error.
-    fn lock(&self) -> MutexGuard<'_, Connection> {
-        self.connection
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+    fn writer(&self) -> MutexGuard<'_, Connection> {
+        lock(&self.connections.writer)
     }
 
     /// Runs `body` inside one deferred transaction, so every query it makes
@@ -290,12 +395,19 @@ impl Store {
 
     /// [`Store::read`] for a body that wants the transaction itself, so its
     /// signature says every query runs inside the one snapshot.
+    /// It runs on this handle's reader or, in memory, on the one
+    /// connection with `query_only` on for the closure.
     fn snapshot<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        let mut connection = self.lock();
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let value = body(&transaction)?;
-        transaction.rollback()?;
-        Ok(value)
+        let _inside = Inside::enter(&self.connections);
+        if self.connections.path.is_none() {
+            let mut held = QueryOnly::hold(self.writer())?;
+            return read_on(&mut held.connection, body);
+        }
+        let mut reader = lock(&self.connections.readers[self.reader]);
+        let reader = reader
+            .as_mut()
+            .expect("a file store's handle has its reader open");
+        read_on(reader, body)
     }
 
     /// Runs `body` inside one transaction, committed when it returns `Ok`.
@@ -307,7 +419,8 @@ impl Store {
     /// writer waits on the busy timeout instead of failing with
     /// `database is locked`.
     pub fn write<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        self.commit_on(&mut self.lock(), body)
+        let _inside = Inside::enter(&self.connections);
+        self.commit_on(&mut self.writer(), body)
     }
 
     /// [`Store::write`] whose commit is on the disk when it returns, for
@@ -330,7 +443,8 @@ impl Store {
     /// unwound by a panic), all under one hold of the lock: no other write
     /// runs under them. Swift: `MeetingStore.writeDurably`.
     pub fn write_durably<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        let mut full = FullSync::hold(self.lock())?;
+        let _inside = Inside::enter(&self.connections);
+        let mut full = FullSync::hold(self.writer())?;
         self.commit_on(&mut full.connection, body)
     }
 
@@ -353,10 +467,16 @@ impl Store {
     /// that another connection (a writer, or a reader still in the WAL) blocks
     /// when the busy timeout runs out: SQLite's `SQLITE_BUSY`, which GRDB
     /// throws too and [`StoreError::is_busy`] recognises, since the commits it
-    /// could not copy are not known to be on the disk. An in-memory store has
-    /// no WAL and returns at once. Swift: `MeetingStore.checkpointDurably`.
+    /// could not copy are not known to be on the disk. This process's own
+    /// readers cannot block it: it takes the writer, then the shared
+    /// reader, then the host's, so a read in flight ends first and no new
+    /// one starts until it returns. An in-memory store has no WAL and no
+    /// reader of its own: it takes its one lock once and returns. Swift:
+    /// `MeetingStore.checkpointDurably`.
     pub fn checkpoint_durably(&self) -> Result<()> {
-        let mut full = FullSync::hold(self.lock())?;
+        let _inside = Inside::enter(&self.connections);
+        let mut full = FullSync::hold(self.writer())?;
+        let _readers = self.connections.readers.each_ref().map(lock);
         let (blocked, wal_frames): (bool, i64) =
             full.connection
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -393,7 +513,7 @@ impl Store {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let value = body(&transaction)?;
         #[cfg(any(test, feature = "testing"))]
-        if let Some(probe) = self.commit_probe.get() {
+        if let Some(probe) = self.connections.commit_probe.get() {
             probe(&transaction);
         }
         transaction.commit()?;
@@ -409,7 +529,18 @@ impl Store {
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn probe_commits(&self, probe: impl Fn(&Connection) + Send + Sync + 'static) {
-        let _ = self.commit_probe.set(Box::new(probe));
+        let _ = self.connections.commit_probe.set(Box::new(probe));
+    }
+
+    /// The writer's connection, outside any transaction, for a test that
+    /// tunes it (its busy timeout, `query_only` so every write fails) or
+    /// reads its pragmas: [`Store::read`] runs on a reader. `body` must not
+    /// call the store: the writer is held.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn on_writer<T>(&self, body: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
+        let _inside = Inside::enter(&self.connections);
+        Ok(body(&self.writer())?)
     }
 
     /// The migration identifiers recorded in `grdb_migrations`, in
@@ -453,6 +584,89 @@ fn set_up(connection: Connection) -> Result<Connection> {
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     connection.pragma_update(None, "checkpoint_fullfsync", true)?;
     Ok(connection)
+}
+
+/// A reader on the file at `path`: set up as the writer is, then
+/// `query_only`, so a write through it fails.
+fn open_reader(path: &Path) -> Result<Connection> {
+    let connection = set_up(Connection::open(path)?)?;
+    connection.pragma_update(None, "query_only", true)?;
+    Ok(connection)
+}
+
+/// A poisoned connection lock is reused: the panic that poisoned it has
+/// already rolled its transaction back.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// [`Store::read`]'s deferred transaction on `connection`, rolled back
+/// when `body` returns.
+fn read_on<T>(
+    connection: &mut Connection,
+    body: impl FnOnce(&Transaction<'_>) -> Result<T>,
+) -> Result<T> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let value = body(&transaction)?;
+    transaction.rollback()?;
+    Ok(value)
+}
+
+thread_local! {
+    /// The databases this thread is inside a store call on ([`Inside`]),
+    /// each by the address of its handles' shared [`Connections`].
+    static INSIDE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Marks the thread as inside a store call on one database for as long as
+/// it lives, so a `Store` call on that database from inside a closure, on
+/// any handle, asserts in a debug build instead of waiting on a lock its
+/// own thread holds. A call on another database's store (a second
+/// process, in a test) is no nesting.
+struct Inside(usize);
+
+impl Inside {
+    fn enter(connections: &Arc<Connections>) -> Inside {
+        let database = Arc::as_ptr(connections).addr();
+        let nested = INSIDE.with_borrow(|inside| inside.contains(&database));
+        debug_assert!(
+            !nested,
+            "a Store call inside a Store closure waits on its own lock"
+        );
+        INSIDE.with_borrow_mut(|inside| inside.push(database));
+        Inside(database)
+    }
+}
+
+impl Drop for Inside {
+    fn drop(&mut self) {
+        INSIDE.with_borrow_mut(|inside| {
+            if let Some(at) = inside.iter().rposition(|database| *database == self.0) {
+                inside.remove(at);
+            }
+        });
+    }
+}
+
+/// The in-memory connection under `query_only` for as long as it is held,
+/// so [`Store::read`] there fails a write as a reader does; dropping it
+/// turns `query_only` off again, once the read's transaction has ended.
+struct QueryOnly<'a> {
+    connection: MutexGuard<'a, Connection>,
+}
+
+impl<'a> QueryOnly<'a> {
+    fn hold(connection: MutexGuard<'a, Connection>) -> Result<QueryOnly<'a>> {
+        connection.pragma_update(None, "query_only", true)?;
+        Ok(QueryOnly { connection })
+    }
+}
+
+impl Drop for QueryOnly<'_> {
+    fn drop(&mut self) {
+        // Outside a transaction the pragma does not fail.
+        let _ = self.connection.pragma_update(None, "query_only", false);
+    }
 }
 
 /// The connection under `synchronous = FULL` and `fullfsync = ON` for as
@@ -582,9 +796,244 @@ fn upsert_sql(table: &str, columns: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
+    use std::thread;
 
     use super::*;
+    use crate::testing::WriteLockHold;
+
+    /// What "live" means in the reader tests: well under the busy timeout
+    /// a waiting write runs out.
+    const LIVE: Duration = Duration::from_millis(200);
+
+    /// A file store and the host's handle on it.
+    fn file_store(directory: &tempfile::TempDir) -> (Arc<Store>, Store, PathBuf) {
+        let path = directory.path().join("steno.sqlite");
+        let store = Arc::new(Store::open(&path).unwrap());
+        let host = store.with_own_reader().unwrap();
+        (store, host, path)
+    }
+
+    /// A write that waits out another connection's write lock holds the
+    /// writer, and a read on the shared reader and on the host's still
+    /// answers at once, as the detection poll and the host's reload need
+    /// (P40 check 10).
+    #[test]
+    fn a_read_does_not_wait_behind_a_write_that_waits_on_another_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, host, path) = file_store(&directory);
+        let hold = WriteLockHold::new(&path);
+        let writer = thread::spawn({
+            let store = store.clone();
+            move || store.rebuild_search_index()
+        });
+        // The write is in its busy wait by now, holding the writer.
+        thread::sleep(LIVE);
+
+        for (name, handle) in [("shared", &*store), ("host's", &host)] {
+            let started = Instant::now();
+            handle.settings().unwrap();
+            assert!(
+                started.elapsed() < LIVE,
+                "the {name} reader waited {:?} behind the write",
+                started.elapsed()
+            );
+        }
+        assert!(!writer.is_finished(), "the write still waits");
+
+        drop(hold);
+        writer.join().unwrap().unwrap();
+    }
+
+    /// The host's reader is its own: a read held open on the shared reader
+    /// (a long export, say) does not hold up a read on the host's.
+    #[test]
+    fn the_hosts_reads_do_not_wait_for_a_read_on_the_shared_reader() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, host, _) = file_store(&directory);
+        let (reading, read) = mpsc::channel::<()>();
+        let (end, ended) = mpsc::channel::<()>();
+        let long_read = thread::spawn({
+            let store = store.clone();
+            move || {
+                store.read(|_| {
+                    reading.send(()).unwrap();
+                    ended.recv().unwrap();
+                    Ok(())
+                })
+            }
+        });
+        read.recv().unwrap();
+        let started = Instant::now();
+        host.settings().unwrap();
+        assert!(
+            started.elapsed() < LIVE,
+            "the host's read waited {:?} for the shared reader",
+            started.elapsed()
+        );
+        end.send(()).unwrap();
+        long_read.join().unwrap().unwrap();
+    }
+
+    /// A write inside `read` fails with `SQLITE_READONLY` on every reader:
+    /// the file store's shared reader and the host's, and the in-memory
+    /// store's one connection, whose `query_only` ends with the closure,
+    /// so its next write commits (P40 check 15).
+    #[test]
+    fn a_write_through_read_fails_on_both_stores() {
+        let directory = tempfile::tempdir().unwrap();
+        let (file, file_host, _) = file_store(&directory);
+        let memory = Store::in_memory().unwrap();
+        let memory_host = memory.with_own_reader().unwrap();
+        let stores = [
+            ("the file store", &*file),
+            ("the file store's host reader", &file_host),
+            ("the in-memory store", &memory),
+            ("the in-memory store's host handle", &memory_host),
+        ];
+        for (name, store) in stores {
+            let error = store
+                .read(|connection| {
+                    connection.execute_batch("CREATE TABLE stenoProbe(x)")?;
+                    Ok(())
+                })
+                .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _))
+                        if error.code == ErrorCode::ReadOnly
+                ),
+                "{name}: {error}"
+            );
+            store
+                .write(|transaction| {
+                    transaction
+                        .execute_batch("CREATE TABLE stenoProbe(x); DROP TABLE stenoProbe;")?;
+                    Ok(())
+                })
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+    }
+
+    /// A `Store` call from inside a store closure asserts in a debug
+    /// build. On another lock (the host's reader inside a write) it would
+    /// not even wait; on the same one it would wait forever (P40 check
+    /// 15).
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "a Store call inside a Store closure")]
+    fn a_store_call_inside_a_store_closure_asserts() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, host, _) = file_store(&directory);
+        let _ = store.write(|_| host.settings());
+    }
+
+    /// A second host reader is refused while the first one's handle
+    /// lives, and opens again once it is dropped.
+    #[test]
+    fn one_host_reader_at_a_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, host, _) = file_store(&directory);
+        assert!(matches!(
+            store.with_own_reader(),
+            Err(StoreError::OwnReaderOpen)
+        ));
+        drop(host);
+        store.with_own_reader().unwrap().settings().unwrap();
+    }
+
+    /// The durable checkpoint waits for the reads in flight on both
+    /// readers, and no read starts on either until it returns: here a
+    /// commit probe holds the checkpoint's last step (its WAL restart
+    /// write) while a read on each reader is asked for (P40 check 15).
+    #[test]
+    fn the_checkpoint_waits_for_reads_in_flight_and_holds_off_new_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, host, _) = file_store(&directory);
+        let host = Arc::new(host);
+        let (in_checkpoint, inside) = mpsc::channel::<()>();
+        let (finish, finished) = mpsc::channel::<()>();
+        let (in_checkpoint, finished) = (Mutex::new(in_checkpoint), Mutex::new(finished));
+        store.probe_commits(move |_| {
+            in_checkpoint.lock().unwrap().send(()).unwrap();
+            finished.lock().unwrap().recv().unwrap();
+        });
+        let readers = [store.clone(), host.clone()];
+
+        // A read in flight on each reader, held inside its closure.
+        let mut in_flight = Vec::new();
+        for reader in readers.clone() {
+            let (reading, read) = mpsc::channel::<()>();
+            let (end, ended) = mpsc::channel::<()>();
+            in_flight.push((
+                thread::spawn(move || {
+                    reader.read(|_| {
+                        reading.send(()).unwrap();
+                        ended.recv().unwrap();
+                        Ok(())
+                    })
+                }),
+                end,
+            ));
+            read.recv().unwrap();
+        }
+        let checkpoint = thread::spawn({
+            let store = store.clone();
+            move || store.checkpoint_durably()
+        });
+        assert!(
+            inside.recv_timeout(LIVE).is_err(),
+            "the checkpoint went ahead of the reads in flight"
+        );
+        for (read, end) in in_flight {
+            end.send(()).unwrap();
+            read.join().unwrap().unwrap();
+        }
+        inside.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // The checkpoint holds its last step: a read on either reader
+        // waits for it.
+        let (done, reads_done) = mpsc::channel::<&'static str>();
+        let new_reads: Vec<_> = readers
+            .into_iter()
+            .zip(["shared", "host's"])
+            .map(|(reader, name)| {
+                let done = done.clone();
+                thread::spawn(move || {
+                    reader.settings().unwrap();
+                    done.send(name).unwrap();
+                })
+            })
+            .collect();
+        if let Ok(name) = reads_done.recv_timeout(LIVE) {
+            panic!("a read on the {name} reader ran during the checkpoint");
+        }
+        finish.send(()).unwrap();
+        checkpoint.join().unwrap().unwrap();
+        for read in new_reads {
+            read.join().unwrap();
+        }
+    }
+
+    /// The in-memory store's one connection is its writer and every
+    /// reader, and its checkpoint takes that lock once and returns at
+    /// once, as `checkpoint_store` at launch needs in the app tests (P40
+    /// check 15).
+    #[test]
+    fn the_in_memory_checkpoint_takes_its_one_lock_once() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let host = Arc::new(store.with_own_reader().unwrap());
+        let (done, checkpointed) = mpsc::channel();
+        for handle in [store, host] {
+            let done = done.clone();
+            thread::spawn(move || done.send(handle.checkpoint_durably()).unwrap());
+            checkpointed
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the checkpoint returns")
+                .unwrap();
+        }
+    }
 
     /// The write that restarts the WAL after a durable checkpoint commits
     /// under `synchronous = FULL` (2), in the checkpoint's hold of the

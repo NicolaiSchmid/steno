@@ -873,7 +873,7 @@ mod tests {
         let path = dir.path().join("steno.sqlite");
         let store = Arc::new(Store::open(&path).unwrap());
         store
-            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_millis(20))?))
+            .on_writer(|connection| connection.busy_timeout(std::time::Duration::from_millis(20)))
             .unwrap();
 
         let (meeting, result) = a_recording(&store, dir.path());
@@ -965,7 +965,7 @@ mod tests {
 
         let path = dir.path().join("steno.sqlite");
         store
-            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_millis(20))?))
+            .on_writer(|connection| connection.busy_timeout(std::time::Duration::from_millis(20)))
             .unwrap();
         let (meeting, result) = a_recording(&store, dir.path());
         let hold = WriteLockHold::new(&path);
@@ -1611,12 +1611,12 @@ mod tests {
         assert!(store.asset(meeting.id).unwrap().is_none());
     }
 
-    /// `PRAGMA synchronous` on the store's connection outside a write.
+    /// `PRAGMA synchronous` on the store's writer outside a write.
     fn synchronous(store: &Store) -> i64 {
         store
-            .read(
-                |connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?),
-            )
+            .on_writer(|connection| {
+                connection.query_row("PRAGMA synchronous", [], |row| row.get(0))
+            })
             .unwrap()
     }
 

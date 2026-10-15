@@ -2564,7 +2564,7 @@ mod tests {
             .unwrap();
         installed.store(true, Ordering::SeqCst);
         store
-            .read(|connection| Ok(connection.busy_timeout(Duration::ZERO)?))
+            .on_writer(|connection| connection.busy_timeout(Duration::ZERO))
             .unwrap();
         let lock = write_lock(dir.path());
 
@@ -2607,7 +2607,7 @@ mod tests {
             export_retries: Arc::new(ExportRetries::in_memory()),
         });
         store
-            .read(|connection| Ok(connection.busy_timeout(Duration::ZERO)?))
+            .on_writer(|connection| connection.busy_timeout(Duration::ZERO))
             .unwrap();
         let meeting = enqueue_call(dir.path(), &service.pipeline.current());
         tokio::time::timeout(PATIENCE, engine.entered.notified())
@@ -2667,7 +2667,7 @@ mod tests {
         );
         let mut events = current.current().dependencies().events.subscribe();
         store
-            .read(|connection| Ok(connection.busy_timeout(Duration::ZERO)?))
+            .on_writer(|connection| connection.busy_timeout(Duration::ZERO))
             .unwrap();
         let meeting = enqueue_call(dir.path(), &current.current());
         tokio::time::timeout(PATIENCE, engine.entered.notified())

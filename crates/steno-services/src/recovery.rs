@@ -1500,7 +1500,7 @@ mod tests {
         let harness = Harness::new();
         harness
             .store
-            .read(|connection| Ok(connection.busy_timeout(Duration::from_millis(20))?))
+            .on_writer(|connection| connection.busy_timeout(Duration::from_millis(20)))
             .unwrap();
         let meeting = harness.begin(MeetingSource::MacInPerson);
         let mut writer = harness.writer(&meeting);

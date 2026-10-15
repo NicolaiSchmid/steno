@@ -3408,7 +3408,7 @@ mod tests {
         );
         let listener = || handover_listener(&source);
         store
-            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
+            .on_writer(|connection| connection.busy_timeout(std::time::Duration::ZERO))
             .unwrap();
         let writer = rusqlite::Connection::open(dir.path().join("steno.sqlite")).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();

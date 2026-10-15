@@ -15,7 +15,9 @@
 //! - `testing` (feature `testing`): deterministic fakes for every
 //!   boundary, so the pipeline, the CLI and the shell test without models.
 //!   The feature also adds `Store::probe_commits`, which lets a test read
-//!   each write transaction's pragmas right before it commits.
+//!   each write transaction's pragmas right before it commits, and
+//!   `Store::on_writer`, which lets it tune or read the writer's
+//!   connection outside a transaction.
 //! - [`json`]: the `StenoJSON` convention and the date and UUID codecs;
 //!   [`json::printer`] holds the Foundation-style printer `meeting.json` and
 //!   the bridge use.

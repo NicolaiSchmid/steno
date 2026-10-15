@@ -3964,7 +3964,7 @@ mod tests {
     ) -> steno_core::testing::WriteLockHold {
         harness
             .store
-            .read(|connection| Ok(connection.busy_handler(Some(handler))?))
+            .on_writer(|connection| connection.busy_handler(Some(handler)))
             .unwrap();
         steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"))
     }
@@ -4358,7 +4358,7 @@ mod tests {
         let harness = harness(&[]);
         harness
             .store
-            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_millis(100))?))
+            .on_writer(|connection| connection.busy_timeout(std::time::Duration::from_millis(100)))
             .unwrap();
         let hold =
             steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
