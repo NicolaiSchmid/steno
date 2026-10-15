@@ -1084,9 +1084,11 @@ fn a_daemon_killed_and_started_again_resumes_the_recording() {
 /// whether it runs or not: while a recording on the default source goes
 /// on, probes of a source whose owner is stopped answer `false`, one once
 /// the owner resumed `true`, and the recording got no report, no gap and
-/// no dropped frame, its master within 0.1 s of wall time. The probe's own
-/// stream is not the recording's, so a stopped owner that wedges what it
-/// is linked to wedges the probe alone.
+/// no dropped frame. Its master is at most 0.1 s shorter than the wall
+/// time from the end of its start to its stop, and at most 0.1 s longer
+/// than the wall time from before its start to the end of its stop. The
+/// probe's own stream is not the recording's, so a stopped owner that
+/// wedges what it is linked to wedges the probe alone.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn probing_a_chosen_source_costs_the_recording_nothing() {
@@ -1104,6 +1106,8 @@ fn probing_a_chosen_source_costs_the_recording_nothing() {
     .expect("the session");
     let stalled = StalledSource::create();
     let notices = session.notices();
+    // The master begins within the start and ends within the stop.
+    let starting = Instant::now();
     session.start(Uuid::new_v4()).expect("the start");
     let started = Instant::now();
     for ask in 1..=3 {
@@ -1125,8 +1129,9 @@ fn probing_a_chosen_source_costs_the_recording_nothing() {
         "once its owner runs"
     );
     std::thread::sleep(Duration::from_millis(500));
-    let wall = started.elapsed().as_secs_f64();
+    let stopping = started.elapsed().as_secs_f64();
     let result = session.stop().expect("the recording");
+    let wall = starting.elapsed().as_secs_f64();
     assert_eq!(notices.try_recv().ok(), None, "no device change, no stall");
     let statistics = &result.statistics;
     assert_eq!(statistics.device_changes, 0);
@@ -1137,10 +1142,10 @@ fn probing_a_chosen_source_costs_the_recording_nothing() {
         statistics.dropped_frames
     );
     let master = statistics.duration;
-    println!("the master: {master:.3} s against {wall:.3} s of wall time");
+    println!("the master: {master:.3} s against {stopping:.3} to {wall:.3} s of wall time");
     assert!(
-        (wall - master).abs() < 0.1,
-        "every frame while the probes ran: {master:.3} s against {wall:.3} s"
+        master > stopping - 0.1 && master < wall + 0.1,
+        "every frame while the probes ran: {master:.3} s against {stopping:.3} to {wall:.3} s"
     );
 }
 

@@ -801,7 +801,8 @@ impl CaptureBackend for OnceThenFailing {
 /// the chosen microphone itself. Every UID it was asked for is kept. With
 /// `probes` it can ask a microphone on a stream of its own, as the Linux
 /// backend does: the chosen one delivers there while connected and
-/// `opens`; every probe is counted.
+/// `opens`; every probe is counted. With `ask_hold` set, the next probe
+/// reports that it began and waits until the test releases it.
 struct ChosenOrDefault {
     inner: SyntheticCaptureBackend,
     connected: AtomicBool,
@@ -812,6 +813,7 @@ struct ChosenOrDefault {
     asked: Mutex<Vec<Option<String>>>,
     probes: AtomicBool,
     probed: AtomicUsize,
+    ask_hold: Mutex<Option<(Sender<()>, Receiver<()>)>>,
 }
 
 impl ChosenOrDefault {
@@ -842,6 +844,7 @@ impl ChosenOrDefault {
             asked: Mutex::new(Vec::new()),
             probes: AtomicBool::new(false),
             probed: AtomicUsize::new(0),
+            ask_hold: Mutex::new(None),
         }
     }
 
@@ -935,6 +938,13 @@ impl CaptureBackend for ChosenOrDefault {
 
     fn probe_input(&self, uid: &str) -> bool {
         assert_eq!(uid, Self::CHOSEN);
+        let hold = self.ask_hold.lock().unwrap().take();
+        if let Some((began, release)) = hold {
+            let _ = began.send(());
+            // The test's sender drops before its session, so a failed
+            // test does not hold its session's drop here.
+            let _ = release.recv();
+        }
         let delivers = self.connected.load(Ordering::Relaxed) && self.opens.load(Ordering::Relaxed);
         self.probed.fetch_add(1, Ordering::SeqCst);
         delivers
@@ -4723,12 +4733,44 @@ fn wait_for_probes(backend: &ChosenOrDefault, count: usize) {
     }
 }
 
+/// Asserts that the asks cost the recording nothing: the chosen microphone
+/// was asked for once and never restarted, and the master has no device
+/// change, no gap, no drop and exactly the whole frames delivered.
+fn assert_cost_nothing(backend: &ChosenOrDefault, result: &CaptureResult) {
+    assert_eq!(
+        backend.asked(),
+        ChosenOrDefault::chosen_then_default(0),
+        "no restart"
+    );
+    assert_eq!(backend.inner.starts(), 1);
+    let statistics = &result.statistics;
+    assert_eq!(statistics.device_changes, 0);
+    assert_eq!(statistics.gap_seconds, 0.0);
+    assert!(statistics.dropped_frames.is_empty());
+    let delivered = backend.inner.frames_delivered();
+    let whole = delivered - delivered % FRAME_SIZE;
+    let master = master_of(result);
+    assert_eq!(
+        (master.frame_count(), master.sample_rate),
+        (whole, SAMPLE_RATE),
+        "every whole frame delivered, nothing else"
+    );
+    assert_eq!(
+        statistics.duration,
+        whole as f64 / SAMPLE_RATE,
+        "the master as long as what was delivered"
+    );
+}
+
 /// A chosen microphone that did not open at the start, over a backend
 /// that can ask one on a stream of its own: the session records the
 /// default in its place and asks after `CHOSEN_INPUT_RECHECK`, then twice
 /// as long after each ask. Asks that find it still not delivering cost the
-/// recording nothing (no restart, no gap, every frame, the master as long
-/// as wall time); nothing else is asked of the backend.
+/// recording nothing (no restart, no gap, no drop, the master holding
+/// exactly the whole frames delivered); nothing else is asked of the
+/// backend. The master is checked by its frames, not wall time: the backend
+/// paces itself on a thread the asks cannot hold, and every clock step
+/// waits for delivery.
 #[test]
 fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing() {
     let directory = tempfile::tempdir().unwrap();
@@ -4739,7 +4781,6 @@ fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing(
     let session = backend.session(directory.path(), clock.clone());
     let notices = session.notices();
     let delivered = || backend.inner.frames_delivered();
-    let started = Instant::now();
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(
         session.stream().and_then(|stream| stream.input),
@@ -4764,29 +4805,53 @@ fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing(
         past_the_ask = step;
         wait *= 2;
     }
-    let wall = started.elapsed().as_secs_f64();
-    let result = session.stop().unwrap();
+    assert_cost_nothing(&backend, &session.stop().unwrap());
+}
+
+/// A slow ask holds neither the watch thread's sampling nor the recording:
+/// held for longer than `STALL_TIMEOUT` on the clock, it costs no stall
+/// and no frame, and once let go it finds the chosen microphone still
+/// silent. The ask runs on a `steno-probe` thread of its own, so the watch
+/// thread goes back to sleep after every sample while it is held.
+#[test]
+fn sampling_goes_on_while_an_ask_is_held() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(ChosenOrDefault::watched(60.0));
+    backend.probes.store(true, Ordering::Relaxed);
+    backend.opens.store(false, Ordering::Relaxed);
+    let session = backend.session(directory.path(), clock.clone());
+    let notices = session.notices();
+    let delivered = || backend.inner.frames_delivered();
+    session.start(Uuid::new_v4()).unwrap();
+    // Declared after the session, so a failing test drops the sender
+    // first and a held probe lets go before the session's drop waits.
+    // Armed after the start, so a probe within the start cannot block on
+    // it; nothing asks before the clock moves.
+    let (release, released) = channel();
+    let (began, asks) = channel();
+    *backend.ask_hold.lock().unwrap() = Some((began, released));
+    advance_while_delivering(&clock, delivered, CaptureSession::CHOSEN_INPUT_RECHECK);
+    recv(&asks);
+    // A second longer than STALL_TIMEOUT on the clock: every step waits
+    // for the watch thread asleep, so it samples while the ask is held.
+    let step = CaptureSession::STALL_CHECK_INTERVAL;
+    let held = CaptureSession::STALL_TIMEOUT + Duration::from_secs(1);
+    for _ in 0..held.as_millis() / step.as_millis() {
+        advance_while_delivering(&clock, delivered, step);
+    }
+    assert!(clock.wait_for_sleepers(1));
+    assert_no_notice(&notices, "no stall while the ask is held");
     assert_eq!(
-        backend.asked(),
-        ChosenOrDefault::chosen_then_default(0),
-        "no restart"
+        backend.probed.load(Ordering::SeqCst),
+        0,
+        "the held ask has not answered"
     );
-    assert_eq!(backend.inner.starts(), 1);
-    let statistics = &result.statistics;
-    assert_eq!(statistics.device_changes, 0);
-    assert_eq!(statistics.gap_seconds, 0.0);
-    assert!(statistics.dropped_frames.is_empty());
-    let delivered = backend.inner.frames_delivered();
-    assert_eq!(
-        master_of(&result).frame_count(),
-        delivered - delivered % FRAME_SIZE,
-        "every whole frame delivered, nothing else"
-    );
-    assert!(
-        (statistics.duration - wall).abs() < 0.1,
-        "the master: {} s against {wall} s of wall time",
-        statistics.duration
-    );
+    release.send(()).unwrap();
+    wait_for_probes(&backend, 1);
+    advance_while_delivering(&clock, delivered, step);
+    assert_no_notice(&notices, "the chosen microphone did not deliver");
+    assert_cost_nothing(&backend, &session.stop().unwrap());
 }
 
 /// The ask that finds the chosen microphone delivering reports
