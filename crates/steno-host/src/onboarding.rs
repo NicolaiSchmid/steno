@@ -42,6 +42,7 @@ use crate::services::{
 use crate::settings::llm::{CodexStatus, KeyRead, LlmPreset, LlmSettingsViewModel, url_host};
 use crate::settings::obsidian::ObsidianSettingsViewModel;
 use crate::settings::snapshots as settings_snapshots;
+use crate::settings::transcription::downloading_text;
 use crate::settings::{AssetState, SpeechSettingsViewModel};
 use crate::setup::{llm_configured, vault_configured};
 use crate::speech::{ModelAsset, SpeechEngineId};
@@ -664,80 +665,72 @@ fn speech_models_snapshot(
             )
         })
         .collect();
-    let total: i64 = rows.iter().map(|(_, _, bytes)| bytes).sum();
+    let installed = |state: &AssetState| matches!(state, AssetState::Installed { .. });
+    if rows.iter().all(|(_, state, _)| installed(state)) {
+        return Some(OnboardingSpeechModels {
+            state: TranscriptionAssetState::Installed,
+            detail: "Installed".to_owned(),
+            asset_ids: Vec::new(),
+            download_fraction: None,
+            failure: None,
+        });
+    }
+    if rows
+        .iter()
+        .any(|(_, state, _)| matches!(state, AssetState::Downloading { .. }))
+    {
+        // The share of the bytes in place, an installed model counting whole.
+        let total: i64 = rows.iter().map(|(_, _, bytes)| bytes).sum();
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a share of a few hundred megabytes"
+        )]
+        let fraction = (total > 0).then(|| {
+            rows.iter()
+                .map(|(_, state, bytes)| {
+                    let done = match state {
+                        AssetState::Installed { .. } => 1.0,
+                        AssetState::Downloading { fraction, .. } => *fraction,
+                        AssetState::Absent | AssetState::Failed(_) => 0.0,
+                    };
+                    done * *bytes as f64
+                })
+                .sum::<f64>()
+                / total as f64
+        });
+        return Some(OnboardingSpeechModels {
+            state: TranscriptionAssetState::Downloading,
+            detail: downloading_text(fraction.unwrap_or(0.0)),
+            asset_ids: Vec::new(),
+            download_fraction: fraction,
+            failure: None,
+        });
+    }
+    // Neither installed nor downloading: Download or Retry starts the rest.
     let failure = rows.iter().find_map(|(_, state, _)| match state {
         AssetState::Failed(failure) => Some(failure.clone()),
         _ => None,
     });
-    let downloading = rows
+    let missing: Vec<_> = rows
         .iter()
-        .any(|(_, state, _)| matches!(state, AssetState::Downloading { .. }));
-    let installed = rows
-        .iter()
-        .all(|(_, state, _)| matches!(state, AssetState::Installed { .. }));
-    let state = if installed {
-        TranscriptionAssetState::Installed
-    } else if downloading {
-        TranscriptionAssetState::Downloading
-    } else if failure.is_some() {
-        TranscriptionAssetState::Failed
-    } else {
-        TranscriptionAssetState::Absent
-    };
-    // The share of the bytes in place, an installed model counting whole.
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "a share of a few hundred megabytes"
-    )]
-    let fraction = (total > 0).then(|| {
-        rows.iter()
-            .map(|(_, state, bytes)| {
-                let done = match state {
-                    AssetState::Installed { .. } => 1.0,
-                    AssetState::Downloading { fraction, .. } => *fraction,
-                    AssetState::Absent | AssetState::Failed(_) => 0.0,
-                };
-                done * *bytes as f64
-            })
-            .sum::<f64>()
-            / total as f64
-    });
-    let detail = match state {
-        TranscriptionAssetState::Installed => "Installed".to_owned(),
-        TranscriptionAssetState::Downloading => match fraction.filter(|share| *share > 0.0) {
-            Some(share) => {
-                // A percentage in 0...100 fits any integer type.
-                #[allow(clippy::cast_possible_truncation)]
-                let percent = (share * 100.0).round() as i64;
-                format!("Downloading… {percent}%")
-            }
-            None => "Downloading…".to_owned(),
-        },
-        TranscriptionAssetState::Absent | TranscriptionAssetState::Failed => {
-            let remaining: i64 = rows
-                .iter()
-                .filter(|(_, state, _)| !matches!(state, AssetState::Installed { .. }))
-                .map(|(_, _, bytes)| bytes)
-                .sum();
-            format!("Not downloaded · {}", file_size(remaining))
-        }
-    };
-    let starts = matches!(
-        state,
-        TranscriptionAssetState::Absent | TranscriptionAssetState::Failed
-    );
+        .filter(|(_, state, _)| !installed(state))
+        .collect();
     Some(OnboardingSpeechModels {
-        state,
-        detail,
-        asset_ids: rows
+        state: if failure.is_some() {
+            TranscriptionAssetState::Failed
+        } else {
+            TranscriptionAssetState::Absent
+        },
+        detail: format!(
+            "Not downloaded · {}",
+            file_size(missing.iter().map(|(_, _, bytes)| bytes).sum())
+        ),
+        asset_ids: missing
             .iter()
-            .filter(|(_, state, _)| {
-                starts && matches!(state, AssetState::Absent | AssetState::Failed(_))
-            })
             .map(|(asset, _, _)| asset.as_str().to_owned())
             .collect(),
-        download_fraction: fraction.filter(|_| state == TranscriptionAssetState::Downloading),
-        failure: failure.filter(|_| state == TranscriptionAssetState::Failed),
+        download_fraction: None,
+        failure,
     })
 }
 
