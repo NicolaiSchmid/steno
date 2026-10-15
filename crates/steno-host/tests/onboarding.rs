@@ -1341,7 +1341,10 @@ fn no_vault_no_mac_or_not_on_page_one_checks_nothing() {
         .for_window(BridgeWindow::Onboarding)
         .page_ready()
         .unwrap();
-    assert_eq!(linux.snapshot(BridgeTopic::Onboarding)["page"], "permissions");
+    assert_eq!(
+        linux.snapshot(BridgeTopic::Onboarding)["page"],
+        "permissions"
+    );
     linux
         .host
         .for_window(BridgeWindow::Onboarding)
