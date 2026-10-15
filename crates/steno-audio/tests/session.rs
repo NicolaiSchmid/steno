@@ -5346,3 +5346,69 @@ fn a_held_stall_waits_for_its_release() {
     assert_eq!(backend.frames_delivered(), stalled, "stalled");
     backend.stop();
 }
+
+/// The runs of at least `shortest` exact zeros in `samples`, as (start,
+/// length): a 440 Hz or 1 kHz tone at amplitude 0.5 touches zero at single
+/// samples only.
+fn zero_runs(samples: &[f32], shortest: usize) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    for (index, sample) in samples.iter().chain(std::iter::once(&1.0)).enumerate() {
+        match (*sample == 0.0, start) {
+            (true, None) => start = Some(index),
+            (false, Some(from)) => {
+                if index - from >= shortest {
+                    runs.push((from, index - from));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    runs
+}
+
+/// A capture thread that misses cycles (A18 of the stable-promotion plan):
+/// the synthetic producer skips 100 ms one second in, which its clock
+/// reports and the sink fills with zeros on both lanes at the same frames,
+/// so the master holds the whole four seconds less only the jump past the
+/// limit: 1.5 s two seconds in, left out rather than written as zeros. The
+/// filled frames count as missed, not as dropped or as a gap.
+#[test]
+fn missed_cycles_are_written_as_silence_on_every_lane_and_counted() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 4.0).miss_at(1.0, 4_800).miss_at(2.0, 72_000),
+    ));
+    let mut configuration = configuration(CaptureMode::Call, directory.path(), false);
+    configuration.echo_cancellation = false;
+    let session = CaptureSession::with_backend(
+        configuration,
+        backend.clone(),
+        None,
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    let statistics = &result.statistics;
+    assert!(statistics.dropped_frames.is_empty(), "{statistics:?}");
+    assert_eq!(statistics.gap_seconds, 0.0);
+    assert_eq!(statistics.missed_seconds, 0.1, "the 100 ms, not the 1.5 s");
+    assert!(
+        (statistics.duration - 2.5).abs() < 0.02,
+        "four seconds less the jump past the limit: {}",
+        statistics.duration
+    );
+    let master = master_of(&result);
+    assert_eq!(master.channels.len(), 2);
+    for (lane, samples) in call().iter().zip(&master.channels) {
+        assert_eq!(
+            zero_runs(samples, 16),
+            [(48_000, 4_800)],
+            "{lane:?}: zeros exactly where the frames were missed"
+        );
+    }
+}

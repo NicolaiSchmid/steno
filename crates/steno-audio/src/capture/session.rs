@@ -166,6 +166,16 @@
 //! that panics leaves `Failed` with no recording rather than `Stopping` for
 //! good.
 //!
+//! Audio the backend's own thread missed while its stream ran (cycles the
+//! scheduler did not give it; A18 of `.plans/2026-10-07-stable-promotion.md`)
+//! is no stall: the backend writes it as zeros on every lane before its next
+//! callback ([`LaneFrameSink::fill_missed`],
+//! [`CycleClock`](crate::realtime::CycleClock)), and the session counts it
+//! per lane at each stream's rate into
+//! [`CaptureStatistics::missed_seconds`], logged at `warn` after the stop.
+//! A jump too long for that fill leaves the master short of wall time, which
+//! the recorder's note counts. Rust only.
+//!
 //! # Threads
 //!
 //! Swift's actor becomes one mutex over the session state. The rule that
@@ -367,9 +377,10 @@ struct Active {
     /// listeners are live before the gap is written); `resume` starts the
     /// next rebuild from it instead of losing it.
     pending_change: Option<DeviceChangeReason>,
-    /// The ring overruns of the streams a rebuild has stopped, each counted
-    /// at its own rate.
-    ring_drops: RingDrops,
+    /// The ring overruns of the streams a rebuild has stopped, and the zeros
+    /// they wrote for audio their thread missed, each counted at its own
+    /// rate.
+    ring_counts: RingCounts,
     /// The watch thread, over a backend that delivers continuously.
     watch: Option<Watch>,
     /// The recording's hold on [`Playback`], taken before the backend
@@ -424,19 +435,20 @@ impl Streak {
     }
 }
 
-/// Ring overruns in samples at [`SAMPLE_RATE`], per lane. The sink counts
-/// them at the device's rate and keeps counting across a rebuild, so each
-/// stream's share is rescaled at that stream's rate once it has stopped.
+/// Per-lane counts the sink keeps in samples at the device's rate (ring
+/// overruns, zeros for missed audio), in samples at [`SAMPLE_RATE`]. The
+/// sink keeps counting across a rebuild, so each stream's share is
+/// rescaled at that stream's rate once it has stopped.
 #[derive(Default)]
-struct RingDrops {
+struct LaneCounts {
     /// The sink's counts at the last fold.
     seen: BTreeMap<AudioLane, usize>,
     /// What every fold so far stands for at [`SAMPLE_RATE`].
     at_output_rate: BTreeMap<AudioLane, usize>,
 }
 
-impl RingDrops {
-    /// Adds the overruns in `counts` since the last fold, counted at `rate`.
+impl LaneCounts {
+    /// Adds what `counts` gained since the last fold, counted at `rate`.
     fn fold(&mut self, counts: BTreeMap<AudioLane, usize>, rate: f64) {
         for (lane, count) in counts {
             let seen = self.seen.entry(lane).or_default();
@@ -444,6 +456,45 @@ impl RingDrops {
                 CaptureStream::rescaled(count.saturating_sub(*seen), rate, SAMPLE_RATE);
             *seen = count;
         }
+    }
+}
+
+/// The sink's per-lane counts of one recording: its ring overruns, and
+/// the zeros written for audio a capture thread missed
+/// ([`LaneFrameSink::fill_missed`]).
+#[derive(Default)]
+struct RingCounts {
+    dropped: LaneCounts,
+    missed: LaneCounts,
+}
+
+impl RingCounts {
+    /// Adds what `sink` counted since the last fold, at the `rate` of the
+    /// stream that wrote it.
+    fn fold(&mut self, sink: &LaneFrameSink, rate: f64) {
+        self.dropped.fold(sink.dropped_samples(), rate);
+        self.missed.fold(sink.missed_samples(), rate);
+    }
+
+    /// Seconds of zeros written for missed audio on the lane that missed
+    /// most, for [`CaptureStatistics::missed_seconds`]; logged at `warn`
+    /// with every lane's count when there are any.
+    fn missed_seconds(&self) -> f64 {
+        let most = self
+            .missed
+            .at_output_rate
+            .values()
+            .max()
+            .copied()
+            .unwrap_or(0);
+        let seconds = most as f64 / SAMPLE_RATE;
+        if most > 0 {
+            tracing::warn!(
+                missed = ?self.missed.at_output_rate,
+                "the capture's thread missed {seconds:.3} s of audio, written as silence"
+            );
+        }
+        seconds
     }
 }
 
@@ -1219,7 +1270,7 @@ impl Core {
             system_peak_so_far: 0.0,
             rebuild: None,
             pending_change: None,
-            ring_drops: RingDrops::default(),
+            ring_counts: RingCounts::default(),
             watch,
             _recording_hold: hold.take(),
             streak: Streak::default(),
@@ -1388,9 +1439,7 @@ impl Core {
         // backend delivered them after a stop overtook its rebuild, with no
         // processing thread running yet. They count as dropped. The rings
         // hold the device's rate; the counts are 48 kHz frames.
-        active
-            .ring_drops
-            .fold(active.sink.dropped_samples(), ring_rate);
+        active.ring_counts.fold(&active.sink, ring_rate);
         let undrained =
             CaptureStream::rescaled(active.sink.available_to_read(), ring_rate, SAMPLE_RATE)
                 / FRAME_SIZE;
@@ -1414,7 +1463,7 @@ impl Core {
         }
         let lanes = self.configuration.lanes();
         let mut dropped: BTreeMap<AudioLane, usize> = BTreeMap::new();
-        for (lane, samples) in &active.ring_drops.at_output_rate {
+        for (lane, samples) in &active.ring_counts.dropped.at_output_rate {
             *dropped.entry(*lane).or_default() += samples / FRAME_SIZE;
         }
         if undrained > 0 {
@@ -1435,6 +1484,7 @@ impl Core {
             ended_on_device_loss: active.ended_on_device_loss,
             device_changes: active.device_changes,
             gap_seconds: active.gap_seconds,
+            missed_seconds: active.ring_counts.missed_seconds(),
         };
         let asset = AudioAsset {
             id: Uuid::new_v4(),
@@ -1763,9 +1813,7 @@ impl Core {
             // rate; the restarted one's come at the next fold.
             if let Some(active) = inner.active.as_mut() {
                 active.system_peak_so_far = active.system_peak_so_far.max(peak);
-                active
-                    .ring_drops
-                    .fold(sink.dropped_samples(), active.stream.sample_rate);
+                active.ring_counts.fold(&sink, active.stream.sample_rate);
                 // No processing thread writes the slot now; the level
                 // publisher hands this on, so a meter does not hold the old
                 // stream's last level through a stall or a long restart.

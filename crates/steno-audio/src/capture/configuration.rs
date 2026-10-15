@@ -378,4 +378,12 @@ pub struct CaptureStatistics {
     /// those rebuilds, and across one a stop overtook while it wrote the
     /// gap (that one is not in `device_changes`).
     pub gap_seconds: f64,
+    /// Seconds of silence written in place of audio the capture's thread
+    /// missed (cycles it was not scheduled for, read from the device's
+    /// clock: [`CycleClock`](crate::realtime::CycleClock)), on the lane
+    /// that missed most; part of `duration`, as the gaps are. Should be 0.
+    /// A jump longer than [`MISSED_FILL_LIMIT`](crate::realtime::MISSED_FILL_LIMIT)
+    /// is not filled and not counted here: the master falls short of wall
+    /// time by it instead. Rust only.
+    pub missed_seconds: f64,
 }

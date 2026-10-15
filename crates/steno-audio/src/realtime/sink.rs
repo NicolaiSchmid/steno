@@ -13,6 +13,13 @@
 //! count the session's stall watchdog samples from its own thread (one
 //! relaxed store per callback, refused callbacks included: a device that
 //! delivers into full rings is not stalled). Rust only.
+//!
+//! Audio the backend's thread missed (cycles it was not scheduled for,
+//! [`CycleClock`](super::CycleClock)) becomes zeros on every lane through
+//! [`LaneFrameSink::fill_missed`], one callback of its own before the next
+//! real one, and is counted per lane ([`LaneFrameSink::missed_samples`]) for
+//! the session's statistics. A18 of `.plans/2026-10-07-stable-promotion.md`;
+//! Rust only.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -40,6 +47,8 @@ pub struct LaneFrameSink {
     /// Frames of every callback begun, refused ones included; written by
     /// the single producer, read by the session's watchdog.
     frames_offered: AtomicUsize,
+    /// Zeros written per lane in place of audio a capture thread missed.
+    missed: Vec<AtomicUsize>,
 }
 
 impl std::fmt::Debug for LaneFrameSink {
@@ -80,6 +89,7 @@ impl LaneFrameSink {
             device_change_handler: on_device_change,
             pending_frames: AtomicUsize::new(0),
             frames_offered: AtomicUsize::new(0),
+            missed: lanes.iter().map(|_| AtomicUsize::new(0)).collect(),
         }
     }
 
@@ -168,6 +178,36 @@ impl LaneFrameSink {
         self.rings.commit();
     }
 
+    /// `frames` of zeros on every lane for audio the backend's thread
+    /// missed, as one callback of their own, counted as missed on every
+    /// lane; whether they were written. Refused, and counted as dropped
+    /// like any callback, when a ring has no room. The caller bounds
+    /// `frames` ([`CycleClock`](super::CycleClock) reports at most
+    /// [`MISSED_FILL_LIMIT`](super::MISSED_FILL_LIMIT)).
+    #[inline(always)]
+    pub fn fill_missed(&self, frames: usize) -> bool {
+        if frames == 0 || !self.begin_callback(frames) {
+            return false;
+        }
+        for lane in 0..self.lanes.len() {
+            self.write_silence(lane);
+            self.record_missed(lane, frames);
+        }
+        self.end_callback();
+        true
+    }
+
+    /// Counts `frames` of zeros a producer wrote on `lane` in place of audio
+    /// its thread missed (the WASAPI master fills the follower's lane with
+    /// the follower's own frames, so it counts lane by lane). One atomic
+    /// add; a lane out of range is ignored.
+    #[inline(always)]
+    pub fn record_missed(&self, lane: usize, frames: usize) {
+        if let Some(missed) = self.missed.get(lane) {
+            missed.fetch_add(frames, Ordering::Relaxed);
+        }
+    }
+
     // Backend (any thread)
 
     /// Frames of every callback begun so far, refused ones included; only
@@ -229,9 +269,73 @@ impl LaneFrameSink {
             .collect()
     }
 
-    /// Zeroes every ring so a restart never replays stale frames. Only
-    /// while no producer runs.
+    /// Zeros written per lane in place of audio a capture thread missed,
+    /// in samples at the rings' rate ([`Self::fill_missed`],
+    /// [`Self::record_missed`]); lanes without are absent. Counted across
+    /// restarts until [`Self::clear`], as the overruns are.
+    #[must_use]
+    pub fn missed_samples(&self) -> BTreeMap<AudioLane, usize> {
+        self.lanes
+            .iter()
+            .zip(&self.missed)
+            .map(|(lane, missed)| (*lane, missed.load(Ordering::Relaxed)))
+            .filter(|(_, missed)| *missed > 0)
+            .collect()
+    }
+
+    /// Zeroes every ring, and the counts of what they missed, so a restart
+    /// never replays stale frames. Only while no producer runs.
     pub fn clear(&self) {
         self.rings.clear();
+        for missed in &self.missed {
+            missed.store(0, Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fill_writes_zeros_on_every_lane_and_counts_them_as_missed() {
+        let lanes = [AudioLane::Mic, AudioLane::System];
+        let sink = LaneFrameSink::with_handler(&lanes, 1_000.0, 1.0, Box::new(|_| {}));
+        assert!(sink.begin_callback(10));
+        sink.write_slice(0, &[1.0; 10]);
+        sink.write_slice(1, &[2.0; 10]);
+        sink.end_callback();
+        assert!(sink.fill_missed(6));
+        assert!(!sink.fill_missed(0), "nothing to fill");
+        assert_eq!(sink.available_to_read(), 16);
+        let (mut mic, mut system) = ([9.0f32; 16], [9.0f32; 16]);
+        assert!(sink.ring(0).read(&mut mic) && sink.ring(1).read(&mut system));
+        assert_eq!(&mic[10..], [0.0; 6]);
+        assert_eq!(&system[10..], [0.0; 6]);
+        assert_eq!(
+            sink.missed_samples(),
+            BTreeMap::from([(AudioLane::Mic, 6), (AudioLane::System, 6)])
+        );
+        assert_eq!(sink.frames_offered(), 16, "a fill is delivery");
+        assert!(sink.dropped_samples().is_empty());
+        sink.record_missed(1, 4);
+        sink.record_missed(7, 4);
+        assert_eq!(sink.missed_samples()[&AudioLane::System], 10);
+        sink.clear();
+        assert!(sink.missed_samples().is_empty(), "cleared with the rings");
+    }
+
+    #[test]
+    fn a_fill_the_rings_cannot_take_is_dropped_not_missed() {
+        let lanes = [AudioLane::Mixed];
+        // 1 000 samples of ring, rounded up to 1 024.
+        let sink = LaneFrameSink::with_handler(&lanes, 1_000.0, 1.0, Box::new(|_| {}));
+        assert!(!sink.fill_missed(1_025));
+        assert!(sink.missed_samples().is_empty());
+        assert_eq!(
+            sink.dropped_samples(),
+            BTreeMap::from([(AudioLane::Mixed, 1_025)])
+        );
+        assert_eq!(sink.available_to_read(), 0);
     }
 }

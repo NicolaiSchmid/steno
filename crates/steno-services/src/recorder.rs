@@ -58,10 +58,10 @@
 //! "No audio is arriving. Still trying." otherwise: a Mac call capture runs
 //! on the output's clock and a Linux one on the graph's driver, which may
 //! be the sink. After the stop a note says about how many seconds of the
-//! recording are missing, the gaps filled with silence and the wall time
-//! the master does not hold beyond the clocks' drift (0.1 %), once that is
-//! more than about a second, and from which device on the same terms.
-//! Rust only.
+//! recording are missing, the gaps and the cycles the capture missed filled
+//! with silence and the wall time the master does not hold beyond the
+//! clocks' drift (0.1 %), once that is more than about a second, and from
+//! which device on the same terms. Rust only.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -786,13 +786,15 @@ fn no_audio_warning(stalled: Option<&str>) -> String {
 }
 
 /// The seconds a recording's master is missing, for
-/// [`missing_audio_note`]: the `gap_seconds` filled with silence, and the
-/// wall time (`wall` seconds) the master's `duration` does not hold (a gap
-/// past `MAXIMUM_GAP`, a stop inside one) beyond what the device clocks
-/// drift from the wall clock ([`CLOCK_DRIFT`]; 300 to 500 ppm: 2 to 4 s in
-/// two hours). Rust only.
-fn missing_seconds(gap_seconds: f64, wall: f64, duration: f64) -> f64 {
-    gap_seconds + (wall - duration - wall * CLOCK_DRIFT).max(0.0)
+/// [`missing_audio_note`]: the `silence` written in place of audio (the
+/// rebuilds' gaps, `gap_seconds`, and the cycles the capture's thread
+/// missed, `missed_seconds`), and the wall time (`wall` seconds) the
+/// master's `duration` does not hold (a gap past `MAXIMUM_GAP`, a stop
+/// inside one, a missed stretch too long to fill) beyond what the device
+/// clocks drift from the wall clock ([`CLOCK_DRIFT`]; 300 to 500 ppm: 2 to
+/// 4 s in two hours). Rust only.
+fn missing_seconds(silence: f64, wall: f64, duration: f64) -> f64 {
+    silence + (wall - duration - wall * CLOCK_DRIFT).max(0.0)
 }
 
 /// The note after a recording whose master holds `missing` seconds of
@@ -1860,7 +1862,11 @@ impl CaptureRecorder {
                         None,
                     ),
                 );
-                let missing = missing_seconds(statistics.gap_seconds, wall, statistics.duration);
+                let missing = missing_seconds(
+                    statistics.gap_seconds + statistics.missed_seconds,
+                    wall,
+                    statistics.duration,
+                );
                 match completed {
                     Ok(_) => Ok((recording_warning(active.mode, &statistics), missing, ended)),
                     Err(error) => Err(not_saved(meeting_id, &error)),
@@ -3391,6 +3397,53 @@ mod tests {
             Some("About 13 seconds of the recording are missing.")
         );
         assert_eq!(missing_seconds(3.0, 60.0, 60.0), 3.0);
+    }
+
+    /// Cycles the capture's thread missed (A18 of the stable-promotion
+    /// plan), which the session writes as silence, count in the note after
+    /// the stop as the rebuilds' gaps do: the synthetic producer misses
+    /// 0.75 s twice, 1.5 s that the master holds as zeros and the wall time
+    /// does not show, and the note says about 2 seconds are missing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missed_cycles_count_in_the_note_after_the_stop() {
+        let capture: MakeCaptureSession = Arc::new(|configuration: CaptureConfiguration| {
+            let options = SyntheticOptions::tones(
+                &configuration.lanes(),
+                &[(AudioLane::Mixed, 440.0)],
+                600.0,
+            )
+            .real_time(true)
+            .miss_at(0.5, 36_000)
+            .miss_at(1.5, 36_000);
+            CaptureSession::with_backend(
+                configuration,
+                Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
+                None,
+                CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+                Arc::new(steno_audio::SystemClock::new()),
+            )
+            .map_err(|error| error.to_string())
+        });
+        let harness = harness_capturing(
+            models_with(&[]),
+            "parakeet-v3",
+            platform_rule(SpeechSettings::default()),
+            capture,
+        );
+        start(&harness.recorder);
+        // Past both misses: 2.25 s of the producer's timeline.
+        tokio::time::sleep(Duration::from_millis(3_000)).await;
+        stop(&harness.recorder);
+        assert_eq!(
+            harness.recorder.status().warning.as_deref(),
+            Some("About 2 seconds of the recording are missing.")
+        );
+        // Before the harness waits for the pipeline's runs, so none starts
+        // after that wait and writes into the folder it removed.
+        eventually("the pipeline picked the saved meeting up", || {
+            harness.engine.transcriptions.count() > 0
+        })
+        .await;
     }
 
     /// The note comes from about a second on, and names a device only when
@@ -5049,6 +5102,7 @@ mod tests {
             ended_on_device_loss: false,
             device_changes: 0,
             gap_seconds: 0.0,
+            missed_seconds: 0.0,
         }
     }
 
