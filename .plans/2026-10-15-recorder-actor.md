@@ -95,9 +95,11 @@ These land before `0.11.0-rc.1` under their own owners:
   exceptions at the FFI boundary (the crate's `coreml` module), which also
   covers the CoreML warm-up (`warm_up_if_installed`) that runs during a live
   recording. PR 2 keeps the warm-up off the actor: the I/O worker calls
-  `warm_up_if_installed` once it has sent `StartFinished` (its model checks
-  read the disk), and the warm-up itself runs on the services runtime as
-  today, so no stop waits for it and the catch stays where A15 puts it.
+  `warm_up_if_installed` once it has sent `StartFinished`, inside a
+  `catch_unwind` that logs a panic and leaves the recording going. Its model
+  checks stat the model files, so a stop queued behind it waits only for them;
+  the warm-up itself runs on the services runtime as today, so no stop waits
+  for the load and the catch stays where A15 puts it.
 
 ## Target design
 
@@ -106,10 +108,11 @@ These land before `0.11.0-rc.1` under their own owners:
 **One thread, `steno-recorder` (the actor), owns a pure machine.** Around it
 run threads that change no state, each described below: the I/O worker for
 blocking work, the alarm for deadlines, the forwarders over the capture's
-receivers, the disk reader and the hook's notifier. PR 2 names each
-`steno-recorder-*`.
+receivers, a disk reader per recording and the hook's notifier. PR 2 names
+each `steno-recorder-*`.
 
 ```rust
+#[derive(Clone)]
 struct RecorderMachine {
     phase: Phase,            // Idle; Starting, Recording, Stopping, each with its epoch
     admission: Admission,    // holds: usize, refused: Option<Refusal>
@@ -154,14 +157,17 @@ forwarder. The disk watch, the clock and the hook (today's `disk`, `clock` and
   clears the stalled device, and a `StalledDevice` that follows it sets it
   again;
 - `Levels { epoch }`: the forwarder stores the newest levels in a slot and
-  sends a wake only when the actor has read the last one, so 10 Hz levels never
+  sends a wake only when the actor has read the last one (the actor takes the
+  slot at every wake, before `step`, whatever the phase), so 10 Hz levels never
   queue up behind a busy step;
-- `Disk { epoch, free, write_failed }` from the disk reader, a thread of its
-  own because `statvfs` and `write_failed()` can block (a network volume, the
-  session mutex during a rebuild). At most one reading per epoch is in flight,
-  so one still blocked when its recording stops holds back none of the next
-  recording's; a due reading moves the disk deadline on at once, in flight or
-  not, so `next_deadline()` never returns a deadline already past;
+- `Disk { epoch, free, write_failed }` from the recording's disk reader, a
+  thread of its own per recording, spawned at its first reading and never
+  joined, as today's watch is, because `statvfs` and `write_failed()` can
+  block (a network volume, the session mutex during a rebuild). At most one
+  reading per epoch is in flight, so one still blocked when its recording
+  stops holds back none of the next recording's; a due reading moves the disk
+  deadline on at once, in flight or not, so `next_deadline()` never returns a
+  deadline already past;
 - `Done(StartFinished | StopFinished | WorkerGone)` from the I/O worker, each
   with the epoch of the effect it answers; `StartFinished` carries the input
   the session started on (`fallback_input` after `session.start`, as today)
@@ -176,7 +182,7 @@ its forwarders before it sends `StopFinished`, so everything they sent arrives
 first and the stop's notes name the stalled device and the fallback input, as
 `finish_stop`'s join of the notice thread makes them today. The forwarders hold
 the session weakly, as the notice thread does, since a receiver ends only when
-the session is gone. The disk reader also holds it weakly and is never joined:
+the session is gone. The disk reader also holds it weakly:
 a reading that arrives while stopping is a second stop cause or a warning the
 stopping status does not show, and one that arrives after `StopFinished` is
 dropped, since `Idle` has no epoch.
@@ -187,21 +193,22 @@ they do today. `Start`, and a `Toggle` that starts, reply after
 after the `StopFinished` of the stop they began, or at once when they begin
 none; `Quit` once the phase is `Idle` ("Quit is a command", below).
 `RefuseStarts` and `ToneTestEnded` get no reply; every other command replies
-after its own step. Each reply is sent after its step has stored its status
-snapshot (below), so a `status()` read after a reply sees that step (the
-host's `recording_start` reads it to select the live row or re-read the
-permissions). After `Hold` the status says what an install would stop, as
-`hold_starts`' doc promises; channel order and the reply now give that, not
-the lock the doc names.
+after its own step. The actor takes each reply out of its command before
+`step` and holds it until then, so a `step` that panics loses none (below).
+Each reply is sent after its step has stored its status snapshot (below), so
+a `status()` read after a reply sees that step (the host's `recording_start`
+reads it to select the live row or re-read the permissions). After `Hold` the
+status says what an install would stop, as `hold_starts`' doc promises;
+channel order and the reply now give that, not the lock the doc names.
 
 **Effects run off the machine:** `Publish`, `Log` and `CancelToneTests` on the
-actor, `ReadDisk` on the disk reader (above), and `OpenSession`,
+actor, `ReadDisk` on the recording's disk reader (above), and `OpenSession`,
 `CloseSession(reason)` and `Save` in order on one I/O worker thread,
 `steno-recorder-io`. `OpenSession` is all of today's `start_inner` (session
 start, up to 10 s), `CloseSession` is `session.stop()`, and `Save` is
 `intake.complete`, whose busy commit waits out the 5 s busy timeout up to
-`COMMIT_ATTEMPTS` (3) times, or `recover_failed_stop`. A start while system
-audio tests run emits `CancelToneTests` and holds `OpenSession` until the last
+`COMMIT_ATTEMPTS` (3) times, or `recover_failed_stop`. A start while tone
+tests run emits `CancelToneTests` and holds `OpenSession` until the last
 `ToneTestEnded` or until `TONE_TEST_PATIENCE` passes, so the I/O worker waits
 on no test. The actor thread never blocks on I/O, so it answers a command, a
 notice or a status read while a start or a save waits. More threads run than
@@ -223,7 +230,7 @@ replaces the `steno-auto-stop` thread per armed countdown and
 `steno-recording-watch`'s loop. Under `ManualClock` the alarm is one sleeper,
 on the nearest deadline, which while recording is usually the next disk
 reading's (every 20 ms in the tests' disk watch). Since a cancelled sleeper can
-still be registered, tests wait for the alarm by that deadline (a test-only
+still be registered, tests wait for a sleeper on that deadline (a test-only
 helper beside `wait_for_sleepers`) before they `advance`, and check an armed
 countdown in the status, not in the sleepers.
 
@@ -274,21 +281,30 @@ leaves the recorder idle with an error. A guard on the I/O worker sends
 start or stop, so no waiter is left without a reply, and the actor spawns a
 fresh I/O worker before the next effect that needs one.
 
-A `step` that panics resets the machine from what the actor tracks outside it,
-the effects the I/O worker still owes and whether it holds a session, so every
-`Done` still finds its epoch:
+`step` runs on a copy of the machine that the actor keeps only when it returns
+(a few small fields, cloned on the actor thread, never on the audio path). A
+`step` that panics therefore changes at most the phase and the error, as
+`Unwinding` changes only the status today: the `Admission`, the tone tests and
+every reply the actor holds stay as they were before that event. The counts
+stay true, since the actor applies a `Hold`, a `Release` or a `ToneTestEnded`
+to its count before `step`, and a `ToneTest` whose step panics is refused.
+Every reply held at the panic, the panicking command's among them, is sent
+when the phase is next `Idle`. The phase follows what the I/O worker still
+owes, so no owed `Done` is dropped as stale:
 
 - **An `OpenSession` owed:** the machine stores `START_PANICKED` but stays
-  `Starting`, refusing starts silently as while not idle, until that epoch's
-  `StartFinished`, which undoes the start as a start that panics does today
-  (`BegunMeeting`: the session stopped, the folder removed, the meeting
-  failed, the recorded folder forgotten).
+  `Starting`, refusing starts silently, as any phase but `Idle` does, until
+  that epoch's `StartFinished`. It then stays `Stopping` while the I/O worker
+  undoes the start as a start that panics does today (`BegunMeeting`: the
+  session stopped, the folder removed, the meeting failed, the recorded folder
+  forgotten), until the undo's `StopFinished`.
 - **A session held, or its close or save owed:** it closes that session
-  through the stop path, or lets the close or save under way finish, with
-  `SAVE_PANICKED`, and stays `Stopping` until its `StopFinished`, so a `Quit`
-  waits for the save and no start opens a second session beside it.
-- **Otherwise:** it is `Idle`, with `START_PANICKED` if it was starting, and
-  replies to the start's waiters.
+  through the stop path, storing `SAVE_PANICKED`, or lets the close or save
+  under way finish with its own outcome, and stays `Stopping` until its
+  `StopFinished`, so a `Quit` waits for the save and no start opens a second
+  session beside it.
+- **Otherwise:** it goes `Idle`, with `START_PANICKED` if it was starting or
+  the panicking command was a `Start` or a `Toggle`.
 
 If the actor thread itself dies, every later command's send fails at once and
 returns, and a guard on the thread stores a status whose error is
@@ -454,8 +470,9 @@ the D9 ruling is made.
 
 - **Scope.** `steno-services`. `recorder.rs` becomes `recorder/` with
   `machine.rs` (the pure machine, about 400 lines), `actor.rs` (the thread, the
-  I/O worker, the alarm, the forwarders, the hook's notifier) and the rest; its
-  state code shrinks from about 1 200 production lines to about 700.
+  I/O worker, the alarm, the forwarders, the disk readers, the hook's
+  notifier) and the rest; its state code shrinks from about 1 200 production
+  lines to about 700.
   `auto_stop.rs` keeps `CallWatch`; its `Countdown` loses the `Cancel` the
   countdown thread slept on. `arc-swap` joins `[workspace.dependencies]`, and
   `steno-audio`'s test-only `ManualClock` gains the deadline helper (above).
