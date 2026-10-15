@@ -166,7 +166,8 @@ forwarder. The disk watch, the clock and the hook (today's `disk`, `clock` and
   and, like today's watch, never joined. At most one reading per epoch is in
   flight, so one still blocked when its recording stops holds back none of the
   next recording's; a due reading moves the disk deadline on at once, in
-  flight or not, so `next_deadline()` never returns a deadline already past;
+  flight or not, so a reading still in flight never holds the disk deadline
+  in the past;
 - `Done(StartFinished | StopFinished | WorkerGone)` from the I/O worker, each
   with the epoch of the effect it answers; `StartFinished` carries the input
   the session started on (`fallback_input` after `session.start`, as today)
@@ -207,9 +208,11 @@ thread, `steno-recorder-io`. `OpenSession` is all of today's `start_inner`
 (session start, up to 10 s), `CloseSession` is `session.stop()`, and `Save` is
 `intake.complete`, whose busy commit waits out the 5 s busy timeout up to
 `COMMIT_ATTEMPTS` (3) times, or `recover_failed_stop`. `UndoStart`, answered
-by a `StopFinished`, is today's `BegunMeeting` guard on a start that panics: it
-stops the session, removes its folder, fails the meeting with `START_PANICKED`
-and forgets the folder it recorded. A start while tone tests run emits
+by a `StopFinished`, does what today's `BegunMeeting` guard does when a start
+panics, for a start whose `StartFinished` the actor could not apply (Panics,
+below): it stops the session, removes its folder, fails the meeting with
+`START_PANICKED` and forgets the folder it recorded. A start while tone tests
+run emits
 `CancelToneTests` and holds `OpenSession` until the last `ToneTestEnded` or
 until `TONE_TEST_PATIENCE` passes, so the I/O worker waits on no test. The
 actor thread never blocks on I/O, so it answers a command, a notice or a status
@@ -220,21 +223,23 @@ and exits, so `a_dropped_recorder_lets_its_countdown_go` still passes, its
 `wait_for_sleepers(1)` replaced by the status check and the alarm wait below.
 
 **Deadlines on the injectable clock, not timer threads.** The auto-stop
-countdown (`Countdown`), the 5 s disk reading (`DiskReading`) and the tone
+countdown (`AutoStop`), the 5 s disk reading (`DiskReading`) and the tone
 tests' patience (`TonePatience`) are the deadlines the machine returns from
 `next_deadline()`. One alarm sleeps on the injected `steno_audio::Clock`
 (`Clock::sleep` with a `Cancel`) until the nearest deadline, then sends its
-`Deadline`; the actor re-arms it when the deadline moves. The alarm holds no
-state and decides nothing: it re-checks `clock.now()` against its deadline each
-time it wakes, and the machine compares the deadline with `now` when the event
-arrives, so a stale `Deadline` does nothing. This replaces the
-`steno-auto-stop` thread per armed countdown and `steno-recording-watch`'s
-loop. Under `ManualClock` the alarm is one sleeper, on the nearest deadline,
-which while recording is usually the next disk reading's (every 20 ms in the
-tests' disk watch). Since a cancelled sleeper can still be registered, tests
-wait for a sleeper on that deadline (a test-only helper beside
-`wait_for_sleepers`) before they `advance`, and check an armed countdown in the
-status, not in the sleepers.
+`Deadline`; the actor re-arms it whenever `next_deadline()` changes, its kind
+included. Deadlines due at the same instant fire one per `Deadline`, in `Due`'s
+order (`AutoStop`, `DiskReading`, `TonePatience`), so each step handles one
+kind. The alarm holds no state and decides nothing: it re-checks `clock.now()`
+against its deadline each time it wakes, and the machine compares the deadline
+with `now` when the event arrives, so a stale `Deadline` does nothing. This
+replaces the `steno-auto-stop` thread per armed countdown and
+`steno-recording-watch`'s loop. Under `ManualClock` the alarm is one sleeper,
+on the nearest deadline, which while recording is usually the next disk
+reading's (every 20 ms in the tests' disk watch). Since a cancelled sleeper can
+still be registered, tests wait for a sleeper on that deadline (a test-only
+helper beside `wait_for_sleepers`) before they `advance`, and check an armed
+countdown in the status, not in the sleepers.
 
 **A lock-free `status()`.** After each step that changes what the host shows,
 the actor builds an `Arc<RecorderStatus>` and stores it in an `ArcSwap`
@@ -284,9 +289,10 @@ that thread or call, and the recording goes on. The actor keeps both:
   with the effect's `Done`, carrying `START_PANICKED` (once `BegunMeeting` has
   undone the start) or `SAVE_PANICKED`. A panic in `CloseSession` skips its
   stop's `Save` and drops the session before the stop's one `StopFinished`,
-  leaving the row `recording` as a panic in today's `session.stop()` does. A
-  guard sends `Done(WorkerGone)` if the thread ends, answered as a panicked
-  start or stop, and the actor spawns a fresh worker before the next effect.
+  leaving the meeting `recording` as a panic in today's `session.stop()`
+  does. A guard sends `Done(WorkerGone)` if the thread ends, answered as a
+  panicked start or stop, and the actor spawns a fresh worker before the next
+  effect.
 - **Before `step`** the actor applies what no panic may lose, so `step` finds
   it applied: the counts of `Hold`, `Release` and `ToneTestEnded`; the
   `Refusal` of `RefuseStarts` and `Quit` and the tone-test cancel they raise,
@@ -298,12 +304,13 @@ that thread or call, and the recording goes on. The actor keeps both:
   recording goes on. The actor logs the panic and replies at once, refusing a
   `ToneTest`; while `Idle` it stores `START_PANICKED` for a `Start` or a
   `Toggle`. A `Quit` is the exception: it still waits for a stop under way, and
-  with none it leaves a start or a recording to the next launch's recovery. A
-  `Countdown` or `DiskReading` deadline whose step panics is dropped and the
-  other kind keeps firing, as a panic today ends only its own thread: the
-  countdown is disarmed as `keep_recording` does (today's answer to a countdown
-  thread that cannot spawn), or the disk readings and the write-failed check
-  end, as when today's watch panics. No past deadline is left to fire again.
+  with none it leaves a start or a recording to the next launch's recovery. An
+  `AutoStop` or `DiskReading` deadline whose step panics is dropped by the
+  actor from the machine it keeps, and the other of the two keeps firing, as
+  a panic today ends only its own thread: the countdown is disarmed as
+  `keep_recording` does (today's answer to a countdown thread that cannot
+  spawn), or the disk readings and the write-failed check end, as when
+  today's watch panics. No past deadline is left to fire again.
 - **A panic on what a start or a stop waits for ends it instead.** That is any
   `Done`, whose effect has run, and a `ToneTestEnded` or `TonePatience`
   deadline while a start waits for tone tests. The actor sets the phase
@@ -499,9 +506,10 @@ the D9 ruling is made.
     for the shutdown's `Cancel` in place of `inner().quitting`, #286's "the
     host hears of the refusal" waits for the hook's count under `HANG_GUARD`,
     and `held_in`'s holds become `ScriptedCapture` gates on `start` and
-    `stop`. Their assertions do not change: `kill_tests.rs`'s kills, from
-    before the first write to the save, #277's three quit-commit tests, #286's
-    tests, and the start's compensation tests in `recorder.rs`
+    `stop`. Their assertions do not change, apart from a caller that panicked
+    (below): `kill_tests.rs`'s kills, from before the first write to the save,
+    #277's three quit-commit tests, #286's tests, and the start's compensation
+    tests in `recorder.rs`
     (`the_folder_is_recorded_before_the_master_and_forgotten_when_the_start_fails`,
     `a_start_whose_meeting_cannot_be_written_forgets_its_folder`,
     `a_start_that_panics_after_the_meeting_began_fails_it_and_leaves_no_folder`).
@@ -517,6 +525,10 @@ the D9 ruling is made.
     `a_stop_that_panics_leaves_the_recorder_idle_with_an_error`) move their
     panic into `ScriptedCapture`'s `start` and `stop`, and assert the idle
     status and its error, not a panicking caller.
+    `a_start_that_panics_after_the_meeting_began_fails_it_and_leaves_no_folder`
+    keeps its panicking synthetic start and its meeting, folder and status
+    assertions, and drops only `starting.join().is_err()`: the I/O worker
+    catches the panic and the start replies.
   - With the fake's `start` held at a gate, `status()` answers, and a `Stop`
     gets its reply (ignored, as today), while the gate is closed.
   - Every call of the recorder's change hook comes from `steno-recorder-hook`:
