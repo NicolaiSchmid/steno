@@ -352,15 +352,19 @@ fn jobs(chunks: &[Chunk], gap_windows: &[Range<usize>]) -> Vec<Job> {
 /// or dropped. The windows of one gap merge with each other first. Chunk
 /// tokens inside the gap come from an accepted recovery, which keeps its
 /// chunk's overlap and so can reach into the gap from the chunk before it
-/// or the one after it, or from both. They split into two sides where the
-/// earlier chunk's recovery stops keeping words, at the first word that
-/// starts on a frame past `overlap_seconds` after the gap's start
-/// ([`keep_chunk_and_overlap`]), and each side's tokens cover the gap from
-/// the first of them to the last: the window tokens before the first side,
-/// between the two and after the second go in, and those inside a side's
-/// cover are dropped. Where window tokens meet chunk tokens, [`Seam::fit`]
-/// drops the window's copy of the chunk's adjacent word; every such check
-/// is against chunk tokens, never against another window's.
+/// or the one after it, or from both. They split into two sides at the
+/// first word that starts on a frame past `overlap_seconds` after the
+/// gap's start, the frame up to which the earlier chunk's recovery keeps
+/// words ([`keep_chunk_and_overlap`]), and each side's tokens cover the
+/// gap from the first of them to the last: the window tokens before the
+/// first side, between the two and after the second go in, and those
+/// inside a side's cover are dropped. A later recovery's tokens that begin
+/// past that frame with a punctuation piece count for the earlier side,
+/// and the window words between the two are lost; with the `CoreML` engine's
+/// settings no gap has recoveries on both sides. Where window tokens meet
+/// chunk tokens, [`Seam::fit`] drops the window's copy of the chunk's
+/// adjacent word; every such check is against chunk tokens, never against
+/// another window's.
 fn splice_gaps(
     tokens: &[Token],
     windows: &[Range<usize>],
@@ -421,9 +425,10 @@ fn splice_gaps(
 /// Where window tokens meet the chunk tokens: a window word is the chunk's
 /// adjacent word heard again only when it is the same piece and starts
 /// within two encoder frames of it. A word said again starts later than
-/// that. A copy timed further off stays in, since the seam cannot tell it
-/// from a word said again, and a repeated word is the lesser error than a
-/// lost one.
+/// that, unless it is two frames long or shorter: such a word said twice
+/// back to back across the edge comes out once. A copy timed further off
+/// stays in, since the seam cannot tell it from a word said again, and a
+/// repeated word is the lesser error than a lost one.
 struct Seam<'a> {
     vocab: &'a Vocab,
 }
@@ -440,10 +445,11 @@ impl Seam<'_> {
     /// The window tokens `part` that go in between `tokens[at - 1]` and
     /// `tokens[at]`. Dropped, and nothing else: a token at or after
     /// `tokens[at]`; when the chunk starts inside a word, the window's last
-    /// piece if it is the chunk's first; otherwise the window's last word
-    /// if it repeats the chunk's next word; the rest of a word at the
-    /// window's start, which belongs to the chunk's last word; and the
-    /// window's first word if it repeats the chunk's last word.
+    /// piece if it is the chunk's first and starts less than a second
+    /// before it; otherwise the window's last word if it repeats the
+    /// chunk's next word; the rest of a word at the window's start, which
+    /// belongs to the chunk's last word; and the window's first word if it
+    /// repeats the chunk's last word.
     fn fit(&self, mut part: Vec<Token>, tokens: &[Token], at: usize) -> Vec<Token> {
         if let Some(next) = tokens.get(at) {
             part.retain(|t| t.sample() < next.sample());
@@ -452,7 +458,9 @@ impl Seam<'_> {
                     .rposition(|t| self.starts_word(t))
                     .filter(|&i| Self::repeats(&part[i], next))
             } else {
-                part.len().checked_sub(1).filter(|&i| part[i].id == next.id)
+                part.len().checked_sub(1).filter(|&i| {
+                    part[i].id == next.id && next.sample() - part[i].sample() < SAMPLE_RATE
+                })
             };
             if let Some(last) = last {
                 part.truncate(last);
@@ -1295,7 +1303,7 @@ mod tests {
         }
     }
 
-    /// `splice_gaps` at the 2 s overlap (a 1 s tolerance), as ids.
+    /// `splice_gaps` at the 2 s overlap, as ids.
     fn spliced(chunk: &[Token], windows: &[(f32, f32)], decoded: &[&[Token]]) -> Vec<u32> {
         let windows: Vec<Range<usize>> = windows
             .iter()
@@ -1350,10 +1358,14 @@ mod tests {
         let late = [piece(2, 14.0), piece(5, 20.64), piece(25, 20.72)];
         assert_eq!(spliced(&chunk, &gap, &[&late]), [13, 2, 5, 25, 14]);
         // A chunk that starts inside a word: its first piece, not a word
-        // start, is what the window's last piece repeats, however timed.
+        // start, is what the window's last piece repeats within a second.
         let chunk = [piece(13, 6.0), piece(25, 20.88), piece(14, 22.0)];
         let late = [piece(2, 14.0), piece(5, 20.4), piece(25, 20.56)];
         assert_eq!(spliced(&chunk, &gap, &[&late]), [13, 2, 5, 25, 14]);
+        // "w5 s25" 5.8 s before that chunk is a word of its own and keeps
+        // its last piece.
+        let early = [piece(2, 14.0), piece(5, 15.0), piece(25, 15.08)];
+        assert_eq!(spliced(&chunk, &gap, &[&early]), [13, 2, 5, 25, 25, 14]);
     }
 
     #[test]
@@ -1519,16 +1531,23 @@ mod tests {
         let window = [piece(2, 10.96), piece(7, 12.48), piece(4, 13.6)];
         assert_eq!(spliced(&chunk, &gap, &[&window]), [11, 2, 22, 32, 7, 4, 12]);
         // A word on the very frame the recovery keeps to (11.2 s) is the
-        // earlier side's, so the window's word 5 past it stays.
-        let chunk = [
-            piece(11, 4.0),
-            piece(2, 9.6),
-            piece(3, 11.2),
-            piece(4, 13.6),
-            piece(12, 16.0),
-        ];
+        // earlier side's, also half a frame into it, so the window's word 5
+        // past it stays.
         let window = [piece(3, 11.2), piece(5, 12.4), piece(4, 13.6)];
-        assert_eq!(spliced(&chunk, &gap, &[&window]), [11, 2, 3, 5, 4, 12]);
+        for phase in [0, FRAME_SAMPLES / 2] {
+            let on_bound = Token {
+                phase,
+                ..piece(3, 11.2)
+            };
+            let chunk = [
+                piece(11, 4.0),
+                piece(2, 9.6),
+                on_bound,
+                piece(4, 13.6),
+                piece(12, 16.0),
+            ];
+            assert_eq!(spliced(&chunk, &gap, &[&window]), [11, 2, 3, 5, 4, 12]);
+        }
     }
 
     #[test]
