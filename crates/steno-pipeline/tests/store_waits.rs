@@ -5,12 +5,11 @@
 //! resume the store refuses is owed to that retry. The lock is a second
 //! connection's `BEGIN IMMEDIATE`, as a `steno` command's write holds it.
 //!
-//! Every test runs on two workers: the pipeline calls the store
-//! synchronously on the runtime's workers, as it did before these waits,
-//! so a write that waits out the busy timeout blocks its worker for five
-//! seconds. On one worker nothing else (a test's timer, a quit) could run
-//! meanwhile. P40 of `.plans/2026-10-07-stable-promotion.md` moves the
-//! store calls off the async workers.
+//! Every test runs on one worker: the pipeline reaches the store through
+//! its facade (`Store::reading`, `Store::writing`), so a write that waits
+//! out the busy timeout waits on the blocking pool, and the worker stays
+//! free for a test's timer or a quit
+//! (`.plans/2026-10-12-store-off-the-workers.md`, check 13).
 
 mod common;
 
@@ -355,7 +354,7 @@ fn drain(receiver: &mut EventReceiver) -> Vec<MeetingEvent> {
 /// store, not for models. An install's resume leaves it alone, and
 /// "Process again" says what it waits for. Once the lock is let go, the
 /// store's retry processes it to `ready`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_run_the_store_keeps_locked_past_its_busy_timeout_waits_queued_and_then_runs() {
     let engine = Arc::new(HeldWarmUp::default());
     let world = world(engine.clone(), identity);
@@ -419,7 +418,7 @@ async fn a_run_the_store_keeps_locked_past_its_busy_timeout_waits_queued_and_the
 /// the meeting stays `processing` in the store. It waits all the same, its
 /// transcript, its recording and its asset row as the run left them, and
 /// the retry once the lock is let go processes it to `ready`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_run_the_store_stops_after_the_merge_keeps_its_transcript_and_its_audio() {
     let cleaner = Arc::new(HeldCleaner::default());
     let world = world(Arc::new(FakeSpeechEngine::default()), |dependencies| {
@@ -457,7 +456,7 @@ async fn a_run_the_store_stops_after_the_merge_keeps_its_transcript_and_its_audi
 /// A speaker match the store refuses (the speaker memory reads the store)
 /// does not cost the meeting its speakers, as another failure there would:
 /// the run waits for the store, and the retry matches them.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_speaker_match_the_store_refuses_waits_instead_of_dropping_the_match() {
     let world = world(
         Arc::new(FakeSpeechEngine::default()),
@@ -481,7 +480,7 @@ async fn a_speaker_match_the_store_refuses_waits_instead_of_dropping_the_match()
 /// A meeting waiting for its models is not taken by the store's retry: it
 /// stays waiting for them, unstarted, and "Process again" still says to
 /// download them.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn the_store_retry_leaves_a_meeting_waiting_for_models_alone() {
     let engine = Arc::new(Uninstalled::default());
     let world = world(engine.clone(), identity);
@@ -512,7 +511,7 @@ async fn the_store_retry_leaves_a_meeting_waiting_for_models_alone() {
 /// the store's retry is woken. Once the lock is let go, the retry starts
 /// them: the one with an asset runs to `ready`, the other is failed as
 /// the resume would have.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_resume_the_store_refuses_waits_for_the_store_retry() {
     let (world, gone, kept, lock) = waiting_for_models_under_the_lock().await;
     let pipeline = &world.pipeline;
@@ -549,7 +548,7 @@ async fn a_resume_the_store_refuses_waits_for_the_store_retry() {
 /// and stays owed while the lock refuses the retry too; the retry runs it
 /// again once the lock is let go: the queued meeting is processed, not
 /// left for the next launch.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_launch_resume_the_store_refuses_runs_again_on_the_store_retry() {
     let world = world(Arc::new(FakeSpeechEngine::default()), identity);
     let pipeline = &world.pipeline;
@@ -580,7 +579,7 @@ async fn a_launch_resume_the_store_refuses_runs_again_on_the_store_retry() {
 /// A store error that is not the lock (a full disk, from the speaker
 /// memory) is not a wait for the store: it costs the match only, as
 /// before, and the meeting runs to `ready`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_store_error_that_is_not_the_lock_does_not_wait_for_the_store() {
     assert!(!full().is_busy());
     let world = world(
@@ -602,7 +601,7 @@ async fn a_store_error_that_is_not_the_lock_does_not_wait_for_the_store() {
 /// not for models, and wakes the next retry. A retry that fails for
 /// another reason (the store refuses writes) drops them: they stay
 /// `queued`, unfailed, and the next launch processes them.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_retry_the_lock_refuses_keeps_its_meetings_and_another_failure_leaves_them_queued() {
     let (world, gone, kept, lock) = waiting_for_models_under_the_lock().await;
     let pipeline = &world.pipeline;
@@ -659,7 +658,7 @@ async fn a_retry_the_lock_refuses_keeps_its_meetings_and_another_failure_leaves_
 /// that moment, and only that one: a held meeting that did not wait for
 /// the store is left `queued` for the next launch, as a launch leaves it,
 /// and neither is put back to wait for models.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_owed_launch_resume_puts_back_the_held_meeting_that_waits_for_the_store() {
     let world = world(
         Arc::new(FakeSpeechEngine::default()),
@@ -723,7 +722,7 @@ async fn left_processing_by_the_lock() -> (World, Uuid, WriteLockHold, usize) {
 /// The app quits while such a meeting is `processing`, the lock is let
 /// go, and the next launch resumes it to `ready`, its transcript not
 /// doubled.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_meeting_the_lock_left_processing_runs_at_the_next_launch() {
     let (world, meeting, lock, segments) = left_processing_by_the_lock().await;
     world.pipeline.quit();
@@ -738,7 +737,7 @@ async fn a_meeting_the_lock_left_processing_runs_at_the_next_launch() {
 /// The same, but the next launch comes while the lock is still held: its
 /// run waits for the store again, unfailed, and its retry processes the
 /// meeting once the lock is let go.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_meeting_the_lock_left_processing_waits_again_at_a_launch_under_the_lock() {
     let (world, meeting, lock, segments) = left_processing_by_the_lock().await;
     world.pipeline.quit();
@@ -760,7 +759,7 @@ async fn a_meeting_the_lock_left_processing_waits_again_at_a_launch_under_the_lo
 /// A quit while a meeting waits `queued` for the store: a retry after the
 /// quit starts nothing, the meeting is not failed, and the next launch
 /// processes it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_quit_while_a_meeting_waits_for_the_store_leaves_it_for_the_next_launch() {
     let engine = Arc::new(HeldWarmUp::default());
     let world = world(engine.clone(), identity);
@@ -791,7 +790,7 @@ async fn a_quit_while_a_meeting_waits_for_the_store_leaves_it_for_the_next_launc
 /// A quit while the run still waits out the store's five-second busy
 /// timeout on its first write: the meeting is not failed and not recorded
 /// as waiting, and the next launch processes it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_quit_while_a_run_waits_on_the_lock_leaves_the_meeting_for_the_next_launch() {
     let engine = Arc::new(HeldWarmUp::default());
     let world = world(engine.clone(), identity);
@@ -830,7 +829,7 @@ async fn a_quit_while_a_run_waits_on_the_lock_leaves_the_meeting_for_the_next_la
 /// meeting waiting for models, whose run then waits for the store too.
 /// Neither is failed, and the store's retry processes both once the lock
 /// is let go.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_models_install_under_the_lock_leaves_both_meetings_waiting_for_the_store() {
     let engine = Arc::new(Uninstalled::default());
     engine.installed.store(true, Ordering::SeqCst);
@@ -874,7 +873,7 @@ async fn a_models_install_under_the_lock_leaves_both_meetings_waiting_for_the_st
 /// out: the in-flight set reads idle, so the install takes its hold, and a
 /// retry during the hold runs nothing. The install quits the app; the
 /// meeting stays `queued`, unfailed, and the next launch processes it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_update_hold_during_a_store_wait_runs_nothing_and_the_relaunch_processes_it() {
     let world = world(
         Arc::new(FakeSpeechEngine::default()),
@@ -912,7 +911,7 @@ async fn an_update_hold_during_a_store_wait_runs_nothing_and_the_relaunch_proces
 
 /// The same install given up (its hold dropped, no quit): the run the
 /// retry started under the hold goes on to `ready`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_retry_under_an_update_hold_runs_once_the_hold_is_given_up() {
     let world = world(
         Arc::new(FakeSpeechEngine::default()),
@@ -954,7 +953,7 @@ async fn an_owed_launch_resume_and_a_meeting_waiting_for_models()
 /// waiting for models, as the launch's resume does: with the models in
 /// place, it runs the one waiting for them to `ready`, and it no longer
 /// reads as waiting.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_owed_launch_resume_takes_the_meetings_waiting_for_models() {
     let (world, engine, gone, queued, models) =
         an_owed_launch_resume_and_a_meeting_waiting_for_models().await;
@@ -979,7 +978,7 @@ async fn an_owed_launch_resume_takes_the_meetings_waiting_for_models() {
 /// operation (a re-export) holds the meeting waiting for models puts it
 /// back to wait for them: the models install then starts it, rather than
 /// only the next launch.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_owed_launch_resume_keeps_a_held_meeting_waiting_for_its_models() {
     let (world, engine, gone, queued, models) =
         an_owed_launch_resume_and_a_meeting_waiting_for_models().await;
@@ -1010,7 +1009,7 @@ async fn an_owed_launch_resume_keeps_a_held_meeting_waiting_for_its_models() {
 /// waiting for models back to wait for them meanwhile: a models install
 /// in between starts it, and the next retry, with the lock let go, runs
 /// every queued meeting.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_owed_launch_resume_the_lock_refuses_again_keeps_the_meeting_waiting_for_models() {
     let (world, engine, gone, queued, models) =
         an_owed_launch_resume_and_a_meeting_waiting_for_models().await;
@@ -1040,7 +1039,7 @@ async fn an_owed_launch_resume_the_lock_refuses_again_keeps_the_meeting_waiting_
 /// wakes no retry: the left meetings stay `queued` for the next launch,
 /// and the one waiting for models is put back to wait for them, so the
 /// models install starts it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_owed_launch_resume_another_failure_ends_keeps_the_meetings_waiting_for_models() {
     let (world, engine, gone, queued, models) =
         an_owed_launch_resume_and_a_meeting_waiting_for_models().await;
@@ -1072,4 +1071,91 @@ async fn an_owed_launch_resume_another_failure_ends_keeps_the_meetings_waiting_f
     assert_eq!(pipeline.resume_waiting().unwrap(), [models]);
     pipeline.wait_until_idle().await;
     assert_eq!(world.state(models), MeetingState::Ready);
+}
+
+/// P40 check 11 (`.plans/2026-10-12-store-off-the-workers.md`): a phone
+/// admission that meets the lock waits on the blocking pool, its copy and
+/// its commit in one step, so a timer task on the runtime's one worker
+/// keeps ticking, and the admission commits once the lock goes. The lock
+/// is held for two seconds, inside the admission's busy timeout, which a
+/// longer hold would run out: the phone's retry is the handover's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn an_admit_under_a_held_lock_leaves_the_worker_free() {
+    use steno_core::{AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steno.sqlite");
+    let store = Arc::new(Store::open(&path).unwrap());
+    let mut settings = store.settings().unwrap();
+    settings.audio_folder = steno_core::paths::file_url(&dir.path().join("audio"), true);
+    store.save_settings(&settings).unwrap();
+    let now = chrono::Utc::now();
+    let device = PairedDevice {
+        id: Uuid::new_v4(),
+        name: "Phone".to_owned(),
+        paired_at: now,
+        last_seen_at: None,
+    };
+    store.save_paired_device(&device, &[1; 32]).unwrap();
+    let metadata = RecordingMetadata {
+        recording_id: Uuid::new_v4(),
+        started_at: now,
+        duration_seconds: 12.0,
+        byte_count: 9,
+        sha256: vec![0; 32],
+        chunk_size: 9,
+        format: AudioFormat::M4aAac,
+        device_name: "Phone".to_owned(),
+    };
+    let upload = dir.path().join("upload.m4a");
+    std::fs::write(&upload, b"aac bytes").unwrap();
+    let intake = Arc::new(steno_pipeline::RecordingIntake::new(
+        store.clone(),
+        Arc::new(|_, _| Box::pin(async { Ok(()) })),
+        Arc::new(move || now),
+        chrono::FixedOffset::east_opt(0).unwrap(),
+    ));
+    let ticked = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let timer = tokio::spawn({
+        let ticked = ticked.clone();
+        async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                *ticked.lock().unwrap() = std::time::Instant::now();
+            }
+        }
+    });
+
+    let hold = WriteLockHold::new(&path);
+    let admit = tokio::spawn({
+        let (intake, upload, metadata, device) = (
+            intake.clone(),
+            upload.clone(),
+            metadata.clone(),
+            device.clone(),
+        );
+        async move { intake.admit(&upload, &metadata, &device).await }
+    });
+    let held_until = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < held_until {
+        std::thread::sleep(Duration::from_millis(50));
+        let since = ticked.lock().unwrap().elapsed();
+        assert!(
+            since < Duration::from_millis(200),
+            "the timer stood still for {since:?} while the admission waited"
+        );
+    }
+    assert!(!admit.is_finished(), "the admission waits for the lock");
+    drop(hold);
+    let meeting_id = admit.await.unwrap().unwrap();
+    timer.abort();
+    let receipt = store
+        .handover_receipt(metadata.recording_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.state.meeting_id(), Some(meeting_id));
+    assert_eq!(
+        store.meeting(meeting_id).unwrap().unwrap().state,
+        MeetingState::Queued
+    );
 }
