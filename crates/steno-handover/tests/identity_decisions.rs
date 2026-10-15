@@ -306,8 +306,11 @@ fn every_observation() -> Vec<Observations> {
         None,
     ];
     let names = ["A", "B", "C"];
-    let mut identities = vec![Identities::Unreadable, Identities::Malformed];
-    identities.push(Identities::Found(Vec::new()));
+    let mut identities = vec![
+        Identities::Unreadable,
+        Identities::Malformed,
+        Identities::Found(Vec::new()),
+    ];
     let found = |name: &str, start| Found {
         fingerprint: name.to_owned(),
         start,

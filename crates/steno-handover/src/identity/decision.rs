@@ -188,6 +188,21 @@ fn wait(reason: Reason) -> Decision {
     }
 }
 
+/// The identities found, or the wait for a place that could not be read
+/// or held no identity that parses.
+fn identities_found(identities: &Identities) -> Result<&[Found], Decision> {
+    match identities {
+        Identities::Unreadable => Err(wait(Reason::SecretUnreadable)),
+        Identities::Malformed => Err(wait(Reason::Malformed)),
+        Identities::Found(found) => Ok(found),
+    }
+}
+
+/// The note's drop, where a note is left.
+fn drop_note(pending: Option<&str>) -> Vec<Write> {
+    pending.map(|_| Write::DropNote).into_iter().collect()
+}
+
 fn serve(fingerprint: &str, writes: Vec<Write>) -> Decision {
     Decision {
         outcome: Outcome::Serve(fingerprint.to_owned()),
@@ -201,12 +216,11 @@ fn load(observed: &Observations) -> Decision {
         Record::DoesNotParse => return wait(Reason::RecordDoesNotParse),
         Record::Read { current, pending } => (current.as_deref(), pending.as_deref()),
     };
-    let found = match &observed.identities {
-        Identities::Unreadable => return wait(Reason::SecretUnreadable),
-        Identities::Malformed => return wait(Reason::Malformed),
-        Identities::Found(found) => found,
+    let found = match identities_found(&observed.identities) {
+        Ok(found) => found,
+        Err(waiting) => return waiting,
     };
-    let identity = match found.as_slice() {
+    let identity = match found {
         [] => return no_identity(current, pending, &observed.phones),
         [identity] => identity,
         // The secret store holds one identity at most.
@@ -225,12 +239,7 @@ fn load(observed: &Observations) -> Decision {
     }
     if current == Some(fingerprint) {
         // The recorded identity; a note beside it wrote nothing.
-        let writes = if pending.is_some() {
-            vec![Write::DropNote]
-        } else {
-            Vec::new()
-        };
-        return serve(fingerprint, writes);
+        return serve(fingerprint, drop_note(pending));
     }
     if current.is_some() || pending.is_some() {
         return wait(Reason::Replaced);
@@ -245,36 +254,27 @@ fn load(observed: &Observations) -> Decision {
 /// that wrote nothing, so it goes; then the guard: a mint only with
 /// nothing recorded and no phone paired.
 fn no_identity(current: Option<&str>, pending: Option<&str>, phones: &Phones) -> Decision {
-    let writes = if pending.is_some() {
-        vec![Write::DropNote]
-    } else {
-        Vec::new()
-    };
     let outcome = match (current, phones) {
         (Some(_), _) => Outcome::Wait(Reason::Missing),
         (None, Phones::Unreadable) => Outcome::Wait(Reason::PhonesUnreadable),
         (None, Phones::Paired(paired)) if !paired.is_empty() => Outcome::Wait(Reason::Missing),
         (None, Phones::Paired(_)) => Outcome::Mint,
     };
-    Decision { outcome, writes }
+    Decision {
+        outcome,
+        writes: drop_note(pending),
+    }
 }
 
 fn import(observed: &Observations) -> Decision {
-    let found = match &observed.identities {
-        Identities::Unreadable => return wait(Reason::SecretUnreadable),
-        Identities::Malformed => return wait(Reason::Malformed),
-        Identities::Found(found) => found,
+    let found = match identities_found(&observed.identities) {
+        Ok(found) => found,
+        Err(waiting) => return waiting,
     };
     // Copies of one certificate (one identity in two keychains) count once.
-    let mut distinct: Vec<Found> = Vec::new();
-    for identity in found {
-        if !distinct
-            .iter()
-            .any(|seen| seen.fingerprint == identity.fingerprint)
-        {
-            distinct.push(identity.clone());
-        }
-    }
+    let mut seen = std::collections::HashSet::new();
+    let mut distinct = found.to_vec();
+    distinct.retain(|identity| seen.insert(identity.fingerprint.clone()));
     match judge(&distinct, &observed.phones, observed.now) {
         Ok(index) => serve(&distinct[index].fingerprint, Vec::new()),
         Err(reason) => wait(reason),
@@ -297,12 +297,11 @@ fn pin(observed: &Observations) -> Decision {
         } => return serve(current, Vec::new()),
         Record::Read { current: None, .. } => {}
     }
-    let found = match &observed.identities {
-        Identities::Unreadable => return wait(Reason::SecretUnreadable),
-        Identities::Malformed => return wait(Reason::Malformed),
-        Identities::Found(found) => found,
+    let found = match identities_found(&observed.identities) {
+        Ok(found) => found,
+        Err(waiting) => return waiting,
     };
-    let [identity] = found.as_slice() else {
+    let [identity] = found else {
         return wait(Reason::Replaced);
     };
     match judge(found, &observed.phones, observed.now) {
