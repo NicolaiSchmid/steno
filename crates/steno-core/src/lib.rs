@@ -10,8 +10,11 @@
 //!   `EchoCanceller`, `LanguageModel`, `Destination`, `SecretStore`,
 //!   `SpeakerMemory` and the pipeline stage traits), one trait per file,
 //!   with the async-trait decision documented once in its module doc.
-//! - [`store`]: the SQLite store and its migrations; [`store::convert`]
-//!   holds the column codecs a query outside the crate uses.
+//! - [`store`]: the SQLite store, its writer and reader connections, and
+//!   its migrations; [`store::convert`] holds the column codecs a query
+//!   outside the crate uses. With the `tokio` feature, `Store::reading`
+//!   and `Store::writing` run a store step from async code on tokio's
+//!   blocking pool.
 //! - `testing` (feature `testing`): deterministic fakes for every
 //!   boundary, so the pipeline, the CLI and the shell test without models.
 //!   The feature also adds `Store::probe_commits`, which lets a test read

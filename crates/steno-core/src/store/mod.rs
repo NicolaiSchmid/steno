@@ -13,6 +13,8 @@ mod assets;
 pub mod convert;
 mod deliveries;
 mod export;
+#[cfg(feature = "tokio")]
+mod facade;
 mod handover;
 mod meetings;
 pub mod migrator;
@@ -208,8 +210,9 @@ const OWN_READER: usize = 1;
 ///   connections to `:memory:` do not share a database. Every handle locks
 ///   it, and [`Store::read`] turns `query_only` on for its closure only.
 ///
-/// Every method blocks on its connection's lock and on SQLite; an async
-/// host calls them from `spawn_blocking`. The mutexes are `std`'s
+/// Every method blocks on its connection's lock and on SQLite; async code
+/// calls through `Store::reading` and `Store::writing` (feature `tokio`),
+/// which run the call on tokio's blocking pool. The mutexes are `std`'s
 /// and not reentrant: a `Store` method called from inside a
 /// [`Store::read`] or [`Store::write`] closure waits on its own lock, and
 /// a debug build asserts instead. Query the connection the closure was
