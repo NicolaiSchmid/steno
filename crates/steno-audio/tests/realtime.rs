@@ -3,7 +3,8 @@
 //! `process` body (`interleaved_view` over one interleaved buffer, then
 //! `deliver_slices` through the capture's gate on Linux), the WASAPI
 //! capture threads' two stream bodies (`FollowerLane` and
-//! `PacketRouter`), the macOS IOProc's first-callback mark, the
+//! `PacketRouter`), the fill of audio a capture thread missed (`CycleClock`
+//! and `fill_missed`, A18), the macOS IOProc's first-callback mark, the
 //! processing loop with the real Speex canceller, its far-end delay line,
 //! metering, the raw-mic copy and the relay hand-off run one second of
 //! audio on the test's thread under the counting allocator and allocate
@@ -30,7 +31,7 @@ use std::sync::Arc;
 
 use steno_audio::capture::{ChannelRef, LaneSource, SplitStreamPlan, StreamLayout};
 use steno_audio::realtime::{
-    BufferView, FirstCallback, FollowerLane, FrameRelay, LaneFrameSink, PacketRouter,
+    BufferView, CycleClock, FirstCallback, FollowerLane, FrameRelay, LaneFrameSink, PacketRouter,
     ProcessingConfiguration, ProcessingThread, SliceView, StreamBody, deliver, deliver_slices,
     interleaved_view,
 };
@@ -334,7 +335,9 @@ fn the_pipewire_process_body_allocates_nothing() {
                 i32::try_from(stride).unwrap(),
                 CHANNELS,
             );
-            through_the_gate(|| deliver_slices(&[view], &sources, &sink));
+            through_the_gate(|| {
+                deliver_slices(&[view], &sources, &sink);
+            });
             offset += count;
         }
     });
@@ -483,6 +486,118 @@ fn the_two_stream_bodies_allocate_nothing() {
         "allocations in the two-stream bodies: {allocations}; underrun {} frames, slipped {}",
         follower.underrun_frames(),
         follower.slipped_frames()
+    );
+}
+
+/// The fill of audio a capture thread missed (A18): the clock that reads
+/// each cycle's position and the zeros it reports, through the sink as the
+/// PipeWire and macOS callbacks write them and through both two-stream
+/// bodies as the WASAPI threads do, allocate nothing. Every tenth cycle is
+/// missed; the rings end up holding every frame of the timeline, the
+/// missed ones as zeros counted per lane.
+#[test]
+fn the_missed_cycle_fill_allocates_nothing() {
+    const CYCLE: usize = 480;
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let sources = [
+        LaneSource {
+            lane: AudioLane::Mic,
+            left: ChannelRef::new(0, 0, 2),
+            right: None,
+        },
+        LaneSource {
+            lane: AudioLane::System,
+            left: ChannelRef::new(0, 1, 2),
+            right: None,
+        },
+    ];
+    let sink = LaneFrameSink::new(&lanes);
+    let memory = vec![0.25f32; CYCLE * 2];
+    let mut clock = CycleClock::new(48_000.0);
+    let allocations = CountingAllocator::allocations_during(|| {
+        for cycle in 0..100u64 {
+            if cycle % 10 == 9 {
+                continue;
+            }
+            let view = SliceView {
+                channels: 2,
+                frames: CYCLE,
+                samples: Some(&memory),
+            };
+            let missed = clock.advance(cycle * CYCLE as u64, CYCLE);
+            through_the_gate(|| {
+                if missed > 0 {
+                    sink.fill_missed(missed);
+                }
+                deliver_slices(&[view], &sources, &sink);
+            });
+        }
+    });
+    assert_eq!(allocations, 0, "{allocations} allocations in the fill");
+    assert_eq!(
+        sink.available_to_read(),
+        99 * CYCLE,
+        "the last miss is never seen"
+    );
+    let missed = 9 * CYCLE;
+    assert_eq!(
+        sink.missed_samples(),
+        std::collections::BTreeMap::from([(AudioLane::Mic, missed), (AudioLane::System, missed)]),
+    );
+    assert!(sink.dropped_samples().is_empty());
+
+    // The two-stream bodies: the master misses 4 periods and the
+    // follower 2, each told before its next packet.
+    let plan = SplitStreamPlan::new(&lanes).unwrap();
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let follower = Arc::new(FollowerLane::for_streams(CYCLE, 4_800));
+    let mut master = StreamBody::Master {
+        router: PacketRouter::new(
+            plan.layout.sources.clone(),
+            Some(Arc::clone(&follower)),
+            4_800,
+        ),
+        sink: Arc::clone(&sink),
+    };
+    let mut staging = StreamBody::follower(Arc::clone(&follower), 4_800);
+    let mic = vec![0.5f32; CYCLE];
+    let tap = vec![0.25f32; 2 * CYCLE];
+    let allocations = CountingAllocator::allocations_during(|| {
+        for period in 0..50 {
+            if period == 20 {
+                staging.fill_missed(2, 2 * CYCLE);
+            }
+            staging.handle(SliceView {
+                frames: CYCLE,
+                channels: 2,
+                samples: Some(&tap),
+            });
+            if period == 30 {
+                master.fill_missed(1, 4 * CYCLE);
+            }
+            master.handle(SliceView {
+                frames: CYCLE,
+                channels: 1,
+                samples: Some(&mic),
+            });
+        }
+    });
+    assert_eq!(
+        allocations, 0,
+        "{allocations} allocations in the bodies' fill"
+    );
+    assert_eq!(
+        sink.available_to_read(),
+        54 * CYCLE,
+        "50 periods and the 4 missed"
+    );
+    assert_eq!(
+        sink.missed_samples(),
+        std::collections::BTreeMap::from([
+            (AudioLane::Mic, 4 * CYCLE),
+            (AudioLane::System, 2 * CYCLE)
+        ]),
+        "the master's zeros on its lane, the follower's on its own"
     );
 }
 

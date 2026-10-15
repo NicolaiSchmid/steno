@@ -294,10 +294,11 @@ fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> CallR
     println!(
         "{what}: first callback {first:?} after start returned ({:?} after it was called), \
          {callbacks} callbacks, {frames} frames ({seconds:.2} s at {} Hz) in {elapsed:?}, \
-         system peak {system_peak}, dropped {:?}; stopped in {:?}",
+         system peak {system_peak}, dropped {:?}, missed {:?}; stopped in {:?}",
         first.map(|first| first + (started - starting)),
         stream.sample_rate,
         sink.dropped_samples(),
+        sink.missed_samples(),
         stopping.elapsed()
     );
     CallRun {

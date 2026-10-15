@@ -31,8 +31,9 @@
 //! is logged and ignored; otherwise the sink gets one
 //! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
 //! `start` again. Nothing here runs on the IO thread except `io_proc`,
-//! which only calls [`deliver`] and marks the first callback's host time
-//! ([`FirstCallback`]), and `silent_io_proc` (below), which only zeroes
+//! which only calls [`deliver`], marks the first callback's host time
+//! ([`FirstCallback`]) and writes the audio the IO thread missed as
+//! silence first (below), and `silent_io_proc` (below), which only zeroes
 //! its output; `stop()` logs that callback's offset from the start
 //! at `info`, so a call recording shows whether the IOProc ran at once
 //! (at `debug` while the session's restarts go on, `start_log`).
@@ -67,7 +68,19 @@
 //! enforced by [`Playback`](crate::playback::Playback): Steno's own output
 //! would land in the system lane, and the capture session holds that gate
 //! while it records. In-person mode has no tap and needs no output client.
+//!
+//! An IO thread the scheduler holds up past its deadline misses cycles:
+//! the HAL reports an overload, and the next input time stamp's sample time
+//! sits past where the last buffer ended, the audio between gone. `io_proc`
+//! reads that sample time against the frames the last callback delivered
+//! ([`CycleClock`], in the aggregate's frames) and writes the missed frames
+//! as zeros on every lane before the callback's own
+//! ([`LaneFrameSink::fill_missed`]), so the master stays on wall time and
+//! the session counts them (A18 of `.plans/2026-10-07-stable-promotion.md`;
+//! Rust only, Swift reads no time stamps). A time stamp without a valid
+//! sample time resets the clock; every start begins a new one.
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{Arc, Condvar, Mutex};
@@ -82,7 +95,7 @@ use objc2_core_audio::{
     kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
     kAudioObjectPropertyScopeOutput,
 };
-use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp};
+use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp, AudioTimeStampFlags};
 use steno_core::AudioLane;
 
 use super::hal::{
@@ -95,8 +108,9 @@ use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     LaneSource, NominalSampleRate, StreamLayout,
 };
+use crate::realtime::io_proc::callback_frames;
 use crate::realtime::{
-    BufferView, FirstCallback, LaneFrameSink, MAX_BUFFERS, RateConverter, deliver,
+    BufferView, CycleClock, FirstCallback, LaneFrameSink, MAX_BUFFERS, RateConverter, deliver,
     first_callback_line, silence_output,
 };
 
@@ -106,17 +120,42 @@ struct CallbackContext {
     sink: Arc<LaneFrameSink>,
     sources: Vec<LaneSource>,
     first_callback: FirstCallback,
+    /// Where the last callback ended in the aggregate's sample time. A
+    /// `Cell`: only the IO thread touches it, one callback at a time, and
+    /// only through the shared reference `io_proc` makes.
+    clock: Cell<CycleClock>,
+}
+
+/// The frames missed before a callback of `frames` whose input time stamp
+/// is `time`: `clock` advanced to its sample time; a stamp without a valid
+/// one resets the clock and reports nothing. Real-time safe.
+#[inline(always)]
+fn missed_before(clock: &Cell<CycleClock>, time: &AudioTimeStamp, frames: usize) -> usize {
+    let mut cycles = clock.get();
+    let valid = time.mFlags.0 & AudioTimeStampFlags::SampleTimeValid.0 != 0
+        && time.mSampleTime.is_finite()
+        && time.mSampleTime >= 0.0;
+    let missed = if valid {
+        // A finite sample time at or above 0, to the nearest frame.
+        cycles.advance(time.mSampleTime.round() as u64, frames)
+    } else {
+        cycles.reset();
+        0
+    };
+    clock.set(cycles);
+    missed
 }
 
 /// The IOProc. Builds a stack array of [`BufferView`]s from the HAL's
 /// buffer list and hands it to [`deliver`], after marking the first
-/// callback's host time: no allocation, no lock, no syscall; behind
-/// [`hal::abort_on_panic`].
+/// callback's host time and writing the frames the IO thread missed before
+/// it as zeros ([`missed_before`]): no allocation, no lock, no syscall;
+/// behind [`hal::abort_on_panic`].
 unsafe extern "C-unwind" fn io_proc(
     _device: Id,
     now: NonNull<AudioTimeStamp>,
     input: NonNull<AudioBufferList>,
-    _input_time: NonNull<AudioTimeStamp>,
+    input_time: NonNull<AudioTimeStamp>,
     _output: NonNull<AudioBufferList>,
     _output_time: NonNull<AudioTimeStamp>,
     client: *mut c_void,
@@ -124,8 +163,10 @@ unsafe extern "C-unwind" fn io_proc(
     hal::abort_on_panic(|| {
         // SAFETY: `client` is the boxed `CallbackContext` registered in
         // `start`, alive until the IOProc is destroyed (which happens before
-        // the box is dropped); `input` and `now` are the HAL's, valid for
-        // the call.
+        // the box is dropped), and the HAL calls the IOProc one cycle at a
+        // time, so the context's `Cell` is never touched from two threads at
+        // once; `input`, `now` and `input_time` are the HAL's, valid for the
+        // call.
         unsafe {
             let ctx = &*client.cast::<CallbackContext>();
             ctx.first_callback.mark(now.as_ref().mHostTime);
@@ -146,7 +187,13 @@ unsafe extern "C-unwind" fn io_proc(
                     byte_size: buffer.mDataByteSize as usize,
                 };
             }
-            deliver(&views[..count], &ctx.sources, &ctx.sink);
+            let views = &views[..count];
+            let frames = callback_frames(views, &ctx.sources);
+            let missed = missed_before(&ctx.clock, input_time.as_ref(), frames);
+            if missed > 0 {
+                ctx.sink.fill_missed(missed);
+            }
+            deliver(views, &ctx.sources, &ctx.sink);
         }
     });
     0
@@ -616,6 +663,7 @@ impl CaptureBackend for LiveCaptureBackend {
             sink: Arc::clone(&sink),
             sources: layout.sources.clone(),
             first_callback: FirstCallback::new(),
+            clock: Cell::new(CycleClock::new(sample_rate)),
         });
         let context_ptr: *const CallbackContext = &raw const *context;
         let started = (hal::host_time_now(), Instant::now());

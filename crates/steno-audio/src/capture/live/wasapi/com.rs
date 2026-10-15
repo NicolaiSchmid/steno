@@ -55,13 +55,14 @@ use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE, S_OK};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
-    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
-    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, AUDIOCLIENT_ACTIVATION_PARAMS,
-    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, ActivateAudioInterfaceAsync, AudioSessionDisconnectReason,
-    AudioSessionState, AudioSessionStateActive, AudioSessionStateExpired, DEVICE_STATE,
-    DEVICE_STATE_ACTIVE, EDataFlow, ERole, IActivateAudioInterfaceAsyncOperation,
+    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+    AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    ActivateAudioInterfaceAsync, AudioSessionDisconnectReason, AudioSessionState,
+    AudioSessionStateActive, AudioSessionStateExpired, DEVICE_STATE, DEVICE_STATE_ACTIVE,
+    EDataFlow, ERole, IActivateAudioInterfaceAsyncOperation,
     IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
     IAudioCaptureClient, IAudioClient, IAudioSessionControl, IAudioSessionControl2,
     IAudioSessionEvents, IAudioSessionEvents_Impl, IAudioSessionManager2,
@@ -89,7 +90,7 @@ use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
 use crate::capture::split_streams::{BUFFER_DURATION, StreamSizes, stream_sizes};
 use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
-use crate::realtime::SliceView;
+use crate::realtime::{CycleClock, SliceView};
 
 /// A failed COM or WASAPI call: which one, its `HRESULT`, the system's
 /// message for it.
@@ -502,6 +503,11 @@ pub struct CaptureClient {
     /// No packet drained yet: loopback streams commonly flag their first
     /// packet as a discontinuity, which is not a late thread.
     first_packet: bool,
+    /// Where the last packet ended in device position.
+    clock: CycleClock,
+    /// Frames the discontinuities lost, as the device positions tell them
+    /// (handed to the body to fill).
+    missed_frames: usize,
 }
 
 impl CaptureClient {
@@ -612,6 +618,8 @@ impl CaptureClient {
             sizes: stream_sizes(buffer_frames, period, latency),
             discontinuities: 0,
             first_packet: true,
+            clock: CycleClock::new(SAMPLE_RATE),
+            missed_frames: 0,
         })
     }
 
@@ -628,6 +636,13 @@ impl CaptureClient {
     #[must_use]
     pub fn discontinuities(&self) -> u64 {
         self.discontinuities
+    }
+
+    /// Frames those discontinuities lost, as far as the device positions
+    /// tell (see [`Self::drain`]).
+    #[must_use]
+    pub fn missed_frames(&self) -> usize {
+        self.missed_frames
     }
 
     /// Starts the stream.
@@ -655,10 +670,18 @@ impl CaptureClient {
         let _ = unsafe { WaitForSingleObject(event.0, milliseconds) };
     }
 
-    /// Hands every queued packet to `handle`, then returns. The real-time
-    /// part: no allocation and no lock here on success (the `windows`
-    /// error values are built only on failure); `handle` must keep it so.
-    pub fn drain(&mut self, mut handle: impl FnMut(SliceView<'_>)) -> Result<(), ComError> {
+    /// Hands every queued packet to `handle`, then returns, with the frames
+    /// the engine lost right before it: on a packet flagged
+    /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` (the first one aside, see
+    /// `first_packet`), how far its device position passed where the last
+    /// packet ended ([`CycleClock`]), 0 otherwise and for a position the
+    /// engine flags as invalid (`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`).
+    /// The position counts the stream's frames, as Microsoft's
+    /// documentation of `GetBuffer` describes it (not run on hardware: see
+    /// the module doc of `capture::live::wasapi`). The real-time part: no
+    /// allocation and no lock here on success (the `windows` error values
+    /// are built only on failure); `handle` must keep it so.
+    pub fn drain(&mut self, mut handle: impl FnMut(SliceView<'_>, usize)) -> Result<(), ComError> {
         loop {
             // SAFETY: plain call on the started capture service.
             let next = check(
@@ -671,15 +694,16 @@ impl CaptureClient {
             let mut data: *mut u8 = std::ptr::null_mut();
             let mut frames: u32 = 0;
             let mut flags: u32 = 0;
+            let mut position: u64 = 0;
             check(
-                // SAFETY: the three out-pointers are live locals; no device or
-                // QPC position is asked for.
+                // SAFETY: the four out-pointers are live locals; no QPC
+                // position is asked for.
                 unsafe {
                     self.capture.GetBuffer(
                         &raw mut data,
                         &raw mut frames,
                         &raw mut flags,
-                        None,
+                        Some(&raw mut position),
                         None,
                     )
                 },
@@ -687,11 +711,21 @@ impl CaptureClient {
             )?;
             // The flag constants are small positive bit masks.
             let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
-            if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 && !self.first_packet {
+            let discontinuity =
+                flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 && !self.first_packet;
+            if discontinuity {
                 self.discontinuities += 1;
             }
             self.first_packet = false;
             let count = frames as usize;
+            let missed = if flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0 {
+                self.clock.reset();
+                0
+            } else {
+                let missed = self.clock.advance(position, count);
+                if discontinuity { missed } else { 0 }
+            };
+            self.missed_frames += missed;
             // Alignment is checked before the slice is made.
             #[allow(clippy::cast_ptr_alignment)]
             let floats = data.cast::<f32>();
@@ -710,11 +744,14 @@ impl CaptureClient {
                     std::slice::from_raw_parts(floats.cast_const(), count * self.channels)
                 })
             };
-            handle(SliceView {
-                frames: count,
-                channels: self.channels,
-                samples,
-            });
+            handle(
+                SliceView {
+                    frames: count,
+                    channels: self.channels,
+                    samples,
+                },
+                missed,
+            );
             check(
                 // SAFETY: releases exactly the packet `GetBuffer` lent; the
                 // slice over it ended with the `handle` call.

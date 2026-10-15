@@ -72,12 +72,17 @@
 //! timeout too, so a polled loopback stream works), checking an atomic
 //! stop flag. `start` starts the follower before the master, the sink's
 //! only producer, so a start that fails has written nothing. Data the
-//! engine itself lost (a packet flagged as a discontinuity, the first one
-//! aside) is counted and logged at stop, not added to the sink's drop
-//! count: WASAPI does not say how much was lost. The follower's underrun,
-//! slip and trim counts are logged at stop too. All of these logs are at
-//! `info`, below the shell's default filter: set
-//! `RUST_LOG=steno_audio=info` to see them.
+//! engine itself lost because a capture thread was late (a packet flagged
+//! as a discontinuity, the first one aside) is counted, and what the
+//! packet's device position says was lost before it is written as zeros
+//! before it (A18 of `.plans/2026-10-07-stable-promotion.md`;
+//! [`StreamBody::fill_missed`]): on the master, as a silent packet that
+//! still pulls the follower's frames for that time, so the lanes stay
+//! aligned and the master on wall time; on the follower, into its staging
+//! ring. Both count in the sink as missed, for the session's statistics.
+//! The count and the seconds are logged at stop, as are the follower's
+//! underrun, slip and trim counts. All of these logs are at `info`, below
+//! the shell's default filter: set `RUST_LOG=steno_audio=info` to see them.
 
 pub(crate) mod com;
 
@@ -547,7 +552,13 @@ fn run_stream(
         if stop.load(Ordering::Acquire) {
             break;
         }
-        if let Err(error) = client.drain(|packet| body.handle(packet)) {
+        let drained = client.drain(|packet, missed| {
+            if missed > 0 {
+                body.fill_missed(packet.channels, missed);
+            }
+            body.handle(packet);
+        });
+        if let Err(error) = drained {
             let why = if error.is_device_invalidated() {
                 "its device went away or changed format"
             } else {
@@ -562,8 +573,10 @@ fn run_stream(
     let discontinuities = client.discontinuities();
     if discontinuities > 0 {
         tracing::info!(
-            "{} stream: {discontinuities} packets after a glitch (thread late)",
-            source.as_str()
+            "{} stream: {discontinuities} packets after a glitch (thread late), {:.3} s \
+             written as silence",
+            source.as_str(),
+            client.missed_frames() as f64 / SAMPLE_RATE
         );
     }
     drop(pro_audio);
