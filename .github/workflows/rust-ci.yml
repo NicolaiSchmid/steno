@@ -32,8 +32,11 @@ name: Rust CI
 # under a recording on a session bus with no tray host and requires the
 # app to quit and save it, and beside a stand-in host requires the close
 # to hide the window and the tray menu's Quit to save it
-# (apps/desktop/scripts/close-without-tray-linux.sh), and bundles a `.deb` with
-# the speech sidecar
+# (apps/desktop/scripts/close-without-tray-linux.sh), stops a recording from
+# the tray's menu while another process holds the store's write lock and
+# requires the tray to read Stopping at once and the recording saved once
+# the lock goes (apps/desktop/scripts/locked-store-linux.sh), and bundles a
+# `.deb` with the speech sidecar
 # (apps/desktop/scripts/check-bundle.sh finds it beside the app) so a
 # packaging regression (the bundle config, the icons, the plists, the
 # release profile, the sidecar) fails here and not in desktop-release.yml.
@@ -476,6 +479,17 @@ jobs:
         run: |
           scripts/pipewire-headless.sh \
             apps/desktop/scripts/close-without-tray-linux.sh --with-host target/debug/steno-desktop
+      # Beside the stand-in tray host again: Stop recording in the tray's
+      # menu while Python's sqlite3 holds the store's write lock for 8 s.
+      # The stop runs off the main thread (P40), so the menu's row reads
+      # Stopping… within 3 s, and the save lands within 2 s of the release.
+      # About 25 s, here and on atlas (P40's plan, check 7).
+      - name: Desktop stop under a locked store
+        if: matrix.name == 'linux'
+        timeout-minutes: 5
+        run: |
+          scripts/pipewire-headless.sh \
+            apps/desktop/scripts/locked-store-linux.sh target/debug/steno-desktop
       # The same smoke on macOS, after the tests so they build as before.
       # It shows the windows on the runner's screen for 15 s and runs with a
       # fresh HOME; the script waits for another runner's smoke to end.

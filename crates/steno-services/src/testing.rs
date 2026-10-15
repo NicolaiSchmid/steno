@@ -359,6 +359,7 @@ pub fn app_over_fakes(
         installed_bundle: false,
         startup_warnings: Vec::new(),
         live_recording_check: crate::recovery::LiveRecordingCheck::default(),
+        tone_directory: None,
         launch_work: std::sync::Mutex::default(),
         secrets_unlocked: std::sync::Mutex::new(None),
         database_lock: None,

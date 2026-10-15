@@ -2008,6 +2008,10 @@ impl Recorder for RacingRecorder {
         self.inner.hold_starts()
     }
 
+    fn refuse_starts(&self) {
+        self.inner.refuse_starts();
+    }
+
     fn stop(&self) {
         self.inner.stop();
     }

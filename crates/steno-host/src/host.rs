@@ -51,16 +51,35 @@
 //!
 //! # Threads
 //!
-//! The crate doc says which thread the shell calls from. Locks are taken in
-//! one order: the publishing mutex, then the view models, then the sink
-//! slot. The dialogs (`confirm`, `choose_folder`) are called with no lock
-//! held, on the command's thread. The services are called with the
-//! view-model lock held, so they must not call back into the host (the
-//! `services` module doc has the rule), except for the calls that run with
-//! it released: the recorder's commands, whose changes re-enter the host
-//! (`Host::recorder_changed`), the permission prompts, the LLM probe, the
-//! Codex calls and the model download, the prompts and the probe with
-//! their busy flag published first. `settings.transcription.download`
+//! The crate doc says which thread the shell calls from: its blocking pool,
+//! for every command and page load, its ordered lane for each deep link,
+//! tray action and the onboarding window's close, and never the thread it
+//! marks with [`mark_ui_thread`](crate::mark_ui_thread). The services'
+//! event follower and their two-second poll ([`Host::apply_meeting_event`],
+//! [`Host::store_changed`], [`Host::refresh_pairing`]) call from their
+//! runtime's blocking pool, so a reload that waits never holds a runtime
+//! worker. The update schedule's `Host::updates_changed` and the gated
+//! handover's `Host::phones_changed` still call from runtime workers;
+//! both only read, and P40's readers end their wait. One exemption: the
+//! launch (`steno_services::App::launch`, with
+//! [`Host::should_open_onboarding`] before it) runs on the shell's main
+//! thread during setup, once the main window is built and before the
+//! event loop runs. It reloads once ([`Host::store_changed`]), and there
+//! it also writes: it resumes the meetings and exports left unfinished
+//! (unless a keyring answer or the Swift import is pending) and runs the
+//! retention sweep (unless the import is pending). It is not a shell
+//! entry point, so the mark does not assert there.
+//!
+//! Locks are taken in one order: the publishing mutex, then the view
+//! models, then the sink slot. The dialogs (`confirm`, `choose_folder`)
+//! are called with no lock held, on the command's thread. The services are
+//! called with the view-model lock held, so they must not call back into
+//! the host (the `services` module doc has the rule), except for the calls
+//! that run with it released: the recorder's commands, whose changes
+//! re-enter the host (`Host::recorder_changed`), the permission prompts,
+//! the LLM probe, the Codex calls and the model download, the prompts and
+//! the probe with their busy flag published first.
+//! `settings.transcription.download`
 //! replies after its first publish and keeps publishing from its own
 //! thread until the download ends; a second download of the asset
 //! reattaches to that thread instead of starting one. The flush thread
@@ -1044,9 +1063,9 @@ impl Host {
     pub fn onboarding_window_closed(&self) {
         OnboardingViewModel::mark_completed(&self.shared.services);
         // Closing the window over the import step skips it: phone
-        // handover waits, and the step returns at the next launch. This
-        // runs on the main thread, so the skip never waits: a run whose
-        // prompt is up is left to end by itself.
+        // handover waits, and the step returns at the next launch. The
+        // skip never waits: a run whose prompt is up is left to end by
+        // itself.
         if let Some(import) = &self.shared.services.swift_import
             && import.status().stage == crate::services::SwiftImportStage::Pending
         {

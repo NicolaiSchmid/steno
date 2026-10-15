@@ -190,6 +190,11 @@ pub struct App {
     /// When the launch counts an interrupted recording's master as still
     /// being written ([`crate::recovery`]).
     pub live_recording_check: LiveRecordingCheck,
+    /// Where the Mac's system audio probe writes its tone
+    /// (`steno_audio::capture::permission::tone_directory`), for
+    /// [`App::launch`] to remove the tone files a process that ended
+    /// during a probe left there; none off the Mac, which has no probe.
+    pub tone_directory: Option<std::path::PathBuf>,
     /// The launch's background half, for [`App::launch_finished`].
     pub(crate) launch_work: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Resolves once the secret store chose where the secrets are, true
@@ -865,6 +870,8 @@ pub fn build_with_import(
         installed_bundle: options.installed_bundle,
         startup_warnings: warnings,
         live_recording_check: LiveRecordingCheck::default(),
+        tone_directory: cfg!(target_os = "macos")
+            .then(steno_audio::capture::permission::tone_directory),
         launch_work: std::sync::Mutex::default(),
         secrets_unlocked: std::sync::Mutex::new(secrets_unlocked),
         database_lock,
@@ -1096,6 +1103,50 @@ fn log_operation_failure(event: &MeetingEvent) {
     }
 }
 
+/// How often the launch's poll reloads the meetings and the pairing
+/// ([`App::launch`]).
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What the event follower does with one event from the pipeline's bus,
+/// on the blocking pool ([`App::launch`]): the host applies it, then
+/// reloads where the event changed rows the progress does not carry. A
+/// retention applied also sweeps first. `None` is a follower that fell
+/// behind the bus and missed events: it reloads everything.
+fn follow_event(host: &Host, sweep: &RetentionSweep, event: Option<&MeetingEvent>) {
+    let Some(event) = event else {
+        host.store_changed();
+        return;
+    };
+    host.apply_meeting_event(event);
+    match event {
+        MeetingEvent::Progress { .. } => {}
+        MeetingEvent::RetentionApplied { .. } => {
+            run_sweep(sweep);
+            host.store_changed();
+        }
+        MeetingEvent::SpeakersNeedReview { .. }
+        | MeetingEvent::Deleted { .. }
+        | MeetingEvent::ModelsMissing { .. }
+        | MeetingEvent::StoreBusy { .. } => host.store_changed(),
+        MeetingEvent::OperationFailed { .. } => {
+            log_operation_failure(event);
+            host.store_changed();
+        }
+    }
+}
+
+/// Runs `body` on the runtime's blocking pool and waits for it there, so
+/// a host call that waits on the store holds no runtime worker. A panic
+/// in `body` resumes here. False when the runtime is shutting down and
+/// did not run it, which ends the calling task.
+async fn off_the_workers(body: impl FnOnce() + Send + 'static) -> bool {
+    match tokio::task::spawn_blocking(body).await {
+        Ok(()) => true,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => false,
+    }
+}
+
 impl App {
     /// The host over this graph, with the viewer's zone, the version,
     /// whether a package manager delivers the updates
@@ -1219,36 +1270,25 @@ impl App {
         }
         self.report_update_checks(host);
 
+        // The host's reloads read the store, and the sweep writes it: each
+        // waits, behind a write, for as long as another process holds the
+        // write lock. So both tasks hand the host to the blocking pool and
+        // await it there, one event at a time in the bus's order, and no
+        // wait holds a runtime worker, which the pipeline's runs, the
+        // handover and the timers need.
         let mut receiver = self.events.subscribe();
         let sweep = self.sweep.clone();
         let event_host = host.clone();
         tokio::spawn(async move {
             loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        event_host.apply_meeting_event(&event);
-                        match &event {
-                            MeetingEvent::Progress { .. } => {}
-                            MeetingEvent::RetentionApplied { .. } => {
-                                run_sweep(&sweep);
-                                event_host.store_changed();
-                            }
-                            MeetingEvent::SpeakersNeedReview { .. }
-                            | MeetingEvent::Deleted { .. }
-                            | MeetingEvent::ModelsMissing { .. }
-                            | MeetingEvent::StoreBusy { .. } => {
-                                event_host.store_changed();
-                            }
-                            MeetingEvent::OperationFailed { .. } => {
-                                log_operation_failure(&event);
-                                event_host.store_changed();
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        event_host.store_changed();
-                    }
+                let event = match receiver.recv().await {
+                    Ok(event) => Some(event),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                };
+                let (host, sweep) = (event_host.clone(), sweep.clone());
+                if !off_the_workers(move || follow_event(&host, &sweep, event.as_ref())).await {
+                    return;
                 }
             }
         });
@@ -1257,13 +1297,22 @@ impl App {
         // itself (the Swift app had GRDB observation). The same tick is
         // the pairing poll Swift's Phones pane ran every two seconds: a
         // phone that paired closes the code, a code that ran out closes.
+        // A tick that waited is followed by the next one a full interval
+        // later, never by a burst.
         let poll_host = host.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            let mut interval = tokio::time::interval(POLL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
-                poll_host.store_changed();
-                poll_host.refresh_pairing();
+                let host = poll_host.clone();
+                let tick = move || {
+                    host.store_changed();
+                    host.refresh_pairing();
+                };
+                if !off_the_workers(tick).await {
+                    return;
+                }
             }
         });
 
@@ -1274,6 +1323,15 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(work);
         self.start_alongside(host);
+        // Off this thread, which never waits for the listing.
+        if let Some(directory) = self.tone_directory.clone() {
+            tokio::task::spawn_blocking(move || {
+                steno_audio::capture::permission::remove_leftover_tones(
+                    &directory,
+                    std::time::SystemTime::now(),
+                );
+            });
+        }
         host.store_changed();
     }
 
@@ -1712,6 +1770,39 @@ mod tests {
         assert_eq!(marks.damage(kept.id), damage);
         assert!(marks.damage(deleted).is_none());
         drop(app);
+    }
+
+    /// The launch removes, in the background, a tone file the system audio
+    /// probe of a process that ended during it left in the tone directory,
+    /// and leaves a file whose name only resembles it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_removes_the_tone_files_a_probe_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let tones = dir.path().join("tmp");
+        std::fs::create_dir_all(&tones).unwrap();
+        let leftover = tones.join(format!(
+            "steno-permission-4242-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let resembling = tones.join("steno-permission-4242.wav");
+        let written =
+            std::time::SystemTime::now() - steno_audio::capture::permission::LEFTOVER_TONE_AGE;
+        for path in [&leftover, &resembling] {
+            std::fs::write(path, b"RIFF").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(written)
+                .unwrap();
+        }
+        let mut app = build(options_under(&dir.path().join("support"))).unwrap();
+        app.tone_directory = Some(tones);
+        let host = Arc::new(app.host().unwrap());
+        app.launch(&host);
+        crate::testing::eventually("the leftover tone file is gone", || !leftover.exists()).await;
+        assert!(resembling.exists());
+        app.launch_finished().await;
     }
 
     /// What `App::launch` does to a meeting a previous process left
@@ -2444,6 +2535,33 @@ mod tests {
             let status = app.recorder.status();
             assert_eq!(status.state, steno_bridge::RecordingState::Idle, "{method}");
             assert_eq!(status.error, error, "{method}");
+        }
+        assert_eq!(store.all_meetings().unwrap(), []);
+    }
+
+    /// The page's Record and Record in person while a menu Quit waits for
+    /// the actions clicked before it (the starts refused,
+    /// [`Recorder::refuse_starts`](steno_host::services::Recorder::refuse_starts)):
+    /// each returns, records nothing, and the page's `recording` snapshot
+    /// says why.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_pages_record_during_a_menu_quit_is_refused_and_says_why() {
+        use steno_bridge::BridgeMethod;
+        use steno_host::services::{QUITTING_REFUSAL, Recorder as _};
+        let (dir, store) = temp_store();
+        let app = recording_app(&dir, &store);
+        let host = wired_host(&app);
+        app.recorder.refuse_starts();
+        let start = serde_json::json!({ "mode": "inPerson" });
+        for (method, params) in [
+            (BridgeMethod::RecordingStart, Some(start)),
+            (BridgeMethod::RecordingToggle, None),
+        ] {
+            call(&host, method, params);
+            let status = app.recorder.status();
+            assert_eq!(status.state, steno_bridge::RecordingState::Idle, "{method}");
+            let shown = host.snapshot(steno_bridge::BridgeTopic::Recording).unwrap();
+            assert_eq!(shown["error"], QUITTING_REFUSAL, "{method}");
         }
         assert_eq!(store.all_meetings().unwrap(), []);
     }
@@ -3771,5 +3889,393 @@ mod tests {
         memory.fail_reads(Some("the keyring is locked"));
         assert_eq!(sent().await, None);
         server.stop();
+    }
+
+    /// A pipeline whose `export_keeps_failing`, which the detail's reload
+    /// asks, waits at a gate while the gate is armed: a reload held there
+    /// stands for one that waits on the store behind another process's
+    /// write lock. Everything else is the host's fake.
+    #[derive(Default)]
+    struct GatedPipeline {
+        fake: steno_host::fakes::FakePipeline,
+        gate: ReloadGate,
+    }
+
+    #[derive(Default)]
+    struct ReloadGate {
+        state: std::sync::Mutex<GateState>,
+        changed: std::sync::Condvar,
+    }
+
+    #[derive(Default)]
+    struct GateState {
+        armed: bool,
+        /// Reloads waiting at the gate now.
+        held: usize,
+        /// Reloads the gate has held, in all.
+        entered: usize,
+        reloads: usize,
+    }
+
+    impl ReloadGate {
+        fn state(&self) -> std::sync::MutexGuard<'_, GateState> {
+            self.state.lock().unwrap()
+        }
+
+        fn pass(&self) {
+            let mut state = self.state();
+            state.reloads += 1;
+            if state.armed {
+                state.held += 1;
+                state.entered += 1;
+                self.changed.notify_all();
+                while state.armed {
+                    state = self.changed.wait(state).unwrap();
+                }
+                state.held -= 1;
+            }
+            self.changed.notify_all();
+        }
+
+        fn reloads(&self) -> usize {
+            self.state().reloads
+        }
+
+        /// Waits up to `patience` for `reached`; whether it was.
+        fn wait_for(
+            &self,
+            patience: std::time::Duration,
+            reached: impl Fn(&GateState) -> bool,
+        ) -> bool {
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(self.state(), patience, |state| !reached(state))
+                .unwrap();
+            reached(&state)
+        }
+
+        /// Arms the gate; the next reload waits there until the guard
+        /// drops, also when the test fails.
+        fn arm(&self) -> ArmedGate<'_> {
+            self.state().armed = true;
+            ArmedGate(self)
+        }
+    }
+
+    struct ArmedGate<'a>(&'a ReloadGate);
+
+    impl Drop for ArmedGate<'_> {
+        fn drop(&mut self) {
+            self.0.state().armed = false;
+            self.0.changed.notify_all();
+        }
+    }
+
+    impl steno_host::services::Pipeline for GatedPipeline {
+        fn rerun_summary(&self, meeting_id: uuid::Uuid, template_id: &str) -> BoundaryResult<()> {
+            self.fake.rerun_summary(meeting_id, template_id)
+        }
+
+        fn redeliver(&self, meeting_id: uuid::Uuid) -> BoundaryResult<()> {
+            self.fake.redeliver(meeting_id)
+        }
+
+        fn export_keeps_failing(&self, meeting_id: uuid::Uuid) -> bool {
+            self.gate.pass();
+            self.fake.export_keeps_failing(meeting_id)
+        }
+
+        fn process_again(
+            &self,
+            meeting_id: uuid::Uuid,
+        ) -> Result<(), steno_host::services::ProcessAgainRefusal> {
+            self.fake.process_again(meeting_id)
+        }
+
+        fn damaged_audio(&self, meeting_id: uuid::Uuid) -> steno_core::AudioDamage {
+            self.fake.damaged_audio(meeting_id)
+        }
+
+        fn audio_may_be_damaged(&self, meeting_id: uuid::Uuid) -> bool {
+            self.fake.audio_may_be_damaged(meeting_id)
+        }
+
+        fn apply_retention(
+            &self,
+            meeting_id: uuid::Uuid,
+            rule: steno_core::AudioRetention,
+        ) -> BoundaryResult<()> {
+            self.fake.apply_retention(meeting_id, rule)
+        }
+
+        fn reload(&self) -> BoundaryResult<()> {
+            self.fake.reload()
+        }
+
+        fn keep_all_recordings(&self) -> BoundaryResult<i64> {
+            self.fake.keep_all_recordings()
+        }
+    }
+
+    /// Fails unless the timer behind `ticked` keeps ticking for `length`:
+    /// no gap of 200 ms or more between its ticks, read from the test's
+    /// own thread, which is not one of the runtime's.
+    fn assert_live(
+        ticked: &std::sync::Mutex<std::time::Instant>,
+        length: std::time::Duration,
+        what: &str,
+    ) {
+        let start = std::time::Instant::now();
+        while start.elapsed() < length {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let since = ticked.lock().unwrap().elapsed();
+            assert!(
+                since < std::time::Duration::from_millis(200),
+                "{what}: the runtime's timer stopped for {since:?}"
+            );
+        }
+    }
+
+    /// The launch's two tasks, the event follower and the two-second
+    /// poll, reload the host on the blocking pool: while a reload is held
+    /// (the detail asks the pipeline whether its export keeps failing, at
+    /// a gate), a timer task on the services runtime, which has one
+    /// worker, keeps ticking. Run on that worker, a held reload would stop
+    /// every task there: the pipeline's runs, the handover, the timers.
+    #[test]
+    fn the_poll_and_the_events_task_never_block_a_worker() {
+        let runtime = one_worker_runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let (app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let ticked = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let ticks = ticked.clone();
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                *ticks.lock().unwrap() = std::time::Instant::now();
+            }
+        });
+        let gate = &pipeline.gate;
+        let patience = std::time::Duration::from_secs(5);
+
+        // Right after a poll's reload, so the next one is two seconds off:
+        // the reload the gate holds is the event follower's.
+        let before = gate.reloads();
+        assert!(
+            gate.wait_for(patience, |state| state.reloads > before),
+            "the poll reloads"
+        );
+        let armed = gate.arm();
+        app.events.post(MeetingEvent::Deleted {
+            meeting_id: uuid::Uuid::new_v4(),
+        });
+        assert!(
+            gate.wait_for(std::time::Duration::from_secs(1), |state| state.entered
+                == 1),
+            "the event follower's reload reaches the gate"
+        );
+        assert_live(
+            &ticked,
+            std::time::Duration::from_millis(600),
+            "the event follower",
+        );
+        drop(armed);
+        assert!(
+            gate.wait_for(patience, |state| state.held == 0),
+            "the event follower's reload goes on"
+        );
+
+        // No event now: the next reload the gate holds is the poll's.
+        let armed = gate.arm();
+        assert!(
+            gate.wait_for(patience, |state| state.entered == 2),
+            "the poll's reload reaches the gate"
+        );
+        assert_live(&ticked, std::time::Duration::from_millis(600), "the poll");
+        drop(armed);
+        runtime.shutdown_background();
+    }
+
+    /// A services runtime with one worker, so a wait on it shows.
+    fn one_worker_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// The launch on `runtime`, under `dir`, over a [`GatedPipeline`],
+    /// with one meeting's detail shown, so each reload asks the gate.
+    fn launched_over_a_gated_pipeline(
+        runtime: &tokio::runtime::Runtime,
+        dir: &std::path::Path,
+    ) -> (App, Arc<GatedPipeline>, Arc<Host>) {
+        let mut app =
+            runtime.block_on(async { build(options_under(&dir.join("support"))).unwrap() });
+        let pipeline = Arc::new(GatedPipeline::default());
+        app.services.pipeline = pipeline.clone();
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = steno_core::MeetingState::Ready;
+        app.store.save_meeting(&meeting).unwrap();
+        let host = Arc::new(app.host().unwrap());
+        host.request_meeting(meeting.id);
+        assert!(pipeline.gate.reloads() > 0, "the meeting's detail is shown");
+        {
+            let _inside = runtime.enter();
+            app.launch(&host);
+        }
+        runtime.block_on(app.launch_finished());
+        (app, pipeline, host)
+    }
+
+    /// The event follower takes one event at a time, in the bus's order:
+    /// while the first event's reload is held, the next events wait in the
+    /// bus. The host's own lock would hold a second reload back before the
+    /// gate, so the gate alone cannot tell; the runtime's tasks can: a
+    /// follower that spawned per event would leave one task per waiting
+    /// event.
+    #[test]
+    fn the_event_follower_takes_one_event_at_a_time() {
+        let runtime = one_worker_runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let (app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let gate = &pipeline.gate;
+        let patience = std::time::Duration::from_secs(5);
+        let before = gate.reloads();
+        assert!(
+            gate.wait_for(patience, |state| state.reloads > before),
+            "the poll reloads"
+        );
+        let armed = gate.arm();
+        app.events.post(MeetingEvent::Deleted {
+            meeting_id: uuid::Uuid::new_v4(),
+        });
+        assert!(
+            gate.wait_for(std::time::Duration::from_secs(1), |state| state.entered
+                == 1),
+            "the first event's reload reaches the gate"
+        );
+        let tasks = runtime.metrics().num_alive_tasks();
+        for _ in 0..4 {
+            app.events.post(MeetingEvent::Deleted {
+                meeting_id: uuid::Uuid::new_v4(),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let waiting = runtime.metrics().num_alive_tasks();
+        let second = gate.wait_for(std::time::Duration::from_millis(200), |state| {
+            state.entered >= 2
+        });
+        drop(armed);
+        runtime.shutdown_background();
+        assert!(
+            !second,
+            "the second event's reload ran beside the first one's"
+        );
+        assert_eq!(
+            waiting, tasks,
+            "the follower took the next events while one was held"
+        );
+    }
+
+    /// A retention applied sweeps on the blocking pool too: while the
+    /// sweep's write waits on a store another process holds, a timer task
+    /// on the services runtime, which has one worker, keeps ticking, and
+    /// the sweep goes through once the lock goes. Run inline in the
+    /// follower's task, the wait would stop that worker. (The test reads
+    /// the store only after the release: until P40's readers land, a read
+    /// waits behind the sweep's write.)
+    #[test]
+    fn the_event_followers_sweep_never_blocks_a_worker() {
+        let runtime = one_worker_runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.id = uuid::Uuid::new_v4();
+        meeting.state = steno_core::MeetingState::Ready;
+        let asset = steno_core::AudioAsset {
+            id: uuid::Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: file_url(&dir.path().join("audio").join("master.wav"), false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: vec![steno_core::AudioLane::Mixed],
+            sidecars_16k: std::collections::BTreeMap::new(),
+            mixdown_url: None,
+            retention: steno_core::AudioRetention::KeepDays(1),
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+        };
+        app.store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        let ticked = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let ticks = ticked.clone();
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                *ticks.lock().unwrap() = std::time::Instant::now();
+            }
+        });
+
+        let hold =
+            steno_core::testing::WriteLockHold::new(&dir.path().join("support/steno.sqlite"));
+        app.events.post(MeetingEvent::RetentionApplied {
+            meeting_id: meeting.id,
+        });
+        assert_live(
+            &ticked,
+            std::time::Duration::from_millis(800),
+            "the event follower's sweep",
+        );
+        drop(hold);
+        let swept = std::time::Instant::now();
+        while app
+            .store
+            .asset(meeting.id)
+            .unwrap()
+            .unwrap()
+            .expires_at
+            .is_some()
+        {
+            assert!(swept.elapsed() < PATIENCE, "the sweep never went through");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        runtime.shutdown_background();
+    }
+
+    /// A poll tick that waited is followed by one overdue tick, then the
+    /// next a full interval later, never by a burst of the ticks it
+    /// missed (`MissedTickBehavior::Delay`). The poll's reload is held for
+    /// two intervals and a half.
+    #[test]
+    fn a_held_poll_is_not_followed_by_a_burst() {
+        let runtime = one_worker_runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let (_app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let gate = &pipeline.gate;
+        let patience = std::time::Duration::from_secs(5);
+        // How many passes one tick makes, unheld.
+        let before = gate.reloads();
+        assert!(
+            gate.wait_for(patience, |state| state.reloads > before),
+            "the poll reloads"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let per_tick = gate.reloads() - before;
+        let armed = gate.arm();
+        assert!(
+            gate.wait_for(patience, |state| state.entered == 1),
+            "the poll's reload is held"
+        );
+        std::thread::sleep(POLL_INTERVAL * 5 / 2);
+        let released = gate.reloads();
+        drop(armed);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        let after = gate.reloads() - released;
+        runtime.shutdown_background();
+        // The held tick's own passes after the held one, then one overdue
+        // tick; a burst adds another.
+        assert!(
+            after < 2 * per_tick,
+            "the held tick was followed by a burst: {after} passes, {per_tick} per tick"
+        );
     }
 }

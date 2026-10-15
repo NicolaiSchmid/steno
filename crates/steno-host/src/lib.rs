@@ -20,11 +20,18 @@
 //!   that moves to WP4, and the detail's split of the core's rendered
 //!   summary.
 //!
-//! Every call blocks until it is done, for as long as a native prompt is
-//! up if it asks one, so the shell runs each command on a blocking thread
-//! (`tauri::async_runtime::spawn_blocking`), never on a runtime worker or
-//! the thread that draws the dialogs; [`host`]'s `Threads` section has the
-//! rest of the rules.
+//! Every call blocks until it is done: for as long as a native prompt is
+//! up if it asks one, and for as long as the store waits for another
+//! process's write lock. So the shell runs each command and page load on
+//! Tauri's blocking pool (`call_blocking` in
+//! `apps/desktop/src-tauri/src/host.rs`), and each tray action, window
+//! request and the onboarding window's close on a thread of its own that
+//! takes them one at a time in the order they came (`call_in_order`
+//! there), never on a runtime worker or the thread that runs its event
+//! loop, which it marks with [`mark_ui_thread`] so a call there fails a
+//! debug build ([`assert_off_ui_thread`]); the services' polls call from
+//! their runtime's blocking pool. [`host`]'s `Threads` section has the rest of
+//! the rules, and the one exemption, the launch.
 //!
 //! The crate holds no UI framework and no I/O of its own beyond the store:
 //! everything the Swift app reached through a system framework (TCC,
@@ -66,6 +73,8 @@ pub mod setup;
 pub mod speakers;
 pub mod speech;
 pub mod summary_markdown;
+mod ui_thread;
 
 pub use host::{Host, HostConfig};
 pub use services::Services;
+pub use ui_thread::{assert_off_ui_thread, mark_ui_thread};

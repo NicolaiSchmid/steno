@@ -22,9 +22,9 @@ use crate::services::{
     AudioDevices, AutoStopStatus, ClipPlayer, Clock, CodexModel, CodexModelsError, ExportValidator,
     FileSystem, FolderUsage, Handover, INSTALLING_UPDATE, InputDevice, LeftRecording,
     ListenerState, LlmService, LoginItem, LoginItemStatus, Opener, PairingCode, Permissions,
-    Pipeline, Preferences, ProcessAgainRefusal, QrEncoder, Recorder, RecorderStatus, Services,
-    SpeechModels, StartHold, SwiftImport, SwiftImportStage, SwiftImportStatus, UpdateOutcome,
-    Updater, WithheldApiKey, permission_is_required,
+    Pipeline, Preferences, ProcessAgainRefusal, QUITTING_REFUSAL, QrEncoder, Recorder,
+    RecorderStatus, Services, SpeechModels, StartHold, SwiftImport, SwiftImportStage,
+    SwiftImportStatus, UpdateOutcome, Updater, WithheldApiKey, permission_is_required,
 };
 use crate::speech::ModelAsset;
 
@@ -289,6 +289,8 @@ pub struct FakeRecorder {
     status: Arc<Mutex<RecorderStatus>>,
     /// The start holds alive.
     holds: Arc<Mutex<usize>>,
+    /// Set by `refuse_starts`.
+    starts_refused: std::sync::atomic::AtomicBool,
     clock: Arc<dyn Clock>,
     permissions: Arc<dyn Permissions>,
     pub starts: Mutex<Vec<(CaptureMode, Option<String>)>>,
@@ -320,6 +322,7 @@ impl FakeRecorder {
         FakeRecorder {
             status: Arc::new(Mutex::new(RecorderStatus::idle())),
             holds: Arc::default(),
+            starts_refused: std::sync::atomic::AtomicBool::new(false),
             clock,
             permissions,
             starts: Mutex::new(Vec::new()),
@@ -362,6 +365,13 @@ impl Recorder for FakeRecorder {
         if status.state != RecordingState::Idle {
             return;
         }
+        if self
+            .starts_refused
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            status.error = Some(QUITTING_REFUSAL.to_owned());
+            return;
+        }
         if *lock(&self.holds) > 0 {
             status.error = Some(INSTALLING_UPDATE.to_owned());
             return;
@@ -383,6 +393,11 @@ impl Recorder for FakeRecorder {
             status: self.status.clone(),
             holds: self.holds.clone(),
         })
+    }
+
+    fn refuse_starts(&self) {
+        self.starts_refused
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     fn stop(&self) {

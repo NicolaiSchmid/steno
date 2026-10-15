@@ -31,14 +31,14 @@
 
 use steno_bridge::{SettingsSection, WindowParams};
 use steno_core::json::parse_uuid;
-use tauri::{AppHandle, Manager, Url};
+// `app.env()`, for the `AppImage` that registers its own scheme.
+#[cfg(target_os = "linux")]
+use tauri::Manager as _;
+use tauri::{AppHandle, Url};
 use tauri_plugin_deep_link::DeepLinkExt;
 use uuid::Uuid;
 
-use crate::{
-    host::Host,
-    windows::{self, BridgeWindow},
-};
+use crate::windows::{self, BridgeWindow};
 
 pub const SCHEME: &str = "steno";
 
@@ -156,8 +156,7 @@ pub fn handle(app: &AppHandle, urls: &[Url]) {
         match DeepLink::parse(url) {
             Ok(link) => match link.window_request() {
                 Some(request) => {
-                    let host = app.state::<Host>();
-                    if let Err(error) = windows::open_requested(app, &host, &request) {
+                    if let Err(error) = windows::open_requested(app, &request) {
                         stderr_line!("[steno-desktop] {}", not_followed(url, &error));
                     }
                 }

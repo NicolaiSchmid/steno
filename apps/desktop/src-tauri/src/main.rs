@@ -148,6 +148,10 @@ fn main() {
             .build()
             .expect("a tokio runtime"),
     ));
+    // The thread the event loop runs on: a host call here fails a debug
+    // build (`host.rs`), since it would freeze every window and the tray
+    // for as long as it waits.
+    steno_host::mark_ui_thread();
     let mut builder = tauri::Builder::default();
     // First, so a second instance exits before it builds anything; it
     // hands its arguments (a `steno:` link among them) to this one and
@@ -190,6 +194,7 @@ fn main() {
         .manage(smoke::Smoke::default())
         .manage(panels::Panels::default())
         .manage(windows::Pages::default())
+        .manage(host::Lane::start())
         .manage(windows::Kept::default())
         .manage(TrayAtClose::default())
         .manage(steno_services::app::ExitGate::default())
@@ -264,7 +269,7 @@ fn setup(
     autostart::remove_earlier_agent();
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
-    tray::note_login_item(handle);
+    tray::note_login_item(handle, autostart::status(handle).is_on());
     #[cfg(target_os = "linux")]
     autostart::sync_at_launch(handle);
     #[cfg(unix)]
@@ -575,11 +580,21 @@ fn save_before_end(app: &tauri::AppHandle) {
 }
 
 /// The onboarding window closed, kept or destroyed: the host counts its
-/// pages as seen (`Host::onboarding_window_closed`), and a smoke run counts
-/// the close.
+/// pages as seen ([`count_onboarding_seen`]), and a smoke run counts the
+/// close.
 fn onboarding_closed(app: &tauri::AppHandle) {
     app.state::<smoke::Smoke>().note_onboarding_closed();
-    host::host(app).onboarding_window_closed();
+    count_onboarding_seen(app.clone());
+}
+
+/// `Host::onboarding_window_closed`, queued on the shell's ordered lane
+/// (`host::call_in_order`): it reloads onboarding from the store, and the
+/// window's close arrives on the main thread.
+fn count_onboarding_seen<H: host::ShellHost>(host: H) {
+    host::call_in_order(host, "the onboarding window's close", |host| {
+        host.onboarding_window_closed();
+        Ok(())
+    });
 }
 
 /// What every exit runs once (`ExitGate`): the host's shutdown
@@ -1293,5 +1308,29 @@ mod tests {
         } else {
             assert!(single_instance_available());
         }
+    }
+
+    /// The onboarding window's close counts the pages as seen on the lane:
+    /// the close (on the main thread) returns while the host's reload of
+    /// onboarding is held, and the host then hears of it.
+    #[test]
+    fn the_onboarding_close_reaches_the_host_off_the_closing_thread() {
+        use std::time::Duration;
+
+        use crate::host::gated::{GatedHost, returns_at_once};
+
+        let host = GatedHost::holding("onboarding.closed");
+        let _opens = host.opens_on_drop();
+        let closed = host.clone();
+        assert!(
+            returns_at_once(move || count_onboarding_seen(closed)),
+            "the close waited for the host"
+        );
+        assert!(
+            host.wait_held(Duration::from_secs(5)),
+            "the host heard of the close"
+        );
+        host.open();
+        assert!(host.wait_answered("onboarding.closed", Duration::from_secs(5)));
     }
 }
