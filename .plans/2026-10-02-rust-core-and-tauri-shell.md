@@ -283,16 +283,20 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     (`steno_speech::chunker::MIN_GAP_SECONDS`) is decoded in extra windows that stay
     inside it (`gap_windows`), and their words go in between the chunks' without
     changing one (`splice_gaps`; chunk words a recovery kept inside a gap cover it,
-    those the earlier chunk's recovery kept, up to 2 s past the gap's start, and those
-    after them, each from the first of them to the last; at a seam a window's word
-    falls away only as the chunk's next or last word heard again, the same piece
-    starting within two frames of it, so a word said twice across a gap's edge stays,
-    and so does the window's copy of a word sounding across the edge when the two
-    copies start further apart); a window of digital silence is left out. FLEURS and the corpus are unchanged (4.874 %, 8.46 %,
-    no word added), quiet speech at -20 and -26 dB comes through as the lead-in, a 9.1 s
-    gap and the tail (14, 19 and 14 words, main's level), and the cost is +13 % on
-    FLEURS, +9 % on the corpus and +10 % on a 15-minute meeting's two lanes (+21 % on
-    its microphone lane alone). Known limit: a gap shorter than 2.5 s is not decoded,
+    those before the first word that starts more than 2 s past the gap's start and
+    those from it on, each from the first of them to the last; a later recovery whose
+    words begin with punctuation past that point counts for the earlier side, and the
+    window words between the two are lost, an ONNX-only case noted in A16 of the stable
+    plan; at a seam a window's word falls away only as the chunk's next or last word
+    heard again, the same piece starting within two frames of it, or as the chunk's
+    first piece heard less than a second before it, so a word said twice across a
+    gap's edge stays unless it is two frames long or shorter, and so does the window's
+    copy of a word sounding across the edge when the two copies start further apart);
+    a window of digital silence is left out. FLEURS and the corpus are unchanged
+    (4.874 %, 8.46 %, no word added), quiet speech at -20 and -26 dB comes through as
+    the lead-in, a 9.1 s gap and the tail (14, 19 and 14 words, main's level), and the
+    cost is +13 % on FLEURS, +9 % on the corpus and +10 % on a 15-minute meeting's two
+    lanes (+21 % on its microphone lane alone). Known limit: a gap shorter than 2.5 s is not decoded,
     even where it is the uncovered edge of a longer pause, because windows that short
     inserted words (eight on FLEURS, all wrong); so a 6.65 s pause that the chunks cover
     except for 1.3 s keeps 12 of 14 words at -26 dB. Windows reaching 2 s into the

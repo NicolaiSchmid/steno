@@ -935,9 +935,13 @@ Each lands before `0.11.0-rc.1`.
   pause a chunk's start moves past) are decoded in extra windows: FLEURS and
   the corpus are unchanged, and the cost is +13 % on FLEURS, +9 % on the
   corpus and +10 % on a 15-minute meeting's two lanes (+21 % on its
-  microphone lane alone). Known limit: a gap shorter than 2.5 s is not
+  microphone lane alone). Known limits: a gap shorter than 2.5 s is not
   decoded, even where it is the uncovered edge of a longer pause, because
-  windows that short insert words.
+  windows that short insert words; and a word that a chunk and a window
+  both hear, across a gap's edge or beside the words a recovery kept inside
+  the gap, comes out twice when the two copies start more than two encoder
+  frames apart, because the merge cannot tell such a copy from the word
+  said again.
   Measured with A13 (#279) in: FLEURS German `cat/` through CoreML 4.87 % mean
   WER, from 5.46 % (the ONNX engine 4.88 %). The parity test against the Swift
   transcripts of the calibration corpus tracks drift from the old Swift output:
@@ -1437,6 +1441,22 @@ Each lands before `0.11.0-rc.1`.
     +15 % runtime. If it misses them, the measured lead/tail switch instead
     (the lead-in and the tail only, the long-pause skip kept; measured at
     FLEURS 4.865 % and corpus 9.794 %, no runtime cost).
+  - Known loss to carry, or to make moot by redesigning the gap merge:
+    `splice_gaps` splits a gap's chunk tokens into sides at the first
+    word start past the earlier recovery's keep frame, while
+    `keep_chunk_and_overlap` lets a later recovery's tokens begin at any
+    splice-safe piece, punctuation included. A later recovery whose kept
+    tokens begin with a punctuation piece past that frame puts the piece on
+    the earlier side, whose cover then drops every window-only word
+    between the two recoveries. Direct call: a gap from 10 to 20 s, 2 s of
+    overlap, chunk tokens `w11` at 4 s, `w13` at 10.4 s, `.` at 18.0 s,
+    `w5` at 18.4 s and `w12` at 22 s, and a window word `w2` at 14 s,
+    which is lost. It needs accepted recoveries on both sides of one gap,
+    which CoreML's settings cannot produce (their 15 s clamp leaves room
+    for a recovery to reach into a gap from one side only), so it
+    reaches only the ONNX engine, where the windows are still off. The
+    fix is one token: split at `vocab.is_splice_safe(t.id)` instead of
+    `seam.starts_word(t)`, with the case above as a test.
   - Owner: audio.
 - **A17 No crash loop from a file that aborts the process.** Found by A14's
   testing (#280): symphonia sizes some allocations straight from file
