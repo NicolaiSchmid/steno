@@ -94,11 +94,10 @@ These land before `0.11.0-rc.1` under their own owners:
 - **A15** (added to the stable plan by #263) catches CoreML's Objective-C
   exceptions at the FFI boundary (the crate's `coreml` module), which also
   covers the CoreML warm-up (`warm_up_if_installed`) that runs during a live
-  recording. PR 2 keeps the warm-up off the actor and out of every stop: the
-  I/O worker calls `warm_up_if_installed` once it has sent `StartFinished` (its
-  model checks read the disk), and the warm-up itself runs on the services
-  runtime as today, so no stop waits for it and the catch stays where A15 puts
-  it.
+  recording. PR 2 keeps the warm-up off the actor: the I/O worker calls
+  `warm_up_if_installed` once it has sent `StartFinished` (its model checks
+  read the disk), and the warm-up itself runs on the services runtime as
+  today, so no stop waits for it and the catch stays where A15 puts it.
 
 ## Target design
 
@@ -159,16 +158,15 @@ forwarder. The disk watch, the clock and the hook (today's `disk`, `clock` and
   queue up behind a busy step;
 - `Disk { epoch, free, write_failed }` from the disk reader, a thread of its
   own because `statvfs` and `write_failed()` can block (a network volume, the
-  session mutex during a rebuild). At most one reading is in flight, and the
-  in-flight mark belongs to its epoch, so a reading still blocked when its
-  recording stops holds back none of the next recording's; a due reading moves
-  the disk deadline on at once, in flight or not, so `next_deadline()` never
-  returns a deadline already past;
+  session mutex during a rebuild). At most one reading per epoch is in flight,
+  so one still blocked when its recording stops holds back none of the next
+  recording's; a due reading moves the disk deadline on at once, in flight or
+  not, so `next_deadline()` never returns a deadline already past;
 - `Done(StartFinished | StopFinished | WorkerGone)` from the I/O worker, each
   with the epoch of the effect it answers; `StartFinished` carries the input
   the session started on (`fallback_input` after `session.start`, as today)
   and the start's room, so a low-space warning shows from `Recording` on, as
-  `Active::disk_warning` starts today;
+  `Active::disk_warning` does today;
 - `Deadline` from the alarm;
 - `Dropped` when the last `CaptureRecorder` goes (below).
 
@@ -211,8 +209,7 @@ today (above), but only `steno-recorder` changes state. Dropping the last
 `CaptureRecorder` sends `Dropped`: the actor cancels the alarm, ends the
 notifier and the I/O worker, and exits, so
 `a_dropped_recorder_lets_its_countdown_go` still passes, its
-`wait_for_sleepers(1)` replaced by a check that the status shows the countdown
-and a wait for the alarm (below).
+`wait_for_sleepers(1)` replaced by the status check and the alarm wait below.
 
 **Deadlines on the injectable clock, not timer threads.** The auto-stop
 countdown, the 5 s disk reading and the tone tests' patience are deadlines the
@@ -226,9 +223,9 @@ replaces the `steno-auto-stop` thread per armed countdown and
 `steno-recording-watch`'s loop. Under `ManualClock` the alarm is one sleeper,
 on the nearest deadline, which while recording is usually the next disk
 reading's (every 20 ms in the tests' disk watch). Since a cancelled sleeper can
-still be registered, tests wait for it by that deadline (a test-only helper
-beside `wait_for_sleepers`) before they `advance`, and see an armed countdown
-in the status, not in the sleepers.
+still be registered, tests wait for the alarm by that deadline (a test-only
+helper beside `wait_for_sleepers`) before they `advance`, and check an armed
+countdown in the status, not in the sleepers.
 
 **A lock-free `status()`.** After each step that changes what the host shows,
 the actor builds an `Arc<RecorderStatus>` and stores it in an `ArcSwap`
@@ -275,25 +272,30 @@ sends `Quit` and waits for the reply, which the machine sends once the phase is
 leaves the recorder idle with an error. A guard on the I/O worker sends
 `Done(WorkerGone)` if the thread ends, which the machine answers as a panicked
 start or stop, so no waiter is left without a reply, and the actor spawns a
-fresh I/O worker before the next effect that needs one. A `step` that panics
-resets the machine from what the actor tracks outside it: the effects the I/O
-worker still owes and whether it holds a session. With an `OpenSession` owed,
-it stores `START_PANICKED` but stays `Starting`, so starts are refused
-silently, as while not idle, until that epoch's `StartFinished`, which undoes
-the start as a start that panics does today (`BegunMeeting`: the session
-stopped, the folder removed, the meeting failed, the recorded folder
-forgotten). With a session held, or its close or save owed, it closes that
-session through the stop path, or lets the close or save under way finish, with
-`SAVE_PANICKED`, and stays `Stopping` until its `StopFinished`, so a `Quit`
-waits for the save and no start opens a second session beside it. Otherwise it
-is `Idle`, with `START_PANICKED` if it was starting, and replies to the start's
-waiters. Every `Done` therefore still finds its epoch. If the actor thread
-itself dies, every later command's send fails at once and returns, and a guard
-on the thread stores a status whose error is `SAVE_PANICKED` when a session
-was open, else `START_PANICKED`. The I/O worker, its channel closed, ends and
-drops the session, which stops it and closes its files (`CaptureSession`'s
-`Drop`); the meeting stays `recording` and the next launch recovers it, as
-after a kill.
+fresh I/O worker before the next effect that needs one.
+
+A `step` that panics resets the machine from what the actor tracks outside it,
+the effects the I/O worker still owes and whether it holds a session, so every
+`Done` still finds its epoch:
+
+- **An `OpenSession` owed:** the machine stores `START_PANICKED` but stays
+  `Starting`, refusing starts silently as while not idle, until that epoch's
+  `StartFinished`, which undoes the start as a start that panics does today
+  (`BegunMeeting`: the session stopped, the folder removed, the meeting
+  failed, the recorded folder forgotten).
+- **A session held, or its close or save owed:** it closes that session
+  through the stop path, or lets the close or save under way finish, with
+  `SAVE_PANICKED`, and stays `Stopping` until its `StopFinished`, so a `Quit`
+  waits for the save and no start opens a second session beside it.
+- **Otherwise:** it is `Idle`, with `START_PANICKED` if it was starting, and
+  replies to the start's waiters.
+
+If the actor thread itself dies, every later command's send fails at once and
+returns, and a guard on the thread stores a status whose error is
+`SAVE_PANICKED` when a session was open, else `START_PANICKED`. The I/O
+worker, its channel closed, ends and drops the session, which stops it and
+closes its files (`CaptureSession`'s `Drop`); the meeting stays `recording`
+and the next launch recovers it, as after a kill.
 
 **What the machine answers in one arm each:**
 
@@ -494,7 +496,7 @@ the D9 ruling is made.
   - With the fake's `start` held at a gate, `status()` answers, and a `Stop`
     gets its reply (ignored, as today), while the gate is closed.
   - Every call of the recorder's change hook comes from `steno-recorder-hook`:
-    a test hook records each call's thread name and the test asserts them
+    a test hook records each call's thread name for the test to assert
     afterwards, since the notifier's `catch_unwind` would catch an assert
     inside the hook. A hook that panics is logged and called again at the next
     change.
