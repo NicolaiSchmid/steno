@@ -693,13 +693,11 @@ struct Inner {
     tone_tests: ToneTests,
 }
 
-/// The system audio tests that play their tone now, and the cancel a
-/// start raises to stop them ([`CaptureRecorder::run_tone_test`]).
+/// The system audio tests that play their tone now
+/// ([`CaptureRecorder::run_tone_test`]); the cancel that stops them is
+/// [`CaptureRecorder::tone_cancel`].
 struct ToneTests {
     running: usize,
-    /// Shared by every test running; a fresh one for the first test after
-    /// none ran.
-    cancel: steno_audio::clock::Cancel,
     /// How long a start waits for the stopped tests to end; the
     /// recorder's own tests set it.
     patience: Duration,
@@ -976,6 +974,14 @@ pub struct CaptureRecorder {
     /// reads it under that lock. Apart from `quitting`, which the
     /// shutdown sets and which also ends a stop's retries of its save.
     starts_refused: AtomicBool,
+    /// The cancel a start, the menu's Quit and the shutdown raise to stop
+    /// the system audio tests running ([`Self::run_tone_test`]), shared by
+    /// every test running and fresh for the first test after none ran.
+    /// Outside `inner`, so [`Recorder::refuse_starts`] raises it on the
+    /// shell's main thread without the status lock: a leaf, held only to
+    /// replace, clone or raise the cancel, never while waiting, and taken
+    /// after `inner` when both are.
+    tone_cancel: Mutex<steno_audio::clock::Cancel>,
     /// Signalled with every status change, for [`Self::settle`].
     changes: Condvar,
     /// Called after every status change so the host republishes.
@@ -1030,11 +1036,11 @@ impl CaptureRecorder {
                 calls: CallWatch::default(),
                 tone_tests: ToneTests {
                     running: 0,
-                    cancel: steno_audio::clock::Cancel::new(),
                     patience: TONE_TEST_PATIENCE,
                 },
             }),
             starts_refused: AtomicBool::new(false),
+            tone_cancel: Mutex::default(),
             changes: Condvar::new(),
             changed: Mutex::new(None),
             disk: Mutex::new(DiskWatch::system(None)),
@@ -1087,11 +1093,13 @@ impl CaptureRecorder {
     }
 
     /// Runs `test`, the system audio test, unless a recording is starting,
-    /// running or stopping, or the app quits: the test plays a tone, and
-    /// a recording would pick it up. `None` then, and `test` never runs. A
+    /// running or stopping, or the app quits (the menu's Quit refused the
+    /// starts, or the shutdown began): the test plays a tone, and a
+    /// recording would pick it up. `None` then, and `test` never runs. A
     /// start while it runs raises the `Cancel` it gets and waits for it to
-    /// return before it opens a device ([`Self::stop_tone_tests`]). Rust
-    /// only: Swift ran its test whatever the recorder did.
+    /// return before it opens a device ([`Self::stop_tone_tests`]); the
+    /// menu's Quit and the shutdown raise it without waiting. Rust only:
+    /// Swift ran its test whatever the recorder did.
     pub(crate) fn run_tone_test<T>(
         &self,
         test: impl FnOnce(&steno_audio::clock::Cancel) -> T,
@@ -1114,12 +1122,19 @@ impl CaptureRecorder {
                 );
                 return None;
             }
-            let tests = &mut inner.tone_tests;
-            if tests.running == 0 {
-                tests.cancel = steno_audio::clock::Cancel::new();
+            // Read under the cancel's lock, which `refuse_starts` takes
+            // after it set the flag: either the flag is seen here, or the
+            // cancel handed out is raised there.
+            let mut cancel = self.tone_cancel();
+            if self.starts_refused.load(Ordering::Acquire) {
+                tracing::debug!("the system audio test is refused: the app quits");
+                return None;
             }
-            tests.running += 1;
-            tests.cancel.clone()
+            if inner.tone_tests.running == 0 {
+                *cancel = steno_audio::clock::Cancel::new();
+            }
+            inner.tone_tests.running += 1;
+            cancel.clone()
         };
         let _ended = Ended(self);
         Some(test(&cancel))
@@ -1134,7 +1149,7 @@ impl CaptureRecorder {
         if inner.tone_tests.running == 0 {
             return;
         }
-        inner.tone_tests.cancel.cancel();
+        self.tone_cancel().cancel();
         let patience = inner.tone_tests.patience;
         let (_inner, waited) = self
             .changes
@@ -1332,6 +1347,12 @@ impl CaptureRecorder {
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
         self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn tone_cancel(&self) -> MutexGuard<'_, steno_audio::clock::Cancel> {
+        self.tone_cancel
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -1725,8 +1746,13 @@ impl CaptureRecorder {
     /// then `stop(reason: .quit)` in `AppController.shutdown`.
     pub fn stop_for_quit(&self) {
         // Before the wait, so a stop under way tries its commit no more
-        // ([`Self::finish_stop`]) and nothing starts meanwhile.
-        self.inner().quitting = true;
+        // ([`Self::finish_stop`]) and nothing starts meanwhile. A system
+        // audio test running is stopped, not waited for.
+        {
+            let mut inner = self.inner();
+            inner.quitting = true;
+            self.tone_cancel().cancel();
+        }
         let active = Self::begin_stop(&mut self.settle());
         if let Some(active) = active {
             self.finish_stop(active, RecordingEndReason::Quit, None);
@@ -2091,6 +2117,8 @@ impl Recorder for CaptureRecorder {
 
     fn refuse_starts(&self) {
         self.starts_refused.store(true, Ordering::Release);
+        // A system audio test running is stopped, not waited for.
+        self.tone_cancel().cancel();
     }
 
     fn stop(&self) {
@@ -5997,5 +6025,67 @@ mod tests {
             steno_bridge::PermissionState::Granted
         );
         assert_eq!(log.runs.load(Ordering::SeqCst), 2, "no test while quitting");
+    }
+
+    /// After the menu's Quit refused the starts, a system audio test is
+    /// refused too: its tone would play through the exit's wait.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tone_test_after_a_menu_quit_is_refused() {
+        let harness = harness(&[]);
+        let (permissions, log, _preferences) = tone_tested(&harness, |_, _| ProbeAnswer::Heard);
+        harness.recorder.refuse_starts();
+        assert_eq!(
+            permissions.request(PermissionKind::SystemAudio),
+            steno_bridge::PermissionState::Unknown
+        );
+        assert_eq!(log.runs.load(Ordering::SeqCst), 0, "no tone after a Quit");
+    }
+
+    /// A system audio test under way when the menu's Quit refuses the
+    /// starts, or when the shutdown quits, is stopped at once: neither
+    /// waits for it, and its request answers within the patience rather
+    /// than after the test's own bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tone_test_under_way_stops_at_a_menu_quit_and_at_the_shutdown() {
+        for (quits, by) in [
+            (
+                Box::new(|recorder: &Arc<CaptureRecorder>| {
+                    let refusing = recorder.clone();
+                    on_own_thread(HANG_GUARD, "the refusal returned", move || {
+                        refusing.refuse_starts();
+                    });
+                }) as Box<dyn Fn(&Arc<CaptureRecorder>)>,
+                "the menu's Quit",
+            ),
+            (
+                Box::new(quit) as Box<dyn Fn(&Arc<CaptureRecorder>)>,
+                "the shutdown",
+            ),
+        ] {
+            let harness = harness(&[]);
+            let (began, beginning) = std::sync::mpsc::channel::<()>();
+            let began = Mutex::new(began);
+            let (permissions, log, _preferences) = tone_tested(&harness, move |cancel, log| {
+                began.lock().unwrap().send(()).unwrap();
+                if cancel.sleep(HANG_GUARD) {
+                    return ProbeAnswer::Silent;
+                }
+                log.note("the tone stopped");
+                ProbeAnswer::Stopped
+            });
+            let (answered, answer) = std::sync::mpsc::channel();
+            let requesting = permissions.clone();
+            std::thread::spawn(move || {
+                let _ = answered.send(requesting.request(PermissionKind::SystemAudio));
+            });
+            beginning.recv_timeout(PATIENCE).unwrap();
+            quits(&harness.recorder);
+            assert_eq!(
+                answer.recv_timeout(PATIENCE).expect(by),
+                steno_bridge::PermissionState::Unknown,
+                "{by}"
+            );
+            assert_eq!(log.events(), ["the tone stopped"], "{by}");
+        }
     }
 }

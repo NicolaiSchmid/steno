@@ -255,9 +255,11 @@ pub trait Recorder: Send + Sync {
     /// any surface (the tray, the page, the detection prompt, one queued
     /// behind a stop) leaves no recording to save on the way out. A
     /// recording already starting, running or stopping goes on, and its
-    /// stop still retries its save until the shutdown's own quit. Takes
-    /// no lock a command holds while it waits, so the shell's main thread
-    /// may call it. Rust only: Swift's Quit ended its menu.
+    /// stop still retries its save until the shutdown's own quit. A
+    /// system audio test under way is stopped, without waiting for it,
+    /// and none starts after. Takes no lock a command holds while it
+    /// waits, so the shell's main thread may call it. Rust only: Swift's
+    /// Quit ended its menu.
     fn refuse_starts(&self);
     fn stop(&self);
     fn toggle(&self);

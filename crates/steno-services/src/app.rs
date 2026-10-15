@@ -190,6 +190,11 @@ pub struct App {
     /// When the launch counts an interrupted recording's master as still
     /// being written ([`crate::recovery`]).
     pub live_recording_check: LiveRecordingCheck,
+    /// Where the Mac's system audio probe writes its tone
+    /// (`steno_audio::capture::permission::tone_directory`), for
+    /// [`App::launch`] to remove the tone files a process that ended
+    /// during a probe left there; none off the Mac, which has no probe.
+    pub tone_directory: Option<std::path::PathBuf>,
     /// The launch's background half, for [`App::launch_finished`].
     pub(crate) launch_work: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Resolves once the secret store chose where the secrets are, true
@@ -865,6 +870,8 @@ pub fn build_with_import(
         installed_bundle: options.installed_bundle,
         startup_warnings: warnings,
         live_recording_check: LiveRecordingCheck::default(),
+        tone_directory: cfg!(target_os = "macos")
+            .then(steno_audio::capture::permission::tone_directory),
         launch_work: std::sync::Mutex::default(),
         secrets_unlocked: std::sync::Mutex::new(secrets_unlocked),
         database_lock,
@@ -1316,6 +1323,15 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(work);
         self.start_alongside(host);
+        // Off this thread, which never waits for the listing.
+        if let Some(directory) = self.tone_directory.clone() {
+            tokio::task::spawn_blocking(move || {
+                steno_audio::capture::permission::remove_leftover_tones(
+                    &directory,
+                    std::time::SystemTime::now(),
+                );
+            });
+        }
         host.store_changed();
     }
 
@@ -1754,6 +1770,39 @@ mod tests {
         assert_eq!(marks.damage(kept.id), damage);
         assert!(marks.damage(deleted).is_none());
         drop(app);
+    }
+
+    /// The launch removes, in the background, a tone file the system audio
+    /// probe of a process that ended during it left in the tone directory,
+    /// and leaves a file whose name only resembles it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_removes_the_tone_files_a_probe_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let tones = dir.path().join("tmp");
+        std::fs::create_dir_all(&tones).unwrap();
+        let leftover = tones.join(format!(
+            "steno-permission-4242-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let resembling = tones.join("steno-permission-4242.wav");
+        let written =
+            std::time::SystemTime::now() - steno_audio::capture::permission::LEFTOVER_TONE_AGE;
+        for path in [&leftover, &resembling] {
+            std::fs::write(path, b"RIFF").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(written)
+                .unwrap();
+        }
+        let mut app = build(options_under(&dir.path().join("support"))).unwrap();
+        app.tone_directory = Some(tones);
+        let host = Arc::new(app.host().unwrap());
+        app.launch(&host);
+        crate::testing::eventually("the leftover tone file is gone", || !leftover.exists()).await;
+        assert!(resembling.exists());
+        app.launch_finished().await;
     }
 
     /// What `App::launch` does to a meeting a previous process left

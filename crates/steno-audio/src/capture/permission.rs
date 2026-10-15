@@ -111,6 +111,18 @@ fn listen(
     heard
 }
 
+/// The probe's tap, apart from the system's, so a test sees the probe end
+/// however its tap behaves.
+#[cfg(any(target_os = "macos", test))]
+trait Tap {
+    /// Starts listening; an error names why it could not.
+    fn start(&self) -> Result<(), String>;
+    /// What the tap delivered since the last call.
+    fn sample(&self) -> Vec<f32>;
+    /// Closes the tap.
+    fn stop(&self);
+}
+
 /// Runs the probe for up to `timeout` (the product passes
 /// [`PROBE_TIMEOUT`]) and answers what the tap heard: the tap first, where
 /// the prompt appears, then the tone through `/usr/bin/afplay`, played
@@ -128,8 +140,8 @@ pub fn probe_system_audio(timeout: Duration, cancel: &Cancel) -> ProbeAnswer {
     use crate::capture::{CaptureBackend as _, LiveCaptureBackend};
     use crate::realtime::LaneFrameSink;
 
-    /// The tone through `afplay`; stops the player and removes the tone
-    /// file however the probe ends.
+    /// The tone through `afplay`; stops the player however the probe
+    /// ends.
     struct Player {
         tone: std::path::PathBuf,
         player: Option<Child>,
@@ -161,34 +173,194 @@ pub fn probe_system_audio(timeout: Duration, cancel: &Cancel) -> ProbeAnswer {
     impl Drop for Player {
         fn drop(&mut self) {
             self.stop();
-            let _ = std::fs::remove_file(&self.tone);
         }
     }
 
-    let tone = std::env::temp_dir().join(format!(
-        "steno-permission-{}-{}.wav",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    if let Err(error) = std::fs::write(&tone, tone_wav()) {
-        tracing::warn!(%error, "the system audio probe could not write its tone");
-        return ProbeAnswer::Silent;
+    /// The system audio tap, into a sink of its own.
+    struct SystemTap {
+        sink: Arc<LaneFrameSink>,
+        backend: LiveCaptureBackend,
     }
-    let mut player = Player { tone, player: None };
-    let sink = Arc::new(LaneFrameSink::new(&[AudioLane::System]));
-    let backend = LiveCaptureBackend::new();
-    if let Err(error) = backend.start(&[AudioLane::System], None, sink.clone()) {
+    impl Tap for SystemTap {
+        fn start(&self) -> Result<(), String> {
+            // The stream's description is not needed: the probe looks
+            // only for a sample above the floor.
+            self.backend
+                .start(&[AudioLane::System], None, self.sink.clone())
+                .map(drop)
+                .map_err(|error| error.to_string())
+        }
+
+        fn sample(&self) -> Vec<f32> {
+            self.sink.ring(0).drain_all()
+        }
+
+        fn stop(&self) {
+            self.backend.stop();
+        }
+    }
+
+    let tap = SystemTap {
+        sink: Arc::new(LaneFrameSink::new(&[AudioLane::System])),
+        backend: LiveCaptureBackend::new(),
+    };
+    probe_in(
+        &tone_directory(),
+        timeout,
+        &crate::clock::SystemClock::new(),
+        cancel,
+        &tap,
+        |tone| {
+            Box::new(Player {
+                tone: tone.to_path_buf(),
+                player: None,
+            })
+        },
+    )
+}
+
+/// [`probe_system_audio`] over `tap`, the tone written into `dir` and
+/// played by the player `play` makes for it. The tone file is removed
+/// however the probe ends: once it has listened, been cancelled, or
+/// failed to start its tap, and when the file could not be written in
+/// full. Only a process that ends during a probe leaves it, for the next
+/// launch to remove ([`remove_leftover_tones`]).
+#[cfg(any(target_os = "macos", test))]
+fn probe_in(
+    dir: &std::path::Path,
+    timeout: Duration,
+    clock: &dyn Clock,
+    cancel: &Cancel,
+    tap: &dyn Tap,
+    play: impl FnOnce(&std::path::Path) -> Box<dyn Tone>,
+) -> ProbeAnswer {
+    let file = match ToneFile::write(dir) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(%error, "the system audio probe could not write its tone");
+            return ProbeAnswer::Silent;
+        }
+    };
+    // Declared after the file, so the player stops before the file goes.
+    let mut player = play(&file.0);
+    if let Err(error) = tap.start() {
         tracing::warn!(%error, "the system audio probe could not start the tap");
         return ProbeAnswer::Silent;
     }
     listen(
         timeout,
-        &crate::clock::SystemClock::new(),
+        clock,
         cancel,
-        || sink.ring(0).drain_all(),
-        &mut player,
-        || backend.stop(),
+        || tap.sample(),
+        player.as_mut(),
+        || tap.stop(),
     )
+}
+
+/// Where the probe writes its tone: the system's temporary directory.
+pub fn tone_directory() -> std::path::PathBuf {
+    std::env::temp_dir()
+}
+
+/// The start and the end of a tone file's name,
+/// `steno-permission-<pid>-<uuid>.wav`.
+const TONE_PREFIX: &str = "steno-permission-";
+const TONE_SUFFIX: &str = ".wav";
+
+/// How old a tone file must be before [`remove_leftover_tones`] takes it
+/// for a leftover: a probe needs its file for [`PROBE_TIMEOUT`] at most,
+/// so one this old belongs to no probe under way, not even another Steno
+/// process's.
+pub const LEFTOVER_TONE_AGE: Duration = Duration::from_secs(120);
+
+/// The name of the tone file process `pid` writes for a probe, `id` new
+/// for each.
+#[cfg(any(target_os = "macos", test))]
+fn tone_file_name(pid: u32, id: uuid::Uuid) -> String {
+    format!("{TONE_PREFIX}{pid}-{}{TONE_SUFFIX}", id.hyphenated())
+}
+
+/// Whether `name` is exactly what `tone_file_name` makes: the prefix, a
+/// process id in decimal without a leading zero, a hyphen, a version 4
+/// UUID in lowercase hyphenated form, and `.wav`.
+fn is_tone_file_name(name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix(TONE_PREFIX)
+        .and_then(|rest| rest.strip_suffix(TONE_SUFFIX))
+    else {
+        return false;
+    };
+    let Some((pid, id)) = rest.split_once('-') else {
+        return false;
+    };
+    let pid_matches = pid
+        .parse::<u32>()
+        .is_ok_and(|parsed| parsed.to_string() == pid);
+    let id_matches = uuid::Uuid::try_parse(id)
+        .is_ok_and(|parsed| parsed.get_version_num() == 4 && parsed.hyphenated().to_string() == id);
+    pid_matches && id_matches
+}
+
+/// A tone file this process wrote, removed when dropped.
+#[cfg(any(target_os = "macos", test))]
+struct ToneFile(std::path::PathBuf);
+
+#[cfg(any(target_os = "macos", test))]
+impl ToneFile {
+    /// Writes the tone into a file of its own in `dir`. A write that
+    /// fails halfway leaves no file.
+    fn write(dir: &std::path::Path) -> std::io::Result<Self> {
+        let file = Self(dir.join(tone_file_name(std::process::id(), uuid::Uuid::new_v4())));
+        std::fs::write(&file.0, tone_wav())?;
+        Ok(file)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Drop for ToneFile {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::debug!(%error, path = %self.0.display(), "the probe's tone file was not removed");
+        }
+    }
+}
+
+/// Removes the tone files a probe left in `dir` because its process ended
+/// first, at launch: only regular files named exactly as the probe names
+/// them, `steno-permission-<pid>-<uuid>.wav`, last written
+/// [`LEFTOVER_TONE_AGE`] or longer before `now`. A file that cannot be read or removed, or a `dir`
+/// that cannot be listed, is logged at debug and left. Blocks for as long
+/// as listing `dir` takes, so the launch calls it off its thread.
+pub fn remove_leftover_tones(dir: &std::path::Path, now: std::time::SystemTime) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::debug!(%error, "the leftover tone files were not looked for");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_str().is_some_and(is_tone_file_name) {
+            continue;
+        }
+        let path = entry.path();
+        // `DirEntry::metadata` does not follow a symbolic link.
+        let leftover = entry.metadata().is_ok_and(|metadata| {
+            metadata.is_file()
+                && metadata.modified().is_ok_and(|written| {
+                    now.duration_since(written)
+                        .is_ok_and(|age| age >= LEFTOVER_TONE_AGE)
+                })
+        });
+        if !leftover {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::debug!(%error, path = %path.display(), "a leftover tone file was not removed");
+        }
+    }
 }
 
 /// One second of a 1 kHz tone at half scale, as a 48 kHz mono 16-bit WAV
@@ -371,6 +543,235 @@ mod tests {
             );
             assert_eq!(events[0], "tone played", "{answer:?}");
         }
+    }
+
+    /// A tap that starts unless `fails`, and answers each poll, counted
+    /// from 1, with what `sample` says.
+    struct FakeTap<F: Fn(usize) -> Vec<f32>> {
+        fails: bool,
+        sample: F,
+        polls: Mutex<usize>,
+    }
+
+    impl<F: Fn(usize) -> Vec<f32>> Tap for FakeTap<F> {
+        fn start(&self) -> Result<(), String> {
+            if self.fails {
+                Err("no tap".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn sample(&self) -> Vec<f32> {
+            let mut polls = self.polls.lock().unwrap();
+            *polls += 1;
+            (self.sample)(*polls)
+        }
+
+        fn stop(&self) {}
+    }
+
+    fn tap<F: Fn(usize) -> Vec<f32>>(fails: bool, sample: F) -> FakeTap<F> {
+        FakeTap {
+            fails,
+            sample,
+            polls: Mutex::new(0),
+        }
+    }
+
+    /// A tone that notes, each time it plays, whether its file is there.
+    struct SeenTone {
+        file: std::path::PathBuf,
+        seen: std::sync::Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl Tone for SeenTone {
+        fn keep_playing(&mut self) {
+            self.seen.lock().unwrap().push(self.file.exists());
+        }
+
+        fn stop(&mut self) {}
+    }
+
+    /// [`probe_in`] over `tap` into `dir`, on a stepping clock; the
+    /// answer, whether the tone's file was there when its player was made,
+    /// and whether it was there at each play.
+    fn probe_into(
+        dir: &std::path::Path,
+        tap: &dyn Tap,
+        cancel: &Cancel,
+    ) -> (ProbeAnswer, bool, Vec<bool>) {
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut written = false;
+        let answer = probe_in(
+            dir,
+            Duration::from_millis(500),
+            &SteppingClock::default(),
+            cancel,
+            tap,
+            |file| {
+                written = file.is_file() && file.parent() == Some(dir);
+                Box::new(SeenTone {
+                    file: file.to_path_buf(),
+                    seen: seen.clone(),
+                })
+            },
+        );
+        let seen = seen.lock().unwrap().clone();
+        (answer, written, seen)
+    }
+
+    fn is_empty(dir: &std::path::Path) -> bool {
+        std::fs::read_dir(dir).unwrap().next().is_none()
+    }
+
+    /// The tone's file is there while the probe listens and gone once it
+    /// heard the tone or heard silence until the deadline.
+    #[test]
+    fn the_tone_file_is_removed_once_the_probe_has_listened() {
+        for (heard, answer) in [(true, ProbeAnswer::Heard), (false, ProbeAnswer::Silent)] {
+            let dir = tempfile::tempdir().unwrap();
+            let listening = tap(false, |poll| {
+                if heard && poll == 3 {
+                    vec![0.5]
+                } else {
+                    vec![0.0]
+                }
+            });
+            let (found, written, seen) = probe_into(dir.path(), &listening, &Cancel::new());
+            assert_eq!(found, answer);
+            assert!(written, "{answer:?}");
+            assert!(
+                !seen.is_empty() && seen.iter().all(|&there| there),
+                "{answer:?}"
+            );
+            assert!(is_empty(dir.path()), "{answer:?}: the tone file is gone");
+        }
+    }
+
+    /// A probe cancelled while it listens (a start, the menu's Quit)
+    /// removes its tone file.
+    #[test]
+    fn the_tone_file_is_removed_when_the_probe_is_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = Cancel::new();
+        let raised = cancel.clone();
+        let cancelling = tap(false, move |poll| {
+            if poll == 2 {
+                raised.cancel();
+            }
+            vec![0.0]
+        });
+        let (found, written, seen) = probe_into(dir.path(), &cancelling, &cancel);
+        assert_eq!(found, ProbeAnswer::Stopped);
+        assert!(written);
+        assert_eq!(seen, [true, true]);
+        assert!(is_empty(dir.path()), "the tone file is gone");
+    }
+
+    /// A tap that cannot start answers silent and removes the tone file it
+    /// wrote first; a tone that cannot be written leaves nothing.
+    #[test]
+    fn the_tone_file_is_removed_when_the_probe_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let failing = tap(true, |_| vec![0.5]);
+        let (found, written, seen) = probe_into(dir.path(), &failing, &Cancel::new());
+        assert_eq!(found, ProbeAnswer::Silent);
+        assert!(written, "the tone was written before the tap failed");
+        assert!(seen.is_empty(), "no tone without a tap");
+        assert!(is_empty(dir.path()), "the tone file is gone");
+
+        let missing = dir.path().join("missing");
+        let unwritten = tap(false, |_| vec![0.5]);
+        let (found, written, _) = probe_into(&missing, &unwritten, &Cancel::new());
+        assert_eq!((found, written), (ProbeAnswer::Silent, false));
+        assert!(!missing.exists());
+    }
+
+    /// At launch only regular files named exactly as the probe names them
+    /// and older than [`LEFTOVER_TONE_AGE`] are removed: a near miss of
+    /// the name, a fresh file (another Steno's probe under way), a
+    /// directory and a symbolic link with the name are left. A name that
+    /// differs only in case or by a trailing space is never taken either;
+    /// it is checked by name alone, since the Mac's and Windows' file
+    /// systems would make it the leftover's own file.
+    #[test]
+    fn only_old_tone_files_named_as_the_probe_names_them_are_removed_at_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+        let old = now - LEFTOVER_TONE_AGE;
+        let id = uuid::Uuid::new_v4();
+        let mut version_1 = id.hyphenated().to_string();
+        version_1.replace_range(14..15, "1");
+        let leftover = tone_file_name(4242, id);
+        let other_leftover = tone_file_name(7, uuid::Uuid::new_v4());
+        let fresh = tone_file_name(4242, uuid::Uuid::new_v4());
+        let near_misses = [
+            format!("{leftover}.part"),
+            format!("x{leftover}"),
+            leftover.replace("permission", "permissions"),
+            leftover.replace("permission", "transcript"),
+            leftover.replace("-4242-", "--"),
+            leftover.replace("-4242-", "-04242-"),
+            leftover.replace("-4242-", "-+4242-"),
+            leftover.replace("-4242-", "-4242x-"),
+            leftover.replace("-4242-", "-99999999999-"),
+            leftover.replace(".wav", "-1.wav"),
+            leftover.replace(&id.hyphenated().to_string(), &id.simple().to_string()),
+            leftover.replace(&id.hyphenated().to_string(), &id.braced().to_string()),
+            leftover.replace(&id.hyphenated().to_string(), &version_1),
+        ];
+        let folded_elsewhere = [
+            format!("{leftover} "),
+            leftover.replace(".wav", ".WAV"),
+            leftover.replace("steno-", "Steno-"),
+            leftover.replace(
+                &id.hyphenated().to_string(),
+                &id.hyphenated().to_string().to_uppercase(),
+            ),
+        ];
+        assert!(is_tone_file_name(&leftover));
+        for name in near_misses.iter().chain(&folded_elsewhere) {
+            assert!(!is_tone_file_name(name), "{name}");
+        }
+        let write = |name: &str, written: std::time::SystemTime| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"RIFF").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(written)
+                .unwrap();
+        };
+        for name in [&leftover, &other_leftover] {
+            write(name, old);
+        }
+        for name in &near_misses {
+            write(name, old);
+        }
+        write(&fresh, now);
+        let directory = tone_file_name(4242, uuid::Uuid::new_v4());
+        std::fs::create_dir(dir.path().join(&directory)).unwrap();
+        let mut kept: Vec<String> = near_misses.to_vec();
+        kept.extend([fresh, directory]);
+        #[cfg(unix)]
+        {
+            let link = tone_file_name(4242, uuid::Uuid::new_v4());
+            std::os::unix::fs::symlink(dir.path().join(&near_misses[0]), dir.path().join(&link))
+                .unwrap();
+            kept.push(link);
+        }
+
+        remove_leftover_tones(dir.path(), now);
+
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        kept.sort();
+        assert_eq!(left, kept);
     }
 
     /// The tone is one second of 1 kHz at half scale, 48 kHz mono 16-bit.
