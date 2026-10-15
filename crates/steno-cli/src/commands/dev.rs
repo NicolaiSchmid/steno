@@ -21,7 +21,7 @@ use steno_diarize::{DiarizerConfig, Install, ModelDiarizer};
 use steno_host::speech::ModelAsset;
 use steno_llm::{LlmClient, LlmEndpoint, LlmMeetingSummarizer, LlmTranscriptCleaner, RetryPolicy};
 use steno_services::speech::{ModelStoreSpeechModels, SpeechSetup};
-use steno_speech_coreml::wer;
+use steno_speech::wer;
 
 use crate::wiring::{DatabaseOptions, Failure, Outcome, sha256_hex};
 

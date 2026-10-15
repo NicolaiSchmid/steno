@@ -1,9 +1,8 @@
 //! Steno's speech pipeline above the tensors: voice activity detection, the
 //! pause-aligned chunker, the greedy TDT decoder, the overlap merge and the
-//! mapping from pieces to segments, with the model calls behind one trait
-//! (ONNX Runtime here). The `CoreML` backend runs the same decode loop
-//! through [`TdtModel`]; the WP4 notes in the plan list where the rest of
-//! its pipeline still differs. Plan:
+//! mapping from pieces to segments, with the model calls behind one trait:
+//! ONNX Runtime here, `CoreML` in `steno-speech-coreml`, which runs the
+//! same [`Transcriber`] under its own chunker settings and detector. Plan:
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (WP4, invariant 4) and
 //! decisions 1 to 5 of `.plans/2026-10-01-cross-platform-speech-stack.md`.
 //!
@@ -12,16 +11,19 @@
 //!   logits split.
 //! - [`features`]: the `NeMo` mel preprocessor in Rust.
 //! - [`vocab`]: `tokens.txt`, word boundaries, the splice-safe set.
-//! - [`decoder`]: the greedy TDT loop over one encoder window, over
-//!   [`TdtModel`].
-//! - [`vad`]: [`VoiceActivityDetector`], Silero through ONNX Runtime and an
-//!   energy detector for tests.
-//! - [`chunker`]: the longest-pause layout with the 60 s memory clamp.
+//! - [`decoder`]: the greedy TDT loop over one encoder window.
+//! - [`vad`]: [`VoiceActivityDetector`], Silero through ONNX Runtime, and
+//!   energy detectors: a fixed threshold for tests, one that follows the
+//!   recording's level for the `CoreML` engine.
+//! - [`chunker`]: the longest-pause layout with the 60 s memory clamp, or
+//!   the models' fixed 15 s window (`CoreML`), and the extra windows over
+//!   the audio the layout leaves out.
 //! - [`merge`]: the time-tolerant LCS merge of overlapping windows.
 //! - [`segmentation`]: pieces to words to [`RawSegment`](steno_core::RawSegment)s.
 //! - [`language`]: the per-segment language tagger.
-//! - [`pipeline`]: [`Transcriber`], which runs the above in order and
-//!   retries empty chunks with a wider window.
+//! - [`pipeline`]: [`Transcriber`], which runs the above in order, decodes
+//!   chunks (and the extra windows) on one backend or several in parallel
+//!   and retries empty chunks with a wider window.
 //! - [`onnx`]: the ONNX Runtime backend over our fp32 export, with the
 //!   encoder on `DirectML` on Windows when the settings ask and the probe
 //!   passes ([`EncoderProvider`]).
@@ -39,6 +41,8 @@
 //! - [`runtime`]: [`SpeechSettings`] and [`SpeechRuntime`], which engine
 //!   runs on which platform.
 //! - [`wav`]: the 16 kHz PCM-16 reader of the example and the tests.
+//! - [`wer`]: the word error rate and the word-start agreement the FLEURS
+//!   gate, the `CoreML` parity harness and the CLI's bake-off score with.
 //! - [`error`]: [`SpeechError`], the one error type, and [`SidecarError`],
 //!   its cause when the speech sidecar fails.
 //!
@@ -122,17 +126,15 @@ pub mod sidecar;
 pub mod vad;
 pub mod vocab;
 pub mod wav;
+pub mod wer;
 
 pub use backend::{
     DecoderState, DecoderStep, EncoderOutput, FRAME_SAMPLES, FRAME_SECONDS, Features,
     JointDecision, ModelShape, SAMPLE_RATE, SpeechBackend, sample_count, split_logits,
 };
 pub use chunker::{Chunk, ChunkerConfig, Cut};
-pub use decoder::{
-    DecodeStats, Decoded, DecoderConfig, TdtModel, Token, TokenBudget, TokenDuration, WindowEnd,
-    confidence, decode_frames,
-};
-pub use engine::OnnxSpeechEngine;
+pub use decoder::{DecodeStats, DecoderConfig, Token, confidence};
+pub use engine::{OnnxSpeechEngine, PARAKEET_V3_ID, PARAKEET_V3_LANGUAGES};
 pub use error::{SidecarError, SpeechError};
 pub use features::MelExtractor;
 pub use language::{LanguageRecognizer, LanguageTagger, StopwordRecognizer, WhatlangRecognizer};
@@ -146,5 +148,5 @@ pub use pipeline::{PipelineConfig, RecoveryConfig, Transcriber, Transcript};
 pub use runtime::{SpeechRuntime, SpeechSettings};
 pub use segmentation::{TokenAggregator, TranscriptSegmenter};
 pub use sidecar::{SidecarConfig, SidecarHealth, SidecarSpeechEngine};
-pub use vad::{EnergyVad, SileroVad, VadConfig, VoiceActivityDetector};
+pub use vad::{AdaptiveEnergyVad, EnergyVad, SileroVad, VadConfig, VoiceActivityDetector};
 pub use vocab::Vocab;

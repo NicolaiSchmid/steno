@@ -6,23 +6,16 @@
 //! to `max_symbols_per_frame` symbols before a forced advance of one.
 //!
 //! [`DecoderConfig::default`] is `NeMo`'s reference semantics
-//! (`GreedyTDTInfer`), which sherpa-onnx matched at 5.3 % WER in spike F,
-//! and what the ONNX pipeline runs ([`decode_window`]). The other variants
-//! of [`TokenBudget`], [`WindowEnd`] and [`TokenDuration`] are `FluidAudio`'s
-//! guards, which `steno-speech-coreml` sets (`FLUID_AUDIO`) for parity with
-//! the Swift app; the steps it keeps around the loop are listed in its
-//! decoder module.
-//!
-//! The model side is [`TdtModel`]: the prediction network and the joint
-//! over one window's encoder frames, which [`decode_window`] builds over a
-//! [`SpeechBackend`] and `steno-speech-coreml` over its models
-//! (`WindowModel`).
+//! (`GreedyTDTInfer`), which sherpa-onnx matched at 5.3 % WER in spike F;
+//! the ONNX and the `CoreML` backends both run it. Three of `FluidAudio`'s
+//! guards (two symbols a frame, 150 tokens a window, a token past the
+//! window's end dropped) changed nothing on FLEURS German and are not
+//! ported (A2 in `.plans/2026-10-07-stable-promotion.md`); its tail flush
+//! of the last window, not measured, is not ported either.
 //! Swift: `FluidAudio`'s `TdtDecoderV3`, ported in
 //! `spikes/coreml-rs/src/decoder.rs`.
 
-use crate::backend::{
-    DecoderState, DecoderStep, EncoderOutput, FRAME_SAMPLES, JointDecision, SpeechBackend,
-};
+use crate::backend::{DecoderState, EncoderOutput, FRAME_SAMPLES, ModelShape, SpeechBackend};
 use crate::error::SpeechError;
 
 /// One emitted token: a `SentencePiece` piece with its frame.
@@ -40,8 +33,7 @@ pub struct Token {
     pub phase: usize,
     /// The joint's probability for the piece ([`confidence`]).
     pub confidence: f32,
-    /// The TDT duration in frames: the model's prediction, or the frames
-    /// the loop advanced under [`TokenDuration::Advanced`].
+    /// The TDT duration in frames the model predicted, zero included.
     pub duration: usize,
 }
 
@@ -53,50 +45,16 @@ impl Token {
     }
 }
 
-/// When the loop stops a window for emitting too many tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenBudget {
-    /// This many tokens per second of window, plus 16, beyond which the
-    /// window is abandoned as a runaway; the token that crosses the
-    /// budget is kept. German speech needs about ten.
-    PerSecond(usize),
-    /// At most this many tokens per window; the next one ends the window
-    /// and is not emitted (`FluidAudio`'s `maxTokensPerChunk`).
-    PerWindow(usize),
-}
-
-/// What happens to a token whose duration reaches the end of the window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowEnd {
-    /// It is emitted, as `NeMo` does; the merge owns the overlap.
-    Emit,
-    /// It is dropped and the window ends, as `FluidAudio` does.
-    Drop,
-}
-
-/// Which duration a token records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenDuration {
-    /// The model's prediction, zero included.
-    Predicted,
-    /// The frames the loop advanced after it: the prediction, or one when
-    /// the symbol limit forced the advance (`FluidAudio` rewrites the
-    /// duration it acts on).
-    Advanced,
-}
-
 /// Limits of the loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecoderConfig {
     /// Symbols with duration zero allowed on one frame before the loop
     /// moves on (`NeMo`'s `max_symbols`).
     pub max_symbols_per_frame: usize,
-    /// When a window that emits too many tokens is abandoned.
-    pub token_budget: TokenBudget,
-    /// What happens to a token that advances past the window's end.
-    pub window_end: WindowEnd,
-    /// Which duration each [`Token`] records.
-    pub token_duration: TokenDuration,
+    /// Tokens per second of window, plus 16, beyond which the window is
+    /// abandoned as a runaway; the token that crosses the budget is kept.
+    /// German speech needs about ten.
+    pub tokens_per_second: usize,
 }
 
 /// `max_symbols_per_frame` is `NeMo`'s default `max_symbols` of 10; the
@@ -106,9 +64,7 @@ impl Default for DecoderConfig {
     fn default() -> Self {
         DecoderConfig {
             max_symbols_per_frame: 10,
-            token_budget: TokenBudget::PerSecond(40),
-            window_end: WindowEnd::Emit,
-            token_duration: TokenDuration::Predicted,
+            tokens_per_second: 40,
         }
     }
 }
@@ -125,28 +81,16 @@ pub struct DecodeStats {
     pub runaways: usize,
 }
 
-/// The prediction network and the joint over one window's encoder frames:
-/// the calls the loop makes, with the backend's own error.
-pub trait TdtModel {
-    type Error;
-
-    /// The blank's id.
-    fn blank_id(&self) -> u32;
-
-    /// Frames for the joint's duration bin `bin`; a bin outside the
-    /// model's table is the backend's error.
-    fn duration(&self, bin: usize) -> Result<usize, Self::Error>;
-
-    /// Resets the prediction network and primes it with the blank as start
-    /// of sequence.
-    fn start(&mut self) -> Result<(), Self::Error>;
-
-    /// Feeds an emitted token to the prediction network.
-    fn feed(&mut self, token: u32) -> Result<(), Self::Error>;
-
-    /// Runs the joint over encoder frame `t` of the window and the
-    /// projection of the last fed token.
-    fn joint(&mut self, t: usize) -> Result<JointDecision, Self::Error>;
+impl DecodeStats {
+    /// Adds another worker's counts.
+    pub(crate) fn add(&mut self, other: &DecodeStats) {
+        self.windows += other.windows;
+        self.decoder_calls += other.decoder_calls;
+        self.joint_calls += other.joint_calls;
+        self.recoveries_tried += other.recoveries_tried;
+        self.recoveries_accepted += other.recoveries_accepted;
+        self.runaways += other.runaways;
+    }
 }
 
 /// The joint's probability as a confidence: non-finite values are zero,
@@ -161,144 +105,24 @@ pub fn confidence(probability: f32) -> f32 {
     }
 }
 
-/// What [`decode_frames`] decoded.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Decoded {
-    /// The emitted tokens, in order, with frames counted from the start of
-    /// the recording.
-    pub tokens: Vec<Token>,
-    /// The window frame the loop reached: at or past the decoded frames,
-    /// or, when the token budget ended the window, the frame that token's
-    /// advance reaches. `FluidAudio`'s tail flush starts here.
-    pub stop_frame: usize,
-}
-
-/// Decodes the first `frames` encoder frames of `model`'s window with a
-/// fresh prediction-network state; token frames are offset by
-/// `frame_offset`, the window's first frame in the recording, and their
-/// phase is 0, as on the grid; [`decode_window`] sets it.
-pub fn decode_frames<M: TdtModel + ?Sized>(
-    model: &mut M,
-    frames: usize,
-    frame_offset: usize,
-    config: &DecoderConfig,
-    stats: &mut DecodeStats,
-) -> Result<Decoded, M::Error> {
-    stats.windows += 1;
-    if frames == 0 {
-        return Ok(Decoded::default());
-    }
-    let mut tokens = Vec::new();
-    let blank = model.blank_id();
-    model.start()?;
-    stats.decoder_calls += 1;
-    let mut t = 0;
-    let mut symbols_here = 0;
-    while t < frames {
-        let decision = model.joint(t)?;
-        stats.joint_calls += 1;
-        let duration = model.duration(decision.duration_bin)?;
-        if decision.token == blank {
-            t += duration.max(1);
-            symbols_here = 0;
-            continue;
-        }
-        let frame = t;
-        // A zero duration holds the frame until the symbol limit forces
-        // an advance of one.
-        let advance = if duration == 0 && symbols_here + 1 < config.max_symbols_per_frame {
-            0
-        } else {
-            duration.max(1)
-        };
-        t += advance;
-        if config.window_end == WindowEnd::Drop && t >= frames {
-            break;
-        }
-        if let TokenBudget::PerWindow(max) = config.token_budget
-            && tokens.len() >= max
-        {
-            stats.runaways += 1;
-            break;
-        }
-        tokens.push(Token {
-            id: decision.token,
-            frame: frame_offset + frame,
-            phase: 0,
-            confidence: confidence(decision.probability),
-            duration: match config.token_duration {
-                TokenDuration::Predicted => duration,
-                TokenDuration::Advanced => advance,
-            },
-        });
-        // 80 ms frames are 12.5 a second; dividing by 12 errs high.
-        if let TokenBudget::PerSecond(per_second) = config.token_budget
-            && tokens.len() > per_second * frames / 12 + 16
-        {
-            stats.runaways += 1;
-            break;
-        }
-        model.feed(decision.token)?;
-        stats.decoder_calls += 1;
-        symbols_here = if advance > 0 { 0 } else { symbols_here + 1 };
-    }
-    Ok(Decoded {
-        tokens,
-        stop_frame: t,
+/// Frames for the joint's duration bin `bin`; a bin outside the model's
+/// table is a shape error.
+fn duration(shape: &ModelShape, bin: usize) -> Result<usize, SpeechError> {
+    shape.durations.get(bin).copied().ok_or_else(|| {
+        SpeechError::Shape(format!(
+            "duration bin {bin} outside the {} bins",
+            shape.durations.len()
+        ))
     })
 }
 
-/// [`TdtModel`] over a [`SpeechBackend`] and one window's encoder output.
-struct BackendWindow<'a, B: ?Sized> {
-    backend: &'a mut B,
-    encoder: &'a EncoderOutput,
-    /// The projection of the last fed token and the state after it.
-    step: DecoderStep,
-}
-
-impl<B: SpeechBackend + ?Sized> TdtModel for BackendWindow<'_, B> {
-    type Error = SpeechError;
-
-    fn blank_id(&self) -> u32 {
-        self.backend.shape().blank_id
-    }
-
-    fn duration(&self, bin: usize) -> Result<usize, SpeechError> {
-        let durations = &self.backend.shape().durations;
-        durations.get(bin).copied().ok_or_else(|| {
-            SpeechError::Shape(format!(
-                "duration bin {bin} outside the {} bins",
-                durations.len()
-            ))
-        })
-    }
-
-    fn start(&mut self) -> Result<(), SpeechError> {
-        let shape = self.backend.shape();
-        let zeros = DecoderState::zeros(shape.decoder_layers, shape.decoder_hidden);
-        let blank = shape.blank_id;
-        self.step = self.backend.decoder_step(blank, &zeros)?;
-        Ok(())
-    }
-
-    fn feed(&mut self, token: u32) -> Result<(), SpeechError> {
-        self.step = self.backend.decoder_step(token, &self.step.state)?;
-        Ok(())
-    }
-
-    fn joint(&mut self, t: usize) -> Result<JointDecision, SpeechError> {
-        self.backend
-            .joint_step(self.encoder.frame(t), &self.step.projection)
-    }
-}
-
-/// Decodes `encoder` with a fresh prediction-network state. `start_sample`
-/// is the window's first sample in the recording: token frames count from
-/// the frame it falls in, and the samples it lies past that frame's start
-/// are each token's [`Token::phase`], so a window off the frame grid times
-/// its tokens from where it really starts. A window abandoned at the token
-/// budget is logged as a warning; it reports the tokens kept, which under
-/// [`TokenBudget::PerWindow`] is the budget itself.
+/// Decodes `encoder` with a fresh prediction-network state, primed with
+/// the blank as start of sequence. `start_sample` is the window's first
+/// sample in the recording: token frames count from the frame it falls
+/// in, and the samples it lies past that frame's start are each token's
+/// [`Token::phase`], so a window off the frame grid times its tokens from
+/// where it really starts. A window abandoned at the token budget is
+/// logged as a warning.
 pub fn decode_window<B: SpeechBackend + ?Sized>(
     backend: &mut B,
     encoder: &EncoderOutput,
@@ -314,28 +138,58 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
         )));
     }
     let frames = encoder.len.min(encoder.data.len() / encoder.hidden.max(1));
-    let mut window = BackendWindow {
-        backend,
-        encoder,
-        // Replaced by `TdtModel::start` before the first joint.
-        step: DecoderStep {
-            projection: Vec::new(),
-            state: DecoderState::zeros(0, 0),
-        },
-    };
-    let runaways = stats.runaways;
-    let (frame_offset, phase) = (start_sample / FRAME_SAMPLES, start_sample % FRAME_SAMPLES);
-    let mut tokens = decode_frames(&mut window, frames, frame_offset, config, stats)?.tokens;
-    for token in &mut tokens {
-        token.phase = phase;
+    stats.windows += 1;
+    if frames == 0 {
+        return Ok(Vec::new());
     }
-    if stats.runaways > runaways {
-        tracing::warn!(
-            frames,
-            tokens = tokens.len(),
-            start_sample,
-            "runaway decode: window abandoned at the token budget, its tail is lost"
-        );
+    let (frame_offset, phase) = (start_sample / FRAME_SAMPLES, start_sample % FRAME_SAMPLES);
+    let shape = backend.shape();
+    let blank = shape.blank_id;
+    let zeros = DecoderState::zeros(shape.decoder_layers, shape.decoder_hidden);
+    let mut step = backend.decoder_step(blank, &zeros)?;
+    stats.decoder_calls += 1;
+    let mut tokens = Vec::new();
+    let mut t = 0;
+    let mut symbols_here = 0;
+    while t < frames {
+        let decision = backend.joint_step(encoder.frame(t), &step.projection)?;
+        stats.joint_calls += 1;
+        let duration = duration(backend.shape(), decision.duration_bin)?;
+        if decision.token == blank {
+            t += duration.max(1);
+            symbols_here = 0;
+            continue;
+        }
+        let frame = t;
+        // A zero duration holds the frame until the symbol limit forces
+        // an advance of one.
+        let advance = if duration == 0 && symbols_here + 1 < config.max_symbols_per_frame {
+            0
+        } else {
+            duration.max(1)
+        };
+        t += advance;
+        tokens.push(Token {
+            id: decision.token,
+            frame: frame_offset + frame,
+            phase,
+            confidence: confidence(decision.probability),
+            duration,
+        });
+        // 80 ms frames are 12.5 a second; dividing by 12 errs high.
+        if tokens.len() > config.tokens_per_second * frames / 12 + 16 {
+            stats.runaways += 1;
+            tracing::warn!(
+                frames,
+                tokens = tokens.len(),
+                start_sample,
+                "runaway decode: window abandoned at the token budget, its tail is lost"
+            );
+            break;
+        }
+        step = backend.decoder_step(decision.token, &step.state)?;
+        stats.decoder_calls += 1;
+        symbols_here = if advance > 0 { 0 } else { symbols_here + 1 };
     }
     Ok(tokens)
 }
@@ -343,7 +197,7 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{DecoderStep, Features, JointDecision, ModelShape};
+    use crate::backend::{DecoderStep, Features, JointDecision};
 
     /// A backend driven by a script of joint decisions, in call order; the
     /// decoder step records what it was fed and the state it was fed with,
@@ -521,9 +375,7 @@ mod tests {
             DecoderConfig::default(),
             DecoderConfig {
                 max_symbols_per_frame: 10,
-                token_budget: TokenBudget::PerSecond(40),
-                window_end: WindowEnd::Emit,
-                token_duration: TokenDuration::Predicted,
+                tokens_per_second: 40,
             }
         );
     }
@@ -608,8 +460,7 @@ mod tests {
         let mut backend = ScriptedBackend::new(&script);
         let config = DecoderConfig {
             max_symbols_per_frame: 1000,
-            token_budget: TokenBudget::PerSecond(12),
-            ..DecoderConfig::default()
+            tokens_per_second: 12,
         };
         let (tokens, stats) = decode_with(&mut backend, &encoder(12), &config).unwrap();
         // The budget is 12 * 12 / 12 + 16; the token that crosses it is kept.

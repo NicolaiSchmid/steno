@@ -1,9 +1,7 @@
 //! The four model calls of a Parakeet TDT transducer behind one trait, so
 //! the decoder, the chunker and the merge are written once over any
-//! backend ([`crate::onnx`] here). The `CoreML` crate runs only the decode
-//! loop, through the narrower [`TdtModel`](crate::TdtModel); its pipeline
-//! does not use this trait yet, and the WP4 notes in the plan list where
-//! the pipelines differ.
+//! backend: [`crate::onnx`] here, the `CoreML` one in
+//! `steno-speech-coreml`.
 //! Swift: `FluidAudio`'s `AsrModels` (Preprocessor, Encoder, Decoder,
 //! `JointDecisionv3`), which `ParakeetEngine` drives through `AsrManager`.
 //!

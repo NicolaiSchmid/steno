@@ -311,9 +311,9 @@ why and the alternative.
   the audio processing is stable and ideally the final version before we
   cutover to the tauri version."
   - **Reading:** no change to the audio and speech path is planned after the
-    cutover. A1 to A10 land before `0.11.0-rc.1`, so the rehearsals run on the
-    final pipeline. A fix found during the candidates becomes a new candidate
-    and restarts the stability count (G2).
+    cutover. A1 to A10 and A12 to A17 land before `0.11.0-rc.1`, so the
+    rehearsals run on the final pipeline. A fix found during the candidates
+    becomes a new candidate and restarts the stability count (G2).
   - **The remaining differences, each made final.** Confirmed 2026-10-07.
 
     | Difference | Choice | Why |
@@ -445,7 +445,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | ID | Package | Owner |
 |---|---|---|
 | A1 | A streamed decoder and mixdown: CAF and WAV decoded and mixed in bounded chunks, so a two-hour two-channel master never sits in memory whole | audio (#228) |
-| A2 | The CoreML backend on the shared chunker, merge and decoder settings | audio |
+| A2 | The CoreML backend on the shared chunker, merge and decoder settings | audio (#263) |
 | A3 | The diarizer on `ModelStore` (#229), and its inference in the speech sidecar's child on every platform, so a crash in ONNX Runtime ends the child, not the app (invariant 4) | audio (#229, #266) |
 | A4 | PipeWire: `stop()` bounded, the own output and the default move settled (#214); `start`'s first cycle and the latencies measured on Nicolai's hardware | audio (#214) |
 | A5 | One speech engine per reload | #218, merged |
@@ -458,6 +458,9 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A12 | An undecodable AAC packet becomes silence of its length, counted and shown on the meeting | audio (#264) |
 | A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
+| A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio, after #263 |
+| A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
+| A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured; a durable working marker, and quarantine at launch ("Steno stopped while reading this recording") with the file kept and Process again offered; kill tests; the allocations bounded only if a real trigger exists | audio, after #263 |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -922,9 +925,30 @@ Each lands before `0.11.0-rc.1`.
   sidecar together). Decoded samples equal today's. The soak's bound is 6 GiB
   (#228); on atlas, `steno process` with the diarizer peaked at 4.26 GiB on a
   two-hour two-lane recording.
-- **A2 CoreML on the shared chunker.** The CoreML backend moves onto the shared
+- **A2 CoreML on the shared chunker** (#263). The CoreML backend moves onto the shared
   chunker, merge and decoder settings, settling the unticked WP4 integration
-  notes. Parity: FLEURS and the Swift fixtures hold within today's tolerance.
+  notes. FLEURS, which has references, is the accuracy gate (Nicolai,
+  2026-10-12): FLEURS German `cat/` through CoreML at or below 5.0 % mean WER,
+  a hard limit (`scripts/coreml-parity-forge.sh` prints PASS or FAIL against it
+  and exits 1 above it). The Swift corpus tracks drift, with a limit of 10 %.
+  The gaps the CoreML chunks leave (the lead-in, the tail, the rest of a
+  pause a chunk's start moves past) are decoded in extra windows: FLEURS and
+  the corpus are unchanged, and the cost is +13 % on FLEURS, +9 % on the
+  corpus and +10 % on a 15-minute meeting's two lanes (+21 % on its
+  microphone lane alone). Known limits: a gap shorter than 2.5 s is not
+  decoded, even where it is the uncovered edge of a longer pause, because
+  windows that short insert words; and a word that a chunk and a window
+  both hear, across a gap's edge or beside the words a recovery kept inside
+  the gap, comes out twice when the two copies start more than two encoder
+  frames apart, because the merge cannot tell such a copy from the word
+  said again.
+  Measured with A13 (#279) in: FLEURS German `cat/` through CoreML 4.87 % mean
+  WER, from 5.46 % (the ONNX engine 4.88 %). The parity test against the Swift
+  transcripts of the calibration corpus tracks drift from the old Swift output:
+  8.46 % mean per-file WER, from 0.00 %, because the windows are laid out
+  differently, under its limit of 10 %; and the mean word-start offset from
+  Swift's, +4.2 ms (+7.4 ms on FLEURS), under its limit of 15 ms. The numbers per
+  item are in the port plan's WP4 integration notes.
 - **A3 The diarizer on `ModelStore` and in the sidecar.** Its models come
   through `steno_speech::ModelStore` (resume, lock, mirror; #229), and its
   inference runs in the speech sidecar's child on every platform, the Mac
@@ -1247,10 +1271,15 @@ Each lands before `0.11.0-rc.1`.
     matching and the recovery count whole frames, so none of their
     decisions changes; the merge's monotonic pass orders tokens by frame
     and phase.
-  - The CoreML backend's own pipeline decodes only windows on the frame
+  - The CoreML backend's own pipeline decoded only windows on the frame
     grid, so its starts were exact (mean offset 0.0 ms from Swift's on the
-    corpus and FLEURS) and do not change; it takes the fix with the shared
-    chunker (A2).
+    corpus and FLEURS). On the shared chunker (A2, #263) its chunks start
+    anywhere too, and the fix applies: the text is unchanged, every start
+    moves 0 to 79 ms later, and against Swift's starts the mean offset is
+    +2.5 ms on the corpus and +7.5 ms on FLEURS, from -30.5 and -27.7 ms
+    without the phase (p10 and p90 -56 and +56 ms on the corpus, -48 and
+    +64 ms on FLEURS; matched as above). The CoreML parity test holds the
+    corpus mean within 15 ms; its own alignment of the words gives +4.2 ms.
   - Measured on the ONNX backend: text and word order identical on FLEURS
     German `cat/`, the Swift corpus, the seven calibration calls and the
     fixtures; FLEURS mean WER 4.927 % before and after (CoreML 5.462 %
@@ -1390,6 +1419,60 @@ Each lands before `0.11.0-rc.1`.
     untouched too; under "delete after processing" the salvaged recording
     stays unstamped through the sweep and its detail reads kept
     incomplete, while its finished twin is stamped.
+  - Owner: audio. It blocks stable (D3).
+- **A15 The CoreML IOSurface abort.** Found by A13's testing (#279): in a
+  release build with debug assertions, the CoreML parity test aborted on the
+  second corpus file ("Failed to allocate memory IOSurface object", then
+  "Rust cannot catch foreign exceptions"); a plain release build passed. If
+  CoreML's resources build up across runs, a plain build would meet the same
+  wall later. Its own PR, after #263 merges, since it measures #263's code.
+  - Gates: IOSurface and memory growth measured per file, and fixed if it
+    leaks; an Objective-C exception from CoreML is caught at the FFI boundary
+    (the crate's `coreml` module), so the meeting fails retryably with its
+    audio kept; Nicolai runs a debug build of the app over several meetings
+    and checks that nothing aborts and memory stays flat.
+  - Owner: audio. It blocks stable (D3).
+- **A16 Extra windows for the ONNX engine.** A2's design (#263) on the ONNX
+  engine: every gap of 2.5 s or more (`MIN_GAP_SECONDS`) decoded in extra
+  windows, the long-pause skip kept for the cuts. After #263 merges.
+  - Gates, against ONNX's own numbers: FLEURS German `cat/` at or below
+    4.882 % mean WER; the corpus not worse; no word added where the Swift
+    transcripts have none, and none from silence or room noise; at most
+    +15 % runtime. If it misses them, the measured lead/tail switch instead
+    (the lead-in and the tail only, the long-pause skip kept; measured at
+    FLEURS 4.865 % and corpus 9.794 %, no runtime cost).
+  - Known loss to carry, or to make moot by redesigning the gap merge:
+    `splice_gaps` splits a gap's chunk tokens into sides at the first
+    word start past the earlier recovery's keep frame, while
+    `keep_chunk_and_overlap` lets a later recovery's tokens begin at any
+    splice-safe piece, punctuation included. A later recovery whose kept
+    tokens begin with a punctuation piece past that frame puts the piece on
+    the earlier side, whose cover then drops every window-only word
+    between the two recoveries. Direct call: a gap from 10 to 20 s, 2 s of
+    overlap, chunk tokens `w11` at 4 s, `w13` at 10.4 s, `.` at 18.0 s,
+    `w5` at 18.4 s and `w12` at 22 s, and a window word `w2` at 14 s,
+    which is lost. It needs accepted recoveries on both sides of one gap,
+    which CoreML's settings cannot produce (their 15 s clamp leaves room
+    for a recovery to reach into a gap from one side only), so it
+    reaches only the ONNX engine, where the windows are still off. The
+    fix is one token: split at `vocab.is_splice_safe(t.id)` instead of
+    `seam.starts_word(t)`, with the case above as a test.
+  - Owner: audio.
+- **A17 No crash loop from a file that aborts the process.** Found by A14's
+  testing (#280): symphonia sizes some allocations straight from file
+  fields, and a failed allocation aborts the process, which `catch_unwind`
+  cannot catch. A corrupt or crafted phone file could stop the app on
+  decode and again at every launch through recovery: a crash loop, which is
+  data loss under D3. Its own PR, after #263 merges, designed with A15's
+  containment.
+  - Gates: the allocation abort measured (which fields and paths can trigger
+    it); a durable "working on" marker around every read of an asset (the
+    decode, recovery's duration, the mixdown, Process again, the CLI); an
+    asset whose marker survives into a launch is quarantined: its meeting
+    fails with "Steno stopped while reading this recording", the file is
+    kept and never touched again automatically, and Process again is
+    offered; kill tests (a child killed or aborted with the marker written);
+    the allocations bounded only if the measurement finds a real trigger.
   - Owner: audio. It blocks stable (D3).
 
 ### P: no data lost (D3)

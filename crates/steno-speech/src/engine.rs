@@ -17,6 +17,18 @@ use crate::onnx::{OnnxBackend, OnnxOptions};
 use crate::pipeline::{PipelineConfig, Transcriber};
 use crate::vad::{SileroVad, VadConfig};
 
+/// The engine id of Parakeet TDT v3, whichever backend runs it: the
+/// Swift engine's, stored in `Settings.speechEngineID`
+/// (`SpeechEngineID.parakeetV3`).
+pub const PARAKEET_V3_ID: &str = "parakeet-v3";
+
+/// The 25 European languages of Parakeet TDT v3 (NVIDIA model card;
+/// `SpeechEngineID.parakeetV3Languages`).
+pub const PARAKEET_V3_LANGUAGES: [&str; 25] = [
+    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt",
+    "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
+];
+
 /// Parakeet v3 on ONNX Runtime.
 pub struct OnnxSpeechEngine {
     store: ModelStore,
@@ -28,13 +40,11 @@ pub struct OnnxSpeechEngine {
 }
 
 impl OnnxSpeechEngine {
-    pub const ID: &'static str = "parakeet-v3";
+    /// [`PARAKEET_V3_ID`].
+    pub const ID: &'static str = PARAKEET_V3_ID;
 
-    /// The 25 European languages of Parakeet TDT v3 (NVIDIA model card).
-    pub const LANGUAGES: [&'static str; 25] = [
-        "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt",
-        "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
-    ];
+    /// [`PARAKEET_V3_LANGUAGES`].
+    pub const LANGUAGES: [&'static str; 25] = PARAKEET_V3_LANGUAGES;
 
     /// An engine over `store`; nothing is loaded until `prepare`.
     #[must_use]
