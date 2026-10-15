@@ -1978,6 +1978,10 @@ that path holds `com.nicolaischmid.steno.desktop`.
 | Codex sign-in | The Codex CLI's own `auth.json`, untouched | R3 |
 | Login item | The new app registers itself when `launch_at_login` is on; the Swift entry is left to macOS (S6) | R3 |
 | Updates | The Tauri updater reads `desktop-stable` daily (S4) | R4 |
+| Speaker models | The diarizer's ONNX models (about 33 MB) are new: onboarding opens on its permissions page while they are missing, even with every grant in place, and its Speech models row downloads them; the meetings waiting for them then resume | R3; "Nicolai's Mac", step 17 |
+| Vault folder | A vault under Documents, Desktop, Downloads or iCloud Drive needs Files and Folders access for the new identifier: the permissions page writes to it once, so macOS asks there, and the row says what to do after a Don't Allow | R3; "Nicolai's Mac", step 18 |
+| Local Network | macOS asks once, when the new app starts listening for the phone; Settings > iPhone says where to switch it on if the phone cannot find the Mac | R3; "Nicolai's Mac", step 16 |
+| A setting the new app cannot read | It refuses to start and names the setting and the database, in the dialog and the log, without its value | "Nicolai's Mac", step 6 |
 
 ## Landing page and README
 
@@ -2134,7 +2138,12 @@ except case e.
     offers Try again); Try again brings it back, and with Always Allow none
     appears again;
   - the phone uploads without pairing again;
-  - both calls are listed, transcribed and summarised.
+  - both calls are listed, transcribed and summarised;
+  - on the Mac, besides the prompts above, two more are expected: the Local
+    Network prompt, once, when the new app starts listening for the phone
+    (Allow), and, when the vault is under Documents, Desktop, Downloads or
+    iCloud Drive, one Files and Folders prompt while onboarding's
+    permissions page shows (Allow). Any other modal dialog fails R1.
 - **R2 Handoff mechanics** (Forge; the cutover plan's test 6).
   1. Fetch the candidate's `sparkle-item` on atlas
      (`gh run download <run> -n sparkle-item`) and copy it over.
@@ -2162,12 +2171,14 @@ except case e.
 - **R3 The real handoff** (**Nicolai**, a fresh account; the cutover plan's
   tests 1 to 3). The phone keeps one pairing, so pairing it here unpairs his
   daily install until he pairs it there again.
-  1. Install `v0.10.0-rc.2`. Grant every permission, set an API key, pair the
-     phone, record and process a meeting, and turn on launch at login. Save
-     `sudo sfltool dumpbtm` as `btm-before.txt`.
-  2. Quit. Run `defaults write uno.schmid.steno.mac SUFeedURL
-     http://localhost:8765/appcast.xml` (Sparkle 2.10 honours it in release
-     builds), and relaunch.
+  1. Install `v0.10.0-rc.2`. Grant every permission, set an API key, choose
+     a vault folder under `~/Documents`, pair the phone, record and process a
+     meeting, and turn on launch at login. Save `sudo sfltool dumpbtm` as
+     `btm-before.txt`.
+  2. Quit. Record about 20 seconds on the phone while Steno is quit, and
+     leave the recording queued there. Run `defaults write
+     uno.schmid.steno.mac SUFeedURL http://localhost:8765/appcast.xml`
+     (Sparkle 2.10 honours it in release builds), and relaunch.
   3. Check for Updates and install.
   4. Pass when:
      - the app comes back as `com.nicolaischmid.steno.desktop`, and the meeting is
@@ -2183,12 +2194,23 @@ except case e.
        `lsof -nP -a -c steno-desktop -iTCP -sTCP:LISTEN` in this account shows no listener;
      - onboarding then opens on its permissions page, and each of microphone,
        system audio and calendar prompts once;
+     - the same page shows Speech models with the speaker models to download
+       (about 33 MB): Download installs them with progress, and a meeting
+       waiting with "Download the speech models in Settings" starts
+       processing;
+     - the same page shows the vault row: macOS asks once for the Documents
+       folder (Allow), and the row reads allowed;
+     - the recording queued on the phone in step 2 uploads as exactly one
+       new meeting, which is processed once the speech models are in, and
+       the phone deletes its copy;
      - after that, a summary runs with the stored key and no prompt, and the
        phone uploads without pairing again;
      - a call records both lanes;
      - Settings shows the CoreML Parakeet as installed.
 
-     Any other modal dialog fails R3.
+     Besides the prompts above, the Local Network prompt is expected once,
+     when the new app starts listening for the phone (Allow). Any other
+     modal dialog fails R3.
   5. **The old login item.** Save `sudo sfltool dumpbtm` again as
      `btm-after.txt`. Log out and in: Steno starts once. Turn launch at login off
      in the new app, save `sudo sfltool dumpbtm` as `btm-off.txt`, log out and
@@ -2267,11 +2289,12 @@ except case e.
      whether `~/Library/Application Support/Steno/preferences.json` holds
      `steno.swiftImportRan`, and whether the import's own entry exists
      (`security find-generic-password -s uno.schmid.steno.mac -a swift-import-done`).
-     If either of the latter does, the dogfood does not test the import, and
-     R3 is its only proof. No desktop-id install in this account is
-     updated before the dogfood.
-  3. His daily install takes the candidate through the local feed, as in R3, and
-     the `SUFeedURL` default is deleted afterwards.
+     If any of the three is found, the dogfood stops until Codex has
+     resolved it: the marker or the flag would skip the import, and a
+     desktop-id identity would be served to a phone that does not know it.
+     No desktop-id install in this account is updated before the dogfood.
+  3. His daily install takes the candidate through the local feed, following
+     "Nicolai's Mac" below, and the `SUFeedURL` default is deleted afterwards.
 
   Pass: the meetings count towards the stability count (G2); one phone upload
   without pairing again; no regression he would not ship.
@@ -2306,6 +2329,197 @@ except case e.
     `steno-desktop`, `com.nicolaischmid.steno.desktop` and 0.11.0;
   - **Linux:** on the GNOME, Omarchy and NixOS machines, each gate's step 0,
     from the last candidate to `v0.11.0`, and one recording.
+
+### Nicolai's Mac
+
+The dogfood's migration in his own account, on the day he takes
+`0.11.0-rc.N` (decision 1 of 2026-10-15: no Swift bridge release; he is the
+only user, so whatever makes this migration not seamless is a step here or
+a fix before the candidate). R1 to R6 in fresh accounts come first; R3 is
+the only end-to-end proof of the keychain export and of the iPhone against
+the new app, so it runs before this list, and the phone is paired with his
+daily install again afterwards (dogfood step 1; pairing again moves
+`pairedAt` forward, which the import accepts).
+
+Every step is **Nicolai**'s, in order. Every command reads, or copies into
+`~/steno-backup`, and the backup comes before anything that writes. The only
+other writes are the `SUFeedURL` and `SUAutomaticallyUpdate` defaults and
+the installs themselves. Nothing here deletes or moves his data, apart from
+step 35, the rollback's last resort, which moves the current folder aside
+and deletes nothing. Where a step says stop, Codex resolves it with him
+before he goes on.
+
+**Before the handoff**
+
+1. **Every Steno on the Mac.** `mdfind 'kMDItemCFBundleIdentifier ==
+   "uno.schmid.steno.mac"'` lists only `/Applications/Steno.app`, and
+   `defaults read /Applications/Steno.app/Contents/Info.plist
+   CFBundleShortVersionString` prints `0.10.0-rc.2` (`CFBundleVersion`
+   prints `542`). Any other copy (`~/Applications`, a mounted Steno disk
+   image, a build folder, `/nix/store` from the flake): stop. A Homebrew
+   cask copy in `/Applications` is fine.
+2. **No earlier build of the new app ran in this account.** Each of these
+   answers "could not be found" or "No such file":
+   - `security find-generic-password -s uno.schmid.steno.mac -a swift-import-done`
+   - `security find-generic-password -s uno.schmid.steno.mac -a handover-identity`
+   - `ls ~/Library/Application\ Support/Steno/preferences.json ~/Library/Application\ Support/Steno/handover-identity.json ~/Library/LaunchAgents/Steno.plist`
+
+   If any exists: stop (dogfood step 2).
+3. **Back up, with Steno quit** (menu bar > Quit Steno):
+   - `mkdir -p ~/steno-backup && ditto ~/Library/Application\ Support/Steno ~/steno-backup/Steno`
+   - `defaults export uno.schmid.steno.mac ~/steno-backup/defaults.plist`
+   - `ditto -c -k --keepParent /Applications/Steno.app ~/steno-backup/Steno-0.10.0-rc.2.zip`
+
+   Keep the `v0.10.0-rc.2` disk image too.
+4. **The pairing data.** `sqlite3 -readonly ~/Library/Application\ Support/Steno/steno.sqlite
+   "select id, name, pairedAt from pairedDevice"` lists one row, his
+   iPhone, and `security find-certificate -a -c "Steno on" -p | openssl x509
+   -noout -startdate` shows one certificate that starts before that
+   `pairedAt`. More than one row or certificate: stop. The Mac sets its
+   date and time automatically.
+5. **The settings to compare later.** `sqlite3 -readonly
+   ~/Library/Application\ Support/Steno/steno.sqlite "select key, value
+   from setting" > ~/steno-backup/settings-before.txt`. Note the vault path
+   (the `obsidian` row): under Documents, Desktop, Downloads or iCloud
+   Drive, step 18's prompt comes. Retention reads `keepForever` (it matters
+   for a rollback).
+6. **The settings load.** Codex runs, from a checkout of the candidate's
+   tag, `scripts/verify-store-against-swift-db.sh ~/steno-backup/Steno/steno.sqlite`.
+   It opens only a copy of the copy and prints the migrations and a
+   `settings: provider ..., retention ...` line with no error. If one
+   setting cannot be read, the candidate would refuse to start and name it
+   ("The setting ... It is stored in the database at ..."): stop.
+7. **The speech model.** `stat -f %z ~/Library/Application\ Support/Steno/Models/fluidaudio/parakeet-tdt-0.6b-v3/Encoder.mlmodelc/weights/weight.bin`
+   prints `445187200`. Anything else means one download of about 483 MB
+   later.
+8. **The network.** Mac and phone on the same Wi-Fi.
+   `/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate` and
+   `--getallowsigned`: the firewall is off, or both "allow signed" lines are
+   on.
+9. **The phone uploads to the Swift app today.** Open Steno again, record
+   10 seconds on the phone and see it arrive. Then turn the phone's Wi-Fi off, record 20
+   seconds more and leave it queued: step 19's recording.
+10. **Nothing in flight.** Nothing recording, no meeting "Queued" or
+    "Processing" in the list.
+
+**The handoff**
+
+11. **The candidate's feed** (as in R3), in `~/steno-backup/feed`: `mkdir
+    ~/steno-backup/feed && cd ~/steno-backup/feed`, then
+    `gh release download v0.11.0-rc.N -R NicolaiSchmid/steno -p 'Steno_*_aarch64.dmg'`
+    and `gh run download <run> -R NicolaiSchmid/steno -n sparkle-item`;
+    the enclosure URL in `appcast.xml` becomes
+    `http://localhost:8765/<dmg name>`; `python3 -m http.server 8765 --bind
+    127.0.0.1` serves it, and `curl -fsS http://localhost:8765/appcast.xml`
+    answers.
+12. **Install.** Quit Steno, run `defaults write uno.schmid.steno.mac
+    SUFeedURL http://localhost:8765/appcast.xml`, open Steno, choose Check
+    for Updates, then Install and Relaunch. The server's log shows `GET
+    /appcast.xml` and `GET /<dmg>`. If Sparkle refuses: quit Steno, open the
+    disk image, drag Steno onto Applications and choose Replace, then open
+    it and choose Open at the Gatekeeper question.
+13. **The feed goes.** `defaults delete uno.schmid.steno.mac SUFeedURL`, and
+    stop the server.
+
+**The first launch**
+
+14. **Steno comes back by itself** (within a minute; else open
+    `/Applications/Steno.app`). `mdls -name kMDItemCFBundleIdentifier
+    /Applications/Steno.app` shows `com.nicolaischmid.steno.desktop`, and
+    every meeting is listed. Before the next step no keychain prompt has
+    come, and `lsof -nP -a -c steno-desktop -iTCP -sTCP:LISTEN` shows
+    nothing.
+15. **The import step comes first.** Choose Continue, never Not now. macOS
+    asks for the login keychain password for `llm-api-key`: type it and
+    choose Always Allow. Then "steno-desktop wants to export key 'Steno
+    handover identity'": type it and choose Allow (Always Allow if
+    offered). With ChatGPT summaries and no API key, only the second prompt
+    comes. If either was denied, choose Try again in Settings > iPhone,
+    never Pair again.
+16. **The permissions page.** Microphone: Allow. System audio: the test
+    plays a tone for up to 30 seconds; allow the audio recording prompt.
+    Calendar: allow full access. Each prompt comes once. Then "Allow Steno
+    to find devices on local networks?": Allow. System Settings > Privacy &
+    Security > Local Network shows Steno switched on (two "Steno" rows are
+    expected; the other is the old app). If the prompt was missed, switch
+    Steno on there (Settings > iPhone says where), then quit and reopen
+    Steno.
+17. **Speech models**, the row on the same page. It offers the speaker
+    models (about 33 MB): choose Download. It ends on Downloaded, Settings >
+    Transcription shows Parakeet v3 and speaker recognition installed, and
+    any meeting showing "Download the speech models in Settings" starts
+    processing.
+18. **The notes folder**, the row on the same page when the vault is set.
+    With the vault under Documents, Desktop, Downloads or iCloud Drive,
+    macOS asks for that folder while the page shows: Allow. The row reads
+    Allowed. If it says Steno cannot write the notes there, choose Open
+    System Settings, turn Steno on under Files and Folders, then Check
+    again.
+19. **The phone.** Turn its Wi-Fi back on and open Steno on it. The
+    recording from step 9 uploads without pairing again: the Mac lists
+    exactly one new phone meeting and processes it, and the phone deletes
+    its copy. `dns-sd -B _steno._tcp` (Ctrl-C to stop) shows the Mac's name.
+    If the phone stays on "Waiting for Mac", check step 16's switch, then
+    quit and reopen Steno on the Mac.
+20. **Summaries.** That meeting gets its summary with no keychain prompt;
+    with ChatGPT summaries, from the same model as before.
+21. **The vault.** On a recent meeting, choose Export again: no prompt
+    comes, the note is in Obsidian, and a note he edited there gets a
+    `(Steno <date>).md` beside it instead of being overwritten.
+22. **A real call.** One short call with sound on both sides: both lanes are
+    transcribed, and the call prompt appears for the call app.
+23. **No second prompts.** Quit and reopen Steno: no keychain and no
+    permission prompt. `sqlite3 -readonly ~/Library/Application\ Support/Steno/steno.sqlite
+    "select key, value from setting" | diff ~/steno-backup/settings-before.txt -`
+    shows the same rows, apart from the speech engine if it was Whisper,
+    Ultra or the German model, and an added `handoverPort`.
+24. **The login item.** Settings > General: Open at login is on. System
+    Settings > General > Login Items & Extensions, under Open at Login,
+    shows one Steno. If there are two, `sudo sfltool dumpbtm | grep -B4 -A12
+    -i steno` shows which belongs to `uno.schmid.steno.mac`; it stays until
+    the 14 days end (a rollback needs it). Log out and in: Steno starts once
+    (`pgrep -lx steno-desktop` shows one process), and `ls
+    ~/Library/LaunchAgents | grep -i steno` prints nothing.
+
+**After it, the 14 days**
+
+25. `~/steno-backup`, the `v0.10.0-rc.2` disk image and the Swift keychain
+    items ("Steno handover identity", `llm-api-key`) stay: a rollback reads
+    them.
+26. No Pair again in either app unless Settings > iPhone asks for it.
+27. The meetings count towards G2. `ls ~/Library/Application\
+    Support/Steno/crash-*.log` and `ls ~/Library/Logs/DiagnosticReports |
+    grep -i steno` print nothing.
+28. After the 14 days, Codex tidies up with him as a task of its own (the
+    old login item, the Whisper and German models, the backup); nothing in
+    this list removes them.
+
+**The rollback, only if needed**
+
+29. Quit Steno, then `ditto -c -k --keepParent /Applications/Steno.app
+    ~/steno-backup/Steno-rust.zip`.
+30. Drag Steno from the `v0.10.0-rc.2` disk image onto Applications and
+    choose Replace. Before opening it, `defaults read uno.schmid.steno.mac
+    SUFeedURL` says it does not exist, and `defaults write
+    uno.schmid.steno.mac SUAutomaticallyUpdate -bool false` runs.
+31. Open it. Every meeting is listed, the ones the new app recorded too; it
+    records with its old grants, summarises with no prompt, and the phone
+    uploads to it without pairing.
+32. While on the Swift app: no Pair again. If retention is not Keep
+    forever, also no Export again, speaker rename or summary re-run on a
+    meeting the new app processed: the Swift app stamps its retention, and
+    its sweep can then delete the recording ("Retention during a
+    rollback").
+33. Back to the new app: quit, `ditto -x -k ~/steno-backup/Steno-rust.zip
+    ~/steno-backup/rust-app/`, drag `~/steno-backup/rust-app/Steno.app` onto
+    Applications and choose Replace. It opens with no import step, lists the meetings the Swift app received, and the phone
+    uploads without pairing.
+34. Each rollback step that does not pass: stop.
+35. The last resort, only if the database itself is in doubt: quit Steno,
+    move the current folder aside with `mv ~/Library/Application\
+    Support/Steno ~/steno-backup/Steno-current-$(date +%Y%m%d)`, then `ditto
+    ~/steno-backup/Steno ~/Library/Application\ Support/Steno`. Recordings
+    made since step 3 are then only in the folder moved aside, which stays.
 
 ### The Linux gates
 
