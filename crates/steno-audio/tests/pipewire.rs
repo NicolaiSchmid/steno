@@ -1084,8 +1084,10 @@ fn a_daemon_killed_and_started_again_resumes_the_recording() {
 /// whether it runs or not: while a recording on the default source goes
 /// on, probes of a source whose owner is stopped answer `false`, one once
 /// the owner resumed `true`, and the recording got no report, no gap and
-/// no dropped frame. Its master is at most 0.1 s shorter than the wall
-/// time from the end of its start to its stop, and at most 0.1 s longer
+/// no dropped frame. Its master, the cycles the capture's thread missed in
+/// it as zeros (A18 of the stable-promotion plan), is at most 0.1 s
+/// shorter than the wall time from the end of its start to its stop, and
+/// at most 0.1 s longer
 /// than the wall time from before its start to the end of its stop. The
 /// probe's own stream is not the recording's, so a stopped owner that
 /// wedges what it is linked to wedges the probe alone.
@@ -1142,10 +1144,17 @@ fn probing_a_chosen_source_costs_the_recording_nothing() {
         statistics.dropped_frames
     );
     let master = statistics.duration;
-    println!("the master: {master:.3} s against {stopping:.3} to {wall:.3} s of wall time");
+    // The cycles the capture's thread missed (A18) are in the master as
+    // zeros, so it stays on wall time however busy the machine is.
+    let missed = statistics.missed_seconds;
+    println!(
+        "the master: {master:.3} s against {stopping:.3} to {wall:.3} s of wall time, \
+         {missed:.3} s of it for missed cycles"
+    );
     assert!(
         master > stopping - 0.1 && master < wall + 0.1,
-        "every frame while the probes ran: {master:.3} s against {stopping:.3} to {wall:.3} s"
+        "every frame while the probes ran, missed cycles as zeros: {master:.3} s \
+         ({missed:.3} s missed) against {stopping:.3} to {wall:.3} s"
     );
 }
 
