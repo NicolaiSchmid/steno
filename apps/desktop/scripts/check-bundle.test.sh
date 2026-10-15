@@ -83,10 +83,25 @@ printf '#!/usr/bin/env bash\n[[ "$1 $2" == "stapler validate" ]]\n' > "$scratch/
 printf '#!/usr/bin/env bash\n[[ "$1 $2" == "--assess --type" ]]\n' > "$scratch/signed-bin/spctl"
 chmod +x "$scratch/signed-bin/"*
 
+# The purpose strings of src-tauri/Info.plist, as the merged Info.plist
+# carries them, one <key><string> pair each; `omit` names one to leave out.
+src_plist="$(cd "$(dirname "$script")/../src-tauri" && pwd)/Info.plist"
+usage_entries() {
+  local key
+  for key in NSMicrophoneUsageDescription NSAudioCaptureUsageDescription \
+    NSCalendarsFullAccessUsageDescription NSLocalNetworkUsageDescription \
+    NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription \
+    NSDownloadsFolderUsageDescription; do
+    [[ "$key" == "${omit:-}" ]] && continue
+    printf '<key>%s</key><string>%s</string>\n' "$key" \
+      "$(PATH="$scratch/bin:$PATH" plutil -extract "$key" raw -o - "$src_plist")"
+  done
+}
+
 # bundle <name> <bundle id> [<SUPublicEDKey> [<CFBundleVersion>]]: a
 # bundle directory holding macos/Steno.app, its Info.plist with that id,
-# key and build (none of the last two where empty or missing), the app's
-# executable and a sidecar that greets.
+# key and build (none of the last two where empty or missing) and the
+# purpose strings, the app's executable and a sidecar that greets.
 bundle() {
   local dir="$scratch/$1" app key_entry="" build_entry=""
   app="$dir/macos/Steno.app/Contents"
@@ -102,6 +117,7 @@ bundle() {
   <key>CFBundleIdentifier</key><string>$2</string>
   $key_entry
   $build_entry
+  $(usage_entries)
 </dict>
 </plist>
 PLIST
@@ -132,12 +148,19 @@ refused() {
 if output="$(check "$(bundle good "$identifier" "$key")")"; then
   [[ "$output" == *"holds CFBundleIdentifier $identifier"* ]] || fail "the bundle id is not reported: $output"
   [[ "$output" == *"holds SUPublicEDKey $key"* ]] || fail "the key is not reported: $output"
+  for folder in Documents Desktop Downloads; do
+    [[ "$output" == *"holds NS${folder}FolderUsageDescription Steno writes your meeting notes to the folder you chose."* ]] \
+      || fail "the $folder purpose string is not reported: $output"
+  done
 else
   fail "the good bundle failed: $output"
 fi
 refused no-key "SUPublicEDKey ''" "$identifier"
 refused other-key "SUPublicEDKey 'c29tZSBvdGhlciBrZXk='" "$identifier" 'c29tZSBvdGhlciBrZXk='
 refused earlier-id "CFBundleIdentifier 'uno.schmid.steno.desktop'" uno.schmid.steno.desktop "$key"
+# A purpose string the bundle lacks fails it: the vault folder prompt's.
+omit=NSDocumentsFolderUsageDescription refused no-documents-string \
+  "NSDocumentsFolderUsageDescription ''" "$identifier" "$key"
 [[ ! -e "$scratch/codesign-calls" ]] || fail "the unsigned check ran codesign: $(cat "$scratch/codesign-calls")"
 
 # signed <bundle dir> <check-bundle.sh options...>: the signed check with
@@ -192,8 +215,8 @@ other_key='c29tZSBvdGhlciBrZXk='
 # moved_config <identifier> <key>: the moved copy's tauri.conf.json and Info.plist.
 moved_config() {
   printf '{"identifier": "%s"}\n' "$1" > "$moved/src-tauri/tauri.conf.json"
-  printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>SUPublicEDKey</key><string>%s</string></dict></plist>\n' \
-    "$2" > "$moved/src-tauri/Info.plist"
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>SUPublicEDKey</key><string>%s</string>%s</dict></plist>\n' \
+    "$2" "$(usage_entries)" > "$moved/src-tauri/Info.plist"
 }
 # moved_check <bundle dir> <expected text>: the moved script passes the
 # signed check and fails the handoff, naming <expected text>.

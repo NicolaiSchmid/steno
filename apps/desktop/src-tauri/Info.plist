@@ -5,7 +5,10 @@
      strings the TCC prompts show (permissions.rs) and the Bonjour service
      the handover listener advertises, verbatim from the Swift app's
      apps/macos/project.yml. NSAudioCaptureUsageDescription gates Core Audio
-     process taps. -->
+     process taps. The three folder strings are this app's own: macOS shows
+     one when the vault is under Documents, Desktop or Downloads, at the
+     onboarding's vault check or the first export. check-bundle.sh checks
+     every usage string in the built bundle. -->
 <dict>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Steno records the audio of your calls on this Mac so it can transcribe and summarise them afterwards. Audio never leaves your Mac.</string>
@@ -15,6 +18,12 @@
 	<string>Steno reads the title and attendees of the calendar event that overlaps a recording to name the meeting and its speakers.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Steno receives recordings from your paired iPhone over your local network.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Steno writes your meeting notes to the folder you chose.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Steno writes your meeting notes to the folder you chose.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Steno writes your meeting notes to the folder you chose.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_steno._tcp</string>
