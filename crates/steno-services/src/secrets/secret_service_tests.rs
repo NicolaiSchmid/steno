@@ -369,6 +369,116 @@ async fn an_identity_the_service_already_holds_is_not_adopted_over_the_files() {
     );
 }
 
+/// The move's pin applies the handover identity's decision: with nothing
+/// recorded, the file's identity is pinned unless every paired phone was
+/// paired before it started, as no phone can know it then. With no phone,
+/// with phones paired after it, with some before and some after, with a
+/// time after now, and with phones it cannot read, it is pinned, as the
+/// move runs once; a recorded fingerprint stays.
+#[test]
+fn the_pin_records_the_file_s_identity_unless_no_phone_can_know_it() {
+    use chrono::TimeDelta;
+    let mint = chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap();
+    let file_identity = HandoverIdentity::mint("file", mint).unwrap();
+    let pem = file_identity.to_pem().unwrap();
+    let start = file_identity.not_valid_before().unwrap();
+    let now = mint + TimeDelta::days(30);
+    let day = TimeDelta::days(1);
+    for (case, phones, pinned) in [
+        ("no phone", Some(&[][..]), true),
+        ("phones after it", Some(&[start, start + day][..]), true),
+        (
+            "phones before it",
+            Some(&[start - day, start - day * 2][..]),
+            false,
+        ),
+        (
+            "some before, some after",
+            Some(&[start - day, start + day][..]),
+            true,
+        ),
+        (
+            "a pairing after now",
+            Some(&[start - day, now + day][..]),
+            true,
+        ),
+        ("no database", None, true),
+    ] {
+        let folder = tempfile::tempdir().unwrap();
+        let record = FingerprintFile::in_support_directory(folder.path());
+        let store = phones.map(|phones| {
+            let store = steno_core::Store::in_memory().unwrap();
+            for paired_at in phones {
+                crate::testing::pair_a_phone_at(&store, *paired_at);
+            }
+            store
+        });
+        pin_file_identity(&record, &pem, store.as_ref(), now).unwrap();
+        let expected = pinned.then(|| fingerprint(&file_identity));
+        assert_eq!(record.recorded().unwrap(), expected, "{case}");
+
+        record.record("recorded-before").unwrap();
+        pin_file_identity(&record, &pem, store.as_ref(), now).unwrap();
+        assert_eq!(
+            record.recorded().unwrap().as_deref(),
+            Some("recorded-before"),
+            "{case}: a recorded fingerprint stays"
+        );
+    }
+}
+
+/// The service's identity is the one the phones know when every phone was
+/// paired before the file's identity started (the file's was minted later,
+/// while the keyring could not be opened): the first move pins nothing, and
+/// the handover's load adopts the service's identity by the same rule
+/// instead of waiting as replaced.
+#[tokio::test]
+async fn a_file_identity_every_phone_predates_is_not_pinned_over_the_service_s() {
+    use chrono::TimeDelta;
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    let theirs = HandoverIdentity::mint("service", now - TimeDelta::days(30)).unwrap();
+    let ours = HandoverIdentity::mint("file", now - TimeDelta::days(1)).unwrap();
+    setup
+        .launch()
+        .await
+        .set_secret(&identity(), Some(&theirs.to_pem().unwrap()))
+        .await
+        .unwrap();
+    write_file(
+        &setup.path(),
+        &[("handover-identity", &ours.to_pem().unwrap())],
+    );
+    let database = Arc::new(steno_core::Store::in_memory().unwrap());
+    crate::testing::pair_a_phone_at(&database, now - TimeDelta::days(10));
+
+    let store = SecretServiceStore::on_bus_with_phones(
+        file_at(&setup.path(), &[]),
+        setup.record(),
+        Some(database.clone()),
+        &setup.daemon.address,
+        PROMPT_TIMEOUT,
+    );
+    store.chosen().await;
+    assert!(chose_service(&store));
+    assert_eq!(setup.record().recorded().unwrap(), None, "nothing pinned");
+    let loaded = HandoverIdentity::load_or_create(&store, &setup.record(), &database, "x", now)
+        .await
+        .unwrap();
+    assert_eq!(loaded.fingerprint(), theirs.fingerprint());
+    assert_eq!(
+        setup.record().recorded().unwrap(),
+        Some(fingerprint(&theirs))
+    );
+    assert_eq!(
+        database.paired_devices().unwrap().len(),
+        1,
+        "the phone stays"
+    );
+}
+
 #[tokio::test]
 async fn after_the_move_the_service_wins_and_an_older_file_key_goes() {
     let Some(setup) = Setup::new(true, State::default()).await else {
@@ -1199,6 +1309,7 @@ async fn a_choice_that_panics_falls_back_to_the_file() {
     let store = SecretServiceStore::start(
         file_at(&path, &[]),
         FingerprintFile::in_support_directory(folder.path()),
+        None,
         PROMPT_TIMEOUT,
         |_| panic!("a provider's reply broke the parser"),
     );

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use steno_core::{
-    SecretKey, SecretPlace, SecretStore, StenoPaths, async_trait, protocols::BoundaryResult,
+    SecretKey, SecretPlace, SecretStore, StenoPaths, Store, async_trait, protocols::BoundaryResult,
 };
 
 use crate::files::{Access, replace_file, restrict_new_file};
@@ -48,20 +48,34 @@ pub const KEYRING_SERVICE: &str = "uno.schmid.steno.mac";
 /// provider answers on the session bus (else the secrets file, decided on
 /// a thread of the store's own as soon as it is made; see
 /// `SecretServiceStore`). Without `keyring` (the CLI), the secrets file
-/// under the support directory.
+/// under the support directory. It has no database, so a first move into
+/// the Secret Service reads no paired phones; the app's store is
+/// [`secret_store_with_unlock`]'s.
 #[must_use]
 pub fn secret_store(keyring: bool, paths: &StenoPaths) -> Arc<dyn SecretStore> {
-    secret_store_with_unlock(keyring, paths).0
+    secret_store_from(keyring, paths, None).0
 }
 
 /// [`secret_store`], and on Linux what resolves once the Secret Service
 /// store made its choice, true when a read failed with
 /// [`KeyringUnavailable::Unlocking`] on the way while the keyring asked the
 /// user: the app reads its secrets again then. `None` where no store asks.
+/// On Linux the first move into the Secret Service reads the phones paired
+/// in `store` (`SecretServiceStore`).
 #[must_use]
 pub fn secret_store_with_unlock(
     keyring: bool,
     paths: &StenoPaths,
+    store: &Arc<Store>,
+) -> (Arc<dyn SecretStore>, Option<SecretsUnlocked>) {
+    secret_store_from(keyring, paths, Some(store))
+}
+
+/// [`secret_store_with_unlock`] over the database `store`, if any.
+fn secret_store_from(
+    keyring: bool,
+    paths: &StenoPaths,
+    store: Option<&Arc<Store>>,
 ) -> (Arc<dyn SecretStore>, Option<SecretsUnlocked>) {
     let file = || FileSecretStore::in_support_directory(&paths.support_directory);
     if !keyring {
@@ -71,12 +85,13 @@ pub fn secret_store_with_unlock(
     {
         let record =
             crate::handover::FingerprintFile::in_support_directory(&paths.support_directory);
-        let store = SecretServiceStore::new(file(), record);
-        let unlocked = store.unlocked_after_prompt();
-        (Arc::new(store), Some(unlocked))
+        let secrets = SecretServiceStore::new(file(), record, store.cloned());
+        let unlocked = secrets.unlocked_after_prompt();
+        (Arc::new(secrets), Some(unlocked))
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = store;
         (Arc::new(KeyringSecretStore), None)
     }
 }

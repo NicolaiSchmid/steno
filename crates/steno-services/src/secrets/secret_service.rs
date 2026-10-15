@@ -22,8 +22,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
+use steno_core::Store;
 use steno_core::{
     BoxError, SecretKey, SecretPlace, SecretStore, async_trait, protocols::BoundaryResult,
+};
+use steno_handover::identity::decision::{
+    self, Caller, Found, Identities, Observations, Outcome, Phones, Reason, Write,
 };
 use steno_handover::{FingerprintRecord as _, HandoverIdentity};
 use tokio::sync::watch;
@@ -84,7 +88,9 @@ use crate::handover::FingerprintFile;
 /// in the file until an identity is stored, or for the user to take by
 /// hand. As this computer's phones paired with the file's identity, its
 /// fingerprint is recorded first when none is ([`FingerprintFile`]), so the
-/// handover reports the service's as replaced instead of adopting it.
+/// handover reports the service's as replaced instead of adopting it,
+/// unless every paired phone predates the file's identity
+/// (`pin_file_identity`).
 /// After the marker the service wins for every key, and a write through
 /// the store drops that key's copy from the file at once, so a removal or
 /// a change in the launch that moved the entries is never undone by the
@@ -105,6 +111,9 @@ struct Shared {
     file: FileSecretStore,
     /// Where the handover identity's fingerprint is recorded.
     record: FingerprintFile,
+    /// The database the paired phones are read from when the move pins
+    /// the file's identity.
+    phones: Option<Arc<Store>>,
     /// How long a prompt may stay unanswered.
     prompt_timeout: Duration,
     backend: OnceLock<Backend>,
@@ -167,16 +176,19 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl SecretServiceStore {
     /// The Secret Service on the session bus, falling back to `file`, with
-    /// the handover identity's fingerprint in `record`; the choice starts
+    /// the handover identity's fingerprint in `record` and the paired
+    /// phones in `phones` (the app's database; `None` where there is none,
+    /// which the move reads as phones it cannot read); the choice starts
     /// now, on the store's own thread.
     #[must_use]
-    pub fn new(file: FileSecretStore, record: FingerprintFile) -> Self {
-        Self::start(file, record, PROMPT_TIMEOUT, |shared| {
+    pub fn new(file: FileSecretStore, record: FingerprintFile, phones: Option<Arc<Store>>) -> Self {
+        Self::start(file, record, phones, PROMPT_TIMEOUT, |shared| {
             shared.choose_on_own_runtime(&Bus::Session)
         })
     }
 
-    /// The Secret Service on the bus at `address`, falling back to `file`.
+    /// The Secret Service on the bus at `address`, falling back to `file`,
+    /// with no database.
     #[cfg(test)]
     pub(super) fn on_bus(
         file: FileSecretStore,
@@ -184,8 +196,20 @@ impl SecretServiceStore {
         address: &str,
         prompt_timeout: Duration,
     ) -> Self {
+        Self::on_bus_with_phones(file, record, None, address, prompt_timeout)
+    }
+
+    /// [`Self::on_bus`] with the paired phones in `phones`.
+    #[cfg(test)]
+    pub(super) fn on_bus_with_phones(
+        file: FileSecretStore,
+        record: FingerprintFile,
+        phones: Option<Arc<Store>>,
+        address: &str,
+        prompt_timeout: Duration,
+    ) -> Self {
         let bus = Bus::Address(address.to_owned());
-        Self::start(file, record, prompt_timeout, move |shared| {
+        Self::start(file, record, phones, prompt_timeout, move |shared| {
             shared.choose_on_own_runtime(&bus)
         })
     }
@@ -195,12 +219,14 @@ impl SecretServiceStore {
     fn start(
         file: FileSecretStore,
         record: FingerprintFile,
+        phones: Option<Arc<Store>>,
         prompt_timeout: Duration,
         choose: impl FnOnce(&Shared) -> Backend + Send + 'static,
     ) -> Self {
         let shared = Arc::new(Shared {
             file,
             record,
+            phones,
             prompt_timeout,
             backend: OnceLock::new(),
             marked: AtomicBool::new(false),
@@ -398,7 +424,13 @@ impl Shared {
             return Backend::Service(keyring);
         }
         match keyring
-            .take_over(&self.file, &self.record, &contents, ask)
+            .take_over(
+                &self.file,
+                &self.record,
+                self.phones.as_deref(),
+                &contents,
+                ask,
+            )
             .await
         {
             Ok(moved) => {
@@ -626,6 +658,7 @@ impl Keyring {
         &self,
         file: &FileSecretStore,
         record: &FingerprintFile,
+        phones: Option<&Store>,
         contents: &Contents,
         ask: Ask<'_>,
     ) -> Result<usize, ServiceError> {
@@ -641,7 +674,7 @@ impl Keyring {
                         "secrets: the Secret Service already holds another handover identity; \
                          it stays, and the file keeps its own"
                     );
-                    pin_file_identity(record, value)?;
+                    pin_file_identity(record, value, phones, chrono::Utc::now())?;
                 }
                 continue;
             }
@@ -841,12 +874,18 @@ impl Keyring {
     }
 }
 
-/// Records the fingerprint of the file's identity, `pem`, when nothing is
-/// recorded: this computer's phones paired with it, so the handover's load
-/// then finds the service's identity replaced instead of adopting it. A
-/// record that cannot be read, or a file identity that does not parse,
-/// leaves the record as it is (the load refuses over the first, and the
-/// second pins nothing).
+/// Records the fingerprint of the file's identity, `pem`, where the
+/// handover identity's decision ([`decision::decide`], as the move) pins it: with
+/// nothing recorded, unless every phone paired in `phones` was paired
+/// before the file's identity started, judged at `now`. This computer's
+/// phones paired with the file's identity, so the handover's load then
+/// finds the service's replaced instead of adopting it. Where no phone can
+/// know the file's identity it records nothing, and the load judges the
+/// service's identity by the same rule. A recorded fingerprint, a record
+/// that cannot be read, or a file identity that does not parse leaves the
+/// record as it is (the load refuses over the second, and the third pins
+/// nothing). Phones that cannot be read (or no database) pin it, as the
+/// move runs once.
 ///
 /// Its record drops the note of an unfinished Pair again. The move runs
 /// inside the first Secret Service choice, which settles before the
@@ -858,17 +897,49 @@ impl Keyring {
 /// between the note's read and its write leaves the note with nothing
 /// recorded beside the service's identity, which reads as unknown and
 /// waits as replaced too.
-fn pin_file_identity(record: &FingerprintFile, pem: &str) -> Result<(), ServiceError> {
-    if !matches!(record.recorded(), Ok(None)) {
-        return Ok(());
-    }
-    let Ok(identity) = HandoverIdentity::from_pem(pem) else {
+fn pin_file_identity(
+    record: &FingerprintFile,
+    pem: &str,
+    phones: Option<&Store>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), ServiceError> {
+    let identities = if let Ok(identity) = HandoverIdentity::from_pem(pem) {
+        Identities::Found(vec![Found {
+            fingerprint: steno_handover::identity::hex(&identity.fingerprint()),
+            start: identity.not_valid_before().ok(),
+        }])
+    } else {
         tracing::warn!("secrets: the file's handover identity does not parse; nothing recorded");
-        return Ok(());
+        Identities::Malformed
     };
-    record
-        .record(&steno_handover::identity::hex(&identity.fingerprint()))
-        .map_err(ServiceError::Record)
+    let phones = match phones.map(Store::paired_devices) {
+        Some(Ok(devices)) => {
+            Phones::Paired(devices.iter().map(|device| device.paired_at).collect())
+        }
+        _ => Phones::Unreadable,
+    };
+    let decided = decision::decide(&Observations {
+        caller: Caller::Move,
+        identities,
+        record: steno_handover::identity::observe_record(record).0,
+        phones,
+        now,
+    });
+    if decided.outcome == Outcome::Wait(Reason::Replaced) {
+        tracing::info!(
+            "secrets: every paired phone predates the file's handover identity; nothing recorded"
+        );
+    }
+    for write in decided.writes {
+        match write {
+            Write::Record(fingerprint) => {
+                record.record(&fingerprint).map_err(ServiceError::Record)?;
+            }
+            // The move's decision writes nothing else.
+            Write::DropNote | Write::RemovePhones => {}
+        }
+    }
+    Ok(())
 }
 
 /// A call's failure after the choice as the user reads it: a bus error or

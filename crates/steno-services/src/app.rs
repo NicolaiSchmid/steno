@@ -684,7 +684,7 @@ pub fn build_with_import(
     ));
     let pending = import(preferences.clone());
     let store = open_store(&database_path)?;
-    let (platform, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
+    let (platform, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths, &store);
     let (import, graph_secrets) =
         gated_secrets(pending, &preferences, platform, &paths, !options.keyring);
     let secrets = graph_secrets.secrets.clone();
