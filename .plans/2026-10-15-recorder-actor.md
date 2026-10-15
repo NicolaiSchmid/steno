@@ -172,8 +172,7 @@ forwarder. The disk watch, the clock and the hook (today's `disk`, `clock` and
   the session started on (`fallback_input` after `session.start`, as today)
   and the start's room, so a low-space warning shows from `Recording` on, as
   `Active::disk_warning` does today;
-- `Deadline(Due)` from the alarm, `Due` being `Countdown`, `DiskReading` or
-  `TonePatience`;
+- `Deadline(Due)` from the alarm, `Due` naming the deadline's kind (below);
 - `Dropped` when the last `CaptureRecorder` goes (below).
 
 A stale `epoch` is dropped in one place, at the top of `step`. Events of the
@@ -221,20 +220,21 @@ and exits, so `a_dropped_recorder_lets_its_countdown_go` still passes, its
 `wait_for_sleepers(1)` replaced by the status check and the alarm wait below.
 
 **Deadlines on the injectable clock, not timer threads.** The auto-stop
-countdown, the 5 s disk reading and the tone tests' patience are deadlines the
-machine returns from `next_deadline()`. One alarm sleeps on the injected
-`steno_audio::Clock` (`Clock::sleep` with a `Cancel`) until the nearest
-deadline, then sends `Deadline`; the actor re-arms it when the deadline moves.
-The alarm holds no state and decides nothing: it re-checks `clock.now()`
-against its deadline each time it wakes, and the machine compares the deadline
-with `now` when the event arrives, so a stale `Deadline` does nothing. This
-replaces the `steno-auto-stop` thread per armed countdown and
-`steno-recording-watch`'s loop. Under `ManualClock` the alarm is one sleeper,
-on the nearest deadline, which while recording is usually the next disk
-reading's (every 20 ms in the tests' disk watch). Since a cancelled sleeper can
-still be registered, tests wait for a sleeper on that deadline (a test-only
-helper beside `wait_for_sleepers`) before they `advance`, and check an armed
-countdown in the status, not in the sleepers.
+countdown (`Countdown`), the 5 s disk reading (`DiskReading`) and the tone
+tests' patience (`TonePatience`) are the deadlines the machine returns from
+`next_deadline()`. One alarm sleeps on the injected `steno_audio::Clock`
+(`Clock::sleep` with a `Cancel`) until the nearest deadline, then sends its
+`Deadline`; the actor re-arms it when the deadline moves. The alarm holds no
+state and decides nothing: it re-checks `clock.now()` against its deadline each
+time it wakes, and the machine compares the deadline with `now` when the event
+arrives, so a stale `Deadline` does nothing. This replaces the
+`steno-auto-stop` thread per armed countdown and `steno-recording-watch`'s
+loop. Under `ManualClock` the alarm is one sleeper, on the nearest deadline,
+which while recording is usually the next disk reading's (every 20 ms in the
+tests' disk watch). Since a cancelled sleeper can still be registered, tests
+wait for a sleeper on that deadline (a test-only helper beside
+`wait_for_sleepers`) before they `advance`, and check an armed countdown in the
+status, not in the sleepers.
 
 **A lock-free `status()`.** After each step that changes what the host shows,
 the actor builds an `Arc<RecorderStatus>` and stores it in an `ArcSwap`
@@ -282,8 +282,8 @@ that thread or call, and the recording goes on. The actor keeps both:
 
 - **The I/O worker** runs each effect inside `catch_unwind` and answers a panic
   with the effect's `Done`, carrying `START_PANICKED` (once `BegunMeeting` has
-  undone the start) or `SAVE_PANICKED`; a panic in `CloseSession` skips its
-  stop's `Save` and drops the session before that stop's one `StopFinished`,
+  undone the start) or `SAVE_PANICKED`. A panic in `CloseSession` skips its
+  stop's `Save` and drops the session before the stop's one `StopFinished`,
   leaving the row `recording` as a panic in today's `session.stop()` does. A
   guard sends `Done(WorkerGone)` if the thread ends, answered as a panicked
   start or stop, and the actor spawns a fresh worker before the next effect.
@@ -299,11 +299,11 @@ that thread or call, and the recording goes on. The actor keeps both:
   `ToneTest`; while `Idle` it stores `START_PANICKED` for a `Start` or a
   `Toggle`. A `Quit` is the exception: it still waits for a stop under way, and
   with none it leaves a start or a recording to the next launch's recovery. A
-  `Countdown` or `DiskReading` deadline whose step panics is dropped, as today
-  only the panicking thread ends: the countdown is disarmed as `keep_recording`
-  does (today's answer to a countdown thread that cannot spawn), or the disk
-  readings and the write-failed check end, as when today's watch panics. The
-  other kind keeps firing, and no past deadline is left to fire again.
+  `Countdown` or `DiskReading` deadline whose step panics is dropped and the
+  other kind keeps firing, as a panic today ends only its own thread: the
+  countdown is disarmed as `keep_recording` does (today's answer to a countdown
+  thread that cannot spawn), or the disk readings and the write-failed check
+  end, as when today's watch panics. No past deadline is left to fire again.
 - **A panic on what a start or a stop waits for ends it instead.** That is any
   `Done`, whose effect has run, and a `ToneTestEnded` or `TonePatience`
   deadline while a start waits for tone tests. The actor sets the phase
