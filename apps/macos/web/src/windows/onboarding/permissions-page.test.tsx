@@ -113,4 +113,66 @@ describe("PermissionsPage", () => {
 		await user.click(screen.getByTestId("onboarding-done"));
 		expect(callsTo(harness.transport, "onboarding.advance")).toHaveLength(1);
 	});
+
+	it("has no speech models or vault row unless the host sends them", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(<OnboardingWindow />, harness);
+		expect(screen.queryByTestId("onboarding-models")).not.toBeInTheDocument();
+		expect(
+			screen.queryByTestId("onboarding-vault-access"),
+		).not.toBeInTheDocument();
+	});
+
+	it("downloads the speech models through Settings' install, once per model", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness("scenario=onboarding-handoff");
+		renderWithBridge(<OnboardingWindow />, harness);
+		const row = screen.getByTestId("onboarding-models");
+		expect(row).toHaveTextContent("Speech models");
+		expect(row).toHaveTextContent(
+			"Meetings wait until these are downloaded. Not downloaded · 22 MB.",
+		);
+		await user.click(screen.getByTestId("onboarding-models-download"));
+		expect(
+			callsTo(harness.transport, "settings.transcription.download"),
+		).toEqual([
+			{
+				method: "settings.transcription.download",
+				params: { assetID: "offlineDiarizer" },
+			},
+		]);
+	});
+
+	it("says where a refused vault is allowed, and checks again", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness("scenario=onboarding-handoff");
+		renderWithBridge(<OnboardingWindow />, harness);
+		expect(screen.getByTestId("onboarding-vault-access")).toHaveTextContent(
+			"Steno cannot write your notes to Work Vault. Turn on Steno under Files and Folders in System Settings, then choose Check again.",
+		);
+		await user.click(screen.getByTestId("onboarding-vault-open"));
+		expect(
+			callsTo(harness.transport, "onboarding.openFilesAndFolders"),
+		).toHaveLength(1);
+		await user.click(screen.getByTestId("onboarding-vault-check"));
+		expect(callsTo(harness.transport, "onboarding.refresh")).toHaveLength(1);
+	});
+
+	it("shows the download's progress and a writable vault", async () => {
+		const harness = await createBridgeHarness(
+			"scenario=onboarding-handoff-downloading",
+		);
+		renderWithBridge(<OnboardingWindow />, harness);
+		expect(screen.getByTestId("onboarding-models-progress")).toHaveTextContent(
+			"40%",
+		);
+		expect(
+			screen.getByRole("progressbar", {
+				name: "Downloading the speech models",
+			}),
+		).toHaveAttribute("aria-valuenow", "40");
+		expect(screen.getByTestId("onboarding-vault-access")).toHaveTextContent(
+			"Steno writes your meeting notes to Work Vault.",
+		);
+	});
 });

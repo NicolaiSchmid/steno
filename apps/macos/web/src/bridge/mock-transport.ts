@@ -172,6 +172,8 @@ export const scenarios = [
 	"onboarding-vault-saved",
 	"onboarding-import",
 	"onboarding-import-waiting",
+	"onboarding-handoff",
+	"onboarding-handoff-downloading",
 ] as const;
 
 /**
@@ -388,9 +390,9 @@ export function applyScenario(
 	// `recording.live`, `meeting.detail.damagedAudio`,
 	// `meeting.detail.keptIncomplete`, `settings.summaries.codex`,
 	// `settings.summaries.fileKey`, `settings.iphone.pairing`,
-	// `settings.iphone.waiting`, `onboarding.setup`, `onboarding.import` and
-	// `meeting.detail.keyWithheld` are fixtures, not topics; the page never
-	// sees them by those names.
+	// `settings.iphone.waiting`, `onboarding.setup`, `onboarding.import`,
+	// `onboarding.handoff` and `meeting.detail.keyWithheld` are fixtures, not
+	// topics; the page never sees them by those names.
 	delete result["recording.live"];
 	delete result["meeting.detail.damagedAudio"];
 	delete result["meeting.detail.keptIncomplete"];
@@ -400,6 +402,7 @@ export function applyScenario(
 	delete result["settings.iphone.waiting"];
 	delete result["onboarding.setup"];
 	delete result["onboarding.import"];
+	delete result["onboarding.handoff"];
 	delete result["meeting.detail.keyWithheld"];
 	return result;
 }
@@ -415,8 +418,12 @@ export function applyScenario(
  * open), `onboarding-codex` (page 2 with ChatGPT chosen and its consent
  * card), `onboarding-vault-saved` (page 2 with the vault saved and the
  * Summaries form open), `onboarding-import` (the import step before page 1,
- * not run yet, two prompts) and `onboarding-import-waiting` (the step after
- * a denied export, from `onboarding.import`, with Try again).
+ * not run yet, two prompts), `onboarding-import-waiting` (the step after
+ * a denied export, from `onboarding.import`, with Try again),
+ * `onboarding-handoff` (page 1 after the update from the Swift app, from
+ * `onboarding.handoff`: the speaker models to download and a vault whose
+ * folder macOS refused) and `onboarding-handoff-downloading` (that, the
+ * models downloading and the vault writable).
  */
 function applyOnboardingScenario(
 	result: FixtureMap,
@@ -428,6 +435,28 @@ function applyOnboardingScenario(
 	const importStep = snapshots["onboarding.import"] as
 		| OnboardingSnapshot
 		| undefined;
+	const handoff = snapshots["onboarding.handoff"] as
+		| OnboardingSnapshot
+		| undefined;
+	if (scenario === "onboarding-handoff" && handoff) {
+		result.onboarding = handoff;
+	}
+	if (
+		scenario === "onboarding-handoff-downloading" &&
+		handoff?.speechModels &&
+		handoff.vaultAccess
+	) {
+		result.onboarding = {
+			...handoff,
+			speechModels: {
+				state: "downloading",
+				detail: "Downloading… 40%",
+				assetIDs: [],
+				downloadFraction: 0.4,
+			},
+			vaultAccess: { state: "writable", name: handoff.vaultAccess.name },
+		} satisfies OnboardingSnapshot;
+	}
 	if (!onboarding || !setup) {
 		return;
 	}

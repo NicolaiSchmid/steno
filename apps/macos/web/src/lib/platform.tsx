@@ -80,6 +80,12 @@ export interface PlatformWords {
 	 */
 	localNetworkPrompt?: string;
 	/**
+	 * What to do when the phone cannot find this computer, with "Open"
+	 * `systemSettings` at its local network switch; Mac only, the one
+	 * platform with such a switch Steno can open.
+	 */
+	localNetworkHelp?: string;
+	/**
 	 * What a permission the system says nothing of before a recording
 	 * (the host's `unknown`) means, where Steno has no prompt to raise:
 	 * Windows and Linux. A row in that state says this instead of offering
@@ -105,6 +111,8 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
 		systemAudioPrompt:
 			"macOS asks once, during a short test recording that plays a tone.",
 		localNetworkPrompt: "macOS asks when you pair the first phone.",
+		localNetworkHelp:
+			"If your iPhone can't find this Mac, turn on Steno under Local Network in System Settings.",
 	},
 	windows: {
 		computer: "computer",

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { PhoneSettingsSnapshot } from "@/bridge/contract";
 import { loadFixtureSnapshots } from "@/bridge/mock-transport";
+import { platformFor } from "@/lib/platform";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { PhoneSection } from "./iphone-section";
 
@@ -171,5 +172,33 @@ describe("PhoneSection", () => {
 		);
 		await user.click(screen.getByText("Details"));
 		expect(screen.getByText("Address already in use.")).toBeInTheDocument();
+	});
+
+	it("says where the Mac's local network switch is, on the Mac only", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness();
+		const { unmount } = renderWithBridge(<PhoneSection />, harness);
+		expect(screen.getByTestId("phone-local-network")).toHaveTextContent(
+			"If your iPhone can't find this Mac, turn on Steno under Local Network in System Settings.",
+		);
+		await user.click(screen.getByTestId("phone-local-network-open"));
+		expect(callsTo(harness.transport, "system.openSystemSettings")).toEqual([
+			{
+				method: "system.openSystemSettings",
+				params: { kind: "localNetwork" },
+			},
+		]);
+		unmount();
+		for (const os of ["windows", "linux"] as const) {
+			const { unmount: done } = renderWithBridge(
+				<PhoneSection />,
+				await createBridgeHarness(),
+				platformFor(os),
+			);
+			expect(
+				screen.queryByTestId("phone-local-network"),
+			).not.toBeInTheDocument();
+			done();
+		}
 	});
 });
