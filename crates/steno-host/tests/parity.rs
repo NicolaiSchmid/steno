@@ -844,15 +844,7 @@ fn onboarding_handoff() {
             fakes
                 .speech_models
                 .set_installed(ModelAsset::ParakeetV3, Some(485_000_000));
-            let mut settings = store.settings().unwrap();
-            settings.obsidian = Some(steno_core::ObsidianSettings {
-                vault_path: "/Users/nicolai/Documents/Work Vault".to_owned(),
-                people_folder: None,
-                include_audio: false,
-                task_tag: None,
-                extra: serde_json::Map::new(),
-            });
-            store.save_settings(&settings).unwrap();
+            store_vault(store, "/Users/nicolai/Documents/Work Vault");
             fakes.export_validator.fail_validation(Some(
                 "Steno cannot write to the Obsidian vault at /Users/nicolai/Documents/Work Vault.",
             ));
@@ -863,12 +855,10 @@ fn onboarding_handoff() {
         .for_window(BridgeWindow::Onboarding)
         .page_ready()
         .unwrap();
-    harness.wait_for("the vault check", |harness| {
-        harness
-            .sink
-            .last(BridgeTopic::Onboarding)
-            .is_some_and(|onboarding| onboarding["vaultAccess"]["state"] == "refused")
-    });
+    harness.wait_for(
+        "the vault check",
+        onboarding_row_is("vaultAccess", "refused"),
+    );
     assert_parity(
         "onboarding.handoff",
         &harness.snapshot(BridgeTopic::Onboarding),

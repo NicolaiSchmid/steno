@@ -1151,16 +1151,11 @@ fn the_speech_models_row_downloads_through_settings_and_follows_it() {
                 .unwrap();
         }
     };
-    let row_is = |state: &'static str| {
-        move |harness: &Harness| {
-            harness
-                .sink
-                .last(BridgeTopic::Onboarding)
-                .is_some_and(|onboarding| onboarding["speechModels"]["state"] == state)
-        }
-    };
     download(&harness);
-    harness.wait_for("the failed download", row_is("failed"));
+    harness.wait_for(
+        "the failed download",
+        onboarding_row_is("speechModels", "failed"),
+    );
     let row = harness.snapshot(BridgeTopic::Onboarding)["speechModels"].clone();
     assert_eq!(row["failure"], "offline");
     assert_eq!(row["assetIDs"], json!(["offlineDiarizer"]));
@@ -1188,7 +1183,10 @@ fn the_speech_models_row_downloads_through_settings_and_follows_it() {
 
     harness.fakes.speech_models.fail_downloads(None);
     download(&harness);
-    harness.wait_for("the install", row_is("installed"));
+    harness.wait_for(
+        "the install",
+        onboarding_row_is("speechModels", "installed"),
+    );
     assert_eq!(
         harness.snapshot(BridgeTopic::Onboarding)["speechModels"],
         json!({ "assetIDs": [], "detail": "Installed", "state": "installed" })
@@ -1205,15 +1203,7 @@ fn the_speech_models_row_downloads_through_settings_and_follows_it() {
 
 /// The stored vault under Documents, as the Swift app left it.
 fn with_a_vault(store: &steno_core::Store, _: &steno_host::fakes::FakeServices) {
-    let mut settings = store.settings().unwrap();
-    settings.obsidian = Some(steno_core::ObsidianSettings {
-        vault_path: "/Users/nicolai/Documents/Work Vault".to_owned(),
-        people_folder: None,
-        include_audio: false,
-        task_tag: None,
-        extra: serde_json::Map::new(),
-    });
-    store.save_settings(&settings).unwrap();
+    store_vault(store, "/Users/nicolai/Documents/Work Vault");
 }
 
 fn missing_microphone(_: &steno_core::Store, fakes: &steno_host::fakes::FakeServices) {
@@ -1233,12 +1223,7 @@ fn vault_checks(harness: &Harness) -> usize {
 }
 
 fn vault_row_is(state: &'static str) -> impl Fn(&Harness) -> bool {
-    move |harness| {
-        harness
-            .sink
-            .last(BridgeTopic::Onboarding)
-            .is_some_and(|onboarding| onboarding["vaultAccess"]["state"] == state)
-    }
+    onboarding_row_is("vaultAccess", state)
 }
 
 /// Page 1 writes to the stored vault once, when the onboarding window's
