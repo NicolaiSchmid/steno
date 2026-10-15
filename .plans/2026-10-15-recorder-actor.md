@@ -9,11 +9,10 @@ stable plan.
 
 This plan turns a review of the capture and the recorder, and Nicolai's
 decisions on it (both 2026-10-15), into work; everything it needs from them is
-written here. It supersedes no plan and changes none in its own PR: no plan
-rule asks for an entry for work after stable, and the open rc.1 PRs (#263,
-#286) edit the stable plan. The pointer lands with the D9 ruling: the PR that
-records it in D9's entry also adds this plan to the stable plan's "What
-follows".
+written here. It supersedes no plan and changes none in its own PR, since no
+plan rule asks for an entry for work after stable and the open rc.1 PRs (#263,
+#286) are editing the stable plan. The PR that records the D9 ruling in D9's
+entry also adds this plan to the stable plan's "What follows".
 
 ## Goal
 
@@ -89,8 +88,8 @@ These land before `0.11.0-rc.1` under their own owners:
 
 - **#286** merges as is (Nicolai, 2026-10-15).
 - **P40** (added to the stable plan by #286) changes how the host takes the
-  recorder's hook. Whatever its final form, PR 2 runs the hook on one notifier
-  thread and `status()` never waits, so PR 2 needs nothing more from it.
+  recorder's hook. Whatever its final form, PR 2 needs nothing more from it:
+  the hook runs on its own notifier thread and `status()` never waits.
 - **A15** (added to the stable plan by #263): the Objective-C exception catch
   covers the CoreML warm-up (`warm_up_if_installed`), which runs during a live
   recording. PR 2 keeps the warm-up off the I/O worker: the start's effect
@@ -129,15 +128,16 @@ the levels slot stays shared, with its forwarder.
   `stop_for_quit`'s; the menu's Quit sends `RefuseStarts`. The caller reads the
   denied permissions on its own thread;
 - `Capture { epoch, State | Notice | StalledDevice | Input }` from thin
-  forwarders over the session's receivers, which decide nothing. The forwarder
-  makes both stream reads, the stalled device at a `DeviceChanged` and the
-  input at a `DeviceResumed`, and sends each as its own event; the actor calls
-  no `CaptureControl` method itself;
+  forwarders over the session's receivers, which decide nothing. They also make
+  both stream reads (the stalled device at a `DeviceChanged`, the input at a
+  `DeviceResumed`) and send each as its own event, so the actor calls no
+  `CaptureControl` method;
 - `Levels { epoch }`: the forwarder stores the newest levels in a slot and
   sends a wake only when the actor has read the last one, so 10 Hz levels never
   queue up behind a busy step;
-- `Disk { epoch, free, write_failed }` from a reader thread, which also asks
-  `write_failed()` at each reading;
+- `Disk { epoch, free, write_failed }` from a reader thread of its own, because
+  `statvfs` and `write_failed()` can block (a network volume, the session mutex
+  during a rebuild); at most one reading is in flight;
 - `Done(StartFinished | StopFinished)` from the I/O worker;
 - `Deadline` from the alarm.
 
@@ -172,9 +172,7 @@ arrives, so a stale `Deadline` does nothing. This replaces the `steno-auto-stop`
 thread per armed countdown and the watch's own loop. Under `ManualClock` the
 alarm is one sleeper, so `wait_for_sleepers` and `advance` drive time; tests
 read a command's reply before `wait_for_sleepers`, so a cancelled sleeper is not
-counted. The disk reading runs on its own reader thread, because `statvfs` and
-`write_failed()` can block (a network volume, the session mutex during a
-rebuild); at most one reading is in flight.
+counted.
 
 **A lock-free `status()`.** After each step that changes what the host shows,
 the actor builds an `Arc<RecorderStatus>` and stores it in an `ArcSwap`
@@ -187,18 +185,18 @@ clone, with nothing under it.
 
 **The change hook on one notifier thread.** The hook takes the host lock and
 can reload the list from the store, and detection's hook takes detection's
-state lock, so the actor never calls it. After storing a snapshot the actor
-wakes `steno-recorder-hook`; wakes coalesce, and the hook reads the newest
-snapshot, so the hook and `status()` agree. Rule: no thread waits for an actor
-reply while it holds a lock the hook takes (the host's `inner`, detection's
-`state`); `status()` and `is_busy()` never wait. Today the hook already runs on
-whichever thread changed something, so the host does not change.
+state lock, so the actor calls neither. After storing a snapshot it wakes
+`steno-recorder-hook`; wakes coalesce, and the hook reads the newest snapshot,
+so the hook and `status()` agree. Rule: no thread waits for an actor reply
+while it holds a lock the hook takes (the host's `inner`, detection's `state`).
+The hook already runs on any thread today (the lock order, above), so the host
+does not change.
 
 **Admission is one value.** `quitting`, `start_holds` and `starts_refused`
-become `Admission { holds, refused: Option<Refusal> }`, where `Refusal` is
+become `Admission { holds, refused: Option<Refusal> }`. `Refusal` is
 `MenuQuit` (the menu's Quit, #286's `starts_refused`), which says
 `QUITTING_REFUSAL`, or `ShuttingDown` (`stop_for_quit`, today's `quitting`),
-which refuses silently as today and takes precedence; a hold says
+which takes precedence and refuses silently as today; a hold says
 `INSTALLING_UPDATE`. A tone test is admitted only while idle and not refused,
 in the same step that a start sets `Starting`, so no tone reaches a recording.
 `RefuseStarts` is a non-blocking send, so the shell's main thread can make it,
@@ -269,8 +267,7 @@ The same shape one layer down, in `steno-audio`:
   becomes the events' epoch, checked in one place;
 - `backend.start()` runs on a worker, so the session mutex is never held for
   seconds; a stop during that start is accepted at once and tears the backend
-  down once its `start` returned, so `backend.stop()` never runs beside
-  `backend.start()`;
+  down once that `start` has returned (the teardown rule, below);
 - the writer thread stores levels into an atomic slot instead of taking the
   session mutex (`Core::publish`);
 - one `events()` channel replaces `states()`, `notices()` and `levels()`, and
@@ -400,7 +397,7 @@ the D9 ruling is made.
     locked store. That is today's behaviour too (a start is refused until the
     recorder is idle); the test above pins that the status stays live.
   - The host sees the hook on the notifier thread. It already runs on any
-    thread today; the host's tests run unchanged.
+    thread today, and the host's tests run unchanged.
 
 ### PR 3: the session's control loop and one events channel
 
@@ -441,8 +438,8 @@ D9 reads: "no change to the audio and speech path is planned after the
 cutover." PR 3 changes the capture session's control plane (which thread decides
 a restart, a stall and the end of a recording), not what is recorded. It still
 sits inside the audio path, so it needs Nicolai's ruling. PRs 1 and 2 stay in
-`steno-services` and change no part of the capture, so they need none; PR 2's
-release rule below holds whatever the ruling.
+`steno-services` and change no part of the capture, so they need none, but
+PR 2 has its own release rule, below.
 
 Proposed ruling, for Nicolai to confirm, change or refuse:
 
@@ -466,10 +463,10 @@ The options:
   restart state stays in two copies, the mutex stays held over
   `backend.start()`, and `microphone_is_the_master` keeps its mirror.
 
-**PR 2's release rule.** PR 2 rewrites recording behaviour code, though not the
-capture. Like PR 3, it merges only after the 14-day rollback window of
-`0.11.0` has closed, and it ships first in a candidate of the next minor
-release that passes R5's soak and G2's stability count. If both merge before
+**PR 2's release rule**, whatever the ruling. PR 2 rewrites recording
+behaviour, so it too merges only after the 14-day rollback window of `0.11.0`
+has closed and ships first in a candidate of the next minor release that
+passes R5's soak and G2's stability count. If PR 2 and PR 3 both merge before
 the count starts, one series covers both.
 
 ## Follow-ups this plan takes over
@@ -478,5 +475,5 @@ the count starts, one series covers both.
 |---|---|---|
 | A macOS MSRV job. The `msrv` job (`rust-version` 1.90, `.github/workflows/rust-ci.yml`) runs on Linux only, so Mac-only code is checked against the MSRV only by hand. | #285 | Its own `ci` PR, the first after the stable release and before PR 1, so PR 3's Mac code is checked. The Linux job's steps (`rust-version` read from `Cargo.toml`, then `cargo +<version> check --workspace --all-targets --locked`) on the macOS runner (`vars.MACOS_RUNS_ON`, `macos-15` as the fallback), same triggers as the Linux job. Acceptance: green on `main`, and red on a scratch commit that uses an API newer than the MSRV under `cfg(target_os = "macos")`. Risk: one more job on Forge, a shared machine. |
 | `DiskWarning` hysteresis. `DiskWarning::set` forgets a dismissal at the first reading with room, so a reading that hovers across the 30-minute line shows a dismissed warning again at each crossing. | #285 | PR 2, as table rows. The machine keeps the minutes left at every reading, not only under the line (a helper beside `Room::of`, which stays as it is). Proposed: the warning shows under 30 minutes; a dismissal is forgotten only at 40 minutes or more. Nicolai settles the 40 in PR 2. |
-| A stale countdown on a stalled Windows call. The change hook fires only after the notice thread's stream read, which can wait up to about 10 s behind a rebuild's start, so the host can show a countdown the status already hides. Cosmetic; no data lost. | #283 | PR 2: the `DeviceChanged` step marks the capture as recovering and publishes at once, so the hook and the status agree from that step on; the stream read for the stalled device moves to the forwarder, which sends it as a `StalledDevice` event. Acceptance: with the fake's `stream()` held at a gate, the hook's status after the `DeviceChanged` shows no countdown. PR 3 removes the read altogether: the session's event names the stalled device. |
-| Three ways to refuse a start: `quitting`, `start_holds`, `starts_refused`. | #286 | PR 2: `Admission { holds, refused: Option<Refusal> }`, one message slot. #286's tests (`a_start_after_a_menu_quit_is_refused_with_a_message`, `a_stop_under_way_at_a_menu_quit_still_tries_its_commit_again`) run unchanged. |
+| A stale countdown on a stalled Windows call. The change hook fires only after the notice thread's stream read, which can wait up to about 10 s behind a rebuild's start, so the host can show a countdown the status already hides. Cosmetic; no data lost. | #283 | PR 2: the `DeviceChanged` step marks the capture as recovering and publishes at once, so the hook and the status agree from that step on; the stalled device's stream read moves to the forwarder (`StalledDevice`, above). Acceptance: with the fake's `stream()` held at a gate, the hook's status after the `DeviceChanged` shows no countdown. PR 3 removes the read altogether: the session's event names the stalled device. |
+| Three ways to refuse a start: `quitting`, `start_holds`, `starts_refused`. | #286 | PR 2: one `Admission` value (above), one message slot. #286's tests (`a_start_after_a_menu_quit_is_refused_with_a_message`, `a_stop_under_way_at_a_menu_quit_still_tries_its_commit_again`) run unchanged. |
