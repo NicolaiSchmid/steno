@@ -134,6 +134,21 @@ fn onboarding_vault_error_details() {
 }
 
 #[test]
+fn onboarding_speech_models_fraction_and_failure() {
+    let mut onboarding: OnboardingSnapshot = fixture("onboarding.handoff");
+    let row = onboarding.speech_models.as_mut().unwrap();
+    let before = encoded(&*row);
+    assert!(before.get("downloadFraction").is_none());
+    assert!(before.get("failure").is_none());
+
+    row.download_fraction = Some(0.5);
+    row.failure = Some("The network connection was lost.".into());
+    let json = encoded(&*row);
+    assert_eq!(json["downloadFraction"], 0.5);
+    assert_eq!(json["failure"], "The network connection was lost.");
+}
+
+#[test]
 fn general_settings_snapshot_error_details() {
     let mut general: GeneralSettingsSnapshot = fixture("settings.general");
     assert!(encoded(&general).get("errorDetails").is_none());

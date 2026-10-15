@@ -133,6 +133,10 @@ string_enum! {
         /// The import step's Not now: no prompt comes up, phone handover
         /// waits, and the step returns at the next launch.
         OnboardingSkipImport = "onboarding.skipImport",
+        /// The vault row's Open System Settings when the write was refused:
+        /// Privacy & Security > Files and Folders on the Mac, nothing
+        /// elsewhere. Rust only.
+        OnboardingOpenFilesAndFolders = "onboarding.openFilesAndFolders",
 
         UpdatesCheck = "updates.check",
         SystemOpenUrl = "system.openURL",

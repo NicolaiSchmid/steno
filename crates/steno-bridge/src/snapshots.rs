@@ -611,6 +611,58 @@ pub struct OnboardingVault {
     pub error_details: Option<String>,
 }
 
+/// Page 1's speech models row, shown while the models a meeting needs were
+/// missing when onboarding opened (the speaker models after the update
+/// from the Swift app, every model on a fresh install), and kept, as
+/// installed, once they arrive. Download starts
+/// [`BridgeMethod::SettingsTranscriptionDownload`](crate::BridgeMethod::SettingsTranscriptionDownload)
+/// once per id in `asset_ids`, the install Settings runs. Rust only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingSpeechModels {
+    pub state: crate::TranscriptionAssetState,
+    /// The row's status line: "Not downloaded · 33 MB", "Downloading… 40%",
+    /// "Installed".
+    pub detail: String,
+    /// The models Download or Retry starts; empty while they download or
+    /// once they are installed.
+    #[serde(rename = "assetIDs")]
+    pub asset_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_fraction: Option<f64>,
+    /// Why the last download did not finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+string_enum! {
+    /// Whether Steno may write to the stored vault. Rust only.
+    pub enum OnboardingVaultAccessState {
+        /// The check runs; macOS may be asking for the folder.
+        Checking = "checking",
+        Writable = "writable",
+        /// The write was refused, most often because macOS's Files and
+        /// Folders setting is off for Steno.
+        Refused = "refused",
+    }
+}
+
+/// Page 1's vault row on the Mac: the stored vault is written to once while
+/// the page shows, so a Files and Folders prompt for a vault under
+/// Documents, Desktop, Downloads or iCloud Drive comes up here rather than
+/// at the first export. Absent without a stored vault, and off the Mac.
+/// Rust only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingVaultAccess {
+    pub state: OnboardingVaultAccessState,
+    /// The vault folder's name.
+    pub name: String,
+    /// Why the write was refused, in the destination's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// The onboarding window: page 1's permission steps and page 2's two setup
 /// rows. Swift: `OnboardingSnapshot`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -632,6 +684,12 @@ pub struct OnboardingSnapshot {
     /// was current. Rust only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swift_import: Option<OnboardingImport>,
+    /// Page 1's speech models row. Rust only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_models: Option<OnboardingSpeechModels>,
+    /// Page 1's vault row. Rust only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_access: Option<OnboardingVaultAccess>,
     /// Set once onboarding is over; the page closes the window.
     pub finished: bool,
 }

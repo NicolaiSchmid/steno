@@ -128,6 +128,7 @@ export const bridgeMethods = [
 	"onboarding.finish",
 	"onboarding.import",
 	"onboarding.skipImport",
+	"onboarding.openFilesAndFolders",
 	"updates.check",
 	"system.openURL",
 	"system.openSystemSettings",
@@ -774,6 +775,30 @@ export const onboardingSnapshot = z
 			})
 			.strict()
 			.optional(),
+		// Page 1's speech models row while the models a meeting needs were
+		// missing when onboarding opened; Download sends
+		// `settings.transcription.download` once per id. The Tauri shell
+		// alone sends it.
+		speechModels: z
+			.object({
+				state: z.enum(["absent", "downloading", "installed", "failed"]),
+				detail: z.string(),
+				assetIDs: z.array(z.string()),
+				downloadFraction: z.number().optional(),
+				failure: z.string().optional(),
+			})
+			.strict()
+			.optional(),
+		// Page 1's vault row on the Mac: the stored vault written to once,
+		// so macOS asks for its folder here. The Tauri shell alone sends it.
+		vaultAccess: z
+			.object({
+				state: z.enum(["checking", "writable", "refused"]),
+				name: z.string(),
+				error: z.string().optional(),
+			})
+			.strict()
+			.optional(),
 		finished: z.boolean(),
 	})
 	.strict();
@@ -959,6 +984,7 @@ export const methodParams = {
 	"onboarding.finish": null,
 	"onboarding.import": null,
 	"onboarding.skipImport": null,
+	"onboarding.openFilesAndFolders": null,
 	"updates.check": null,
 	"system.openURL": openURLParams,
 	"system.openSystemSettings": permissionKindParams,
@@ -1037,8 +1063,10 @@ export const fixtureSchemas = {
 	"reply.confirm": confirmReply,
 	"reply.chosenPath": chosenPathReply,
 	// Written by the Rust bridge alone (the Swift app has no import step,
-	// never withholds the API key, and its phone handover never waits).
+	// never withholds the API key, its phone handover never waits, and its
+	// onboarding has no speech models or vault row).
 	"onboarding.import": onboardingSnapshot,
 	"meeting.detail.keyWithheld": meetingDetailSnapshot,
 	"settings.iphone.waiting": phoneSettingsSnapshot,
+	"onboarding.handoff": onboardingSnapshot,
 } as const satisfies Record<string, z.ZodTypeAny>;

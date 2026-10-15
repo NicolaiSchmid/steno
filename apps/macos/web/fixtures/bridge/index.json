@@ -53,5 +53,6 @@
   "reply.chosenPath",
   "onboarding.import",
   "meeting.detail.keyWithheld",
-  "settings.iphone.waiting"
+  "settings.iphone.waiting",
+  "onboarding.handoff"
 ]

@@ -682,6 +682,17 @@ pub fn drop_sample_summary(store: &Store) {
 }
 
 /// The settings with an LM Studio endpoint configured, no vault.
+/// Installs the models a meeting needs (the speech model and the
+/// diarizer), so onboarding shows no speech models row.
+pub fn install_speech_models(fakes: &FakeServices) {
+    for asset in [
+        steno_host::speech::ModelAsset::ParakeetV3,
+        steno_host::speech::ModelAsset::OfflineDiarizer,
+    ] {
+        fakes.speech_models.set_installed(asset, None);
+    }
+}
+
 pub fn configure_llm(store: &Store, model: &str) {
     let mut settings = store.settings().unwrap();
     settings.llm_base_url = Some("http://127.0.0.1:1234/v1".to_owned());

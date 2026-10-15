@@ -1,5 +1,5 @@
 //! The bridge host over the real store: one [`Host`] owns every view model
-//! of the three windows and answers all 77 methods, after
+//! of the three windows and answers all 78 methods, after
 //! `Web/{MainWindowBridge,SettingsBridge,OnboardingBridge}.swift` and the
 //! controller state of `AppController.swift` the bridges read. Commands
 //! map one to one onto the view models' methods, so no rule lives here;
@@ -77,9 +77,9 @@
 //! the host (the `services` module doc has the rule), except for the calls
 //! that run with it released: the recorder's commands, whose changes
 //! re-enter the host (`Host::recorder_changed`), the permission prompts,
-//! the LLM probe, the Codex calls and the model download, the prompts and
-//! the probe with their busy flag published first.
-//! `settings.transcription.download`
+//! the LLM probe, the Codex calls, the model download and onboarding's
+//! vault check, the prompts, the probe and the check with their busy state
+//! published first. `settings.transcription.download`
 //! replies after its first publish and keeps publishing from its own
 //! thread until the download ends; a second download of the asset
 //! reattaches to that thread instead of starting one. The flush thread
@@ -367,6 +367,11 @@ pub const TOPICS: [BridgeTopic; 12] = [
     BridgeTopic::Onboarding,
 ];
 
+/// What a model download or remove changes: Settings' Transcription
+/// section and onboarding's speech models row, which reads its states.
+const MODEL_TOPICS: [BridgeTopic; 2] =
+    [BridgeTopic::SettingsTranscription, BridgeTopic::Onboarding];
+
 const SECTION_TOPICS: [BridgeTopic; 6] = [
     BridgeTopic::SettingsGeneral,
     BridgeTopic::SettingsRecording,
@@ -432,6 +437,11 @@ pub fn pair_again_prompt(platform: Platform) -> ConfirmDestructiveParams {
         confirm_title: "Pair again".to_owned(),
     }
 }
+
+/// System Settings > Privacy & Security > Files and Folders, which the
+/// vault row opens when the write to the vault was refused. Rust only.
+pub const FILES_AND_FOLDERS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
 
 /// The preferences flag Swift's `AppController` set on its first launch on
 /// the Mac; here it counts the first launch on Linux and Windows.
@@ -710,7 +720,11 @@ impl Host {
                 inner.subtitle(SettingsSection::Phone),
                 self.shared.config.platform,
             )),
-            BridgeTopic::Onboarding => to_value(onboarding::snapshot(&inner.onboarding)),
+            BridgeTopic::Onboarding => to_value(onboarding::snapshot(
+                &inner.onboarding,
+                &inner.speech,
+                self.shared.services.speech_models.as_ref(),
+            )),
         };
         snapshot.ok()
     }
@@ -1304,7 +1318,48 @@ impl Host {
                 .opener
                 .close_window(BridgeWindow::Onboarding);
         }
+        self.check_vault_if_due();
         answer
+    }
+
+    /// Page 1's vault row ([`OnboardingViewModel::begin_vault_check`]):
+    /// when the model says the check is due, the row reads checking and
+    /// the probe write runs on its own thread, since macOS holds it while
+    /// its Files and Folders prompt is up; the outcome lands on the row.
+    /// Called once the onboarding page is ready and after every onboarding
+    /// command, so a page that reaches page 1 later (after the import step,
+    /// Back from page 2) checks then.
+    fn check_vault_if_due(&self) {
+        let settings = {
+            let mut inner = self.lock();
+            let settings = inner.onboarding.begin_vault_check(&self.shared.store);
+            if settings.is_some() {
+                inner.publisher.schedule(BridgeTopic::Onboarding);
+            }
+            settings
+        };
+        let Some(settings) = settings else {
+            return;
+        };
+        self.publish();
+        let host = self.clone();
+        let spawned = thread::Builder::new()
+            .name("steno-vault-check".to_owned())
+            .spawn(move || {
+                let outcome = host.shared.services.export_validator.validate(&settings);
+                host.finish_vault_check(outcome);
+            });
+        if let Err(error) = spawned {
+            self.finish_vault_check(Err(
+                format!("The vault could not be checked: {error}").into()
+            ));
+        }
+    }
+
+    fn finish_vault_check(&self, outcome: steno_core::protocols::BoundaryResult<()>) {
+        self.command(&[BridgeTopic::Onboarding], |inner| {
+            inner.onboarding.finish_vault_check(outcome);
+        });
     }
 
     fn command(&self, topics: &[BridgeTopic], body: impl FnOnce(&mut Inner)) {
@@ -1433,7 +1488,7 @@ impl Host {
             .services
             .speech_models
             .download(asset, &mut |fraction, phase| {
-                self.command(&[BridgeTopic::SettingsTranscription], |inner| {
+                self.command(&MODEL_TOPICS, |inner| {
                     inner.speech.download_progress(asset, fraction, phase);
                 });
             });
@@ -1441,6 +1496,7 @@ impl Host {
             inner
                 .speech
                 .finish_download(asset, outcome, &self.shared.services);
+            inner.publisher.schedule(BridgeTopic::Onboarding);
         });
     }
 
@@ -1549,11 +1605,13 @@ impl Host {
     }
 
     /// Page 1 moves on by itself once every step is handled, as the Swift
-    /// page did; only after a command that can change a step, so Back from
-    /// page 2 stays on page 1.
+    /// page did, and the speech models row has nothing left to download;
+    /// only after a command that can change a step, so Back from page 2
+    /// stays on page 1.
     fn advance_if_handled(&self, inner: &mut Inner) {
         if inner.onboarding.page == steno_bridge::OnboardingPage::Permissions
             && inner.onboarding.permissions_handled()
+            && !inner.onboarding.models_pending(&self.shared.services)
         {
             inner.onboarding.advance(&self.shared.services);
         }
@@ -1702,6 +1760,9 @@ impl BridgeHost for Host {
     fn page_ready(&self) -> Outcome<()> {
         self.lock().publisher.page_did_become_ready();
         self.publish();
+        if self.window == BridgeWindow::Onboarding {
+            self.check_vault_if_due();
+        }
         Ok(())
     }
 
@@ -2245,7 +2306,9 @@ impl BridgeHost for Host {
         let starts = {
             let mut inner = self.lock();
             let starts = inner.speech.begin_download(asset);
-            inner.publisher.schedule(BridgeTopic::SettingsTranscription);
+            for topic in MODEL_TOPICS {
+                inner.publisher.schedule(topic);
+            }
             starts
         };
         self.publish();
@@ -2264,6 +2327,7 @@ impl BridgeHost for Host {
                     Err(message.clone().into()),
                     &self.shared.services,
                 );
+                inner.publisher.schedule(BridgeTopic::Onboarding);
             });
             return Err(BridgeError::failed(message));
         }
@@ -2274,6 +2338,7 @@ impl BridgeHost for Host {
         let asset = parse_asset(&params)?;
         self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
             inner.speech.remove(asset, &self.shared.services);
+            inner.publisher.schedule(BridgeTopic::Onboarding);
         });
         Ok(())
     }
@@ -2524,6 +2589,7 @@ impl BridgeHost for Host {
             inner
                 .onboarding
                 .load(&self.shared.store, &self.shared.services, KeyRead::Absent);
+            inner.onboarding.retry_vault_check();
             self.advance_if_handled(inner);
         });
         Ok(())
@@ -2642,6 +2708,14 @@ impl BridgeHost for Host {
         }
         let status = import.skip();
         self.finish_swift_import(status, true);
+        Ok(())
+    }
+
+    /// On the Mac only: no other platform asks for a folder.
+    fn onboarding_open_files_and_folders(&self) -> Outcome<()> {
+        if self.shared.config.platform == Platform::Macos {
+            self.shared.services.opener.open_url(FILES_AND_FOLDERS_URL);
+        }
         Ok(())
     }
 

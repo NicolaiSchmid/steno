@@ -249,6 +249,7 @@ bridge_host! {
     OnboardingFinish => fn onboarding_finish() -> ();
     OnboardingImport => fn onboarding_import() -> ();
     OnboardingSkipImport => fn onboarding_skip_import() -> ();
+    OnboardingOpenFilesAndFolders => fn onboarding_open_files_and_folders() -> ();
 
     UpdatesCheck => fn updates_check() -> ();
     SystemOpenUrl => fn system_open_url(params: OpenUrlParams) -> ();
