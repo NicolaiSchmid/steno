@@ -26,7 +26,8 @@ serde_json.workspace = true
 steno-adapters = { path = "../steno-adapters" }
 steno-audio = { path = "../steno-audio" }
 steno-bridge = { path = "../steno-bridge" }
-steno-core = { path = "../steno-core" }
+# `Store::reading` and `Store::writing`, the store's facade for async code.
+steno-core = { path = "../steno-core", features = ["tokio"] }
 # The ONNX diarizer only; the CoreML diarizer is not wired.
 steno-diarize = { path = "../steno-diarize", default-features = false, features = ["onnx"] }
 steno-handover = { path = "../steno-handover" }

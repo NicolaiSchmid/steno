@@ -1387,11 +1387,16 @@ impl App {
     }
 
     /// The host hears of every update check from here on, the launch
-    /// tick's included.
+    /// tick's included, on the blocking pool: the schedule calls from a
+    /// runtime worker, and the host's lock may be held through a settings
+    /// save's busy wait.
     fn report_update_checks(&self, host: &Arc<Host>) {
         if let Some(updates) = &self.updates {
-            let updates_host = host.clone();
-            updates.on_change(Arc::new(move || updates_host.updates_changed()));
+            let (updates_host, runtime) = (host.clone(), self.runtime.clone());
+            updates.on_change(Arc::new(move || {
+                let host = updates_host.clone();
+                runtime.spawn_blocking(move || host.updates_changed());
+            }));
         }
     }
 
@@ -1409,8 +1414,11 @@ impl App {
             tokio::spawn(async move { start_if_paired(&handover).await });
         }
         if let Some(gated) = &self.gated_handover {
-            let phones_host = host.clone();
-            tokio::spawn(gated.clone().follow(move || phones_host.phones_changed()));
+            // On the blocking pool, as the update checks' report.
+            let (phones_host, runtime) = (host.clone(), self.runtime.clone());
+            tokio::spawn(gated.clone().follow(move || {
+                runtime.spawn_blocking(move || phones_host.phones_changed());
+            }));
         }
     }
 

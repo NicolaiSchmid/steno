@@ -58,9 +58,12 @@
 //! event follower and their two-second poll ([`Host::apply_meeting_event`],
 //! [`Host::store_changed`], [`Host::refresh_pairing`]) call from their
 //! runtime's blocking pool, so a reload that waits never holds a runtime
-//! worker. The update schedule's `Host::updates_changed` and the gated
-//! handover's `Host::phones_changed` still call from runtime workers;
-//! both only read, and P40's readers end their wait. One exemption: the
+//! worker, and so do the update schedule's `Host::updates_changed` and
+//! the gated handover's `Host::phones_changed`, which wait for the
+//! view-model lock a settings save may hold through its busy wait. Under
+//! the lock the host reads on a reader of its own
+//! ([`Store::with_own_reader`]), so no read there waits for a write. One
+//! exemption: the
 //! launch (`steno_services::App::launch`, with
 //! [`Host::should_open_onboarding`] before it) runs on the shell's main
 //! thread during setup, once the main window is built and before the
