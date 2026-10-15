@@ -31,10 +31,10 @@ use rustls_pki_types::pem::PemObject as _;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sha2::{Digest as _, Sha256};
 use steno_core::{BoxError, SecretKey, SecretStore, Store, StoreError};
-
-use decision::{Caller, Found, Identities, Observations, Outcome, Phones, Reason, Record, Write};
 use thiserror::Error;
 use uuid::Uuid;
+
+use decision::{Caller, Found, Identities, Observations, Outcome, Phones, Reason, Record, Write};
 
 /// The identity: the leaf certificate (for the fingerprint the phone pins
 /// and the computer id derived from it) and the private key rustls

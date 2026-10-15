@@ -85,9 +85,8 @@ use crate::swift_import::{HandoverGate, ImportMarker};
 ///   unreadable, and one that cannot open it waits as
 ///   [`PhoneWaitingReason::FileNotOpened`].
 /// - Only the load's decision interprets the note
-///   ([`HandoverIdentity::load_or_create`]).
-///   Anything that only needs the pinned fingerprint reads `KEY`, as
-///   before.
+///   ([`HandoverIdentity::load_or_create`]). Anything that only needs the
+///   pinned fingerprint reads `KEY`, as before.
 /// - Writes are not serialised between instances. The writers outside a
 ///   load and Pair again are the Swift import's store, which runs only
 ///   while the import's marker is absent and so meets no note (every Pair
@@ -412,9 +411,8 @@ const COMPUTER: &str = if cfg!(target_os = "macos") {
 /// sentence when the guard refused the identity or the record could not be
 /// opened, as the card below it says what to do; a sentence of its own when
 /// the database failed or the record does not parse, and when Pair again
-/// could not note
-/// the next fingerprint (the caller logs the error); the read's error
-/// otherwise.
+/// could not note the next fingerprint (the caller logs the error); the
+/// read's error otherwise.
 pub(crate) fn identity_failure(error: &IdentityError) -> String {
     match error {
         IdentityError::Unavailable(Unavailability::Missing) => {

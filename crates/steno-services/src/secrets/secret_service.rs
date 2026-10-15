@@ -22,9 +22,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
-use steno_core::Store;
 use steno_core::{
-    BoxError, SecretKey, SecretPlace, SecretStore, async_trait, protocols::BoundaryResult,
+    BoxError, SecretKey, SecretPlace, SecretStore, Store, async_trait, protocols::BoundaryResult,
 };
 use steno_handover::identity::decision::{
     self, Caller, Found, Identities, Observations, Outcome, Phones, Reason, Write,
@@ -875,17 +874,12 @@ impl Keyring {
 }
 
 /// Records the fingerprint of the file's identity, `pem`, where the
-/// handover identity's decision ([`decision::decide`], as the move) pins it: with
-/// nothing recorded, unless every phone paired in `phones` was paired
-/// before the file's identity started, judged at `now`. This computer's
-/// phones paired with the file's identity, so the handover's load then
-/// finds the service's replaced instead of adopting it. Where no phone can
-/// know the file's identity it records nothing, and the load judges the
-/// service's identity by the same rule. A recorded fingerprint, a record
-/// that cannot be read, or a file identity that does not parse leaves the
-/// record as it is (the load refuses over the second, and the third pins
-/// nothing). Phones that cannot be read (or no database) pin it, as the
-/// move runs once.
+/// handover identity's decision ([`decision::decide`], as the move) pins
+/// it over the phones paired in `phones` (none: phones it cannot read),
+/// judged at `now`. This computer's phones paired with the file's
+/// identity, so the handover's load then finds the service's replaced
+/// instead of adopting it; where no phone can know the file's identity it
+/// records nothing, and the load judges the service's by the same rule.
 ///
 /// Its record drops the note of an unfinished Pair again. The move runs
 /// inside the first Secret Service choice, which settles before the
