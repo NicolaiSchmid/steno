@@ -3630,6 +3630,12 @@ mod tests {
         let summaries = asked.snapshot(BridgeTopic::SettingsSummaries);
         assert_eq!(summaries["hasAPIKey"], false);
         assert!(summaries.get("keyStore").is_none(), "{summaries}");
+        // No speech model is installed here, so onboarding waits on page 1
+        // with its speech models row; Continue shows the Summaries row.
+        let host = asked.host.clone();
+        on_own_thread(PATIENCE, "onboarding moved on", move || {
+            steno_bridge::BridgeHost::onboarding_advance(&host).unwrap();
+        });
         let onboarding = asked.snapshot(BridgeTopic::Onboarding);
         assert_eq!(
             onboarding["summaries"]["error"],
