@@ -259,12 +259,11 @@ become `Admission { holds, refused: Option<Refusal> }`. `Refusal` is `MenuQuit`
 `ShuttingDown` (`stop_for_quit`, today's `quitting`); a hold says
 `INSTALLING_UPDATE`. As in #286, a start is refused in this order: silently
 when `ShuttingDown` or not idle, then with `MenuQuit`'s message, then with a
-hold's. A tone test is admitted only while `Idle` and no `Refusal` is set, so
-none begins once a start has set `Starting` or a Quit has refused the starts. A
-start waits for those already running (above), so no tone reaches a recording;
-`RefuseStarts` and `Quit` cancel them and wait for none, as #286 does.
-`RefuseStarts` is a non-blocking send the shell's main thread can make, and
-channel order refuses every start sent after it.
+hold's. A tone test is admitted only while `Idle` and no `Refusal` is set. A
+start waits for the tests already running (above), so no tone reaches a
+recording; `RefuseStarts` and `Quit` cancel them and wait for none, as #286
+does. `RefuseStarts` is a non-blocking send the shell's main thread can make,
+and channel order refuses every start sent after it.
 
 **Quit is a command.** `stop_for_quit` raises the shutdown's `Cancel`, which
 the I/O worker's `retrying_while` reads, so a save under way stops retrying a
@@ -283,27 +282,29 @@ that thread or call, and the recording goes on. The actor keeps both:
   undone the start) or `SAVE_PANICKED`. A guard sends `Done(WorkerGone)` if the
   thread ends, answered as a panicked start or stop, and the actor spawns a
   fresh worker before the next effect.
-- **Before `step`** the actor applies what no panic may lose, as today's
-  `quitting` and `starts_refused` are plain stores: the counts of `Hold`,
-  `Release` and `ToneTestEnded`, the `Refusal` of `RefuseStarts` and `Quit` and
-  the tone-test cancel they raise, and a `Disk` reading's in-flight mark, which
-  `step` finds applied.
+- **Before `step`** the actor applies what no panic may lose, so `step` finds
+  it applied: the counts of `Hold`, `Release` and `ToneTestEnded`; the
+  `Refusal` of `RefuseStarts` and `Quit` and the tone-test cancel they raise,
+  as today's `quitting` and `starts_refused` are plain stores; and a `Disk`
+  reading's in-flight mark.
 - **A step that panics loses only its event:** it runs on a copy of the machine
   (a few small fields, cloned on the actor thread, never on the audio path)
   kept only if `step` returns, so the phase and its epoch stay and a start or a
   recording goes on. The actor logs the panic and replies at once, refusing a
-  `ToneTest`, and while `Idle` stores `START_PANICKED` for a `Start` or a
-  `Toggle`. A `Quit` still waits for a stop under way, else it leaves a start or
-  a recording to the next launch's recovery. A lost `Deadline` is not sent
-  again (the alarm re-arms only when the deadline moves), so the disk readings
-  and the countdown end, as when today's watch or countdown thread panics.
-- **A panic on what a start or a stop waits for ends it:** on any `Done`, whose
-  effect has run, or on a `ToneTestEnded` or `Deadline` while a start waits for
-  tone tests, the actor sets the phase outside `step`: `Idle`, or, after a
-  `StartFinished` with a started session, `Stopping` on the same epoch while
-  the I/O worker undoes the start as `BegunMeeting` does. Every held reply is
-  sent at the next `Idle`; the error is `START_PANICKED` for a start or its
-  undo, else `SAVE_PANICKED`, as a panic in `finish_stop` leaves it.
+  `ToneTest`; while `Idle` it stores `START_PANICKED` for a `Start` or a
+  `Toggle`. A `Quit` is the exception: it still waits for a stop under way, and
+  with none it leaves a start or a recording to the next launch's recovery. A
+  lost `Deadline` is not sent again (the alarm re-arms only when the deadline
+  moves), so the disk readings and the countdown end, as when today's watch or
+  countdown thread panics.
+- **A panic on what a start or a stop waits for ends it instead.** That is any
+  `Done`, whose effect has run, and a `ToneTestEnded` or `Deadline` while a
+  start waits for tone tests. The actor sets the phase outside `step`: `Idle`,
+  or `Stopping` on the same epoch after a `StartFinished` with a started
+  session, while the I/O worker undoes the start as `BegunMeeting` does. The
+  error is `START_PANICKED` for a start or its undo, else `SAVE_PANICKED`, as a
+  panic in `finish_stop` leaves it, and every held reply is sent at the next
+  `Idle`.
 
 If the actor thread itself dies, every later command's send fails at once and
 returns, and a guard on the thread stores a status whose error is
