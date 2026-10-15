@@ -161,59 +161,57 @@ forwarder. The disk watch, the clock and the hook (today's `disk`, `clock` and
 
 A stale `epoch` is dropped in one place, at the top of `step`. Events of the
 epoch that is stopping still apply: the I/O worker drops the session and joins
-its forwarders before it sends `StopFinished`. They hold the session weakly, as
-the notice thread does today, since a receiver ends only when the session is
-gone. Everything they sent therefore arrives first, and the stop's notes name
-the stalled device and the fallback input, as `finish_stop`'s join of the notice
-thread makes them today. The disk reader also holds the session weakly and is
-never joined: a reading that arrives while stopping is a second stop cause or a
-warning the stopping status does not show, and one that arrives after
-`StopFinished` is dropped, since `Idle` has no epoch.
+its forwarders before it sends `StopFinished`, so everything they sent arrives
+first and the stop's notes name the stalled device and the fallback input, as
+`finish_stop`'s join of the notice thread makes them today. The forwarders hold
+the session weakly, as the notice thread does, since a receiver ends only when
+the session is gone. The disk reader also holds it weakly and is never joined:
+a reading that arrives while stopping is a second stop cause or a warning the
+stopping status does not show, and one that arrives after `StopFinished` is
+dropped, since `Idle` has no epoch.
 
 **Replies keep today's timing**, so the `Recorder` trait's methods return when
-they do today, and each reply is sent after the step that sends it has stored
-its snapshot, so a `status()` read after a reply sees that step (the host's
-`recording_start` reads it to select the live row or re-read the permissions).
-`Start`, and a `Toggle` that starts, reply after `StartFinished`, or at once
-when refused; `Stop`, and a `Toggle` that stops, after the `StopFinished` of the
-stop they began, or at once when they begin none; `Quit` once the phase is
-`Idle` ("Quit is a command", below). `RefuseStarts` and `ToneTestEnded` get no
-reply; every other command replies after its own step. After `Hold` the status
-says what an install would stop, as `hold_starts`' doc promises; channel order
-and the reply now give that, not the lock the doc names.
+they do today. `Start`, and a `Toggle` that starts, reply after
+`StartFinished`, or at once when refused; `Stop`, and a `Toggle` that stops,
+after the `StopFinished` of the stop they began, or at once when they begin
+none; `Quit` once the phase is `Idle` ("Quit is a command", below).
+`RefuseStarts` and `ToneTestEnded` get no reply; every other command replies
+after its own step. Each reply is sent after its step has stored its snapshot,
+so a `status()` read after a reply sees that step (the host's `recording_start`
+reads it to select the live row or re-read the permissions). After `Hold` the
+status says what an install would stop, as `hold_starts`' doc promises; channel
+order and the reply now give that, not the lock the doc names.
 
-**Effects run off the machine:** `OpenSession`, `CloseSession(reason)`, `Save`,
-`Publish`, `Log`, `ReadDisk`, `CancelToneTests`. `Publish`, `Log` and
-`CancelToneTests` run on the actor; `ReadDisk` goes to the disk reader (above);
-the rest run in order on one I/O worker thread, `steno-recorder-io`:
-`OpenSession` is all of today's `start_inner` (session start, up to 10 s),
-`CloseSession` is `session.stop()`, and `Save` is `intake.complete`, whose busy
-commit waits out the 5 s busy timeout up to `COMMIT_ATTEMPTS` (3) times, or
-`recover_failed_stop`. A start while system audio tests run emits
-`CancelToneTests` and holds `OpenSession` until the last `ToneTestEnded` or
-until `TONE_TEST_PATIENCE` passes, so the I/O worker waits on no test. The actor thread never blocks on I/O, so it
-answers a command, a notice or a status read while a start or a save waits.
-More threads run than today (the actor, the I/O worker, the alarm, the
-forwarders, the disk reader, the hook's notifier; PR 2 names each
-`steno-recorder-*`), but only `steno-recorder` changes state. Dropping the last
-`CaptureRecorder` sends `Dropped`: the actor cancels the alarm, ends the
-notifier and the I/O worker, and exits, so
-`a_dropped_recorder_lets_its_countdown_go` still passes, its
+**Effects run off the machine:** `Publish`, `Log` and `CancelToneTests` on the
+actor, `ReadDisk` on the disk reader (above), and `OpenSession`,
+`CloseSession(reason)` and `Save` in order on one I/O worker thread,
+`steno-recorder-io`. `OpenSession` is all of today's `start_inner` (session
+start, up to 10 s), `CloseSession` is `session.stop()`, and `Save` is
+`intake.complete`, whose busy commit waits out the 5 s busy timeout up to
+`COMMIT_ATTEMPTS` (3) times, or `recover_failed_stop`. A start while system
+audio tests run emits `CancelToneTests` and holds `OpenSession` until the last
+`ToneTestEnded` or until `TONE_TEST_PATIENCE` passes, so the I/O worker waits
+on no test. The actor thread never blocks on I/O, so it answers a command, a
+notice or a status read while a start or a save waits. More threads run than
+today (the actor, the I/O worker, the alarm, the forwarders, the disk reader,
+the hook's notifier; PR 2 names each `steno-recorder-*`), but only
+`steno-recorder` changes state. Dropping the last `CaptureRecorder` sends
+`Dropped`: the actor cancels the alarm, ends the notifier and the I/O worker,
+and exits, so `a_dropped_recorder_lets_its_countdown_go` still passes, its
 `wait_for_sleepers(1)` replaced by a wait on the countdown's deadline (below).
 
 **Deadlines on the injectable clock, not timer threads.** The auto-stop
 countdown, the 5 s disk reading and the tone tests' patience are deadlines the
 machine returns from `next_deadline()`. One alarm sleeps on the injected
-`steno_audio::Clock`
-(`Clock::sleep` with a `Cancel`) until the nearest deadline, then sends
-`Deadline`; the actor re-arms it when the deadline moves. The alarm holds no
-state and decides nothing: it re-checks `clock.now()` against its deadline each
-time it wakes, and the machine compares the deadline with `now` when the event
-arrives, so a stale `Deadline` does nothing. This replaces the `steno-auto-stop`
-thread per armed countdown and `steno-recording-watch`'s loop. Under
-`ManualClock` the alarm is one sleeper; since a cancelled sleeper can still be
-registered, tests wait for it by its deadline (a test-only helper beside
-`wait_for_sleepers`) before they `advance`.
+`steno_audio::Clock` (`Clock::sleep` with a `Cancel`) until the nearest
+deadline, then sends `Deadline`; the actor re-arms it when the deadline moves.
+The alarm holds no state and decides nothing: it re-checks `clock.now()`
+against its deadline each time it wakes, and the machine compares the deadline
+with `now` when the event arrives, so a stale `Deadline` does nothing. This
+replaces the `steno-auto-stop` thread per armed countdown and
+`steno-recording-watch`'s loop. Under `ManualClock` the alarm is one sleeper;
+since a cancelled sleeper can still be registered, tests wait for it by its
+deadline (a test-only helper beside `wait_for_sleepers`) before they `advance`.
 
 **A lock-free `status()`.** After each step that changes what the host shows,
 the actor builds an `Arc<RecorderStatus>` and stores it in an `ArcSwap`
@@ -243,8 +241,9 @@ a hold says `INSTALLING_UPDATE`. As in #286, a start is refused in this order:
 silently when `ShuttingDown` or not idle, then with `MenuQuit`'s message, then
 with a hold's. A tone test is admitted only while `Idle` and not
 `ShuttingDown`, so none begins once a start has set `Starting`, and a start
-waits for those already running (above): no tone reaches a recording. `RefuseStarts` is a non-blocking send the shell's
-main thread can make, and channel order refuses every start sent after it.
+waits for those already running (above): no tone reaches a recording.
+`RefuseStarts` is a non-blocking send the shell's main thread can make, and
+channel order refuses every start sent after it.
 
 **Quit is a command.** `stop_for_quit` raises the shutdown's `Cancel`, which
 the I/O worker's `retrying_while` reads, so a save under way stops retrying a
