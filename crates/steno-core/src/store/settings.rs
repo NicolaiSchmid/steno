@@ -8,6 +8,11 @@
 //! Swift: `Sources/StenoCore/Storage/SettingsStore.swift`, which still
 //! deletes and rewrites every row.
 //!
+//! A row that cannot be read as its setting fails the load with
+//! [`StoreError::UndecodableSetting`], which names the row's key and what is
+//! wrong with it and leaves the value out. Rust only: the Swift app's
+//! decoding error named a coding path.
+//!
 //! Parakeet v3 ([`PARAKEET_V3_ENGINE_ID`]) is the one engine the Rust app
 //! runs; [`Store::retire_speech_engine`] moves any other stored engine id
 //! (Whisper, Parakeet Ultra and the German Parakeet the Swift app offered)
@@ -18,7 +23,7 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer, Visitor};
 use serde_json::Value;
 
-use super::{Result, Store, execute_cached, query_all};
+use super::{Result, Store, StoreError, execute_cached, query_all};
 use crate::json;
 use crate::model::Settings;
 
@@ -34,6 +39,28 @@ const SPEECH_ENGINE_KEY: &str = "speechEngineID";
 /// The key [`Settings::handover_port`] is stored under, the one users type
 /// by hand (`apps/desktop/README.md`).
 const HANDOVER_PORT_KEY: &str = "handoverPort";
+
+/// What is wrong with a stored setting
+/// ([`StoreError::UndecodableSetting`]), in words that never quote the
+/// value. Rust only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingProblem {
+    /// The row's text is not JSON.
+    NotJson,
+    /// The row is JSON, but not of the shape the setting has in this
+    /// build (a string where a number belongs, a name this build does not
+    /// know).
+    WrongShape,
+}
+
+impl std::fmt::Display for SettingProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SettingProblem::NotJson => "is not valid JSON",
+            SettingProblem::WrongShape => "does not have the form this version of Steno reads",
+        })
+    }
+}
 
 /// `settings` as a JSON object. Through text, not `to_value`, so an `f32`
 /// keeps its shortest form (`0.6`) as in [`json::to_column_string`].
@@ -79,6 +106,29 @@ impl<'de> Deserializer<'de> for FieldNames<'_> {
     }
 }
 
+/// The first stored key whose value alone over `defaults` does not decode
+/// as `Settings`, as the error that names it: the merged object failed as a
+/// whole, and serde's message quotes the value it choked on. `None` when
+/// each row decodes on its own (two rows that only fail together), which
+/// leaves serde's error.
+fn undecodable_row(
+    defaults: &serde_json::Map<String, Value>,
+    merged: &serde_json::Map<String, Value>,
+) -> Option<StoreError> {
+    merged
+        .iter()
+        .filter(|(key, value)| defaults.get(*key) != Some(*value))
+        .find(|(key, value)| {
+            let mut alone = defaults.clone();
+            alone.insert((*key).clone(), (*value).clone());
+            serde_json::from_value::<Settings>(Value::Object(alone)).is_err()
+        })
+        .map(|(key, _)| StoreError::UndecodableSetting {
+            key: key.clone(),
+            problem: SettingProblem::WrongShape,
+        })
+}
+
 impl Store {
     /// The defaults overlaid with every stored row.
     pub fn settings(&self) -> Result<Settings> {
@@ -93,7 +143,8 @@ impl Store {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
         })?;
-        let mut merged = object(defaults)?;
+        let defaults = object(defaults)?;
+        let mut merged = defaults.clone();
         for (key, value) in rows {
             if key == HANDOVER_PORT_KEY && json::from_column_str::<Option<u16>>(&value).is_err() {
                 tracing::warn!(
@@ -102,9 +153,16 @@ impl Store {
                 );
                 continue;
             }
-            merged.insert(key, json::from_column_str(&value)?);
+            let Ok(value) = json::from_column_str(&value) else {
+                return Err(StoreError::UndecodableSetting {
+                    key,
+                    problem: SettingProblem::NotJson,
+                });
+            };
+            merged.insert(key, value);
         }
-        Ok(serde_json::from_value(Value::Object(merged))?)
+        serde_json::from_value(Value::Object(merged.clone()))
+            .map_err(|error| undecodable_row(&defaults, &merged).unwrap_or(error.into()))
     }
 
     /// Writes every property and removes the rows of known properties that
@@ -204,6 +262,72 @@ mod tests {
         let mut known = known_keys().to_vec();
         known.sort_unstable();
         assert_eq!(known, serialized);
+    }
+
+    /// Stores `value` as the row of `key`, as another build or a hand edit
+    /// would, past `save_settings`.
+    fn store_with_row(key: &str, value: &str) -> Store {
+        let store = Store::in_memory().unwrap();
+        store.save_settings(&Settings::default()).unwrap();
+        store
+            .write(|transaction| {
+                execute_cached(
+                    transaction,
+                    "INSERT INTO setting (key, value) VALUES (?1, ?2) \
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    params![key, value],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// One row that cannot be read stops the load (no silent default for
+    /// a vault path or a retention rule), and the error names that row's
+    /// key and what is wrong, never its value: a row that is not JSON, a
+    /// row of the wrong type, an enum this build does not know.
+    #[test]
+    fn an_undecodable_row_is_named_by_its_key_without_its_value() {
+        for (key, value, problem) in [
+            (
+                "llmBaseURL",
+                "https://user:sk-secret@example.com",
+                SettingProblem::NotJson,
+            ),
+            (
+                "llmBaseURL",
+                "{\"token\":\"sk-secret\"}",
+                SettingProblem::WrongShape,
+            ),
+            (
+                "defaultRetention",
+                "\"sk-secret-rule\"",
+                SettingProblem::WrongShape,
+            ),
+            ("launchAtLogin", "\"sk-secret\"", SettingProblem::WrongShape),
+        ] {
+            let error = store_with_row(key, value).settings().unwrap_err();
+            let text = error.to_string();
+            assert!(
+                matches!(
+                    &error,
+                    StoreError::UndecodableSetting { key: named, problem: found }
+                        if named == key && *found == problem
+                ),
+                "{key} = {value}: {error:?}"
+            );
+            assert_eq!(text, format!("the stored setting {key} {problem}"));
+            assert!(!text.contains("sk-secret"), "{text}");
+        }
+    }
+
+    /// A row this build does not know, and every row this build wrote,
+    /// load as before.
+    #[test]
+    fn unknown_and_well_formed_rows_still_load() {
+        let store = store_with_row("someLaterSetting", "{\"any\":1}");
+        assert_eq!(store.settings().unwrap(), Settings::default());
     }
 
     #[test]

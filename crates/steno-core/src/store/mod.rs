@@ -34,7 +34,7 @@ use uuid::Uuid;
 pub use assets::ExpiredAsset;
 pub use meetings::DeletedMeeting;
 pub use search::{SearchHit, fts5_pattern};
-pub use settings::PARAKEET_V3_ENGINE_ID;
+pub use settings::{PARAKEET_V3_ENGINE_ID, SettingProblem};
 pub use timings::StageRateRow;
 
 use crate::model::MeetingStateKind;
@@ -60,6 +60,16 @@ pub enum StoreError {
     /// [`convert::DbJson`] and surfaces as [`StoreError::Sqlite`].
     #[error("JSON column: {0}")]
     Json(#[from] serde_json::Error),
+    /// The `setting` path only: the row under `key` cannot be read as the
+    /// setting this build knows by that key (another build wrote it, or a
+    /// hand edit), so the settings do not load. The value is left out: a
+    /// setting can hold a server address or a folder path, and this text
+    /// goes into the log and the "could not start" dialog. Rust only.
+    #[error("the stored setting {key} {problem}")]
+    UndecodableSetting {
+        key: String,
+        problem: SettingProblem,
+    },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("meeting {0} not found")]
