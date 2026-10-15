@@ -74,6 +74,7 @@ fixtures![
     "onboarding.import",
     "meeting.detail.keyWithheld",
     "settings.iphone.waiting",
+    "onboarding.handoff",
 ];
 
 /// The contract's topics (`bridgeTopics` in `contract.ts`). The other
@@ -207,6 +208,7 @@ mod tests {
             "onboarding.import",
             "meeting.detail.keyWithheld",
             "settings.iphone.waiting",
+            "onboarding.handoff",
         ] {
             assert!(fixture(key).is_some(), "{key} is recorded");
             assert!(
