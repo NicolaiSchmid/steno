@@ -96,10 +96,10 @@ These land before `0.11.0-rc.1` under their own owners:
   covers the CoreML warm-up (`warm_up_if_installed`) that runs during a live
   recording. PR 2 keeps the warm-up off the actor: the I/O worker calls
   `warm_up_if_installed` once it has sent `StartFinished`, inside a
-  `catch_unwind` that logs a panic and leaves the recording going. Its model
-  checks stat the model files, so a stop queued behind it waits only for them;
-  the warm-up itself runs on the services runtime as today, so no stop waits
-  for the load and the catch stays where A15 puts it.
+  `catch_unwind` that logs a panic and leaves the recording going. A stop
+  queued behind it waits only for its model checks, which stat the model
+  files: the load itself runs on the services runtime as today, so the catch
+  stays where A15 puts it.
 
 ## Target design
 
@@ -157,17 +157,16 @@ forwarder. The disk watch, the clock and the hook (today's `disk`, `clock` and
   clears the stalled device, and a `StalledDevice` that follows it sets it
   again;
 - `Levels { epoch }`: the forwarder stores the newest levels in a slot and
-  sends a wake only when the actor has read the last one (the actor takes the
-  slot at every wake, before `step`, whatever the phase), so 10 Hz levels never
+  sends a wake only once the actor has taken the last one, which it does at
+  every wake, before `step` and whatever the phase, so 10 Hz levels never
   queue up behind a busy step;
-- `Disk { epoch, free, write_failed }` from the recording's disk reader, a
-  thread of its own per recording, spawned at its first reading and never
-  joined, as today's watch is, because `statvfs` and `write_failed()` can
-  block (a network volume, the session mutex during a rebuild). At most one
-  reading per epoch is in flight, so one still blocked when its recording
-  stops holds back none of the next recording's; a due reading moves the disk
-  deadline on at once, in flight or not, so `next_deadline()` never returns a
-  deadline already past;
+- `Disk { epoch, free, write_failed }` from the recording's disk reader, its
+  own thread because `statvfs` and `write_failed()` can block (a network
+  volume, the session mutex during a rebuild), spawned at its first reading
+  and, like today's watch, never joined. At most one reading per epoch is in
+  flight, so one still blocked when its recording stops holds back none of the
+  next recording's; a due reading moves the disk deadline on at once, in
+  flight or not, so `next_deadline()` never returns a deadline already past;
 - `Done(StartFinished | StopFinished | WorkerGone)` from the I/O worker, each
   with the epoch of the effect it answers; `StartFinished` carries the input
   the session started on (`fallback_input` after `session.start`, as today)
@@ -182,10 +181,10 @@ its forwarders before it sends `StopFinished`, so everything they sent arrives
 first and the stop's notes name the stalled device and the fallback input, as
 `finish_stop`'s join of the notice thread makes them today. The forwarders hold
 the session weakly, as the notice thread does, since a receiver ends only when
-the session is gone. The disk reader also holds it weakly:
-a reading that arrives while stopping is a second stop cause or a warning the
-stopping status does not show, and one that arrives after `StopFinished` is
-dropped, since `Idle` has no epoch.
+the session is gone. The disk reader also holds it weakly: a reading that
+arrives while stopping is a second stop cause or a warning the stopping status
+does not show, and one that arrives after `StopFinished` is dropped, since
+`Idle` has no epoch.
 
 **Replies keep today's timing**, so the `Recorder` trait's methods return when
 they do today. `Start`, and a `Toggle` that starts, reply after
@@ -281,20 +280,20 @@ leaves the recorder idle with an error. A guard on the I/O worker sends
 start or stop, so no waiter is left without a reply, and the actor spawns a
 fresh I/O worker before the next effect that needs one.
 
-`step` runs on a copy of the machine that the actor keeps only when it returns
-(a few small fields, cloned on the actor thread, never on the audio path). A
+`step` runs on a copy of the machine (a few small fields, cloned on the actor
+thread, never on the audio path) that the actor keeps only when it returns. A
 `step` that panics therefore changes at most the phase and the error, as
-`Unwinding` changes only the status today: the `Admission`, the tone tests and
-every reply the actor holds stay as they were before that event. The counts
-stay true, since the actor applies a `Hold`, a `Release` or a `ToneTestEnded`
-to its count before `step`, and a `ToneTest` whose step panics is refused.
-Every reply held at the panic, the panicking command's among them, is sent
-when the phase is next `Idle`. The phase follows what the I/O worker still
-owes, so no owed `Done` is dropped as stale:
+`Unwinding` changes only the status today: the `Admission` and the tone tests
+stay as they were before that event, and their counts stay true, since the
+actor applies a `Hold`, a `Release` or a `ToneTestEnded` to its count before
+`step` and refuses a `ToneTest` whose step panics. Every reply held at the
+panic, the panicking command's among them, is sent when the phase is next
+`Idle`, and the phase follows what the I/O worker still owes, so no owed
+`Done` is dropped as stale:
 
 - **An `OpenSession` owed:** the machine stores `START_PANICKED` but stays
   `Starting`, refusing starts silently, as any phase but `Idle` does, until
-  that epoch's `StartFinished`. It then stays `Stopping` while the I/O worker
+  that epoch's `StartFinished`. It is then `Stopping` while the I/O worker
   undoes the start as a start that panics does today (`BegunMeeting`: the
   session stopped, the folder removed, the meeting failed, the recorded folder
   forgotten), until the undo's `StopFinished`.
