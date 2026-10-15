@@ -1,25 +1,28 @@
 # Recorder actor: one thread decides what a recording does
 
 Status: planned 2026-10-15, not started. **It starts after the stable release
-`0.11.0`** (step 7 and gate G3 of `.plans/2026-10-07-stable-promotion.md`).
-**Nothing in it lands before `0.11.0-rc.1` or while the `0.11.0` candidates
-run**: D9 freezes the audio path at the first candidate, and Nicolai's decision 5
-of 2026-10-15 rules out restructuring the recorder or the capture before rc.1.
-PR 3 also needs a new D9 ruling, below.
+`0.11.0`** (gate G3 of `.plans/2026-10-07-stable-promotion.md`): D9 freezes the
+audio path at the first candidate, and Nicolai decided on 2026-10-15 that
+neither the recorder nor the capture is restructured before rc.1. PR 3 also
+needs a new D9 ruling, below. D, P, A, R, S and G IDs name entries of the
+stable plan.
 
-This plan turns the capture and recorder architecture review of 2026-10-15 into
-work. The review and the decisions live outside the repository; what this plan
-needs from them is written here. It supersedes no plan and changes no other plan
-in its own PR: once Nicolai makes the D9 ruling, PR 3's owner records it in D9's
-entry of the stable plan.
+This plan turns a review of the capture and the recorder, and Nicolai's
+decisions on it (both 2026-10-15), into work; everything it needs from them is
+written here. It supersedes no plan and changes none in its own PR: no plan
+rule asks for an entry for work after stable, and the open rc.1 PRs (#263,
+#286) edit the stable plan. The pointer lands with the D9 ruling: the PR that
+records it in D9's entry also adds this plan to the stable plan's "What
+follows".
 
 ## Goal
 
 Make every decision about a recording (start, stop, auto-stop, the outage
 warnings, the disk floor, quit) one match arm in one pure state machine, run by
 one thread, tested by table tests and a scripted capture under a manual clock.
-A new rule, such as a new stop cause, then becomes one arm and one table row,
-settled in one or two review rounds instead of today's five to seven.
+A new rule, such as a new stop cause, then becomes one arm and one table row
+whose orderings the table tests cover, instead of an interleaving found in
+review (#244 took seven rounds).
 
 The audio does not change: what the capture records, where it writes and the
 order it tears down in stay as they are.
@@ -28,30 +31,33 @@ order it tears down in stay as they are.
 
 The recorder and the capture session decide one recording's state from many
 threads through many locks, and each change uncovers an interleaving nobody
-wrote down.
+wrote down. Counts are on `main` at c79d00b70.
 
 - **#244** (stall watchdog, restarts, coreaudiod restarts) took seven review
-  rounds: rounds 4 to 6 on streak, gap and backoff accounting across rebuilds,
-  round 7 on the window between the notice thread and the auto-stop countdown.
-  Its own soak disproved "about once a minute" only with a 120 s probe.
-- **#283** fixed the order of the outage lock against `session.stream()` so a
-  Windows call's countdown could not end a call while its capture recovered. It
-  left a stale countdown on the host (follow-ups, below).
-- **#277, #287 and #290** were test-only: they moved waits to `HANG_GUARD` and
-  added `HeldOutages`, because the recorder's policy tests run the real
-  producer, processing and writer threads at real-time pace. #287's
-  investigation found that for a non-monotone condition "no bound helps".
-  `recorder.rs`'s tests hold 22 `eventually` waits, 8 sleeps and one
+  rounds: rounds 4 to 6 on the `Streak`, gap and backoff accounting across
+  rebuilds, round 7 on the window between the notice thread and the auto-stop
+  countdown. Its review disproved the session doc's "about once a minute"
+  (P22's log cadence) only with a 120 s probe on the manual clock.
+- **#283** moved the device change's recovery mark (`Outage::follow`) ahead of
+  the notice thread's `session.stream()` read, so a Windows call's countdown
+  could not end a call while its capture recovered. It left a stale countdown
+  on the host (follow-ups, below).
+- **#277 and #287** were test-only: they moved waits to `HANG_GUARD` and added
+  `HeldOutages`, because the recorder's policy tests run the real producer,
+  processing and writer threads at real-time pace; #290 did the same for
+  `steno-audio`'s session tests. #287's investigation found that for a
+  condition that can become true and then false again "no bound helps".
+  `recorder.rs`'s tests hold 26 `eventually` waits, 8 sleeps and one
   `ManualClock`.
-- **#286** (open) adds a third way to refuse a
-  start, `starts_refused`, an `AtomicBool` beside `quitting` and `start_holds`,
-  each with its own lock rule.
+- **#286** (open) adds a third way to refuse a start, `starts_refused`:
+  `quitting` and `start_holds` are fields under `inner`, `starts_refused` an
+  `AtomicBool` outside it.
 
-The cause, on `main` at c79d00b70:
+The cause:
 
 | Where | Threads that change state | Locks |
 |---|---|---|
-| Recorder (`crates/steno-services/src/recorder.rs`, 5 907 lines) | `steno-recording-levels`, `steno-notices`, `steno-recording-watch`, one `steno-auto-stop` per armed countdown, the host's callers, the shutdown's `stop_for_quit`, and with #286 the shell's main thread | `inner`, `changed`, `disk`, `clock`, and per recording `levels`, `fallback`, `outage`; #286 adds an atomic outside them |
+| Recorder (`crates/steno-services/src/recorder.rs`, 5 907 lines) | `steno-recording-levels`, `steno-notices`, `steno-recording-watch`, one `steno-auto-stop` per armed countdown, the host's callers, the shutdown's `stop_for_quit`, and with #286 the shell's main thread | `inner` and its `changes` condvar, `changed`, `disk`, `clock`, and per recording `levels`, `fallback`, `outage`; #286 adds an atomic outside them |
 | Capture session (`crates/steno-audio/src/capture/session.rs`, 2 585 lines) | `steno-watch`, `steno-rebuild`, `steno-wfail`, `steno-probe`, the caller of `stop()` | one `Core.inner` mutex and its `state_changed` condvar, held across `backend.start()` for up to 10 s; the writer thread takes it to publish levels |
 
 - **A recording ends from many places.** In the recorder: user Stop, toggle,
@@ -77,6 +83,20 @@ is pure and has a table test. What is missing is a seam between the recorder and
 the capture (`MakeCaptureSession` returns a concrete `CaptureSession`) and one
 owner for the state.
 
+## What this plan assumes
+
+These land before `0.11.0-rc.1` under their own owners:
+
+- **#286** merges as is (Nicolai, 2026-10-15).
+- **P40** (added to the stable plan by #286) changes how the host takes the
+  recorder's hook. Whatever its final form, PR 2 runs the hook on one notifier
+  thread and `status()` never waits, so PR 2 needs nothing more from it.
+- **A15** (added to the stable plan by #263): the Objective-C exception catch
+  covers the CoreML warm-up (`warm_up_if_installed`), which runs during a live
+  recording. PR 2 keeps the warm-up off the I/O worker: the start's effect
+  spawns it on the services runtime after `StartFinished`, as today, so no stop
+  waits for it, and the catch stays where A15 puts it.
+
 ## Target design
 
 ### The recorder (PRs 1 and 2)
@@ -90,7 +110,8 @@ struct RecorderMachine {
     calls: CallWatch,        // unchanged policy
     capture: CaptureView,    // recovering, still trying, fallback input, stalled device
     disk: DiskWarning,
-    messages: Messages,      // error and warning the status shows
+    tone_tests: ToneTests,   // running system audio tests and their cancels
+    messages: Messages,      // error, warning and launch note the status shows
 }
 
 fn step(&mut self, now: Duration, event: Event) -> Vec<Effect>;
@@ -98,87 +119,121 @@ fn next_deadline(&self) -> Option<Duration>;
 ```
 
 `step` does no I/O, takes no lock and reads no clock: `now` is an argument.
-Today's locked fields (`Outage`, `Fallback`, `DiskWarning`, the levels slot)
-become plain fields.
+Today's locked `Outage`, `Fallback` and `DiskWarning` become plain fields; only
+the levels slot stays shared, with its forwarder.
 
 **One event channel.** The thread reads one `Receiver<Event>`:
 
-- `Command(Start | Stop | Toggle | Quit | Keep | ClearMessages | Hold | Release | RefuseStarts | RefreshPermissions, reply)`
-  from the host's callers;
-- `Capture { epoch, State | Notice }` from thin forwarders over the session's
-  receivers, which decide nothing;
-- `Levels { epoch }`: the forwarder stores the newest levels in a slot and wakes
-  the thread, so 10 Hz levels never queue up behind a busy step;
-- `Disk { epoch, free }` from a reader thread;
+- `Command(Start | Stop | Toggle | Quit | Keep | ClearMessages | Hold | Release | RefuseStarts | RefreshPermissions(denied) | MicrophoneActivity | ToneTest | ToneTestEnded | NoteAdopted(count), reply)`
+  from the host's callers, the call detector and the launch. `Quit` is
+  `stop_for_quit`'s; the menu's Quit sends `RefuseStarts`. The caller reads the
+  denied permissions on its own thread;
+- `Capture { epoch, State | Notice | StalledDevice | Input }` from thin
+  forwarders over the session's receivers, which decide nothing. The forwarder
+  makes both stream reads, the stalled device at a `DeviceChanged` and the
+  input at a `DeviceResumed`, and sends each as its own event; the actor calls
+  no `CaptureControl` method itself;
+- `Levels { epoch }`: the forwarder stores the newest levels in a slot and
+  sends a wake only when the actor has read the last one, so 10 Hz levels never
+  queue up behind a busy step;
+- `Disk { epoch, free, write_failed }` from a reader thread, which also asks
+  `write_failed()` at each reading;
 - `Done(StartFinished | StopFinished)` from the I/O worker;
 - `Deadline` from the alarm.
 
 A stale `epoch` is dropped in one place, at the top of `step`.
 
+**Replies keep today's timing.** `Start` replies after `StartFinished`, or at
+once when it is refused; `Stop`, `Toggle` and `Quit` after `StopFinished`, or
+at once when nothing records; every other command once its step's snapshot is
+stored (`Hold` included, so a `status()` read after it says what an install
+would stop). The `Recorder` trait's methods return when they return today, and
+a `status()` read after a reply sees that step.
+
 **Effects run off the machine:** `OpenSession`, `CloseSession(reason)`, `Save`,
 `Publish`, `Log`, `ReadDisk`, `Arm(deadline)`. Anything that can block runs in
 order on one I/O worker thread, `steno-recorder-io`: all of today's
-`start_inner` (session start, up to 10 s), `session.stop()` with
-`intake.complete`, which may wait on a locked store (P39), and
-`recover_failed_stop`. The actor thread never blocks on I/O, so it answers a
-command, a notice or a status read while a start or a save waits.
+`start_inner` (session start, up to 10 s) with the tone tests' wait before it,
+`session.stop()` with `intake.complete`, whose busy commit waits out the 5 s
+busy timeout up to `COMMIT_ATTEMPTS` (3) times, and `recover_failed_stop`. The
+actor thread never blocks on I/O, so it answers a command, a notice or a status
+read while a start or a save waits. More threads run than today (the actor, the
+I/O worker, the alarm, the forwarders, the disk reader, the hook's notifier;
+PR 2 names each `steno-recorder-*`), but only `steno-recorder` changes state.
 
 **Deadlines on the injectable clock, not timer threads.** The auto-stop
 countdown and the 5 s disk reading are deadlines the machine returns from
 `next_deadline()`. One alarm sleeps on the injected `steno_audio::Clock`
 (`Clock::sleep` with a `Cancel`) until the nearest deadline, then sends
 `Deadline`; the actor re-arms it when the deadline moves. The alarm holds no
-state and decides nothing: the machine compares the deadline with `now` when the
-event arrives, so a stale `Deadline` does nothing. This replaces the
-`steno-auto-stop` thread per armed countdown and the watch's own loop. Under
-`ManualClock` the alarm is one sleeper, so `wait_for_sleepers` and `advance`
-drive time exactly. The disk reading runs on its own reader thread, because
-`statvfs` can block on a network volume; at most one reading is in flight.
+state and decides nothing: it re-checks `clock.now()` against its deadline each
+time it wakes, and the machine compares the deadline with `now` when the event
+arrives, so a stale `Deadline` does nothing. This replaces the `steno-auto-stop`
+thread per armed countdown and the watch's own loop. Under `ManualClock` the
+alarm is one sleeper, so `wait_for_sleepers` and `advance` drive time; tests
+read a command's reply before `wait_for_sleepers`, so a cancelled sleeper is not
+counted. The disk reading runs on its own reader thread, because `statvfs` and
+`write_failed()` can block (a network volume, the session mutex during a
+rebuild); at most one reading is in flight.
 
 **A lock-free `status()`.** After each step that changes what the host shows,
 the actor builds an `Arc<RecorderStatus>` and stores it in an `ArcSwap`
-(`arc-swap`, a new entry in the root `[workspace.dependencies]`). `status()`
-loads it without a lock: it never waits on the actor, and the actor never waits
-on a reader. The countdown is stored as its deadline; `status()` turns it into
-seconds left with `clock.now()`, so the number does not go stale between
-publishes. If `arc-swap` is refused, the fallback is a leaf mutex held only for
-the `Arc` clone, with nothing under it.
+(`arc-swap`, new in PR 2). `status()` and `is_busy()` load it without a lock:
+they never wait on the actor, and the actor never waits on a reader. The
+countdown is stored as its deadline; `status()` turns it into seconds left with
+`clock.now()`, so the number does not go stale between publishes. If review
+refuses the dependency, the fallback is a leaf mutex held only for the `Arc`
+clone, with nothing under it.
 
-**Change hooks from that one thread only.** Only `steno-recorder` calls the
-host's `recorder_changed`, after storing the snapshot, so the hook and
-`status()` always agree. The host already assumes nothing about the hook's
-thread (P40's contract: `recorder.status()` is a leaf, the hook may run on any
-thread), so it does not change.
+**The change hook on one notifier thread.** The hook takes the host lock and
+can reload the list from the store, and detection's hook takes detection's
+state lock, so the actor never calls it. After storing a snapshot the actor
+wakes `steno-recorder-hook`; wakes coalesce, and the hook reads the newest
+snapshot, so the hook and `status()` agree. Rule: no thread waits for an actor
+reply while it holds a lock the hook takes (the host's `inner`, detection's
+`state`); `status()` and `is_busy()` never wait. Today the hook already runs on
+whichever thread changed something, so the host does not change.
 
 **Admission is one value.** `quitting`, `start_holds` and `starts_refused`
 become `Admission { holds, refused: Option<Refusal> }`, where `Refusal` is
-`Quitting` (the menu's Quit, #286) or `ShuttingDown` (`stop_for_quit`), each
-with its own message. `RefuseStarts` is a non-blocking send, so the shell's
-main thread can make it, and channel order refuses every start sent after it.
+`MenuQuit` (the menu's Quit, #286's `starts_refused`), which says
+`QUITTING_REFUSAL`, or `ShuttingDown` (`stop_for_quit`, today's `quitting`),
+which refuses silently as today and takes precedence; a hold says
+`INSTALLING_UPDATE`. A tone test is admitted only while idle and not refused,
+in the same step that a start sets `Starting`, so no tone reaches a recording.
+`RefuseStarts` is a non-blocking send, so the shell's main thread can make it,
+and channel order refuses every start sent after it.
 
-**Quit is a command.** `stop_for_quit` sends `Quit` and waits for the reply,
-which the machine sends once the phase is `Idle` and starts are refused.
-`settle`'s wait on the status condvar goes; the shell's `SHUTDOWN_PATIENCE`
-stays.
+**Quit is a command.** `stop_for_quit` raises the shutdown's `Cancel`, which
+the I/O worker's `retrying_while` reads, so a save under way stops retrying a
+busy commit as `quitting` makes it today (a menu Quit still retries). It then
+sends `Quit` and waits for the reply, which the machine sends once the phase is
+`Idle` and starts are refused. `settle`'s wait on the `changes` condvar goes;
+`ExitGate`'s `SHUTDOWN_PATIENCE` stays.
 
 **Panics.** The actor wraps each `step` and each effect in `catch_unwind` and
-maps a panic to today's `Unwinding` outcomes (`START_PANICKED` and the stop's),
-so a start or stop that panics still leaves the recorder idle with an error.
-If the actor thread itself dies, every later command returns an error at once
-and the status says so; an open session keeps writing, and the next launch
-recovers it, as after a kill today.
+maps a panic to today's `Unwinding` outcomes (`START_PANICKED`,
+`SAVE_PANICKED`), so a start or stop that panics still leaves the recorder idle
+with an error. A `step` that panics while a session is open closes that session
+through the stop path, with `SAVE_PANICKED`. If the actor thread itself dies,
+every later command's send fails at once and returns, and a guard on the thread
+stores a status whose error says so. The session it held is dropped, which
+stops it and closes its files (`CaptureSession`'s `Drop`); the meeting stays
+`recording` and the next launch recovers it, as after a kill.
 
 **What the machine answers in one arm each:**
 
 - A second stop cause while `Stopping` joins the waiters; the first cause is
   the meeting's reason.
-- A stop or a quit while `Starting` stops the recording the start produces.
+- A quit while `Starting` stops the recording the start produces; a Stop or a
+  toggle while `Starting` is ignored, as today.
+- A microphone opened while `Starting` is remembered for the countdown.
 - `recovering` and the countdown live in the same struct, so a release's
   countdown cannot run out between the notice and the check (S2).
-- A disk reading below the floor stops with the disk's reason; above it, it
-  sets or clears the warning.
+- A disk reading below the floor, or a failed write, stops with its reason;
+  above the floor, the reading sets or clears the warning.
 
-**The capture seam.** A small trait in steno-services:
+**The capture seam.** A small trait in `steno-services`:
 
 ```rust
 pub trait CaptureControl: Send + Sync {
@@ -192,25 +247,30 @@ pub trait CaptureControl: Send + Sync {
 }
 ```
 
-`CaptureSession` implements it by delegation. `ScriptedCapture`, in
-`steno_services::testing`, is the fake: a test sends states, notices and levels
-by hand, holds `start`, `stop` or `stream` at a gate, makes a write fail, and
-reads what the recorder asked of it. Its doc lists the orderings the real
-session guarantees (for example, `states()` is subscribed before `start`; a
-`DeviceResumed` comes before its `Delivering`), and the fake keeps them.
+`CaptureSession` implements it by delegation. `ScriptedCapture`, in the crate's
+test-only `testing` module (`crates/steno-services/src/testing.rs`), is the
+fake: a test sends states, notices and levels by hand, holds `start`, `stop` or
+`stream` at a gate, makes a write fail, and reads what the recorder asked of
+it. Its doc lists the orderings the real session guarantees (`states()` begins
+with the current state; `notices()` sends only what follows its subscription; a
+`DeviceResumed` comes before its `Delivering`; no order holds across the three
+receivers), and the fake keeps them.
 
 ### The capture session (PR 3)
 
-The same shape one layer down, in steno-audio:
+The same shape one layer down, in `steno-audio`:
 
 - one control thread owns `Streak`, `Watch`, the probe's schedule and the
   rebuild steps (`restart_plan` is nearly pure already), with their deadlines
   on the session's clock;
 - the three finalisers (stop, device loss, write failure) become events to that
   thread, which finalises once through `finish()`; `finalised`,
-  `rebuild_generation`, `recordings_started` and `before_stop_waits` go;
+  `rebuild_generation` and `before_stop_waits` go, and `recordings_started`
+  becomes the events' epoch, checked in one place;
 - `backend.start()` runs on a worker, so the session mutex is never held for
-  seconds;
+  seconds; a stop during that start is accepted at once and tears the backend
+  down once its `start` returned, so `backend.stop()` never runs beside
+  `backend.start()`;
 - the writer thread stores levels into an atomic slot instead of taking the
   session mutex (`Core::publish`);
 - one `events()` channel replaces `states()`, `notices()` and `levels()`, and
@@ -229,21 +289,26 @@ These bound every PR in this plan; a diff inside them sends the PR back.
 - **The relay** (`FrameRelay`) from `steno-process` to the writer.
 - **The writer.** `steno-writer`'s writes, syncs, drain and error reporting. PR 3
   changes only where its level store goes, from the session mutex to an atomic.
-- **The teardown order** in `CaptureSession::finish()`: the watch cancelled and
-  joined; the rebuild cancelled and joined, its gap and peak kept, before the
-  processing, the writer and `clear()`; `backend.stop()`; the processing thread
-  stopped, which drains the rings; the writer stopped, which drains the relay;
-  the files closed; the asset built even when a write or the close failed, with
-  the failure beside it.
-- **The start order that keeps data safe** (D3), in `start_inner`: the calendar
-  lookup first; the room check, refusing below the floor; the session made; the
-  audio folder recorded before the meeting row, so a kill from there on leaves a
-  row whose master recovery can find; the row begun; the receivers subscribed
-  before `session.start`; the threads that follow a recording spawned before
-  `Recording` is visible. Its compensations stay: `forget_recording` when no row
-  began, `intake.fail` and `forget_recording` when the session would not start,
-  `BegunMeeting` failing the meeting and removing its folder when a start
-  panics.
+- **The teardown order** in `CaptureSession::finish()`: no watch or rebuild
+  step runs once the teardown begins (today: the watch and the rebuild
+  cancelled and joined), and the rebuild's unaccounted gap and its peak are
+  kept, before the processing, the writer and `clear()`; `backend.stop()`; the
+  processing thread stopped, which drains the rings; the writer stopped, which
+  drains the relay; the ring drops and the frames still in the rings counted,
+  then the rings cleared; the files closed; the asset built even when a write
+  or the close failed, with the failure beside it. `backend.stop()` never runs
+  beside `backend.start()`.
+- **The start order that keeps data safe** (D3): before `start_inner`, the
+  system audio tests cancelled and waited for, up to `TONE_TEST_PATIENCE`; then
+  in `start_inner` the calendar lookup; the room check, refusing below the
+  floor; the session made; the audio folder recorded before the meeting row, so
+  a kill from there on leaves a row whose master recovery can find; the row
+  begun; the receivers subscribed before `session.start`; the levels and notice
+  threads spawned before `Recording` is visible, so a stop that takes the
+  session takes them, the watch after it. Its compensations stay:
+  `forget_recording` when no row began, `intake.fail` and `forget_recording`
+  when the session would not start, `BegunMeeting` failing the meeting and
+  removing its folder when a start panics.
 - **Recovery** (`crates/steno-services/src/recovery.rs`), `CallWatch`'s policy,
   `Room::of`, `missing_seconds`, every user-facing sentence, the bridge
   contract and its fixtures, and the host's `Recorder` trait
@@ -252,70 +317,81 @@ These bound every PR in this plan; a diff inside them sends the PR back.
 
 ## The pull requests
 
-Each is one PR through the usual pipeline (simplify, review and tests, then
-fixes). Decision 6 applies: a PR that reaches ten review rounds stops and is
-reported as a structural problem. PR 2 starts only after PR 1's fake is merged,
-since the fake makes PR 2 reviewable.
+Order: the macOS MSRV job (follow-ups, below), then PR 1, PR 2 once PR 1's fake
+is merged (the fake makes PR 2 reviewable), and PR 3 once PR 2 is merged and
+the D9 ruling is made.
 
 ### PR 1: the capture seam and the scripted fake
 
-`test(core): the recorder's policy tests run on a scripted capture`
+`refactor(core): the recorder drives its capture through a seam, and its policy tests run on a scripted capture`
 
-- **Scope.** steno-services only, about 400 lines. `CaptureControl` and its
+- **Scope.** `steno-services` only, about 400 lines. `CaptureControl` and its
   delegation to `CaptureSession`; `MakeCaptureSession` returns
   `Arc<dyn CaptureControl>`; `ScriptedCapture` in `testing.rs`. The recorder's
   policy tests move onto the fake under `ManualClock`: auto-stop against
-  recovery (`auto_stop/tests.rs`), the outage and fallback warnings, the disk
-  floor and warning, quit during a start and during a stop, the start holds.
-  A few end-to-end tests stay on the synthetic capture, and `kill_tests.rs`
-  stays as it is.
+  recovery (`auto_stop/tests.rs`), the outage and fallback warnings, quit
+  during a start and during a stop, the start holds. The disk floor and
+  warning move onto the fake on a short interval, waiting under `HANG_GUARD`,
+  until PR 2 puts the reading on the clock. A few end-to-end tests stay on the
+  synthetic capture, and `kill_tests.rs` stays as it is.
 - **Acceptance.**
   - No production behaviour changes: `recorder.rs`'s non-test diff is the
     session's type and nothing else.
   - The moved tests read no wall time: no sleeps, and `eventually` only where a
-    real thread must run, bounded by `HANG_GUARD`. `HeldOutages` and the gated
-    restarts are gone from the moved tests.
+    real thread must run, bounded by `HANG_GUARD`. `HeldOutages` and
+    `GatedRestart` are gone from the moved tests.
   - A contract test runs one script (start, a device change, a resume, a stall,
-    a stop) against the synthetic capture and the fake and gets the same
-    sequence of states and notices.
-  - #283's mutation (the stream read before `Outage::follow`) and #244's S2
-    mutations still fail a test.
-  - 20 of 20 runs pass in a 1-CPU container, and the steno-services suite's
+    a stop) against the synthetic capture, and checks that the fake's
+    documented orderings hold in what the real session sent.
+  - #283's mutation (the stream read before `Outage::follow`) still fails
+    `a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call` on
+    Windows CI, and the mutations #244 used to prove S2's recovery rule still
+    fail a test.
+  - 20 of 20 runs pass in a 1-CPU container, and the `steno-services` suite's
     wall time is measured before and after.
 - **Risks.** Low. The fake may promise orderings the session does not keep; the
   contract test and the fake's documented orderings are the guard.
 
 ### PR 2: the recorder actor and the pure machine
 
-`refactor(core): one recorder thread owns the recording's state`
+`fix(core): one recorder thread owns the recording's state`
 
-- **Scope.** steno-services. `recorder.rs` becomes `recorder/` with
+- **Scope.** `steno-services`. `recorder.rs` becomes `recorder/` with
   `machine.rs` (the pure machine, about 400 lines), `actor.rs` (the thread, the
-  I/O worker, the alarm, the forwarders) and the rest; its state code shrinks
-  from about 1 200 production lines to about 700. `auto_stop.rs` keeps
-  `CallWatch` and drops its thread. `arc-swap` joins
-  `[workspace.dependencies]`. Folds in `Admission`, the `DiskWarning`
-  hysteresis and #283's stale countdown (follow-ups, below).
+  I/O worker, the alarm, the forwarders, the hook's notifier) and the rest; its
+  state code shrinks from about 1 200 production lines to about 700.
+  `auto_stop.rs` keeps `CallWatch`; its `Countdown` loses the `Cancel` the
+  countdown thread slept on. `arc-swap` joins `[workspace.dependencies]`. Folds
+  in `Admission`, the `DiskWarning` hysteresis and #283's stale countdown
+  (follow-ups, below).
 - **Acceptance.**
-  - Table tests over `step` for: auto-stop against recovery (each S2 row,
-    including the one-grace cap), the disk floor and the warning with its
-    hysteresis, quit during a start and during a stop, a second stop cause
-    while stopping, a stale epoch, and every admission case (hold, menu Quit,
-    shutdown, and a start while not idle).
-  - The existing quit, save-retry, recovery and kill tests (`kill_tests.rs`, the
-    D3 kills at each step of the start) pass unchanged against the actor.
-  - With the fake's `start` held at a gate, `status()` answers and a `Stop` is
-    accepted while the gate is closed.
-  - Every `recorder_changed` call comes from `steno-recorder` (a test hook
-    asserts the thread's name).
+  - Table tests over `step` for: auto-stop against recovery (each case of S2's
+    "As built" rule, the one-grace cap included), the disk floor and the
+    warning with its hysteresis, a failed write, quit during a start and during
+    a stop, a Stop and a toggle ignored while starting, a second stop cause
+    while stopping, a stale epoch, a tone test refused while starting, and
+    every admission case (hold, menu Quit, shutdown, and a start while not
+    idle).
+  - The existing quit, save-retry, recovery and kill tests pass unchanged
+    against the actor: `kill_tests.rs`'s kills, from before the first write to
+    the save, #277's three quit-commit tests, #286's tests, and the start's
+    compensation tests in `recorder.rs`
+    (`the_folder_is_recorded_before_the_master_and_forgotten_when_the_start_fails`,
+    `a_start_whose_meeting_cannot_be_written_forgets_its_folder`,
+    `a_start_that_panics_after_the_meeting_began_fails_it_and_leaves_no_folder`).
+  - With the fake's `start` held at a gate, `status()` answers, and a `Stop`
+    gets its reply (ignored, as today), while the gate is closed.
+  - Every call of the recorder's change hook comes from `steno-recorder-hook`
+    (a test hook asserts the thread's name).
   - No `Mutex` or `RwLock` is left in the recorder's state besides the levels
-    slot; the threads `steno-recording-levels`, `steno-notices`,
-    `steno-recording-watch` and `steno-auto-stop` are gone.
+    slot and, if `arc-swap` is refused, the snapshot's leaf mutex; the threads
+    `steno-recording-levels`, `steno-notices`, `steno-recording-watch` and
+    `steno-auto-stop` are gone.
   - #244's manual checks 2 and 3 pass again: on Forge, `sudo killall
-    coreaudiod` during a call recording; on atlas's headless PipeWire,
-    `kill -STOP` on a chosen `pw-loopback` source's owner and `kill -CONT` after
-    20 to 30 s, with the warning, the resume and the missing-seconds note as
-    #244 describes them.
+    coreaudiod` during a call recording; under headless PipeWire
+    (`scripts/pipewire-headless.sh`), `kill -STOP` on a chosen `pw-loopback`
+    source's owner and `kill -CONT` after 20 to 30 s, with the warning, the
+    resume and the missing-seconds note as P22 states them.
 - **Risks.** Medium: it rewrites the state code of the most data-loss-sensitive
   file.
   - A who-wins order drifts (a stop's reason, a quit's reply). The table tests
@@ -323,30 +399,33 @@ since the fake makes PR 2 reviewable.
   - One I/O worker serialises a start behind a stop whose save waits on a
     locked store. That is today's behaviour too (a start is refused until the
     recorder is idle); the test above pins that the status stays live.
-  - The host sees the hook on a different thread. P40's contract already allows
-    any thread; the host's tests run unchanged.
+  - The host sees the hook on the notifier thread. It already runs on any
+    thread today; the host's tests run unchanged.
 
 ### PR 3: the session's control loop and one events channel
 
 `refactor(core): one control thread decides the capture session's restarts and end`
 
 - **Prerequisite.** The new D9 ruling below, and PR 2 merged.
-- **Scope.** steno-audio, about 600 lines of `session.rs`, and the recorder's
+- **Scope.** `steno-audio`, about 600 lines of `session.rs`, and the recorder's
   forwarders collapsing into one, as described under "The capture session"
-  above. Folds in #290's wall-time follow-up.
+  above. `CaptureControl`, `ScriptedCapture` and PR 1's contract test move to
+  `events()`.
 - **Acceptance.**
-  - `crates/steno-audio/tests/restarts.rs`, `tests/session.rs`,
-    `tests/sessions.rs` and the session's unit tests pass unchanged, apart from
-    receivers renamed to `events()`. Every behaviour of the stable plan's P22
-    row holds as written there (backoff, the log's cadence, the gap's ends, the
-    warning's rules): that row is the spec.
+  - `crates/steno-audio/tests/restarts.rs`, `tests/session.rs` and
+    `tests/sessions.rs` pass unchanged, apart from receivers renamed to
+    `events()`. The session's two unit tests go with `before_stop_waits` and
+    become rows of the "finalise once" check below, run through the public API.
+    Every behaviour of P22 holds as written there (backoff, the log's cadence,
+    the gap's ends, the warning's rules): that row is the spec.
   - The live tests on Forge keep A10's bounds: with nothing playing, the first
     callback within 100 ms of `start` returning and 200 ms of the call to
     `start`. The headless PipeWire daemon kill test
     (`a_daemon_killed_and_started_again_resumes_the_recording`) and Windows CI's
     `live_windows` pass.
-  - With a backend whose `start` is held at a gate, `stream()`, the status and a
-    stop answer while the gate is closed: the mutex is not held over the start.
+  - With a backend whose `start` is held at a gate, `stream()` and the status
+    answer, and a stop is accepted, while the gate is closed; the stop
+    completes once the gate opens: the mutex is not held over the start.
   - A device loss, a write failure and a stop at once finalise once, with one
     reason.
   - #244's manual checks 2 and 3 again, and 20 of 20 soak runs of `session` and
@@ -362,19 +441,19 @@ D9 reads: "no change to the audio and speech path is planned after the
 cutover." PR 3 changes the capture session's control plane (which thread decides
 a restart, a stall and the end of a recording), not what is recorded. It still
 sits inside the audio path, so it needs Nicolai's ruling. PRs 1 and 2 stay in
-steno-services and change no part of the capture; decision 5 asks no ruling
-for them.
+`steno-services` and change no part of the capture, so they need none; PR 2's
+release rule below holds whatever the ruling.
 
 Proposed ruling, for Nicolai to confirm, change or refuse:
 
 > After the stable release, the capture session's control plane may change in one
 > PR (this plan's PR 3), on four conditions: the data plane is untouched (the
-> callbacks, the rings, the relay, the writer, `finish()`'s order); every P22
-> behaviour holds as written; it is not merged before the 14-day rollback window
-> of `0.11.0` has closed; and it ships first in a candidate of the next minor
-> release, which passes R5's soak and D12's stability count (ten real meetings
-> on the Mac, five on each listed Linux target, one with a device switch during
-> a call) before a stable tag carries it. A fix during that count restarts it.
+> callbacks, the rings, the relay, the writer apart from where it stores levels,
+> `finish()`'s order); every P22 behaviour holds as written; it is not merged
+> before the 14-day rollback window of `0.11.0` has closed; and it ships first in
+> a candidate of the next minor release (`0.12.0`), which passes R5's soak and
+> G2's stability count (D12) as written there before a stable tag carries it. A
+> fix during that count restarts it.
 
 The options:
 
@@ -387,29 +466,17 @@ The options:
   restart state stays in two copies, the mutex stays held over
   `backend.start()`, and `microphone_is_the_master` keeps its mirror.
 
-PR 2 changes recording behaviour code too, though not the capture. It should
-ship through the same candidate series as PR 3; if both merge before the count
-starts, one series covers both.
+**PR 2's release rule.** PR 2 rewrites recording behaviour code, though not the
+capture. Like PR 3, it merges only after the 14-day rollback window of
+`0.11.0` has closed, and it ships first in a candidate of the next minor
+release that passes R5's soak and G2's stability count. If both merge before
+the count starts, one series covers both.
 
-## Follow-ups from merged PRs
+## Follow-ups this plan takes over
 
 | Follow-up | From | Where it goes |
 |---|---|---|
-| A macOS MSRV job. The `msrv` job (`rust-version` 1.90, `.github/workflows/rust-ci.yml`) runs on Linux only, so Mac-only code is checked against 1.90 only by hand. | #285 | Its own `ci` PR, the first after the stable release and before PR 1, so PR 3's Mac code is checked. `cargo +1.90 check --workspace --all-targets --locked` on the macOS runner (`vars.MACOS_RUNS_ON`, `macos-15` as the fallback), same triggers as the Linux job. Acceptance: green on `main`, and red on a scratch commit that uses a newer-than-1.90 API under `cfg(target_os = "macos")`. Risk: one more job on Forge, a shared machine. |
-| `DiskWarning` hysteresis. `DiskWarning::set` forgets a dismissal at the first reading with room, so a reading that hovers across the 30-minute line shows a dismissed warning again at each crossing. | #285 | PR 2, as table rows. The machine keeps the minutes left at every reading, not only under the line. Proposed: the warning shows under 30 minutes; a dismissal is forgotten only at 40 minutes or more. The 40 is for review. |
-| A stale countdown on a stalled Windows call. The change hook fires only after the notice thread's stream read, which can wait up to about 10 s behind a rebuild's start, so the host can show a countdown the status already hides. Cosmetic; no data lost. | #283 | PR 2: the `DeviceChanged` step marks the capture as recovering and publishes at once, so the hook and the status agree from that step on; the stream read for the stalled device moves to the forwarder, which sends it as a second event. Acceptance: with the fake's `stream()` held at a gate, the hook's status after the `DeviceChanged` shows no countdown. PR 3 removes the read altogether: the session's event names the stalled device. |
+| A macOS MSRV job. The `msrv` job (`rust-version` 1.90, `.github/workflows/rust-ci.yml`) runs on Linux only, so Mac-only code is checked against the MSRV only by hand. | #285 | Its own `ci` PR, the first after the stable release and before PR 1, so PR 3's Mac code is checked. The Linux job's steps (`rust-version` read from `Cargo.toml`, then `cargo +<version> check --workspace --all-targets --locked`) on the macOS runner (`vars.MACOS_RUNS_ON`, `macos-15` as the fallback), same triggers as the Linux job. Acceptance: green on `main`, and red on a scratch commit that uses an API newer than the MSRV under `cfg(target_os = "macos")`. Risk: one more job on Forge, a shared machine. |
+| `DiskWarning` hysteresis. `DiskWarning::set` forgets a dismissal at the first reading with room, so a reading that hovers across the 30-minute line shows a dismissed warning again at each crossing. | #285 | PR 2, as table rows. The machine keeps the minutes left at every reading, not only under the line (a helper beside `Room::of`, which stays as it is). Proposed: the warning shows under 30 minutes; a dismissal is forgotten only at 40 minutes or more. Nicolai settles the 40 in PR 2. |
+| A stale countdown on a stalled Windows call. The change hook fires only after the notice thread's stream read, which can wait up to about 10 s behind a rebuild's start, so the host can show a countdown the status already hides. Cosmetic; no data lost. | #283 | PR 2: the `DeviceChanged` step marks the capture as recovering and publishes at once, so the hook and the status agree from that step on; the stream read for the stalled device moves to the forwarder, which sends it as a `StalledDevice` event. Acceptance: with the fake's `stream()` held at a gate, the hook's status after the `DeviceChanged` shows no countdown. PR 3 removes the read altogether: the session's event names the stalled device. |
 | Three ways to refuse a start: `quitting`, `start_holds`, `starts_refused`. | #286 | PR 2: `Admission { holds, refused: Option<Refusal> }`, one message slot. #286's tests (`a_start_after_a_menu_quit_is_refused_with_a_message`, `a_stop_under_way_at_a_menu_quit_still_tries_its_commit_again`) run unchanged. |
-| A wall-clock verdict outside a measurement test: `asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing` checks the master within 0.1 s of wall time. | #290 | PR 3, counting the frames the synthetic producer delivered instead of wall time. |
-
-## Before rc.1, outside this plan
-
-These land before `0.11.0-rc.1` under their own owners, and this plan assumes
-them:
-
-- **#286** merges as is (decision 4). Its `starts_refused` is folded in PR 2.
-- **P40's recorder hook:** `recorder.status()` is a leaf and the hook may run on
-  any thread, and no host lock is added that the hook must take in a set order.
-  That is the actor's contract too, so PR 2 redoes nothing.
-- **A15:** the Objective-C exception catch covers the CoreML warm-up
-  (`warm_up_if_installed`), which runs during a live recording. PR 2 moves the
-  warm-up onto the I/O worker and keeps the catch.
