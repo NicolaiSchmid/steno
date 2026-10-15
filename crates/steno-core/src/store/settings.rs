@@ -111,17 +111,16 @@ impl<'de> Deserializer<'de> for FieldNames<'_> {
 /// whole, and serde's message quotes the value it choked on. `None` when
 /// each row decodes on its own (two rows that only fail together), which
 /// leaves serde's error.
-fn undecodable_row(
-    defaults: &serde_json::Map<String, Value>,
-    merged: &serde_json::Map<String, Value>,
-) -> Option<StoreError> {
+fn undecodable_row(defaults: &Settings, merged: &Value) -> Option<StoreError> {
+    let defaults = object(defaults).ok()?;
     merged
+        .as_object()?
         .iter()
         .filter(|(key, value)| defaults.get(*key) != Some(*value))
         .find(|(key, value)| {
             let mut alone = defaults.clone();
             alone.insert((*key).clone(), (*value).clone());
-            serde_json::from_value::<Settings>(Value::Object(alone)).is_err()
+            Settings::deserialize(&Value::Object(alone)).is_err()
         })
         .map(|(key, _)| StoreError::UndecodableSetting {
             key: key.clone(),
@@ -143,8 +142,7 @@ impl Store {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
         })?;
-        let defaults = object(defaults)?;
-        let mut merged = defaults.clone();
+        let mut merged = object(defaults)?;
         for (key, value) in rows {
             if key == HANDOVER_PORT_KEY && json::from_column_str::<Option<u16>>(&value).is_err() {
                 tracing::warn!(
@@ -161,8 +159,9 @@ impl Store {
             };
             merged.insert(key, value);
         }
-        serde_json::from_value(Value::Object(merged.clone()))
-            .map_err(|error| undecodable_row(&defaults, &merged).unwrap_or(error.into()))
+        let merged = Value::Object(merged);
+        Settings::deserialize(&merged)
+            .map_err(|error| undecodable_row(defaults, &merged).unwrap_or_else(|| error.into()))
     }
 
     /// Writes every property and removes the rows of known properties that
