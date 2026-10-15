@@ -18,18 +18,20 @@
 //!
 //! | Event | Plain handover | Gated handover | Read or written |
 //! |-------|----------------|----------------|-----------------|
-//! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read; a mint only where the guard allows; an identity found unrecorded is recorded only where the pairing-time rule adopts it ([`HandoverIdentity::known_by_every_phone`]), else waiting with the rule's reason (replaced, partly replaced, the clock) |
+//! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read and decided: served, minted or waiting, after the decision's writes |
 //! | Try again while waiting | the listener once the read succeeds, else the new reason | the gate waits: the import's step runs again; a listener adopted: its Try again | the identity read (or the import's export) |
 //! | Try again with a listener | nothing | the adopted listener's: nothing | nothing |
 //! | Pair again while waiting | the listener over a new identity | the gate waits: the import ends with a new identity and the gate opens; a listener adopted: its Pair again | the marker, then the next fingerprint noted (a record that does not parse set aside first), then the new identity, then the paired phones removed, then its fingerprint recorded (dropping the note); a stop leaves the note |
-//! | Launch, Try again or gate ready after an unfinished Pair again | finished: the listener over the new identity, no phones; abandoned: as Launch; unknown: waiting, replaced; undecided: waiting, unreadable | the gate waits: Try again runs the import, whose store brings the Swift pairing back and drops the note; at gate ready: as plain | finished: the phones removed, its fingerprint recorded, no mint; abandoned: the note dropped; otherwise nothing |
+//! | Launch, Try again or gate ready after an unfinished Pair again | as Launch: finished over the new identity with no phones, or waiting | the gate waits: Try again runs the import, whose store brings the Swift pairing back and drops the note; at gate ready: as plain | as Launch |
 //! | The keyring answered after asking at the launch (`App::launch`) | as Try again | nothing: Try again reads it | as Try again |
 //! | Gate ready | | the listener built and adopted | the identity read, as at the launch |
 //! | A failed build (the store's checkpoint) | | no listener; built again at the next gate change | nothing |
 //! | Shutdown | no listener handed over from now on | no listener built or adopted from now on | nothing |
 //!
-//! The cases of an unfinished Pair again are
-//! [`HandoverIdentity::load_or_create`]'s.
+//! Every case of the identity's read, an unfinished Pair again's
+//! included, is a row of the decision's truth table
+//! ([`decide`](steno_handover::identity::decision::decide),
+//! `crates/steno-handover/tests/fixtures/identity-decisions.json`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -82,7 +84,8 @@ use crate::swift_import::{HandoverGate, ImportMarker};
 ///   the file: a read that meets one that does not parse waits as
 ///   unreadable, and one that cannot open it waits as
 ///   [`PhoneWaitingReason::FileNotOpened`].
-/// - Only [`HandoverIdentity::load_or_create`] interprets the note.
+/// - Only the load's decision interprets the note
+///   ([`HandoverIdentity::load_or_create`]).
 ///   Anything that only needs the pinned fingerprint reads `KEY`, as
 ///   before.
 /// - Writes are not serialised between instances. The writers outside a
@@ -103,11 +106,7 @@ use crate::swift_import::{HandoverGate, ImportMarker};
 /// Not `preferences.json`: that file holds only flags, is rewritten in
 /// place, and a build that reads it as flags would drop every flag over a
 /// text value. The Swift app never reads or writes this file, so a
-/// rollback to it leaves the record alone. With #284 the Swift app keeps
-/// its own record in this format, `swift-handover-identity.json`
-/// ([`SwiftRecord`](crate::swift_import::SwiftRecord)), which in this app
-/// only the import reads, read only.
-///
+/// rollback to it leaves the record alone.
 #[derive(Debug, Clone)]
 pub struct FingerprintFile {
     path: PathBuf,
@@ -411,9 +410,9 @@ const COMPUTER: &str = if cfg!(target_os = "macos") {
 /// in plain words: the keyring's own sentence when it was not opened at
 /// start, as that one already names the pairing; the waiting card's first
 /// sentence when the guard refused the identity or the record could not be
-/// opened, followed by where to choose Pair again when some phones were
-/// paired before the pairing changed; a sentence of its own when the database
-/// failed or the record does not parse, and when Pair again could not note
+/// opened, as the card below it says what to do; a sentence of its own when
+/// the database failed or the record does not parse, and when Pair again
+/// could not note
 /// the next fingerprint (the caller logs the error); the read's error
 /// otherwise.
 pub(crate) fn identity_failure(error: &IdentityError) -> String {
@@ -427,16 +426,13 @@ pub(crate) fn identity_failure(error: &IdentityError) -> String {
                  phones know."
             )
         }
-        // The first sentence is the Swift app's
-        // (`IdentityUnavailability.partlyReplaced`, #284), the second names
-        // this app's button.
+        // The card below it names Pair again.
         IdentityError::Unavailable(Unavailability::PartlyReplaced) => {
             format!(
                 "Some of your phones were paired before this {COMPUTER}'s pairing changed and \
-                 can't connect. To reconnect them, choose Pair again in Settings > iPhone."
+                 can't connect."
             )
         }
-        // The Swift app's first sentence (`IdentityUnavailability.clockBehind`).
         IdentityError::Unavailable(Unavailability::ClockBehind) => {
             format!(
                 "This {COMPUTER}'s date and time are earlier than when its phone pairing was \
@@ -1368,8 +1364,10 @@ mod tests {
     }
 
     /// With nothing recorded, an identity some paired phones predate and
-    /// others do not waits with the mixed words and its own reason, whose card in Settings offers Pair
-    /// again first; Pair again reconnects every phone over a new identity.
+    /// others do not waits with the mixed words and its own reason, whose
+    /// card in Settings offers Pair again first, and a Try again that still
+    /// waits says only what the card does not; Pair again reconnects every
+    /// phone over a new identity.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_identity_some_phones_predate_waits_with_the_mixed_words_until_pair_again() {
         let paired = Paired::new(true).await;
@@ -1382,8 +1380,7 @@ mod tests {
             handover.state(),
             ListenerState::Failed(format!(
                 "Phone handover is unavailable: Some of your phones were paired before this \
-                 {COMPUTER}'s pairing changed and can't connect. To reconnect them, choose Pair \
-                 again in Settings > iPhone."
+                 {COMPUTER}'s pairing changed and can't connect."
             ))
         );
         let card = steno_host::settings::snapshots::waiting_message(
@@ -1393,6 +1390,12 @@ mod tests {
         assert!(
             card.starts_with("Some of your phones were paired before"),
             "{card}"
+        );
+        let details = tokio::task::block_in_place(|| handover.read_again()).unwrap_err();
+        assert!(card.starts_with(&details), "{details}");
+        assert!(
+            !details.contains("Pair again"),
+            "the card names it: {details}"
         );
         let (_, recorded, _, phones) = paired.places().await;
         assert_eq!((recorded, phones), (None, 2), "nothing written");

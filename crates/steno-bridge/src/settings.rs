@@ -481,8 +481,7 @@ string_enum! {
         /// none recorded, one no paired phone knows.
         Replaced = "replaced",
         /// With no pairing recorded, the paired phones do not all know one
-        /// pairing, but some know one. Rust mirrors the Swift app's
-        /// `partlyReplaced` (#284) as a reason of its own, because the
+        /// pairing, but some know one: a reason of its own, because the
         /// card's text comes from the reason alone.
         PartlyReplaced = "partlyReplaced",
         /// A file in the folder Steno keeps its data in could not be

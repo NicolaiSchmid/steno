@@ -417,11 +417,9 @@ pub fn waiting_message(reason: PhoneWaitingReason, platform: Platform) -> String
              know. Choose Try again if you put the old one back, or Pair again to start over."
         ),
         // Some phones know another pairing or none: Pair again is the way
-        // on. The first sentence is the Swift app's
-        // (`IdentityUnavailability.partlyReplaced`, #284), the second names
-        // this app's button, just below; the import step and the details
-        // line add the section (`PARTLY_REPLACED_PAIRING` in
-        // `steno-services`).
+        // on. The second sentence names this app's button, just below; the
+        // import step adds the section (`PARTLY_REPLACED_PAIRING` in
+        // `steno-services`), and the details line stops after the first.
         PhoneWaitingReason::PartlyReplaced => format!(
             "Some of your phones were paired before this {computer}'s pairing changed and can't \
              connect. To reconnect them, choose Pair again."
@@ -429,8 +427,7 @@ pub fn waiting_message(reason: PhoneWaitingReason, platform: Platform) -> String
         // The clock, not the pairing: Try again leads, and the words do not
         // ask for Pair again, which would drop pairings the phones may still
         // know. It stays the second button, the way out when a time was
-        // saved while the clock ran ahead. The first sentence is the Swift
-        // app's (`IdentityUnavailability.clockBehind`, #284).
+        // saved while the clock ran ahead.
         PhoneWaitingReason::ClockBehind => format!(
             "This {computer}'s date and time are earlier than when its phone pairing was made, \
              so Steno can't tell which pairing your phones know. Check the date and time{}, then \
