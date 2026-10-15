@@ -9,11 +9,15 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-steno-core = { path = "../steno-core" }
+# `Store::reading` and `Store::writing`, the store's facade for async code.
+steno-core = { path = "../steno-core", features = ["tokio"] }
 
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+# A panic in a store call through the facade, as the I/O error a request
+# answers with (`catch_unwind` over its future).
+futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true

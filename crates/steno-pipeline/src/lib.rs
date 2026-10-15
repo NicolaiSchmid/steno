@@ -27,8 +27,14 @@
 //! knows the boundaries (`steno_core::protocols`) and the store, never an
 //! engine. The Swift package kept this in `StenoCore`; here it is its own
 //! crate because it needs an async runtime (`tokio`) that the core, which
-//! every crate depends on, must not pull in, and because the host crate
-//! already set the precedent of one crate per layer above the core.
+//! every crate depends on, pulls in only behind its `tokio` feature, and
+//! because the host crate already set the precedent of one crate per layer
+//! above the core. Every store call of an async step goes through the
+//! store's facade (`Store::reading`, `Store::writing`), so a write that
+//! waits for another process waits on the blocking pool, never on a
+//! runtime worker. The synchronous halves (the enqueues, the claims, the
+//! resumes, the phone intake's enqueue and the local intake the
+//! recorder's stop drives on its own thread) call the store directly.
 //!
 //! One operation runs per meeting at a time; stage durations feed the
 //! `stageRate` table only when the meeting was alone in flight; every

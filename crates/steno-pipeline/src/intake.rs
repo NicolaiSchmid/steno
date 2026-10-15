@@ -162,144 +162,200 @@ impl RecordingIntake {
     }
 }
 
+/// What the intake's one store step decided ([`admit_on`]).
+enum Admission {
+    /// Answered from the store, or by the ledger's meeting for these
+    /// bytes: nothing to enqueue.
+    Answered(Uuid),
+    /// Committed: the meeting and its asset to hand to the pipeline.
+    Admitted(Box<(Meeting, AudioAsset)>),
+}
+
 #[async_trait]
 impl HandoverIntake for RecordingIntake {
+    /// The reads, the durable copy and the commit are one step on the
+    /// store's facade (`Store::writing`): the copy is blocking file I/O,
+    /// and the commit must follow it. The enqueue runs after it.
     async fn admit(
         &self,
         file: &Path,
         metadata: &RecordingMetadata,
         device: &PairedDevice,
     ) -> BoundaryResult<Uuid> {
-        let existing = self.store.handover_receipt(metadata.recording_id)?;
-        // Another upload's receipt under this id is never completed or
-        // answered from: another phone's (this one was revoked, and that one
-        // announced the id or took the receipt over), which would take this
-        // meeting for its own and delete its copy; or one of other bytes (the
-        // phone announced another file under the id), whose `complete` would
-        // get this meeting and delete a file never admitted.
-        if existing.as_ref().is_some_and(|receipt| {
-            receipt.device_id != device.id
-                || receipt.byte_count != metadata.byte_count
-                || receipt.sha256 != metadata.sha256
-        }) {
-            return Err(StoreError::ReceiptOfAnotherUpload(metadata.recording_id).into());
-        }
-        // A retry of an admitted recording is answered from the store with
-        // no write of its own: the launch checkpoint
-        // (`HandoverService::checkpoint_store`) put every earlier commit on
-        // the disk, and this process commits its admissions durably.
-        if let Some(meeting_id) = existing
-            .as_ref()
-            .and_then(|receipt| receipt.state.meeting_id())
-            && self.store.meeting(meeting_id)?.is_some()
-        {
-            return Ok(meeting_id);
-        }
-
-        let settings = self.store.settings()?;
-        let meeting_id = Uuid::new_v4();
-        let timestamp = (self.now)();
-        let audio_folder = file_url_path(&settings.audio_folder)
-            .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
-        let layout = RecordingLayout::new(&audio_folder, meeting_id);
-        // The copy and its folder are on the disk before the receipt says
-        // complete: the phone deletes its own copy on that answer.
-        self.folders.copying(meeting_id, &audio_folder)?;
-        let destination = copy_into_new_folder(file, &layout, metadata.format)
-            .inspect_err(|_| self.folders.settled(meeting_id))?;
-
-        let meeting = Meeting {
-            id: meeting_id,
-            title: phone_title(metadata.started_at, self.zone),
-            started_at: metadata.started_at,
-            duration: metadata.duration_seconds,
-            language: None,
-            source: MeetingSource::Phone,
-            calendar_event_id: None,
-            tags: Vec::new(),
-            state: MeetingState::Queued,
-            end_reason: None,
-            title_origin: TitleOrigin::Default,
-            template_id: settings.default_template_id.clone(),
-            summary: None,
-            scratchpad: String::new(),
-            llm_usage: None,
-            created_at: timestamp,
-            updated_at: timestamp,
+        let step = AdmitStep {
+            file: file.to_path_buf(),
+            metadata: metadata.clone(),
+            device: device.clone(),
+            now: self.now.clone(),
+            zone: self.zone,
+            folders: self.folders.clone(),
         };
-        let asset = AudioAsset {
-            id: Uuid::new_v4(),
-            meeting_id,
-            url: file_url(&destination, false),
-            format: metadata.format,
-            lanes: vec![AudioLane::Mixed],
-            sidecars_16k: std::collections::BTreeMap::new(),
-            mixdown_url: None,
-            retention: settings.default_retention,
-            expires_at: None,
-        };
-        let mut receipt = existing.unwrap_or_else(|| HandoverReceipt {
-            recording_id: metadata.recording_id,
-            device_id: device.id,
-            state: HandoverState::Receiving,
-            byte_count: metadata.byte_count,
-            sha256: metadata.sha256.clone(),
-            chunk_size: metadata.chunk_size,
-            received_chunks: Vec::new(),
-            created_at: timestamp,
-            updated_at: timestamp,
-        });
-        receipt.state = HandoverState::Complete { meeting_id };
-        receipt.updated_at = timestamp;
-
-        let admitted = match self
+        let admission = self
             .store
-            .save_admission_durably(&receipt, &meeting, &asset)
-        {
-            Ok(admitted) => {
-                self.folders.settled(meeting_id);
-                admitted
-            }
-            Err(error) => {
-                if matches!(error, StoreError::ReceiptOfAnotherUpload(_)) {
-                    // The refusal wrote nothing, and another upload's
-                    // receipt is left as it is.
-                    let _ = std::fs::remove_file(&destination);
-                    self.folders.settled(meeting_id);
-                } else {
-                    // A failed commit is not proof that nothing committed: a
-                    // WAL sync that fails leaves the commit's frames in the
-                    // WAL, and recovery after a crash replays them. The
-                    // durable `failed` save writes over them, or voids them
-                    // when the WAL restarts, so the copy goes only once that
-                    // save is on the disk; otherwise it stays, still noted,
-                    // so the next launch adopts it unless a replay brings
-                    // its meeting back.
-                    receipt.state = HandoverState::Failed(format!("admit: {error}"));
-                    if self.store.save_handover_receipt_durably(&receipt).is_ok() {
-                        let _ = std::fs::remove_file(&destination);
-                        self.folders.settled(meeting_id);
-                    }
+            .writing(move |store| Ok(admit_on(store, &step)))
+            .await??;
+        match admission {
+            Admission::Answered(meeting_id) => Ok(meeting_id),
+            Admission::Admitted(admitted) => {
+                let (meeting, asset) = *admitted;
+                let meeting_id = meeting.id;
+                // Admitted: a pipeline that cannot take the meeting now
+                // leaves it `queued`, and the next launch resumes it.
+                if let Err(failure) = (self.enqueue)(meeting, asset).await {
+                    tracing::warn!(%meeting_id, stage = failure.stage.as_str(), "admitted meeting not enqueued");
                 }
-                return Err(error.into());
+                Ok(meeting_id)
             }
-        };
-        let _ = std::fs::remove_file(file);
-        if admitted != meeting_id {
-            // The ledger held these bytes with a meeting: the receipt is
-            // complete with it, and this copy and its folder belong to no
-            // meeting.
-            let _ = std::fs::remove_file(&destination);
-            let _ = std::fs::remove_dir(&layout.directory);
-            return Ok(admitted);
         }
-        // Admitted: a pipeline that cannot take the meeting now leaves it
-        // `queued`, and the next launch resumes it.
-        if let Err(failure) = (self.enqueue)(meeting, asset).await {
-            tracing::warn!(%meeting_id, stage = failure.stage.as_str(), "admitted meeting not enqueued");
-        }
-        Ok(meeting_id)
     }
+}
+
+/// What [`admit_on`] needs of the call and of the intake, owned, so the
+/// step runs on the store's blocking pool.
+struct AdmitStep {
+    file: std::path::PathBuf,
+    metadata: RecordingMetadata,
+    device: PairedDevice,
+    now: Now,
+    zone: FixedOffset,
+    folders: Arc<dyn AdmissionFolders>,
+}
+
+/// [`RecordingIntake::admit`] up to the enqueue, on `store`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one admission, in the order it commits"
+)]
+fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
+    let AdmitStep {
+        file,
+        metadata,
+        device,
+        now,
+        zone,
+        folders,
+    } = step;
+    let existing = store.handover_receipt(metadata.recording_id)?;
+    // Another upload's receipt under this id is never completed or
+    // answered from: another phone's (this one was revoked, and that one
+    // announced the id or took the receipt over), which would take this
+    // meeting for its own and delete its copy; or one of other bytes (the
+    // phone announced another file under the id), whose `complete` would
+    // get this meeting and delete a file never admitted.
+    if existing.as_ref().is_some_and(|receipt| {
+        receipt.device_id != device.id
+            || receipt.byte_count != metadata.byte_count
+            || receipt.sha256 != metadata.sha256
+    }) {
+        return Err(StoreError::ReceiptOfAnotherUpload(metadata.recording_id).into());
+    }
+    // A retry of an admitted recording is answered from the store with
+    // no write of its own: the launch checkpoint
+    // (`HandoverService::checkpoint_store`) put every earlier commit on
+    // the disk, and this process commits its admissions durably.
+    if let Some(meeting_id) = existing
+        .as_ref()
+        .and_then(|receipt| receipt.state.meeting_id())
+        && store.meeting(meeting_id)?.is_some()
+    {
+        return Ok(Admission::Answered(meeting_id));
+    }
+
+    let settings = store.settings()?;
+    let meeting_id = Uuid::new_v4();
+    let timestamp = now();
+    let audio_folder = file_url_path(&settings.audio_folder)
+        .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
+    let layout = RecordingLayout::new(&audio_folder, meeting_id);
+    // The copy and its folder are on the disk before the receipt says
+    // complete: the phone deletes its own copy on that answer.
+    folders.copying(meeting_id, &audio_folder)?;
+    let destination = copy_into_new_folder(file, &layout, metadata.format)
+        .inspect_err(|_| folders.settled(meeting_id))?;
+
+    let meeting = Meeting {
+        id: meeting_id,
+        title: phone_title(metadata.started_at, *zone),
+        started_at: metadata.started_at,
+        duration: metadata.duration_seconds,
+        language: None,
+        source: MeetingSource::Phone,
+        calendar_event_id: None,
+        tags: Vec::new(),
+        state: MeetingState::Queued,
+        end_reason: None,
+        title_origin: TitleOrigin::Default,
+        template_id: settings.default_template_id.clone(),
+        summary: None,
+        scratchpad: String::new(),
+        llm_usage: None,
+        created_at: timestamp,
+        updated_at: timestamp,
+    };
+    let asset = AudioAsset {
+        id: Uuid::new_v4(),
+        meeting_id,
+        url: file_url(&destination, false),
+        format: metadata.format,
+        lanes: vec![AudioLane::Mixed],
+        sidecars_16k: std::collections::BTreeMap::new(),
+        mixdown_url: None,
+        retention: settings.default_retention,
+        expires_at: None,
+    };
+    let mut receipt = existing.unwrap_or_else(|| HandoverReceipt {
+        recording_id: metadata.recording_id,
+        device_id: device.id,
+        state: HandoverState::Receiving,
+        byte_count: metadata.byte_count,
+        sha256: metadata.sha256.clone(),
+        chunk_size: metadata.chunk_size,
+        received_chunks: Vec::new(),
+        created_at: timestamp,
+        updated_at: timestamp,
+    });
+    receipt.state = HandoverState::Complete { meeting_id };
+    receipt.updated_at = timestamp;
+
+    let admitted = match store.save_admission_durably(&receipt, &meeting, &asset) {
+        Ok(admitted) => {
+            folders.settled(meeting_id);
+            admitted
+        }
+        Err(error) => {
+            if matches!(error, StoreError::ReceiptOfAnotherUpload(_)) {
+                // The refusal wrote nothing, and another upload's
+                // receipt is left as it is.
+                let _ = std::fs::remove_file(&destination);
+                folders.settled(meeting_id);
+            } else {
+                // A failed commit is not proof that nothing committed: a
+                // WAL sync that fails leaves the commit's frames in the
+                // WAL, and recovery after a crash replays them. The
+                // durable `failed` save writes over them, or voids them
+                // when the WAL restarts, so the copy goes only once that
+                // save is on the disk; otherwise it stays, still noted,
+                // so the next launch adopts it unless a replay brings
+                // its meeting back.
+                receipt.state = HandoverState::Failed(format!("admit: {error}"));
+                if store.save_handover_receipt_durably(&receipt).is_ok() {
+                    let _ = std::fs::remove_file(&destination);
+                    folders.settled(meeting_id);
+                }
+            }
+            return Err(error.into());
+        }
+    };
+    let _ = std::fs::remove_file(file);
+    if admitted != meeting_id {
+        // The ledger held these bytes with a meeting: the receipt is
+        // complete with it, and this copy and its folder belong to no
+        // meeting.
+        let _ = std::fs::remove_file(&destination);
+        let _ = std::fs::remove_dir(&layout.directory);
+        return Ok(Admission::Answered(admitted));
+    }
+    Ok(Admission::Admitted(Box::new((meeting, asset))))
 }
 
 /// Copies the verified upload `file` durably into the new meeting folder of

@@ -1015,6 +1015,7 @@ struct DecodedLane {
 
 /// What the diarize stage hands on. Swift: `Diarization` in
 /// `Pipeline/Stages/Diarize.swift`.
+#[derive(Clone)]
 struct Diarization {
     speakers: Vec<Speaker>,
     cluster_speakers: Vec<ClusterSpeaker>,
@@ -1824,7 +1825,7 @@ impl ProcessingPipeline {
         };
         // Read under the claim: since the launch found it, the user may
         // have exported it, or a run may have left it not ready.
-        let Some(meeting) = self.still_owed(meeting_id) else {
+        let Some(meeting) = self.still_owed(meeting_id).await else {
             return;
         };
         let operation = self.deliver_again_claimed(meeting, admitted);
@@ -1847,7 +1848,8 @@ impl ProcessingPipeline {
         // first, the count ends at 0; a refused one leaves it alone.
         if self
             .store()
-            .deliveries(meeting_id)
+            .reading(move |store| store.deliveries(meeting_id))
+            .await
             .is_ok_and(|rows| all_delivered(&rows))
         {
             let retries = retries.clone();
@@ -1861,24 +1863,20 @@ impl ProcessingPipeline {
     /// caller holds the meeting's claim. A store error is logged and leaves
     /// the rows.
     fn fail_pending_deliveries(&self, meeting_id: Uuid, reason: &str) {
-        let store = self.store();
-        let rows = match store.deliveries(meeting_id) {
-            Ok(rows) => rows,
-            Err(error) => {
-                tracing::warn!(target: BACKGROUND_RUN_LOG, %meeting_id, %error, "deliveries could not be read");
-                return;
-            }
-        };
-        for mut row in rows {
-            if row.status != DeliveryStatus::Pending {
-                continue;
-            }
-            row.status = DeliveryStatus::Failed(reason.to_owned());
-            row.last_attempt_at.get_or_insert(self.now());
-            if let Err(error) = store.save_delivery(&row) {
-                tracing::warn!(target: BACKGROUND_RUN_LOG, %meeting_id, %error, "a delivery could not be saved failed");
-            }
-        }
+        fail_pending(self.store(), meeting_id, reason, self.now());
+    }
+
+    /// [`fail_pending_deliveries`](Self::fail_pending_deliveries) from an
+    /// async caller, through the store's facade.
+    async fn fail_pending_deliveries_off_the_workers(&self, meeting_id: Uuid, reason: String) {
+        let now = self.now();
+        let _ = self
+            .store()
+            .writing(move |store| {
+                fail_pending(store, meeting_id, &reason, now);
+                Ok(())
+            })
+            .await;
     }
 
     /// Spawns `work` among the background runs
@@ -2153,17 +2151,31 @@ impl ProcessingPipeline {
             let quitting = PipelineFailure::new(PipelineStage::Decode, "the app is quitting");
             return (Err(quitting), None);
         }
-        let found = required(
+        let found = attributing(
             PipelineStage::Decode,
-            self.store().asset_by_id(asset_id),
-            || format!("audio asset {asset_id} not found"),
+            self.store()
+                .reading(move |store| {
+                    let Some(asset) = store.asset_by_id(asset_id)? else {
+                        return Ok(None);
+                    };
+                    let meeting = store.meeting(asset.meeting_id)?;
+                    Ok(Some((asset, meeting)))
+                })
+                .await,
         )
-        .and_then(|asset| {
-            let meeting = required(
-                PipelineStage::Decode,
-                self.store().meeting(asset.meeting_id),
-                || format!("meeting {} not found", asset.meeting_id),
-            )?;
+        .and_then(|found| {
+            let (asset, meeting) = found.ok_or_else(|| {
+                PipelineFailure::new(
+                    PipelineStage::Decode,
+                    format!("audio asset {asset_id} not found"),
+                )
+            })?;
+            let meeting = meeting.ok_or_else(|| {
+                PipelineFailure::new(
+                    PipelineStage::Decode,
+                    format!("meeting {} not found", asset.meeting_id),
+                )
+            })?;
             Ok((asset, meeting))
         });
         let (asset, meeting) = match found {
@@ -2201,7 +2213,8 @@ impl ProcessingPipeline {
                         // nothing resumes it to deliver it later.
                         let ready = self
                             .store()
-                            .meeting(meeting_id)
+                            .reading(move |store| store.meeting(meeting_id))
+                            .await
                             .ok()
                             .flatten()
                             .is_some_and(|stored| stored.state == MeetingState::Ready);
@@ -2220,13 +2233,13 @@ impl ProcessingPipeline {
                             });
                             return Err(failure);
                         }
-                        let _ = self.store().set_state(
-                            meeting_id,
-                            MeetingState::Failed {
-                                reason: failure.to_string(),
-                            },
-                            self.now(),
-                        );
+                        let (reason, now) = (failure.to_string(), self.now());
+                        let _ = self
+                            .store()
+                            .writing(move |store| {
+                                store.set_state(meeting_id, MeetingState::Failed { reason }, now)
+                            })
+                            .await;
                         return Err(failure);
                     }
                 };
@@ -2334,19 +2347,24 @@ impl ProcessingPipeline {
         let claim = self.speech_engine().claim();
         let transcribed: Result<_> = async {
             self.warm_up_for_job(meeting.id).await?;
-            attributing(
+            let (meeting_id, now) = (meeting.id, self.now());
+            let settings = attributing(
                 PipelineStage::Decode,
                 self.store()
-                    .set_state(meeting.id, MeetingState::Processing, self.now()),
+                    .writing(move |store| {
+                        store.set_state(meeting_id, MeetingState::Processing, now)?;
+                        store.settings()
+                    })
+                    .await,
             )?;
-            let settings = attributing(PipelineStage::Decode, self.store().settings())?;
             self.begin_run(
                 &meeting,
                 &asset.lanes,
                 None,
                 PipelineStage::ALL.to_vec(),
                 &settings,
-            )?;
+            )
+            .await?;
             let mut current = meeting;
             current.state = MeetingState::Processing;
             let (transcription, last) = self.decode_and_transcribe(asset, current.id).await?;
@@ -2373,7 +2391,7 @@ impl ProcessingPipeline {
             Ok(diarized) => diarized,
             Err(failure) => {
                 self.carry_on_after(&failure, current.id)?;
-                self.diarization_without_diarizer(current.id, lane)?
+                self.diarization_without_diarizer(current.id, lane).await?
             }
         };
         current.language = transcription.language;
@@ -2404,17 +2422,29 @@ impl ProcessingPipeline {
         // or a calendar event they attached (either keeps the model's title
         // out), and the speakers they named or merged during cleanup, with
         // the segments a merge repointed (their text is the cleaned text).
-        let stored = required(
+        let meeting_id = current.id;
+        let (stored, speakers, segments) = attributing(
             PipelineStage::Summarize,
-            self.store().meeting(current.id),
-            || format!("meeting {} not found", current.id),
+            self.store()
+                .reading(move |store| {
+                    Ok((
+                        store.meeting(meeting_id)?,
+                        store.speakers(meeting_id)?,
+                        store.segments(meeting_id)?,
+                    ))
+                })
+                .await,
         )?;
+        let stored = stored.ok_or_else(|| {
+            PipelineFailure::new(
+                PipelineStage::Summarize,
+                format!("meeting {meeting_id} not found"),
+            )
+        })?;
         current.template_id = stored.template_id;
         current.title = stored.title;
         current.title_origin = stored.title_origin;
         current.calendar_event_id = stored.calendar_event_id;
-        let speakers = attributing(PipelineStage::Summarize, self.store().speakers(current.id))?;
-        let segments = attributing(PipelineStage::Summarize, self.store().segments(current.id))?;
         let current = self.summarize(current, &segments, &speakers).await?;
         self.persist(&current, asset).await
     }
@@ -2472,20 +2502,19 @@ impl ProcessingPipeline {
         if sample_clips::reach(probe.as_ref(), ClipStep::Sweeping).is_err() {
             return;
         }
-        let store = self.store().clone();
         let (replaced, committed) = (merged.replaced.clone(), merged.speakers.clone());
-        let swept = off_the_workers(move || {
-            sample_clips::sweep_after_merge(
-                &store,
-                &layout.speakers_directory(),
-                &replaced,
-                &committed,
-                probe.as_ref(),
-            )
-        })
-        .await
-        .map_err(StoreError::from)
-        .flatten();
+        let swept = self
+            .store()
+            .reading(move |store| {
+                sample_clips::sweep_after_merge(
+                    store,
+                    &layout.speakers_directory(),
+                    &replaced,
+                    &committed,
+                    probe.as_ref(),
+                )
+            })
+            .await;
         if let Err(error) = swept {
             tracing::warn!(
                 target: BACKGROUND_RUN_LOG,
@@ -2512,7 +2541,7 @@ impl ProcessingPipeline {
     /// over and its id is taken, so those segments get no speaker, and its
     /// row still marks the speakers incomplete. Rust only: Swift fails the
     /// meeting.
-    fn diarization_without_diarizer(
+    async fn diarization_without_diarizer(
         &self,
         meeting_id: Uuid,
         lane: Option<AudioLane>,
@@ -2521,12 +2550,18 @@ impl ProcessingPipeline {
             return Ok(Diarization::NONE);
         };
         let me = LaneMerger::me_speaker_id(meeting_id);
-        let speakers: Vec<Speaker> =
-            attributing(PipelineStage::Diarize, self.store().speakers(meeting_id))?
-                .into_iter()
-                .filter(|speaker| speaker.id != me)
-                .collect();
-        let segments = attributing(PipelineStage::Diarize, self.store().segments(meeting_id))?;
+        let (speakers, segments) = attributing(
+            PipelineStage::Diarize,
+            self.store()
+                .reading(move |store| {
+                    Ok((store.speakers(meeting_id)?, store.segments(meeting_id)?))
+                })
+                .await,
+        )?;
+        let speakers: Vec<Speaker> = speakers
+            .into_iter()
+            .filter(|speaker| speaker.id != me)
+            .collect();
         let owners: Vec<ClusterSpeaker> = speakers
             .iter()
             .map(|speaker| ClusterSpeaker {
@@ -2623,8 +2658,12 @@ impl ProcessingPipeline {
 
     async fn resummarize(&self, meeting: Meeting, template_id: &str) -> Result<()> {
         let meeting_id = meeting.id;
-        let export = attributing(PipelineStage::Summarize, self.store().export(meeting_id))?;
-        let settings = attributing(PipelineStage::Summarize, self.store().settings())?;
+        let (export, settings) = attributing(
+            PipelineStage::Summarize,
+            self.store()
+                .reading(move |store| Ok((store.export(meeting_id)?, store.settings()?)))
+                .await,
+        )?;
         let lanes = export
             .audio
             .as_ref()
@@ -2636,15 +2675,24 @@ impl ProcessingPipeline {
             Some(ProcessingEstimator::token_count(&export.segments)),
             vec![PipelineStage::Summarize, PipelineStage::Deliver],
             &settings,
-        )?;
+        )
+        .await?;
         let mut current = meeting;
         current.template_id = template_id.to_owned();
         current.state = MeetingState::Ready;
         self.summarize(current, &export.segments, &export.speakers)
             .await?;
         // The new summary is owed to the vault, so an exit before
-        // `deliver` leaves `pending` rows for the next launch.
-        self.inner.dependencies.dispatcher.mark_pending(meeting_id);
+        // `deliver` leaves `pending` rows for the next launch. The
+        // dispatcher writes them through its own handle on the store.
+        let dispatcher = self.inner.dependencies.dispatcher.clone();
+        let _ = self
+            .store()
+            .writing(move |_| {
+                dispatcher.mark_pending(meeting_id);
+                Ok(())
+            })
+            .await;
         self.deliver(meeting_id).await;
         self.stamp_deferred_retention(meeting_id, Stamp::Automatic)
             .await
@@ -2685,19 +2733,26 @@ impl ProcessingPipeline {
     /// The meeting, when it is still `ready` with a delivery `pending` or
     /// failed: what the launch re-exports once it holds the claim. A store
     /// error reads as not owed, and the next launch looks again.
-    fn still_owed(&self, meeting_id: Uuid) -> Option<Meeting> {
-        let store = self.store();
-        let meeting = store.meeting(meeting_id).ok().flatten()?;
-        let owed = meeting.state == MeetingState::Ready
-            && store.deliveries(meeting_id).is_ok_and(|rows| {
-                rows.iter().any(|row| {
-                    matches!(
-                        row.status,
-                        DeliveryStatus::Pending | DeliveryStatus::Failed(_)
-                    )
-                })
-            });
-        owed.then_some(meeting)
+    async fn still_owed(&self, meeting_id: Uuid) -> Option<Meeting> {
+        self.store()
+            .reading(move |store| {
+                let Some(meeting) = store.meeting(meeting_id)? else {
+                    return Ok(None);
+                };
+                let owed = meeting.state == MeetingState::Ready
+                    && store.deliveries(meeting_id).is_ok_and(|rows| {
+                        rows.iter().any(|row| {
+                            matches!(
+                                row.status,
+                                DeliveryStatus::Pending | DeliveryStatus::Failed(_)
+                            )
+                        })
+                    });
+                Ok(owed.then_some(meeting))
+            })
+            .await
+            .ok()
+            .flatten()
     }
 
     /// [`claim_deliver_again`](Self::claim_deliver_again) once `admitted`
@@ -2716,7 +2771,9 @@ impl ProcessingPipeline {
                 .as_ref()
                 .err()
                 .map_or(EXPORT_INTERRUPTED, |failure| failure.reason.as_str());
-            pipeline.fail_pending_deliveries(meeting_id, reason);
+            pipeline
+                .fail_pending_deliveries_off_the_workers(meeting_id, reason.to_owned())
+                .await;
             drop(admitted);
             result
         })
@@ -2724,17 +2781,21 @@ impl ProcessingPipeline {
 
     async fn deliver_again(&self, meeting: &Meeting) -> Result<()> {
         let meeting_id = meeting.id;
-        let settings = attributing(PipelineStage::Deliver, self.store().settings())?;
-        let lanes = attributing(PipelineStage::Deliver, self.store().asset(meeting_id))?
-            .map(|a| a.lanes)
-            .unwrap_or_default();
+        let (settings, asset) = attributing(
+            PipelineStage::Deliver,
+            self.store()
+                .reading(move |store| Ok((store.settings()?, store.asset(meeting_id)?)))
+                .await,
+        )?;
+        let lanes = asset.map(|a| a.lanes).unwrap_or_default();
         self.begin_run(
             meeting,
             &lanes,
             None,
             vec![PipelineStage::Deliver],
             &settings,
-        )?;
+        )
+        .await?;
         self.deliver(meeting_id).await;
         self.stamp_deferred_retention(meeting_id, Stamp::Automatic)
             .await
@@ -2768,17 +2829,26 @@ impl ProcessingPipeline {
     /// while the meeting is processing: the stages read the row again
     /// before they write it.
     pub async fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> Result<()> {
-        let mut asset = required(
+        let applied = attributing(
             PipelineStage::Retention,
-            self.store().asset(meeting_id),
-            || format!("meeting {meeting_id} has no audio asset"),
+            self.store()
+                .writing(move |store| {
+                    let Some(mut asset) = store.asset(meeting_id)? else {
+                        return Ok(false);
+                    };
+                    asset.retention = rule;
+                    asset.expires_at = None;
+                    store.save_asset_durably(&asset)?;
+                    Ok(true)
+                })
+                .await,
         )?;
-        asset.retention = rule;
-        asset.expires_at = None;
-        attributing(
-            PipelineStage::Retention,
-            self.store().save_asset_durably(&asset),
-        )?;
+        if !applied {
+            return Err(PipelineFailure::new(
+                PipelineStage::Retention,
+                format!("meeting {meeting_id} has no audio asset"),
+            ));
+        }
         self.stamp_deferred_retention(meeting_id, Stamp::Chosen)
             .await
     }
@@ -2788,7 +2858,7 @@ impl ProcessingPipeline {
     /// Starts the meeting's run over `stages`, estimated from the learned
     /// rates; the operation's [`Admitted`] mark removes it when the
     /// operation ends.
-    fn begin_run(
+    async fn begin_run(
         &self,
         meeting: &Meeting,
         lanes: &[AudioLane],
@@ -2797,7 +2867,7 @@ impl ProcessingPipeline {
         settings: &Settings,
     ) -> Result<()> {
         let stage = *stages.first().unwrap_or(&PipelineStage::Decode);
-        let rows = attributing(stage, self.store().stage_rates())?;
+        let rows = attributing(stage, self.store().reading(Store::stage_rates).await)?;
         let estimator = ProcessingEstimator::new(
             meeting.duration,
             lanes.to_vec(),
@@ -2929,7 +2999,7 @@ impl ProcessingPipeline {
         if let Some(sample) = sample {
             // The rates are a convenience; a bookkeeping failure never
             // fails a run.
-            if let Err(error) = self.record(&sample) {
+            if let Err(error) = self.record(sample).await {
                 tracing::debug!(%error, "stage rate not recorded");
             }
         }
@@ -2939,14 +3009,18 @@ impl ProcessingPipeline {
     /// Folds one measurement into its row in one write: the first sample
     /// replaces the seed outright, later ones move the average.
     /// Swift: `MeetingStore.record`.
-    fn record(&self, sample: &StageSample) -> std::result::Result<(), StoreError> {
+    async fn record(&self, sample: StageSample) -> std::result::Result<(), StoreError> {
         self.store()
-            .update_stage_rate(sample.stage, &sample.key, sample.recorded_at, |current| {
-                let current =
-                    current.unwrap_or_else(|| StageRates::seeds().rate(sample.stage, &sample.key));
-                absorbing(current, sample.seconds_per_unit)
+            .writing(move |store| {
+                store
+                    .update_stage_rate(sample.stage, &sample.key, sample.recorded_at, |current| {
+                        let current = current
+                            .unwrap_or_else(|| StageRates::seeds().rate(sample.stage, &sample.key));
+                        absorbing(current, sample.seconds_per_unit)
+                    })
+                    .map(drop)
             })
-            .map(drop)
+            .await
     }
 
     // Stages
@@ -3180,9 +3254,10 @@ impl ProcessingPipeline {
         lanes: &BTreeMap<AudioLane, Vec<RawSegment>>,
         diarization: &Diarization,
     ) -> Result<Merged> {
-        let store = self.store();
         let now = self.now();
-        self.run(PipelineStage::Merge, 0, meeting.id, async {
+        let meeting_id = meeting.id;
+        let (meeting, lanes, diarization) = (meeting.clone(), lanes.clone(), diarization.clone());
+        let merged = self.store().writing(move |store| {
             let mut all_speakers = diarization.speakers.clone();
             let mut me_speaker_id = None;
             let mic_is_room = diarization.lane == Some(AudioLane::Mic);
@@ -3196,7 +3271,7 @@ impl ProcessingPipeline {
             }
             let segments = LaneMerger::merge(
                 meeting.id,
-                lanes,
+                &lanes,
                 &diarization.cluster_speakers,
                 me_speaker_id,
                 diarization.lane,
@@ -3216,13 +3291,13 @@ impl ProcessingPipeline {
             let mut updated = meeting.clone();
             updated.updated_at = now;
             let replaced = store.replace_transcript(&updated, &segments, &all_speakers)?;
-            Ok::<_, StoreError>(Merged {
+            Ok(Merged {
                 segments,
                 speakers: all_speakers,
                 replaced,
             })
-        })
-        .await
+        });
+        self.run(PipelineStage::Merge, 0, meeting_id, merged).await
     }
 
     /// Runs the `TranscriptCleaner` and persists the cleaned `text` by
@@ -3245,8 +3320,13 @@ impl ProcessingPipeline {
             let Some(cleaner) = cleaner else {
                 return Ok::<_, PipelineFailure>(None);
             };
-            let participants = attributing(PipelineStage::Cleanup, store.participants(meeting.id))?;
-            let people = attributing(PipelineStage::Cleanup, store.persons())?;
+            let meeting_id = meeting.id;
+            let (participants, people) = attributing(
+                PipelineStage::Cleanup,
+                store
+                    .reading(move |store| Ok((store.participants(meeting_id)?, store.persons()?)))
+                    .await,
+            )?;
             let output = attributing(
                 PipelineStage::Cleanup,
                 cleaner
@@ -3285,7 +3365,9 @@ impl ProcessingPipeline {
             updated.updated_at = now;
             attributing(
                 PipelineStage::Cleanup,
-                store.update_segment_texts(&updated, &corrected),
+                store
+                    .writing(move |store| store.update_segment_texts(&updated, &corrected))
+                    .await,
             )?;
             Ok(Some(output.usage))
         })
@@ -3314,9 +3396,12 @@ impl ProcessingPipeline {
             let mut updated = meeting.clone();
             let Some(summarizer) = summarizer else {
                 updated.updated_at = now;
+                let saved = updated.clone();
                 attributing(
                     PipelineStage::Summarize,
-                    store.save_processing_results(&updated),
+                    store
+                        .writing(move |store| store.save_processing_results(&saved))
+                        .await,
                 )?;
                 return Ok::<_, PipelineFailure>(updated);
             };
@@ -3327,9 +3412,12 @@ impl ProcessingPipeline {
                         format!("unknown summary template {}", meeting.template_id),
                     )
                 })?;
-            let participants =
-                attributing(PipelineStage::Summarize, store.participants(meeting_id))?;
-            let people = attributing(PipelineStage::Summarize, store.persons())?;
+            let (participants, people) = attributing(
+                PipelineStage::Summarize,
+                store
+                    .reading(move |store| Ok((store.participants(meeting_id)?, store.persons()?)))
+                    .await,
+            )?;
             let output = attributing(
                 PipelineStage::Summarize,
                 summarizer
@@ -3364,14 +3452,13 @@ impl ProcessingPipeline {
                 }) + output.usage,
             );
             updated.updated_at = now;
+            let saved = updated.clone();
+            let (tasks, decisions, names) = (output.tasks, output.decisions, output.speaker_names);
             attributing(
                 PipelineStage::Summarize,
-                store.replace_summary(
-                    &updated,
-                    &output.tasks,
-                    &output.decisions,
-                    &output.speaker_names,
-                ),
+                store
+                    .writing(move |store| store.replace_summary(&saved, &tasks, &decisions, &names))
+                    .await,
             )?;
             Ok(updated)
         })
@@ -3401,30 +3488,39 @@ impl ProcessingPipeline {
                 attributing(PipelineStage::Persist, decoder.mixdown(asset, &path).await)?;
                 mixdown = Some(file_url(&path, false));
             }
-            let mut updated = attributing(PipelineStage::Persist, store.asset_by_id(asset.id))?
-                .unwrap_or_else(|| asset.clone());
-            if let Some(mixdown) = mixdown {
-                updated.mixdown_url = Some(mixdown);
-            }
-            attributing(PipelineStage::Persist, store.save_asset(&updated))?;
-            // Read before the ready write, so a failed read never fails a
-            // meeting already marked ready.
-            let unconfirmed: Vec<Uuid> =
-                attributing(PipelineStage::Persist, store.speakers(meeting.id))?
-                    .into_iter()
-                    .filter(|speaker| !speaker.assignment.is_confirmed())
-                    .map(|speaker| speaker.id)
-                    .collect();
-            // The export is owed before the meeting is ready, so an exit
-            // in between leaves a `pending` row for the next launch. Marked
-            // after the ready write instead, an exit between the two would
-            // leave a ready meeting nothing exports; marked before, a
-            // failed ready write leaves `pending` rows on a failed meeting,
-            // which keep its audio and which Process again exports.
-            self.inner.dependencies.dispatcher.mark_pending(meeting.id);
-            attributing(
+            let (meeting_id, fallback) = (meeting.id, asset.clone());
+            let dispatcher = self.inner.dependencies.dispatcher.clone();
+            let (updated, unconfirmed) = attributing(
                 PipelineStage::Persist,
-                store.set_state(meeting.id, MeetingState::Ready, now),
+                store
+                    .writing(move |store| {
+                        let mut updated = store
+                            .asset_by_id(fallback.id)?
+                            .unwrap_or_else(|| fallback.clone());
+                        if let Some(mixdown) = mixdown {
+                            updated.mixdown_url = Some(mixdown);
+                        }
+                        store.save_asset(&updated)?;
+                        // Read before the ready write, so a failed read never
+                        // fails a meeting already marked ready.
+                        let unconfirmed: Vec<Uuid> = store
+                            .speakers(meeting_id)?
+                            .into_iter()
+                            .filter(|speaker| !speaker.assignment.is_confirmed())
+                            .map(|speaker| speaker.id)
+                            .collect();
+                        // The export is owed before the meeting is ready, so
+                        // an exit in between leaves a `pending` row for the
+                        // next launch. Marked after the ready write instead,
+                        // an exit between the two would leave a ready meeting
+                        // nothing exports; marked before, a failed ready write
+                        // leaves `pending` rows on a failed meeting, which
+                        // keep its audio and which Process again exports.
+                        dispatcher.mark_pending(meeting_id);
+                        store.set_state(meeting_id, MeetingState::Ready, now)?;
+                        Ok((updated, unconfirmed))
+                    })
+                    .await,
             )?;
             if !unconfirmed.is_empty() {
                 events.post(MeetingEvent::SpeakersNeedReview {
@@ -3461,13 +3557,18 @@ impl ProcessingPipeline {
         let store = self.store();
         let events = &self.inner.dependencies.events;
         let meeting_id = asset.meeting_id;
-        let delivered = attributing(PipelineStage::Retention, store.deliveries(meeting_id))?
-            .iter()
-            .all(|delivery| delivery.status == DeliveryStatus::Delivered);
+        let delivered = attributing(
+            PipelineStage::Retention,
+            store
+                .reading(move |store| store.deliveries(meeting_id))
+                .await,
+        )?
+        .iter()
+        .all(|delivery| delivery.status == DeliveryStatus::Delivered);
         if !delivered {
             return Ok(());
         }
-        if stamp == Stamp::Automatic && self.stored_results_need_the_audio(asset)? {
+        if stamp == Stamp::Automatic && self.stored_results_need_the_audio(asset).await? {
             tracing::info!(
                 target: BACKGROUND_RUN_LOG,
                 %meeting_id,
@@ -3476,14 +3577,20 @@ impl ProcessingPipeline {
             return Ok(());
         }
         let now = self.now();
+        let fallback = asset.clone();
         self.run(PipelineStage::Retention, 0, meeting_id, async {
-            let mut updated = store
-                .asset_by_id(asset.id)?
-                .unwrap_or_else(|| asset.clone());
-            updated.expires_at = updated.retention.expiry(now);
-            // Durable, so the stamp that lets the sweep delete the
-            // recording never outlives the transcript it was kept for.
-            store.save_asset_durably(&updated)?;
+            store
+                .writing(move |store| {
+                    let mut updated = store
+                        .asset_by_id(fallback.id)?
+                        .unwrap_or_else(|| fallback.clone());
+                    updated.expires_at = updated.retention.expiry(now);
+                    // Durable, so the stamp that lets the sweep delete the
+                    // recording never outlives the transcript it was kept
+                    // for.
+                    store.save_asset_durably(&updated)
+                })
+                .await?;
             events.post(MeetingEvent::RetentionApplied { meeting_id });
             Ok::<_, StoreError>(())
         })
@@ -3494,11 +3601,24 @@ impl ProcessingPipeline {
     /// stored, or the recording [may be damaged](DamagedAudio::may_be_damaged):
     /// parts of it were replaced by silence, which decode recorded and
     /// synced before this stamp, or the damage record cannot be read.
-    fn stored_results_need_the_audio(&self, asset: &AudioAsset) -> Result<bool> {
-        let store = self.store();
+    async fn stored_results_need_the_audio(&self, asset: &AudioAsset) -> Result<bool> {
         let meeting_id = asset.meeting_id;
-        let Some(meeting) = attributing(PipelineStage::Retention, store.meeting(meeting_id))?
-        else {
+        let stored = attributing(
+            PipelineStage::Retention,
+            self.store()
+                .reading(move |store| {
+                    let Some(meeting) = store.meeting(meeting_id)? else {
+                        return Ok(None);
+                    };
+                    Ok(Some((
+                        meeting,
+                        store.speakers(meeting_id)?,
+                        store.segments(meeting_id)?,
+                    )))
+                })
+                .await,
+        )?;
+        let Some((meeting, speakers, segments)) = stored else {
             return Ok(false);
         };
         if self
@@ -3509,8 +3629,6 @@ impl ProcessingPipeline {
         {
             return Ok(true);
         }
-        let speakers = attributing(PipelineStage::Retention, store.speakers(meeting_id))?;
-        let segments = attributing(PipelineStage::Retention, store.segments(meeting_id))?;
         Ok(steno_core::results_need_the_audio(
             &meeting, &speakers, &segments, asset,
         ))
@@ -3520,21 +3638,49 @@ impl ProcessingPipeline {
     /// retention and no stamp gets one now if every delivery succeeded. Only
     /// a `ready` meeting whose master is still on disk is stamped.
     async fn stamp_deferred_retention(&self, meeting_id: Uuid, stamp: Stamp) -> Result<()> {
-        let store = self.store();
-        let Some(asset) = attributing(PipelineStage::Retention, store.asset(meeting_id))? else {
+        let (asset, meeting) = attributing(
+            PipelineStage::Retention,
+            self.store()
+                .reading(move |store| Ok((store.asset(meeting_id)?, store.meeting(meeting_id)?)))
+                .await,
+        )?;
+        let Some(asset) = asset else {
             return Ok(());
         };
         if asset.retention == AudioRetention::KeepForever || asset.expires_at.is_some() {
             return Ok(());
         }
-        let ready = attributing(PipelineStage::Retention, store.meeting(meeting_id))?
-            .is_some_and(|meeting| meeting.state == MeetingState::Ready);
+        let ready = meeting.is_some_and(|meeting| meeting.state == MeetingState::Ready);
         let master_exists =
             steno_core::paths::file_url_path(&asset.url).is_some_and(|path| path.exists());
         if !ready || !master_exists {
             return Ok(());
         }
         self.retention(&asset, stamp).await
+    }
+}
+
+/// Saves the deliveries of `meeting_id` still `pending` as failed with
+/// `reason`, keeping their receipt and their last attempt, stamped `now`
+/// when there is none:
+/// [`ProcessingPipeline::fail_pending_deliveries`]'s write.
+fn fail_pending(store: &Store, meeting_id: Uuid, reason: &str, now: DateTime<Utc>) {
+    let rows = match store.deliveries(meeting_id) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(target: BACKGROUND_RUN_LOG, %meeting_id, %error, "deliveries could not be read");
+            return;
+        }
+    };
+    for mut row in rows {
+        if row.status != DeliveryStatus::Pending {
+            continue;
+        }
+        row.status = DeliveryStatus::Failed(reason.to_owned());
+        row.last_attempt_at.get_or_insert(now);
+        if let Err(error) = store.save_delivery(&row) {
+            tracing::warn!(target: BACKGROUND_RUN_LOG, %meeting_id, %error, "a delivery could not be saved failed");
+        }
     }
 }
 
@@ -3683,9 +3829,11 @@ pub fn ensure_me_participant(
     Ok(me)
 }
 
-/// Runs `work` on tokio's blocking pool, off the async workers, and returns
-/// what it returned. A panic in `work` resumes here; a task the runtime
-/// cancelled before it ran (the runtime shutting down) is an error.
+/// Runs `work`, file work with no store call (a store call goes through
+/// `Store::reading` or `Store::writing`), on tokio's blocking pool, off
+/// the async workers, and returns what it returned. A panic in `work`
+/// resumes here; a task the runtime cancelled before it ran (the runtime
+/// shutting down) is an error.
 async fn off_the_workers<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> std::io::Result<T> {

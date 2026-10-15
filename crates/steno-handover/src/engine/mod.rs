@@ -377,7 +377,7 @@ impl Engine {
         &self,
         body: impl FnOnce(&Store) -> store::Result<T> + Send + 'static,
     ) -> store::Result<T> {
-        on_blocking_pool(self.store.clone(), body).await
+        unless_it_panics(self.store.reading(body)).await
     }
 
     /// Runs `write` on the blocking pool once the write asked for before it
@@ -402,7 +402,7 @@ impl Engine {
                 // Closed, not sent: the write before has returned.
                 let _ = previous.await;
             }
-            let written = on_blocking_pool(store, write).await;
+            let written = unless_it_panics(store.writing(write)).await;
             drop(done);
             written
         })
@@ -1094,14 +1094,21 @@ fn same_upload(held: &HandoverReceipt, read: &HandoverReceipt) -> bool {
         && held.sha256 == read.sha256
 }
 
-/// `body` on the blocking pool; a panic there is an I/O error.
-async fn on_blocking_pool<T: Send + 'static>(
-    store: Arc<Store>,
-    body: impl FnOnce(&Store) -> store::Result<T> + Send + 'static,
+/// A store call through the store's facade, whose panic is an I/O error,
+/// as a failed write is: the request it served answers with a server
+/// error, and the connection lives on.
+async fn unless_it_panics<T>(
+    call: impl std::future::Future<Output = store::Result<T>>,
 ) -> store::Result<T> {
-    tokio::task::spawn_blocking(move || body(&store))
+    use futures_util::FutureExt as _;
+    std::panic::AssertUnwindSafe(call)
+        .catch_unwind()
         .await
-        .map_err(|error| join_error(&error))?
+        .unwrap_or_else(|_| {
+            Err(store::StoreError::Io(std::io::Error::other(
+                "the store call panicked",
+            )))
+        })
 }
 
 /// A task that panicked or was cancelled, as a store I/O error.
