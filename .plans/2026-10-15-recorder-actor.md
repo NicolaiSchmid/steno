@@ -55,7 +55,7 @@ The cause:
 
 | Where | Threads that change state | Locks |
 |---|---|---|
-| Recorder (`crates/steno-services/src/recorder.rs`, 5 907 lines) | `steno-recording-levels`, `steno-notices`, `steno-recording-watch`, one `steno-auto-stop` per armed countdown, the host's callers, the shutdown's `stop_for_quit`, and with #286 the shell's main thread | `inner` and its `changes` condvar, `changed`, `disk`, `clock`, and per recording `levels`, `fallback`, `outage`; #286 adds an atomic outside them |
+| Recorder (`crates/steno-services/src/recorder.rs`, 5 907 lines) | `steno-recording-levels`, `steno-notices`, `steno-recording-watch`, one `steno-auto-stop` per armed countdown, the host's callers, the shutdown's `stop_for_quit`, and with #286 the shell's main thread | `inner` and its `changes` condvar, `changed`, `disk`, `clock`, and per recording `levels`, `fallback`, `outage`; #286 adds an atomic and the tone tests' cancel lock outside them |
 | Capture session (`crates/steno-audio/src/capture/session.rs`, 2 585 lines) | `steno-watch`, `steno-rebuild`, `steno-wfail`, `steno-probe`, the caller of `stop()` | one `Core.inner` mutex (the session mutex) and its `state_changed` condvar, held across `backend.start()` for up to 10 s; the writer thread takes it to publish levels |
 
 - **A recording ends from many places.** In the recorder: user Stop, toggle,
@@ -98,8 +98,8 @@ These land before `0.11.0-rc.1` under their own owners:
   `warm_up_if_installed` once it has sent `StartFinished`, inside a
   `catch_unwind` that logs a panic and leaves the recording going. A stop
   queued behind it waits only for its model checks, which stat the model
-  files: the load itself runs on the services runtime as today, so the catch
-  stays where A15 puts it.
+  files: the load itself runs on the services runtime as today, where A15's
+  catch at the FFI boundary covers it.
 
 ## Target design
 
@@ -193,7 +193,7 @@ after the `StopFinished` of the stop they began, or at once when they begin
 none; `Quit` once the phase is `Idle` ("Quit is a command", below).
 `RefuseStarts` and `ToneTestEnded` get no reply; every other command replies
 after its own step. The actor takes each reply out of its command before
-`step` and holds it until then, so a `step` that panics loses none (below).
+`step` and holds it until it is due, so a `step` that panics loses none (below).
 Each reply is sent after its step has stored its status snapshot (below), so
 a `status()` read after a reply sees that step (the host's `recording_start`
 reads it to select the live row or re-read the permissions). After `Hold` the
@@ -254,14 +254,15 @@ calling thread now says the capture recorder reports from its notifier, and
 `hold_starts`' doc names no lock (above).
 
 **Admission is one value.** `quitting`, `start_holds` and `starts_refused`
-become `Admission { holds, refused: Option<Refusal> }`. `Refusal` is
-`MenuQuit` (the menu's Quit, #286's `starts_refused`), which says
-`QUITTING_REFUSAL`, or `ShuttingDown` (`stop_for_quit`, today's `quitting`);
-a hold says `INSTALLING_UPDATE`. As in #286, a start is refused in this order:
-silently when `ShuttingDown` or not idle, then with `MenuQuit`'s message, then
-with a hold's. A tone test is admitted only while `Idle` and not
-`ShuttingDown`, so none begins once a start has set `Starting`, and a start
-waits for those already running (above): no tone reaches a recording.
+become `Admission { holds, refused: Option<Refusal> }`. `Refusal` is `MenuQuit`
+(the menu's Quit, #286's `starts_refused`), which says `QUITTING_REFUSAL`, or
+`ShuttingDown` (`stop_for_quit`, today's `quitting`); a hold says
+`INSTALLING_UPDATE`. As in #286, a start is refused in this order: silently
+when `ShuttingDown` or not idle, then with `MenuQuit`'s message, then with a
+hold's. A tone test is admitted only while `Idle` and no `Refusal` is set, so
+none begins once a start has set `Starting` or a Quit has refused the starts. A
+start waits for those already running (above), so no tone reaches a recording;
+`RefuseStarts` and `Quit` cancel them and wait for none, as #286 does.
 `RefuseStarts` is a non-blocking send the shell's main thread can make, and
 channel order refuses every start sent after it.
 
@@ -272,38 +273,37 @@ sends `Quit` and waits for the reply, which the machine sends once the phase is
 `Idle` and starts are refused. `CaptureRecorder::settle`'s wait on the
 `changes` condvar goes; `ExitGate`'s `SHUTDOWN_PATIENCE` stays.
 
-**Panics.** The actor wraps each `step`, and the I/O worker each effect, in
-`catch_unwind` and maps a panic to today's `Unwinding` outcomes
-(`START_PANICKED`, `SAVE_PANICKED`), so a start or stop that panics still
-leaves the recorder idle with an error. A guard on the I/O worker sends
-`Done(WorkerGone)` if the thread ends, which the machine answers as a panicked
-start or stop, so no waiter is left without a reply, and the actor spawns a
-fresh I/O worker before the next effect that needs one.
+**Panics.** Today a start or a stop that panics leaves the recorder `Idle` with
+`START_PANICKED` or `SAVE_PANICKED` (`Unwinding`); a panic elsewhere, on the
+notice or levels thread or in a call under the poison-tolerant `inner`, ends
+that thread or call, and the recording goes on. The actor keeps both:
 
-`step` runs on a copy of the machine (a few small fields, cloned on the actor
-thread, never on the audio path) that the actor keeps only when it returns. A
-`step` that panics therefore changes at most the phase and the error, as
-`Unwinding` changes only the status today: the `Admission` and the tone tests
-stay as they were before that event, and their counts stay true, since the
-actor applies a `Hold`, a `Release` or a `ToneTestEnded` to its count before
-`step` and refuses a `ToneTest` whose step panics. Every reply held at the
-panic, the panicking command's among them, is sent when the phase is next
-`Idle`, and the phase follows what the I/O worker still owes, so no owed
-`Done` is dropped as stale:
-
-- **An `OpenSession` owed:** the machine stores `START_PANICKED` but stays
-  `Starting`, refusing starts silently, as any phase but `Idle` does, until
-  that epoch's `StartFinished`. It is then `Stopping` while the I/O worker
-  undoes the start as a start that panics does today (`BegunMeeting`: the
-  session stopped, the folder removed, the meeting failed, the recorded folder
-  forgotten), until the undo's `StopFinished`.
-- **A session held, or its close or save owed:** it closes that session
-  through the stop path, storing `SAVE_PANICKED`, or lets the close or save
-  under way finish with its own outcome, and stays `Stopping` until its
-  `StopFinished`, so a `Quit` waits for the save and no start opens a second
-  session beside it.
-- **Otherwise:** it goes `Idle`, with `START_PANICKED` if it was starting or
-  the panicking command was a `Start` or a `Toggle`.
+- **The I/O worker** runs each effect inside `catch_unwind` and answers a panic
+  with the effect's `Done`, carrying `START_PANICKED` (once `BegunMeeting` has
+  undone the start) or `SAVE_PANICKED`. A guard sends `Done(WorkerGone)` if the
+  thread ends, answered as a panicked start or stop, and the actor spawns a
+  fresh worker before the next effect.
+- **Before `step`** the actor applies what no panic may lose, as today's
+  `quitting` and `starts_refused` are plain stores: the counts of `Hold`,
+  `Release` and `ToneTestEnded`, the `Refusal` of `RefuseStarts` and `Quit` and
+  the tone-test cancel they raise, and a `Disk` reading's in-flight mark, which
+  `step` finds applied.
+- **A step that panics loses only its event:** it runs on a copy of the machine
+  (a few small fields, cloned on the actor thread, never on the audio path)
+  kept only if `step` returns, so the phase and its epoch stay and a start or a
+  recording goes on. The actor logs the panic and replies at once, refusing a
+  `ToneTest`, and while `Idle` stores `START_PANICKED` for a `Start` or a
+  `Toggle`. A `Quit` still waits for a stop under way, else it leaves a start or
+  a recording to the next launch's recovery. A lost `Deadline` is not sent
+  again (the alarm re-arms only when the deadline moves), so the disk readings
+  and the countdown end, as when today's watch or countdown thread panics.
+- **A panic on what a start or a stop waits for ends it:** on any `Done`, whose
+  effect has run, or on a `ToneTestEnded` or `Deadline` while a start waits for
+  tone tests, the actor sets the phase outside `step`: `Idle`, or, after a
+  `StartFinished` with a started session, `Stopping` on the same epoch while
+  the I/O worker undoes the start as `BegunMeeting` does. Every held reply is
+  sent at the next `Idle`; the error is `START_PANICKED` for a start or its
+  undo, else `SAVE_PANICKED`, as a panic in `finish_stop` leaves it.
 
 If the actor thread itself dies, every later command's send fails at once and
 returns, and a guard on the thread stores a status whose error is
@@ -483,9 +483,9 @@ the D9 ruling is made.
     warning with its hysteresis, a failed write, quit during a start and during
     a stop, a `Stop` and a `Toggle` ignored while starting, a second stop cause
     while stopping, a `Failed` and a `DeviceChanged` that arrive before
-    `StartFinished`, a stale epoch, a tone test refused while starting, and
-    every admission case (hold, menu Quit, shutdown, and a start while not
-    idle).
+    `StartFinished`, a stale epoch, a tone test refused while starting and
+    after a menu Quit, and every admission case (hold, menu Quit, shutdown,
+    and a start while not idle).
   - The existing quit, save-retry, recovery and kill tests pass against the
     actor with only their observation points moved: `quit_while_busy` waits
     for the shutdown's `Cancel` in place of `inner().quitting`, #286's "the
@@ -616,4 +616,4 @@ the count starts, one series covers both.
 | A macOS MSRV job. The `msrv` job (`rust-version` 1.90, `.github/workflows/rust-ci.yml`) runs on Linux only, so Mac-only code is checked against the MSRV only by hand. | #285 | Its own `ci` PR, the first after the stable release and before PR 1, so PR 3's Mac code is checked. The Linux job's steps (`rust-version` read from `Cargo.toml`, then `cargo +<version> check --workspace --all-targets --locked`) on the macOS runner (`vars.MACOS_RUNS_ON`, `macos-15` as the fallback), same triggers as the Linux job. Acceptance: green on `main`, and red on a scratch commit that uses an API newer than the MSRV under `cfg(target_os = "macos")`. Risk: one more job on Forge, a shared machine. |
 | `DiskWarning` hysteresis. `DiskWarning::set` forgets a dismissal at the first reading with room, so a reading that hovers across the 30-minute line shows a dismissed warning again at each crossing. | #285 | PR 2, as table rows. The machine keeps the minutes left at every reading, not only under the line (a helper beside `Room::of`, which stays as it is). Proposed: the warning shows under 30 minutes; a dismissal is forgotten only at 40 minutes or more. Nicolai settles the 40 in PR 2. |
 | A stale countdown on a stalled Windows call. The change hook fires only after the notice thread's stream read, which can wait up to about 10 s behind a rebuild's start, so the host can show a countdown the status already hides. Cosmetic; no data lost. | #283 | PR 2: the `DeviceChanged` step marks the capture as recovering and publishes at once, so the hook and the status agree from that step on; the stalled device's stream read moves to the forwarder (`StalledDevice`, above). Acceptance: with the fake's `stream()` held at a gate, the hook's status after the `DeviceChanged` shows no countdown. PR 3 removes the read altogether: the session's event names the stalled device. |
-| Three ways to refuse a start: `quitting`, `start_holds`, `starts_refused`. | #286 | PR 2: one `Admission` value (above), one message slot. #286's tests (`a_start_after_a_menu_quit_is_refused_with_a_message`, `a_stop_under_way_at_a_menu_quit_still_tries_its_commit_again`) keep their assertions. |
+| Three ways to refuse a start: `quitting`, `start_holds`, `starts_refused`. | #286 | PR 2: one `Admission` value (above), one message slot. #286's tests (`a_start_after_a_menu_quit_is_refused_with_a_message`, `a_stop_under_way_at_a_menu_quit_still_tries_its_commit_again`, `a_tone_test_after_a_menu_quit_is_refused`, `a_tone_test_under_way_stops_at_a_menu_quit_and_at_the_shutdown`) keep their assertions. |
