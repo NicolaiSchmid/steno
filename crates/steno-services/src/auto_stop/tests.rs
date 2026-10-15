@@ -563,6 +563,68 @@ async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
     );
 }
 
+/// P40 check 3 (`.plans/2026-10-12-store-off-the-workers.md`): a countdown
+/// that runs out while another process holds the write lock, and a write
+/// of this process waits behind it, shows `Stopping` live in the host,
+/// with a reload in flight as the poll runs one, and the meeting is saved
+/// within a second of the lock going.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn an_auto_stop_under_a_held_lock_saves_once_the_lock_goes() {
+    let recording = recording();
+    let hosted = crate::testing::hosted(&recording.store, &recording.recorder);
+    recording.start(CaptureMode::Call, None);
+    recording.opened(Some("Zen"));
+    recording.released();
+    recording.sleepers(1);
+    recording.clock.advance(Duration::from_secs(89));
+    recording.sleepers(1);
+
+    let mut held =
+        crate::testing::HeldStore::with_a_write_waiting(&recording.store, &recording.database());
+    let reload = hosted.reload_in_flight();
+    let since = std::time::Instant::now();
+    recording.clock.advance(Duration::from_secs(1));
+    let stopping = hosted
+        .sink
+        .recording_in("stopping", since, PATIENCE)
+        .expect("the countdown's stop reached the host");
+    let shown = stopping.duration_since(since);
+    assert!(
+        shown < Duration::from_millis(200),
+        "Stopping reached the host {shown:?} after the countdown ran out"
+    );
+
+    let released = held.release_after_hold();
+    let deadline = released + Duration::from_secs(1);
+    let saved = loop {
+        let meetings = recording.meetings();
+        if meetings
+            .first()
+            .is_some_and(|meeting| meeting.state != MeetingState::Recording)
+        {
+            break meetings[0].clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the meeting was saved within a second of the lock going"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        !matches!(saved.state, MeetingState::Failed { .. }),
+        "handed to processing, got {:?}",
+        saved.state
+    );
+    assert_eq!(
+        saved.end_reason,
+        Some(RecordingEndReason::CallEnded {
+            app_name: Some("Zen".to_owned())
+        })
+    );
+    reload.join().unwrap();
+    recording.idle("the stop ended").await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unnamed_app_ends_the_call_with_the_bare_reason() {
     let recording = recording();

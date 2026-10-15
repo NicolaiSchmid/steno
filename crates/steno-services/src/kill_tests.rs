@@ -16,6 +16,11 @@
 //! `steno_audio::writer`). A child dies with its test: the test kills it
 //! when its guard drops, and the child ends itself once its parent is gone
 //! or its own time is up.
+//!
+//! The delete's kill tests run the same way, at a gate between two steps
+//! of a delete through the host ([`DeleteGate`]): the child records and
+//! saves a meeting, deletes it, and is killed at the gate; the next launch
+//! lists it, with its recording, or does not, and adopts no master.
 //! Rust only: Swift had no recovery.
 
 use std::io::Write as _;
@@ -28,9 +33,9 @@ use steno_audio::CaptureError;
 use steno_audio::writer::{
     CafStreamWriter, LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting, WavFile,
 };
-use steno_bridge::CaptureMode;
+use steno_bridge::{BridgeHost as _, CaptureMode, MeetingIdParams};
 use steno_core::{MeetingState, MeetingStateKind, RecordingEndReason, Store, paths::file_url_path};
-use steno_host::services::Recorder as _;
+use steno_host::services::{FileSystem, LeftRecording, Recorder};
 
 use crate::recorder::MakeCaptureSession;
 use crate::testing::{
@@ -265,12 +270,16 @@ impl Drop for ChildGuard {
 /// Starts the child over `directory` with `gate`, its output in files
 /// there.
 fn spawn_child(directory: &Path, gate: Gate) -> ChildGuard {
-    spawn_test("kill_tests::child_records_until_killed", directory, gate)
+    spawn_test(
+        "kill_tests::child_records_until_killed",
+        directory,
+        gate.name(),
+    )
 }
 
 /// Starts the ignored test `name` of this binary as the child over
-/// `directory` with `gate`, its output in files there.
-fn spawn_test(name: &str, directory: &Path, gate: Gate) -> ChildGuard {
+/// `directory` with the gate named `gate`, its output in files there.
+fn spawn_test(name: &str, directory: &Path, gate: &str) -> ChildGuard {
     let output = |name: &str| Stdio::from(std::fs::File::create(directory.join(name)).unwrap());
     let child = Command::new(std::env::current_exe().unwrap())
         .args([
@@ -281,7 +290,7 @@ fn spawn_test(name: &str, directory: &Path, gate: Gate) -> ChildGuard {
             "--test-threads=1",
         ])
         .env(DIRECTORY, directory)
-        .env(GATE, gate.name())
+        .env(GATE, gate)
         .env(PARENT, std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(output("child.out"))
@@ -643,7 +652,7 @@ async fn a_warm_up_killed_turns_the_warm_up_off_until_a_meeting_loads_the_models
     let mut child = spawn_test(
         "kill_tests::child_warms_up_until_killed",
         dir.path(),
-        Gate::Open,
+        Gate::Open.name(),
     );
     let loading = dir.path().join("loading");
     kill_when(&mut child, dir.path(), "the warm-up's load", || {
@@ -694,4 +703,288 @@ async fn a_warm_up_killed_turns_the_warm_up_off_until_a_meeting_loads_the_models
         "this recording's warm-up and its processing's load"
     );
     assert!(!warm_up_mark(dir.path()).exists());
+}
+
+/// Where the child's delete waits to be killed: each between two of the
+/// delete's steps, the entry the recorder kept for the meeting forgotten
+/// first (`Recorder::forget_recording`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeleteGate {
+    /// The entry forgotten, the delete's transaction open and not yet
+    /// committed: a commit probe holds it.
+    BeforeCommit,
+    /// The rows deleted and committed, the meeting's files not yet removed.
+    AfterCommit,
+    /// The delete refused (the pipeline took the meeting up while the
+    /// prompt was up), the rows kept, and the forgotten entry not yet
+    /// recorded again.
+    BeforeRestore,
+}
+
+impl DeleteGate {
+    const ALL: [DeleteGate; 3] = [
+        DeleteGate::BeforeCommit,
+        DeleteGate::AfterCommit,
+        DeleteGate::BeforeRestore,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            DeleteGate::BeforeCommit => "before-commit",
+            DeleteGate::AfterCommit => "after-commit",
+            DeleteGate::BeforeRestore => "before-restore",
+        }
+    }
+
+    fn named(name: &str) -> Self {
+        DeleteGate::ALL
+            .into_iter()
+            .find(|gate| gate.name() == name)
+            .expect("a known gate")
+    }
+}
+
+/// Says the child reached its gate, and waits there for the kill.
+fn hold_at_the_gate(reports: &Reports) -> ! {
+    Reports::append(&reports.gated(), b"1");
+    loop {
+        std::thread::park();
+    }
+}
+
+/// The real file system, held at the first removal: the delete's rows are
+/// gone by then.
+struct RemovalGate(Reports);
+
+impl FileSystem for RemovalGate {
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn remove(&self, _path: &Path) -> steno_core::BoundaryResult<()> {
+        hold_at_the_gate(&self.0)
+    }
+}
+
+/// The capture recorder, held where a refused delete records the
+/// forgotten entry again.
+struct RestoreGate {
+    inner: Arc<crate::recorder::CaptureRecorder>,
+    reports: Reports,
+}
+
+impl Recorder for RestoreGate {
+    fn status(&self) -> steno_host::services::RecorderStatus {
+        self.inner.status()
+    }
+    fn start(&self, mode: CaptureMode, call_app: Option<&str>) {
+        self.inner.start(mode, call_app);
+    }
+    fn hold_starts(&self) -> steno_host::services::StartHold {
+        self.inner.hold_starts()
+    }
+    fn refuse_starts(&self) {
+        self.inner.refuse_starts();
+    }
+    fn stop(&self) {
+        self.inner.stop();
+    }
+    fn toggle(&self) {
+        self.inner.toggle();
+    }
+    fn keep_recording(&self) {
+        self.inner.keep_recording();
+    }
+    fn clear_messages(&self) {
+        self.inner.clear_messages();
+    }
+    fn refresh_permissions(&self) {
+        self.inner.refresh_permissions();
+    }
+    fn remember_audio_folder(&self, folder: &Path) {
+        self.inner.remember_audio_folder(folder);
+    }
+    fn left_recording(&self, meeting_id: uuid::Uuid) -> LeftRecording {
+        self.inner.left_recording(meeting_id)
+    }
+    fn forget_recording(&self, meeting_id: uuid::Uuid) -> std::io::Result<Option<PathBuf>> {
+        self.inner.forget_recording(meeting_id)
+    }
+    fn restore_recording(&self, _meeting_id: uuid::Uuid, _folder: &Path) {
+        hold_at_the_gate(&self.reports)
+    }
+}
+
+/// The file the child writes its meeting's id into.
+fn meeting_id_file(directory: &Path) -> PathBuf {
+    directory.join("meeting.id")
+}
+
+/// The child: records and saves a meeting under its directory, then
+/// deletes it through the host, confirmed, until it is killed at its
+/// [`DeleteGate`]. Passes at once outside a child.
+#[test]
+#[ignore = "the kill tests run it in a child process"]
+fn child_deletes_until_killed() {
+    let Ok(directory) = std::env::var(DIRECTORY) else {
+        return;
+    };
+    die_with_the_parent();
+    let directory = PathBuf::from(directory);
+    let gate = DeleteGate::named(&std::env::var(GATE).unwrap());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
+    let mut app = app_over_fakes(&directory, &store, synthetic_capture());
+    app.recorder.start(CaptureMode::InPerson, None);
+    let meeting_id = app.recorder.status().meeting_id.expect("a recording");
+    std::thread::sleep(Duration::from_millis(500));
+    app.recorder.stop();
+    runtime.block_on(app.pipeline.current().wait_until_idle());
+    assert_eq!(
+        store.meeting(meeting_id).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
+    assert!(
+        crate::audio_folders::recorded(&directory.join("support"))
+            .unwrap()
+            .contains_key(&meeting_id),
+        "the recorder kept the meeting's folder"
+    );
+    std::fs::write(meeting_id_file(&directory), meeting_id.to_string()).unwrap();
+
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    match gate {
+        DeleteGate::BeforeCommit => {
+            let (armed, reports) = (armed.clone(), Reports(directory.clone()));
+            store.probe_commits(move |_| {
+                if armed.load(std::sync::atomic::Ordering::SeqCst) {
+                    hold_at_the_gate(&reports);
+                }
+            });
+        }
+        DeleteGate::AfterCommit => {
+            app.services.file_system = Arc::new(RemovalGate(Reports(directory.clone())));
+        }
+        DeleteGate::BeforeRestore => {
+            app.services.recorder = Arc::new(RestoreGate {
+                inner: app.recorder.clone(),
+                reports: Reports(directory.clone()),
+            });
+        }
+    }
+    let confirmed = store.clone();
+    let host = app.host().unwrap().with_dialogs(
+        Box::new(move |_| {
+            if gate == DeleteGate::BeforeRestore {
+                confirmed
+                    .set_state(meeting_id, MeetingState::Processing, chrono::Utc::now())
+                    .unwrap();
+            }
+            true
+        }),
+        Box::new(|_| None),
+    );
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = host.meetings_delete(MeetingIdParams { meeting_id });
+    panic!("the delete passed its gate");
+}
+
+/// Kills the child at `gate` and launches a new app over what it left;
+/// the meeting's id and the meetings that launch lists once its
+/// processing settled.
+async fn delete_killed_at(
+    directory: &Path,
+    gate: DeleteGate,
+) -> (uuid::Uuid, Vec<steno_core::Meeting>) {
+    let reports = Reports(directory.to_path_buf());
+    let mut child = spawn_test(
+        "kill_tests::child_deletes_until_killed",
+        directory,
+        gate.name(),
+    );
+    kill_when(&mut child, directory, "the delete's gate", || {
+        reports.gated().exists()
+    });
+    let meeting_id: uuid::Uuid = std::fs::read_to_string(meeting_id_file(directory))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
+    let mut app = app_over_fakes(directory, &store, synthetic_capture());
+    app.live_recording_check = an_hour_later();
+    let host = Arc::new(app.host().unwrap());
+    app.launch(&host);
+    app.launch_finished().await;
+    app.pipeline.current().wait_until_idle().await;
+    (meeting_id, store.meetings(10, 0).unwrap())
+}
+
+/// The master the child recorded for `meeting_id`.
+fn master_of(directory: &Path, meeting_id: uuid::Uuid) -> PathBuf {
+    steno_core::RecordingLayout::new(&audio_folder(directory), meeting_id)
+        .master(steno_core::AudioFormat::Caf48kFloat32)
+}
+
+/// Asserts that the launch lists the meeting once, ready, with its
+/// recording on disk.
+fn assert_listed_with_its_recording(
+    directory: &Path,
+    meeting_id: uuid::Uuid,
+    listed: &[steno_core::Meeting],
+) {
+    assert_eq!(
+        listed.iter().map(|meeting| meeting.id).collect::<Vec<_>>(),
+        [meeting_id],
+        "the meeting, listed once"
+    );
+    assert_eq!(listed[0].state, MeetingState::Ready);
+    let store = Store::open(directory.join("steno.sqlite")).unwrap();
+    let asset = store.asset(meeting_id).unwrap().expect("its recording");
+    assert_eq!(
+        file_url_path(&asset.url),
+        Some(master_of(directory, meeting_id))
+    );
+    assert!(
+        master_of(directory, meeting_id).exists(),
+        "the master on disk"
+    );
+}
+
+/// Killed after the delete forgot the meeting's entry and before its
+/// rows went: the next launch lists the meeting with its recording, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kill_after_the_entry_is_forgotten_keeps_the_meeting() {
+    let dir = tempfile::tempdir().unwrap();
+    let (meeting_id, listed) = delete_killed_at(dir.path(), DeleteGate::BeforeCommit).await;
+    assert_listed_with_its_recording(dir.path(), meeting_id, &listed);
+}
+
+/// Killed after the delete committed and before its files went: the next
+/// launch does not list the meeting, and its master, still on disk, is
+/// not adopted as a recovered recording.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kill_after_the_delete_commits_never_brings_the_meeting_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let (meeting_id, listed) = delete_killed_at(dir.path(), DeleteGate::AfterCommit).await;
+    assert!(
+        master_of(dir.path(), meeting_id).exists(),
+        "the master was left"
+    );
+    assert_eq!(listed, Vec::new(), "nothing listed, nothing adopted");
+}
+
+/// A delete refused because the pipeline took the meeting up while the
+/// prompt was up, killed before the forgotten entry was recorded again:
+/// the next launch lists the kept meeting with its recording, once, and
+/// processes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kill_before_a_kept_meetings_entry_is_restored_keeps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (meeting_id, listed) = delete_killed_at(dir.path(), DeleteGate::BeforeRestore).await;
+    assert_listed_with_its_recording(dir.path(), meeting_id, &listed);
 }

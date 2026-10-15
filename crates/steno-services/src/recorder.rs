@@ -4350,6 +4350,167 @@ mod tests {
         }
     }
 
+    /// What "live" means in the held-store checks: well under the busy
+    /// timeout a waiting write runs out.
+    const LIVE: Duration = Duration::from_millis(200);
+
+    /// The database file of `harness`'s store.
+    fn database(harness: &Harness) -> PathBuf {
+        crate::testing::database_in(harness.dir.path())
+    }
+
+    /// Waits up to `within` of `released` until `meeting_id` was saved,
+    /// out of `recording` and not failed.
+    fn saved_within(harness: &Harness, meeting_id: Uuid, released: Instant, within: Duration) {
+        let deadline = released + within;
+        loop {
+            let state = harness.store.meeting(meeting_id).unwrap().unwrap().state;
+            if state != steno_core::MeetingState::Recording {
+                assert!(
+                    !matches!(state, steno_core::MeetingState::Failed { .. }),
+                    "handed to processing, got {state:?}"
+                );
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "saved within {within:?} of the lock going"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// P40 check 4 (`.plans/2026-10-12-store-off-the-workers.md`): a stop
+    /// while another process holds the write lock, and a write of this
+    /// process waits behind it, shows `Stopping` in the host within 100 ms,
+    /// with a reload in flight as the poll runs one; the save waits for the
+    /// lock and lands within a second of its release, past one busy timeout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_stop_under_a_held_lock_shows_stopping_at_once_and_saves_once_the_lock_goes() {
+        let harness = harness(&[]);
+        let hosted = crate::testing::hosted(&harness.store, &harness.recorder);
+        start(&harness.recorder);
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+
+        let mut held =
+            crate::testing::HeldStore::with_a_write_waiting(&harness.store, &database(&harness));
+        let reload = hosted.reload_in_flight();
+        let since = Instant::now();
+        let stopper = harness.recorder.clone();
+        let stopping = std::thread::spawn(move || stopper.stop());
+        let shown = hosted
+            .sink
+            .recording_in("stopping", since, PATIENCE)
+            .expect("the stop reached the host")
+            .duration_since(since);
+        assert!(
+            shown < Duration::from_millis(100),
+            "Stopping reached the host {shown:?} after the stop"
+        );
+
+        let released = held.release_after_hold();
+        saved_within(&harness, meeting_id, released, Duration::from_secs(1));
+        stopping.join().unwrap();
+        reload.join().unwrap();
+        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
+    }
+
+    /// Decision 4 of `.plans/2026-10-12-store-off-the-workers.md`: the stop
+    /// runs and saves on its own thread and never needs the runtime, so a
+    /// stop while the services runtime's only worker is blocked still
+    /// saves the meeting.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_stop_saves_while_every_runtime_worker_is_blocked() {
+        let harness = harness(&[]);
+        start(&harness.recorder);
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let (blocked, worker) = std::sync::mpsc::channel();
+        let (unblock, unblocked) = std::sync::mpsc::channel::<()>();
+        tokio::spawn(async move {
+            blocked.send(()).unwrap();
+            let _ = unblocked.recv_timeout(HANG_GUARD);
+        });
+        worker
+            .recv_timeout(PATIENCE)
+            .expect("the worker is blocked");
+
+        stop(&harness.recorder);
+        let state = harness.store.meeting(meeting_id).unwrap().unwrap().state;
+        unblock.send(()).unwrap();
+        assert!(
+            !matches!(
+                state,
+                steno_core::MeetingState::Recording | steno_core::MeetingState::Failed { .. }
+            ),
+            "saved while the worker was blocked, got {state:?}"
+        );
+    }
+
+    /// P40 check 8: a start while another process holds the write lock
+    /// waits out the busy timeout writing its meeting, then is refused with
+    /// "Steno could not create the meeting." and no recording: no capture
+    /// ran and no row was written. Meanwhile the UI stays live: `Starting`
+    /// reaches the host live, as each change's `recording` snapshot does
+    /// (check 1), and a command answers live (check 6).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_start_under_a_held_lock_is_refused_and_the_ui_stays_live() {
+        use steno_bridge::BridgeHost as _;
+        let harness = harness(&[]);
+        let hosted = crate::testing::hosted(&harness.store, &harness.recorder);
+        let mut held = crate::testing::HeldStore::lock_only(&database(&harness));
+        let since = Instant::now();
+        let starter = harness.recorder.clone();
+        let starting = std::thread::spawn(move || starter.start(CaptureMode::InPerson, None));
+        let shown = hosted
+            .sink
+            .recording_in("starting", since, PATIENCE)
+            .expect("the start reached the host")
+            .duration_since(since);
+        assert!(
+            shown < LIVE,
+            "Starting reached the host {shown:?} after the start"
+        );
+        // The start's write waits out its busy timeout meanwhile.
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(!starting.is_finished(), "the start still waits");
+        let asked = Instant::now();
+        hosted.host.settings_recording_refresh_devices().unwrap();
+        let answered = asked.elapsed();
+        assert!(
+            answered < LIVE,
+            "a command took {answered:?} during the start"
+        );
+        let (slowest, _) = hosted.slowest_hook_since(since);
+        assert!(slowest < LIVE, "a change's hook took {slowest:?}");
+
+        starting.join().unwrap();
+        let refused = since.elapsed();
+        assert!(
+            refused >= Duration::from_secs(4),
+            "refused after the busy timeout, not {refused:?}"
+        );
+        let status = harness.recorder.status();
+        assert_eq!(status.state, RecordingState::Idle);
+        assert_eq!(
+            status.error.as_deref(),
+            Some("Recording could not start: Steno could not create the meeting.")
+        );
+        assert!(
+            hosted
+                .sink
+                .recording_in("recording", since, Duration::ZERO)
+                .is_none(),
+            "nothing recorded"
+        );
+        held.release();
+        assert_eq!(harness.store.meetings(10, 0).unwrap(), Vec::new());
+        let audio = harness.dir.path().join("audio");
+        assert!(
+            std::fs::read_dir(&audio).map_or(true, |mut entries| entries.next().is_none()),
+            "no capture wrote into the audio folder"
+        );
+    }
+
     /// A start whose meeting cannot be written (the database held past the
     /// busy timeout) forgets the folder it recorded first, and writes no
     /// row; the folder stays known.
