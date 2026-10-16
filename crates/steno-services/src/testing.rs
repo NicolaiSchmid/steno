@@ -22,6 +22,7 @@ use steno_audio::SymphoniaAudioCodec;
 use steno_core::Store;
 use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory};
 use steno_host::services::Recorder as _;
+use steno_host::speech::ModelAsset;
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
 use steno_speech::SpeechRuntime;
 
@@ -130,12 +131,23 @@ pub fn built(dependencies: PipelineDependencies) -> BuiltPipeline {
 /// A pipeline on the current runtime whose reload builds `dependencies`
 /// again.
 pub fn current_pipeline(dependencies: PipelineDependencies) -> Arc<CurrentPipeline> {
+    current_pipeline_of(built(dependencies))
+}
+
+/// [`current_pipeline`] over the build `first`; every reload hands back
+/// that same build.
+fn current_pipeline_of(first: BuiltPipeline) -> Arc<CurrentPipeline> {
     let make: MakeDependencies = {
-        let dependencies = dependencies.clone();
-        Arc::new(move || Ok(built(dependencies.clone())))
+        let (dependencies, engine) = (first.dependencies.clone(), first.engine.clone());
+        Arc::new(move || {
+            Ok(BuiltPipeline {
+                dependencies: dependencies.clone(),
+                engine: engine.clone(),
+            })
+        })
     };
     Arc::new(CurrentPipeline::new(
-        built(dependencies),
+        first,
         make,
         tokio::runtime::Handle::current(),
     ))
@@ -319,12 +331,59 @@ pub fn app_over_fakes(
     store: &Arc<Store>,
     make_session: MakeCaptureSession,
 ) -> crate::App {
+    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
+    app_over_build(
+        root,
+        store,
+        make_session,
+        built(fake_dependencies(store, "fake-engine")),
+        &fakes,
+    )
+}
+
+/// [`app_over_fakes`] with `engine` run in this process, as `CoreML` is on
+/// the Mac, its models and the diarizer's installed, and the warm-up mark
+/// of `root/support` read as a launch reads it: a recording warms `engine`
+/// up, unless a mark left there turns the warm-up off.
+pub fn app_warming_up(
+    root: &std::path::Path,
+    store: &Arc<Store>,
+    make_session: MakeCaptureSession,
+    engine: Arc<dyn steno_core::SpeechEngine>,
+) -> crate::App {
+    let dependencies = fake_dependencies(store, "parakeet-v3")
+        .with_speech_engine(steno_pipeline::SharedSpeechEngine::new(engine))
+        .with_warm_up_mark(Arc::new(steno_pipeline::WarmUpMark::at_launch(
+            &root.join("support"),
+        )));
+    let in_process = BuiltPipeline {
+        dependencies,
+        engine: BuiltEngine {
+            engine_id: "parakeet-v3".to_owned(),
+            runtime: SpeechRuntime::CoreMlInProcess,
+        },
+    };
+    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
+    for asset in [ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer] {
+        fakes.speech_models.set_installed(asset, None);
+    }
+    app_over_build(root, store, make_session, in_process, &fakes)
+}
+
+/// [`app_over_fakes`] over the build `first` (every reload builds it again)
+/// and the host's `fakes`.
+fn app_over_build(
+    root: &std::path::Path,
+    store: &Arc<Store>,
+    make_session: MakeCaptureSession,
+    first: BuiltPipeline,
+    fakes: &steno_host::fakes::FakeServices,
+) -> crate::App {
     let mut settings = store.settings().unwrap();
     settings.audio_folder = steno_core::paths::file_url(&root.join("audio"), true);
     store.save_settings(&settings).unwrap();
-    let pipeline = current_pipeline(fake_dependencies(store, "fake-engine"));
+    let pipeline = current_pipeline_of(first);
     let zone = chrono::FixedOffset::east_opt(0).unwrap();
-    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
     let recorder = crate::recorder::CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),

@@ -13,7 +13,8 @@
 //!   built everywhere, so its tests run on all three CI platforms.
 //! - macOS only (plain names, because the modules do not exist in a
 //!   Linux or Windows build of these docs): `coreml` (the one module
-//!   allowed `unsafe`, wrapping `objc2-core-ml`), `backend` (the four
+//!   allowed `unsafe`, wrapping `objc2-core-ml`, and the boundary no
+//!   Objective-C exception crosses), `backend` (the four
 //!   model calls behind `steno_speech::SpeechBackend`), `engine` (the
 //!   `SpeechEngine` implementation) and `parity` (the harness against the
 //!   Swift transcripts).

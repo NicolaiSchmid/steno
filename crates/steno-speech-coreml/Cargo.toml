@@ -20,7 +20,9 @@ thiserror.workspace = true
 # platform-independent half of the crate (chunk layout, merge, segmentation,
 # the WER scorer) and nothing else.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2.workspace = true
+# `exception`: the `@catch` that keeps an Objective-C exception from
+# CoreML out of Rust (`coreml::contained`).
+objc2 = { workspace = true, features = ["exception"] }
 objc2-core-ml.workspace = true
 objc2-foundation.workspace = true
 

@@ -58,6 +58,7 @@ use crate::export_retries::ExportRetries;
 use crate::lane_merger::{ClusterSpeaker, LaneMerger};
 use crate::run::ProcessingRun;
 use crate::sample_clips::{self, ClipProbe, ClipStep};
+use crate::warm_up_mark::WarmUpMark;
 
 /// The one failure type: any error inside a stage becomes this, and
 /// [`ProcessingPipeline::process`] marks the meeting failed in one place,
@@ -842,6 +843,10 @@ pub struct PipelineDependencies {
     /// Fresh from [`new`](Self::new); clones share theirs, and
     /// [`with_model_waits`](Self::with_model_waits) shares the caller's.
     pub model_waits: ModelWaits,
+    /// The recorder's warm-up mark: in memory from [`new`](Self::new); the
+    /// app attaches the one its launch read with
+    /// [`with_warm_up_mark`](Self::with_warm_up_mark).
+    pub warm_up_mark: Arc<WarmUpMark>,
 }
 
 impl PipelineDependencies {
@@ -873,6 +878,7 @@ impl PipelineDependencies {
             damaged_audio: Arc::new(DamagedAudio::in_memory()),
             clip_probe: None,
             model_waits: ModelWaits::default(),
+            warm_up_mark: Arc::new(WarmUpMark::in_memory()),
         }
     }
 
@@ -947,6 +953,15 @@ impl PipelineDependencies {
     #[must_use]
     pub fn with_model_waits(mut self, waits: ModelWaits) -> Self {
         self.model_waits = waits;
+        self
+    }
+
+    /// Guards the recordings' warm-ups with `mark` instead of the one in
+    /// memory from [`new`](Self::new), and clears it when a job loads the
+    /// speech engine.
+    #[must_use]
+    pub fn with_warm_up_mark(mut self, mark: Arc<WarmUpMark>) -> Self {
+        self.warm_up_mark = mark;
         self
     }
 }
@@ -2041,14 +2056,46 @@ impl ProcessingPipeline {
     /// does not load goes through [`carry_on_after`](Self::carry_on_after)
     /// and does not fail the job: `diarize` then falls back to
     /// [`diarization_without_diarizer`](Self::diarization_without_diarizer).
-    /// Rust only: Swift fails the meeting.
+    /// A speech engine that loaded clears a [`WarmUpMark`] left over, so
+    /// recordings warm up again. Rust only: Swift fails the meeting.
     async fn warm_up_for_job(&self, meeting_id: Uuid) -> Result<()> {
         match self.warm_up().await {
+            Ok(()) => {
+                self.speech_engine_loaded().await;
+                Ok(())
+            }
+            // The speech engine loaded before the diarizer failed.
             Err(failure) if failure.stage == PipelineStage::Diarize => {
+                self.speech_engine_loaded().await;
                 self.carry_on_after(&failure, meeting_id)
             }
-            result => result,
+            failed => failed,
         }
+    }
+
+    /// Clears a [`WarmUpMark`] left over, off the workers: its removal
+    /// syncs the disk.
+    async fn speech_engine_loaded(&self) {
+        let mark = Arc::clone(&self.inner.dependencies.warm_up_mark);
+        let _ = off_the_workers(move || mark.speech_engine_loaded()).await;
+    }
+
+    /// [`warm_up`](Self::warm_up) for a recording that just started, behind
+    /// the [`WarmUpMark`]: marked on disk while it runs, and skipped (`Ok`
+    /// at once) while a mark left over from a warm-up that ended with the
+    /// app turns it off. The mark is written and removed off the workers,
+    /// since both sync the disk. The recorder calls it for a speech engine
+    /// in this process (`CoreML` on the Mac). Rust only: Swift warmed up
+    /// every time.
+    pub async fn warm_up_while_recording(&self) -> Result<()> {
+        let mark = Arc::clone(&self.inner.dependencies.warm_up_mark);
+        // Off while skipping, or with the runtime shutting down.
+        let Ok(Some(warming)) = off_the_workers(move || mark.begin()).await else {
+            return Ok(());
+        };
+        let warmed = self.warm_up().await;
+        let _ = off_the_workers(move || drop(warming)).await;
+        warmed
     }
 
     /// [`warm_up`](Self::warm_up) for the diarizer alone, for a speech

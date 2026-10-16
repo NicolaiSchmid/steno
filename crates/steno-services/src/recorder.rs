@@ -1376,9 +1376,16 @@ impl CaptureRecorder {
     /// The diarizer's warm-up checks its models and starts no child: its
     /// models load into the sidecar's child when it diarizes. Swift:
     /// `AppEnvironment.warmUpPipelineIfModelsInstalled`, called when a
-    /// recording starts.
+    /// recording starts. It runs only there, never at launch or on a
+    /// capture restart. The in-process warm-up is marked on disk while it
+    /// runs ([`WarmUpMark`]): one that took the app down, an abort that no
+    /// `@catch` stops, turns the warm-up off from the next launch until a
+    /// meeting's processing loads the models, so it cannot end every
+    /// recording at the same point (A15 of
+    /// `.plans/2026-10-07-stable-promotion.md`).
     ///
     /// [`BuiltEngine`]: crate::pipeline::BuiltEngine
+    /// [`WarmUpMark`]: steno_pipeline::WarmUpMark
     fn warm_up_if_installed(&self) {
         let (pipeline, engine) = self.pipeline.current_with_engine();
         if !(self.speech_models.engine_installed(&engine.engine_id)
@@ -1389,12 +1396,16 @@ impl CaptureRecorder {
         let in_process = engine.runtime == SpeechRuntime::CoreMlInProcess;
         self.runtime.spawn(async move {
             let warmed = if in_process {
-                pipeline.warm_up().await
+                pipeline.warm_up_while_recording().await
             } else {
                 pipeline.warm_up_diarizer().await
             };
+            // One line, and the recording goes on: processing loads the
+            // models again and fails its meeting retryably if they still
+            // do not load. A `CoreML` exception is caught at the model
+            // call and arrives here as its name and reason.
             if let Err(failure) = warmed {
-                tracing::debug!(%failure, "warm-up failed; processing loads the models");
+                tracing::warn!(%failure, "the warm-up failed; processing loads the models");
             }
         });
     }
@@ -2427,6 +2438,23 @@ mod tests {
         runtime_of: impl Fn(&str) -> SpeechRuntime + Send + Sync + 'static,
         capture: MakeCaptureSession,
     ) -> Harness {
+        harness_with_engine(
+            models,
+            engine_id,
+            runtime_of,
+            capture,
+            FakeSpeechEngine::default(),
+        )
+    }
+
+    /// [`harness_capturing`] over `engine`.
+    fn harness_with_engine(
+        models: Arc<dyn SpeechModels>,
+        engine_id: &str,
+        runtime_of: impl Fn(&str) -> SpeechRuntime + Send + Sync + 'static,
+        capture: MakeCaptureSession,
+        engine: FakeSpeechEngine,
+    ) -> Harness {
         let (dir, store) = temp_store();
         let free = Arc::new(AtomicU64::new(u64::MAX));
         let capture_slot = Arc::new(Mutex::new(capture));
@@ -2435,7 +2463,7 @@ mod tests {
         settings.audio_folder = file_url(&dir.path().join("audio"), true);
         engine_id.clone_into(&mut settings.speech_engine_id);
         store.save_settings(&settings).unwrap();
-        let engine = Arc::new(FakeSpeechEngine::default());
+        let engine = Arc::new(engine);
         let diarizer = Arc::new(FakeDiarizer::default());
         let mut dependencies = fake_dependencies(&store, "fake-engine")
             .with_speech_engine(steno_pipeline::SharedSpeechEngine::new(engine.clone()));
@@ -2760,6 +2788,62 @@ mod tests {
         assert!(in_process.save_engine("parakeet-ultra").is_err());
         assert!(warmed_the_engine(&in_process).await);
         stop(&in_process.recorder);
+    }
+
+    /// A warm-up whose model load fails, as a `CoreML` exception caught at
+    /// the model call arrives (its name and reason), fails quietly: one
+    /// `warn` line gives the reason, the recording goes on without an error
+    /// or a warning, and its stop saves it with its audio. Processing then
+    /// fails the meeting retryably, which the pipeline's tests cover.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_warm_up_that_fails_leaves_the_recording_running_and_logs_one_line() {
+        let log = steno_pipeline::fixtures::CapturedLog::warnings();
+        let reason = format!(
+            "CoreML raised NSGenericException: Failed to allocate memory IOSurface object ({})",
+            Uuid::new_v4()
+        );
+        let harness = harness_with_engine(
+            models_with(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]),
+            "parakeet-v3",
+            mac_rule,
+            synthetic_capture(),
+            FakeSpeechEngine {
+                prepare_failure: Some(reason.clone()),
+                ..FakeSpeechEngine::default()
+            },
+        );
+        start(&harness.recorder);
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        eventually("the warm-up failure was logged", || {
+            log.text().contains(&reason)
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let status = harness.recorder.status();
+        assert_eq!(status.state, RecordingState::Recording);
+        assert_eq!(status.meeting_id, Some(meeting_id));
+        assert_eq!(status.error, None);
+        assert_eq!(status.warning, None);
+        assert_eq!(
+            harness.diarizer.preparations.count(),
+            0,
+            "the warm-up stopped at the engine"
+        );
+
+        stop(&harness.recorder);
+        let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(meeting.end_reason, Some(RecordingEndReason::Manual));
+        assert!(meeting.duration > 0.0);
+        let asset = harness.store.asset(meeting_id).unwrap().unwrap();
+        let master = steno_core::paths::file_url_path(&asset.url).unwrap();
+        assert!(
+            std::fs::metadata(&master).unwrap().len() > 4096,
+            "audio kept"
+        );
+        let text = log.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(&reason)).collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("the warm-up failed"), "{text}");
     }
 
     /// A microphone input for the warning tests: `None` names none.

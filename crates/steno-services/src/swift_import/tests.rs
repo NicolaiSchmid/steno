@@ -2429,9 +2429,12 @@ fn built_over(
         &crate::llm::codex_store(),
         &steno_pipeline::MeetingEventBus::new(),
         &tokio::runtime::Handle::current(),
-        &Arc::new(steno_pipeline::DamagedAudio::in_directory(
-            &paths.support_directory,
-        )),
+        &crate::app::SupportFiles {
+            damaged_audio: Arc::new(steno_pipeline::DamagedAudio::in_directory(
+                &paths.support_directory,
+            )),
+            warm_up_mark: Arc::new(steno_pipeline::WarmUpMark::in_memory()),
+        },
     )
     .unwrap()
 }

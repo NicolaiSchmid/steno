@@ -3,7 +3,8 @@
 //! merge, the segmentation and the language tagger) over four [`Backend`]
 //! workers. Models load on the first `prepare` (or the first `transcribe`)
 //! from the Swift app's model directory and stay loaded for the engine's
-//! lifetime.
+//! lifetime, unless a model call raises an Objective-C exception
+//! ([`SpeechError::Exception`]): then they load again on the next call.
 //! Swift: `Sources/StenoSpeech/Engines/ParakeetEngine.swift`.
 //!
 //! `transcribe` runs the pipeline on the calling thread: it takes seconds
@@ -191,7 +192,19 @@ impl CoreMlParakeetEngine {
             );
         }
         let transcriber = slot.as_mut().expect("loaded above");
-        work(transcriber)
+        let result = work(transcriber);
+        // An Objective-C exception stopped a model call midway, so the
+        // models go, as after a panic, and the next call loads them again.
+        // That reload is best effort: Cocoa is not exception safe, so
+        // nothing promises what a framework holds after one. Only real
+        // models exercise this branch (measured on the Mac with CoreML's
+        // own allocation exception: the process lived on, and each later
+        // call loaded the models again); the tests' synthetic exceptions
+        // never reach a loaded engine.
+        if result.as_ref().is_err_and(SpeechError::is_exception) {
+            *slot = None;
+        }
+        result
     }
 
     /// The models' load time; loads them when they are not yet.

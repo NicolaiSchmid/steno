@@ -18,7 +18,10 @@
 //! so no logits leave the model. The models take one fixed window of
 //! 15 s ([`MAX_WINDOW_SAMPLES`]); the engine clamps the chunker to it.
 //! Every call allocates its own input arrays, so a [`Backend`] holds no
-//! CoreML object of its own and moves to a worker thread as it is.
+//! CoreML object of its own and moves to a worker thread as it is. Each
+//! call, and each model load, runs inside [`contained`]: one autorelease
+//! pool, and an Objective-C exception turned into
+//! [`SpeechError::Exception`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,7 +33,7 @@ use steno_speech::{
 };
 
 use crate::SpeechError;
-use crate::coreml::{Array, ComputeUnits, EncoderView, Model, inputs};
+use crate::coreml::{Array, ComputeUnits, EncoderView, Model, contained, inputs};
 use crate::vocab::{self, BLANK_TOKEN};
 
 /// The models' window: 15 s at 16 kHz (`ASRConstants.maxModelSamples`).
@@ -158,10 +161,13 @@ impl Models {
                 ),
             });
         }
-        let preprocessor = Model::load(&directory.join(PREPROCESSOR_FILE), units.preprocessor)?;
-        let encoder = Model::load(&directory.join(ENCODER_FILE), units.encoder)?;
-        let decoder = Model::load(&directory.join(DECODER_FILE), units.decoder)?;
-        let joint = Model::load(&directory.join(JOINT_FILE), units.joint)?;
+        let load = |file: &str, units: ComputeUnits| {
+            contained(|| Model::load(&directory.join(file), units))
+        };
+        let preprocessor = load(PREPROCESSOR_FILE, units.preprocessor)?;
+        let encoder = load(ENCODER_FILE, units.encoder)?;
+        let decoder = load(DECODER_FILE, units.decoder)?;
+        let joint = load(JOINT_FILE, units.joint)?;
         let shape = ModelShape {
             vocab_size: vocab.len(),
             blank_id: BLANK_TOKEN,
@@ -357,11 +363,11 @@ impl SpeechBackend for Backend {
     }
 
     fn features(&mut self, samples: &[f32]) -> Result<Features, steno_speech::SpeechError> {
-        Ok(self.models.preprocess(samples)?)
+        Ok(contained(|| self.models.preprocess(samples))?)
     }
 
     fn encode(&mut self, features: &Features) -> Result<EncoderOutput, steno_speech::SpeechError> {
-        Ok(self.models.encode(features)?)
+        Ok(contained(|| self.models.encode(features))?)
     }
 
     fn decoder_step(
@@ -369,7 +375,7 @@ impl SpeechBackend for Backend {
         token: u32,
         state: &DecoderState,
     ) -> Result<DecoderStep, steno_speech::SpeechError> {
-        Ok(self.models.decoder_step(token, state)?)
+        Ok(contained(|| self.models.decoder_step(token, state))?)
     }
 
     fn joint_step(
@@ -377,6 +383,8 @@ impl SpeechBackend for Backend {
         encoder_frame: &[f32],
         projection: &[f32],
     ) -> Result<JointDecision, steno_speech::SpeechError> {
-        Ok(self.models.joint_step(encoder_frame, projection)?)
+        Ok(contained(|| {
+            self.models.joint_step(encoder_frame, projection)
+        })?)
     }
 }

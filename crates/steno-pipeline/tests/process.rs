@@ -26,7 +26,7 @@ use steno_pipeline::pipeline::{diarized_lane_after_transcription, tap_carried_no
 use steno_pipeline::{
     ClipProbe, ClipStep, ExportRetries, InFlight, LaneMerger, MeetingEventBus, MonotonicClock,
     PipelineDependencies, ProcessingPipeline, QuitLatch, ReprocessError, RetentionSweep,
-    SharedSpeechEngine, StageRates,
+    SharedSpeechEngine, StageRates, WarmUpMark,
 };
 use uuid::Uuid;
 
@@ -1051,6 +1051,65 @@ async fn a_job_whose_transcription_fails_releases_the_engine_too() {
     assert_eq!(failing.releases.count(), 1);
 }
 
+/// What the `CoreML` engine fails with once its model call raised an
+/// Objective-C exception and the boundary caught it (A15 of
+/// `.plans/2026-10-07-stable-promotion.md`): an ordinary speech error.
+const COREML_EXCEPTION: &str =
+    "CoreML raised NSGenericException: Failed to allocate memory IOSurface object";
+
+/// A `CoreML` exception caught at the model call fails the meeting like
+/// any speech failure, in the job's model load (`decode`) or in a
+/// transcription: under "delete after processing" every audio file stays,
+/// through the sweep too, and Process again, once the models work, makes
+/// the meeting ready.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_coreml_exception_fails_the_meeting_retryably_with_its_audio_kept() {
+    let world = world(false, None, AudioRetention::DeleteAfterProcessing);
+    let raising_load = FakeSpeechEngine {
+        prepare_failure: Some(COREML_EXCEPTION.to_owned()),
+        ..FakeSpeechEngine::default()
+    };
+    let raising_call = FakeSpeechEngine {
+        failure: Some(COREML_EXCEPTION.to_owned()),
+        ..FakeSpeechEngine::default()
+    };
+    for (engine, stage) in [(raising_load, "decode"), (raising_call, "transcribe")] {
+        let pipeline = ProcessingPipeline::new(with_engine(&world, Arc::new(engine)));
+        let mut meeting = call_meeting(world.now);
+        meeting.id = Uuid::new_v4();
+        let asset = call_asset(
+            &world.audio,
+            meeting.id,
+            AudioRetention::DeleteAfterProcessing,
+        );
+        let before = audio_files(&asset);
+        pipeline.enqueue(&meeting, &asset).unwrap();
+        pipeline.wait_until_idle().await;
+        assert_eq!(
+            meeting_state(&world, meeting.id),
+            MeetingState::Failed {
+                reason: format!("{stage}: {COREML_EXCEPTION}")
+            }
+        );
+        let stored = world.store.asset(meeting.id).unwrap().unwrap();
+        assert_eq!(stored.expires_at, None, "{stage}: no retention stamp");
+        let _ = RetentionSweep::new(world.store.clone()).run(world.now + Duration::days(400));
+        assert_eq!(
+            audio_files(&asset),
+            before,
+            "{stage}: every audio file is kept"
+        );
+
+        world.pipeline.process_again(meeting.id).unwrap();
+        world.pipeline.wait_until_idle().await;
+        assert_eq!(
+            meeting_state(&world, meeting.id),
+            MeetingState::Ready,
+            "{stage}"
+        );
+    }
+}
+
 /// A lane that cannot be decoded fails the job in `decode`, after the
 /// engine was loaded; the engine is released all the same.
 #[tokio::test(flavor = "multi_thread")]
@@ -1092,12 +1151,18 @@ impl steno_core::Diarizer for UnloadableDiarizer {
 
 /// A diarizer that does not load fails neither the warm-up nor the job:
 /// the lanes are transcribed, the meeting is ready with one unknown room
-/// speaker, and the engine is released after the last lane as usual.
+/// speaker, and the engine is released after the last lane as usual. The
+/// speech engine loaded, so a warm-up mark left over is cleared too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_whose_diarizer_does_not_load_keeps_its_transcript() {
     let world = world(false, None, AudioRetention::KeepForever);
+    let support = tempfile::tempdir().unwrap();
+    let left_over = support.path().join(WarmUpMark::FILE_NAME);
+    std::fs::write(&left_over, b"1\n").unwrap();
+    let mark = Arc::new(WarmUpMark::at_launch(support.path()));
+    assert!(mark.skipping());
     let engine = Arc::new(FakeSpeechEngine::default());
-    let mut dependencies = with_engine(&world, engine.clone());
+    let mut dependencies = with_engine(&world, engine.clone()).with_warm_up_mark(mark.clone());
     dependencies.diarizer = Arc::new(UnloadableDiarizer);
     let pipeline = ProcessingPipeline::new(dependencies);
     let meeting = enqueue_call(&world, &pipeline);
@@ -1107,6 +1172,8 @@ async fn a_job_whose_diarizer_does_not_load_keeps_its_transcript() {
     assert_eq!(engine.preparations.count(), 1);
     assert_eq!(engine.transcriptions.count(), 2);
     assert_eq!(engine.releases.count(), 1);
+    assert!(!mark.skipping(), "recordings warm up again");
+    assert!(!left_over.exists());
 }
 
 /// A speech engine whose models cannot load; it logs its releases.
@@ -1156,6 +1223,30 @@ async fn a_job_whose_warm_up_fails_releases_the_engine_too() {
     );
     assert_eq!(engine.0.transcriptions.count(), 0);
     assert_eq!(engine.0.releases.count(), 1);
+}
+
+/// A speech engine that does not load keeps a warm-up mark left over in
+/// place: only a load that succeeded turns the warm-up back on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_whose_speech_engine_does_not_load_keeps_the_mark_left_over() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let support = tempfile::tempdir().unwrap();
+    let left_over = support.path().join(WarmUpMark::FILE_NAME);
+    std::fs::write(&left_over, b"1\n").unwrap();
+    let mark = Arc::new(WarmUpMark::at_launch(support.path()));
+    let engine = Arc::new(UnloadableEngine(FakeSpeechEngine::default()));
+    let dependencies = with_engine(&world, engine).with_warm_up_mark(mark.clone());
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        meeting_state(&world, meeting),
+        MeetingState::Failed {
+            reason: "decode: no speech model".to_owned()
+        }
+    );
+    assert!(mark.skipping(), "the warm-up stays off");
+    assert!(left_over.exists());
 }
 
 /// Which call of a [`GatedEngine`] is gated.
