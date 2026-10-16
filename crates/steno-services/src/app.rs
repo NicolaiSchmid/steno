@@ -1198,6 +1198,43 @@ async fn off_the_workers(body: impl FnOnce() + Send + 'static) -> bool {
     }
 }
 
+/// The update schedule's change hook: the host's `updates_changed` on the
+/// blocking pool, since the schedule calls from a runtime worker and the
+/// host's lock may be held through a settings save's busy wait.
+fn updates_hook(host: &Arc<Host>, runtime: &tokio::runtime::Handle) -> Arc<dyn Fn() + Send + Sync> {
+    let (host, runtime) = (host.clone(), runtime.clone());
+    Arc::new(move || {
+        let host = host.clone();
+        notify_on_the_blocking_pool(&runtime, "updates_changed", move || host.updates_changed());
+    })
+}
+
+/// What the gated handover calls once its listener is adopted: the host's
+/// `phones_changed` on the blocking pool, as [`updates_hook`].
+fn phones_hook(
+    host: &Arc<Host>,
+    runtime: &tokio::runtime::Handle,
+) -> impl FnOnce() + Send + 'static {
+    let (host, runtime) = (host.clone(), runtime.clone());
+    move || notify_on_the_blocking_pool(&runtime, "phones_changed", move || host.phones_changed())
+}
+
+/// Runs `notify`, a host notification nothing waits for, on `runtime`'s
+/// blocking pool. Nothing would see its panic, so a panic is logged at
+/// `error` under the notification's name, without its message, which may
+/// name a path.
+fn notify_on_the_blocking_pool(
+    runtime: &tokio::runtime::Handle,
+    notification: &'static str,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    runtime.spawn_blocking(move || {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(notify)).is_err() {
+            tracing::error!(notification, "a host notification panicked");
+        }
+    });
+}
+
 impl App {
     /// The host over this graph, with the viewer's zone, the version,
     /// whether a package manager delivers the updates
@@ -1387,16 +1424,10 @@ impl App {
     }
 
     /// The host hears of every update check from here on, the launch
-    /// tick's included, on the blocking pool: the schedule calls from a
-    /// runtime worker, and the host's lock may be held through a settings
-    /// save's busy wait.
+    /// tick's included ([`updates_hook`]).
     fn report_update_checks(&self, host: &Arc<Host>) {
         if let Some(updates) = &self.updates {
-            let (updates_host, runtime) = (host.clone(), self.runtime.clone());
-            updates.on_change(Arc::new(move || {
-                let host = updates_host.clone();
-                runtime.spawn_blocking(move || host.updates_changed());
-            }));
+            updates.on_change(updates_hook(host, &self.runtime));
         }
     }
 
@@ -1414,11 +1445,7 @@ impl App {
             tokio::spawn(async move { start_if_paired(&handover).await });
         }
         if let Some(gated) = &self.gated_handover {
-            // On the blocking pool, as the update checks' report.
-            let (phones_host, runtime) = (host.clone(), self.runtime.clone());
-            tokio::spawn(gated.clone().follow(move || {
-                runtime.spawn_blocking(move || phones_host.phones_changed());
-            }));
+            tokio::spawn(gated.clone().follow(phones_hook(host, &self.runtime)));
         }
     }
 
@@ -4232,33 +4259,45 @@ mod tests {
         }
     }
 
+    /// Fails unless the runtime's one worker runs tasks spawned while a
+    /// reload is held at the gate. A worker the held reload blocks never
+    /// runs them, however long the test waits, so the bound is only
+    /// [`HANG_GUARD`] and load cannot fail the test; three tasks a little
+    /// apart, so a follower that takes its event late is behind the gate
+    /// by the last of them.
+    fn assert_the_worker_runs(runtime: &tokio::runtime::Runtime, what: &str) {
+        for _ in 0..3 {
+            let (ran, runs) = std::sync::mpsc::channel();
+            runtime.spawn(async move {
+                let _ = ran.send(());
+            });
+            runs.recv_timeout(HANG_GUARD)
+                .unwrap_or_else(|_| panic!("{what}: the runtime's one worker is blocked"));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     /// The launch's two tasks, the event follower and the two-second
     /// poll, reload the host on the blocking pool: while a reload is held
     /// (the detail asks the pipeline whether its export keeps failing, at
-    /// a gate), a timer task on the services runtime, which has one
-    /// worker, keeps ticking. Run on that worker, a held reload would stop
+    /// a gate), a task spawned on the services runtime, which has one
+    /// worker, still runs. Run on that worker, a held reload would stop
     /// every task there: the pipeline's runs, the handover, the timers.
+    /// Only the gate decides; every wait is bounded for hangs alone.
     #[test]
     fn the_poll_and_the_events_task_never_block_a_worker() {
         let runtime = one_worker_runtime();
         let dir = tempfile::tempdir().unwrap();
         let (app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
-        let ticked = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-        let ticks = ticked.clone();
-        runtime.spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                *ticks.lock().unwrap() = std::time::Instant::now();
-            }
-        });
         let gate = &pipeline.gate;
-        let patience = std::time::Duration::from_secs(5);
 
         // Right after a poll's reload, so the next one is two seconds off:
-        // the reload the gate holds is the event follower's.
+        // the reload the gate holds is most likely the event follower's.
+        // Either way the follower's reload is then at the gate or behind
+        // the host's lock.
         let before = gate.reloads();
         assert!(
-            gate.wait_for(patience, |state| state.reloads > before),
+            gate.wait_for(HANG_GUARD, |state| state.reloads > before),
             "the poll reloads"
         );
         let armed = gate.arm();
@@ -4266,29 +4305,115 @@ mod tests {
             meeting_id: uuid::Uuid::new_v4(),
         });
         assert!(
-            gate.wait_for(std::time::Duration::from_secs(1), |state| state.entered
-                == 1),
+            gate.wait_for(HANG_GUARD, |state| state.entered == 1),
             "the event follower's reload reaches the gate"
         );
-        assert_live(
-            &ticked,
-            std::time::Duration::from_millis(600),
-            "the event follower",
-        );
+        assert_the_worker_runs(&runtime, "the event follower");
         drop(armed);
         assert!(
-            gate.wait_for(patience, |state| state.held == 0),
+            gate.wait_for(HANG_GUARD, |state| state.held == 0),
             "the event follower's reload goes on"
         );
 
         // No event now: the next reload the gate holds is the poll's.
         let armed = gate.arm();
         assert!(
-            gate.wait_for(patience, |state| state.entered == 2),
+            gate.wait_for(HANG_GUARD, |state| state.entered == 2),
             "the poll's reload reaches the gate"
         );
-        assert_live(&ticked, std::time::Duration::from_millis(600), "the poll");
+        assert_the_worker_runs(&runtime, "the poll");
         drop(armed);
+        runtime.shutdown_background();
+    }
+
+    /// The update and phone hooks reach the host on the blocking pool:
+    /// called on the services runtime's one worker while the host's lock is
+    /// held through a settings save that waits on another connection's
+    /// lock, they return at once, and the task that called them goes on
+    /// within [`LIVE`](crate::testing::LIVE); once the lock goes, the phone
+    /// section is published. Inline, either would wait on the host's lock
+    /// and stop that worker for the busy timeout (the shape of P40 check
+    /// 11).
+    #[test]
+    fn the_update_and_phone_hooks_never_wait_on_the_hosts_lock() {
+        use steno_bridge::BridgeHost as _;
+        let runtime = one_worker_runtime();
+        let (dir, store) = temp_store();
+        let services = steno_host::fakes::FakeServices::new(Utc::now()).services();
+        let host = Arc::new(Host::new(store, services, steno_host::HostConfig::default()).unwrap());
+        let sink = Arc::new(crate::testing::TimedSink::default());
+        host.attach(sink.clone());
+        host.page_ready().unwrap();
+        let mut held =
+            crate::testing::HeldStore::lock_only(&crate::testing::database_in(dir.path()));
+        let saving = std::thread::spawn({
+            let host = host.clone();
+            move || {
+                host.settings_general_set_detection(steno_bridge::SetBoolParams { value: false })
+            }
+        });
+        // The save holds the host's lock in its busy wait by now; nothing
+        // reports it.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let (updates, phones) = (
+            updates_hook(&host, runtime.handle()),
+            phones_hook(&host, runtime.handle()),
+        );
+        let (returned, hooks_returned) = std::sync::mpsc::channel();
+        let since = std::time::Instant::now();
+        runtime.spawn(async move {
+            updates();
+            phones();
+            let _ = returned.send(std::time::Instant::now());
+        });
+        let took = hooks_returned
+            .recv_timeout(HANG_GUARD)
+            .expect("the hooks returned")
+            .duration_since(since);
+        assert!(
+            took < crate::testing::LIVE,
+            "the hooks held the runtime's worker for {took:?}"
+        );
+        assert!(!saving.is_finished(), "the save still waits");
+
+        held.release();
+        let _ = saving.join().unwrap();
+        let deadline = std::time::Instant::now() + HANG_GUARD;
+        while sink.since(BridgeTopic::SettingsPhone, since).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the phone section was published"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        runtime.shutdown_background();
+    }
+
+    /// A host notification nothing waits for that panics is logged at
+    /// `error` under its name, without the panic's message.
+    #[test]
+    fn a_notification_that_panics_is_logged_without_its_message() {
+        let log = steno_pipeline::fixtures::CapturedLog::warnings();
+        let runtime = one_worker_runtime();
+        notify_on_the_blocking_pool(runtime.handle(), "the_panicking_test_notification", || {
+            panic!("at /a/private/folder")
+        });
+        let deadline = std::time::Instant::now() + HANG_GUARD;
+        let line = loop {
+            if let Some(line) = log
+                .text()
+                .lines()
+                .find(|line| line.contains("the_panicking_test_notification"))
+            {
+                break line.to_owned();
+            }
+            assert!(std::time::Instant::now() < deadline, "the panic was logged");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(line.contains("ERROR"), "{line}");
+        assert!(line.contains("a host notification panicked"), "{line}");
+        assert!(!log.text().contains("/a/private/folder"), "{line}");
         runtime.shutdown_background();
     }
 
