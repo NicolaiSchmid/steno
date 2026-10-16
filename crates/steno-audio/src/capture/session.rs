@@ -1161,15 +1161,6 @@ impl Core {
             }),
         );
         writer_thread.start();
-        let level_publisher = LevelPublisher::start(
-            Arc::clone(&levels),
-            Box::new(move |levels| {
-                if let Some(core) = on_levels.upgrade() {
-                    core.publish(levels);
-                }
-            }),
-        );
-        processing.start();
 
         let watch = self.backend.delivers_continuously(&lanes).then(|| {
             let probes = self.backend.probes_inputs();
@@ -1198,6 +1189,17 @@ impl Core {
             }
             watch
         });
+        // Last, so nothing after the publisher's start can panic and drop
+        // it, joining its thread, with the mutex held.
+        let level_publisher = LevelPublisher::start(
+            Arc::clone(&levels),
+            Box::new(move |levels| {
+                if let Some(core) = on_levels.upgrade() {
+                    core.publish(levels);
+                }
+            }),
+        );
+        processing.start();
         inner.active = Some(Active {
             meeting_id,
             stream,
