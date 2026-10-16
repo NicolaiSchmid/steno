@@ -240,7 +240,7 @@ fn setup(
             handle,
             refusal,
             &format_args!("{SWIFT_BUNDLE_ID} is running"),
-            None,
+            refusal.message(None),
         );
         return Ok(false);
     }
@@ -248,11 +248,15 @@ fn setup(
     let host = match host::Host::real(handle, runtime) {
         Ok(host) => host,
         Err(error) => {
+            // The whole error, paths included, only at debug level (the
+            // `steno_services::logs` rule).
+            tracing::debug!("not starting: {error}");
+            let refusal = Refusal::after(&error);
             refuse_to_start(
                 handle,
-                Refusal::after(&error),
-                &error,
-                error.setting_detail().as_deref(),
+                refusal,
+                &refusal_log_line(&error),
+                refusal.message(error.unreadable_setting()),
             );
             return Ok(false);
         }
@@ -347,18 +351,66 @@ impl Refusal {
         }
     }
 
-    /// The dialog's text: [`Self::text`], or, for a stored setting the
-    /// app cannot read (`detail`, which names the setting and the database
-    /// and never its value), what to fix, since opening Steno again does
-    /// not help there.
-    fn message(self, detail: Option<&str>) -> String {
-        match (self, detail) {
-            (Refusal::Unavailable, Some(detail)) => format!(
-                "Steno could not read one of its settings, so it did not open. \
-                 Your meetings are safe.\n\n{detail}"
+    /// The dialog's text: [`Self::text`], or, for a stored setting the app
+    /// cannot read (its key, the problem and the database, never its
+    /// value), what to fix, since opening Steno again does not help there.
+    fn message(
+        self,
+        setting: Option<(&str, steno_core::SettingProblem, &std::path::Path)>,
+    ) -> String {
+        match (self, setting) {
+            (Refusal::Unavailable, Some((key, problem, database))) => format!(
+                "Steno could not read one of its settings. Your meetings are safe.\n\n\
+                 The setting {key} {problem}. It is stored in the database at {}. \
+                 Steno has not changed it: fix or remove it there, then open Steno again.",
+                database.display()
             ),
             _ => self.text().to_owned(),
         }
+    }
+}
+
+/// The error-level log line for a host that could not be built: what went
+/// wrong, and for a stored setting its key and the problem, never a path
+/// or a value (the `steno_services::logs` rule; the dialog may name the
+/// database, the log may not).
+#[cfg(not(feature = "fixture-host"))]
+fn refusal_log_line(error: &host::ShellHostError) -> String {
+    use host::ShellHostError;
+    use steno_core::DatabaseLockError;
+    use steno_services::BuildError;
+
+    match error {
+        ShellHostError::SupportDirectory(error) => {
+            format!(
+                "the support directory could not be created ({})",
+                error.kind()
+            )
+        }
+        ShellHostError::Build(BuildError::Lock(DatabaseLockError::Held(_))) => {
+            "another Steno holds the database".to_owned()
+        }
+        ShellHostError::Build(BuildError::Lock(DatabaseLockError::Unsupported {
+            source, ..
+        })) => format!(
+            "the database cannot be locked on this filesystem ({})",
+            source.kind()
+        ),
+        ShellHostError::Build(BuildError::Lock(DatabaseLockError::Io { source, .. })) => {
+            format!("the database could not be locked ({})", source.kind())
+        }
+        ShellHostError::Build(BuildError::DatabaseFolder(error)) => {
+            format!(
+                "the database folder could not be created ({})",
+                error.kind()
+            )
+        }
+        // Names the key and the problem only.
+        ShellHostError::Build(BuildError::Setting { source, .. }) => source.to_string(),
+        ShellHostError::Build(BuildError::Store(_)) => {
+            "the database could not be opened or read".to_owned()
+        }
+        ShellHostError::Host(_) => "the host could not be built".to_owned(),
     }
 }
 
@@ -393,8 +445,9 @@ fn platform_app_running(bundle_id: &str) -> bool {
     }
 }
 
-/// Says why this app does not start ([`Refusal`], with `detail` for a
-/// setting it cannot read), logs `reason` at error level, and ends
+/// Says why this app does not start ([`Refusal`], whose `message` the
+/// dialog shows), writes `reason` to stderr and the log at error level (so
+/// it names no path or value), and ends
 /// with [`REFUSED_CODE`] once the dialog is closed, before it opens a window:
 /// two apps on one database would fail each other's recordings at launch,
 /// and a host that could not be built writes nothing more. Its run loop has
@@ -407,7 +460,7 @@ fn refuse_to_start(
     handle: &tauri::AppHandle,
     refusal: Refusal,
     reason: &dyn std::fmt::Display,
-    detail: Option<&str>,
+    message: String,
 ) {
     use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 
@@ -424,7 +477,7 @@ fn refuse_to_start(
     let app = handle.clone();
     handle
         .dialog()
-        .message(refusal.message(detail))
+        .message(message)
         .title(refusal.title())
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::Ok)
@@ -1006,26 +1059,88 @@ mod tests {
         assert_eq!(Refusal::after(&held), Refusal::DatabaseHeld);
     }
 
-    /// A stored setting the app cannot read says which one and where in
-    /// the dialog; every other refusal keeps its text.
+    /// A stored setting the app cannot read says which one, where, and
+    /// what to do in the dialog; every other refusal keeps its text.
     #[test]
     fn an_unreadable_setting_names_itself_in_the_dialog() {
-        let detail = "The setting llmBaseURL is not valid JSON. \
-                      It is stored in the database at /Users/n/Steno/steno.sqlite.";
+        let setting = Some((
+            "llmBaseURL",
+            steno_core::SettingProblem::NotJson,
+            std::path::Path::new("/Users/n/Steno/steno.sqlite"),
+        ));
         assert_eq!(
-            Refusal::Unavailable.message(Some(detail)),
-            format!(
-                "Steno could not read one of its settings, so it did not open. \
-                 Your meetings are safe.\n\n{detail}"
-            )
+            Refusal::Unavailable.message(setting),
+            "Steno could not read one of its settings. Your meetings are safe.\n\n\
+             The setting llmBaseURL is not in a form Steno can read. It is stored in the \
+             database at /Users/n/Steno/steno.sqlite. Steno has not changed it: fix or \
+             remove it there, then open Steno again."
         );
         assert_eq!(
             Refusal::Unavailable.message(None),
             Refusal::Unavailable.text()
         );
         assert_eq!(
-            Refusal::DatabaseHeld.message(Some(detail)),
+            Refusal::DatabaseHeld.message(setting),
             Refusal::DatabaseHeld.text()
+        );
+    }
+
+    /// The error-level log line of a refusal names no path (the
+    /// `steno_services::logs` rule): a setting's line has its key and the
+    /// problem, the lock's says another Steno holds the database, while
+    /// the dialog still names the database.
+    #[cfg(not(feature = "fixture-host"))]
+    #[test]
+    fn a_refusal_logs_no_path() {
+        let database = std::path::PathBuf::from("/Users/n/Library/Steno/steno.sqlite");
+        let setting = host::ShellHostError::Build(steno_services::BuildError::Setting {
+            database: database.clone(),
+            source: steno_core::StoreError::UndecodableSetting {
+                key: "obsidian".to_owned(),
+                problem: steno_core::SettingProblem::WrongShape,
+            },
+        });
+        let line = refusal_log_line(&setting);
+        assert_eq!(
+            line,
+            "the stored setting obsidian holds a value this version of Steno does not understand"
+        );
+        assert!(
+            Refusal::after(&setting)
+                .message(setting.unreadable_setting())
+                .contains("/Users/n/Library/Steno/steno.sqlite")
+        );
+        let lock = "/Users/n/Library/Steno/steno.lock";
+        let io = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        for error in [
+            setting,
+            host::ShellHostError::Build(steno_services::BuildError::Lock(
+                steno_core::DatabaseLockError::Held(lock.into()),
+            )),
+            host::ShellHostError::Build(steno_services::BuildError::Lock(
+                steno_core::DatabaseLockError::Unsupported {
+                    path: lock.into(),
+                    source: io(),
+                },
+            )),
+            host::ShellHostError::Build(steno_services::BuildError::Lock(
+                steno_core::DatabaseLockError::Io {
+                    path: lock.into(),
+                    source: io(),
+                },
+            )),
+            host::ShellHostError::Build(steno_services::BuildError::Store(
+                steno_core::StoreError::PendingMigration("/Users/n/v9".to_owned()),
+            )),
+        ] {
+            let line = refusal_log_line(&error);
+            assert!(!line.contains('/'), "{line}");
+        }
+        assert_eq!(
+            refusal_log_line(&host::ShellHostError::Build(
+                steno_services::BuildError::Lock(steno_core::DatabaseLockError::Held(lock.into()))
+            )),
+            "another Steno holds the database"
         );
     }
 

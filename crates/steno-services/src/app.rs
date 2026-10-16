@@ -3,14 +3,15 @@
 //! object graph, and [`App`], what it hands back. Swift: `AppEnvironment.live`
 //! and `AppController.launch`.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{FixedOffset, Local, Offset as _};
 use steno_adapters::DeliveryCoordinator;
 use steno_audio::{CaptureSession, SymphoniaAudioCodec};
 use steno_core::{
-    DatabaseLock, DatabaseLockError, MeetingEvent, SecretKey, SecretStore, StenoPaths, Store,
-    StoreError,
+    DatabaseLock, DatabaseLockError, MeetingEvent, SecretKey, SecretStore, SettingProblem,
+    StenoPaths, Store, StoreError,
 };
 use steno_handover::HandoverService;
 use steno_host::fakes::{
@@ -58,11 +59,14 @@ pub enum BuildError {
     #[error("Could not create the database folder: {0}")]
     DatabaseFolder(#[source] std::io::Error),
     /// A stored setting cannot be read
-    /// ([`StoreError::UndecodableSetting`]), with the database it is in,
-    /// so whoever fixes the row knows where it is; never its value. The
-    /// app refuses to start rather than run on a default for it (a vault
-    /// path, a retention rule). Rust only.
-    #[error("{source}, in the database {}", database.display())]
+    /// ([`StoreError::UndecodableSetting`], or
+    /// [`StoreError::UndecodableSettings`]), with the database it is in,
+    /// so the dialog can say where it is ([`BuildError::unreadable_setting`]).
+    /// The text names the key and the problem, never the value or the
+    /// database's path: it goes into the log. The app refuses to start
+    /// rather than run on a default for it (a vault path, a retention
+    /// rule). Rust only.
+    #[error("{source}")]
     Setting {
         database: std::path::PathBuf,
         source: StoreError,
@@ -70,22 +74,18 @@ pub enum BuildError {
 }
 
 impl BuildError {
-    /// The "could not start" dialog's lines for a stored setting that
-    /// cannot be read: its key, what is wrong with it and the database it
-    /// is in; `None` for every other failure.
+    /// For a stored setting that cannot be read: its key, what is wrong
+    /// with it and the database it is in, which the "could not start"
+    /// dialog says; `None` for every other failure.
     #[must_use]
-    pub fn setting_detail(&self) -> Option<String> {
-        let BuildError::Setting {
-            database,
-            source: StoreError::UndecodableSetting { key, problem },
-        } = self
-        else {
-            return None;
-        };
-        Some(format!(
-            "The setting {key} {problem}. It is stored in the database at {}.",
-            database.display()
-        ))
+    pub fn unreadable_setting(&self) -> Option<(&str, SettingProblem, &Path)> {
+        match self {
+            BuildError::Setting {
+                database,
+                source: StoreError::UndecodableSetting { key, problem },
+            } => Some((key, *problem, database)),
+            _ => None,
+        }
     }
 }
 
@@ -744,10 +744,12 @@ pub fn build_with_import(
     // the pipeline (and every reload, which keeps its engine when it runs
     // where the last one did) and the model service share them.
     let settings = store.settings().map_err(|error| match error {
-        StoreError::UndecodableSetting { .. } => BuildError::Setting {
-            database: database_path.clone(),
-            source: error,
-        },
+        StoreError::UndecodableSetting { .. } | StoreError::UndecodableSettings => {
+            BuildError::Setting {
+                database: database_path.clone(),
+                source: error,
+            }
+        }
         other => BuildError::Store(other),
     })?;
     let engines = Arc::new(SpeechEngines::new(SpeechSetup::new(&settings, &paths)));
@@ -1698,10 +1700,11 @@ mod tests {
         );
     }
 
-    /// One setting row the app cannot read stops the build (gap B3 of the
-    /// first launch after the Swift app, stable plan Rehearsal): the error
-    /// and the dialog's lines name the row's key, what is wrong and the
-    /// database, never the stored value, and the database keeps the row.
+    /// One setting row the app cannot read stops the build (the stable
+    /// plan's "First launch after the handoff", row "A setting the new app
+    /// cannot read"): the error's text, which the log gets, names the row's
+    /// key and what is wrong and neither the value nor the database's path;
+    /// the dialog's parts add the database; the database keeps the row.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unreadable_setting_names_its_key_and_the_database_and_not_its_value() {
         let dir = tempfile::tempdir().unwrap();
@@ -1724,19 +1727,15 @@ mod tests {
             panic!("the build went ahead over an unreadable setting");
         };
         let text = error.to_string();
-        let detail = error.setting_detail().expect("a setting's lines");
-        for line in [&text, &detail] {
-            assert!(line.contains("llmBaseURL"), "{line}");
-            assert!(line.contains(&database.display().to_string()), "{line}");
-            assert!(line.contains("is not valid JSON"), "{line}");
-            assert!(!line.contains("sk-secret"), "{line}");
-        }
         assert_eq!(
-            detail,
-            format!(
-                "The setting llmBaseURL is not valid JSON. It is stored in the database at {}.",
-                database.display()
-            )
+            text,
+            "the stored setting llmBaseURL is not in a form Steno can read"
+        );
+        assert!(!text.contains(&support.display().to_string()), "{text}");
+        assert!(!format!("{error:?}").contains("sk-secret"), "{error:?}");
+        assert_eq!(
+            error.unreadable_setting(),
+            Some(("llmBaseURL", SettingProblem::NotJson, database.as_path()))
         );
         let kept: String = open_store(&database)
             .unwrap()
@@ -1751,7 +1750,7 @@ mod tests {
         assert_eq!(kept, value);
         assert!(
             BuildError::Store(StoreError::BlankPersonName)
-                .setting_detail()
+                .unreadable_setting()
                 .is_none()
         );
     }
