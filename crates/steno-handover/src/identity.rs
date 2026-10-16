@@ -129,6 +129,13 @@ impl HandoverIdentity {
     /// writes what is left. A note that cannot be dropped is logged and
     /// left.
     ///
+    /// All three reads run every time, so the decision alone orders them:
+    /// a record that cannot be read waits on the record whatever the secret
+    /// store and the phones hold, but the secret store is still read, which
+    /// on a Mac may show the keychain's prompt for an entry another build
+    /// owns before the load waits. That needs a record that cannot be read
+    /// (its permissions, a disk error), which is rare.
+    ///
     /// Every read decides an unfinished Pair again
     /// ([`HandoverIdentity::mint_anew`] stopped after it noted the next
     /// fingerprint) the same way: the launch, a plain handover's Try again,
@@ -482,6 +489,8 @@ pub enum Unavailability {
 /// of a read that failed: one that cannot open the file (an
 /// [`std::io::Error`], as [`FingerprintRecord`]'s file reports it) is
 /// [`Record::NotOpened`], any other [`Record::DoesNotParse`].
+/// `steno-services`' `file_not_opened` reads the same distinction from
+/// the error the load returns.
 pub fn observe_record(record: &dyn FingerprintRecord) -> (Record, Option<BoxError>) {
     let read = record
         .recorded()

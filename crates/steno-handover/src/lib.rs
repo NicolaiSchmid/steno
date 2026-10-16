@@ -23,7 +23,10 @@
 //!   [`SecretStore`](steno_core::SecretStore), with its fingerprint
 //!   recorded through a [`FingerprintRecord`]: a store that cannot read
 //!   it, lost it or holds another one is [`Unavailability`], never a
-//!   mint, so no phone has to pair again.
+//!   mint, so no phone has to pair again. Which identity is served,
+//!   minted or waited for is [`identity::decision::decide`], whose truth
+//!   table `crates/steno-handover/tests/fixtures/identity-decisions.json`
+//!   is the rule.
 //! - [`PairingPayload`]: what the QR code shows; [`base64url`] is its
 //!   encoding of the fingerprint and the secret.
 //! - [`pinning`]: the trust rule the phone applies, in Rust, for a client
