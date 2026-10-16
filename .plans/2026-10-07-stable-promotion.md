@@ -1980,7 +1980,7 @@ that path holds `com.nicolaischmid.steno.desktop`.
 | Login item | The new app registers itself when `launch_at_login` is on; the Swift entry is left to macOS (S6) | R3 |
 | Updates | The Tauri updater reads `desktop-stable` daily (S4) | R4 |
 | Speaker models | The diarizer's ONNX models (about 33 MB) are new: onboarding opens on its permissions page while they are missing, even with every grant in place, and its Speech models row downloads them; the meetings waiting for them then resume | R3; "Nicolai's Mac", step 17 |
-| Obsidian vault | A vault under Documents, Desktop, Downloads or iCloud Drive, or on an external disk or a network share, needs folder access for the new identifier: the permissions page writes a hidden empty file to it once and removes it at once, so macOS asks there, and the row says what to do after a Don't Allow; a leftover from a crash is removed at the next check | R3; "Nicolai's Mac", step 18 |
+| Obsidian vault | A vault under Documents, Desktop, Downloads or iCloud Drive, or on an external disk or a network share, needs folder access for the new identifier: the permissions page writes a hidden empty file to it once and removes it at once, so macOS asks there, and the row says what to do after a Don't Allow; a leftover from a crash is removed at the next check, and a folder that refuses deletes reads as not writable once its second probe stays, so it holds two at most | R3; "Nicolai's Mac", step 18 |
 | Local Network | macOS asks once, when the new app starts listening for the phone; Settings > iPhone says where to switch it on if the phone cannot find the Mac | R3; "Nicolai's Mac", step 16 |
 | A setting the new app cannot read | It refuses to start; the dialog names the setting's key and the database, the log names the key and the problem only; neither holds its value | "Nicolai's Mac", step 6 |
 
@@ -2146,7 +2146,8 @@ except case e.
     iCloud Drive, one Files and Folders prompt while onboarding's
     permissions page shows (Allow; for iCloud Drive, including Obsidian's
     iCloud folder, it reads "“Steno” wants to access files managed by
-    “iCloud Drive”."). Any other modal dialog fails R1.
+    “iCloud Drive”.", and may come at the first export instead, as R3
+    records). Any other modal dialog fails R1.
 - **R2 Handoff mechanics** (Forge; the cutover plan's test 6).
   1. Fetch the candidate's `sparkle-item` on atlas
      (`gh run download <run> -n sparkle-item`) and copy it over.
@@ -2223,7 +2224,7 @@ except case e.
      “iCloud Drive”." with the app's reason below it (Allow), and Files &
      Folders lists iCloud Drive below the new app afterwards. Record when
      it came: at the vault row, or only at the first export (macOS may
-     not ask for a file the app creates itself). The pass list is
+     ask only when Steno first reads a file there). The pass list is
      otherwise the same.
   5. **The old login item.** Save `sudo sfltool dumpbtm` again as
      `btm-after.txt`. Log out and in: Steno starts once. Turn launch at login off
