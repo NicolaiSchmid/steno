@@ -15,9 +15,10 @@ pub enum SpeechError {
 
     /// CoreML raised an Objective-C exception, which the `coreml` module
     /// caught at the boundary (`coreml::contained`): its `name` and
-    /// `reason`, empty when it had none. The engine drops its models after
-    /// one, so the next call loads them again.
-    #[error("CoreML raised {name}: {reason}")]
+    /// `reason`, empty when it had none (and then left out of the text).
+    /// The engine drops its models after one, so the next call loads them
+    /// again.
+    #[error("CoreML raised {name}{}", reason_suffix(.reason))]
     Exception { name: String, reason: String },
 
     /// An output, or an input built for a model, had a shape the port
@@ -67,6 +68,15 @@ impl SpeechError {
                 .is_some_and(SpeechError::is_exception),
             _ => false,
         }
+    }
+}
+
+/// `": reason"`, or nothing for an exception without one.
+fn reason_suffix(reason: &str) -> String {
+    if reason.is_empty() {
+        String::new()
+    } else {
+        format!(": {reason}")
     }
 }
 
@@ -124,6 +134,11 @@ mod tests {
             "CoreML raised NSGenericException: no IOSurface"
         );
         assert!(!SpeechError::CoreMl("refused".to_owned()).is_exception());
+        let bare = SpeechError::Exception {
+            name: "nil".to_owned(),
+            reason: String::new(),
+        };
+        assert_eq!(bare.to_string(), "CoreML raised nil", "no trailing colon");
         let other = SpeechError::Pipeline(steno_speech::SpeechError::from(
             SpeechError::MissingOutput("mel"),
         ));
