@@ -1,12 +1,14 @@
 //! A phone admission while another connection holds the database's write
 //! lock, through the real `RecordingIntake` behind the real handover
-//! service (`.plans/2026-10-12-store-off-the-workers.md`, the admission
-//! under a held lock). `complete` never answers 200 unless the meeting is
-//! durable, since the phone then deletes its copy; a refusal leaves no
-//! meeting row, no ledger row and no copy that nothing notes, and the
-//! phone's retry once the lock goes admits the recording exactly once. An
-//! admission whose request is dropped (a phone that hung up mid-admit)
-//! still commits, is enqueued once, and the retry is answered from it.
+//! service (`.plans/2026-10-12-store-off-the-workers.md`, "The phone
+//! admission runs to its end" in the facade's as-built). `complete` never
+//! answers 200 unless the meeting is durable, since the phone then deletes
+//! its copy; a refusal leaves no meeting row, no ledger row and no copy
+//! unless it is noted for the launch, and the phone's retry once the lock
+//! goes admits the recording exactly once. An admission whose request is
+//! dropped (a phone that hung up mid-admit) still commits, is enqueued
+//! once, keeps its `completing` mark until it ends, and the retry is
+//! answered from it.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -36,6 +38,17 @@ const CHUNK_SIZE: i64 = 128 * 1024;
 /// How long a test waits before it fails as hung, as steno-audio's
 /// `HANG_GUARD`: every wait here ends once a busy timeout or two ran out.
 const HANG_GUARD: Duration = Duration::from_secs(120);
+
+/// How long an admission may take to end once the test let the lock go:
+/// two busy timeouts, so an admission that never ends (its task not
+/// spawned, and the request dropped) fails here rather than at
+/// [`HANG_GUARD`].
+const AFTER_THE_LOCK: Duration = Duration::from_secs(10);
+
+/// One answer that must not wait on the lock, as `LIVE` in steno-services'
+/// testing module: a fifth of the five-second busy timeout a wait on the
+/// lock runs out, and loose enough for a loaded machine.
+const LIVE: Duration = Duration::from_secs(1);
 
 /// The admission folders the intake noted and not yet settled. With
 /// [`Noted::lock_at_the_next_copy`], the next `copying` takes the write
@@ -88,6 +101,8 @@ impl Noted {
     }
 }
 
+/// A file store with an audio folder, the intake's noted folders and its
+/// enqueue count.
 struct World {
     dir: tempfile::TempDir,
     path: PathBuf,
@@ -196,24 +211,26 @@ impl World {
     }
 
     /// Drops `call`, an admission, once its copy took the write lock from
-    /// another connection, so its commit waits; then lets the lock go.
+    /// another connection, so its commit waits on the lock until
+    /// [`Noted::release`].
     async fn dropped_at_the_copy<T: std::fmt::Debug>(&self, call: impl Future<Output = T>) {
         self.noted.lock_at_the_next_copy(&self.path);
-        {
-            let mut call = pin!(call);
-            tokio::select! {
-                answered = &mut call => panic!("answered under the lock: {answered:?}"),
-                () = bounded("the copy", self.noted.copying.notified()) => {}
-            }
+        let mut call = pin!(call);
+        tokio::select! {
+            answered = &mut call => panic!("answered under the lock: {answered:?}"),
+            () = bounded("the copy", self.noted.copying.notified()) => {}
         }
-        self.noted.release();
     }
 
-    /// Waits until the intake enqueued `count` meetings.
+    /// Waits until the intake enqueued `count` meetings, once the lock
+    /// went.
     async fn enqueued(&self, count: usize) {
-        let deadline = Instant::now() + HANG_GUARD;
+        let deadline = Instant::now() + AFTER_THE_LOCK;
         while self.enqueued.load(Ordering::SeqCst) < count {
-            assert!(Instant::now() < deadline, "enqueued within {HANG_GUARD:?}");
+            assert!(
+                Instant::now() < deadline,
+                "enqueued within {AFTER_THE_LOCK:?}"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -260,8 +277,8 @@ async fn complete_under(
 }
 
 /// The phone's retry and a replay once the lock went: one meeting, one
-/// ledger row, one enqueue, an announce answered delivered, and no copy
-/// on the disk that no meeting owns and nothing notes.
+/// ledger row, one enqueue, an announce answered `complete`, and no copy
+/// on the disk that no meeting owns unless it is noted for the launch.
 async fn the_retry_admits_once(
     world: &World,
     test: &TestService,
@@ -312,10 +329,11 @@ async fn a_complete_under_a_seven_second_hold_answers_with_a_durable_meeting() {
         (
             world.count("meeting"),
             world.count("handoverAdmission"),
-            world.audio_files().len()
+            world.audio_files().len(),
+            world.enqueued.load(Ordering::SeqCst)
         ),
-        (1, 1, 1),
-        "one admission"
+        (1, 1, 1, 1),
+        "one admission, enqueued once"
     );
     assert_eq!(world.receipt(id), Some(HandoverStateKind::Complete));
     the_retry_admits_once(&world, &test, &phone, &metadata).await;
@@ -335,10 +353,11 @@ async fn a_complete_under_a_twelve_second_hold_fails_cleanly_and_its_retry_admit
             world.count("meeting"),
             world.count("handoverAdmission"),
             world.audio_files().len(),
-            world.noted.len()
+            world.noted.len(),
+            world.enqueued.load(Ordering::SeqCst)
         ),
-        (0, 0, 0, 0),
-        "a refused admission leaves no row and no copy"
+        (0, 0, 0, 0, 0),
+        "a refused admission leaves no row and no copy, and enqueues nothing"
     );
     assert_eq!(world.receipt(id), Some(HandoverStateKind::Failed));
     the_retry_admits_once(&world, &test, &phone, &metadata).await;
@@ -395,10 +414,11 @@ async fn intake_alone(hold: Duration) {
             world.count("meeting"),
             world.count("handoverAdmission"),
             world.audio_files().len(),
-            world.noted.len()
+            world.noted.len(),
+            world.enqueued.load(Ordering::SeqCst)
         ),
-        (0, 0, 0, 0),
-        "no row, and the copy went once the failed save landed"
+        (0, 0, 0, 0, 0),
+        "no row and no enqueue, and the copy went once the failed save landed"
     );
     assert_eq!(
         world.receipt(metadata.recording_id),
@@ -437,6 +457,7 @@ async fn a_dropped_admit_still_commits_and_enqueues() {
     world
         .dropped_at_the_copy(intake.admit(&file, &metadata, &device))
         .await;
+    world.noted.release();
     world.enqueued(1).await;
     let meeting_id = bounded("the replay", intake.admit(&file, &metadata, &device))
         .await
@@ -445,12 +466,11 @@ async fn a_dropped_admit_still_commits_and_enqueues() {
     world.admitted_once();
 }
 
-/// A `complete` dropped mid-admit, as a phone that hangs up does: the
-/// admission commits once the lock goes, is enqueued once, and the
-/// receipt ends `complete`, so the phone's retry gets a 200 with that
-/// meeting, not a 409 that asks for the chunks again.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_complete_dropped_mid_admit_leaves_its_meeting_and_the_retry_is_answered_from_it() {
+/// A paired phone's two-chunk upload, whose `complete` is dropped once
+/// the admission's copy took the write lock: the admission waits on it
+/// until [`Noted::release`]. Returns the world, the service, the phone and
+/// the recording id.
+async fn a_complete_dropped_at_the_copy() -> (World, TestService, EngineDevice, Uuid) {
     let world = world();
     let test = world.service(false).await;
     let phone = EngineDevice::paired(&test, "Phone").await;
@@ -458,12 +478,47 @@ async fn a_complete_dropped_mid_admit_leaves_its_meeting_and_the_retry_is_answer
     let metadata = phone.metadata(&bytes, CHUNK_SIZE);
     phone.upload_all(&metadata, &bytes).await;
     let id = metadata.recording_id;
-    let mut receipts = test.service.receipts();
-
     world.dropped_at_the_copy(phone.complete(id)).await;
+    (world, test, phone, id)
+}
+
+/// The `completing` mark outlives a `complete` dropped mid-admit: while
+/// the admission still waits on the lock, the phone's retry gets at once
+/// the 409 of a recording in flight, `verifying` with every chunk listed,
+/// so it backs off and uploads nothing, and no second admission starts
+/// (one noted copy). Once the lock goes, the admission ends as usual.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_while_a_dropped_complete_still_admits_is_told_to_wait() {
+    let (world, _test, phone, id) = a_complete_dropped_at_the_copy().await;
+
+    let retry = tokio::time::timeout(LIVE, phone.complete(id))
+        .await
+        .expect("the retry is answered without waiting on the lock");
+    assert_eq!(retry.status.as_u16(), 409, "the mark is still held");
+    let status: wire::RecordingStatus = serde_json::from_slice(&retry.body).unwrap();
+    assert_eq!(
+        (status.state, status.received_chunks),
+        (HandoverStateKind::Verifying, vec![0, 1])
+    );
+    assert_eq!(world.noted.len(), 1, "no second admission");
+
+    world.noted.release();
     world.enqueued(1).await;
-    bounded(
-        "the receipt completes",
+    assert_eq!(world.noted.len(), 0, "the admission settled its copy");
+}
+
+/// A `complete` dropped mid-admit, as a phone that hangs up does: the
+/// admission commits once the lock goes, is enqueued once, and the
+/// receipt ends `complete`, so the phone's retry gets a 200 with that
+/// meeting, not a 409 that asks for the chunks again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_dropped_mid_admit_leaves_its_meeting_and_the_retry_is_answered_from_it() {
+    let (world, test, phone, id) = a_complete_dropped_at_the_copy().await;
+    let mut receipts = test.service.receipts();
+    world.noted.release();
+    world.enqueued(1).await;
+    tokio::time::timeout(
+        AFTER_THE_LOCK,
         receipts.wait_for(|receipts| {
             receipts.iter().any(|receipt| {
                 receipt.recording_id == id && receipt.state.kind() == HandoverStateKind::Complete
@@ -471,6 +526,7 @@ async fn a_complete_dropped_mid_admit_leaves_its_meeting_and_the_retry_is_answer
         }),
     )
     .await
+    .expect("the receipt completes once the lock went")
     .unwrap();
 
     let retry = bounded("the retry", phone.complete(id)).await;

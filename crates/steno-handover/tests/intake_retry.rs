@@ -2,7 +2,8 @@
 //! failing once, the phone retrying by `complete` or by announcing again,
 //! and a restart resuming from the stored receipt while the sweep removes
 //! only what no receipt accounts for; after a restart and a revoke, another
-//! phone's first announce of the same recording id starts from no file.
+//! phone's first announce of the same recording id starts from no file; a
+//! panic in the admission resumes in its `complete` and lets the retry in.
 
 #![allow(
     clippy::assert_is_empty,
@@ -15,12 +16,19 @@
 
 mod common;
 
+use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::sync::Arc;
 
-use common::{EngineDevice, Phone, ScriptedIntake, TestService, chunks, fake_intake, seeded_bytes};
+use common::{
+    EngineDevice, Options, Phone, ScriptedIntake, TestService, chunks, fake_intake, seeded_bytes,
+};
+use futures_util::FutureExt as _;
+use steno_core::protocols::BoundaryResult;
 use steno_core::testing::FakeHandoverIntake;
 use steno_core::{
-    AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, RecordingMetadata,
+    AudioFormat, HandoverIntake, HandoverReceipt, HandoverState, HandoverStateKind, PairedDevice,
+    RecordingMetadata,
 };
 use steno_handover::engine::Engine;
 use steno_handover::{HandoverIdentity, HandoverService, wire};
@@ -470,4 +478,65 @@ async fn a_complete_receipt_without_its_meeting_is_admitted_again_after_a_restar
         assert_eq!(&std::fs::read(&admission.file).unwrap(), bytes);
     }
     second.stop().await;
+}
+
+/// `inner`'s admission, then a panic, as a bug after the real intake's
+/// commit (in its enqueue, say) would: the verified file is gone by then.
+struct PanicsAfter(Arc<dyn HandoverIntake>);
+
+#[steno_core::async_trait]
+impl HandoverIntake for PanicsAfter {
+    async fn admit(
+        &self,
+        file: &Path,
+        metadata: &RecordingMetadata,
+        device: &PairedDevice,
+    ) -> BoundaryResult<Uuid> {
+        let _ = self.0.admit(file, metadata, device).await;
+        panic!("the admission panicked");
+    }
+}
+
+/// A panic in the admission's task resumes in the `complete` that started
+/// it, not as a 500, and the task's unwind releases the `completing` mark.
+/// The retry is then not the 409 of a recording in flight, which lists
+/// every chunk, but goes on to the verify, which finds the verified file
+/// and the partial gone and asks for every chunk again: a 409 that lists
+/// none. The panicking intake sits outside [`common::taking`], so the
+/// file is taken by the admission, not by the panic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panic_in_the_admission_resumes_in_its_complete_and_releases_the_mark() {
+    let first = TestService::with(Options {
+        chunk_size: CHUNK_SIZE,
+        start: false,
+        ..Options::default()
+    })
+    .await;
+    let now = first.now;
+    let service = Arc::new(HandoverService::new(
+        first.service.configuration.clone(),
+        first.store.clone(),
+        Arc::new(PanicsAfter(common::taking(fake_intake(meeting_id())))),
+        Arc::new(HandoverIdentity::mint("Steno test identity", now).unwrap()),
+        Arc::new(move || now),
+    ));
+    let phone = EngineDevice::paired_on(&service, &first.store, "Phone").await;
+    let bytes = seeded_bytes(2 * CHUNK_SIZE as usize, 79);
+    let metadata = phone.metadata(&bytes, CHUNK_SIZE);
+    phone.upload_all(&metadata, &bytes).await;
+    let id = metadata.recording_id;
+
+    let answered = AssertUnwindSafe(phone.complete(id)).catch_unwind().await;
+    assert!(
+        answered.is_err(),
+        "the panic resumed in the request, not as a 500"
+    );
+    let retry = phone.complete(id).await;
+    assert_eq!(retry.status.as_u16(), 409);
+    let status: wire::RecordingStatus = serde_json::from_slice(&retry.body).unwrap();
+    assert_eq!(
+        status.received_chunks,
+        Vec::<i64>::new(),
+        "the mark went with the panic"
+    );
 }

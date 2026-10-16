@@ -910,6 +910,26 @@ mod tests {
         }
     }
 
+    /// A `completing` mark holds the engine only while it lives: once it
+    /// drops, the owner's `Arc` is the only one again, so the engine's weak
+    /// handle on itself leaves no cycle and the engine is freed with its
+    /// owner.
+    #[tokio::test]
+    async fn a_dropped_mark_leaves_the_engine_to_its_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = engine(
+            directory.path(),
+            Arc::new(Store::in_memory().unwrap()),
+            Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
+        );
+        let mark = engine
+            .begin_completing(Uuid::new_v4())
+            .expect("not completing yet");
+        assert_eq!(Arc::strong_count(&engine), 2, "the mark holds the engine");
+        drop(mark);
+        assert_eq!(Arc::strong_count(&engine), 1, "only the owner's");
+    }
+
     #[tokio::test]
     async fn a_refusal_leaves_another_devices_receipt_and_files_alone() {
         // X's revoke landed during the store read of phone X's `complete`
