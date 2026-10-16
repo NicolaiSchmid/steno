@@ -1,8 +1,8 @@
 //! The handover identity's decision against its truth table,
 //! `crates/steno-handover/tests/fixtures/identity-decisions.json` (its
-//! `about` says how a row reads), a check that the table has a row for
-//! every kind of decision the input space reaches, and properties over
-//! that space:
+//! `about` says how a row reads), a check of the runner's own refusals, a
+//! check that the table has a row for every kind of decision the input
+//! space reaches, and properties over that space:
 //! - nothing mints silently;
 //! - no pairing the phones know is lost;
 //! - no decision destroys a stored identity;
@@ -273,7 +273,12 @@ fn rows() -> Vec<Row> {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/identity-decisions.json"
     );
-    let Strict(table) = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    table(&std::fs::read(path).unwrap())
+}
+
+/// The rows of the table in `json`.
+fn table(json: &[u8]) -> Vec<Row> {
+    let Strict(table) = serde_json::from_slice(json).unwrap();
     let keys: Vec<_> = table
         .as_object()
         .expect("the table is an object")
@@ -306,7 +311,7 @@ fn orders(found: &[Found]) -> Vec<Vec<Found>> {
 #[test]
 fn every_row_of_the_table_decides_as_it_says() {
     let rows = rows();
-    assert!(rows.len() >= 80, "{} rows", rows.len());
+    assert_eq!(rows.len(), 95, "a row added or removed changes this count");
     let mut names = HashSet::new();
     for row in &rows {
         assert!(names.insert(row.name.clone()), "{}: twice", row.name);
@@ -329,6 +334,45 @@ fn every_row_of_the_table_decides_as_it_says() {
             );
         }
     }
+}
+
+/// The runner refuses what would let a row say less than it seems to: a
+/// key twice, an offset without a sign, a start for a name not found, and
+/// a key beside the table's two.
+#[test]
+fn the_runner_refuses_a_key_twice_an_unsigned_offset_a_stray_start_and_a_stray_key() {
+    use std::panic::catch_unwind;
+    let twice = serde_json::from_str::<Strict>(r#"{"phones": "unreadable", "phones": []}"#);
+    assert!(twice.is_err(), "a key twice was read");
+    let nested = serde_json::from_str::<Strict>(r#"{"rows": [{"a": 1, "a": 1}]}"#);
+    assert!(nested.is_err(), "a key twice inside a row was read");
+
+    assert!(
+        catch_unwind(|| offset("10d")).is_err(),
+        "an offset without a sign was read"
+    );
+    assert_eq!(offset("+10d"), now() + TimeDelta::days(10));
+    assert_eq!(offset("-10d"), now() - TimeDelta::days(10));
+
+    let one = |starts: Value| {
+        serde_json::json!({
+            "name": "x", "caller": "load", "found": ["A"], "starts": starts,
+            "expect": {"serve": "A"},
+        })
+    };
+    let stray = one(serde_json::json!({"A": "-1d", "Z": "-1d"}));
+    assert!(
+        catch_unwind(|| row(&stray)).is_err(),
+        "a start for a name not found was read"
+    );
+    let named = row(&one(serde_json::json!({"A": "-1d"})));
+    assert_eq!(named.expected.outcome, Outcome::Serve("A".to_owned()));
+
+    assert!(
+        catch_unwind(|| table(br#"{"about": [], "rows": [], "more": []}"#)).is_err(),
+        "a key beside about and rows was read"
+    );
+    assert!(table(br#"{"about": [], "rows": []}"#).is_empty());
 }
 
 /// The kind of a decision for `caller`: its outcome (the reason of a

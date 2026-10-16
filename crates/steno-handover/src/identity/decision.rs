@@ -5,7 +5,8 @@
 //!
 //! Its truth table is the statement of the rule:
 //! `crates/steno-handover/tests/fixtures/identity-decisions.json`, one row
-//! per case, which `tests/identity_decisions.rs` runs through [`decide`].
+//! per case, which `crates/steno-handover/tests/identity_decisions.rs` runs
+//! through [`decide`].
 //! A new case is a new row there, not a paragraph here.
 //!
 //! Three callers ask ([`Caller`]):
