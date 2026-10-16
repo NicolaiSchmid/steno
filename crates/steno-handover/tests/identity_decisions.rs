@@ -1,14 +1,20 @@
 //! The handover identity's decision against its truth table,
-//! `tests/fixtures/identity-decisions.json` (its `about` says how a row
-//! reads), and three properties over an enumerated input space: nothing
-//! mints silently, no pairing the phones know is lost, and a stop after
-//! any write decides the same at the next read.
+//! `crates/steno-handover/tests/fixtures/identity-decisions.json` (its
+//! `about` says how a row reads), a check that the table has a row for
+//! every kind of decision the input space reaches, and properties over
+//! that space:
+//! - nothing mints silently;
+//! - no pairing the phones know is lost;
+//! - no decision destroys a stored identity;
+//! - a stop after any write decides the same at the next read;
+//! - the order the identities were found in never decides.
 
 #![allow(clippy::too_many_lines)]
 
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeDelta, Utc};
+use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use steno_handover::identity::decision::{
     Caller, Decision, Found, Identities, Observations, Outcome, Phones, Reason, Record, Write,
@@ -20,13 +26,13 @@ fn now() -> DateTime<Utc> {
     DateTime::from_timestamp(1_790_000_000, 0).unwrap()
 }
 
-/// An offset from [`now`]: an optional sign, a whole number and a unit
-/// (`ms`, `s`, `m`, `h` or `d`).
+/// An offset from [`now`]: a sign, a whole number and a unit (`ms`, `s`,
+/// `m`, `h` or `d`).
 fn offset(text: &str) -> DateTime<Utc> {
     let (sign, rest) = match text.as_bytes().first() {
         Some(b'-') => (-1, &text[1..]),
         Some(b'+') => (1, &text[1..]),
-        _ => (1, text),
+        _ => panic!("{text:?} has no sign"),
     };
     let digits = rest
         .find(|c: char| !c.is_ascii_digit())
@@ -44,6 +50,70 @@ fn offset(text: &str) -> DateTime<Utc> {
         _ => panic!("{text:?} has no unit this table knows"),
     };
     now() + delta * sign
+}
+
+/// A JSON value as `serde_json` reads it, except that an object naming a
+/// key twice is refused: `serde_json` keeps the last, so a row could
+/// silently state a field twice.
+struct Strict(Value);
+
+impl<'de> Deserialize<'de> for Strict {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(StrictVisitor).map(Strict)
+    }
+}
+
+struct StrictVisitor;
+
+impl<'de> Visitor<'de> for StrictVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(Strict(item)) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut object = serde_json::Map::new();
+        while let Some((key, Strict(value))) = map.next_entry::<String, Strict>()? {
+            if object.contains_key(&key) {
+                return Err(serde::de::Error::custom(format!("the key {key:?} twice")));
+            }
+            object.insert(key, value);
+        }
+        Ok(Value::Object(object))
+    }
 }
 
 fn text<'a>(value: &'a Value, what: &str) -> &'a str {
@@ -65,7 +135,7 @@ fn row(value: &Value) -> Row {
     for key in fields.keys() {
         assert!(
             [
-                "name", "caller", "found", "certs", "record", "phones", "expect"
+                "name", "caller", "found", "starts", "record", "phones", "expect"
             ]
             .contains(&key.as_str()),
             "{name}: no field {key:?} in this table"
@@ -77,14 +147,14 @@ fn row(value: &Value) -> Row {
         "move" => Caller::Move,
         other => panic!("{name}: no caller {other:?}"),
     };
-    let certs = fields.get("certs").map_or_else(BTreeMap::new, |certs| {
-        certs
+    let starts = fields.get("starts").map_or_else(BTreeMap::new, |starts| {
+        starts
             .as_object()
-            .unwrap_or_else(|| panic!("{name}: certs is no object"))
+            .unwrap_or_else(|| panic!("{name}: starts is no object"))
             .iter()
-            .map(|(cert, start)| {
+            .map(|(found, start)| {
                 let start = (!start.is_null()).then(|| offset(text(start, "a start")));
-                (cert.clone(), start)
+                (found.clone(), start)
             })
             .collect()
     });
@@ -96,7 +166,7 @@ fn row(value: &Value) -> Row {
                 .iter()
                 .map(|name_of| {
                     let fingerprint = text(name_of, "a name found").to_owned();
-                    let start = *certs
+                    let start = *starts
                         .get(&fingerprint)
                         .unwrap_or_else(|| panic!("{name}: no start for {fingerprint}"));
                     Found { fingerprint, start }
@@ -105,6 +175,11 @@ fn row(value: &Value) -> Row {
         ),
         other => panic!("{name}: found is {other}"),
     };
+    for start_of in starts.keys() {
+        let named = matches!(&identities, Identities::Found(found)
+            if found.iter().any(|identity| identity.fingerprint == *start_of));
+        assert!(named, "{name}: a start for {start_of}, which is not found");
+    }
     let record = match fields.get("record") {
         None => Record::EMPTY,
         Some(Value::String(record)) if record == "notOpened" => Record::NotOpened,
@@ -130,7 +205,7 @@ fn row(value: &Value) -> Row {
         Some(Value::Array(phones)) => Phones::Paired(
             phones
                 .iter()
-                .map(|phone| offset(text(&phone["pairedAt"], "pairedAt")))
+                .map(|phone| offset(text(phone, "a pairing time")))
                 .collect(),
         ),
         Some(other) => panic!("{name}: phones is {other}"),
@@ -198,7 +273,13 @@ fn rows() -> Vec<Row> {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/identity-decisions.json"
     );
-    let table: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let Strict(table) = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let keys: Vec<_> = table
+        .as_object()
+        .expect("the table is an object")
+        .keys()
+        .collect();
+    assert_eq!(keys, ["about", "rows"], "the table's keys");
     table["rows"]
         .as_array()
         .expect("the table has rows")
@@ -250,45 +331,55 @@ fn every_row_of_the_table_decides_as_it_says() {
     }
 }
 
-/// Every caller, outcome and reason has a row.
+/// The kind of a decision for `caller`: its outcome (the reason of a
+/// wait) and its writes, with the names served and recorded left out.
+fn signature(caller: Caller, decided: &Decision) -> String {
+    let outcome = match &decided.outcome {
+        Outcome::Serve(_) => "serve".to_owned(),
+        Outcome::Mint => "mint".to_owned(),
+        Outcome::Wait(reason) => format!("wait {reason:?}"),
+    };
+    let writes: Vec<_> = decided
+        .writes
+        .iter()
+        .map(|write| match write {
+            Write::Record(_) => "record".to_owned(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    format!("{caller:?} {outcome} [{}]", writes.join(", "))
+}
+
+/// Every kind of decision the input space reaches, for each caller, has a
+/// row, except two that no caller observes: the import and the move never
+/// pass identities that could not be read (the import reads certificates
+/// it found, the move the file it moves).
 #[test]
-fn the_table_covers_every_caller_outcome_and_reason() {
-    let rows = rows();
-    let mut seen = std::collections::HashSet::new();
-    for row in &rows {
-        seen.insert(format!("{:?}", row.observed.caller));
-        seen.insert(match &row.expected.outcome {
-            Outcome::Serve(_) => "serve".to_owned(),
-            Outcome::Mint => "mint".to_owned(),
-            Outcome::Wait(reason) => format!("{reason:?}"),
-        });
-        for write in &row.expected.writes {
-            seen.insert(match write {
-                Write::Record(_) => "record".to_owned(),
-                other => format!("{other:?}"),
-            });
-        }
+fn the_table_has_a_row_for_every_kind_of_decision_reached() {
+    let unobserved = [
+        "Import wait SecretUnreadable []",
+        "Move wait SecretUnreadable []",
+    ];
+    let tabled: std::collections::BTreeSet<String> = rows()
+        .iter()
+        .map(|row| signature(row.observed.caller, &row.expected))
+        .collect();
+    let reached: std::collections::BTreeSet<String> = every_observation()
+        .iter()
+        .map(|observed| signature(observed.caller, &decide(observed)))
+        .collect();
+    for kind in &reached {
+        assert!(
+            tabled.contains(kind) || unobserved.contains(&kind.as_str()),
+            "no row for {kind}"
+        );
     }
-    for wanted in [
-        "Load",
-        "Import",
-        "Move",
-        "serve",
-        "mint",
-        "RecordNotOpened",
-        "RecordDoesNotParse",
-        "SecretUnreadable",
-        "Malformed",
-        "PhonesUnreadable",
-        "Missing",
-        "Replaced",
-        "PartlyReplaced",
-        "ClockBehind",
-        "DropNote",
-        "RemovePhones",
-        "record",
-    ] {
-        assert!(seen.contains(wanted), "no row for {wanted}");
+    for kind in unobserved {
+        assert!(reached.contains(kind), "{kind} is no longer reached");
+        assert!(!tabled.contains(kind), "{kind} has a row after all");
+    }
+    for kind in &tabled {
+        assert!(reached.contains(kind), "{kind} is outside the input space");
     }
 }
 
@@ -296,7 +387,8 @@ fn the_table_covers_every_caller_outcome_and_reason() {
 /// cannot be read, do not parse, none, one or two of three fingerprints
 /// (a copy included), each starting long before, before, at a second
 /// after now, after now, or unreadable; every record; phones that cannot
-/// be read, none, or paired at times around the starts.
+/// be read, none, or paired at times around the starts, at a start, and
+/// within the clock's slack after now.
 fn every_observation() -> Vec<Observations> {
     let starts = [
         Some(offset("-30d")),
@@ -350,6 +442,8 @@ fn every_observation() -> Vec<Observations> {
         at(&["-20d", "-1d"]),
         at(&["-40d", "-1d"]),
         at(&["+1d"]),
+        at(&["-10d"]),
+        at(&["+500ms"]),
     ];
     let mut every = Vec::new();
     for caller in [Caller::Load, Caller::Import, Caller::Move] {
@@ -469,6 +563,54 @@ fn no_pairing_the_phones_know_is_lost() {
     }
 }
 
+/// No decision destroys a stored identity. A [`Write`] has no write of an
+/// identity, by design; on top of that, a mint is decided only where no
+/// identity was found, the import writes nothing, the move records at most
+/// the one identity it found (the file's) and drops no note and no phone,
+/// and the phones go only in the load's finished Pair again. Two writes
+/// outside the decision replace a stored identity, and are the named
+/// exceptions: Pair again's own mint (the user's confirmed choice, which
+/// removes every phone) and the Mac import's store over a desktop-id
+/// build's identity (S6 of `.plans/2026-10-07-stable-promotion.md`).
+/// `steno-services`' `no_identity_is_ever_destroyed_by_the_move` runs the
+/// move itself over a fake Secret Service.
+#[test]
+fn no_decision_destroys_a_stored_identity() {
+    for observed in every_observation() {
+        let decided = decide(&observed);
+        if decided.outcome == Outcome::Mint {
+            assert_eq!(
+                observed.identities,
+                Identities::Found(Vec::new()),
+                "a mint over an identity: {observed:?}"
+            );
+        }
+        let found = match &observed.identities {
+            Identities::Found(found) => found.as_slice(),
+            _ => &[],
+        };
+        match observed.caller {
+            Caller::Load => {}
+            Caller::Import => assert_eq!(decided.writes, [], "{observed:?}"),
+            Caller::Move => match decided.writes.as_slice() {
+                [] => {}
+                [Write::Record(fingerprint)] => assert!(
+                    matches!(found, [file] if file.fingerprint == *fingerprint),
+                    "the move recorded another than the file's: {observed:?}"
+                ),
+                other => panic!("the move writes {other:?}: {observed:?}"),
+            },
+        }
+        if decided.writes.contains(&Write::RemovePhones) {
+            assert_eq!(observed.caller, Caller::Load, "{observed:?}");
+            assert!(
+                matches!(found, [noted] if pending(&observed.record) == Some(noted.fingerprint.as_str())),
+                "the phones went without a finished Pair again: {observed:?}"
+            );
+        }
+    }
+}
+
 /// `observed` after `writes` landed.
 fn after(observed: &Observations, writes: &[Write]) -> Observations {
     let mut observed = observed.clone();
@@ -489,7 +631,10 @@ fn after(observed: &Observations, writes: &[Write]) -> Observations {
 }
 
 /// A stop after any prefix of the writes decides the same at the next
-/// read, and its writes end where the whole list ends.
+/// read, and its writes end where the whole list ends. The callers' own
+/// writes after the decision (the mint's secret, then its record; the
+/// import's store, marker and flag; Pair again's steps) are outside it:
+/// `tests/identity.rs` and `steno-services`' tests stop each of them.
 #[test]
 fn a_stop_after_any_write_decides_the_same_next_time() {
     for observed in every_observation() {

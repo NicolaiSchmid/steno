@@ -1,9 +1,14 @@
 {
   "about": [
-    "The handover identity's decision, one row per case: steno_handover::identity::decision::decide.",
+    "The handover identity's decision, steno_handover::identity::decision::decide, one row per case: from the identities found, the fingerprint record with its Pair again note, the paired phones and now, it serves, mints or waits, with idempotent writes in order.",
+    "Invariants: nothing mints silently (only the load mints, with no identity, nothing recorded, no phone paired and a record that reads), and no pairing the phones know is lost (phones go only when a Pair again is finished).",
+    "No decision destroys a stored identity: no write is an identity's, the import writes nothing, and the move writes at most the record of the file's identity. The move observes the file's identity alone; the service's is never written or removed, and neither is the file's copy. Two writes outside the decision replace a stored identity, by design: Pair again (the user's confirmed choice; it removes every phone) and the Mac import's store over a desktop-id build's identity (S6 of .plans/2026-10-07-stable-promotion.md).",
+    "The pairing-time rule, for an identity found with nothing recorded: a phone knows the newest identity whose start is at or before its pairing; two equal starts are no newest one. Over the times it can read, a start or a pairing more than 1 s (CLOCK_SLACK) after now waits for the clock; phones or a start that cannot be read wait with their own reason first. A mint back-dates its start by 60 s. A recorded fingerprint is never judged.",
+    "Pair again, by what the secret store holds beside the note: the noted identity (finished: the phones go, it is recorded); the recorded one or none (abandoned: the note goes); another (unknown: the note stays, replaced); nothing it can read (undecided: the note stays).",
+    "For the move, serve X means X is, or becomes, the recorded fingerprint; wait means nothing is pinned and the next load decides.",
     "tests/identity_decisions.rs runs every row (each list of found identities also in every rotation and reversed) and fails on a row it cannot run.",
-    "Names stand for fingerprints. Times are offsets from the decision's now: ms, s, m, h or d after a sign; a start of null cannot be read.",
-    "caller: load, import or move. found: unreadable, malformed, or the names found. record: notOpened, doesNotParse, or the current and pending fingerprints (absent: nothing recorded). phones: unreadable, or each phone's pairedAt (absent: none).",
+    "Names stand for fingerprints. Times are offsets from the decision's now: a sign, a whole number and ms, s, m, h or d; a start of null cannot be read.",
+    "caller: load, import or move. found: unreadable, malformed, or the names found. starts: when each name found starts. record: notOpened, doesNotParse, or the current and pending fingerprints (absent: nothing recorded). phones: unreadable, or when each phone paired (absent: none).",
     "expect: serve, mint or wait, and the writes in order (absent: none): dropNote, removePhones, {record: name}."
   ],
   "rows": [
@@ -11,18 +16,18 @@
       "name": "load: a record that cannot be opened waits, whatever else holds",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "record": "notOpened",
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"wait": "recordNotOpened"}
     },
     {
       "name": "load: a record that does not parse waits, and is not replaced",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "record": "doesNotParse",
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"wait": "recordDoesNotParse"}
     },
     {
@@ -50,7 +55,7 @@
       "caller": "load",
       "found": "unreadable",
       "record": {"current": "A"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"wait": "secretUnreadable"}
     },
     {
@@ -70,7 +75,7 @@
       "name": "load: no identity with a phone paired is missing, not minted",
       "caller": "load",
       "found": [],
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"wait": "missing"}
     },
     {
@@ -96,37 +101,45 @@
       "expect": {"wait": "phonesUnreadable"}
     },
     {
+      "name": "load: Pair again abandoned with no identity, nothing recorded, phones that cannot be read: the note goes, waits",
+      "caller": "load",
+      "found": [],
+      "record": {"pending": "B"},
+      "phones": "unreadable",
+      "expect": {"wait": "phonesUnreadable", "writes": ["dropNote"]}
+    },
+    {
       "name": "load: the recorded identity is served",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "record": {"current": "A"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"serve": "A"}
     },
     {
       "name": "load: the recorded identity is served though every phone predates it",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "record": {"current": "A"},
-      "phones": [{"pairedAt": "-40d"}, {"pairedAt": "-35d"}],
+      "phones": ["-40d", "-35d"],
       "expect": {"serve": "A"}
     },
     {
       "name": "load: the recorded identity is served though a phone pairs after now",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "record": {"current": "A"},
-      "phones": [{"pairedAt": "+1d"}],
+      "phones": ["+1d"],
       "expect": {"serve": "A"}
     },
     {
       "name": "load: the recorded identity is served though its start is after now",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "+1d"},
+      "starts": {"A": "+1d"},
       "record": {"current": "A"},
       "expect": {"serve": "A"}
     },
@@ -134,7 +147,7 @@
       "name": "load: the recorded identity is served though the phones cannot be read",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "record": {"current": "A"},
       "phones": "unreadable",
       "expect": {"serve": "A"}
@@ -143,7 +156,7 @@
       "name": "load: the recorded identity is served though its start cannot be read",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": null},
+      "starts": {"A": null},
       "record": {"current": "A"},
       "expect": {"serve": "A"}
     },
@@ -151,16 +164,16 @@
       "name": "load: another identity than the recorded one is replaced",
       "caller": "load",
       "found": ["B"],
-      "certs": {"B": "-1d"},
+      "starts": {"B": "-1d"},
       "record": {"current": "A"},
-      "phones": [{"pairedAt": "-2d"}],
+      "phones": ["-2d"],
       "expect": {"wait": "replaced"}
     },
     {
       "name": "load: another identity than the recorded one is replaced, with no phone",
       "caller": "load",
       "found": ["B"],
-      "certs": {"B": "-1d"},
+      "starts": {"B": "-1d"},
       "record": {"current": "A"},
       "expect": {"wait": "replaced"}
     },
@@ -168,62 +181,62 @@
       "name": "load: found unrecorded, no phone: recorded",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "expect": {"serve": "A", "writes": [{"record": "A"}]}
     },
     {
       "name": "load: found unrecorded, every phone paired after it: recorded",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-29d"}, {"pairedAt": "-1d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-29d", "-1d"],
       "expect": {"serve": "A", "writes": [{"record": "A"}]}
     },
     {
       "name": "load: found unrecorded, a phone paired at its start counts as after it",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-30d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-30d"],
       "expect": {"serve": "A", "writes": [{"record": "A"}]}
     },
     {
       "name": "load: found unrecorded, every phone paired before it: replaced",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-40d"}, {"pairedAt": "-31d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-40d", "-31d"],
       "expect": {"wait": "replaced"}
     },
     {
       "name": "load: found unrecorded, some phones before it and some after: partly replaced",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-31d"}, {"pairedAt": "-1d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-31d", "-1d"],
       "expect": {"wait": "partlyReplaced"}
     },
     {
-      "name": "load: a phone paired in the minute a mint back-dates knows the identity",
+      "name": "load: found unrecorded, a phone paired in the minute a mint back-dates knows it",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-660s"},
-      "phones": [{"pairedAt": "-630s"}],
+      "starts": {"A": "-660s"},
+      "phones": ["-630s"],
       "expect": {"serve": "A", "writes": [{"record": "A"}]}
     },
     {
-      "name": "load: a phone paired a second before the back-dated start does not",
+      "name": "load: found unrecorded, a phone paired a second before the back-dated start does not know it",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-660s"},
-      "phones": [{"pairedAt": "-661s"}],
+      "starts": {"A": "-660s"},
+      "phones": ["-661s"],
       "expect": {"wait": "replaced"}
     },
     {
       "name": "load: found unrecorded, the phones cannot be read: waits, records nothing",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "phones": "unreadable",
       "expect": {"wait": "phonesUnreadable"}
     },
@@ -231,95 +244,111 @@
       "name": "load: found unrecorded, its start cannot be read: waits, records nothing",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": null},
-      "phones": [{"pairedAt": "-1d"}],
+      "starts": {"A": null},
+      "phones": ["-1d"],
       "expect": {"wait": "malformed"}
     },
     {
       "name": "load: found unrecorded, the phones are read before the start",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": null},
+      "starts": {"A": null},
       "phones": "unreadable",
       "expect": {"wait": "phonesUnreadable"}
     },
     {
-      "name": "load: a start after now with no phone waits for the clock",
+      "name": "load: found unrecorded, a start that cannot be read beside a pairing after now waits on the start",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "+2s"},
+      "starts": {"A": null},
+      "phones": ["+1d"],
+      "expect": {"wait": "malformed"}
+    },
+    {
+      "name": "load: found unrecorded, phones that cannot be read beside a start after now wait on the phones",
+      "caller": "load",
+      "found": ["A"],
+      "starts": {"A": "+1d"},
+      "phones": "unreadable",
+      "expect": {"wait": "phonesUnreadable"}
+    },
+    {
+      "name": "load: found unrecorded, a start after now with no phone waits for the clock",
+      "caller": "load",
+      "found": ["A"],
+      "starts": {"A": "+2s"},
       "expect": {"wait": "clockBehind"}
     },
     {
-      "name": "load: a start after now waits for the clock, whatever the phones say",
+      "name": "load: found unrecorded, a start after now waits for the clock, whatever the phones say",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "+2h"},
-      "phones": [{"pairedAt": "-1d"}],
+      "starts": {"A": "+2h"},
+      "phones": ["-1d"],
       "expect": {"wait": "clockBehind"}
     },
     {
-      "name": "load: a pairing after now waits for the clock",
+      "name": "load: found unrecorded, a pairing after now waits for the clock",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-1d"}, {"pairedAt": "+1d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-1d", "+1d"],
       "expect": {"wait": "clockBehind"}
     },
     {
-      "name": "load: a pairing after now waits for the clock, whatever else holds",
+      "name": "load: found unrecorded, a pairing after now waits for the clock, whatever the other times say",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-40d"}, {"pairedAt": "+1d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-40d", "+1d"],
       "expect": {"wait": "clockBehind"}
     },
     {
-      "name": "load: a start a second after now is not after it",
+      "name": "load: found unrecorded, a start a second after now is not after it",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "+1s"},
+      "starts": {"A": "+1s"},
       "expect": {"serve": "A", "writes": [{"record": "A"}]}
     },
     {
-      "name": "load: a pairing a second after now is not after it",
+      "name": "load: found unrecorded, a pairing a second after now is not after it",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "+1s"}],
+      "starts": {"A": "-30d"},
+      "phones": ["+1s"],
       "expect": {"serve": "A", "writes": [{"record": "A"}]}
     },
     {
-      "name": "load: a pairing a millisecond past the second waits",
+      "name": "load: found unrecorded, a pairing a millisecond past the second waits",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "+1001ms"}],
+      "starts": {"A": "-30d"},
+      "phones": ["+1001ms"],
       "expect": {"wait": "clockBehind"}
     },
     {
       "name": "load: Pair again finished: the phones go, the new fingerprint is recorded",
       "caller": "load",
       "found": ["B"],
-      "certs": {"B": "-1h"},
+      "starts": {"B": "-1h"},
       "record": {"current": "A", "pending": "B"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"serve": "B", "writes": ["removePhones", {"record": "B"}]}
     },
     {
       "name": "load: Pair again finished with nothing recorded before",
       "caller": "load",
       "found": ["B"],
-      "certs": {"B": "-1h"},
+      "starts": {"B": "-1h"},
       "record": {"pending": "B"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"serve": "B", "writes": ["removePhones", {"record": "B"}]}
     },
     {
       "name": "load: Pair again finished, with no rule: a start after now is no matter",
       "caller": "load",
       "found": ["B"],
-      "certs": {"B": "+1d"},
+      "starts": {"B": "+1d"},
       "record": {"current": "A", "pending": "B"},
       "expect": {"serve": "B", "writes": ["removePhones", {"record": "B"}]}
     },
@@ -327,7 +356,7 @@
       "name": "load: Pair again finished, the phones cannot be read: waits",
       "caller": "load",
       "found": ["B"],
-      "certs": {"B": "-1h"},
+      "starts": {"B": "-1h"},
       "record": {"current": "A", "pending": "B"},
       "phones": "unreadable",
       "expect": {"wait": "phonesUnreadable"}
@@ -336,9 +365,9 @@
       "name": "load: Pair again abandoned over the recorded identity: the note goes",
       "caller": "load",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "record": {"current": "A", "pending": "B"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"serve": "A", "writes": ["dropNote"]}
     },
     {
@@ -346,7 +375,7 @@
       "caller": "load",
       "found": [],
       "record": {"current": "A", "pending": "B"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"wait": "missing", "writes": ["dropNote"]}
     },
     {
@@ -354,7 +383,7 @@
       "caller": "load",
       "found": [],
       "record": {"pending": "B"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"wait": "missing", "writes": ["dropNote"]}
     },
     {
@@ -368,18 +397,18 @@
       "name": "load: Pair again unknown, another identity: the note stays, replaced",
       "caller": "load",
       "found": ["C"],
-      "certs": {"C": "-1h"},
+      "starts": {"C": "-1h"},
       "record": {"current": "A", "pending": "B"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"wait": "replaced"}
     },
     {
       "name": "load: Pair again unknown, another identity and nothing recorded: the note stays, replaced",
       "caller": "load",
       "found": ["C"],
-      "certs": {"C": "-40d"},
+      "starts": {"C": "-40d"},
       "record": {"pending": "B"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"wait": "replaced"}
     },
     {
@@ -387,198 +416,213 @@
       "caller": "load",
       "found": "unreadable",
       "record": {"current": "A", "pending": "B"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"wait": "secretUnreadable"}
     },
     {
       "name": "import: one certificate, no phone: it comes over",
       "caller": "import",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "expect": {"serve": "A"}
     },
     {
       "name": "import: one certificate, a phone paired after it: it comes over",
       "caller": "import",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-1d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-1d"],
       "expect": {"serve": "A"}
     },
     {
       "name": "import: one certificate every phone predates: replaced",
       "caller": "import",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-40d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-40d"],
       "expect": {"wait": "replaced"}
     },
     {
       "name": "import: one certificate some phones predate: partly replaced",
       "caller": "import",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-40d"}, {"pairedAt": "-1d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-40d", "-1d"],
       "expect": {"wait": "partlyReplaced"}
     },
     {
       "name": "import: two copies of one certificate count once",
       "caller": "import",
       "found": ["A", "A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-1d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-1d"],
       "expect": {"serve": "A"}
     },
     {
       "name": "import: two copies of one certificate with no phone count once",
       "caller": "import",
       "found": ["A", "A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "expect": {"serve": "A"}
     },
     {
       "name": "import: of two, no phone: the newer",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-30d", "B": "-10d"},
+      "starts": {"A": "-30d", "B": "-10d"},
       "expect": {"serve": "B"}
     },
     {
       "name": "import: of two, every phone between them: the older",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-30d", "B": "-10d"},
-      "phones": [{"pairedAt": "-29d"}, {"pairedAt": "-11d"}],
+      "starts": {"A": "-30d", "B": "-10d"},
+      "phones": ["-29d", "-11d"],
       "expect": {"serve": "A"}
     },
     {
       "name": "import: of two, every phone after the newer: the newer",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-30d", "B": "-10d"},
-      "phones": [{"pairedAt": "-10d"}, {"pairedAt": "-1d"}],
+      "starts": {"A": "-30d", "B": "-10d"},
+      "phones": ["-10d", "-1d"],
       "expect": {"serve": "B"}
     },
     {
       "name": "import: of two, one phone between them and one after the newer: partly replaced",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-30d", "B": "-10d"},
-      "phones": [{"pairedAt": "-20d"}, {"pairedAt": "-1d"}],
+      "starts": {"A": "-30d", "B": "-10d"},
+      "phones": ["-20d", "-1d"],
       "expect": {"wait": "partlyReplaced"}
     },
     {
       "name": "import: of two, one phone before both and one between: partly replaced",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-30d", "B": "-10d"},
-      "phones": [{"pairedAt": "-31d"}, {"pairedAt": "-20d"}],
+      "starts": {"A": "-30d", "B": "-10d"},
+      "phones": ["-31d", "-20d"],
       "expect": {"wait": "partlyReplaced"}
     },
     {
       "name": "import: of two, every phone before both: replaced",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-30d", "B": "-10d"},
-      "phones": [{"pairedAt": "-40d"}, {"pairedAt": "-31d"}],
+      "starts": {"A": "-30d", "B": "-10d"},
+      "phones": ["-40d", "-31d"],
       "expect": {"wait": "replaced"}
     },
     {
       "name": "import: of three, every phone between the second and the third: the second, not the newest",
       "caller": "import",
       "found": ["A", "B", "C"],
-      "certs": {"A": "-30d", "B": "-20d", "C": "-10d"},
-      "phones": [{"pairedAt": "-20d"}, {"pairedAt": "-15d"}],
+      "starts": {"A": "-30d", "B": "-20d", "C": "-10d"},
+      "phones": ["-20d", "-15d"],
       "expect": {"serve": "B"}
     },
     {
-      "name": "import: two that start in the same second, no phone: no newest one, replaced",
+      "name": "import: two equal starts, no phone: no newest one, replaced",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-10d", "B": "-10d"},
+      "starts": {"A": "-10d", "B": "-10d"},
       "expect": {"wait": "replaced"}
     },
     {
-      "name": "import: two that start in the same second, a phone after both: replaced",
+      "name": "import: two equal starts, a phone after both: replaced",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-10d", "B": "-10d"},
-      "phones": [{"pairedAt": "-1d"}],
+      "starts": {"A": "-10d", "B": "-10d"},
+      "phones": ["-1d"],
       "expect": {"wait": "replaced"}
     },
     {
       "name": "import: a tie beside an older one, a phone between them: the older",
       "caller": "import",
       "found": ["A", "B", "C"],
-      "certs": {"A": "-10d", "B": "-10d", "C": "-30d"},
-      "phones": [{"pairedAt": "-20d"}],
+      "starts": {"A": "-10d", "B": "-10d", "C": "-30d"},
+      "phones": ["-20d"],
       "expect": {"serve": "C"}
     },
     {
       "name": "import: a tie beside an older one, a phone before the tie and one after: partly replaced",
       "caller": "import",
       "found": ["A", "B", "C"],
-      "certs": {"A": "-10d", "B": "-10d", "C": "-30d"},
-      "phones": [{"pairedAt": "-20d"}, {"pairedAt": "-1d"}],
+      "starts": {"A": "-10d", "B": "-10d", "C": "-30d"},
+      "phones": ["-20d", "-1d"],
       "expect": {"wait": "partlyReplaced"}
     },
     {
       "name": "import: a newer one beside a tie, every phone after it: the newer",
       "caller": "import",
       "found": ["A", "B", "C"],
-      "certs": {"A": "-30d", "B": "-30d", "C": "-10d"},
-      "phones": [{"pairedAt": "-1d"}],
+      "starts": {"A": "-30d", "B": "-30d", "C": "-10d"},
+      "phones": ["-1d"],
       "expect": {"serve": "C"}
     },
     {
       "name": "import: a newer one beside a tie, no phone: the newer",
       "caller": "import",
       "found": ["A", "B", "C"],
-      "certs": {"A": "-30d", "B": "-30d", "C": "-10d"},
+      "starts": {"A": "-30d", "B": "-30d", "C": "-10d"},
       "expect": {"serve": "C"}
     },
     {
       "name": "import: a tie newest of three, no phone: replaced",
       "caller": "import",
       "found": ["A", "B", "C"],
-      "certs": {"A": "-30d", "B": "-10d", "C": "-10d"},
+      "starts": {"A": "-30d", "B": "-10d", "C": "-10d"},
       "expect": {"wait": "replaced"}
     },
     {
       "name": "import: a certificate that starts after now waits for the clock",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-30d", "B": "+1d"},
-      "phones": [{"pairedAt": "-1d"}],
+      "starts": {"A": "-30d", "B": "+1d"},
+      "phones": ["-1d"],
       "expect": {"wait": "clockBehind"}
     },
     {
       "name": "import: a certificate that starts after now waits for the clock, with no phone",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-30d", "B": "+1d"},
+      "starts": {"A": "-30d", "B": "+1d"},
       "expect": {"wait": "clockBehind"}
     },
     {
       "name": "import: a pairing after now waits for the clock",
       "caller": "import",
       "found": ["A"],
-      "certs": {"A": "-30d"},
-      "phones": [{"pairedAt": "-1d"}, {"pairedAt": "+1d"}],
+      "starts": {"A": "-30d"},
+      "phones": ["-1d", "+1d"],
       "expect": {"wait": "clockBehind"}
     },
     {
       "name": "import: a certificate whose start cannot be read waits",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": null, "B": "-10d"},
+      "starts": {"A": null, "B": "-10d"},
       "expect": {"wait": "malformed"}
     },
     {
       "name": "import: phones that cannot be read wait",
       "caller": "import",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
+      "phones": "unreadable",
+      "expect": {"wait": "phonesUnreadable"}
+    },
+    {
+      "name": "import: a start that cannot be read beside one after now waits on the start",
+      "caller": "import",
+      "found": ["A", "B"],
+      "starts": {"A": null, "B": "+1d"},
+      "expect": {"wait": "malformed"}
+    },
+    {
+      "name": "import: phones that cannot be read beside a start after now wait on the phones",
+      "caller": "import",
+      "found": ["A"],
+      "starts": {"A": "+1d"},
       "phones": "unreadable",
       "expect": {"wait": "phonesUnreadable"}
     },
@@ -586,7 +630,7 @@
       "name": "import: the record is not read: a fingerprint recorded changes nothing",
       "caller": "import",
       "found": ["A", "B"],
-      "certs": {"A": "-30d", "B": "-10d"},
+      "starts": {"A": "-30d", "B": "-10d"},
       "record": {"current": "A"},
       "expect": {"serve": "B"}
     },
@@ -594,7 +638,7 @@
       "name": "import: the record is not read: one that does not parse changes nothing",
       "caller": "import",
       "found": ["A"],
-      "certs": {"A": "-30d"},
+      "starts": {"A": "-30d"},
       "record": "doesNotParse",
       "expect": {"serve": "A"}
     },
@@ -608,54 +652,54 @@
       "name": "move: nothing recorded, no phone: the file's identity is pinned",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "-10d"},
+      "starts": {"F": "-10d"},
       "expect": {"serve": "F", "writes": [{"record": "F"}]}
     },
     {
       "name": "move: nothing recorded, every phone paired after it: pinned",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "-10d"},
-      "phones": [{"pairedAt": "-9d"}, {"pairedAt": "-1d"}],
+      "starts": {"F": "-10d"},
+      "phones": ["-9d", "-1d"],
       "expect": {"serve": "F", "writes": [{"record": "F"}]}
     },
     {
       "name": "move: nothing recorded, every phone paired before it: nothing pinned, the load judges the service's",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "-10d"},
-      "phones": [{"pairedAt": "-20d"}, {"pairedAt": "-11d"}],
+      "starts": {"F": "-10d"},
+      "phones": ["-20d", "-11d"],
       "expect": {"wait": "replaced"}
     },
     {
       "name": "move: some phones before it and some after: pinned, as the move runs once",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "-10d"},
-      "phones": [{"pairedAt": "-20d"}, {"pairedAt": "-1d"}],
+      "starts": {"F": "-10d"},
+      "phones": ["-20d", "-1d"],
       "expect": {"serve": "F", "writes": [{"record": "F"}]}
     },
     {
       "name": "move: a pairing after now: pinned, as the move runs once",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "-10d"},
-      "phones": [{"pairedAt": "-20d"}, {"pairedAt": "+1d"}],
+      "starts": {"F": "-10d"},
+      "phones": ["-20d", "+1d"],
       "expect": {"serve": "F", "writes": [{"record": "F"}]}
     },
     {
       "name": "move: a start after now: pinned, as the move runs once",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "+1d"},
-      "phones": [{"pairedAt": "-1d"}],
+      "starts": {"F": "+1d"},
+      "phones": ["-1d"],
       "expect": {"serve": "F", "writes": [{"record": "F"}]}
     },
     {
       "name": "move: phones that cannot be read: pinned",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "-10d"},
+      "starts": {"F": "-10d"},
       "phones": "unreadable",
       "expect": {"serve": "F", "writes": [{"record": "F"}]}
     },
@@ -663,33 +707,41 @@
       "name": "move: a start that cannot be read: pinned",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": null},
-      "phones": [{"pairedAt": "-1d"}],
+      "starts": {"F": null},
+      "phones": ["-1d"],
+      "expect": {"serve": "F", "writes": [{"record": "F"}]}
+    },
+    {
+      "name": "move: a start that cannot be read beside a pairing after now: pinned",
+      "caller": "move",
+      "found": ["F"],
+      "starts": {"F": null},
+      "phones": ["+1d"],
       "expect": {"serve": "F", "writes": [{"record": "F"}]}
     },
     {
       "name": "move: a note and nothing recorded: pinned, which drops the note",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "-10d"},
+      "starts": {"F": "-10d"},
       "record": {"pending": "B"},
-      "phones": [{"pairedAt": "-1d"}],
+      "phones": ["-1d"],
       "expect": {"serve": "F", "writes": [{"record": "F"}]}
     },
     {
       "name": "move: a fingerprint recorded stays",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "-10d"},
+      "starts": {"F": "-10d"},
       "record": {"current": "A"},
-      "phones": [{"pairedAt": "-20d"}],
+      "phones": ["-20d"],
       "expect": {"serve": "A"}
     },
     {
       "name": "move: a record that cannot be opened is left",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "-10d"},
+      "starts": {"F": "-10d"},
       "record": "notOpened",
       "expect": {"wait": "recordNotOpened"}
     },
@@ -697,7 +749,7 @@
       "name": "move: a record that does not parse is left",
       "caller": "move",
       "found": ["F"],
-      "certs": {"F": "-10d"},
+      "starts": {"F": "-10d"},
       "record": "doesNotParse",
       "expect": {"wait": "recordDoesNotParse"}
     },
@@ -706,6 +758,22 @@
       "caller": "move",
       "found": "malformed",
       "expect": {"wait": "malformed"}
+    },
+    {
+      "name": "move: the service holds another, some phones before and some after: only the record is written, both identities kept",
+      "caller": "move",
+      "found": ["F"],
+      "starts": {"F": "-10d"},
+      "phones": ["-20d", "-1d"],
+      "expect": {"serve": "F", "writes": [{"record": "F"}]}
+    },
+    {
+      "name": "move: the service holds another, every phone predates the file's: nothing written, both identities kept",
+      "caller": "move",
+      "found": ["F"],
+      "starts": {"F": "-10d"},
+      "phones": ["-20d", "-11d"],
+      "expect": {"wait": "replaced"}
     }
   ]
 }

@@ -95,6 +95,23 @@ impl Setup {
         store
     }
 
+    /// A launch whose move reads the phones paired in `phones`, once its
+    /// choice is made.
+    async fn launch_with_phones(
+        &self,
+        phones: Option<Arc<steno_core::Store>>,
+    ) -> SecretServiceStore {
+        let store = SecretServiceStore::on_bus_with_phones(
+            file_at(&self.path(), &[]),
+            self.record(),
+            phones,
+            &self.daemon.address,
+            PROMPT_TIMEOUT,
+        );
+        store.chosen().await;
+        store
+    }
+
     fn values(&self, key: &str) -> Vec<String> {
         self.state().values(key)
     }
@@ -454,14 +471,7 @@ async fn a_file_identity_every_phone_predates_is_not_pinned_over_the_service_s()
     let database = Arc::new(steno_core::Store::in_memory().unwrap());
     crate::testing::pair_a_phone_at(&database, now - TimeDelta::days(10));
 
-    let store = SecretServiceStore::on_bus_with_phones(
-        file_at(&setup.path(), &[]),
-        setup.record(),
-        Some(database.clone()),
-        &setup.daemon.address,
-        PROMPT_TIMEOUT,
-    );
-    store.chosen().await;
+    let store = setup.launch_with_phones(Some(database.clone())).await;
     assert!(chose_service(&store));
     assert_eq!(setup.record().recorded().unwrap(), None, "nothing pinned");
     let loaded = HandoverIdentity::load_or_create(&store, &setup.record(), &database, "x", now)
@@ -477,6 +487,154 @@ async fn a_file_identity_every_phone_predates_is_not_pinned_over_the_service_s()
         1,
         "the phone stays"
     );
+}
+
+/// No identity is ever destroyed by the move. Whether it pins the file's
+/// identity or, where every phone predates that identity, pins nothing,
+/// the service keeps its identity and the file keeps its own through the
+/// move, the next launch's tidy, a load and another tidy, and every phone
+/// stays paired: only the record says which one the load may serve, so
+/// whichever one the phones know can still be served. Pair again, the
+/// user's confirmed choice, is the write that replaces them.
+#[tokio::test]
+async fn no_identity_is_ever_destroyed_by_the_move() {
+    use chrono::TimeDelta;
+    let now = chrono::Utc::now();
+    let day = TimeDelta::days(1);
+    let service = HandoverIdentity::mint("service", now - day * 30).unwrap();
+    for (case, file_minted, phones, pinned) in [
+        ("no phone", now - day * 10, Some(vec![]), true),
+        (
+            "phones after the file's",
+            now - day * 10,
+            Some(vec![now - day * 5, now - day]),
+            true,
+        ),
+        (
+            "some before the file's, some after",
+            now - day * 10,
+            Some(vec![now - day * 20, now - day * 5]),
+            true,
+        ),
+        (
+            "a pairing after now",
+            now - day * 10,
+            Some(vec![now - day * 20, now + day]),
+            true,
+        ),
+        ("no database", now - day * 10, None, true),
+        (
+            "the file's starts after now",
+            now + day * 2,
+            Some(vec![now - day * 5]),
+            true,
+        ),
+        (
+            "every phone predates the file's",
+            now - day * 10,
+            Some(vec![now - day * 20]),
+            false,
+        ),
+    ] {
+        let Some(setup) = Setup::new(true, State::default()).await else {
+            return;
+        };
+        both_kept_through_the_move(&setup, &service, case, file_minted, phones, pinned, now).await;
+    }
+}
+
+/// One layout of [`no_identity_is_ever_destroyed_by_the_move`]: the
+/// service holds `service`, the unmarked file an identity minted at
+/// `file_minted`, and the phones paired at `phones` (`None`: no
+/// database); the move pins the file's identity where `pinned`, judged
+/// at `now`.
+async fn both_kept_through_the_move(
+    setup: &Setup,
+    service: &HandoverIdentity,
+    case: &str,
+    file_minted: chrono::DateTime<chrono::Utc>,
+    phones: Option<Vec<chrono::DateTime<chrono::Utc>>>,
+    pinned: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let service_pem = service.to_pem().unwrap();
+    let file = HandoverIdentity::mint("file", file_minted).unwrap();
+    let file_pem = file.to_pem().unwrap();
+    setup
+        .launch()
+        .await
+        .set_secret(&identity(), Some(&service_pem))
+        .await
+        .unwrap();
+    write_file(&setup.path(), &[("handover-identity", &file_pem)]);
+    let paired = phones.as_ref().map_or(0, Vec::len);
+    let database = phones.map(|phones| {
+        let database = Arc::new(steno_core::Store::in_memory().unwrap());
+        for paired_at in phones {
+            crate::testing::pair_a_phone_at(&database, paired_at);
+        }
+        database
+    });
+    let both_kept = |step: &str| {
+        assert_eq!(
+            setup.values("handover-identity"),
+            [one_line(&service_pem)],
+            "{case}, {step}: the service's identity"
+        );
+        assert_eq!(
+            setup.contents(),
+            moved(&[("handover-identity", &file_pem)]),
+            "{case}, {step}: the file's identity"
+        );
+        if let Some(database) = &database {
+            assert_eq!(
+                database.paired_devices().unwrap().len(),
+                paired,
+                "{case}, {step}: the phones"
+            );
+        }
+    };
+    let pin = pinned.then(|| fingerprint(&file));
+
+    let store = setup.launch_with_phones(database.clone()).await;
+    assert!(chose_service(&store), "{case}");
+    both_kept("the move");
+    assert_eq!(setup.record().recorded().unwrap(), pin, "{case}: the pin");
+
+    let store = setup.launch_with_phones(database.clone()).await;
+    both_kept("the tidy");
+    let phones_read = database
+        .clone()
+        .unwrap_or_else(|| Arc::new(steno_core::Store::in_memory().unwrap()));
+    let loaded =
+        HandoverIdentity::load_or_create(&store, &setup.record(), &phones_read, "x", now).await;
+    if pinned {
+        assert!(
+            matches!(
+                loaded,
+                Err(steno_handover::IdentityError::Unavailable(
+                    steno_handover::Unavailability::Replaced
+                ))
+            ),
+            "{case}: {loaded:?}"
+        );
+        assert_eq!(setup.record().recorded().unwrap(), pin, "{case}");
+    } else {
+        assert_eq!(
+            loaded.unwrap().fingerprint(),
+            service.fingerprint(),
+            "{case}"
+        );
+        assert_eq!(
+            setup.record().recorded().unwrap(),
+            Some(fingerprint(service)),
+            "{case}"
+        );
+    }
+    both_kept("the load");
+
+    drop(setup.launch_with_phones(database.clone()).await);
+    both_kept("a tidy after the load");
 }
 
 #[tokio::test]

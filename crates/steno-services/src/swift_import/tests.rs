@@ -2251,6 +2251,56 @@ fn the_marker_comes_after_the_identity_and_a_crash_between_them_stores_the_same_
     assert_eq!(*keychain.marker.lock().unwrap(), Ok(true));
 }
 
+/// The store over a desktop-id build's identity replaces it (S6's design,
+/// one of the two named writes that destroy a stored identity) and says
+/// so at warn, naming the fingerprint recorded for it and the imported
+/// one, never a secret. Over the same identity (a rerun) or over nothing
+/// recorded it says nothing.
+#[test]
+fn the_store_over_a_desktop_identity_names_both_fingerprints_at_warn() {
+    let desktop =
+        HandoverIdentity::mint("Steno on a desktop-id build", chrono::Utc::now()).unwrap();
+    let desktop_pem = desktop.to_pem().unwrap();
+    let (_, bundle) = decode_pkcs12(&identity_pkcs12("p"), "p", &identity_der()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = InMemorySecretStore::default();
+    let record = record_in(dir.path());
+    RUNTIME.block_on(desktop.store(&secrets, &*record)).unwrap();
+    let store = || {
+        crate::testing::warnings(|| {
+            RUNTIME.block_on(store_imported_identity(&secrets, &*record, &bundle))
+        })
+    };
+
+    let (stored, logged) = store();
+    stored.unwrap();
+    assert_eq!(stored_fingerprint(&secrets), FIXTURE_FINGERPRINT);
+    assert!(logged.contains(" WARN "), "{logged}");
+    assert!(logged.contains(&hex(&desktop.fingerprint())), "{logged}");
+    assert!(logged.contains(FIXTURE_FINGERPRINT), "{logged}");
+    for secret in [desktop_pem.as_str(), bundle.as_str()] {
+        for line in secret.lines().filter(|line| !line.starts_with("-----")) {
+            assert!(!logged.contains(line), "a secret in the log: {logged}");
+        }
+    }
+    assert!(!logged.contains("-----BEGIN"), "{logged}");
+
+    let (stored, logged) = store();
+    stored.unwrap();
+    assert_eq!(logged, "", "a rerun over the same identity");
+
+    let empty = tempfile::tempdir().unwrap();
+    let (stored, logged) = crate::testing::warnings(|| {
+        RUNTIME.block_on(store_imported_identity(
+            &InMemorySecretStore::default(),
+            &*record_in(empty.path()),
+            &bundle,
+        ))
+    });
+    stored.unwrap();
+    assert_eq!(logged, "", "nothing recorded");
+}
+
 /// A marker query that fails is not a first run: the run replaces nothing
 /// (no export prompt, the stored identity stays) and waits with Try
 /// again, until a query answers.
