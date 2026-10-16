@@ -2176,6 +2176,40 @@ mod tests {
         assert_eq!(std::fs::read_dir(marks).unwrap().count(), 0);
     }
 
+    /// The adoption's read of a master's length is marked: after a first
+    /// crash in it, the read is the second attempt, and once it returns
+    /// the first crash's mark goes (A17).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_adoptions_length_read_is_marked() {
+        let harness = Harness::new();
+        let m4a = phone_orphan(&harness, "tone-440-44k1-500ms.m4a", AudioFormat::M4aAac);
+        let layout = RecordingLayout::new(&harness.audio_folder(), m4a);
+        let master = layout.master(AudioFormat::M4aAac);
+        let marks = killed_in_the_length_read(&harness, m4a, &master, 1);
+        let orphan = Orphan {
+            meeting_id: m4a,
+            layout,
+            master,
+            format: AudioFormat::M4aAac,
+            modified: SystemTime::now(),
+        };
+        let settings = harness.store.settings().unwrap();
+        let zone = chrono::FixedOffset::east_opt(0).unwrap();
+        let (meeting, _, held) = adopted(&orphan, &settings, zone, Utc::now(), &marks).unwrap();
+        assert!(!held);
+        assert!(meeting.duration > 0.0, "its length was read");
+        let folder = harness
+            .dir
+            .path()
+            .join("support")
+            .join(ReadingMarks::FOLDER);
+        assert_eq!(
+            std::fs::read_dir(folder).unwrap().count(),
+            0,
+            "the first crash's mark went with the read"
+        );
+    }
+
     /// A phone master whose read of its length ended with the app twice in
     /// a row (the launches that adopted it were killed in the read) is
     /// listed at the next launch failed with "Steno stopped while reading

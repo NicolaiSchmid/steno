@@ -1312,6 +1312,15 @@ async fn the_apps_quit_during_a_read_leaves_no_mark() {
         reading: reading.clone(),
         open: open.clone(),
     });
+    // Opens the decode however the test ends, so a failed assertion fails
+    // the test instead of leaving the runtime waiting on the decode.
+    struct Opens(PathBuf);
+    impl Drop for Opens {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, b"");
+        }
+    }
+    let opens = Opens(open);
     let app = app_decoding(dir.path(), &store, decoder);
     let pipeline = app.pipeline.current();
     let processing = tokio::spawn(async move { pipeline.process(asset.id).await });
@@ -1334,7 +1343,7 @@ async fn the_apps_quit_during_a_read_leaves_no_mark() {
         0,
         "the quit removed it"
     );
-    std::fs::write(&open, b"").unwrap();
+    drop(opens);
     let _ = processing.await;
     drop(app);
 
