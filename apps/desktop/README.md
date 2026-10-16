@@ -1630,15 +1630,21 @@ nothing: their check fails on the missing manifest, and Settings > General
 reads "Could not check for updates".
 
 When fresh downloads are bad too, take the release out of "latest" with
-`gh release edit v<version> --prerelease`. For a later stable release,
+`gh release edit v<version> --prerelease`, and out of the package
+channels: revert the flake bump here, the cask commit in
+`NicolaiSchmid/homebrew-tap` and the AUR bump (Rollback step 3 in
+`.plans/2026-10-07-stable-promotion.md`). For a later stable release,
 `releases/latest` then falls back to the previous one, and the site stays
-as it is. For `v0.11.0`, `releases/latest` answers 404. A listed desktop's
-download button opens `releases/latest` and an unlisted one's the releases
-page, so in the same hour set every listed desktop's flag in
-`apps/site/src/lib/site.ts` back to false, not only the bad one's, and
-take them all off the root README's desktop badge. The 404 also reaches
-the feed of build 244 (`v0.9.0-rc.1`), the one Swift build that reads
-`releases/latest`; the later Swift builds read the `appcast` branch.
+as it is.
+
+For `v0.11.0`, `releases/latest` answers 404. A listed desktop's
+download button opens `releases/latest`, and an unlisted desktop's opens
+the releases page. So in the same hour, set every listed desktop's flag
+in `apps/site/src/lib/site.ts` back to false, not only the bad one's,
+and remove the desktop badge's line from the root README until the fix
+forward lists a desktop again. The 404 also reaches the feed of build
+244 (`v0.9.0-rc.1`), the one Swift build that reads `releases/latest`;
+the later Swift builds read the `appcast` branch.
 
 A bad handoff item has steps of its own: Rollback in
 `.plans/2026-10-07-stable-promotion.md`.
@@ -1777,7 +1783,7 @@ gpg --verify steno-desktop_<version>_amd64.deb.asc steno-desktop_<version>_amd64
 ```
 
 Each `gpg --verify` must report "Good signature" from the fingerprint
-above, and `sha256sum` must print OK for every file you downloaded; the
+above, and `sha256sum` must print OK for each build you downloaded; the
 warning that the key is not certified by a trusted signature is expected.
 On Windows, in PowerShell,
 `(Get-FileHash .\<installer>).Hash -eq '<its hash in SHA256SUMS>'` must

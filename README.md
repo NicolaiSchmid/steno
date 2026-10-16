@@ -62,7 +62,10 @@ On first launch Steno walks you through what it needs: on every system, the micr
 On macOS it also asks for the system audio of your calls, the local network for the
 phone and, optionally, your calendar for meeting titles and attendee names; on Windows,
 the firewall asks once to let the phone connect. Then point Steno at your Obsidian vault
-and an OpenAI-compatible endpoint, and you are done. Pick the section for your system.
+and an OpenAI-compatible endpoint, and you are done.
+
+Pick your system: [macOS](#macos), [Windows](#windows), [GNOME](#linux-gnome),
+[Omarchy](#linux-omarchy) or [NixOS](#linux-nixos).
 
 ### macOS
 
@@ -93,8 +96,8 @@ instead (Nix details below).
 
 Already running the Swift app, version 0.10 or earlier? Install nothing. It offers 0.11.0
 as an update within a week (the rollout is phased; *Check for Updates* gets it at once) and
-installs it at the same path. macOS then asks once more for its permissions, and for the
-login keychain password once per stored secret (choose *Always Allow*).
+installs it at the same path. macOS then asks once more for Steno's permissions, and for
+the login keychain password once per stored secret (choose *Always Allow*).
 
 <details>
 <summary><b>Homebrew details: tap, release candidates, nix-darwin</b></summary>
@@ -122,18 +125,18 @@ On `aarch64-darwin`, `flake.nix` installs the released `Steno.app` unchanged (no
 no re-signing).
 
 With nix-darwin, add the flake as an input and put `steno.packages.aarch64-darwin.steno`
-in `environment.systemPackages`; nix-darwin links `Applications/Steno.app` into
-`/Applications/Nix Apps`. With home-manager use `home.packages` and link the app yourself
-(`home.file` into `~/Applications`, or the `mac-app-util` module); home-manager does not
-link `Applications/` on its own. `nix run` does not apply: the output is an app bundle
-with no `bin/`.
+in `environment.systemPackages`; nix-darwin copies `Applications/Steno.app` into
+`/Applications/Nix Apps`. With home-manager use `home.packages`; Home Manager 25.11 and
+later (by `home.stateVersion`) copies the app into `~/Applications/Home Manager Apps`,
+and with an earlier state version turn on `targets.darwin.copyApps` or link the app
+yourself. `nix run` does not apply: the output is an app bundle with no `bin/`.
 
-The app runs from the Nix store, which Nix manages. Its updater still offers each update
-and asks for an administrator password to install it: decline. Update instead by bumping
-`release.version` and `release.hash` at the top of `flake.nix` (the release workflow
-prints both in its job summary) or by moving the flake input that pins this repository,
-then rebuild. To stop the daily offer, turn off *Check for updates automatically* in
-Settings > General.
+The app runs from a copy that Nix manages (from the Nix store itself with `nix profile`).
+Its updater still offers each update and asks for an administrator password to install
+it: decline. Update instead by bumping `release.version` and `release.hash` at the top
+of `flake.nix` (the release workflow prints both in its job summary) or by moving the
+flake input that pins this repository, then rebuild. To stop the daily offer, turn off
+*Check for updates automatically* in Settings > General.
 
 nix-darwin users who want in-app updates can use the Homebrew cask through
 `homebrew.casks` instead; it installs into `/Applications`, where the updater can write.
@@ -161,7 +164,7 @@ PC"; choose *More info*, then *Run anyway*). Steno updates itself from then on.
 
 ### Linux: GNOME
 
-Ubuntu 24.04 or Debian 13, or newer. Take one of the two builds:
+Ubuntu 24.04 or Debian 13, or newer. The release has two builds:
 
 - `steno-desktop_<version>_amd64.deb` installs Steno for the whole system and asks for
   your password at each update. Take this one unless you have a reason not to.
@@ -182,9 +185,10 @@ sudo apt install ./steno-desktop_<version>_amd64.deb
 
 Each `gpg --verify` must report "Good signature" from
 `048B 5279 50E4 F609 B90E  6349 5F88 10A6 E6D4 DB46`, and `sha256sum` must print OK for
-every file you downloaded; the warning that the key is not certified by a trusted
-signature is expected. For the AppImage, verify it the same way, then
-`chmod +x steno-desktop_<version>_amd64.AppImage` and run it.
+your build; the warning that the key is not certified by a trusted signature is expected.
+For the AppImage, run the same lines with its file name in the last `gpg --verify` and
+without `sudo apt install`, then `chmod +x steno-desktop_<version>_amd64.AppImage` and
+run it.
 
 - The tray icon needs GNOME's AppIndicator extension: on by default on Ubuntu, and on
   Debian `sudo apt install gnome-shell-extension-appindicator`, then log out and in and
@@ -202,7 +206,7 @@ yay -S steno-desktop-bin
 
 `yay` checks the package against the release key; if it reports an unknown public key,
 run `gpg --keyserver keyserver.ubuntu.com --recv-keys 048B527950E4F609B90E63495F8810A6E6D4DB46`
-and install again. If `ufw` is on, `sudo ufw allow Steno` lets the phone reach Steno.
+and install again.
 
 - On a uwsm session (Omarchy's), start Steno from the app launcher, or with
   `uwsm-app -- steno-desktop` from a terminal or a key binding. If an `exec-once` line
@@ -212,12 +216,13 @@ and install again. If `ufw` is on, `sudo ufw allow Steno` lets the phone reach S
   action.
 - The recording bubble and the meeting prompt need Hyprland window rules to float, stay
   on every workspace and leave your keyboard focus alone. Add this line at the end of
-  `~/.config/hypr/hyprland.lua`, below "Add any other personal Hyprland configuration
-  below":
+  `~/.config/hypr/hyprland.lua` (on Omarchy, after the comment "Add any other personal
+  Hyprland configuration below"):
 
   ```lua
   dofile("/usr/share/steno-desktop/hyprland-steno.lua")
   ```
+- If `ufw` is on, `sudo ufw allow Steno` lets the phone reach Steno.
 
 Updates come with the package (`yay`); the in-app updater stays off.
 
@@ -236,16 +241,17 @@ steno.nixosModules.default
 The module installs Steno, starts it with your graphical session (one that reaches
 `graphical-session.target`: GNOME, Plasma, or Hyprland with `programs.hyprland.withUWSM`),
 opens the phone's port and mDNS in the firewall, and turns on PipeWire and, unless another
-Secret Service or SSH agent runs, GNOME Keyring for Steno's secrets. Log out and in once
-after the first switch. To update, move the input to the new tag and switch again. Without
-the module, `nix profile install github:NicolaiSchmid/steno/v<version>#steno` installs the
-app alone.
+Secret Service or SSH agent runs, GNOME Keyring for Steno's secrets.
 
-Under Hyprland, the recording bubble and the meeting prompt need window rules: the desktop
-README's [Hyprland](apps/desktop/README.md#hyprland) section has them and says where NixOS
-puts the file. The rest is in its
+Log out and in once after the first switch. To update, move the input to the new tag and
+switch again. Without the module,
+`nix profile install github:NicolaiSchmid/steno/v<version>#steno` installs the app alone.
+
+Under Hyprland, the recording bubble and the meeting prompt need window rules. The
+desktop README's [Hyprland](apps/desktop/README.md#hyprland) section has them and says
+where NixOS puts the file; its
 [Nix package and NixOS module](apps/desktop/README.md#the-nix-package-and-the-nixos-module)
-section.
+section has the module's other options.
 
 ## How it works
 
@@ -359,8 +365,8 @@ macOS, phone calls taken via Continuity.
 
 **Everything on your computer**<br>
 Transcription, diarization and speaker matching run on-device. Only transcript text
-leaves your computer, to the LLM endpoint you chose; otherwise Steno downloads its speech
-models and checks for updates.
+leaves your computer, to the LLM endpoint you chose. Beyond that, Steno only downloads its
+speech models and checks for updates.
 
 </td>
 </tr>
