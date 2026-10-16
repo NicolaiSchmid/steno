@@ -163,7 +163,7 @@ fn copy_durably_with(syncs: &dyn Syncs, source: &Path, destination: &Path) -> st
 /// Removes the file at `path` and syncs its folder, so the removal survives
 /// a power loss too; a file that is not there is removed already. On
 /// Windows a file another handle holds for a moment (an antivirus scan) is
-/// tried again ([`retried`]).
+/// tried again, as [`replace_file`]'s rename is.
 pub fn remove_durably(path: &Path) -> std::io::Result<()> {
     remove_durably_with(&Disk, path)
 }
