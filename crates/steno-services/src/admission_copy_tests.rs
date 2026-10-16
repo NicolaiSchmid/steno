@@ -222,11 +222,6 @@ async fn a_copy_left_by_an_admission_that_gave_up_is_adopted_and_the_retry_gets_
     quit(app).await;
 
     let app = relaunch(&world).await;
-    assert_eq!(
-        app.store.meeting(noted).unwrap().map(|m| m.id),
-        Some(noted),
-        "adopted"
-    );
     world.assert_one_meeting(&app.store, noted);
 
     assert_eq!(world.admit(&app).await.unwrap(), noted, "the retry");

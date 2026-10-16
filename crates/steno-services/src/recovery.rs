@@ -1105,14 +1105,14 @@ pub(crate) fn adopt_orphans(
         match saved {
             // Listed and failed, so not among the adopted: their note
             // says they are being processed.
-            Ok((None, true)) => {
+            Ok((AdmissionCommit::Wrote, true)) => {
                 tracing::warn!(%meeting_id, "a recording with no meeting was listed, failed and unread");
             }
-            Ok((None, false)) => {
+            Ok((AdmissionCommit::Wrote, false)) => {
                 tracing::warn!(%meeting_id, "a recording with no meeting was recovered");
                 adopted_ids.push(meeting_id);
             }
-            Ok((Some(admitted), _)) => {
+            Ok((AdmissionCommit::Earlier(admitted), _)) => {
                 // Unless the phone's retry admitted into this copy meanwhile.
                 if admitted != meeting_id {
                     tracing::warn!(%meeting_id, %admitted, "a copy of a phone recording admitted as another meeting is left where it is");
@@ -1168,9 +1168,9 @@ fn noted_uploads(support_directory: &Path) -> BTreeMap<Uuid, NotedUpload> {
 /// Saves `orphan` as `meeting` with `asset` and processes it, or, `held`
 /// ([`ReadingMarks`]), saves them failed and leaves it. With the ledger
 /// row of `upload` when the orphan is a phone copy noted with it that
-/// holds it whole ([`Store::adopt_upload_durably`]): `Some` the ledger's
-/// meeting when the ledger already held it, and nothing is written.
-/// Otherwise as any recording with no meeting ([`save_adopted`]).
+/// holds it whole ([`Store::adopt_upload_durably`]), which writes nothing
+/// when the ledger already held it. Otherwise as any recording with no
+/// meeting ([`save_adopted`]).
 /// A copy that cannot be read now is [`RecoveryError::Unreachable`], kept
 /// for the next launch.
 fn adopt(
@@ -1181,19 +1181,20 @@ fn adopt(
     meeting: &Meeting,
     asset: &AudioAsset,
     held: bool,
-) -> Result<Option<Uuid>, RecoveryError> {
-    let noted = match upload.filter(|_| meeting.source == MeetingSource::Phone) {
-        Some(upload) => upload
+) -> Result<AdmissionCommit, RecoveryError> {
+    let upload = match upload {
+        Some(upload) if meeting.source == MeetingSource::Phone => upload
             .is_held_by(&orphan.master)
             .map_err(|error| {
                 tracing::debug!(meeting_id = %meeting.id, %error, "a phone copy could not be read");
                 RecoveryError::Unreachable
             })?
             .then_some(upload),
-        None => None,
+        _ => None,
     };
-    let Some(upload) = noted else {
-        return save_adopted(store, pipeline, meeting, asset, held).map(|()| None);
+    let Some(upload) = upload else {
+        return save_adopted(store, pipeline, meeting, asset, held)
+            .map(|()| AdmissionCommit::Wrote);
     };
     let committed = store
         .adopt_upload_durably(
@@ -1204,18 +1205,15 @@ fn adopt(
             &upload.sha256,
         )
         .map_err(|error| RecoveryError::NotSaved(error.into()))?;
-    match committed {
-        AdmissionCommit::Wrote => {
-            // Saved: a pipeline that cannot take it now leaves it `queued`
-            // for the next launch's resume; one `held` is saved failed and
-            // left.
-            if !held && let Err(failure) = pipeline.enqueue_saved(meeting, asset) {
-                tracing::warn!(meeting_id = %meeting.id, stage = failure.stage.as_str(), "an adopted phone recording not enqueued");
-            }
-            Ok(None)
+    if committed == AdmissionCommit::Wrote {
+        // Saved: a pipeline that cannot take it now leaves it `queued`
+        // for the next launch's resume; one `held` is saved failed and
+        // left.
+        if !held && let Err(failure) = pipeline.enqueue_saved(meeting, asset) {
+            tracing::warn!(meeting_id = %meeting.id, stage = failure.stage.as_str(), "an adopted phone recording not enqueued");
         }
-        AdmissionCommit::Earlier(admitted) => Ok(Some(admitted)),
     }
+    Ok(committed)
 }
 
 #[cfg(test)]
