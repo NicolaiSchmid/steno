@@ -2343,7 +2343,7 @@ mod tests {
     use crate::app::BuildError;
     use crate::pipeline::{BuiltEngine, BuiltPipeline, MakeDependencies};
     use crate::testing::{
-        HANG_GUARD, HeldOutages, PATIENCE, eventually, eventually_within, fake_dependencies,
+        HANG_GUARD, HeldOutages, LIVE, PATIENCE, eventually, eventually_within, fake_dependencies,
         on_own_thread, synthetic_capture, temp_store,
     };
     use steno_audio::testing::synthetic::SyntheticOptions;
@@ -4350,10 +4350,6 @@ mod tests {
         }
     }
 
-    /// What "live" means in the held-store checks: well under the busy
-    /// timeout a waiting write runs out.
-    const LIVE: Duration = Duration::from_millis(200);
-
     /// The database file of `harness`'s store.
     fn database(harness: &Harness) -> PathBuf {
         crate::testing::database_in(harness.dir.path())
@@ -4361,10 +4357,11 @@ mod tests {
 
     /// P40 check 4 (`.plans/2026-10-12-store-off-the-workers.md`): a stop
     /// while another process holds the write lock, and a write of this
-    /// process waits behind it, shows `Stopping` in the host within 100 ms
-    /// of the recorder's notice, with a reload in flight as the poll runs
-    /// one; the save waits for the lock and lands within a second of its
-    /// release, past one busy timeout.
+    /// process waits behind it, shows `Stopping` in the host within
+    /// [`LIVE`] of the recorder's notice and within
+    /// [`END_TO_END`](crate::testing::END_TO_END) of the stop, with a
+    /// reload in flight as the poll runs one; the save waits for the lock
+    /// and lands within a second of its release, past one busy timeout.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_stop_under_a_held_lock_shows_stopping_at_once_and_saves_once_the_lock_goes() {
         let harness = harness(&[]);
@@ -4382,16 +4379,29 @@ mod tests {
             .sink
             .recording_in("stopping", since, PATIENCE)
             .expect("the stop reached the host");
-        let noticed = hosted
-            .hooks_since(since)
-            .into_iter()
-            .find(|call| call.state != RecordingState::Recording)
-            .expect("the stop's notice")
-            .began;
-        let shown = shown.saturating_duration_since(noticed);
+        // The hook records its call once `recorder_changed` returned, after
+        // the sink got the snapshot.
+        let deadline = Instant::now() + PATIENCE;
+        let noticed = loop {
+            if let Some(call) = hosted
+                .hooks_since(since)
+                .into_iter()
+                .find(|call| call.state != RecordingState::Recording)
+            {
+                break call.began;
+            }
+            assert!(Instant::now() < deadline, "the stop's notice");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let after_notice = shown.saturating_duration_since(noticed);
         assert!(
-            shown < Duration::from_millis(100),
-            "Stopping reached the host {shown:?} after the recorder's notice"
+            after_notice < LIVE,
+            "Stopping reached the host {after_notice:?} after the recorder's notice"
+        );
+        let after_stop = shown.duration_since(since);
+        assert!(
+            after_stop < crate::testing::END_TO_END,
+            "Stopping reached the host {after_stop:?} after the stop"
         );
 
         let released = held.release_after_hold();

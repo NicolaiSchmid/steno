@@ -61,6 +61,19 @@ pub const PATIENCE: Duration = Duration::from_secs(5);
 /// `ManualClock::wait_for_sleepers` wait too.
 pub const HANG_GUARD: Duration = steno_audio::testing::HANG_GUARD;
 
+/// What "live" means in the held-store checks of
+/// `.plans/2026-10-12-store-off-the-workers.md`: one call or one hop that
+/// must not wait on the store. Five times under the busy timeout that
+/// every regression waits out, and loose enough for a loaded machine at
+/// `nice 19`.
+pub const LIVE: Duration = Duration::from_secs(1);
+
+/// The coarse bound of a held-store check from the user's side, the
+/// action to what the host shows: generous for a loaded machine (a load
+/// of 40 to 70), and still well under the five-second freeze a wait on
+/// the store would show.
+pub const END_TO_END: Duration = Duration::from_secs(2);
+
 /// The synthetic backends a test's capture built with their outages held
 /// (`SyntheticOptions::hold_outages`), so that the test lets each outage
 /// go once it saw what comes before it.

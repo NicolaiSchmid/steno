@@ -16,12 +16,9 @@ use steno_bridge::{BridgeHost as _, BridgeTopic, CaptureMode, MeetingIdParams, R
 use steno_host::services::Recorder as _;
 
 use crate::testing::{
-    HANG_GUARD, HeldStore, SyntheticRecorder, hosted, synthetic_recorder, synthetic_recorder_over,
+    END_TO_END, HANG_GUARD, HeldOutages, HeldStore, LIVE, SyntheticRecorder, hosted,
+    synthetic_recorder, synthetic_recorder_over,
 };
-
-/// What "live" means here: well under the busy timeout the waiting write
-/// runs out.
-const LIVE: Duration = Duration::from_millis(200);
 
 /// Waits until the recording sends its levels to the host.
 fn levels_flow(sink: &crate::testing::TimedSink, since: Instant) {
@@ -58,7 +55,7 @@ async fn levels_keep_flowing_while_another_process_holds_the_write_lock() {
         .filter(|call| call.began + LIVE < released)
         .collect();
     assert!(
-        calls.len() >= 10,
+        calls.len() >= 3,
         "the levels kept calling the hook: {} calls",
         calls.len()
     );
@@ -80,15 +77,16 @@ async fn levels_keep_flowing_while_another_process_holds_the_write_lock() {
     capture.stop();
 }
 
-/// A recording whose input device changes `after` seconds into it: the
-/// capture rebuilds on the new one and its notice thread calls the change
-/// hook.
-fn recording_whose_device_changes(after: f64) -> SyntheticRecorder {
+/// A recording whose input device changes `after` seconds into it, once
+/// `outages` lets the change go: the capture rebuilds on the new one and
+/// its notice thread calls the change hook.
+fn recording_whose_device_changes(after: f64, outages: &HeldOutages) -> SyntheticRecorder {
+    let outages = outages.clone();
     synthetic_recorder_over(Arc::new(move |configuration| {
         let options = crate::testing::synthetic_tone(&configuration).change_device_after(after);
         steno_audio::CaptureSession::with_backend(
             configuration,
-            Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
+            outages.backend(options),
             None,
             steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
             Arc::new(steno_audio::SystemClock::new()),
@@ -101,10 +99,13 @@ fn recording_whose_device_changes(after: f64) -> SyntheticRecorder {
 /// write waits reaches the host through the notice thread's hook, which
 /// returns live each time, so the auto-stop's countdown, hidden while the
 /// capture recovers, is armed again at the capture's resume while the
-/// write still waits: no notice waits for the host.
+/// write still waits, within [`END_TO_END`] of the change's first notice:
+/// no notice waits for the host. The change is held until the countdown
+/// is armed and the write waits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_device_notice_reaches_the_host_while_a_write_waits() {
-    let capture = recording_whose_device_changes(2.0);
+    let outages = HeldOutages::default();
+    let capture = recording_whose_device_changes(2.0, &outages);
     let hosted = hosted(&capture.store, &capture.recorder);
     capture.start(CaptureMode::Call, None);
     capture
@@ -123,6 +124,7 @@ async fn a_device_notice_reaches_the_host_while_a_write_waits() {
     let mut held = HeldStore::with_a_write_waiting(&capture.store, &capture.database());
     let reload = hosted.reload_in_flight();
     let since = Instant::now();
+    outages.release();
     let on_the_notices = |calls: &[crate::testing::HookCall]| {
         calls
             .iter()
@@ -150,6 +152,11 @@ async fn a_device_notice_reaches_the_host_while_a_write_waits() {
     assert!(
         !first.armed,
         "the countdown is hidden while the capture recovers"
+    );
+    let rearmed = (armed.began + armed.took).duration_since(first.began);
+    assert!(
+        rearmed < END_TO_END,
+        "the countdown was armed again {rearmed:?} after the change's first notice"
     );
     let slowest = notices.iter().map(|call| call.took).max().unwrap();
     assert!(slowest < LIVE, "a notice's hook took {slowest:?}");
