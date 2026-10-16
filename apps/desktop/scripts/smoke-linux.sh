@@ -56,8 +56,11 @@
 # Then it launches the binary once more over a database it cannot open,
 # in a throwaway XDG_DATA_HOME and HOME, and expects the refusal: the
 # "not starting" line and exit 3, and an autostart entry marked to go
-# still there, since a refused launch changes no login item. It fails
-# (exit 1) otherwise.
+# still there, since a refused launch changes no login item. A last
+# launch, while another process holds the database's lock, expects the
+# same exit. Both "not starting" lines must name no path, since the
+# error-level log gets the same words (the `steno_services::logs` rule).
+# It fails (exit 1) otherwise.
 #
 #   [STENO_SMOKE_DPI=<dpi>] [STENO_REQUIRE_UNIT_SMOKE=1] apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
 #
@@ -363,10 +366,29 @@ touch "$(entry "$refusal")" "$(mark "$refusal")"
 code=0
 HOME="$refusal" XDG_CONFIG_HOME="$refusal/.config" XDG_DATA_HOME="$refusal" STENO_SMOKE_SECONDS=3 \
   xvfb-run --auto-servernum "$binary" > "$refusal/output" 2>&1 || code=$?
-if [[ "$code" != 3 ]] || ! grep -qF "[steno-desktop] not starting:" "$refusal/output"; then
+line="$(grep -F "[steno-desktop] not starting:" "$refusal/output" || true)"
+if [[ "$code" != 3 \
+  || "$line" != "[steno-desktop] not starting: the database could not be opened or read (SQLite: NotADatabase)" ]]; then
   cat "$refusal/output" >&2
-  fail "over a database it cannot open the shell must refuse (exit 3), got $code"
+  fail "over a database it cannot open the shell must refuse (exit 3) with a line naming no path, got $code"
 fi
 [[ -e "$(entry "$refusal")" && -e "$(mark "$refusal")" ]] \
   || fail "the refused launch changed the login item"
 echo "smoke: a database it cannot open is refused (exit 3), the login item untouched"
+
+# Then a launch while another process holds the database's lock, which
+# flock takes on the throwaway support directory's steno.lock: the shell
+# must refuse ("Steno is already running") and exit 3, and its line must
+# not carry the lock's path, which the full error does.
+held="$scratch/held"
+mkdir -p "$held/Steno"
+code=0
+flock -x "$held/Steno/steno.lock" \
+  env HOME="$held" XDG_CONFIG_HOME="$held/.config" XDG_DATA_HOME="$held" STENO_SMOKE_SECONDS=3 \
+  xvfb-run --auto-servernum "$binary" > "$held/output" 2>&1 || code=$?
+line="$(grep -F "[steno-desktop] not starting:" "$held/output" || true)"
+if [[ "$code" != 3 || "$line" != "[steno-desktop] not starting: another Steno holds the database" ]]; then
+  cat "$held/output" >&2
+  fail "with the database's lock held the shell must refuse (exit 3) with a line naming no path, got $code"
+fi
+echo "smoke: a database another process holds is refused (exit 3), its line naming no path"

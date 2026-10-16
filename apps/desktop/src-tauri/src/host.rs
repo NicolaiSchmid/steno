@@ -830,13 +830,12 @@ impl ShellHostError {
         )
     }
 
-    /// A stored setting the app cannot read: its key, the problem and the
-    /// database ([`steno_services::BuildError::unreadable_setting`]).
-    pub fn unreadable_setting(
-        &self,
-    ) -> Option<(&str, steno_core::SettingProblem, &std::path::Path)> {
+    /// The stored settings the app cannot read: the store's error, which
+    /// names the key and the problem and never a value, and the database
+    /// ([`steno_services::BuildError::unreadable_settings`]).
+    pub fn unreadable_settings(&self) -> Option<(&steno_core::StoreError, &std::path::Path)> {
         match self {
-            Self::Build(error) => error.unreadable_setting(),
+            Self::Build(error) => error.unreadable_settings(),
             _ => None,
         }
     }

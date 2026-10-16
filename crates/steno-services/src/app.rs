@@ -10,8 +10,8 @@ use chrono::{FixedOffset, Local, Offset as _};
 use steno_adapters::DeliveryCoordinator;
 use steno_audio::{CaptureSession, SymphoniaAudioCodec};
 use steno_core::{
-    DatabaseLock, DatabaseLockError, MeetingEvent, SecretKey, SecretStore, SettingProblem,
-    StenoPaths, Store, StoreError,
+    DatabaseLock, DatabaseLockError, MeetingEvent, SecretKey, SecretStore, StenoPaths, Store,
+    StoreError,
 };
 use steno_handover::HandoverService;
 use steno_host::fakes::{
@@ -61,7 +61,7 @@ pub enum BuildError {
     /// A stored setting cannot be read
     /// ([`StoreError::UndecodableSetting`], or
     /// [`StoreError::UndecodableSettings`]), with the database it is in,
-    /// so the dialog can say where it is ([`BuildError::unreadable_setting`]).
+    /// so the dialog can say where it is ([`BuildError::unreadable_settings`]).
     /// The text names the key and the problem, never the value or the
     /// database's path: it goes into the log. The app refuses to start
     /// rather than run on a default for it (a vault path, a retention
@@ -74,16 +74,15 @@ pub enum BuildError {
 }
 
 impl BuildError {
-    /// For a stored setting that cannot be read: its key, what is wrong
-    /// with it and the database it is in, which the "could not start"
-    /// dialog says; `None` for every other failure.
+    /// For the stored settings that cannot be read: the store's error,
+    /// whose text names the key and the problem (or that the settings do
+    /// not read together) and never a value, and the database they are in,
+    /// which the "could not start" dialog says; `None` for every other
+    /// failure.
     #[must_use]
-    pub fn unreadable_setting(&self) -> Option<(&str, SettingProblem, &Path)> {
+    pub fn unreadable_settings(&self) -> Option<(&StoreError, &Path)> {
         match self {
-            BuildError::Setting {
-                database,
-                source: StoreError::UndecodableSetting { key, problem },
-            } => Some((key, *problem, database)),
+            BuildError::Setting { database, source } => Some((source, database)),
             _ => None,
         }
     }
@@ -1583,7 +1582,7 @@ mod tests {
     use steno_bridge::BridgeTopic;
     use steno_core::{
         AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata, SecretKey, SecretStore,
-        async_trait, paths::file_url, protocols::BoundaryResult,
+        SettingProblem, async_trait, paths::file_url, protocols::BoundaryResult,
     };
     use steno_host::services::ListenerState;
     use steno_pipeline::MeetingEventBus;
@@ -1733,9 +1732,19 @@ mod tests {
         );
         assert!(!text.contains(&support.display().to_string()), "{text}");
         assert!(!format!("{error:?}").contains("sk-secret"), "{error:?}");
+        let Some((
+            StoreError::UndecodableSetting {
+                key,
+                problem: SettingProblem::NotJson,
+            },
+            in_database,
+        )) = error.unreadable_settings()
+        else {
+            panic!("not an unreadable setting: {error:?}");
+        };
         assert_eq!(
-            error.unreadable_setting(),
-            Some(("llmBaseURL", SettingProblem::NotJson, database.as_path()))
+            (key.as_str(), in_database),
+            ("llmBaseURL", database.as_path())
         );
         let kept: String = open_store(&database)
             .unwrap()
@@ -1750,7 +1759,7 @@ mod tests {
         assert_eq!(kept, value);
         assert!(
             BuildError::Store(StoreError::BlankPersonName)
-                .unreadable_setting()
+                .unreadable_settings()
                 .is_none()
         );
     }

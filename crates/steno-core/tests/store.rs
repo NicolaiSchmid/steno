@@ -705,6 +705,29 @@ fn is_busy_names_the_lock_errors() {
     assert!(!StoreError::MeetingNotFound(uuid(PERSON_ID)).is_busy());
 }
 
+/// The result code of an error SQLite raised, and none for the store's
+/// own errors or a row SQLite read but this build cannot decode.
+#[test]
+fn sqlite_code_names_what_sqlite_raised() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steno.sqlite");
+    std::fs::write(&path, "not a database\n").unwrap();
+    let Err(error) = Store::open(&path) else {
+        panic!("a file that is not a database opened");
+    };
+    assert_eq!(error.sqlite_code(), Some(rusqlite::ErrorCode::NotADatabase));
+    assert_eq!(
+        StoreError::MeetingNotFound(uuid(PERSON_ID)).sqlite_code(),
+        None
+    );
+    let undecodable = StoreError::Sqlite(rusqlite::Error::InvalidColumnType(
+        0,
+        "state".to_owned(),
+        rusqlite::types::Type::Integer,
+    ));
+    assert_eq!(undecodable.sqlite_code(), None);
+}
+
 /// A closure that returns `Err` leaves nothing behind: the transaction is
 /// rolled back, the lock released, and the next write goes through.
 #[test]

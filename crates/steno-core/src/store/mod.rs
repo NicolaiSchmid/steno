@@ -138,12 +138,20 @@ impl StoreError {
     /// with the call, and a caller that can wait should retry it.
     #[must_use]
     pub fn is_busy(&self) -> bool {
+        matches!(
+            self.sqlite_code(),
+            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+        )
+    }
+
+    /// SQLite's result code, for an error SQLite raised: a word such as
+    /// `NotADatabase` or `CannotOpen` that names no path and no value, so
+    /// a log line may carry it. Rust only.
+    #[must_use]
+    pub fn sqlite_code(&self) -> Option<ErrorCode> {
         match self {
-            StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)) => matches!(
-                error.code,
-                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
-            ),
-            _ => false,
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)) => Some(error.code),
+            _ => None,
         }
     }
 }
