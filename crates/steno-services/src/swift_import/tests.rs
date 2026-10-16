@@ -1182,7 +1182,7 @@ async fn a_graph_over_the_secrets_file_reads_its_key_after_a_refused_keychain_re
     );
     let key = SecretKey::llm_api_key();
     file.set_secret(&key, Some("sk-swift")).await.unwrap();
-    let app = crate::build(test_options(paths)).unwrap();
+    let app = crate::build(crate::testing::options_under(&paths.support_directory)).unwrap();
     assert_eq!(
         app.secrets.secret(&key).await.unwrap().as_deref(),
         Some("sk-swift")
@@ -1273,7 +1273,7 @@ async fn a_graph_over_a_pending_import_reads_no_key_and_binds_no_listener_until_
         map.get(key).cloned()
     };
     let keychain = Arc::new(FakeKeychain::swift_app());
-    let app = build_over(paths, keychain);
+    let app = build_over(&paths, keychain);
 
     assert!(app.handover.is_none());
     let gated = app.gated_handover.clone().unwrap();
@@ -1349,7 +1349,7 @@ async fn a_waiting_gate_keeps_the_listener_closed_until_the_identity_came_over()
     let secrets_path = paths.support_directory.join("secrets.json");
     let keychain = Arc::new(FakeKeychain::swift_app());
     keychain.deny_export();
-    let app = build_over(paths, keychain.clone());
+    let app = build_over(&paths, keychain.clone());
     let step = app.services.swift_import.clone().unwrap();
     let run = || {
         let step = step.clone();
@@ -1396,7 +1396,7 @@ async fn a_swift_identity_that_replaced_a_desktop_id_one_is_the_one_the_listener
 
     let dir = tempfile::tempdir().unwrap();
     let paths = steno_core::StenoPaths::new(dir.path().join("support"));
-    let desktop = crate::build(test_options(paths.clone())).unwrap();
+    let desktop = crate::build(crate::testing::options_under(&paths.support_directory)).unwrap();
     let desktop_id = desktop.handover.as_deref().unwrap().mac_id();
     assert!(
         !desktop_id.is_empty(),
@@ -1415,7 +1415,7 @@ async fn a_swift_identity_that_replaced_a_desktop_id_one_is_the_one_the_listener
         stored_identity: Ok(true),
         ..FakeKeychain::swift_app()
     });
-    let app = build_over(paths, keychain);
+    let app = build_over(&paths, keychain);
     let step = app.services.swift_import.clone().unwrap();
     let status = tokio::task::spawn_blocking(move || step.run())
         .await
@@ -1457,7 +1457,7 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
             std::fs::write(&secrets_path, b"not json").unwrap();
         }
         let keychain = Arc::new(FakeKeychain::swift_app());
-        let app = build_over(paths, keychain.clone());
+        let app = build_over(&paths, keychain.clone());
         crate::testing::pair_a_phone(&app.store);
         std::fs::remove_file(dir.path().join("support/preferences.json")).unwrap();
         keychain.certificates.lock().unwrap().clear();
@@ -1610,7 +1610,7 @@ async fn settings_try_again_or_pair_again_ends_a_denied_export() {
         let paths = steno_core::StenoPaths::new(dir.path().join("support"));
         let keychain = Arc::new(FakeKeychain::swift_app());
         keychain.deny_export();
-        let app = build_over(paths, keychain.clone());
+        let app = build_over(&paths, keychain.clone());
         crate::testing::pair_a_phone(&app.store);
         let step = app.services.swift_import.clone().unwrap();
         let status = tokio::task::spawn_blocking(move || step.run())
@@ -1682,7 +1682,7 @@ async fn an_import_pair_again_that_stopped_is_decided_by_the_next_read() {
             let record = record_in(&paths.support_directory);
             let keychain = Arc::new(FakeKeychain::swift_app());
             keychain.deny_export();
-            let app = build_over(paths.clone(), keychain.clone());
+            let app = build_over(&paths, keychain.clone());
             crate::testing::pair_a_phone(&app.store);
             if stop == "after phone 1 of 2" {
                 crate::testing::pair_a_phone(&app.store);
@@ -1738,12 +1738,13 @@ async fn an_import_pair_again_that_stopped_is_decided_by_the_next_read() {
             app.shutdown();
             drop(app);
 
-            let app = crate::build_with_import(test_options(paths), |preferences| {
-                match launch_at_home(preferences, keychain.clone()) {
+            let app = crate::build_with_import(
+                crate::testing::options_under(&paths.support_directory),
+                |preferences| match launch_at_home(preferences, keychain.clone()) {
                     Launch::Pending(pending) => Some(pending),
                     Launch::Done | Launch::Skipped(_) => None,
-                }
-            })
+                },
+            )
             .unwrap();
             assert!(app.gated_handover.is_none(), "{case}: the import is over");
             let handover = app.handover.clone().expect("the listener at the launch");
@@ -1778,7 +1779,7 @@ async fn the_detail_withholds_the_summary_only_for_an_endpoint_that_needs_the_ke
 
     let dir = tempfile::tempdir().unwrap();
     let paths = steno_core::StenoPaths::new(dir.path().join("support"));
-    let app = build_over(paths, Arc::new(FakeKeychain::swift_app()));
+    let app = build_over(&paths, Arc::new(FakeKeychain::swift_app()));
     let gate = app.import_gate.clone().unwrap();
     assert!(gate.key_withheld());
     let meeting = steno_core::testing::sample_data::meeting();
@@ -1844,32 +1845,13 @@ fn chatgpt_summaries(settings: &mut steno_core::Settings) {
     settings.codex_confirmed_at = Some(chrono::Utc::now());
 }
 
-fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
-    crate::AppOptions {
-        paths,
-        database_path: None,
-        keyring: false,
-        opener: Arc::new(steno_host::fakes::FakeOpener::default()),
-        login_item: None,
-        runtime: tokio::runtime::Handle::current(),
-        version: "0.0.0".to_owned(),
-        make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
-        lock_patience: std::time::Duration::ZERO,
-        update_source: None,
-        permissions: None,
-        calendar: None,
-        detection: None,
-        installed_bundle: false,
-        import_marker: None,
-    }
-}
-
 /// The graph under `paths` over the launch half against the Swift domain
 /// fixture and `keychain`, which must leave the import pending.
-fn build_over(paths: steno_core::StenoPaths, keychain: Arc<FakeKeychain>) -> crate::App {
-    crate::build_with_import(test_options(paths), |preferences| {
-        Some(pending(launch_at_home(preferences, keychain)))
-    })
+fn build_over(paths: &steno_core::StenoPaths, keychain: Arc<FakeKeychain>) -> crate::App {
+    crate::build_with_import(
+        crate::testing::options_under(&paths.support_directory),
+        |preferences| Some(pending(launch_at_home(preferences, keychain))),
+    )
     .unwrap()
 }
 
@@ -1931,7 +1913,7 @@ async fn the_update_schedule_reads_the_flags_the_launch_half_copied() {
         }
         let options = crate::AppOptions {
             update_source: Some(Arc::new(NoUpdates)),
-            ..test_options(paths.clone())
+            ..crate::testing::options_under(&paths.support_directory)
         };
         let app = crate::build_with_import(options, |preferences| {
             match launch(
@@ -1976,7 +1958,11 @@ async fn an_app_the_database_lock_refuses_runs_no_launch_half() {
     std::fs::create_dir_all(&paths.support_directory).unwrap();
     let _first = steno_core::DatabaseLock::acquire(&paths.database_path()).unwrap();
     let ran = AtomicUsize::new(0);
-    let refused = crate::build_with_import(test_options(paths.clone()), |_| {
+    let options = crate::AppOptions {
+        lock_patience: std::time::Duration::ZERO,
+        ..crate::testing::options_under(&paths.support_directory)
+    };
+    let refused = crate::build_with_import(options, |_| {
         ran.fetch_add(1, Ordering::SeqCst);
         None
     })
