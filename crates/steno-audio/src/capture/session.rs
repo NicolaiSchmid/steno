@@ -2614,6 +2614,42 @@ mod tests {
         assert_eq!(counts.unfilled_seconds(), 2.0, "48 000 at 24 kHz");
     }
 
+    /// A rebuild's gap takes back what the stalled thread counted unfilled
+    /// in it on every lane, at most the gap's length on each: with a 2.1 s
+    /// gap, the microphone's 2 s come back whole and 2.1 s of the system
+    /// lane's 2.5 s.
+    #[test]
+    fn a_rebuilds_gap_takes_back_the_late_count_on_every_lane() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+        let mut counts = RingCounts::default();
+        let before = sink.unfilled_samples();
+        sink.ring(0).record_unfilled(96_000);
+        sink.ring(1).record_unfilled(120_000);
+        counts.fold_at_a_rebuild(&sink, Some(before), SAMPLE_RATE);
+        counts.gap_written(100_800);
+        assert_eq!(
+            counts.unfilled.at_output_rate,
+            [(AudioLane::Mic, 0), (AudioLane::System, 19_200)].into()
+        );
+    }
+
+    /// What a rebuild kept apart for its gap is gone at the next rebuild's
+    /// fold when no gap took it back (a stop cut the gap short): a later
+    /// gap that starts at a device change, not at a last frame, takes
+    /// nothing back. Through the session a cut gap ends the recording, so
+    /// only this test reaches that order.
+    #[test]
+    fn a_late_count_no_gap_took_back_stays_counted_at_the_next_rebuild() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic]);
+        let mut counts = RingCounts::default();
+        let before = sink.unfilled_samples();
+        sink.ring(0).record_unfilled(48_000);
+        counts.fold_at_a_rebuild(&sink, Some(before), SAMPLE_RATE);
+        counts.fold_at_a_rebuild(&sink, None, SAMPLE_RATE);
+        counts.gap_written(48_000);
+        assert_eq!(counts.unfilled_seconds(), 1.0);
+    }
+
     /// The production writer, except that every write fails as a full disk
     /// does and `finish()` waits for `release`, which holds the writer
     /// failure's finalise in `Stopping`.
