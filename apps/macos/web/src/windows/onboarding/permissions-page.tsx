@@ -1,4 +1,9 @@
-import { CheckCircle2Icon, CircleIcon, XCircleIcon } from "lucide-react";
+import {
+	CheckCircle2Icon,
+	CircleIcon,
+	TriangleAlertIcon,
+	XCircleIcon,
+} from "lucide-react";
 import type { OnboardingSnapshot } from "@/bridge/contract";
 import { send, useBridge } from "@/bridge/hooks";
 import { DownloadFailure, downloadPercent } from "@/components/model-download";
@@ -6,7 +11,7 @@ import { PermissionRow } from "@/components/permission-row";
 import {
 	Badge,
 	Button,
-	Disclosure,
+	Callout,
 	FormCard,
 	FormRow,
 	type FormRowProps,
@@ -32,7 +37,7 @@ type VaultAccess = NonNullable<OnboardingSnapshot["vaultAccess"]>;
 
 /**
  * The speech models row (Tauri shell only): what a meeting waits for, with
- * Download, the download's progress, Retry after a failure, or Downloaded.
+ * Download, the download's progress, Retry after a failure, or Installed.
  * Download is Settings' install, once per model the row lists.
  */
 function SpeechModelsRow({ models }: { models: SpeechModels }) {
@@ -81,7 +86,7 @@ function SpeechModelsRow({ models }: { models: SpeechModels }) {
 			);
 			break;
 		case "installed":
-			control = <Badge variant="success">Downloaded</Badge>;
+			control = <Badge variant="success">Installed</Badge>;
 			break;
 	}
 	const installed = models.state === "installed";
@@ -94,8 +99,8 @@ function SpeechModelsRow({ models }: { models: SpeechModels }) {
 			data-testid="onboarding-models"
 			description={
 				installed
-					? models.detail
-					: `Steno turns speech into text and tells the speakers apart on this ${words.computer}. Meetings wait until these are downloaded.${status}`
+					? undefined
+					: `Steno needs these to turn speech into text and tell the speakers apart. Meetings wait until they are on this ${words.computer}.${status}`
 			}
 			icon={
 				installed ? (
@@ -126,8 +131,9 @@ function SpeechModelsRow({ models }: { models: SpeechModels }) {
 /**
  * The vault row (Tauri shell, Mac only): Steno wrote to the stored vault
  * once, so macOS asked for a protected folder while this page shows. A
- * refusal says how to allow it, with Open System Settings (Files and
- * Folders) and Check again.
+ * folder that refused the write says how to allow it, with Open System
+ * Settings (Files and Folders) and Check again; a vault that cannot be
+ * used otherwise (not there) says to choose it again, with Check again.
  */
 function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 	const client = useBridge();
@@ -136,9 +142,19 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 	let control: React.ReactNode;
 	let icon = <CircleIcon aria-hidden="true" />;
 	let tone: FormRowProps["tone"] = "faint";
+	const checkAgain = (
+		<Button
+			data-testid="onboarding-vault-check"
+			onClick={() => send(client, "onboarding.refresh")}
+			size="sm"
+			variant="outline"
+		>
+			Check again
+		</Button>
+	);
 	switch (vault.state) {
 		case "checking":
-			description = `Steno is checking that it can write your notes to ${vault.name}. If macOS asks for the folder, choose Allow.`;
+			description = `Steno is checking that it can write your meeting notes to ${vault.name}. If macOS asks about the folder, choose Allow.`;
 			control = (
 				<Badge data-testid="onboarding-vault-checking">Checking…</Badge>
 			);
@@ -152,7 +168,7 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 		case "refused":
 			icon = <XCircleIcon aria-hidden="true" />;
 			tone = "warning";
-			description = `Steno cannot write your notes to ${vault.name}. Turn on Steno under Files and Folders in ${words.systemSettings}, then choose Check again.`;
+			description = `Steno cannot write your meeting notes to ${vault.name}. Turn on Steno under Files and Folders in ${words.systemSettings}, then choose Check again.`;
 			control = (
 				<>
 					<Button
@@ -163,16 +179,15 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 					>
 						Open {words.systemSettings}
 					</Button>
-					<Button
-						data-testid="onboarding-vault-check"
-						onClick={() => send(client, "onboarding.refresh")}
-						size="sm"
-						variant="outline"
-					>
-						Check again
-					</Button>
+					{checkAgain}
 				</>
 			);
+			break;
+		case "unusable":
+			icon = <XCircleIcon aria-hidden="true" />;
+			tone = "warning";
+			description = `Steno cannot use ${vault.name} for your meeting notes. Check that the folder is there, or choose the vault again in Settings > Export.`;
+			control = checkAgain;
 			break;
 	}
 	return (
@@ -181,13 +196,17 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 			data-testid="onboarding-vault-access"
 			description={description}
 			icon={icon}
-			label="Notes folder"
+			label="Obsidian vault"
 			tone={tone}
 		>
-			{vault.state === "refused" && vault.error ? (
-				<Disclosure data-testid="onboarding-vault-access-error">
-					{vault.error}
-				</Disclosure>
+			{vault.validationMessage ? (
+				<Callout
+					data-testid="onboarding-vault-access-message"
+					icon={<TriangleAlertIcon aria-hidden="true" />}
+					size="sm"
+					title={vault.validationMessage}
+					variant="warning"
+				/>
 			) : null}
 		</FormRow>
 	);
@@ -196,7 +215,8 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 /**
  * Page 1: one row per permission with the action that fits its state. The
  * required ones gate Continue; the optional ones can be skipped; the local
- * network prompt comes with the first pairing, so its row only explains.
+ * network prompt comes when Steno first listens for the phone, so its row
+ * only explains.
  * Later moves on with whatever is still open. Below them, when the host
  * sends them, the speech models row and the vault row.
  */

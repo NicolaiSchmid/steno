@@ -1350,13 +1350,14 @@ impl Host {
                 host.finish_vault_check(outcome);
             });
         if let Err(error) = spawned {
-            self.finish_vault_check(Err(
-                format!("The vault could not be checked: {error}").into()
-            ));
+            self.finish_vault_check(Err(crate::services::VaultRefusal {
+                message: format!("The vault could not be checked: {error}"),
+                not_writable: false,
+            }));
         }
     }
 
-    fn finish_vault_check(&self, outcome: steno_core::protocols::BoundaryResult<()>) {
+    fn finish_vault_check(&self, outcome: Result<(), crate::services::VaultRefusal>) {
         self.command(&[BridgeTopic::Onboarding], |inner| {
             inner.onboarding.finish_vault_check(outcome);
         });
@@ -1613,13 +1614,15 @@ impl Host {
     }
 
     /// Page 1 moves on by itself once every step is handled, as the Swift
-    /// page did, and the speech models row has nothing left to download;
-    /// only after a command that can change a step, so Back from page 2
-    /// stays on page 1.
+    /// page did, the speech models row has nothing left to download, and
+    /// the vault row is neither checking nor refused (Check again makes its
+    /// check due before this runs); only after a command that can change a
+    /// step, so Back from page 2 stays on page 1.
     fn advance_if_handled(&self, inner: &mut Inner) {
         if inner.onboarding.page == steno_bridge::OnboardingPage::Permissions
             && inner.onboarding.permissions_handled()
             && !inner.onboarding.models_pending(&self.shared.services)
+            && !inner.onboarding.vault_pending()
         {
             inner.onboarding.advance(&self.shared.services);
         }

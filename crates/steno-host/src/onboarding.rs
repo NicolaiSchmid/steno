@@ -13,13 +13,15 @@
 //! handled on page 2, set the completed flag and `finished`.
 //!
 //! Page 1 has two more rows, Rust only, for the first launch after the
-//! Swift app (`.plans/2026-10-07-stable-promotion.md`, Rehearsal,
-//! "Nicolai's Mac"): the speech models row while the models a meeting
-//! needs were missing when onboarding opened (the speaker models the Swift
-//! app never had, or every model on a fresh install), whose Download is
-//! Settings' install, and on the Mac the vault row, which writes to the
-//! stored vault once so that macOS asks for its folder while the page
-//! shows rather than at the first export.
+//! Swift app (`.plans/2026-10-07-stable-promotion.md`, "The Sparkle
+//! handoff", "First launch after the handoff"): the speech models row
+//! while the models a meeting needs were missing when onboarding opened
+//! (the speaker models the Swift app never had, or every model on a fresh
+//! install), whose Download is Settings' install, and on the Mac the vault
+//! row, which writes the destination's probe to the stored vault (a hidden
+//! file, removed at once) so that macOS asks for its folder while the page
+//! shows rather than at the first export. While that row is checking or
+//! refused, page 1 does not move on by itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -37,7 +39,7 @@ use steno_core::{AudioRetention, ObsidianSettings, Settings, Store};
 use crate::labels::{file_size, retention_footnote};
 use crate::services::{
     CodexModel, CodexModelsError, Services, SpeechModels, SwiftImportStage, SwiftImportStatus,
-    permission_is_missing, permission_is_required,
+    VaultRefusal, permission_is_missing, permission_is_required,
 };
 use crate::settings::llm::{CodexStatus, KeyRead, LlmPreset, LlmSettingsViewModel, url_host};
 use crate::settings::obsidian::ObsidianSettingsViewModel;
@@ -77,15 +79,24 @@ impl SetupState {
     }
 }
 
-/// Page 1's vault row: whether the stored vault took the probe write.
-/// Rust only.
+/// Page 1's vault row: the stored vault's folder name and whether it took
+/// the probe write. Rust only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultCheck {
+    pub name: String,
+    pub access: VaultAccess,
+}
+
+/// Whether the stored vault took the probe write. Rust only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VaultAccess {
+    /// Check again was chosen after a refusal: the next check is due, and
+    /// the row reads checking until it has run.
+    Due,
     /// The write runs; macOS may be asking for the folder.
     Checking,
     Writable,
-    /// The destination's message.
-    Refused(String),
+    Refused(VaultRefusal),
 }
 
 /// The two optional rows of page 2, in order.
@@ -124,9 +135,8 @@ pub struct OnboardingViewModel {
     /// page 1's speech models row, which stays, reading installed, once
     /// they arrive. Empty without the row. Rust only.
     pub missing_models: Vec<ModelAsset>,
-    /// Page 1's vault row, once its check started; the folder's name
-    /// beside it. Rust only.
-    pub vault_access: Option<(String, VaultAccess)>,
+    /// Page 1's vault row, once its check started. Rust only.
+    pub vault_check: Option<VaultCheck>,
     loaded: bool,
 }
 
@@ -174,7 +184,7 @@ impl OnboardingViewModel {
             import: None,
             importing: false,
             missing_models: Vec::new(),
-            vault_access: None,
+            vault_check: None,
             loaded: false,
         }
     }
@@ -380,48 +390,75 @@ impl OnboardingViewModel {
     }
 
     /// The vault row's check is due: on the Mac, on page 1, with a vault
-    /// stored, once per window. Marks the row checking and returns the
-    /// stored settings the host writes to with its lock released
-    /// ([`ExportValidator`](crate::services::ExportValidator)). Never for
-    /// a vault that is not stored; off the Mac there is no folder prompt to
-    /// bring forward, so nothing is checked.
+    /// stored, once per window and again after Check again. Marks the row
+    /// checking and returns the stored settings the host writes to with its
+    /// lock released ([`ExportValidator`](crate::services::ExportValidator)).
+    /// Never for a vault that is not stored; off the Mac there is no folder
+    /// prompt to bring forward, so nothing is checked.
     pub fn begin_vault_check(&mut self, store: &Store) -> Option<ObsidianSettings> {
         if self.platform != Platform::Macos
             || self.page != OnboardingPage::Permissions
-            || self.vault_access.is_some()
+            || self
+                .vault_check
+                .as_ref()
+                .is_some_and(|check| check.access != VaultAccess::Due)
         {
             return None;
         }
-        let obsidian = store
+        let Some(obsidian) = store
             .settings()
-            .ok()?
-            .obsidian
-            .filter(|obsidian| !obsidian.vault_path.trim().is_empty())?;
+            .ok()
+            .and_then(|settings| settings.obsidian)
+            .filter(|obsidian| !obsidian.vault_path.trim().is_empty())
+        else {
+            self.vault_check = None;
+            return None;
+        };
         let name = Path::new(&obsidian.vault_path).file_name().map_or_else(
             || obsidian.vault_path.clone(),
             |name| name.to_string_lossy().into_owned(),
         );
-        self.vault_access = Some((name, VaultAccess::Checking));
+        self.vault_check = Some(VaultCheck {
+            name,
+            access: VaultAccess::Checking,
+        });
         Some(obsidian)
     }
 
     /// The check's outcome, on the row it started on (a window closed
     /// meanwhile starts a model without one, which this leaves alone).
-    pub fn finish_vault_check(&mut self, outcome: BoundaryResult<()>) {
-        if let Some((_, access @ VaultAccess::Checking)) = &mut self.vault_access {
-            *access = match outcome {
+    pub fn finish_vault_check(&mut self, outcome: Result<(), VaultRefusal>) {
+        if let Some(check) = &mut self.vault_check
+            && check.access == VaultAccess::Checking
+        {
+            check.access = match outcome {
                 Ok(()) => VaultAccess::Writable,
-                Err(error) => VaultAccess::Refused(error.to_string()),
+                Err(refusal) => VaultAccess::Refused(refusal),
             };
         }
     }
 
-    /// "Check again" on page 1 checks a refused vault again, after the user
-    /// turned Steno on under Files and Folders.
+    /// "Check again" on page 1 makes the check of a refused vault due
+    /// again, after the user turned Steno on under Files and Folders or
+    /// brought the folder back.
     pub fn retry_vault_check(&mut self) {
-        if matches!(self.vault_access, Some((_, VaultAccess::Refused(_)))) {
-            self.vault_access = None;
+        if let Some(check) = &mut self.vault_check
+            && matches!(check.access, VaultAccess::Refused(_))
+        {
+            check.access = VaultAccess::Due;
         }
+    }
+
+    /// The vault row holds page 1: its check is due, runs, or was refused,
+    /// so the page does not move on by itself before the user saw it.
+    #[must_use]
+    pub fn vault_pending(&self) -> bool {
+        self.vault_check.as_ref().is_some_and(|check| {
+            matches!(
+                check.access,
+                VaultAccess::Due | VaultAccess::Checking | VaultAccess::Refused(_)
+            )
+        })
     }
 
     /// Both setup rows saved or skipped.
@@ -736,16 +773,23 @@ fn speech_models_snapshot(
 
 /// The vault row as the page shows it.
 fn vault_access_snapshot(model: &OnboardingViewModel) -> Option<OnboardingVaultAccess> {
-    let (name, access) = model.vault_access.as_ref()?;
-    let (state, error) = match access {
-        VaultAccess::Checking => (OnboardingVaultAccessState::Checking, None),
+    let check = model.vault_check.as_ref()?;
+    let (state, validation_message) = match &check.access {
+        VaultAccess::Due | VaultAccess::Checking => (OnboardingVaultAccessState::Checking, None),
         VaultAccess::Writable => (OnboardingVaultAccessState::Writable, None),
-        VaultAccess::Refused(error) => (OnboardingVaultAccessState::Refused, Some(error.clone())),
+        VaultAccess::Refused(refusal) => (
+            if refusal.not_writable {
+                OnboardingVaultAccessState::Refused
+            } else {
+                OnboardingVaultAccessState::Unusable
+            },
+            Some(refusal.message.clone()),
+        ),
     };
     Some(OnboardingVaultAccess {
         state,
-        name: name.clone(),
-        error,
+        name: check.name.clone(),
+        validation_message,
     })
 }
 

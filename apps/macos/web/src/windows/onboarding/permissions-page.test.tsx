@@ -1,8 +1,18 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import type { OnboardingSnapshot } from "@/bridge/contract";
+import { loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { OnboardingWindow } from "./onboarding-window";
+
+/** Page 1 after the handoff (`onboarding.handoff`) with `change` over it. */
+async function handoffWith(change: Partial<OnboardingSnapshot>) {
+	const handoff = (await loadFixtureSnapshots())[
+		"onboarding.handoff"
+	] as OnboardingSnapshot;
+	return createBridgeHarness("", { onboarding: { ...handoff, ...change } });
+}
 
 describe("PermissionsPage", () => {
 	it("shows every permission in its state with the retention sentence", async () => {
@@ -130,7 +140,7 @@ describe("PermissionsPage", () => {
 		const row = screen.getByTestId("onboarding-models");
 		expect(row).toHaveTextContent("Speech models");
 		expect(row).toHaveTextContent(
-			"Meetings wait until these are downloaded. Not downloaded · 22 MB.",
+			"Steno needs these to turn speech into text and tell the speakers apart. Meetings wait until they are on this Mac. Not downloaded · 22 MB.",
 		);
 		await user.click(screen.getByTestId("onboarding-models-download"));
 		expect(
@@ -147,8 +157,15 @@ describe("PermissionsPage", () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=onboarding-handoff");
 		renderWithBridge(<OnboardingWindow />, harness);
-		expect(screen.getByTestId("onboarding-vault-access")).toHaveTextContent(
-			"Steno cannot write your notes to Work Vault. Turn on Steno under Files and Folders in System Settings, then choose Check again.",
+		const row = screen.getByTestId("onboarding-vault-access");
+		expect(row).toHaveTextContent("Obsidian vault");
+		expect(row).toHaveTextContent(
+			"Steno cannot write your meeting notes to Work Vault. Turn on Steno under Files and Folders in System Settings, then choose Check again.",
+		);
+		expect(
+			screen.getByTestId("onboarding-vault-access-message"),
+		).toHaveTextContent(
+			"The Obsidian vault at /Users/nicolai/Documents/Work Vault is not writable.",
 		);
 		await user.click(screen.getByTestId("onboarding-vault-open"));
 		expect(
@@ -174,5 +191,64 @@ describe("PermissionsPage", () => {
 		expect(screen.getByTestId("onboarding-vault-access")).toHaveTextContent(
 			"Steno writes your meeting notes to Work Vault.",
 		);
+	});
+
+	it("starts every model the row lists, in order", async () => {
+		const user = userEvent.setup();
+		const harness = await handoffWith({
+			speechModels: {
+				state: "absent",
+				detail: "Not downloaded · 518 MB",
+				assetIDs: ["parakeetV3", "offlineDiarizer"],
+			},
+		});
+		renderWithBridge(<OnboardingWindow />, harness);
+		await user.click(screen.getByTestId("onboarding-models-download"));
+		expect(
+			callsTo(harness.transport, "settings.transcription.download").map(
+				(call) => call.params,
+			),
+		).toEqual([{ assetID: "parakeetV3" }, { assetID: "offlineDiarizer" }]);
+	});
+
+	it("says Installed once the models are in, with nothing more to read", async () => {
+		const harness = await handoffWith({
+			speechModels: {
+				state: "installed",
+				detail: "Installed",
+				assetIDs: [],
+			},
+		});
+		renderWithBridge(<OnboardingWindow />, harness);
+		const row = screen.getByTestId("onboarding-models");
+		expect(row).toHaveTextContent("Installed");
+		expect(row).not.toHaveTextContent("Meetings wait");
+		expect(
+			screen.queryByTestId("onboarding-models-download"),
+		).not.toBeInTheDocument();
+	});
+
+	it("says to choose a vault again that is not there, without System Settings", async () => {
+		const user = userEvent.setup();
+		const harness = await handoffWith({
+			vaultAccess: {
+				state: "unusable",
+				name: "Work Vault",
+				validationMessage:
+					"The Obsidian vault at /Volumes/Disk/Work Vault does not exist.",
+			},
+		});
+		renderWithBridge(<OnboardingWindow />, harness);
+		expect(screen.getByTestId("onboarding-vault-access")).toHaveTextContent(
+			"Steno cannot use Work Vault for your meeting notes. Check that the folder is there, or choose the vault again in Settings > Export.",
+		);
+		expect(
+			screen.getByTestId("onboarding-vault-access-message"),
+		).toHaveTextContent("does not exist.");
+		expect(
+			screen.queryByTestId("onboarding-vault-open"),
+		).not.toBeInTheDocument();
+		await user.click(screen.getByTestId("onboarding-vault-check"));
+		expect(callsTo(harness.transport, "onboarding.refresh")).toHaveLength(1);
 	});
 });

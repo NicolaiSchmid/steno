@@ -790,12 +790,14 @@ export const onboardingSnapshot = z
 			.strict()
 			.optional(),
 		// Page 1's vault row on the Mac: the stored vault written to once,
-		// so macOS asks for its folder here. The Tauri shell alone sends it.
+		// so macOS asks for its folder here; `refused` is a folder that
+		// refused the write (Files and Folders), `unusable` one that is not
+		// there. The Tauri shell alone sends it.
 		vaultAccess: z
 			.object({
-				state: z.enum(["checking", "writable", "refused"]),
+				state: z.enum(["checking", "writable", "refused", "unusable"]),
 				name: z.string(),
-				error: z.string().optional(),
+				validationMessage: z.string().optional(),
 			})
 			.strict()
 			.optional(),

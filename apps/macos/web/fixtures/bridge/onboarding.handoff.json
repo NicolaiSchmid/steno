@@ -53,8 +53,8 @@
     "state" : "absent"
   },
   "vaultAccess" : {
-    "error" : "Steno cannot write to the Obsidian vault at /Users/nicolai/Documents/Work Vault.",
     "name" : "Work Vault",
-    "state" : "refused"
+    "state" : "refused",
+    "validationMessage" : "The Obsidian vault at /Users/nicolai/Documents/Work Vault is not writable."
   }
 }

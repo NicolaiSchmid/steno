@@ -845,9 +845,9 @@ fn onboarding_handoff() {
                 .speech_models
                 .set_installed(ModelAsset::ParakeetV3, Some(485_000_000));
             store_vault(store, "/Users/nicolai/Documents/Work Vault");
-            fakes.export_validator.fail_validation(Some(
-                "Steno cannot write to the Obsidian vault at /Users/nicolai/Documents/Work Vault.",
-            ));
+            fakes.export_validator.refuse_writes(
+                "The Obsidian vault at /Users/nicolai/Documents/Work Vault is not writable.",
+            );
         })
         .build();
     harness

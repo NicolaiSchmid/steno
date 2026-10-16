@@ -110,7 +110,8 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
 		codexSignInFile: "~/.codex/auth.json",
 		systemAudioPrompt:
 			"macOS asks once, during a short test recording that plays a tone.",
-		localNetworkPrompt: "macOS asks when you pair the first phone.",
+		localNetworkPrompt:
+			"macOS asks once, when Steno first listens for your phone.",
 		localNetworkHelp:
 			"If your iPhone can't find this Mac, turn on Steno under Local Network in System Settings.",
 	},

@@ -641,9 +641,13 @@ string_enum! {
         /// The check runs; macOS may be asking for the folder.
         Checking = "checking",
         Writable = "writable",
-        /// The write was refused, most often because macOS's Files and
-        /// Folders setting is off for Steno.
+        /// The folder refused the write, most often because macOS's Files
+        /// and Folders setting is off for Steno.
         Refused = "refused",
+        /// The vault cannot be used for another reason the system setting
+        /// does not fix: the folder is not there (an unmounted disk, a
+        /// renamed vault) or the check could not run.
+        Unusable = "unusable",
     }
 }
 
@@ -658,9 +662,10 @@ pub struct OnboardingVaultAccess {
     pub state: OnboardingVaultAccessState,
     /// The vault folder's name.
     pub name: String,
-    /// Why the write was refused, in the destination's words.
+    /// Why the vault was refused or cannot be used, in the destination's
+    /// words, as [`OnboardingVault::validation_message`] on page 2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub validation_message: Option<String>,
 }
 
 /// The onboarding window: page 1's permission steps and page 2's two setup

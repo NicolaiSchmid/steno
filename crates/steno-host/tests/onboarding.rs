@@ -1120,6 +1120,51 @@ fn a_fresh_install_offers_every_model_on_one_row() {
     );
 }
 
+/// On a fresh install where the speech model came in and the speaker
+/// models failed, Retry starts only the speaker models, and the size is
+/// theirs alone.
+#[test]
+fn retry_after_a_partial_install_starts_only_the_missing_model() {
+    let harness = Harness::builder().build();
+    let models = harness.fakes.speech_models.clone();
+    harness.fakes.speech_models.set_on_download(move |asset| {
+        models.fail_downloads((asset == ModelAsset::OfflineDiarizer).then_some("offline"));
+    });
+    let download = |asset: ModelAsset| {
+        harness
+            .host
+            .for_window(BridgeWindow::Onboarding)
+            .settings_transcription_download(steno_bridge::AssetIdParams {
+                asset_id: asset.as_str().to_owned(),
+            })
+            .unwrap();
+    };
+    download(ModelAsset::ParakeetV3);
+    harness.wait_for("the speech model", |harness| {
+        harness
+            .sink
+            .last(BridgeTopic::Onboarding)
+            .is_some_and(|onboarding| {
+                onboarding["speechModels"]["state"] == "absent"
+                    && onboarding["speechModels"]["assetIDs"] == json!(["offlineDiarizer"])
+            })
+    });
+    download(ModelAsset::OfflineDiarizer);
+    harness.wait_for(
+        "the failed download",
+        onboarding_row_is("speechModels", "failed"),
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["speechModels"],
+        json!({
+            "assetIDs": ["offlineDiarizer"],
+            "detail": "Not downloaded · 22 MB",
+            "failure": "offline",
+            "state": "failed",
+        })
+    );
+}
+
 /// The row's Download is Settings' install (`settings.transcription.download`
 /// per id the row lists): the row follows its progress, reads installed
 /// afterwards and stays; a failed download offers Retry with the reason.
@@ -1166,6 +1211,15 @@ fn the_speech_models_row_downloads_through_settings_and_follows_it() {
                 && onboarding["speechModels"]["detail"] == "Downloading… 50%"
         ),
         "the row showed the download's progress"
+    );
+    // While a model downloads, the row offers nothing to start.
+    assert!(
+        harness
+            .sink
+            .all(BridgeTopic::Onboarding)
+            .iter()
+            .filter(|onboarding| onboarding["speechModels"]["state"] == "downloading")
+            .all(|onboarding| onboarding["speechModels"]["assetIDs"] == json!([]))
     );
 
     // Skipping the last open permission does not move on while the row
@@ -1261,6 +1315,11 @@ fn the_stored_vault_is_checked_once_on_page_one() {
     );
 }
 
+/// The destination's refusal of a vault in Documents with Files and
+/// Folders off.
+const NOT_WRITABLE: &str =
+    "The Obsidian vault at /Users/nicolai/Documents/Work Vault is not writable.";
+
 /// A refused write shows the destination's reason; Check again writes
 /// again, and Open System Settings opens Files and Folders.
 #[test]
@@ -1269,9 +1328,7 @@ fn a_refused_vault_says_why_and_check_again_checks_it_again() {
         .seed(with_a_vault)
         .seed(missing_microphone)
         .seed(|_, fakes| {
-            fakes
-                .export_validator
-                .fail_validation(Some("Steno cannot write to the vault."));
+            fakes.export_validator.refuse_writes(NOT_WRITABLE);
         })
         .build();
     let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
@@ -1280,9 +1337,9 @@ fn a_refused_vault_says_why_and_check_again_checks_it_again() {
     assert_eq!(
         harness.snapshot(BridgeTopic::Onboarding)["vaultAccess"],
         json!({
-            "error": "Steno cannot write to the vault.",
             "name": "Work Vault",
             "state": "refused",
+            "validationMessage": NOT_WRITABLE,
         })
     );
     onboarding.onboarding_open_files_and_folders().unwrap();
@@ -1362,4 +1419,106 @@ fn no_vault_no_mac_or_not_on_page_one_checks_nothing() {
     onboarding.onboarding_import().unwrap();
     import.wait_for("the check after the step", vault_row_is("writable"));
     assert_eq!(vault_checks(&import), 1);
+}
+
+/// Nicolai's case (review M1 of the first launch): every grant in place,
+/// the models downloaded from the row after the vault was refused. Page 1
+/// does not move on by itself while the row is refused, and Check again
+/// writes to the vault again instead of leaving page 1 (or closing
+/// onboarding, with page 2 handled) without a new write.
+#[test]
+fn check_again_with_everything_else_done_writes_again_and_stays_on_page_one() {
+    let harness = handoff_without_the_diarizer()
+        .seed(with_a_vault)
+        .seed(|_, fakes| fakes.export_validator.refuse_writes(NOT_WRITABLE))
+        .build();
+    let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
+    onboarding.page_ready().unwrap();
+    harness.wait_for("the refusal", vault_row_is("refused"));
+    onboarding
+        .settings_transcription_download(steno_bridge::AssetIdParams {
+            asset_id: ModelAsset::OfflineDiarizer.as_str().to_owned(),
+        })
+        .unwrap();
+    harness.wait_for(
+        "the install",
+        onboarding_row_is("speechModels", "installed"),
+    );
+
+    harness.fakes.export_validator.fail_validation(None);
+    onboarding.onboarding_refresh().unwrap();
+    harness.wait_for("the second check", vault_row_is("writable"));
+    assert_eq!(vault_checks(&harness), 2);
+    let snapshot = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(snapshot["page"], "permissions");
+    assert_eq!(snapshot["finished"], false);
+}
+
+/// With the models in, the last permission granted while the vault row is
+/// refused leaves page 1 where it is; Continue still moves on.
+#[test]
+fn a_refused_vault_holds_page_one_until_continue() {
+    let harness = builder()
+        .seed(with_a_vault)
+        .seed(missing_microphone)
+        .seed(|_, fakes| fakes.export_validator.refuse_writes(NOT_WRITABLE))
+        .build();
+    let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
+    onboarding.page_ready().unwrap();
+    harness.wait_for("the refusal", vault_row_is("refused"));
+    onboarding
+        .onboarding_request(PermissionKindParams {
+            kind: PermissionKind::Microphone,
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["permissionsComplete"],
+        true
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["page"],
+        "permissions"
+    );
+    onboarding.onboarding_advance().unwrap();
+    assert_eq!(harness.snapshot(BridgeTopic::Onboarding)["page"], "setup");
+}
+
+/// A vault that is not there (an unmounted disk) is not a Files and
+/// Folders refusal: the row reads unusable with the destination's words,
+/// and Check again checks again.
+#[test]
+fn a_missing_vault_reads_unusable_and_check_again_checks_it_again() {
+    let missing = "The Obsidian vault at /Volumes/Disk/Work Vault does not exist.";
+    let harness = builder()
+        .seed(with_a_vault)
+        .seed(missing_microphone)
+        .seed(move |_, fakes| fakes.export_validator.fail_validation(Some(missing)))
+        .build();
+    let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
+    onboarding.page_ready().unwrap();
+    harness.wait_for("the refusal", vault_row_is("unusable"));
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["vaultAccess"]["validationMessage"],
+        missing
+    );
+    harness.fakes.export_validator.fail_validation(None);
+    onboarding.onboarding_refresh().unwrap();
+    harness.wait_for("the second check", vault_row_is("writable"));
+    assert_eq!(vault_checks(&harness), 2);
+}
+
+/// A stored vault whose path is blank is no vault: no write, no row.
+#[test]
+fn a_blank_vault_path_is_not_checked() {
+    let harness = builder()
+        .seed(|store, _| store_vault(store, "  "))
+        .seed(missing_microphone)
+        .build();
+    harness
+        .host
+        .for_window(BridgeWindow::Onboarding)
+        .page_ready()
+        .unwrap();
+    assert_eq!(vault_checks(&harness), 0);
+    assert!(harness.snapshot(BridgeTopic::Onboarding)["vaultAccess"].is_null());
 }

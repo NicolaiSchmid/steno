@@ -526,11 +526,25 @@ pub trait LlmService: Send + Sync {
 }
 
 /// Checks an Obsidian vault configuration without delivering anything
-/// (WP7's `ObsidianFolderDestination.validate()`); the error text is the
-/// destination's and is shown verbatim. The fake records every
-/// configuration it checked and fails with the text a test set.
+/// (WP7's `ObsidianFolderDestination.validate()`); the refusal's text is
+/// the destination's and is shown verbatim. The fake records every
+/// configuration it checked and refuses with what a test set.
 pub trait ExportValidator: Send + Sync {
-    fn validate(&self, settings: &ObsidianSettings) -> BoundaryResult<()>;
+    fn validate(&self, settings: &ObsidianSettings) -> Result<(), VaultRefusal>;
+}
+
+/// Why [`ExportValidator::validate`] refused a vault. Rust only: the Swift
+/// app showed the destination's error as it was.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct VaultRefusal {
+    /// The destination's words.
+    pub message: String,
+    /// The folder is there but refused the write: on the Mac, most often
+    /// because Steno is off under Files and Folders. False for a vault that
+    /// is not there or a settings mistake, which the system setting does
+    /// not fix.
+    pub not_writable: bool,
 }
 
 /// Where the handover listener stands. Swift: `ListenerState` in
