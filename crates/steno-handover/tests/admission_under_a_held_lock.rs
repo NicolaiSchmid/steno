@@ -50,6 +50,16 @@ const AFTER_THE_LOCK: Duration = Duration::from_secs(10);
 /// lock runs out, and loose enough for a loaded machine.
 const LIVE: Duration = Duration::from_secs(1);
 
+/// How long [`complete_with_the_commit_under_the_lock`] holds the lock from
+/// the admission's copy on: two busy timeouts, past the commit's one
+/// however far the host's sleeps overshoot it (SQLite's busy handler
+/// counts the sleeps it asked for, and each Windows `Sleep` ends on a
+/// 15.6 ms tick, so five seconds take about 5.6), well inside the `failed`
+/// save's tries ([`RecordingIntake::FAILED_SAVE_ATTEMPTS`] back-offs and
+/// busy timeouts after the commit), and the answer still inside the test
+/// phone's 15-second request timeout.
+const PAST_THE_COMMIT: Duration = Duration::from_secs(10);
+
 /// The admission folders the intake noted and not yet settled. With
 /// [`Noted::lock_at_the_next_copy`], the next `copying` takes the write
 /// lock from another connection, so the admission's commit meets it.
@@ -286,6 +296,45 @@ async fn complete_under(
     (world, test, phone, metadata, first.status)
 }
 
+/// A paired phone uploads, then `complete` runs with the lock taken at the
+/// admission's copy and let go [`PAST_THE_COMMIT`] later, so the commit
+/// runs out its busy timeout whatever the request, the verify and the
+/// copy took. Returns as [`complete_under`] does.
+async fn complete_with_the_commit_under_the_lock() -> (
+    World,
+    TestService,
+    Phone,
+    steno_core::RecordingMetadata,
+    u16,
+) {
+    let world = world();
+    let test = world.service(true).await;
+    let phone = Phone::pair(&test).await;
+    let bytes = seeded_bytes(2 * CHUNK_SIZE as usize, 41);
+    let metadata = phone.metadata(&bytes, CHUNK_SIZE);
+    phone.upload_all(&metadata, &bytes).await;
+
+    world.noted.lock_at_the_next_copy(&world.path);
+    let release = async {
+        world.noted.copying.notified().await;
+        tokio::time::sleep(PAST_THE_COMMIT).await;
+        world.noted.release();
+    };
+    let (first, ()) = tokio::join!(
+        bounded("the first complete", phone.complete(metadata.recording_id)),
+        bounded("the copy", release),
+    );
+    if first.status == 200 {
+        // The phone deletes its copy on a 200: the meeting must be durable.
+        let meeting_id = first.json::<wire::CompleteResponse>().meeting_id;
+        assert!(
+            world.store.meeting(meeting_id).unwrap().is_some(),
+            "200 without a meeting row"
+        );
+    }
+    (world, test, phone, metadata, first.status)
+}
+
 /// The phone's retry and a replay once the lock went: one meeting, one
 /// ledger row, one enqueue, an announce answered `complete`, and no copy
 /// on the disk that no meeting owns unless it is noted for the launch.
@@ -349,13 +398,15 @@ async fn a_complete_under_a_seven_second_hold_answers_with_a_durable_meeting() {
     the_retry_admits_once(&world, &test, &phone, &metadata).await;
 }
 
-/// A twelve-second hold: the `verifying` write and the admission's commit
-/// each run out a busy timeout, so the phone gets an error with no
-/// meeting, no ledger row and no copy; the `failed` save lands once the
-/// lock goes. The retry admits the recording exactly once.
+/// The lock held from the admission's copy until past its commit
+/// ([`complete_with_the_commit_under_the_lock`]): the commit runs out its
+/// busy timeout, so the phone gets an error with no meeting, no ledger row
+/// and no copy; the `failed` save lands once the lock goes. The retry
+/// admits the recording exactly once. The `verifying` write under the lock
+/// is the seven-second hold's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_complete_under_a_twelve_second_hold_fails_cleanly_and_its_retry_admits_once() {
-    let (world, test, phone, metadata, status) = complete_under(Duration::from_secs(12)).await;
+async fn a_complete_whose_commit_meets_the_lock_fails_cleanly_and_its_retry_admits_once() {
+    let (world, test, phone, metadata, status) = complete_with_the_commit_under_the_lock().await;
     let id = metadata.recording_id;
     assert_ne!(status, 200, "refused while the lock was held");
     assert_eq!(
