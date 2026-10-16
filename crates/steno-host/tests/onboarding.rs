@@ -623,6 +623,56 @@ fn a_held_vault_check_on_page_two_leaves_the_host_live() {
     );
 }
 
+/// Page 2: another vault chosen, then the stored one again while the
+/// first choice's check runs: the stored vault stays, as the row shows.
+/// Rust only: Swift's checks ran one at a time.
+#[test]
+fn the_stored_vault_chosen_again_on_page_two_while_a_check_runs_stays_stored() {
+    let harness = builder()
+        .seed(|store, _| {
+            let mut settings = store.settings().unwrap();
+            settings.obsidian = Some(steno_core::ObsidianSettings {
+                vault_path: "/Vaults/Stored".to_owned(),
+                people_folder: None,
+                include_audio: false,
+                task_tag: None,
+                extra: serde_json::Map::new(),
+            });
+            store.save_settings(&settings).unwrap();
+        })
+        .choose_in_turn(&["/Vaults/Other", "/Vaults/Stored"])
+        .build();
+    let (checking, release) = hold_the_first_vault_check(&harness);
+    let choosing = std::thread::spawn({
+        let host = harness.host.clone();
+        move || host.onboarding_choose_vault()
+    });
+    checking
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the vault check began");
+    harness.host.onboarding_choose_vault().unwrap();
+    release.send(()).unwrap();
+    choosing.join().unwrap().unwrap();
+
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["vault"]["path"], "/Vaults/Stored");
+    assert_eq!(
+        onboarding["setup"][1],
+        json!({"kind": "vault", "savedLine": "Saved: Stored", "state": "saved"})
+    );
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Vaults/Stored",
+        "the store holds what the row shows"
+    );
+}
+
 /// Swift: `testSavingTheVaultValidatesThroughTheDestination`, `vaultRowReadsTheObsidianModel`.
 #[test]
 fn saving_the_vault_validates_through_the_destination() {

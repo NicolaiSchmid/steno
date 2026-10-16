@@ -139,10 +139,12 @@ impl ObsidianSettingsViewModel {
         self.commit()
     }
 
-    /// Begins a save when the draft differs from what is stored. On
-    /// without a vault waits for the chooser and saves nothing.
+    /// Begins a save when the draft differs from what is stored, or when
+    /// a check runs: an edit undone while it runs saves the stored value
+    /// again, so the earlier save does not store what the form no longer
+    /// shows. On without a vault waits for the chooser and saves nothing.
     pub fn commit(&mut self) -> Option<VaultSave> {
-        if self.needs_vault() || self.draft() == self.stored {
+        if self.needs_vault() || (self.in_flight.is_none() && self.draft() == self.stored) {
             self.validation_message = None;
             return None;
         }

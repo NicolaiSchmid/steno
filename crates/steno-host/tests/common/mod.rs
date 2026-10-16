@@ -121,7 +121,8 @@ pub struct HarnessBuilder {
     fakes: FakeServices,
     confirm: bool,
     prompt: Option<Prompt>,
-    chosen: Option<PathBuf>,
+    /// The chooser's answers in turn; the last one repeats.
+    chosen: Vec<PathBuf>,
     seed: Vec<Seed>,
     change_services: Vec<ChangeServices>,
     page_ready: bool,
@@ -165,8 +166,14 @@ impl HarnessBuilder {
     }
 
     /// What the folder chooser returns; `None` cancels.
-    pub fn choose(mut self, path: Option<&str>) -> Self {
-        self.chosen = path.map(PathBuf::from);
+    pub fn choose(self, path: Option<&str>) -> Self {
+        self.choose_in_turn(path.as_slice())
+    }
+
+    /// What the folder chooser returns, one answer per call; the last one
+    /// repeats, and none cancels.
+    pub fn choose_in_turn(mut self, paths: &[&str]) -> Self {
+        self.chosen = paths.iter().map(PathBuf::from).collect();
         self
     }
 
@@ -227,7 +234,7 @@ impl HarnessBuilder {
         let prompt = self.prompt;
         let prompt_host = Arc::new(Mutex::new(None::<Host>));
         let prompt_slot = prompt_host.clone();
-        let chosen = self.chosen;
+        let chosen = Mutex::new(self.chosen.into_iter().rev().collect::<Vec<_>>());
         let mut services = self.fakes.services();
         for change in self.change_services {
             change(&mut services);
@@ -242,7 +249,14 @@ impl HarnessBuilder {
                     }
                     None => confirmed,
                 }),
-                Box::new(move |_| chosen.clone()),
+                Box::new(move |_| {
+                    let mut chosen = chosen.lock().unwrap();
+                    if chosen.len() > 1 {
+                        chosen.pop()
+                    } else {
+                        chosen.last().cloned()
+                    }
+                }),
             );
         *prompt_host.lock().unwrap() = Some(host.clone());
         let sink = Arc::new(RecordingSink::default());
@@ -268,7 +282,7 @@ impl Harness {
             fakes: FakeServices::new(now()),
             confirm: true,
             prompt: None,
-            chosen: None,
+            chosen: Vec::new(),
             seed: Vec::new(),
             change_services: Vec::new(),
             page_ready: true,
@@ -359,6 +373,25 @@ pub fn hold_vault_checks(
             .lock()
             .unwrap()
             .recv_timeout(std::time::Duration::from_secs(5));
+    }));
+    (checking, release)
+}
+
+/// Holds the fake's first vault check as [`hold_vault_checks`] holds each;
+/// the later ones answer at once, so a test can undo an edit while the
+/// first check runs.
+pub fn hold_the_first_vault_check(
+    harness: &Harness,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (began, checking) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let first = Mutex::new(Some((began, released)));
+    *harness.fakes.export_validator.on_validate.lock().unwrap() = Some(Arc::new(move |_| {
+        let Some((began, released)) = first.lock().unwrap().take() else {
+            return;
+        };
+        let _ = began.send(());
+        let _ = released.recv_timeout(std::time::Duration::from_secs(5));
     }));
     (checking, release)
 }

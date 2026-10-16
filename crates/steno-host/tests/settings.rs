@@ -2186,6 +2186,128 @@ fn only_the_latest_of_two_vault_saves_stores() {
     );
 }
 
+/// The stored export settings the undo tests start from: on, the vault
+/// at `/Vaults/Stored`, without the audio.
+const STORED_OBSIDIAN: &str = r#"{"includeAudio":false,"vaultPath":"/Vaults/Stored"}"#;
+
+/// Runs `edit` on another thread with its vault check held, runs `undo`
+/// while the check runs, then lets the check answer.
+fn undo_while_the_check_runs(
+    harness: &Harness,
+    edit: impl FnOnce(&steno_host::Host) + Send + 'static,
+    undo: impl FnOnce(&steno_host::Host),
+) {
+    let (checking, release) = hold_the_first_vault_check(harness);
+    let editing = std::thread::spawn({
+        let host = harness.host.clone();
+        move || edit(&host)
+    });
+    checking
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the vault check began");
+    undo(&harness.host);
+    release.send(()).unwrap();
+    editing.join().unwrap();
+}
+
+fn include_audio(host: &steno_host::Host, on: bool) {
+    host.settings_export_update(ExportUpdateParams {
+        people_folder: None,
+        include_audio: Some(on),
+        task_tag: None,
+    })
+    .unwrap();
+}
+
+/// Include audio turned on, then off again while the first save's vault
+/// check runs: the export stores off, as the form shows. Rust only: Swift's
+/// checks ran one at a time.
+#[test]
+fn audio_turned_off_while_its_check_runs_is_stored_off() {
+    let harness = Harness::builder()
+        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
+        .build();
+    undo_while_the_check_runs(
+        &harness,
+        |host| include_audio(host, true),
+        |host| include_audio(host, false),
+    );
+    let stored = harness.store.settings().unwrap().obsidian.unwrap();
+    let export = harness.snapshot(BridgeTopic::SettingsExport);
+    assert_eq!(export["includeAudio"], false);
+    assert!(!stored.include_audio, "the store holds what the form shows");
+    assert_eq!(export["saved"], true);
+}
+
+/// The export turned on, then off again while its vault check runs: it
+/// stays off, as the form shows. Rust only.
+#[test]
+fn the_export_turned_off_while_its_check_runs_stays_off() {
+    let harness = Harness::builder()
+        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
+        .build();
+    harness
+        .host
+        .settings_export_set_enabled(SetBoolParams { value: false })
+        .unwrap();
+    assert_eq!(harness.store.settings().unwrap().obsidian, None);
+    undo_while_the_check_runs(
+        &harness,
+        |host| {
+            host.settings_export_set_enabled(SetBoolParams { value: true })
+                .unwrap();
+        },
+        |host| {
+            host.settings_export_set_enabled(SetBoolParams { value: false })
+                .unwrap();
+        },
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsExport)["enabled"],
+        false
+    );
+    assert_eq!(
+        harness.store.settings().unwrap().obsidian,
+        None,
+        "the store holds what the form shows"
+    );
+}
+
+/// Another vault chosen, then the stored one again while the first
+/// choice's check runs: the stored vault stays, as the form shows. Rust
+/// only.
+#[test]
+fn the_stored_vault_chosen_again_while_a_check_runs_stays_stored() {
+    let harness = Harness::builder()
+        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
+        .choose_in_turn(&["/Vaults/Other", "/Vaults/Stored"])
+        .build();
+    undo_while_the_check_runs(
+        &harness,
+        |host| {
+            host.settings_export_choose_vault().unwrap();
+        },
+        |host| {
+            host.settings_export_choose_vault().unwrap();
+        },
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsExport)["vaultName"],
+        "Stored"
+    );
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Vaults/Stored",
+        "the store holds what the form shows"
+    );
+}
+
 /// The unknown fields may belong to the vault, so choosing another vault
 /// stores the new one without them.
 #[test]
