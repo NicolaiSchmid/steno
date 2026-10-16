@@ -910,7 +910,11 @@ fn pin_file_identity(
         Some(Ok(devices)) => {
             Phones::Paired(devices.iter().map(|device| device.paired_at).collect())
         }
-        _ => Phones::Unreadable,
+        Some(Err(error)) => {
+            tracing::warn!(%error, "secrets: the paired phones could not be read for the move");
+            Phones::Unreadable
+        }
+        None => Phones::Unreadable,
     };
     let decided = decision::decide(&Observations {
         caller: Caller::Move,
