@@ -1359,8 +1359,9 @@ impl Host {
     /// Back from page 2) checks then.
     fn check_vault_if_due(&self) {
         let settings = {
-            let mut inner = self.lock();
-            let settings = inner.onboarding.begin_vault_check(&self.shared.store);
+            let mut guard = self.lock();
+            let inner = &mut *guard;
+            let settings = inner.onboarding.begin_vault_check(&inner.store);
             if settings.is_some() {
                 inner.publisher.schedule(BridgeTopic::Onboarding);
             }
