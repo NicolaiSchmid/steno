@@ -74,15 +74,13 @@
 //! only producer, so a start that fails has written nothing. Data the
 //! engine itself lost because a capture thread was late (a packet flagged
 //! as a discontinuity, the first one aside) is counted, and what the
-//! packet's device position says was lost before it goes to the stream's
-//! body ([`StreamBody::write_missed`]; A18, the design in
-//! [`realtime::missed`](crate::realtime::missed)) once the positions' unit
-//! is measured ([`DevicePositions`]): filled when the measured unit
-//! explains the positions, counted unfilled otherwise and while
-//! measuring, so the note counts it either way. A stream that had
-//! discontinuities and filled none of them logs the positions' ratio at
-//! `warn` at its stop. At the stop each thread drains its stream once
-//! more, so a jump in what the engine still holds is read too.
+//! packet's clocks say was lost before it goes to the stream's body
+//! ([`StreamBody::write_missed`]; A18, the design in
+//! [`realtime::missed`](crate::realtime::missed)), filled or counted by
+//! the rule [`DevicePositions`] states. A stream that had discontinuities
+//! and filled none of them logs its clocks' ratios at `warn` at its stop.
+//! At the stop each thread drains its stream once more, so a jump in what
+//! the engine still holds is read too.
 //! The count and the seconds are logged at stop, as are the follower's
 //! underrun, slip and trim counts. All of these logs are at `info`, below
 //! the shell's default filter: set `RUST_LOG=steno_audio=info` to see them.
@@ -100,9 +98,7 @@ use steno_core::AudioLane;
 use self::com::{Apartment, CaptureClient, ComError, Enumerator, LoopbackKind, ProAudioThread};
 use super::{AudioDeviceInfo, chosen_or_default};
 use crate::SAMPLE_RATE;
-use crate::capture::split_streams::{
-    DevicePositions, PositionVerdict, StreamSizes, far_end_latencies,
-};
+use crate::capture::split_streams::{DevicePositions, StreamSizes, far_end_latencies};
 use crate::capture::start_log::{self, start_log};
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
@@ -569,7 +565,7 @@ fn run_stream(
         }
     }
     // What the engine still holds at the stop, so a thread held up just
-    // before it is read too (the stop reads no device position).
+    // before it is read too (the stop reads no clock).
     if !failed {
         let _ = drain_into(&mut client, &mut body);
     }
@@ -590,11 +586,10 @@ fn run_stream(
     drop(apartment);
 }
 
-/// The stop's line about `source`'s device positions (`DevicePositions`'s
+/// The stop's line about `source`'s clocks (`DevicePositions`'s
 /// `Display`), on `loopback` for the system stream: at `warn` when the
-/// stream had `discontinuities` and their jumps were not filled (counted
-/// at the measured ratio, or at one position a frame while measuring), at
-/// `info` otherwise.
+/// stream had `discontinuities` and their jumps were counted, not filled
+/// (no sane QPC), at `info` otherwise.
 fn log_positions(
     source: StreamSource,
     loopback: Option<LoopbackKind>,
@@ -602,10 +597,10 @@ fn log_positions(
     discontinuities: u64,
 ) {
     let on = loopback.map_or_else(String::new, |kind| format!(" on {kind:?} loopback"));
-    if discontinuities > 0 && positions.verdict() != PositionVerdict::Fills {
+    if discontinuities > 0 && !positions.fills() {
         tracing::warn!(
             "{} stream{on}: {positions}; what its {discontinuities} discontinuities lost was \
-             counted from the positions, not written as silence",
+             counted, not written as silence",
             source.as_str()
         );
     } else {
@@ -613,11 +608,11 @@ fn log_positions(
     }
 }
 
-/// Every packet the client holds into `body`, each after what was missed
-/// before it.
+/// Every packet the client holds into `body`, a flagged one after what was
+/// missed before it.
 fn drain_into(client: &mut CaptureClient, body: &mut StreamBody) -> Result<(), ComError> {
     client.drain(|packet, missed| {
-        if !missed.is_none() {
+        if let Some(missed) = missed {
             body.write_missed(&packet, missed);
         }
         body.handle(packet);

@@ -125,17 +125,17 @@ impl LaneRingBuffer {
     }
 
     /// Producer side. Records `count` zeros written in place of audio the
-    /// producer's thread missed.
+    /// producer's thread missed; the count saturates, never wraps.
     #[inline(always)]
     pub fn record_filled(&self, count: usize) {
-        self.filled.fetch_add(count, Ordering::Relaxed);
+        saturating_add(&self.filled, count);
     }
 
     /// Producer side. Records `count` samples the producer's thread missed
-    /// and did not write.
+    /// and did not write; the count saturates, never wraps.
     #[inline(always)]
     pub fn record_unfilled(&self, count: usize) {
-        self.unfilled.fetch_add(count, Ordering::Relaxed);
+        saturating_add(&self.unfilled, count);
     }
 
     /// Producer side. The write index when `count` more samples fit; `None`,
@@ -305,5 +305,20 @@ impl LaneRingBuffer {
         self.dropped.store(0, Ordering::SeqCst);
         self.filled.store(0, Ordering::SeqCst);
         self.unfilled.store(0, Ordering::SeqCst);
+    }
+}
+
+/// Adds `count` to `counter`, stopping at `usize::MAX`: lock-free, and with
+/// one producer the exchange succeeds the first time.
+#[inline(always)]
+pub(crate) fn saturating_add(counter: &AtomicUsize, count: usize) {
+    let mut now = counter.load(Ordering::Relaxed);
+    while let Err(actual) = counter.compare_exchange_weak(
+        now,
+        now.saturating_add(count),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        now = actual;
     }
 }

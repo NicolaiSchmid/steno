@@ -605,16 +605,19 @@ fn the_missed_cycle_fill_allocates_nothing() {
         54 * CYCLE,
         "50 periods and the 4 missed"
     );
+    // The master's fill pulled 4 periods with 2 queued: the follower lane
+    // padded 2 periods and re-primed on the target, and the follower's
+    // next discontinuity counts those zeros as filled, part of its jump.
     assert_eq!(
         sink.filled_samples(),
-        BTreeMap::from([(AudioLane::Mic, 4 * CYCLE), (AudioLane::System, 2 * CYCLE)]),
-        "the master's zeros on its lane, the follower's count on its own"
+        BTreeMap::from([(AudioLane::Mic, 4 * CYCLE), (AudioLane::System, 4 * CYCLE)]),
+        "the master's zeros on its lane, the follower's count and padding on its own"
     );
     assert_eq!(
         sink.unfilled_samples(),
         BTreeMap::from([
             (AudioLane::Mic, 200 * CYCLE),
-            (AudioLane::System, 150 * CYCLE)
+            (AudioLane::System, 148 * CYCLE)
         ]),
         "each thread's jump past the limit on its own lane, nothing written"
     );

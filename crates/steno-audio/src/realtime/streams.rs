@@ -55,9 +55,10 @@
 //! [`StreamBody::write_missed`] before the packet that showed it. The
 //! master fills it as a silent packet that still pulls the follower's
 //! frames for that time, and its kept packets do not slip that audio first
-//! ([`FollowerLane::for_streams_filling`]); the follower only counts it,
-//! filled and unfilled apart, since the master's pulls already pad its
-//! lane with zeros while it is out. A master's jump too long to fill drops
+//! ([`FollowerLane::for_streams_filling`]); the follower writes nothing,
+//! since the master's pulls already pad its lane with zeros while it is
+//! out, and those zeros count as its fill ([`FollowerLane::take_missed`]).
+//! A master's jump too long to fill drops
 //! the follower's audio for that time with it
 //! ([`FollowerLane::skip_unfilled`]), and the lanes keep their lag. Three
 //! shapes stay, each counted, none lost silently:
@@ -67,7 +68,10 @@
 //!   jump and the follower's count the same time, and the session takes
 //!   the lane that lost most, so it counts once too; a follower out for
 //!   less than the fill limit inside a master's longer outage counts its
-//!   part on top (an overcount, never a loss).
+//!   part on top (an overcount, never a loss). The follower's padding
+//!   counts up to the engine's buffer above what the engine dropped (the
+//!   packets it kept land late and slip), an overcount of up to 100 ms per
+//!   outage.
 //! - When the master's thread resumes first after such an outage, the
 //!   follower's kept packets land late, as after the follower's own
 //!   outage, until the queue slips back to the target within two slip
@@ -89,7 +93,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::io_proc::{SliceView, deliver_slices};
 use super::missed::{MISSED_FILL_LIMIT, Missed};
-use super::ring::LaneRingBuffer;
+use super::ring::{LaneRingBuffer, saturating_add};
 use super::sink::LaneFrameSink;
 use crate::SAMPLE_RATE;
 use crate::capture::layout::LaneSource;
@@ -123,6 +127,12 @@ pub struct FollowerLane {
     /// yet handed to the sink's counts ([`Self::take_missed`]).
     missed_fill: AtomicUsize,
     missed_unfilled: AtomicUsize,
+    /// The follower's thread reported a discontinuity not yet handed on.
+    discontinuity: AtomicBool,
+    /// Zeros padded since the lane last primed (none before it first
+    /// primed), and those of the run before the last re-prime.
+    run: AtomicUsize,
+    last_run: AtomicUsize,
 }
 
 impl FollowerLane {
@@ -157,6 +167,9 @@ impl FollowerLane {
             reported_overflow: AtomicUsize::new(0),
             missed_fill: AtomicUsize::new(0),
             missed_unfilled: AtomicUsize::new(0),
+            discontinuity: AtomicBool::new(false),
+            run: AtomicUsize::new(0),
+            last_run: AtomicUsize::new(0),
         }
     }
 
@@ -283,28 +296,57 @@ impl FollowerLane {
         }
     }
 
-    /// Producer (follower thread). Counts what the follower's thread
-    /// missed, the fill and the unfilled frames apart, for
+    /// Producer (follower thread), at each packet flagged as a
+    /// discontinuity: what the follower's clocks read was missed before it
+    /// (`missed`, nothing when they read nothing), for
     /// [`Self::take_missed`]. It stages nothing: while the follower is out
     /// the master's pulls pad its lane with zeros, which keeps the lanes
-    /// aligned, so the filled frames are already silence in the sink. A
-    /// master out too (a stopped process) counts its own unfilled jump for
-    /// the same time, and the session takes the lane that lost most, so
-    /// that time counts once.
+    /// aligned, so that padding is the fill. A master out too (a stopped
+    /// process) counts its own unfilled jump for the same time, and the
+    /// session takes the lane that lost most, so that time counts once.
     #[inline(always)]
     pub fn record_missed(&self, missed: Missed) {
-        self.missed_fill.fetch_add(missed.fill, Ordering::Relaxed);
-        self.missed_unfilled
-            .fetch_add(missed.unfilled, Ordering::Relaxed);
+        saturating_add(&self.missed_fill, missed.fill);
+        saturating_add(&self.missed_unfilled, missed.unfilled);
+        self.discontinuity.store(true, Ordering::Release);
     }
 
-    /// Consumer (master thread). What [`Self::record_missed`] counted since
-    /// the last call, for the sink's counts of the follower's lane.
+    /// Consumer (master thread). What the follower lost since the last
+    /// call, for the sink's counts of the follower's lane. After a
+    /// discontinuity, once the lane primed again, the zeros padded before
+    /// that re-prime, less the target the re-prime waits for (delay, not
+    /// loss), count as filled: the loss is the larger of that and what
+    /// [`Self::record_missed`] counted, so it counts once, and whatever
+    /// the follower's clocks read, positions that never move included. A
+    /// drift underrun (no discontinuity) stays in
+    /// [`Self::underrun_frames`]; one right before a discontinuity whose
+    /// own outage padded nothing counts with it, an overcount of one
+    /// underrun.
     #[inline(always)]
     pub fn take_missed(&self) -> Missed {
-        Missed {
+        let discontinuity = self.discontinuity.load(Ordering::Acquire);
+        if discontinuity && !self.primed.load(Ordering::Relaxed) {
+            // The follower is back but the lane has not primed on its
+            // audio yet: its padding is still running.
+            return Missed::default();
+        }
+        let counted = Missed {
             fill: self.missed_fill.swap(0, Ordering::Relaxed),
             unfilled: self.missed_unfilled.swap(0, Ordering::Relaxed),
+        };
+        if !discontinuity {
+            return counted;
+        }
+        self.discontinuity.store(false, Ordering::Relaxed);
+        let padded = self
+            .last_run
+            .swap(0, Ordering::Relaxed)
+            .saturating_sub(self.target);
+        let lost = counted.fill.saturating_add(counted.unfilled).max(padded);
+        let fill = counted.fill.max(padded).min(lost);
+        Missed {
+            fill,
+            unfilled: lost - fill,
         }
     }
 
@@ -363,10 +405,13 @@ impl FollowerLane {
                 // counts at least one frame: these zeros are its re-prime.
                 if self.underrun.load(Ordering::Relaxed) > 0 {
                     self.underrun.fetch_add(wanted, Ordering::Relaxed);
+                    self.run.fetch_add(wanted, Ordering::Relaxed);
                 }
                 return lost;
             }
             self.primed.store(true, Ordering::Relaxed);
+            self.last_run
+                .store(self.run.swap(0, Ordering::Relaxed), Ordering::Relaxed);
             self.restart_window();
         }
         if available >= wanted {
@@ -378,6 +423,7 @@ impl FollowerLane {
             tail.fill(0.0);
             self.underrun
                 .fetch_add(wanted - available, Ordering::Relaxed);
+            self.run.fetch_add(wanted - available, Ordering::Relaxed);
             self.primed.store(false, Ordering::Relaxed);
         }
         lost
@@ -598,7 +644,8 @@ impl StreamBody {
         }
     }
 
-    /// What the thread missed before `next`, its next packet:
+    /// What the thread missed before `next`, its next packet, called for
+    /// every packet flagged as a discontinuity, `missed` none included:
     /// [`PacketRouter::write_missed`] on the master,
     /// [`FollowerLane::record_missed`] on the follower (see the module doc).
     /// Real-time safe.

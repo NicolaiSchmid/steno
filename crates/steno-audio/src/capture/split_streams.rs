@@ -20,7 +20,7 @@ use steno_core::AudioLane;
 use super::configuration::CaptureError;
 use super::layout::StreamLayout;
 use crate::SAMPLE_RATE;
-use crate::realtime::{CycleClock, FollowerLane, Missed};
+use crate::realtime::{FollowerLane, MISSED_FILL_LIMIT, Missed, Ratio};
 
 /// One of the two capture streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -129,77 +129,158 @@ pub fn frames_from_hundred_nanoseconds(duration: i64, sample_rate: f64) -> usize
     (duration as f64 * sample_rate / 10_000_000.0).round() as usize
 }
 
-/// How many delivered frames [`DevicePositions`] measures the device
-/// positions over before it decides whether to trust them: two seconds of
-/// the stream's 48 kHz frames.
-pub const POSITION_CALIBRATION_FRAMES: u64 = 2 * SAMPLE_RATE as u64;
+/// How many delivered frames of clean packets [`DevicePositions`] measures
+/// a stream's QPC over before it fills by it: two seconds of the stream's
+/// 48 kHz frames.
+pub const QPC_CALIBRATION_FRAMES: u64 = 2 * SAMPLE_RATE as u64;
 
-/// What [`DevicePositions`] decided about a stream's device positions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PositionVerdict {
-    /// Fewer than [`POSITION_CALIBRATION_FRAMES`] delivered: a
-    /// discontinuity's jump is read at one position a frame and counted as
-    /// [`Missed::unfilled`], never written.
-    Measuring,
-    /// The positions advance by one per delivered frame, or by the engine's
-    /// rate against 48 kHz, within 1 %: a discontinuity's jump is filled
-    /// and counted.
-    Fills,
-    /// Neither, or the engine's rate is unknown: a discontinuity's jump is
-    /// read at the ratio measured and counted as [`Missed::unfilled`],
-    /// never written, so the note counts it. A unit the measurement got
-    /// wrong overstates the note at worst; no wrong silence goes in.
-    CountsOnly,
+/// The most any one reading of [`DevicePositions`] counts: an hour of
+/// 48 kHz frames. A reading past it on a stream that kept delivering is a
+/// garbage position or QPC; a real one (a computer that slept) is also wall
+/// time the master lacks, which the recorder's note counts anyway.
+pub const MOST_READ_FRAMES: u64 = 3_600 * SAMPLE_RATE as u64;
+
+/// The QPC's 100 ns units in the stream's 48 kHz frames.
+const QPC: Ratio = Ratio {
+    frames: SAMPLE_RATE as u64,
+    ticks: 10_000_000,
+};
+
+/// The longest jump [`DevicePositions`] fills, in 48 kHz frames
+/// ([`MISSED_FILL_LIMIT`]).
+const FILL_LIMIT: usize = SAMPLE_RATE as usize * MISSED_FILL_LIMIT.as_secs() as usize;
+
+/// One packet as `IAudioCaptureClient::GetBuffer` hands it over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Packet {
+    /// The packet's 48 kHz frames.
+    pub frames: usize,
+    /// The device position of its first frame, in a unit Microsoft leaves
+    /// open.
+    pub position: u64,
+    /// The performance counter at its first frame, in 100 ns units; 0 when
+    /// the engine gave none.
+    pub qpc: u64,
+    /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`, the stream's first packet
+    /// aside: the engine lost audio before it.
+    pub discontinuity: bool,
+    /// `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`: the time the position was
+    /// taken at, the QPC, is not to be trusted.
+    pub timestamp_error: bool,
 }
 
-/// The device positions of one WASAPI stream (`GetBuffer`'s), read for the
-/// audio its thread missed (A18, the design in
-/// [`realtime::missed`](crate::realtime::missed)). Microsoft's
-/// documentation leaves their unit open under `AUTOCONVERTPCM`: they may
-/// count the 48 kHz frames the stream asked for or the engine's frames at
-/// the shared-mode mix format's rate (`engine_rate`; `None` when the client
-/// gives no mix format, as process loopback may). Read in the wrong unit,
-/// a jump on a 16 kHz hands-free headset is written three times over, and
-/// above 48 kHz a jump is missed. So the positions are measured first: over
-/// the first [`POSITION_CALIBRATION_FRAMES`] of clean packets (no
-/// discontinuity, a valid position, an advance at most half a packet past
-/// what either unit explains), how far they advance against the
-/// frames delivered. Within 1 % of one a frame, or of the engine's rate
-/// against 48 kHz, the jumps are read in that unit with a [`CycleClock`]
-/// and filled. Otherwise, or with no mix format, a jump is read at the
-/// measured ratio, and while measuring at one position a frame, and
-/// counted, never filled ([`PositionVerdict`]), so no discontinuity goes
-/// uncounted. The sums run on to the stop, which logs them. Real-time
-/// safe: integer arithmetic on plain fields.
+/// One clock read at every packet: its last reading, and how far it
+/// advanced over clean pairs of packets against the frames delivered
+/// across them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Counter {
+    last: Option<u64>,
+    advanced: u64,
+    delivered: u64,
+}
+
+impl Counter {
+    /// How far `now` is past the last reading; `None` without one, and for
+    /// one behind it (a step back wraps past half the range).
+    fn advance(&self, now: u64) -> Option<u64> {
+        let advance = now.wrapping_sub(self.last?);
+        (advance <= u64::MAX / 2).then_some(advance)
+    }
+
+    /// A clean pair: the clock advanced `advance` over `frames` delivered.
+    fn pair(&mut self, advance: u64, frames: usize) {
+        self.advanced = self.advanced.saturating_add(advance);
+        self.delivered = self.delivered.saturating_add(frames as u64);
+    }
+
+    /// The frames delivered per tick so far; `None` before the clock moved.
+    /// The ticks are counted one short: a position read to the whole tick
+    /// at each end puts the sums up to one tick off, so a ratio measured
+    /// over a few packets reads a loss over, never under.
+    fn measured(&self) -> Option<Ratio> {
+        (self.advanced > 0).then_some(Ratio {
+            frames: self.delivered,
+            ticks: self.advanced.saturating_sub(1).max(1),
+        })
+    }
+}
+
+/// Whether `read` is within `percent` % of `frames`.
+fn within(read: u64, frames: u64, percent: u64) -> bool {
+    u128::from(read.abs_diff(frames)) * 100 <= u128::from(frames) * u128::from(percent)
+}
+
+/// What a WASAPI stream's thread missed (A18, the design in
+/// [`realtime::missed`](crate::realtime::missed)), read from the clocks
+/// `GetBuffer` gives with each packet ([`Packet`]). This is the one place
+/// the rule is stated; the backend, the plans and the gate link here.
+///
+/// Two clocks come with a packet. The device position counts in a unit
+/// Microsoft leaves open under `AUTOCONVERTPCM` (the 48 kHz frames the
+/// stream asked for, or the engine's at the mix format's rate, `None` when
+/// the client gives no mix format, as process loopback may), and on CI's
+/// process loopback it never moves. The QPC counts 100 ns whatever the
+/// device. So:
+///
+/// - **Filled only on a sane QPC.** The QPC is measured over the clean
+///   pairs of packets (no discontinuity, no timestamp error on either, an
+///   advance at most half a packet past the frames between them). Once
+///   [`QPC_CALIBRATION_FRAMES`] are measured within 2 % of real time, a
+///   flagged packet's QPC past the last packet's end is the loss: up to
+///   [`MISSED_FILL_LIMIT`] filled, past it unfilled ([`Missed::of_jump`]).
+/// - **Counted otherwise.** Without a sane QPC (none, one off by more than
+///   2 %, still measuring, or a timestamp error on this packet or the last),
+///   a flagged packet counts the largest of its readings past the last
+///   packet's end, unfilled: the device position at one a frame, at the mix
+///   format's rate against 48 kHz and at the ratio measured so far, and the
+///   QPC while the last clean pair's matched its frames within 2 %. A
+///   reading in the right unit is the loss, so the largest is the loss or
+///   more: an overcount in the note, never wrong silence. Each reading is
+///   capped at [`MOST_READ_FRAMES`].
+/// - **What no reading sees.** Positions that never move with no sane QPC
+///   read nothing; a position behind the last packet's or a unit that
+///   neither 48 kHz nor the mix format explains, before its first clean
+///   pair, reads too little. On the microphone (the master) the recorder's
+///   note counts that loss as wall time the recording lacks, past the
+///   clocks' drift allowance (0.1 %); on the system stream (the follower)
+///   the zeros the master pads its lane with count it
+///   ([`FollowerLane::record_missed`]).
+///
+/// The device position's own readings stay in the count for one case: a
+/// microphone stream without a sane QPC whose losses add up to less than
+/// that drift allowance (3.6 s in an hour), which only they count. The
+/// sums run on to the stop, which logs them. Real-time safe: integer
+/// arithmetic on plain fields.
 ///
 /// ```
-/// use steno_audio::capture::split_streams::{DevicePositions, PositionVerdict};
+/// use steno_audio::capture::split_streams::{DevicePositions, Packet};
 ///
-/// // 10 ms packets of 48 kHz frames on a 44.1 kHz engine whose positions
-/// // count 441 a packet: two seconds measured, then a packet flagged as a
-/// // discontinuity half a second on.
-/// let mut positions = DevicePositions::new(Some(44_100));
-/// let mut position = 0;
+/// // 10 ms packets with a QPC: two seconds measured, then a packet flagged
+/// // as a discontinuity half a second on.
+/// let mut positions = DevicePositions::new(Some(48_000));
+/// let mut packet = Packet { frames: 480, qpc: 1_000_000_000, ..Packet::default() };
 /// for _ in 0..=200 {
-///     assert!(positions.packet(Some(position), 480, false).is_none());
-///     position += 441;
+///     assert!(positions.packet(packet).is_none());
+///     packet.position += 480;
+///     packet.qpc += 100_000;
 /// }
-/// assert_eq!(positions.verdict(), PositionVerdict::Fills);
-/// assert_eq!(positions.packet(Some(position + 22_050), 480, true).fill, 24_000);
+/// assert!(positions.fills());
+/// packet.position += 24_000;
+/// packet.qpc += 5_000_000;
+/// packet.discontinuity = true;
+/// assert_eq!(positions.packet(packet).fill, 24_000);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DevicePositions {
     engine_rate: Option<u32>,
-    verdict: PositionVerdict,
-    /// Reads the jumps once the verdict is [`PositionVerdict::Fills`].
-    clock: CycleClock,
-    /// The last packet's position and frames; `None` before the first and
-    /// after a position the engine flagged invalid.
-    last: Option<(u64, usize)>,
-    /// How far the positions advanced across clean packets, and the frames
-    /// delivered across them.
-    advanced: u64,
-    delivered: u64,
+    positions: Counter,
+    qpc: Counter,
+    /// The last clean pair's QPC advance (one inside the bound) matched its
+    /// frames within 2 %.
+    qpc_matched: bool,
+    /// The last packet's frames and whether it had a timestamp error.
+    last_frames: usize,
+    last_timestamp_error: bool,
 }
 
 impl DevicePositions {
@@ -209,105 +290,112 @@ impl DevicePositions {
         Self {
             // A mix format at 0 Hz names no unit.
             engine_rate: engine_rate.filter(|rate| *rate > 0),
-            verdict: PositionVerdict::Measuring,
-            clock: CycleClock::new(SAMPLE_RATE),
-            last: None,
-            advanced: 0,
-            delivered: 0,
+            positions: Counter::default(),
+            qpc: Counter::default(),
+            qpc_matched: false,
+            last_frames: 0,
+            last_timestamp_error: false,
         }
     }
 
-    /// One packet of `frames` at `position` (`None` when the engine flagged
-    /// it as invalid, `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`), flagged as a
-    /// discontinuity or not: the frames missed before it, read only on a
-    /// discontinuity. Filled once the positions are trusted, unfilled
-    /// otherwise ([`PositionVerdict`]).
-    pub fn packet(&mut self, position: Option<u64>, frames: usize, discontinuity: bool) -> Missed {
-        let Some(position) = position else {
-            self.last = None;
-            self.clock.reset();
-            return Missed::default();
-        };
-        let previous = self.last.replace((position, frames));
-        if let Some((last, last_frames)) = previous
-            && !discontinuity
-        {
-            // A position behind the last one wraps past any bound.
-            let advanced = position.wrapping_sub(last);
-            if advanced <= self.most_advance(last_frames) {
-                self.advanced = self.advanced.saturating_add(advanced);
-                self.delivered = self.delivered.saturating_add(last_frames as u64);
+    /// One packet: the frames missed before it, read only on a
+    /// discontinuity (see the type's doc).
+    pub fn packet(&mut self, packet: Packet) -> Missed {
+        let last_frames = std::mem::replace(&mut self.last_frames, packet.frames);
+        let position = self.positions.advance(packet.position);
+        let qpc_now = (!packet.timestamp_error && packet.qpc != 0).then_some(packet.qpc);
+        let qpc = qpc_now.and_then(|now| self.qpc.advance(now));
+        let missed = if packet.discontinuity {
+            self.count(position, qpc, last_frames)
+        } else {
+            if let Some(advance) = position
+                && !packet.timestamp_error
+                && !self.last_timestamp_error
+                && advance <= self.most_advance(last_frames)
+            {
+                self.positions.pair(advance, last_frames);
             }
-        }
-        if self.verdict == PositionVerdict::Measuring
-            && self.delivered >= POSITION_CALIBRATION_FRAMES
-        {
-            self.decide();
-        }
-        match self.verdict {
-            PositionVerdict::Fills => {
-                let missed = self.clock.advance(position, frames);
-                if discontinuity {
-                    missed
-                } else {
-                    Missed::default()
+            if let Some(advance) = qpc {
+                let read = QPC.read(advance);
+                if read <= last_frames as u64 + last_frames as u64 / 2 {
+                    self.qpc_matched = within(read, last_frames as u64, 2);
+                    self.qpc.pair(advance, last_frames);
                 }
             }
-            _ if discontinuity => self.unfilled_since(previous, position),
-            _ => Missed::default(),
-        }
+            Missed::default()
+        };
+        self.positions.last = Some(packet.position);
+        self.qpc.last = qpc_now;
+        self.last_timestamp_error = packet.timestamp_error;
+        missed
     }
 
-    /// While measuring or counting only: how far a flagged packet at
-    /// `position` passed the end of the `last` packet, read at one position
-    /// a frame while measuring, at the ratio measured so far once counting
-    /// only. Counted, never filled; nothing for half a packet or less, as
-    /// [`CycleClock::advance`] rules, and nothing without a last packet or
-    /// for a position behind it.
-    fn unfilled_since(&self, last: Option<(u64, usize)>, position: u64) -> Missed {
-        let Some((last, last_frames)) = last else {
-            return Missed::default();
+    /// A flagged packet's loss: past where the last packet of `last_frames`
+    /// ended, by its device position's advance `position` and its QPC's
+    /// `qpc` (see the type's doc).
+    fn count(&self, position: Option<u64>, qpc: Option<u64>, last_frames: usize) -> Missed {
+        let gap = |read: u64| {
+            read.saturating_sub(last_frames as u64)
+                .min(MOST_READ_FRAMES)
         };
-        let advance = position.wrapping_sub(last);
-        if advance > u64::MAX / 2 {
-            return Missed::default();
+        if self.fills()
+            && let Some(advance) = qpc
+        {
+            return Missed::of_jump(gap(QPC.read(advance)), last_frames, FILL_LIMIT);
         }
-        let (frames, ticks) = if self.verdict == PositionVerdict::CountsOnly && self.advanced > 0 {
-            (u128::from(self.delivered), u128::from(self.advanced))
-        } else {
-            (1, 1)
-        };
-        // `ticks` is never 0 here; a 0 would read nothing, not panic.
-        let read = (u128::from(advance) * frames + ticks / 2)
-            .checked_div(ticks)
-            .unwrap_or(0);
-        let gap = read.saturating_sub(last_frames as u128);
-        if last_frames == 0 || gap <= (last_frames / 2) as u128 {
-            return Missed::default();
-        }
-        Missed {
-            fill: 0,
-            unfilled: usize::try_from(gap).unwrap_or(usize::MAX),
-        }
+        let mix = self.engine_rate.map(|rate| Ratio {
+            frames: SAMPLE_RATE as u64,
+            ticks: u64::from(rate),
+        });
+        let qpc = qpc.filter(|_| self.qpc_matched && self.qpc_sane() != Some(false));
+        let readings = [
+            qpc.map(|advance| QPC.read(advance)),
+            position.map(|advance| Ratio::ONE.read(advance)),
+            position.zip(mix).map(|(advance, mix)| mix.read(advance)),
+            position
+                .zip(self.positions.measured())
+                .map(|(advance, measured)| measured.read(advance)),
+        ];
+        let most = readings.into_iter().flatten().map(gap).max().unwrap_or(0);
+        Missed::of_jump(most, last_frames, 0)
     }
 
     /// The most a clean packet of `frames` may advance the positions and
     /// still enter the sums: half a packet more than either unit explains,
-    /// `(max(1, engine rate / 48 kHz) + 0.5) x frames`. A larger advance on
-    /// a packet not flagged (endpoint loopback delivers nothing while
-    /// nothing plays, and may not flag the packet after that) or one behind
-    /// the last would skew the ratio, so it is left out.
+    /// `(max(1, engine rate / 48 kHz) + 0.5) x frames`, and once the
+    /// positions moved, at most 1.5 times what the ratio measured so far
+    /// explains. A larger advance on a packet not flagged (endpoint loopback
+    /// delivers nothing while nothing plays, and may not flag the packet
+    /// after that) would skew the ratio, so it is left out.
     fn most_advance(&self, frames: usize) -> u64 {
-        let per_frame = u128::from(self.engine_rate.unwrap_or(0).max(SAMPLE_RATE as u32));
-        let most = (2 * per_frame + u128::from(SAMPLE_RATE as u32)) * frames as u128
-            / (2 * u128::from(SAMPLE_RATE as u32));
-        u64::try_from(most).unwrap_or(u64::MAX)
+        let per_frame = u64::from(self.engine_rate.unwrap_or(0).max(SAMPLE_RATE as u32));
+        let by_rate = Ratio {
+            frames: 2 * per_frame + SAMPLE_RATE as u64,
+            ticks: 2 * SAMPLE_RATE as u64,
+        }
+        .read(frames as u64);
+        let by_measure = self.positions.measured().map_or(u64::MAX, |measured| {
+            Ratio {
+                frames: 3 * measured.ticks,
+                ticks: 2 * measured.frames,
+            }
+            .read(frames as u64)
+            .saturating_add(1)
+        });
+        by_rate.min(by_measure)
     }
 
-    /// Whether the jumps are filled.
+    /// Whether a jump is filled: the QPC is sane (see the type's doc).
     #[must_use]
-    pub fn verdict(&self) -> PositionVerdict {
-        self.verdict
+    pub fn fills(&self) -> bool {
+        self.qpc_sane() == Some(true)
+    }
+
+    /// Whether the QPC measured within 2 % of real time; `None` before
+    /// [`QPC_CALIBRATION_FRAMES`] are measured.
+    fn qpc_sane(&self) -> Option<bool> {
+        (self.qpc.delivered >= QPC_CALIBRATION_FRAMES)
+            .then(|| within(QPC.read(self.qpc.advanced), self.qpc.delivered, 2))
     }
 
     /// The rate the client's mix format names, if it gave one.
@@ -320,46 +408,34 @@ impl DevicePositions {
     /// packets so far; `None` before two of them.
     #[must_use]
     pub fn ratio(&self) -> Option<f64> {
-        (self.delivered > 0).then(|| self.advanced as f64 / self.delivered as f64)
+        (self.positions.delivered > 0)
+            .then(|| self.positions.advanced as f64 / self.positions.delivered as f64)
     }
 
-    /// Fills when the sums are within 1 % of one position a frame, or of
-    /// the engine's rate against 48 kHz, read in that unit from here on;
-    /// else counts only.
-    fn decide(&mut self) {
-        let within = |measured: u128, expected: u128| measured.abs_diff(expected) * 100 <= expected;
-        let (advanced, delivered) = (u128::from(self.advanced), u128::from(self.delivered));
-        let scale = match self.engine_rate {
-            Some(_) if within(advanced, delivered) => Some((1, 1)),
-            Some(rate) if within(advanced * 48_000, delivered * u128::from(rate)) => {
-                Some((SAMPLE_RATE as u64, u64::from(rate)))
-            }
-            _ => None,
-        };
-        self.verdict = match scale {
-            Some((frames, ticks)) => {
-                self.clock.rescale(frames, ticks);
-                self.clock.reset();
-                PositionVerdict::Fills
-            }
-            None => PositionVerdict::CountsOnly,
-        };
+    /// How far the QPC advanced, in 48 kHz frames, per delivered frame
+    /// across the clean packets so far; `None` before two of them.
+    #[must_use]
+    pub fn qpc_ratio(&self) -> Option<f64> {
+        (self.qpc.delivered > 0)
+            .then(|| QPC.read(self.qpc.advanced) as f64 / self.qpc.delivered as f64)
     }
 }
 
-/// The stop's account of the positions: how far they advanced against the
-/// frames delivered, the engine's rate, and the verdict.
+/// The stop's account of the clocks: how far the positions and the QPC
+/// advanced against the frames delivered, the engine's rate, and whether
+/// jumps were filled. A position ratio of 0.0000 is positions that never
+/// moved.
 ///
 /// ```
-/// use steno_audio::capture::split_streams::DevicePositions;
+/// use steno_audio::capture::split_streams::{DevicePositions, Packet};
 ///
 /// let mut positions = DevicePositions::new(None);
-/// positions.packet(Some(0), 480, false);
-/// positions.packet(Some(160), 480, false);
+/// positions.packet(Packet { frames: 480, ..Packet::default() });
+/// positions.packet(Packet { frames: 480, position: 160, ..Packet::default() });
 /// assert_eq!(
 ///     positions.to_string(),
 ///     "device positions advanced 160 over 480 frames delivered (0.3333 a frame, \
-///      no mix format), still measuring"
+///      no mix format), QPC no reading, jumps counted, not filled"
 /// );
 /// ```
 impl std::fmt::Display for DevicePositions {
@@ -367,7 +443,7 @@ impl std::fmt::Display for DevicePositions {
         write!(
             f,
             "device positions advanced {} over {} frames delivered (",
-            self.advanced, self.delivered
+            self.positions.advanced, self.positions.delivered
         )?;
         match self.ratio() {
             Some(ratio) => write!(f, "{ratio:.4} a frame, ")?,
@@ -377,10 +453,19 @@ impl std::fmt::Display for DevicePositions {
             Some(rate) => write!(f, "engine at {rate} Hz), ")?,
             None => write!(f, "no mix format), ")?,
         }
-        f.write_str(match self.verdict {
-            PositionVerdict::Measuring => "still measuring",
-            PositionVerdict::Fills => "jumps filled",
-            PositionVerdict::CountsOnly => "jumps counted, not filled",
+        match self.qpc_ratio() {
+            Some(ratio) => write!(
+                f,
+                "QPC {} frames over {} ({ratio:.4} a frame), ",
+                QPC.read(self.qpc.advanced),
+                self.qpc.delivered
+            )?,
+            None => write!(f, "QPC no reading, ")?,
+        }
+        f.write_str(if self.fills() {
+            "jumps filled"
+        } else {
+            "jumps counted, not filled"
         })
     }
 }

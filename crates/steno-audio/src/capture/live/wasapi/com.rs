@@ -88,7 +88,9 @@ use windows_core::implement;
 
 use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
-use crate::capture::split_streams::{BUFFER_DURATION, DevicePositions, StreamSizes, stream_sizes};
+use crate::capture::split_streams::{
+    BUFFER_DURATION, DevicePositions, Packet, StreamSizes, stream_sizes,
+};
 use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
 use crate::realtime::{Missed, SliceView};
 
@@ -509,9 +511,9 @@ pub struct CaptureClient {
     /// No packet drained yet: loopback streams commonly flag their first
     /// packet as a discontinuity, which is not a late thread.
     first_packet: bool,
-    /// The device positions, measured and read for what the engine lost.
+    /// The packets' clocks, measured and read for what the engine lost.
     positions: DevicePositions,
-    /// Frames the discontinuities lost, as the device positions tell them,
+    /// Frames the discontinuities lost, as the packets' clocks tell them,
     /// filled or not (handed to the body).
     missed_frames: usize,
 }
@@ -647,14 +649,14 @@ impl CaptureClient {
         self.discontinuities
     }
 
-    /// Frames those discontinuities lost, as far as the device positions
+    /// Frames those discontinuities lost, as far as the packets' clocks
     /// tell (see [`Self::drain`]).
     #[must_use]
     pub fn missed_frames(&self) -> usize {
         self.missed_frames
     }
 
-    /// The device positions so far, for the stop's log.
+    /// The packets' clocks so far, for the stop's log.
     #[must_use]
     pub fn positions(&self) -> &DevicePositions {
         &self.positions
@@ -685,17 +687,18 @@ impl CaptureClient {
         let _ = unsafe { WaitForSingleObject(event.0, milliseconds) };
     }
 
-    /// Hands every queued packet to `handle`, then returns, with the frames
-    /// the engine lost right before it: on a packet flagged
+    /// Hands every queued packet to `handle`, then returns, with what the
+    /// engine lost right before it on a packet flagged
     /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` (the first one aside, see
-    /// `first_packet`), how far its device position passed where the
-    /// delivered audio ends, filled once the positions are measured and
-    /// their unit explained, counted unfilled otherwise
-    /// ([`DevicePositions`]); nothing for a position the engine flags as
-    /// invalid (`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`). The real-time part: no
-    /// allocation and no lock here on success (the `windows` error values
-    /// are built only on failure); `handle` must keep it so.
-    pub fn drain(&mut self, mut handle: impl FnMut(SliceView<'_>, Missed)) -> Result<(), ComError> {
+    /// `first_packet`): `Some`, read from its device position and QPC by
+    /// [`DevicePositions`] (the rule is stated there), and `None` on any
+    /// other packet. The real-time part: no allocation and no lock here on
+    /// success (the `windows` error values are built only on failure);
+    /// `handle` must keep it so.
+    pub fn drain(
+        &mut self,
+        mut handle: impl FnMut(SliceView<'_>, Option<Missed>),
+    ) -> Result<(), ComError> {
         loop {
             // SAFETY: plain call on the started capture service.
             let next = check(
@@ -709,16 +712,16 @@ impl CaptureClient {
             let mut frames: u32 = 0;
             let mut flags: u32 = 0;
             let mut position: u64 = 0;
+            let mut qpc: u64 = 0;
             check(
-                // SAFETY: the four out-pointers are live locals; no QPC
-                // position is asked for.
+                // SAFETY: the five out-pointers are live locals.
                 unsafe {
                     self.capture.GetBuffer(
                         &raw mut data,
                         &raw mut frames,
                         &raw mut flags,
                         Some(&raw mut position),
-                        None,
+                        Some(&raw mut qpc),
                     )
                 },
                 "IAudioCaptureClient::GetBuffer",
@@ -732,10 +735,13 @@ impl CaptureClient {
             }
             self.first_packet = false;
             let count = frames as usize;
-            let valid = flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 == 0;
-            let missed = self
-                .positions
-                .packet(valid.then_some(position), count, discontinuity);
+            let missed = self.positions.packet(Packet {
+                frames: count,
+                position,
+                qpc,
+                discontinuity,
+                timestamp_error: flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0,
+            });
             self.missed_frames = self
                 .missed_frames
                 .saturating_add(missed.fill)
@@ -764,7 +770,7 @@ impl CaptureClient {
                     channels: self.channels,
                     samples,
                 },
-                missed,
+                discontinuity.then_some(missed),
             );
             check(
                 // SAFETY: releases exactly the packet `GetBuffer` lent; the

@@ -7,9 +7,10 @@
 //!
 //! Each backend's callback says where its first frame sits on the device's
 //! or the graph's clock: PipeWire's `pw_time` ticks, the IOProc's input
-//! sample time on macOS, WASAPI's device position on a packet flagged as a
-//! discontinuity, once its unit is measured
-//! ([`DevicePositions`](crate::capture::split_streams::DevicePositions)).
+//! sample time on macOS, and on WASAPI a packet flagged as a discontinuity,
+//! read from its QPC and device position by the rule
+//! [`DevicePositions`](crate::capture::split_streams::DevicePositions)
+//! states.
 //! A capture thread the scheduler held up misses cycles: the daemon, the
 //! HAL or the engine runs on, the audio of those cycles is gone, and the
 //! next callback's position sits past where the audio delivered so far
@@ -59,9 +60,8 @@
 //! PipeWire compares `CLOCK_MONOTONIC` with the last cycle's `pw_time`,
 //! macOS reads `AudioDeviceGetCurrentTime`. The stop writes what it finds
 //! once the callbacks have ended, while the session's writer is still open.
-//! WASAPI reads no position at the stop: one last drain hands over what the
-//! engine still holds, and the clock reads those packets' positions as
-//! before. A stop for a rebuild reads nothing: the session's gap covers that
+//! WASAPI reads no clock at the stop: one last drain hands over what the
+//! engine still holds, and its flagged packets are read as before. A stop for a rebuild reads nothing: the session's gap covers that
 //! time.
 //!
 //! # The bound
@@ -103,6 +103,78 @@ impl Missed {
     pub fn is_none(&self) -> bool {
         self.fill == 0 && self.unfilled == 0
     }
+
+    /// A jump of `gap` frames past where a callback of `last_frames` ended:
+    /// nothing for half a callback or less (a resampler's rounding; cycles
+    /// are missed whole) or after a callback without frames, else filled
+    /// up to `limit` frames and unfilled past it. The one rule every
+    /// backend reads its clock by.
+    ///
+    /// ```
+    /// use steno_audio::realtime::Missed;
+    ///
+    /// assert!(Missed::of_jump(240, 480, 48_000).is_none());
+    /// assert_eq!(Missed::of_jump(960, 480, 48_000).fill, 960);
+    /// assert_eq!(Missed::of_jump(48_001, 480, 48_000).unfilled, 48_001);
+    /// ```
+    #[must_use]
+    #[inline(always)]
+    pub fn of_jump(gap: u64, last_frames: usize, limit: usize) -> Self {
+        if last_frames == 0 || gap <= last_frames as u64 / 2 {
+            return Self::default();
+        }
+        // At most the limit, a `usize`; past it, as many as a `usize` holds.
+        let frames = usize::try_from(gap).unwrap_or(usize::MAX);
+        if gap <= limit as u64 {
+            Self {
+                fill: frames,
+                unfilled: 0,
+            }
+        } else {
+            Self {
+                fill: 0,
+                unfilled: frames,
+            }
+        }
+    }
+}
+
+/// How one clock's ticks count in another's frames: `frames` frames per
+/// `ticks` ticks (the graph's rate against the stream's 48 kHz, a device
+/// position's unit, the QPC's 100 ns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ratio {
+    /// Frames per `ticks` ticks.
+    pub frames: u64,
+    /// Ticks per `frames` frames.
+    pub ticks: u64,
+}
+
+impl Ratio {
+    /// One tick a frame.
+    pub const ONE: Self = Self {
+        frames: 1,
+        ticks: 1,
+    };
+
+    /// `ticks` in frames, to the nearest frame; 0 for a ratio of no ticks,
+    /// so no reading divides by zero on the audio thread.
+    ///
+    /// ```
+    /// use steno_audio::realtime::Ratio;
+    ///
+    /// let graph = Ratio { frames: 48_000, ticks: 44_100 };
+    /// assert_eq!(graph.read(441), 480);
+    /// assert_eq!(Ratio { frames: 1, ticks: 0 }.read(441), 0);
+    /// ```
+    #[must_use]
+    #[inline(always)]
+    pub fn read(self, ticks: u64) -> u64 {
+        let frames = (u128::from(ticks) * u128::from(self.frames) + u128::from(self.ticks / 2))
+            .checked_div(u128::from(self.ticks))
+            .unwrap_or(0);
+        u64::try_from(frames).unwrap_or(u64::MAX)
+    }
 }
 
 /// Where the audio a capture delivered ends on its clock, and how that
@@ -110,9 +182,8 @@ impl Missed {
 /// by the thread whose callbacks it follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CycleClock {
-    /// Stream frames per `ticks` clock ticks.
-    frames: u64,
-    ticks: u64,
+    /// How the clock's ticks count in stream frames.
+    scale: Ratio,
     /// The most frames [`Self::advance`] reports to fill.
     limit: usize,
     /// The first callback's position since the last [`Self::reset`], from
@@ -127,7 +198,7 @@ pub struct CycleClock {
 
 impl CycleClock {
     /// A clock whose ticks are the stream's frames (the IOProc's sample
-    /// time, WASAPI's device position), at `sample_rate` frames a second,
+    /// time), at `sample_rate` frames a second,
     /// which sets the limit ([`MISSED_FILL_LIMIT`]).
     #[must_use]
     pub fn new(sample_rate: f64) -> Self {
@@ -139,8 +210,7 @@ impl CycleClock {
             0
         };
         Self {
-            frames: 1,
-            ticks: 1,
+            scale: Ratio::ONE,
             limit,
             origin: None,
             end: 0,
@@ -153,10 +223,11 @@ impl CycleClock {
     /// that differs from the one before resets the clock, so a graph that
     /// changed its rate reads as no jump. A zero in either is ignored.
     pub fn rescale(&mut self, frames: u64, ticks: u64) {
-        if frames == 0 || ticks == 0 || (frames, ticks) == (self.frames, self.ticks) {
+        let scale = Ratio { frames, ticks };
+        if frames == 0 || ticks == 0 || scale == self.scale {
             return;
         }
-        (self.frames, self.ticks) = (frames, ticks);
+        self.scale = scale;
         self.reset();
     }
 
@@ -238,41 +309,14 @@ impl CycleClock {
     #[inline(always)]
     fn at(&self, position: u64) -> Option<u64> {
         let since = position.wrapping_sub(self.origin?);
-        (since <= u64::MAX / 2).then(|| self.frames_in(since))
+        (since <= u64::MAX / 2).then(|| self.scale.read(since))
     }
 
-    /// A jump of `gap` frames after a callback of `last_frames`: nothing
-    /// for half a callback or less, or after a callback without frames;
-    /// else filled up to the limit, unfilled past it.
+    /// A jump of `gap` frames after a callback of `last_frames`
+    /// ([`Missed::of_jump`] at the clock's limit).
     #[inline(always)]
     fn jump(&self, gap: u64, last_frames: usize) -> Missed {
-        if last_frames == 0 || gap <= last_frames as u64 / 2 {
-            return Missed::default();
-        }
-        // At most the limit, a `usize`; past it, as many as a `usize` holds.
-        let frames = usize::try_from(gap).unwrap_or(usize::MAX);
-        if gap <= self.limit as u64 {
-            Missed {
-                fill: frames,
-                unfilled: 0,
-            }
-        } else {
-            Missed {
-                fill: 0,
-                unfilled: frames,
-            }
-        }
-    }
-
-    /// `ticks` clock ticks in stream frames, to the nearest frame.
-    #[inline(always)]
-    fn frames_in(&self, ticks: u64) -> u64 {
-        // `rescale` keeps `ticks` above 0; a 0 would read nothing, not
-        // panic on the audio thread.
-        let frames = (u128::from(ticks) * u128::from(self.frames) + u128::from(self.ticks / 2))
-            .checked_div(u128::from(self.ticks))
-            .unwrap_or(0);
-        u64::try_from(frames).unwrap_or(u64::MAX)
+        Missed::of_jump(gap, last_frames, self.limit)
     }
 }
 
