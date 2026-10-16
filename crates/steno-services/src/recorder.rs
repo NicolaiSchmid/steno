@@ -2344,7 +2344,7 @@ mod tests {
     use crate::pipeline::{BuiltEngine, BuiltPipeline, MakeDependencies};
     use crate::testing::{
         HANG_GUARD, HeldOutages, LIVE, PATIENCE, eventually, eventually_within, fake_dependencies,
-        on_own_thread, synthetic_capture, temp_store,
+        found_within, on_own_thread, synthetic_capture, temp_store,
     };
     use steno_audio::testing::synthetic::SyntheticOptions;
     use steno_audio::writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
@@ -4381,18 +4381,13 @@ mod tests {
             .expect("the stop reached the host");
         // The hook records its call once `recorder_changed` returned, after
         // the sink got the snapshot.
-        let deadline = Instant::now() + PATIENCE;
-        let noticed = loop {
-            if let Some(call) = hosted
+        let noticed = found_within(PATIENCE, "the stop's notice", || {
+            hosted
                 .hooks_since(since)
                 .into_iter()
                 .find(|call| call.state != RecordingState::Recording)
-            {
-                break call.began;
-            }
-            assert!(Instant::now() < deadline, "the stop's notice");
-            std::thread::sleep(Duration::from_millis(5));
-        };
+                .map(|call| call.began)
+        });
         let after_notice = shown.saturating_duration_since(noticed);
         assert!(
             after_notice < LIVE,

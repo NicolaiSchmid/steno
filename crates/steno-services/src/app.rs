@@ -4379,14 +4379,9 @@ mod tests {
 
         held.release();
         let _ = saving.join().unwrap();
-        let deadline = std::time::Instant::now() + HANG_GUARD;
-        while sink.since(BridgeTopic::SettingsPhone, since).is_empty() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the phone section was published"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        crate::testing::found_within(HANG_GUARD, "the phone section was published", || {
+            sink.since(BridgeTopic::SettingsPhone, since).pop()
+        });
         runtime.shutdown_background();
     }
 
@@ -4399,18 +4394,12 @@ mod tests {
         notify_on_the_blocking_pool(runtime.handle(), "the_panicking_test_notification", || {
             panic!("at /a/private/folder")
         });
-        let deadline = std::time::Instant::now() + HANG_GUARD;
-        let line = loop {
-            if let Some(line) = log
-                .text()
+        let line = crate::testing::found_within(HANG_GUARD, "the panic was logged", || {
+            log.text()
                 .lines()
                 .find(|line| line.contains("the_panicking_test_notification"))
-            {
-                break line.to_owned();
-            }
-            assert!(std::time::Instant::now() < deadline, "the panic was logged");
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        };
+                .map(str::to_owned)
+        });
         assert!(line.contains("ERROR"), "{line}");
         assert!(line.contains("a host notification panicked"), "{line}");
         assert!(!log.text().contains("/a/private/folder"), "{line}");

@@ -10,13 +10,13 @@
 //! worker would show too. Rust only.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use steno_bridge::{BridgeHost as _, BridgeTopic, CaptureMode, MeetingIdParams, RecordingState};
 use steno_host::services::Recorder as _;
 
 use crate::testing::{
-    END_TO_END, HANG_GUARD, HeldOutages, HeldStore, LIVE, SyntheticRecorder, hosted,
+    END_TO_END, HANG_GUARD, HeldOutages, HeldStore, LIVE, SyntheticRecorder, found_within, hosted,
     synthetic_recorder, synthetic_recorder_over,
 };
 
@@ -132,15 +132,10 @@ async fn a_device_notice_reaches_the_host_while_a_write_waits() {
             .cloned()
             .collect::<Vec<_>>()
     };
-    let deadline = since + HANG_GUARD;
-    let notices = loop {
+    let notices = found_within(HANG_GUARD, "the capture resumed", || {
         let notices = on_the_notices(&hosted.hooks_since(since));
-        if notices.iter().any(|call| call.armed) {
-            break notices;
-        }
-        assert!(Instant::now() < deadline, "the capture resumed");
-        std::thread::sleep(Duration::from_millis(5));
-    };
+        notices.iter().any(|call| call.armed).then_some(notices)
+    });
     let released = held.release_after_hold();
 
     let first = &notices[0];

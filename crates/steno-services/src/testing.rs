@@ -621,6 +621,19 @@ pub async fn eventually_within(patience: Duration, what: &str, mut done: impl Fn
     .expect(what);
 }
 
+/// What `found` returns once it returns something, polled on this thread,
+/// failing the test with `what` after `patience`.
+pub fn found_within<T>(patience: Duration, what: &str, mut found: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + patience;
+    loop {
+        if let Some(value) = found() {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Calls `f` on a thread of its own, as the host calls its services,
 /// failing the test with `what` unless it returns within `patience`. Not
 /// a `spawn_blocking` task: the runtime waits for those when it shuts
