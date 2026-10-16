@@ -1578,8 +1578,8 @@ Each lands before `0.11.0-rc.1`.
   `recording` snapshot it pokes, froze for as long as a sync took: 1.0 to
   1.3 s on a hosted runner, seconds on a slow or external disk. The audio
   was safe (the relay's 20 s of headroom); only the UI froze.
-  - The fix (Nicolai's ruling, option a): the levels go out from a thread
-    of their own, `steno_audio::realtime::LevelPublisher`, which the
+  - The fix (Nicolai, 2026-10-17): the levels go out from a thread of
+    their own, `steno_audio::capture::LevelPublisher`, which the
     session starts and stops with the recording. Each publish into
     `LevelSlot` wakes it (one more lock-free signal on the processing
     thread, none on the audio callback), and it wakes at least every
@@ -1592,7 +1592,7 @@ Each lands before `0.11.0-rc.1`.
   - Gates: `tests/levels.rs` holds the writer's first sync through
     `testing::HeldSyncs` (behind `test-support`) and requires a level, the
     live tone's, at the consumer at least every 200 ms (the 100 ms cadence
-    and 100 ms late) for a second of the hold, then a recording with
+    plus 100 ms of lateness) for a second of the hold, then a recording with
     nothing dropped; publishing from the writer again fails it with no
     level in the whole hold. P40's check 1 passes on all three platforms.
   - Owner: audio. Lands before `0.11.0-rc.1` (D9).
