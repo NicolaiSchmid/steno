@@ -1496,11 +1496,10 @@ impl ProcessingPipeline {
             return Err(ReprocessError::AudioGone(meeting_id));
         }
         asset.expires_at = None;
-        Ok(
-            self.enqueue_claimed(meeting_id, &asset, claim, |store, now, asset| {
-                store.save_meeting_with_asset(&queued(&meeting, now), asset)
-            })?,
-        )
+        self.enqueue_claimed(meeting_id, &asset, claim, |store, now, asset| {
+            store.save_meeting_with_asset(&queued(&meeting, now), asset)
+        })
+        .map_err(Into::into)
     }
 
     /// Claims `asset_id` for a background run of `meeting_id` in the
