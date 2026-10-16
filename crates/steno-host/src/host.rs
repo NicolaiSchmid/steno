@@ -360,7 +360,7 @@ impl Drop for Shared {
     fn drop(&mut self) {
         // The feed's thread holds a `Weak`; woken, it finds no host and
         // ends.
-        self.feed.poke();
+        self.feed.wake();
     }
 }
 
@@ -442,7 +442,8 @@ impl std::fmt::Debug for Host {
 }
 
 /// Every topic, in the order `page.ready` publishes them: the main
-/// window's, then the Settings sections, then onboarding.
+/// window's, then the Settings sections, then onboarding. `recording`
+/// comes from its feed instead, on the feed's thread.
 pub const TOPICS: [BridgeTopic; 12] = [
     BridgeTopic::App,
     BridgeTopic::Recording,

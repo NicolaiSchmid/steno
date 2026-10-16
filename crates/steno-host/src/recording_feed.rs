@@ -4,35 +4,37 @@
 //! reload, a command or a publish under the view-model lock (decision 3 of
 //! `.plans/2026-10-12-store-off-the-workers.md`).
 //!
-//! - **A poke** unparks the thread and returns: the recorder's hook
-//!   ([`Host::recorder_changed`](crate::Host::recorder_changed)), on the
-//!   levels thread and on the stop's thread alike, the start command, and
-//!   `page.ready`.
+//! - **A poke** sets "poked", unparks the thread and returns: the
+//!   recorder's hook ([`Host::recorder_changed`](crate::Host::recorder_changed)),
+//!   on the levels thread and on the stop's thread alike, and the start
+//!   command.
 //! - **Each pass** swaps "resend" and "poked" to false, then reads
 //!   `status()` (the recorder's status lock, released before anything
-//!   else), and sends nothing until the page is ready. A wake with neither
-//!   flag set and no snapshot held back (the unpark of a poke an earlier
-//!   pass already answered) reads and sends nothing. A snapshot goes out at once when
-//!   "resend" was set or when anything but its levels differs from the
-//!   last one sent; one that moved only the levels waits out the rest of
-//!   [`RECORDING_INTERVAL`] and goes out when it ends. Only a snapshot that
-//!   went out stamps the interval and becomes the last one sent. The sink
-//!   is taken from its slot, then emitted to with the slot released.
+//!   else), and sends nothing until the page is ready. A snapshot goes out
+//!   at once when "resend" was set or when anything but its levels differs
+//!   from the last one sent; after a poke, one that moved only the levels,
+//!   or did not move, waits out the rest of [`RECORDING_INTERVAL`] and goes
+//!   out when it ends, so every hook still gets its snapshot. Only a
+//!   snapshot that went out stamps the interval and becomes the last one
+//!   sent. A wake with neither flag set and no snapshot held back (the
+//!   unpark of a poke an earlier pass already answered) reads and sends
+//!   nothing. The sink is taken from its slot, then emitted to with the
+//!   slot released.
 //! - **A move** of the recorder's state or meeting, before `page.ready`
 //!   too, asks the reload owner for a pass
 //!   ([`Host::request_reload`](crate::Host::request_reload)): a start
 //!   wrote the meeting `recording`, a stop queued it, and the list must
 //!   follow, since the web app tells a live row from one left `recording`
 //!   by the recorder's state.
-//! - **`page.ready`** sets "page ready" and "resend", then pokes, and
-//!   never touches the last snapshot sent: every `page.ready`, a reloaded
-//!   page's or another window's, gets the current `recording` once, from
-//!   an idle recorder too.
+//! - **`page.ready`** sets "page ready" and "resend", then unparks the
+//!   thread, and never touches the last snapshot sent: every `page.ready`,
+//!   a reloaded page's or another window's, gets the current `recording`
+//!   once, from an idle recorder too.
 //!
 //! Only the feed's thread touches the last snapshot sent and when it went,
 //! so they need no lock; other threads reach it through the three flags
-//! and the unpark. The thread holds a `Weak` on the host and ends once no host
-//! is left. Each topic is a full state, so the order between `recording`
+//! and the unpark. The thread holds a `Weak` on the host and ends once no
+//! host is left. Each topic is a full state, so the order between `recording`
 //! and a publish's batch decides nothing. Swift: `TopicPublisher`'s
 //! `recordingInterval`, on the main actor.
 
@@ -103,20 +105,26 @@ impl RecordingFeed {
         Ok(())
     }
 
-    /// Wakes the feed's thread for a pass; takes no lock.
+    /// The recorder's status may have moved: wakes the feed's thread for
+    /// a pass that sends it; takes no lock.
     pub(crate) fn poke(&self) {
         self.poked.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.get() {
-            thread.unpark();
-        }
+        self.wake();
     }
 
-    /// `page.ready`: the next pass sends the current snapshot, changed or
-    /// not.
+    /// `page.ready`: the next pass sends the current snapshot at once,
+    /// changed or not.
     pub(crate) fn page_did_become_ready(&self) {
         self.page_ready.store(true, Ordering::SeqCst);
         self.resend.store(true, Ordering::SeqCst);
-        self.poke();
+        self.wake();
+    }
+
+    /// Wakes the feed's thread; at the host's drop, so it ends.
+    pub(crate) fn wake(&self) {
+        if let Some(thread) = self.thread.get() {
+            thread.unpark();
+        }
     }
 }
 
