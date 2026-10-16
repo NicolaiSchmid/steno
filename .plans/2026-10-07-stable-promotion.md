@@ -1601,8 +1601,11 @@ Each lands before `0.11.0-rc.1`.
     directory, and removed when the read returns; the pipeline writes and
     removes it off the async workers. The app's orderly quit removes the
     open ones and those of a meeting Process again released, and marks no
-    more; a run that finishes after the quit began still reads through, and
-    the exit signal's quit runs on the blocking pool. The launch reads
+    more; a run that finishes after the quit began still reads through, a
+    Process again that races the quit removes its released marks itself,
+    and the exit signal's quit runs on the blocking pool while the signal
+    loop goes on receiving, so a second SIGTERM still ends the app at
+    once. The launch reads
     the folder beside A15's warm-up mark (`SupportFiles`), and the breaker
     counts: a meeting's first read that ended with the app costs nothing
     (logged at `warn`; the meeting is processed again, its reads marked as
@@ -1656,8 +1659,11 @@ Each lands before `0.11.0-rc.1`.
     than the file, a CAF description giving packets larger than the file or
     uncompressed frames above 4 KiB, a WAV chunk before the audio larger
     than the file (a `LIST` with its `INFO` values included; what follows
-    the audio is never read), and a WAV `fmt ` that symphonia would read
-    short. A CAF `data` left open (-1) is walked on into its audio, as
+    the audio is never read), a WAV `LIST` of odd size before the audio
+    (symphonia pads it twice and reads every later header out of step,
+    where an `INFO` value may declare 4 GiB; the crate's own WAV reader,
+    which `steno process` checks a file with, refuses it too), and a WAV
+    `fmt ` that symphonia would read short. A CAF `data` left open (-1) is walked on into its audio, as
     symphonia reads on for chunks there. A final top-level box that runs
     past the file is let through unless symphonia parses it (`ftyp`, `moov`,
     `sidx`, `meta`, `moof`): the walk refuses nothing symphonia 0.5.5 reads
@@ -1676,8 +1682,13 @@ Each lands before `0.11.0-rc.1`.
     variant symphonia reads still reads (the bare MP3 fixture is refused
     plainly), and a fuzz that sets the size and count fields of the MP4, CAF
     and WAV fixtures' boxes, chunks, tables and packet sizes to boundary and
-    random values runs in a child held to 8 GiB of address space and aborts
-    nothing; CI runs 400 cases on every platform. The breaker stays, for
+    random values, and in one case of eight plants the header symphonia
+    would misread after an odd WAV `LIST`, aborts nothing; CI runs 400
+    cases on every platform. On Linux the measured cases and the fuzz run
+    in a child held to 2 GiB of address space, so an allocation above about
+    2 GB fails loudly: healthy files peak far below it (138 MB for the
+    12-minute Swift-era recording), and a decode's five-hour reservation
+    (1.15 GB) keeps the limit above 1.2 GiB. The breaker stays, for
     anything the walk does not model.
   - Owner: audio. It blocks stable (D3).
 - **A20 The level meter never freezes behind a sync of the files.** Found
