@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
   <title id="title">Steno</title>
-  <desc id="desc">Meeting notes without the bot. On-device, for macOS, Windows and Linux, MIT licensed.</desc>
+  <desc id="desc">Meeting notes without the bot. Records and transcribes on-device; for macOS, Windows and Linux; MIT licensed.</desc>
   <defs>
     <radialGradient id="glow" cx="0.18" cy="0.35" r="0.7">
       <stop offset="0" stop-color="#ffffff" stop-opacity="0.05"/>

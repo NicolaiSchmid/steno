@@ -26,16 +26,17 @@ export type Platform = (typeof platformIds)[number];
 /**
  * Each desktop, and each Linux target, is listed once its gate in
  * `.plans/2026-10-07-stable-promotion.md` has passed on a real machine (D6,
- * "The Linux gates"). Flipping its flag is the whole change here; the desktop
- * badge in the root README changes in the same commit. A Rollback that takes
- * a bad release out of "latest" sets the flag back to false.
+ * "The Linux gates"). Flipping its flag is the whole change here; when that
+ * adds a desktop, the root README's desktop badge changes in the same commit.
+ * A Rollback that takes `v0.11.0` out of "latest" sets every flag back to
+ * false ("A bad release" in `apps/desktop/README.md` says why).
  */
 const macReleased = true;
 const windowsReleased = false;
 
 interface LinuxTarget {
 	name: string;
-	/** How it is installed, for the note: "GNOME (.deb · AppImage)". */
+	/** How it is installed, shown in the note as "GNOME (.deb · AppImage)". */
 	via: string;
 	released: boolean;
 	install: string;
