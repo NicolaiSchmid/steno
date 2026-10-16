@@ -134,7 +134,8 @@ pub fn current_pipeline(dependencies: PipelineDependencies) -> Arc<CurrentPipeli
     current_pipeline_of(built(dependencies))
 }
 
-/// [`current_pipeline`] for a build of its own.
+/// [`current_pipeline`] over the build `first`; every reload hands back
+/// that same build.
 fn current_pipeline_of(first: BuiltPipeline) -> Arc<CurrentPipeline> {
     let make: MakeDependencies = {
         let (dependencies, engine) = (first.dependencies.clone(), first.engine.clone());

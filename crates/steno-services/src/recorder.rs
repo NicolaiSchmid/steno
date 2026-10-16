@@ -1403,7 +1403,7 @@ impl CaptureRecorder {
             // One line, and the recording goes on: processing loads the
             // models again and fails its meeting retryably if they still
             // do not load. A `CoreML` exception is caught at the model
-            // call and arrives here as its name and reason (A15).
+            // call and arrives here as its name and reason.
             if let Err(failure) = warmed {
                 tracing::warn!(%failure, "the warm-up failed; processing loads the models");
             }

@@ -293,7 +293,6 @@ pub struct GraphSecrets {
 /// not `ChatGPT`'s) there are no passes, as when no summaries are set up:
 /// the meeting completes with its raw transcript and without a summary
 /// instead of failing at it, and its summary can be run again once a key
-/// is saved.
 /// is saved. The pipeline carries the support directory's files in
 /// `support` ([`SupportFiles`]), and the retention rule is to ask.
 pub fn pipeline_dependencies(
@@ -723,8 +722,8 @@ pub fn build_with_import(
     // meeting's entry goes at launch.
     let damaged_audio = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
     damaged_audio.retain(|meeting_id| store.meeting(meeting_id).map_or(true, |m| m.is_some()));
-    // The launch check of the recordings' warm-up: a mark a warm-up left
-    // when it ended with the app turns it off ([`WarmUpMark`]).
+    // The launch check of the recordings' warm-up: a mark left over from a
+    // warm-up that ended with the app turns it off ([`WarmUpMark`]).
     let support = SupportFiles {
         damaged_audio,
         warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
@@ -1785,6 +1784,29 @@ mod tests {
         let marks = DamagedAudio::in_directory(&support);
         assert_eq!(marks.damage(kept.id), damage);
         assert!(marks.damage(deleted).is_none());
+        drop(app);
+    }
+
+    /// The build reads the warm-up mark in the support directory: a mark
+    /// left over from a warm-up that ended with the app turns the warm-up
+    /// off in the pipeline, and without one it stays on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_build_reads_the_warm_up_mark_a_crash_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let skipping = |app: &App| {
+            app.pipeline
+                .current()
+                .dependencies()
+                .warm_up_mark
+                .skipping()
+        };
+        let app = build(options_under(&support)).unwrap();
+        assert!(!skipping(&app));
+        drop(app);
+        std::fs::write(support.join(WarmUpMark::FILE_NAME), b"1\n").unwrap();
+        let app = build(options_under(&support)).unwrap();
+        assert!(skipping(&app), "the mark left over turns the warm-up off");
         drop(app);
     }
 
