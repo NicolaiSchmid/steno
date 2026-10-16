@@ -111,9 +111,9 @@ impl WarmUpMark {
     /// recordings warm up again (the mark of a warm-up running now stays
     /// until it returns).
     pub fn loaded(&self) {
+        // No warm-up runs while skipping, so a mark then is the one left over.
         let mut state = self.state();
-        let was_skipping = std::mem::take(&mut state.skipping);
-        if state.running == 0 && was_skipping {
+        if std::mem::take(&mut state.skipping) {
             self.remove();
         }
     }

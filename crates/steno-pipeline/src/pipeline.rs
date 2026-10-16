@@ -2059,19 +2059,18 @@ impl ProcessingPipeline {
     /// A speech engine that loaded clears a [`WarmUpMark`] left over, so
     /// recordings warm up again. Rust only: Swift fails the meeting.
     async fn warm_up_for_job(&self, meeting_id: Uuid) -> Result<()> {
-        let warmed = self.warm_up().await;
-        if warmed
-            .as_ref()
-            .err()
-            .is_none_or(|failure| failure.stage == PipelineStage::Diarize)
-        {
-            self.inner.dependencies.warm_up_mark.loaded();
-        }
-        match warmed {
+        let mark = &self.inner.dependencies.warm_up_mark;
+        match self.warm_up().await {
+            Ok(()) => {
+                mark.loaded();
+                Ok(())
+            }
+            // The speech engine loaded before the diarizer failed.
             Err(failure) if failure.stage == PipelineStage::Diarize => {
+                mark.loaded();
                 self.carry_on_after(&failure, meeting_id)
             }
-            result => result,
+            failed => failed,
         }
     }
 
