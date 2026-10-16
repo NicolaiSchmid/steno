@@ -137,16 +137,18 @@ pub const POSITION_CALIBRATION_FRAMES: u64 = 2 * SAMPLE_RATE as u64;
 /// What [`DevicePositions`] decided about a stream's device positions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionVerdict {
-    /// Fewer than [`POSITION_CALIBRATION_FRAMES`] delivered: nothing is
-    /// filled yet.
+    /// Fewer than [`POSITION_CALIBRATION_FRAMES`] delivered: a
+    /// discontinuity's jump is read at one position a frame and counted as
+    /// [`Missed::unfilled`], never written.
     Measuring,
     /// The positions advance by one per delivered frame, or by the engine's
     /// rate against 48 kHz, within 1 %: a discontinuity's jump is filled
     /// and counted.
     Fills,
-    /// Neither, or the engine's rate is unknown: a discontinuity is counted
-    /// and its loss shows only in the recording's length against wall time
-    /// (the recorder's note reads that too).
+    /// Neither, or the engine's rate is unknown: a discontinuity's jump is
+    /// read at the ratio measured and counted as [`Missed::unfilled`],
+    /// never written, so the note counts it. A unit the measurement got
+    /// wrong overstates the note at worst; no wrong silence goes in.
     CountsOnly,
 }
 
@@ -160,12 +162,15 @@ pub enum PositionVerdict {
 /// a jump on a 16 kHz hands-free headset is written three times over, and
 /// above 48 kHz a jump is missed. So the positions are measured first: over
 /// the first [`POSITION_CALIBRATION_FRAMES`] of clean packets (no
-/// discontinuity, a valid position), how far they advance against the
+/// discontinuity, a valid position, an advance at most half a packet past
+/// what either unit explains), how far they advance against the
 /// frames delivered. Within 1 % of one a frame, or of the engine's rate
 /// against 48 kHz, the jumps are read in that unit with a [`CycleClock`]
-/// and filled; otherwise, or with no mix format, nothing is filled
-/// ([`PositionVerdict`]). The sums run on to the stop, which logs them.
-/// Real-time safe: integer arithmetic on plain fields.
+/// and filled. Otherwise, or with no mix format, a jump is read at the
+/// measured ratio, and while measuring at one position a frame, and
+/// counted, never filled ([`PositionVerdict`]), so no discontinuity goes
+/// uncounted. The sums run on to the stop, which logs them. Real-time
+/// safe: integer arithmetic on plain fields.
 ///
 /// ```
 /// use steno_audio::capture::split_streams::{DevicePositions, PositionVerdict};
@@ -214,31 +219,31 @@ impl DevicePositions {
     /// One packet of `frames` at `position` (`None` when the engine flagged
     /// it as invalid, `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`), flagged as a
     /// discontinuity or not: the frames missed before it, read only on a
-    /// discontinuity and only once the positions are trusted.
+    /// discontinuity. Filled once the positions are trusted, unfilled
+    /// otherwise ([`PositionVerdict`]).
     pub fn packet(&mut self, position: Option<u64>, frames: usize, discontinuity: bool) -> Missed {
         let Some(position) = position else {
             self.last = None;
             self.clock.reset();
             return Missed::default();
         };
-        if let Some((last, last_frames)) = self.last.replace((position, frames))
+        let previous = self.last.replace((position, frames));
+        if let Some((last, last_frames)) = previous
             && !discontinuity
         {
-            // A position behind the last one is no advance.
+            // A position behind the last one wraps past any bound.
             let advanced = position.wrapping_sub(last);
-            if advanced <= u64::MAX / 2 {
+            if advanced <= self.most_advance(last_frames) {
                 self.advanced = self.advanced.saturating_add(advanced);
                 self.delivered = self.delivered.saturating_add(last_frames as u64);
             }
         }
+        if self.verdict == PositionVerdict::Measuring
+            && self.delivered >= POSITION_CALIBRATION_FRAMES
+        {
+            self.decide();
+        }
         match self.verdict {
-            PositionVerdict::Measuring => {
-                if self.delivered >= POSITION_CALIBRATION_FRAMES {
-                    self.decide();
-                    self.clock.advance(position, frames);
-                }
-                Missed::default()
-            }
             PositionVerdict::Fills => {
                 let missed = self.clock.advance(position, frames);
                 if discontinuity {
@@ -247,8 +252,52 @@ impl DevicePositions {
                     Missed::default()
                 }
             }
-            PositionVerdict::CountsOnly => Missed::default(),
+            _ if discontinuity => self.unfilled_since(previous, position),
+            _ => Missed::default(),
         }
+    }
+
+    /// While measuring or counting only: how far a flagged packet at
+    /// `position` passed the end of the `last` packet, read at one position
+    /// a frame while measuring, at the ratio measured so far once counting
+    /// only. Counted, never filled; nothing for half a packet or less, as
+    /// [`CycleClock::advance`] rules, and nothing without a last packet or
+    /// for a position behind it.
+    fn unfilled_since(&self, last: Option<(u64, usize)>, position: u64) -> Missed {
+        let Some((last, last_frames)) = last else {
+            return Missed::default();
+        };
+        let advance = position.wrapping_sub(last);
+        if advance > u64::MAX / 2 {
+            return Missed::default();
+        }
+        let (frames, ticks) = if self.verdict == PositionVerdict::CountsOnly && self.advanced > 0 {
+            (u128::from(self.delivered), u128::from(self.advanced))
+        } else {
+            (1, 1)
+        };
+        let read = (u128::from(advance) * frames + ticks / 2) / ticks;
+        let gap = read.saturating_sub(last_frames as u128);
+        if last_frames == 0 || gap <= (last_frames / 2) as u128 {
+            return Missed::default();
+        }
+        Missed {
+            fill: 0,
+            unfilled: usize::try_from(gap).unwrap_or(usize::MAX),
+        }
+    }
+
+    /// The most a clean packet of `frames` may advance the positions and
+    /// still enter the sums: half a packet more than either unit explains,
+    /// `(max(1, engine rate / 48 kHz) + 0.5) x frames`. A larger advance on
+    /// a packet not flagged (endpoint loopback delivers nothing while
+    /// nothing plays, and may not flag the packet after that) or one behind
+    /// the last would skew the ratio, so it is left out.
+    fn most_advance(&self, frames: usize) -> u64 {
+        let per_frame = u128::from(self.engine_rate.unwrap_or(0).max(SAMPLE_RATE as u32));
+        let most = (2 * per_frame + u128::from(SAMPLE_RATE as u32)) * frames as u128
+            / (2 * u128::from(SAMPLE_RATE as u32));
+        u64::try_from(most).unwrap_or(u64::MAX)
     }
 
     /// Whether the jumps are filled.
@@ -271,7 +320,8 @@ impl DevicePositions {
     }
 
     /// Fills when the sums are within 1 % of one position a frame, or of
-    /// the engine's rate against 48 kHz, read in that unit from here on.
+    /// the engine's rate against 48 kHz, read in that unit from here on;
+    /// else counts only.
     fn decide(&mut self) {
         let within = |measured: u128, expected: u128| measured.abs_diff(expected) * 100 <= expected;
         let (advanced, delivered) = (u128::from(self.advanced), u128::from(self.delivered));
@@ -326,7 +376,7 @@ impl std::fmt::Display for DevicePositions {
         f.write_str(match self.verdict {
             PositionVerdict::Measuring => "still measuring",
             PositionVerdict::Fills => "jumps filled",
-            PositionVerdict::CountsOnly => "jumps not filled",
+            PositionVerdict::CountsOnly => "jumps counted, not filled",
         })
     }
 }

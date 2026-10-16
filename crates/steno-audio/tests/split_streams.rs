@@ -15,6 +15,7 @@
     clippy::doc_markdown
 )]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use steno_audio::capture::split_streams::{
@@ -151,18 +152,20 @@ const CALIBRATION_PACKETS: usize = POSITION_CALIBRATION_FRAMES as usize / 480 + 
 /// WASAPI's device positions read in the unit they are measured in (A18 of
 /// `.plans/2026-10-07-stable-promotion.md`): on a 44.1 kHz engine whose
 /// positions count 441 a packet of 48 kHz frames, a jump is counted in
-/// 48 kHz frames up to the fill limit and past it; nothing is filled while
-/// they are measured, a discontinuity then (its advance left out of the
-/// sums) included.
+/// 48 kHz frames up to the fill limit and past it. A discontinuity while
+/// they are measured (its advance left out of the sums) is counted, not
+/// filled, read at one position a frame: 4 371 of the 4 800 frames lost.
 #[test]
 fn device_positions_count_at_the_engines_rate() {
     let mut positions = DevicePositions::new(Some(44_100));
     let mut position = measure(&mut positions, 0, 441, 100);
-    assert!(
-        positions
-            .packet(Some(position + 4_410), 480, true)
-            .is_none(),
-        "a discontinuity while measuring is not filled"
+    assert_eq!(
+        positions.packet(Some(position + 4_410), 480, true),
+        Missed {
+            fill: 0,
+            unfilled: 4_410 + 441 - 480
+        },
+        "a discontinuity while measuring is counted, not filled"
     );
     position = measure(
         &mut positions,
@@ -234,22 +237,30 @@ fn device_positions_in_either_unit_fill_exactly_what_was_lost() {
     }
 }
 
-/// Positions whose advance neither unit explains fill nothing: at 16 kHz
-/// or 96 kHz against a 48 kHz engine (one third and two positions a
-/// frame), an engine whose rate is unknown (process loopback with no mix
-/// format), or one off by more than 1 %. The loss then shows in the
-/// recording's length against wall time, and the stop logs the ratio at
-/// `warn`.
+/// Positions whose advance neither unit explains fill nothing, and count
+/// what was lost at the ratio measured, so the note says it: at 16 kHz
+/// against a 48 kHz engine (one third of a position a frame), an engine
+/// whose rate is unknown (process loopback with no mix format), or one off
+/// by more than 1 %. Positions at 96 kHz against a 48 kHz engine (two a
+/// frame) advance more than either unit explains on every packet, so they
+/// never enter the sums: the stream stays measuring and counts at one
+/// position a frame, about twice what was lost, which overstates the note
+/// and writes nothing.
 #[test]
-fn device_positions_no_unit_explains_fill_nothing() {
-    let counts_only = (Missed::default(), PositionVerdict::CountsOnly);
+fn device_positions_no_unit_explains_count_what_was_lost() {
+    let unfilled = |unfilled| Missed { fill: 0, unfilled };
+    let counts_only = (unfilled(24_000), PositionVerdict::CountsOnly);
     assert_eq!(half_a_second_lost(Some(48_000), 160), counts_only, "16 kHz");
-    assert_eq!(half_a_second_lost(Some(48_000), 960), counts_only, "96 kHz");
     assert_eq!(half_a_second_lost(None, 480), counts_only, "no mix format");
     assert_eq!(
         half_a_second_lost(Some(44_100), 446),
         counts_only,
         "441 + 1.1 %"
+    );
+    assert_eq!(
+        half_a_second_lost(Some(48_000), 960),
+        (unfilled(51 * 960 - 480), PositionVerdict::Measuring),
+        "96 kHz"
     );
     assert_eq!(
         half_a_second_lost(Some(44_100), 445).1,
@@ -261,7 +272,7 @@ fn device_positions_no_unit_explains_fill_nothing() {
     assert_eq!(
         positions.to_string(),
         "device positions advanced 32000 over 96000 frames delivered (0.3333 a frame, engine at \
-         48000 Hz), jumps not filled"
+         48000 Hz), jumps counted, not filled"
     );
 }
 
@@ -282,6 +293,309 @@ fn an_invalid_device_position_reports_nothing_and_starts_afresh() {
             .packet(Some(position + 9_600 + 480 + 960), 480, true)
             .fill,
         960
+    );
+}
+
+/// A flagged packet counts nothing while measuring or counting only when
+/// its position sits behind the last packet's, or less than half a packet
+/// past where that one ended (the engine's rounding, as on the other
+/// backends); a jump of more counts in full.
+#[test]
+fn a_flagged_packet_counts_only_a_jump_of_more_than_half_a_packet() {
+    for (engine_rate, packets) in [(Some(48_000), 10), (None, CALIBRATION_PACKETS)] {
+        let mut positions = DevicePositions::new(engine_rate);
+        let position = measure(&mut positions, 1_000_000, 480, packets);
+        let last = position - 480;
+        assert!(positions.packet(Some(last - 4_800), 480, true).is_none());
+        assert!(positions.packet(Some(last), 480, false).is_none());
+        assert!(positions.packet(Some(last + 480 + 240), 480, true).is_none());
+        assert_eq!(
+            positions.packet(Some(last + 2 * 480 + 240 + 241), 480, true),
+            Missed {
+                fill: 0,
+                unfilled: 241
+            },
+            "{engine_rate:?}: {:?}",
+            positions.verdict()
+        );
+    }
+}
+
+/// A clean packet whose position advanced more than either unit explains
+/// is left out of the measurement: endpoint loopback delivers nothing
+/// while nothing plays, and the packet after an idle of 25 ms or 10 s may
+/// not be flagged. Measured with it, the 25 ms alone would put the ratio
+/// 0.6 % off and the 10 s 3.5 times, and nothing would be filled; left
+/// out, the positions measure exactly one a frame and a later loss fills.
+/// A position 10 s behind the last one is left out the same way. On a
+/// 96 kHz engine whose positions count its own frames, the bound is two
+/// and a half positions a frame, so 25 ms idle is left out there too.
+#[test]
+fn an_idle_gap_or_a_step_back_does_not_skew_the_measurement() {
+    for (rate, per_packet, step) in [
+        (48_000, 480, 1_200),
+        (48_000, 480, 480_000),
+        (96_000, 960, 2_400),
+        (48_000, 480, 0u64.wrapping_sub(480_000)),
+    ] {
+        let mut positions = DevicePositions::new(Some(rate));
+        let position = measure(&mut positions, 1_000_000, per_packet, 50);
+        let position = measure(
+            &mut positions,
+            position.wrapping_add(step),
+            per_packet,
+            CALIBRATION_PACKETS,
+        );
+        let at = |verdict| (verdict, Some(per_packet as f64 / 480.0));
+        assert_eq!(
+            (positions.verdict(), positions.ratio()),
+            at(PositionVerdict::Fills),
+            "{rate} Hz, a step of {step}"
+        );
+        assert_eq!(
+            positions.packet(Some(position + 50 * per_packet), 480, true),
+            Missed {
+                fill: 24_000,
+                unfilled: 0
+            }
+        );
+    }
+}
+
+/// Positions that jitter by a few frames a packet around one a frame (480,
+/// then 470 and 490 in turn) stay in the measurement: the bound allows half
+/// a packet over either unit, so the ratio is exact and a loss fills.
+#[test]
+fn positions_that_jitter_stay_in_the_measurement() {
+    let mut positions = DevicePositions::new(Some(48_000));
+    let mut position = 0;
+    for packet in 0..CALIBRATION_PACKETS {
+        assert!(positions.packet(Some(position), 480, false).is_none());
+        position += if packet % 2 == 0 { 470 } else { 490 };
+    }
+    assert_eq!(positions.verdict(), PositionVerdict::Fills);
+    assert_eq!(positions.ratio(), Some(1.0));
+}
+
+/// Positions the engine flags as invalid leave the measurement alone: the
+/// next valid packet's advance spans the invalid one, so it is not paired
+/// with the packet before. Every other packet invalid (and half as long)
+/// for a second, then clean packets: the positions measure exactly one a
+/// frame. Paired across the invalid packets, they would measure 1.5 there.
+#[test]
+fn invalid_positions_are_left_out_of_the_measurement() {
+    let mut positions = DevicePositions::new(Some(48_000));
+    let mut position = 0;
+    for _ in 0..100 {
+        assert!(positions.packet(Some(position), 480, false).is_none());
+        assert!(positions.packet(None, 240, false).is_none());
+        position += 720;
+    }
+    assert_eq!(positions.ratio(), None, "no two valid packets in a row");
+    measure(&mut positions, position, 480, CALIBRATION_PACKETS);
+    assert_eq!(positions.verdict(), PositionVerdict::Fills);
+    assert_eq!(positions.ratio(), Some(1.0));
+}
+
+/// What [`over_positions`] saw: what the flagged packet reported and the
+/// verdict then, the sink's counts and the lanes' lengths, and the seconds the recorder's note
+/// would say are missing (the lane that missed most's zeros, plus the
+/// larger of the lane that left most unfilled and the master's shortfall
+/// to wall time beyond the drift allowance).
+#[derive(Debug)]
+struct OverPositions {
+    reported: Missed,
+    verdict: PositionVerdict,
+    filled: BTreeMap<AudioLane, usize>,
+    unfilled: BTreeMap<AudioLane, usize>,
+    mic_frames: usize,
+    system_frames: usize,
+    note: f64,
+}
+
+/// The two stream bodies of a call over 6 s of 10 ms ticks, each stream's
+/// packets read by its own [`DevicePositions`] on an engine at
+/// `engine_rate` whose positions advance `per_packet` a tick, as
+/// `run_stream` does: the follower's (system) thread out for
+/// `follower_out` ticks from tick `from`, or the master's (microphone) for
+/// `master_out`, the packet after flagged as a discontinuity.
+fn over_positions(
+    engine_rate: Option<u32>,
+    per_packet: u64,
+    from: usize,
+    follower_out: usize,
+    master_out: usize,
+) -> OverPositions {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let plan = SplitStreamPlan::new(&lanes).unwrap();
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let follower = Arc::new(FollowerLane::for_streams_filling(PERIOD, 4_800));
+    let mut master = master_body(&plan, &follower, 4_800, &sink);
+    let mut staging = StreamBody::follower(Arc::clone(&follower), 4_800);
+    let (mut mic_positions, mut system_positions) = (
+        DevicePositions::new(engine_rate),
+        DevicePositions::new(engine_rate),
+    );
+    let mic = vec![0.5f32; PERIOD];
+    let tap = vec![0.25f32; 2 * PERIOD];
+    let mut reported = (Missed::default(), PositionVerdict::Measuring);
+    let mut run = |body: &mut StreamBody,
+                   positions: &mut DevicePositions,
+                   next: SliceView<'_>,
+                   tick: usize,
+                   out: usize| {
+        if (from..from + out).contains(&tick) {
+            return;
+        }
+        let flagged = out > 0 && tick == from + out;
+        let missed = positions.packet(Some(tick as u64 * per_packet), PERIOD, flagged);
+        if flagged {
+            reported = (missed, positions.verdict());
+        }
+        if !missed.is_none() {
+            body.write_missed(&next, missed);
+        }
+        body.handle(next);
+    };
+    let ticks = 600;
+    let (mut mic_frames, mut system_frames) = (0, 0);
+    for tick in 0..ticks {
+        run(
+            &mut staging,
+            &mut system_positions,
+            packet(&tap, 2),
+            tick,
+            follower_out,
+        );
+        run(
+            &mut master,
+            &mut mic_positions,
+            packet(&mic, 1),
+            tick,
+            master_out,
+        );
+        mic_frames += drain(&sink, 0).len();
+        system_frames += drain(&sink, 1).len();
+    }
+    let (filled, unfilled) = (sink.filled_samples(), sink.unfilled_samples());
+    let most = |counts: &BTreeMap<AudioLane, usize>| {
+        counts.values().max().copied().unwrap_or(0) as f64 / SAMPLE_RATE
+    };
+    let wall = (ticks * PERIOD) as f64 / SAMPLE_RATE;
+    let short = wall - mic_frames as f64 / SAMPLE_RATE - wall * 0.001;
+    OverPositions {
+        reported: reported.0,
+        verdict: reported.1,
+        note: most(&filled) + most(&unfilled).max(short),
+        filled,
+        unfilled,
+        mic_frames,
+        system_frames,
+    }
+}
+
+/// The system stream's thread out for 0.9 s or 1.5 s, on the follower,
+/// whose missed audio the master's pulls pad with zeros, so the master
+/// stays on wall time and only the count can tell. Under `Fills` the loss
+/// is filled up to the limit and unfilled past it; when no unit explains
+/// the positions (no mix format, 16 kHz positions on a 48 kHz engine) and
+/// while they are still measured (the thread out at 0.5 s), it is counted
+/// unfilled. Every time the note counts it, and the lanes keep the
+/// master's length.
+#[test]
+fn a_follower_loss_is_counted_whatever_the_positions_verdict() {
+    for (name, rate, per_packet, from) in [
+        ("fills", Some(48_000), 480, 300),
+        ("no mix format", None, 480, 300),
+        ("16 kHz positions", Some(48_000), 160, 300),
+        ("measuring", Some(48_000), 480, 50),
+    ] {
+        for out in [90, 150] {
+            let seen = over_positions(rate, per_packet, from, out, 0);
+            let lost = out * PERIOD;
+            let fills = name == "fills";
+            let expected = if fills && lost <= SAMPLE_RATE as usize {
+                Missed {
+                    fill: lost,
+                    unfilled: 0,
+                }
+            } else {
+                Missed {
+                    fill: 0,
+                    unfilled: lost,
+                }
+            };
+            assert_eq!(seen.reported, expected, "{name}, out {out}: {seen:?}");
+            assert_eq!(
+                seen.verdict,
+                match name {
+                    "fills" => PositionVerdict::Fills,
+                    "measuring" => PositionVerdict::Measuring,
+                    _ => PositionVerdict::CountsOnly,
+                },
+                "{name}"
+            );
+            let on_the_system = |frames: usize| {
+                (frames > 0)
+                    .then_some((AudioLane::System, frames))
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>()
+            };
+            assert_eq!(
+                seen.filled,
+                on_the_system(expected.fill),
+                "{name}, out {out}"
+            );
+            assert_eq!(
+                seen.unfilled,
+                on_the_system(expected.unfilled),
+                "{name}, out {out}"
+            );
+            assert_eq!(
+                (seen.mic_frames, seen.system_frames),
+                (600 * PERIOD, 600 * PERIOD)
+            );
+            assert!(
+                (seen.note - lost as f64 / SAMPLE_RATE).abs() < 1e-9,
+                "{name}, out {out}: the note says {} s",
+                seen.note
+            );
+        }
+    }
+}
+
+/// The microphone's thread out for 1.5 s while its positions are still
+/// measured (from 0.5 s): counted unfilled, so the note says it however
+/// long the recording runs (the master's shortfall alone falls inside the
+/// drift allowance from about 25 minutes on), and the system audio queued
+/// for that time is dropped, so the lanes keep one length.
+#[test]
+fn a_master_loss_while_measuring_is_counted() {
+    let seen = over_positions(Some(48_000), 480, 50, 0, 150);
+    let lost = 150 * PERIOD;
+    assert_eq!(
+        seen.reported,
+        Missed {
+            fill: 0,
+            unfilled: lost
+        }
+    );
+    assert_eq!(seen.verdict, PositionVerdict::Measuring);
+    assert!(seen.filled.is_empty(), "{seen:?}");
+    assert_eq!(seen.unfilled.get(&AudioLane::Mic), Some(&lost));
+    assert_eq!(
+        seen.mic_frames,
+        450 * PERIOD,
+        "the master falls short by it"
+    );
+    assert_eq!(
+        seen.system_frames, seen.mic_frames,
+        "the lanes keep one length"
+    );
+    assert!(
+        (seen.note - 1.5).abs() < 1e-9,
+        "the note says {} s",
+        seen.note
     );
 }
 
@@ -1158,9 +1472,7 @@ fn run_outage_in_order(follower_out: usize, master_out: usize, master_first: boo
             lags.push((position / PERIOD, now));
         }
     }
-    let of = |counts: &std::collections::BTreeMap<AudioLane, usize>, lane| {
-        counts.get(&lane).copied().unwrap_or(0)
-    };
+    let of = |counts: &BTreeMap<AudioLane, usize>, lane| counts.get(&lane).copied().unwrap_or(0);
     let (missed, unfilled) = (sink.filled_samples(), sink.unfilled_samples());
     let (mic_filled, system_filled) = (of(&missed, AudioLane::Mic), of(&missed, AudioLane::System));
     let (mic_unfilled, system_unfilled) = (
@@ -1329,7 +1641,7 @@ fn an_unfilled_jump_of_the_master_drops_the_follower_audio_of_that_time() {
     );
     assert_eq!(
         sink.unfilled_samples(),
-        std::collections::BTreeMap::from([
+        BTreeMap::from([
             (AudioLane::Mic, 100 * PERIOD),
             (AudioLane::System, 99 * PERIOD)
         ])
