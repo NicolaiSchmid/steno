@@ -267,23 +267,10 @@ mod tests {
                 .collect()
         }
 
-        /// Waits up to `patience` for the `n`th `recording` snapshot; when
-        /// it arrived and its payload.
-        fn nth_recording(
-            &self,
-            n: usize,
-            patience: Duration,
-        ) -> Option<(Instant, serde_json::Value)> {
-            let deadline = Instant::now() + patience;
-            loop {
-                if let Some(found) = self.recordings().into_iter().nth(n - 1) {
-                    return Some(found);
-                }
-                if Instant::now() >= deadline {
-                    return None;
-                }
-                thread::sleep(Duration::from_millis(1));
-            }
+        /// Waits for the `n`th `recording` snapshot, `what` ([`found`]);
+        /// when it arrived and its payload.
+        fn nth_recording(&self, n: usize, what: &str) -> (Instant, serde_json::Value) {
+            found(what, || self.recordings().into_iter().nth(n - 1))
         }
     }
 
@@ -328,9 +315,7 @@ mod tests {
         assert!(sink.recordings().is_empty(), "nothing before page.ready");
 
         host.page_ready().unwrap();
-        let (_, first) = sink
-            .nth_recording(1, PATIENCE)
-            .expect("the first snapshot after page.ready");
+        let (_, first) = sink.nth_recording(1, "the first snapshot after page.ready");
         assert_eq!(first["state"], "stopping");
         thread::sleep(2 * RECORDING_INTERVAL);
         assert_eq!(sink.recordings().len(), 1);
@@ -344,8 +329,7 @@ mod tests {
     fn the_recording_feed_runs_while_the_view_models_are_held() {
         let (host, fakes, sink) = host();
         host.page_ready().unwrap();
-        sink.nth_recording(1, PATIENCE)
-            .expect("page.ready's snapshot");
+        sink.nth_recording(1, "page.ready's snapshot");
         let held = host.hold_view_models();
         for step in 1..=5u8 {
             let mic = f64::from(step) / 10.0;
@@ -357,7 +341,7 @@ mod tests {
                 "the hook took {:?}",
                 poked.elapsed()
             );
-            let reached = found(PATIENCE, || {
+            let reached = found("the level update", || {
                 sink.recordings()
                     .into_iter()
                     .find(|(_, payload)| {
@@ -380,7 +364,7 @@ mod tests {
         });
         let poked = Instant::now();
         host.recorder_changed();
-        let reached = found(PATIENCE, || {
+        let reached = found("Stopping", || {
             sink.recordings()
                 .into_iter()
                 .find(|(_, payload)| payload["state"] == "stopping")
@@ -401,14 +385,11 @@ mod tests {
     fn a_second_page_ready_gets_the_recording_again() {
         let (host, _fakes, sink) = host();
         host.page_ready().unwrap();
-        sink.nth_recording(1, PATIENCE)
-            .expect("the first page.ready's");
+        sink.nth_recording(1, "the first page.ready's");
         thread::sleep(2 * RECORDING_INTERVAL);
         let before = sink.recordings().len();
         host.page_ready().unwrap();
-        let (_, again) = sink
-            .nth_recording(before + 1, PATIENCE)
-            .expect("the second page.ready's");
+        let (_, again) = sink.nth_recording(before + 1, "the second page.ready's");
         assert_eq!(again["state"], "idle");
         thread::sleep(2 * RECORDING_INTERVAL);
         assert_eq!(sink.recordings().len(), before + 1, "once per page.ready");
@@ -423,13 +404,12 @@ mod tests {
     #[test]
     fn a_held_level_update_stamps_no_interval() {
         let at = |mic: f64| {
-            let mut status = RecorderStatus {
+            recording_snapshot(&RecorderStatus {
                 state: RecordingState::Recording,
                 meeting_id: Some(Uuid::from_u128(1)),
+                levels: Some(LaneLevels { mic, system: None }),
                 ..RecorderStatus::idle()
-            };
-            status.levels = Some(LaneLevels { mic, system: None });
-            recording_snapshot(&status)
+            })
         };
         let start = Instant::now();
         let ms = |n: u64| start + Duration::from_millis(n);
@@ -466,16 +446,15 @@ mod tests {
         // stamped the interval, each wake would hold it again.
         let (host, fakes, sink) = host();
         host.page_ready().unwrap();
-        sink.nth_recording(1, PATIENCE)
-            .expect("page.ready's snapshot");
+        sink.nth_recording(1, "page.ready's snapshot");
         thread::sleep(2 * RECORDING_INTERVAL);
         recording_with(&fakes, 0.1);
         host.recorder_changed();
-        let (first, _) = sink.nth_recording(2, PATIENCE).expect("the first level");
+        let (first, _) = sink.nth_recording(2, "the first level");
         thread::sleep(RECORDING_INTERVAL * 3 / 5);
         recording_with(&fakes, 0.2);
         host.recorder_changed();
-        let (held, level) = sink.nth_recording(3, PATIENCE).expect("the held level");
+        let (held, level) = sink.nth_recording(3, "the held level");
         assert_eq!(level["level"]["mic"], 0.2);
         let after = held.duration_since(first);
         assert!(
@@ -503,9 +482,7 @@ mod tests {
 
         let ready = Instant::now();
         host.page_ready().unwrap();
-        let (at, recording) = sink
-            .nth_recording(1, PATIENCE)
-            .expect("recording after page.ready");
+        let (at, recording) = sink.nth_recording(1, "recording after page.ready");
         let took = at.saturating_duration_since(ready);
         assert!(
             took < LIVE,
@@ -526,14 +503,14 @@ mod tests {
         assert_eq!(list["filter"], "ready", "{list}");
     }
 
-    /// Waits up to `patience` for `probe` to find something.
-    fn found<T>(patience: Duration, probe: impl Fn() -> Option<T>) -> T {
-        let deadline = Instant::now() + patience;
+    /// Waits up to [`PATIENCE`] for `probe` to find `what`.
+    fn found<T>(what: &str, probe: impl Fn() -> Option<T>) -> T {
+        let deadline = Instant::now() + PATIENCE;
         loop {
             if let Some(found) = probe() {
                 return found;
             }
-            assert!(Instant::now() < deadline, "waited {patience:?}");
+            assert!(Instant::now() < deadline, "waited {PATIENCE:?} for {what}");
             thread::sleep(Duration::from_millis(1));
         }
     }
