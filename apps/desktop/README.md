@@ -921,13 +921,19 @@ would otherwise wait unannounced (plan `.plans/2026-10-07-stable-promotion.md`,
   iCloud Drive, or on an external disk or a network share, needs folder
   access for the new identifier. On the Mac the page runs the Obsidian
   destination's own check once: it creates a hidden, empty probe file of
-  a new name in the stored vault and removes it at once (a probe a crash
-  left behind is removed at the next check, and nothing else in the vault
-  is touched), so macOS asks while the page shows. The row says Allowed;
-  after a Don't Allow, that the folder's switch below Steno under Files &
-  Folders turns it on, with Open System Settings and Check again, which writes again before the page moves on; for a
-  vault that is not there, to choose it again. No vault, no check; off the
-  Mac nothing is checked, since no folder prompt exists there.
+  a new name in the stored vault and removes it at once, so macOS asks
+  while the page shows. A probe a crash left behind is removed at the
+  next check, and nothing else in the vault is touched. One leftover
+  that cannot be removed (another user's, in a shared folder) does not
+  refuse the vault; when the fresh probe cannot be removed either, the
+  folder refuses deletes and the vault reads as not writable, so it
+  holds two leftovers at most. The row says Allowed; when the write is
+  refused, that after a Don't Allow the folder's switch below Steno
+  under Files & Folders turns it on, and otherwise to check that the
+  folder is not read-only, with Open System Settings and Check again,
+  which writes again before the page moves on; for a vault that is not
+  there, to choose it again. No vault, no check; off the Mac nothing is
+  checked, since no folder prompt exists there.
 - **Local Network.** macOS asks once, when the listener first advertises
   itself; Settings > iPhone says where to turn it on when the phone cannot
   find the Mac.
