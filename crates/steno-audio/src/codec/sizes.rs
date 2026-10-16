@@ -47,12 +47,17 @@
 //!   as ffmpeg and Audacity write it, is never read and never refused, and
 //!   `data` may run past the file (a recording cut off, or ffmpeg's
 //!   streamed 2^32 - 1). Symphonia checks a chunk against the one holding
-//!   it before reading it (`common.rs:146`), so the `INFO` values it reads
-//!   whole (`wave/chunks.rs:538`) stay within their `LIST`, and so within
-//!   the file. A `fmt ` chunk symphonia reads fewer bytes of than it holds
-//!   (an extensible format past 40 bytes, an ADPCM, A-law or µ-law format
-//!   whose extra size disagrees) is refused too: symphonia would read the
-//!   next chunk's header out of the format, where the walk never looked;
+//!   it before reading it (`common.rs:146`), so within a `LIST` of even
+//!   size the `INFO` values it reads whole (`wave/chunks.rs:538`) stay
+//!   within the list, and so within the file. A `LIST` of odd size before
+//!   `data` is refused: symphonia pads it twice, as it finishes the list
+//!   (`common.rs:185`) and again after it (`common.rs:122`), so it reads
+//!   the next chunk's header 1 or 2 bytes past the walk's, where an `INFO`
+//!   value may declare 4 GiB; out of step, it reads no such file. A `fmt `
+//!   chunk symphonia reads fewer bytes of than it holds (an extensible
+//!   format past 40 bytes, an ADPCM, A-law or µ-law format whose extra
+//!   size disagrees) is refused too: symphonia would read the next chunk's
+//!   header out of the format, where the walk never looked;
 //! - a sample table (`stts`, `stsc`, `stsz`, `stco`, `co64`, a fragment's
 //!   `trun`) counts more entries than its box holds, or a sample (in
 //!   `stsz`, `trun`, or as a `tfhd` or `trex` default) is larger than the
@@ -549,6 +554,13 @@ impl Walk {
             let end = body + u64::from(size);
             if end > self.length {
                 return Err(past_the_file(kind, at, size));
+            }
+            // Padded twice by symphonia; see the module doc.
+            if &kind == b"LIST" && size % 2 == 1 {
+                return Err(format!(
+                    "the `LIST` chunk at byte {at} declares an odd {size} bytes, \
+                     after which symphonia reads every header out of step"
+                ));
             }
             if &kind == b"fmt " {
                 self.wav_format(body, size)?;

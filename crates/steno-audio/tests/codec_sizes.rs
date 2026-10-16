@@ -5,16 +5,17 @@
 //! first byte is refused before symphonia reads it; every fixture, and
 //! every healthy variant a writer makes that symphonia reads, still reads;
 //! and a fuzz pass that sets the size and count fields of the fixtures'
-//! boxes, chunks and tables to random and boundary values aborts nothing. On Linux the fuzz runs in a
-//! child of this binary whose address space is held to 8 GiB, a machine
-//! that cannot back the allocations the measurement found. Without the
-//! check, the first cases below abort this test binary.
+//! boxes, chunks and tables to random and boundary values aborts nothing.
+//! On Linux the cases and the fuzz run in a child of this binary whose
+//! address space is held to 2 GiB ([`ADDRESS_SPACE_KIB`]), a machine that
+//! cannot back the allocations the measurement found. Without the check,
+//! the first cases below abort this test binary.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use steno_audio::{CodecError, SymphoniaAudioCodec};
+use steno_audio::{CodecError, SymphoniaAudioCodec, WavFile};
 use steno_core::AudioLane;
 
 fn fixture(name: &str) -> PathBuf {
@@ -516,6 +517,120 @@ fn pcm_wav() -> Vec<u8> {
     )
 }
 
+/// A WAV whose odd `LIST` before `data` holds `list`, followed by the
+/// chunk the walk reads next. That chunk holds, `shift` bytes in, where
+/// symphonia reads after padding the list twice, a `LIST` of `outer`
+/// bytes with an `INAM` of `value` bytes; the bytes before `outer`'s
+/// top `shift` bytes give the walk's chunk its size, which fits.
+fn misread_wav(list: &[u8], shift: usize, outer: u32, value: u32) -> Vec<u8> {
+    assert_eq!(list.len() % 2, 1, "an odd list");
+    let mut planted = vec![b'X'; shift];
+    planted.extend_from_slice(b"LIST");
+    planted.extend_from_slice(&outer.to_le_bytes());
+    planted.extend_from_slice(b"INFOINAM");
+    planted.extend_from_slice(&value.to_le_bytes());
+    let size = u32::from_le_bytes(planted[4..8].try_into().unwrap()) as usize;
+    assert!(size < 1 << 17, "the walk's chunk is small: {size}");
+    planted.resize(8 + size + size % 2, 0);
+    let mut chunks = wav(
+        Some(u32::MAX),
+        &[
+            (b"fmt ", pcm16_format(), None),
+            (b"LIST", list.to_vec(), None),
+        ],
+    );
+    chunks.extend_from_slice(&planted);
+    chunks.extend_from_slice(&wav(None, &[(b"data", ramp16(), None)])[12..]);
+    chunks
+}
+
+/// A `fmt ` body of format `tag`, mono, 16 kHz, with `align` and `bits`,
+/// whose extra size says `extra` and which holds `held` extra bytes.
+fn coded_format(tag: u16, align: u16, bits: u16, extra: u16, held: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in [tag, 1] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    let rate = 16_000 * u32::from(bits) / 8;
+    for value in [16_000u32, rate] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [align, bits, extra] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    let mut extra = vec![0; held];
+    // IMA ADPCM: 505 samples a block.
+    if tag == 0x11 && held >= 2 {
+        extra[..2].copy_from_slice(&505u16.to_le_bytes());
+    }
+    out.extend_from_slice(&extra);
+    out
+}
+
+/// A `fmt ` case: its name, its body, and the bytes it holds and
+/// symphonia reads, `None` for one the walk lets through.
+type CodedFormat = (&'static str, Vec<u8>, Option<(usize, usize)>);
+
+/// The ADPCM, A-law and µ-law formats whose extra size disagrees with the
+/// chunk, and each sized right.
+fn coded_formats() -> Vec<CodedFormat> {
+    vec![
+        ("alaw-extra4", coded_format(6, 1, 8, 4, 0), Some((18, 22))),
+        ("mulaw-extra4", coded_format(7, 1, 8, 4, 0), Some((18, 22))),
+        ("ima-24", coded_format(0x11, 256, 4, 2, 6), Some((24, 20))),
+        (
+            "msadpcm-long",
+            coded_format(2, 256, 4, 32, 36),
+            Some((54, 50)),
+        ),
+        ("alaw-ok", coded_format(6, 1, 8, 0, 0), None),
+        ("mulaw-ok", coded_format(7, 1, 8, 0, 0), None),
+        ("ima-ok", coded_format(0x11, 256, 4, 2, 2), None),
+        ("msadpcm-ok", coded_format(2, 256, 4, 32, 32), None),
+    ]
+}
+
+/// The address space, in KiB, the measured cases and the fuzz run in on
+/// Linux: 2 GiB, so an allocation above about 2 GB fails, and aborts,
+/// instead of being reserved lazily. Every healthy file reads well within
+/// it: the 12-minute Swift-era recording peaks at 138 MB as it decodes,
+/// every fixture under 7 MB. Its floor is a decode's reservation for a
+/// `data` chunk declared past the file, capped at five hours at 16 kHz
+/// (1.15 GB, `reserved_frames` in `codec`), so the limit stays above
+/// 1.2 GiB.
+const ADDRESS_SPACE_KIB: u64 = 2_097_152;
+
+/// Runs `body` held to [`ADDRESS_SPACE_KIB`]: on Linux in a child of this
+/// binary that runs the test `name` alone under `ulimit -v` (and writes no
+/// core file), so an abort fails the child and this test with it, and
+/// returns the child's stderr; elsewhere (no such limit on the Mac or
+/// Windows), and in the child itself, in this process, returning `None`.
+fn limited(name: &str, body: impl FnOnce()) -> Option<String> {
+    const CHILD: &str = "STENO_SIZES_LIMITED";
+    if !cfg!(target_os = "linux") || std::env::var_os(CHILD).is_some() {
+        body();
+        return None;
+    }
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "ulimit -c 0 && ulimit -v {ADDRESS_SPACE_KIB} && exec \"$0\" \"$@\""
+        ))
+        .arg(std::env::current_exe().unwrap())
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD, name)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "{name} ended {} under {ADDRESS_SPACE_KIB} KiB:\n{}",
+        output.status,
+        stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n")
+    );
+    Some(stderr)
+}
+
 fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, bytes).unwrap();
@@ -598,11 +713,21 @@ fn measured_bad() -> [(&'static str, Vec<u8>); 2] {
 /// of 1 TiB, packet tables of 2^32 and 2^40 packets or with a packet of
 /// 2^40 or 2^50 bytes, packets or uncompressed frames of 2^28 and 2^31
 /// bytes, the same cookie and packet tables in the audio of an open
-/// `data` chunk, where symphonia reads on for chunks, and a WAV `LIST`
-/// whose `INFO` value declares 4 GiB in a file of 3 KiB.
+/// `data` chunk, where symphonia reads on for chunks, a WAV `LIST` whose
+/// `INFO` value declares 4 GiB in a file of 3 KiB, and a WAV `LIST` of odd
+/// size before `data`, after which symphonia reads a header the walk never
+/// saw, 1 or 2 bytes on, with an `INFO` value of 4 GiB. Held to
+/// [`ADDRESS_SPACE_KIB`] on Linux.
 #[test]
-#[allow(clippy::too_many_lines)]
 fn every_size_measured_to_abort_is_refused() {
+    limited(
+        "every_size_measured_to_abort_is_refused",
+        measured_cases_are_refused,
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+fn measured_cases_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     let phone = std::fs::read(fixture(PHONE)).unwrap();
     let mut cases: Vec<(String, Vec<u8>, &str)> = Vec::new();
@@ -766,6 +891,27 @@ fn every_size_measured_to_abort_is_refused() {
         ),
         "the `LIST` chunk",
     ));
+    // An odd `LIST` before `data`, which symphonia pads twice: an `INFO`
+    // form and one byte (1 byte on), and an `INFO` value that ends the
+    // list on its odd byte (2 bytes on).
+    let one_value = [b"INFOINAM".as_slice(), &1u32.to_le_bytes(), b"A"].concat();
+    for (name, list, shift, outer, value) in [
+        (
+            "odd5-info.wav",
+            b"INFOA".to_vec(),
+            1,
+            0xff00_0000,
+            0xfeff_0000,
+        ),
+        ("odd13-max.wav", one_value, 2, 0xffff_0000, 0xfffe_fff0),
+    ] {
+        let bytes = misread_wav(&list, shift, outer, value);
+        assert!(
+            WavFile::read_bytes(&bytes).is_err(),
+            "{name}: the crate's own reader, which `steno process` checks with"
+        );
+        cases.push((name.into(), bytes, "declares an odd"));
+    }
     for (index, (name, bytes, says)) in cases.iter().enumerate() {
         let path = write(dir.path(), &format!("{index}-{name}"), bytes);
         let error = refused(&path);
@@ -1185,6 +1331,68 @@ fn a_wav_is_walked_up_to_its_audio() {
     );
 }
 
+/// A WAV chunk before the audio after which symphonia would read the next
+/// header where the walk never looked is refused: a `fmt ` whose ADPCM,
+/// A-law or µ-law extra size disagrees with the chunk (each sized right
+/// is let through), and a `LIST` of odd size, which symphonia pads twice
+/// and so fails on even when it is padded as the format says; the crate's
+/// own reader, which `steno process` checks a file with, refuses it too.
+/// An even `LIST` with an odd value at its end reads.
+#[test]
+fn a_wav_chunk_symphonia_reads_out_of_step_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, format, read) in coded_formats() {
+        let bytes = wav(
+            Some(u32::MAX),
+            &[(b"fmt ", format, None), (b"data", vec![0; 1_600], None)],
+        );
+        let path = write(dir.path(), &format!("{name}.wav"), &bytes);
+        match read {
+            Some((holds, reads)) => {
+                let error = refused(&path);
+                let says = format!("holds {holds} bytes, of which symphonia reads {reads}");
+                assert!(error.contains(&says), "{name}: {error}");
+            }
+            None => not_refused(&path),
+        }
+    }
+    let one_value = [b"INFOINAM".as_slice(), &1u32.to_le_bytes(), b"A"].concat();
+    for (name, list) in [
+        ("odd-list.wav", one_value.clone()),
+        ("odd-short.wav", b"INFOA".to_vec()),
+    ] {
+        let bytes = wav(
+            None,
+            &[
+                (b"fmt ", pcm16_format(), None),
+                (b"LIST", list, None),
+                (b"data", ramp16(), None),
+            ],
+        );
+        let error = refused(&write(dir.path(), name, &bytes));
+        assert!(error.contains("declares an odd"), "{name}: {error}");
+        assert!(WavFile::read_bytes(&bytes).is_err(), "{name}");
+    }
+    let even = wav(
+        None,
+        &[
+            (b"fmt ", pcm16_format(), None),
+            (b"LIST", [one_value.as_slice(), &[0]].concat(), None),
+            (b"data", ramp16(), None),
+        ],
+    );
+    let read = SymphoniaAudioCodec::read_channel(
+        &write(dir.path(), "even.wav", &even),
+        0,
+        AudioLane::Mixed,
+    )
+    .unwrap();
+    assert_eq!(read.samples.len(), 1_600);
+    for bytes in [even, pcm_wav()] {
+        assert_eq!(WavFile::read_bytes(&bytes).unwrap().frame_count(), 1_600);
+    }
+}
+
 /// A final top-level box that runs past the file's end is let through when
 /// symphonia only seeks past it, and refused when it parses it. Symphonia
 /// 0.5.5 itself fails on either ("end of stream", as it reads up to where
@@ -1578,6 +1786,17 @@ fn fuzz(cases: u64, seed: u64) {
     let mut random = Random(seed | 1);
     let mut stderr = std::io::stderr();
     for case in 0..cases {
+        if random.below(8) == 0 {
+            let (bytes, planted) = misread(&mut random);
+            let path = dir.path().join("misread.wav");
+            std::fs::write(&path, &bytes).unwrap();
+            let _ = writeln!(stderr, "case {case}: misread.wav {planted:?}");
+            let _ = std::panic::catch_unwind(|| {
+                let _ = SymphoniaAudioCodec::declared_duration(&path);
+                let _ = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed);
+            });
+            continue;
+        }
         let (name, original, fields) = &fixtures[random.below(fixtures.len())];
         let mut bytes = original.clone();
         let mut changed = Vec::new();
@@ -1604,6 +1823,34 @@ fn fuzz(cases: u64, seed: u64) {
     }
 }
 
+/// A WAV of [`misread_wav`]'s class at random, with what was planted: an
+/// odd `LIST` (a form and an odd number of bytes, 1 byte on, or an `INFO`
+/// value of odd length that ends it, 2 bytes on), then the header
+/// symphonia would read, a `LIST` and an `INFO` value of 2 GiB or more.
+fn misread(random: &mut Random) -> (Vec<u8>, (usize, u32, u32)) {
+    let (list, shift) = if random.below(2) == 0 {
+        let form: &[u8; 4] = [b"INFO", b"adtl"][random.below(2)];
+        let bytes = 2 * random.below(4) + 1;
+        ([form.as_slice(), &vec![b'A'; bytes]].concat(), 1)
+    } else {
+        let length = 2 * random.below(20) + 1;
+        let size = u32::try_from(length).unwrap().to_le_bytes();
+        let list = [b"INFOINAM".as_slice(), &size, &vec![b'A'; length]].concat();
+        (list, 2)
+    };
+    // Only the top `shift` bytes are free: the rest is the walk's size.
+    let bits = 8 * u32::try_from(shift).unwrap();
+    let top = (1u64 << bits) - 1;
+    let free = (1u64 << (bits - 1)) + 1 + random.next() % (top - (1 << (bits - 1)));
+    let outer = u32::try_from(free << (32 - bits)).unwrap();
+    let value =
+        (1u32 << 31) + u32::try_from(random.next() % u64::from(outer - 12 - (1 << 31))).unwrap();
+    (
+        misread_wav(&list, shift, outer, value),
+        (shift, outer, value),
+    )
+}
+
 /// Cases from `STENO_SIZES_FUZZ_CASES` (400 by default, CI's bound), seed
 /// from `STENO_SIZES_FUZZ_SEED`.
 fn fuzz_settings() -> (u64, u64) {
@@ -1619,55 +1866,21 @@ fn fuzz_settings() -> (u64, u64) {
     )
 }
 
-/// The child: the fuzz pass, run by the parent under the limit. Passes at
-/// once outside it.
-#[test]
-#[ignore = "the fuzz test runs it in a child process"]
-fn fuzz_child() {
-    if std::env::var_os("STENO_SIZES_FUZZ_CHILD").is_none() {
-        return;
-    }
-    let (cases, seed) = fuzz_settings();
-    fuzz(cases, seed);
-}
-
 /// No size or count field of the fixtures, set to a boundary or a random
-/// value, aborts a read. On Linux the pass runs in a child held to 8 GiB of
-/// address space; elsewhere (no such limit on the Mac or Windows) in this
-/// process.
+/// value, aborts a read, and neither does a WAV whose odd `LIST` would
+/// send symphonia to a header the walk never read (one case in eight).
+/// Held to [`ADDRESS_SPACE_KIB`] on Linux.
 #[test]
 fn random_sizes_and_counts_abort_nothing() {
-    if !cfg!(target_os = "linux") {
-        let (cases, seed) = fuzz_settings();
+    let (cases, seed) = fuzz_settings();
+    let Some(stderr) = limited("random_sizes_and_counts_abort_nothing", || {
         fuzz(cases, seed);
+    }) else {
         return;
-    }
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("ulimit -v 8388608 && exec \"$0\" \"$@\"")
-        .arg(std::env::current_exe().unwrap())
-        .args([
-            "fuzz_child",
-            "--exact",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env("STENO_SIZES_FUZZ_CHILD", "1")
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let ran: Vec<&str> = stderr
+    };
+    let ran = stderr
         .lines()
         .filter(|line| line.starts_with("case "))
-        .collect();
-    assert!(
-        output.status.success(),
-        "the fuzz child ended {}, last {:?}:\n{}",
-        output.status,
-        ran.last(),
-        stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n")
-    );
-    let (cases, _) = fuzz_settings();
-    assert_eq!(ran.len() as u64, cases, "every case ran");
+        .count();
+    assert_eq!(ran as u64, cases, "every case ran");
 }

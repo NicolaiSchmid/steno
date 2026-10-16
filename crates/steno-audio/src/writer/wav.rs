@@ -383,6 +383,13 @@ impl WavLayout {
                     ));
                 }
                 b"data" => samples = Some(body..body + size),
+                // Symphonia reads every header after it out of step, as
+                // `codec::sizes` says, and refuses the same file.
+                b"LIST" if size % 2 == 1 && samples.is_none() => {
+                    return Err(WavReadError::Malformed(
+                        "a LIST chunk of odd size before the audio".into(),
+                    ));
+                }
                 _ => {}
             }
             offset = body + size + (size % 2);
