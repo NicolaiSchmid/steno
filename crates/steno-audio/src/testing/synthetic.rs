@@ -58,7 +58,7 @@
 //! it however late the session's threads run. A restart's stall is not
 //! held: it is how the restarts fail.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -519,15 +519,13 @@ impl CaptureBackend for SyntheticCaptureBackend {
         };
         // Frames into the start, and how many to skip there; the first
         // start's only.
-        let mut skips: std::collections::VecDeque<(usize, usize)> = if is_restart {
-            std::collections::VecDeque::new()
-        } else {
-            self.options
-                .misses
-                .iter()
-                .map(|&(seconds, frames)| ((seconds * rate) as usize, frames))
-                .collect()
-        };
+        let mut skips: VecDeque<(usize, usize)> = self
+            .options
+            .misses
+            .iter()
+            .filter(|_| !is_restart)
+            .map(|&(seconds, frames)| ((seconds * rate) as usize, frames))
+            .collect();
         let mut clock = CycleClock::new(rate);
         let resumed = Arc::clone(&self.resumed);
         let changes_remaining = Arc::clone(&self.changes_remaining);
