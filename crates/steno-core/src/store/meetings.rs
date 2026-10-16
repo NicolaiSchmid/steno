@@ -220,19 +220,27 @@ impl Store {
 
     /// A stopped recording's commit (`LocalRecordingIntake::complete`,
     /// through `ProcessingPipeline::enqueue_stopped_recording`), in one
-    /// transaction on the writer, which also makes the commit's reads (the
-    /// row and the settings), so the save never waits for a read in flight
-    /// on a reader. It writes only while the stored row is still
-    /// `recording`: the row turns `queued` with `duration`, `end_reason`
-    /// and `now` as its `updatedAt`, and keeps the rest as stored (a title
-    /// or notes saved since the recording began). `asset` is saved with
+    /// transaction on the writer. Its reads, the row and the default
+    /// retention, run in that same transaction, so the save never waits
+    /// for a read in flight on a reader.
+    ///
+    /// It writes only while the stored row is still `recording`. The row
+    /// turns `queued` with `duration`, `end_reason` and `now` as its
+    /// `updatedAt`, and keeps the rest as stored (a title or notes saved
+    /// since the recording began). `asset` is saved for `meeting_id` with
     /// the retention `retention`, else the settings' default as stored
-    /// now, and no `expires_at`. Returns the row as saved. A row that moved
-    /// on fails with [`StoreError::NotRecording`] and one that is gone with
-    /// [`StoreError::MeetingNotFound`], and nothing is written, so a
-    /// recording deleted or failed meanwhile is not brought back. Rust
-    /// only: Swift's `complete` read the row and the settings first and
-    /// saved the row it had read.
+    /// now, and no `expires_at`. Returns the row as saved.
+    ///
+    /// No settings row fails the save: it reads only the default
+    /// retention's row, and one that cannot be read gives keep-forever,
+    /// which deletes nothing, with a warning that names the key. A row
+    /// that moved on fails with [`StoreError::NotRecording`] and one that
+    /// is gone with [`StoreError::MeetingNotFound`], and nothing is
+    /// written, so a recording deleted or failed meanwhile is not brought
+    /// back. Rust only: Swift's `LocalRecordingIntake.complete` read the
+    /// settings, wrote the duration and end reason in one update, and
+    /// `ProcessingPipeline.enqueue` saved the returned row with the asset
+    /// in a second commit.
     pub fn save_stopped_recording(
         &self,
         meeting_id: Uuid,
@@ -249,7 +257,7 @@ impl Store {
             }
             let retention = match retention {
                 Some(retention) => retention,
-                None => settings::stored(transaction)?.default_retention,
+                None => settings::default_retention(transaction)?,
             };
             stored.duration = duration;
             stored.end_reason = Some(end_reason);
@@ -685,7 +693,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::model::{AudioFormat, AudioLane, AudioRetention};
+    use crate::model::{AudioFormat, AudioLane, AudioRetention, Settings};
 
     fn asset(meeting_id: Uuid, url: &str) -> AudioAsset {
         AudioAsset {
@@ -800,5 +808,132 @@ mod tests {
                 Some("file:///audio/speakers/new.wav".to_owned())
             )]
         );
+    }
+
+    /// A meeting `recording`, as the recorder's start writes it.
+    fn a_recording_row(store: &Store) -> Meeting {
+        let mut meeting = crate::testing::sample_data::meeting();
+        meeting.id = Uuid::new_v4();
+        meeting.state = MeetingState::Recording;
+        meeting.end_reason = None;
+        meeting.duration = 0.0;
+        store.save_meeting(&meeting).unwrap();
+        store.meeting(meeting.id).unwrap().unwrap()
+    }
+
+    /// Stores `value` as the setting row of `key`, past `save_settings`,
+    /// as another build or a hand edit would.
+    fn store_setting_row(store: &Store, key: &str, value: &str) {
+        store
+            .write(|transaction| {
+                transaction.execute(
+                    "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
+                    params![key, value],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// The stop's save of a fresh recording row with no named retention,
+    /// and the asset it wrote.
+    fn save_a_stop(store: &Store) -> (Meeting, AudioAsset) {
+        let meeting = a_recording_row(store);
+        let saved = store
+            .save_stopped_recording(
+                meeting.id,
+                1.0,
+                RecordingEndReason::Manual,
+                &asset(meeting.id, "file:///audio/x/master.caf"),
+                None,
+                Utc::now(),
+            )
+            .unwrap();
+        (saved, store.asset(meeting.id).unwrap().unwrap())
+    }
+
+    /// What `body` returned, and the warnings it logged on this thread.
+    fn warnings<T>(body: impl FnOnce() -> T) -> (T, String) {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Lines(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, body);
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        (value, text)
+    }
+
+    /// A default retention row that cannot be read, not JSON or of the
+    /// wrong shape, does not fail the stop's save: the meeting is saved
+    /// `queued` and its audio kept forever, which deletes nothing, and the
+    /// warning names the key, never the value.
+    #[test]
+    fn an_unreadable_default_retention_saves_the_stop_kept_forever() {
+        for value in ["sk-secret-rule", "\"sk-secret-rule\""] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path().join("steno.sqlite")).unwrap();
+            store_setting_row(&store, "defaultRetention", value);
+            let ((saved, written), logged) = warnings(|| save_a_stop(&store));
+            assert_eq!(saved.state, MeetingState::Queued);
+            assert_eq!(written.retention, AudioRetention::KeepForever);
+            assert!(logged.contains("WARN"), "{logged}");
+            assert!(logged.contains("defaultRetention"), "{logged}");
+            assert!(!logged.contains("sk-secret"), "{logged}");
+        }
+    }
+
+    /// Another setting that cannot be read leaves the stop's save alone:
+    /// the meeting is saved with the stored default retention, though the
+    /// settings' load refuses the row.
+    #[test]
+    fn an_unrelated_unreadable_setting_does_not_touch_the_stops_save() {
+        for (key, value) in [("llmContextTokens", "not json"), ("audioFolder", "123")] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path().join("steno.sqlite")).unwrap();
+            let mut settings = store.settings().unwrap();
+            settings.default_retention = AudioRetention::KeepDays(3);
+            store.save_settings(&settings).unwrap();
+            store_setting_row(&store, key, value);
+            assert!(store.settings().is_err(), "{key} is unreadable");
+            let (saved, written) = save_a_stop(&store);
+            assert_eq!(saved.state, MeetingState::Queued);
+            assert_eq!(written.retention, AudioRetention::KeepDays(3));
+        }
+    }
+
+    /// With no default retention row the stop's save gives the asset the
+    /// settings' default.
+    #[test]
+    fn a_missing_default_retention_saves_the_stop_with_the_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("steno.sqlite")).unwrap();
+        let mut settings = store.settings().unwrap();
+        settings.default_retention = AudioRetention::KeepDays(3);
+        store.save_settings(&settings).unwrap();
+        store
+            .write(|transaction| {
+                transaction.execute("DELETE FROM setting WHERE key = 'defaultRetention'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let (saved, written) = save_a_stop(&store);
+        assert_eq!(saved.state, MeetingState::Queued);
+        assert_eq!(written.retention, Settings::default().default_retention);
     }
 }

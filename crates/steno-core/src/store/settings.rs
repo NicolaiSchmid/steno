@@ -25,7 +25,7 @@ use serde_json::Value;
 
 use super::{Result, Store, StoreError, execute_cached, query_all};
 use crate::json;
-use crate::model::Settings;
+use crate::model::{AudioRetention, Settings};
 
 /// The one engine the Rust app runs, a Swift engine too: what
 /// [`Store::retire_speech_engine`] stores in place of any other id.
@@ -39,6 +39,9 @@ const SPEECH_ENGINE_KEY: &str = "speechEngineID";
 /// The key [`Settings::handover_port`] is stored under, the one users type
 /// by hand (`apps/desktop/README.md`).
 const HANDOVER_PORT_KEY: &str = "handoverPort";
+
+/// The key [`Settings::default_retention`] is stored under.
+const DEFAULT_RETENTION_KEY: &str = "defaultRetention";
 
 /// What is wrong with a stored setting
 /// ([`StoreError::UndecodableSetting`]), in words that never quote the
@@ -165,10 +168,31 @@ fn overlaid(defaults: &Settings, rows: Vec<(String, String)>) -> Result<Settings
     decode(defaults, &Value::Object(merged))
 }
 
-/// The settings as stored, over the defaults, read on `connection`: inside
-/// a write's transaction, so the write needs no reader.
-pub(super) fn stored(connection: &Connection) -> Result<Settings> {
-    overlaid(&Settings::default(), stored_rows(connection)?)
+/// The default retention as stored, read on `connection` from its own row
+/// alone: inside the stop's save ([`Store::save_stopped_recording`]), so
+/// the save needs no reader and no other setting can fail it. A missing
+/// row is [`Settings::default`]'s. A row that cannot be read as a
+/// retention rule is [`AudioRetention::KeepForever`], which deletes
+/// nothing, with a warning that names the key and never the value. Rust
+/// only: the Swift app loaded every setting and failed on any of them.
+pub(super) fn default_retention(connection: &Connection) -> Result<AudioRetention> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value FROM setting WHERE key = ?1",
+            params![DEFAULT_RETENTION_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(stored) = stored else {
+        return Ok(Settings::default().default_retention);
+    };
+    Ok(json::from_column_str(&stored).unwrap_or_else(|_| {
+        tracing::warn!(
+            target: "steno::store",
+            "the stored {DEFAULT_RETENTION_KEY} is not a retention rule, so this recording's audio is kept"
+        );
+        AudioRetention::KeepForever
+    }))
 }
 
 impl Store {
