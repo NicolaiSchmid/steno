@@ -42,7 +42,14 @@ tauri-plugin-deep-link = "2.6"
 tauri-plugin-dialog = "2.8"
 tauri-plugin-opener = "2.7"
 tauri-plugin-single-instance = { version = "2.5", features = ["deep-link"] }
-tauri-plugin-updater = "2.13"
+# Without the default `zip` feature, which only unpacks update formats Steno
+# does not ship: a zipped Windows update (`zip`, whose `ZipArchive::extract`
+# has RUSTSEC-2026-0367 to 0369) and a `.tar.gz` AppImage. Steno's Linux
+# updates are the AppImage and `.deb` themselves, the Windows install writes
+# the signed installer itself (`install_update` in the desktop crate's
+# `updater.rs`), and the macOS `.app.tar.gz` unpacks with the tar and flate2
+# the plugin always depends on there.
+tauri-plugin-updater = { version = "2.13", default-features = false, features = ["rustls-tls", "system-proxy"] }
 # `sync` for the shell's one-shot channels; `macros`, `rt` and
 # `rt-multi-thread` for the executor the core's boundary tests run on.
 tokio = { version = "1", default-features = false, features = ["sync", "macros", "rt", "rt-multi-thread"] }
