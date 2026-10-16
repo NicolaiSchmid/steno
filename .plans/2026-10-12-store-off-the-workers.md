@@ -558,9 +558,11 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   so a slow folder or the Mac's Files and Folders prompt held the levels
   and the stop. The save now begins under the lock, checks outside it and
   stores under it, as page 1's vault check (#295) already ran on a thread
-  of its own; only the latest of two overlapping saves stores
-  (`a_held_vault_check_leaves_the_host_live`, its page 2 twin, and
-  `only_the_latest_of_two_vault_saves_stores` in `crates/steno-host/tests/`).
+  of its own; only the latest of two overlapping saves stores, and an edit
+  undone while a check runs begins a save of the stored value again
+  (`a_held_vault_check_leaves_the_host_live`, its page 2 twin,
+  `only_the_latest_of_two_vault_saves_stores` and the undo tests in
+  `crates/steno-host/tests/`).
 
 ### WP2b: the facade and the async call sites (PR 2b, or with 2a)
 
@@ -643,6 +645,9 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   `main`, where the worker stands still for the whole hold. The admission
   under 7 s and 12 s holds is pinned over TLS through the real service
   instead.
+- **The vault saves split into begin, validate and finish:** the begin and
+  the finish run under the host's lock, the destination's check between them
+  without it (WP2a's as-built).
 - **Check 12** (`the_poll_and_the_events_task_never_block_a_worker`) asks
   the runtime's one worker to run a task while a reload is held at the
   gate, bounded only by `HANG_GUARD`, in place of a timer's 200 ms gaps,
