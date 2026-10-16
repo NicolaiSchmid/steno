@@ -1532,6 +1532,65 @@ async fn a_quit_never_counts_as_a_read_that_ended_with_the_app() {
     }
 }
 
+/// A retry after one crash whose run fails plainly returned every read,
+/// so the count starts again: after Process again and one more crash in
+/// its read, the next launch reads the meeting once more instead of
+/// quarantining it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_that_fails_plainly_starts_the_count_again() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let support = world.dir.path().join("support");
+    let id = killed_in_its_reads(&world, &support, 1);
+    let marks = Arc::new(ReadingMarks::at_launch(&support, &world.store, world.now));
+    assert!(!marks.holds(id));
+    let asset = world.store.asset(id).unwrap().unwrap();
+    let system = RecordingLayout::from_asset(&asset)
+        .unwrap()
+        .sidecar(AudioLane::System);
+    let lane = std::fs::read(&system).unwrap();
+    std::fs::remove_file(&system).unwrap();
+    let (gate, entered) = (
+        world.dir.path().join("gate"),
+        world.dir.path().join("entered"),
+    );
+    std::fs::write(&gate, b"").unwrap();
+    let mut dependencies = world
+        .pipeline
+        .dependencies()
+        .clone()
+        .with_reading_marks(marks.clone());
+    dependencies.decoder = Arc::new(GatedDecoder {
+        inner: world.decoder.clone(),
+        gate: gate.clone(),
+        entered: entered.clone(),
+    });
+    let pipeline = ProcessingPipeline::new(dependencies);
+    // The retry fails plainly: a lane cannot be decoded.
+    assert_eq!(pipeline.resume_unfinished().unwrap(), [id]);
+    pipeline.wait_until_idle().await;
+    let MeetingState::Failed { reason } = meeting_state(&world, id) else {
+        panic!("the retry failed");
+    };
+    assert!(reason.starts_with("decode: "), "{reason}");
+    // Process again, and the app ends while it decodes.
+    std::fs::write(&system, lane).unwrap();
+    std::fs::remove_file(&gate).unwrap();
+    std::fs::remove_file(&entered).unwrap();
+    pipeline.process_again(id).unwrap();
+    while !entered.exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let next = ReadingMarks::at_launch(&support, &world.store, world.now);
+    assert!(!next.holds(id), "read once more");
+    assert!(matches!(
+        meeting_state(&world, id),
+        MeetingState::Queued | MeetingState::Processing
+    ));
+    std::fs::write(&gate, b"").unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, id), MeetingState::Ready);
+}
+
 /// A lane that cannot be decoded fails the job in `decode`, after the
 /// engine was loaded; the engine is released all the same.
 #[tokio::test(flavor = "multi_thread")]

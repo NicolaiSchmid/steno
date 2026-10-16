@@ -275,19 +275,41 @@ impl ReadingMarks {
     /// reads the recording once more, as a second attempt. Its marks stay
     /// on disk until that run reads through, so a crash before it reads
     /// quarantines it again; an orderly exit removes them
-    /// ([`exiting`](Self::exiting)). Writes nothing: callers need not leave
-    /// the async workers.
+    /// ([`exiting`](Self::exiting)). Writes nothing unless the exit has
+    /// begun: then the exit may have taken the released marks before these
+    /// joined them, and the run will not read, so this removes them, and
+    /// syncs the disk on the caller's thread, as Process again's store
+    /// writes do.
     pub fn release(&self, meeting_id: Uuid) {
-        let mut found = self.found();
-        if let Some(files) = found.held.remove(&meeting_id) {
+        {
+            let mut found = self.found();
+            let Some(files) = found.held.remove(&meeting_id) else {
+                return;
+            };
             found.retrying.insert(
                 meeting_id,
                 Retry {
                     files,
-                    read: false,
                     released: true,
+                    ..Retry::default()
                 },
             );
+        }
+        // After the insert, as `exiting` sets the flag before it takes the
+        // released marks: one of the two takes these, never both.
+        if !self.open().exiting {
+            return;
+        }
+        let files = self
+            .found()
+            .retrying
+            .get_mut(&meeting_id)
+            .map(|retry| std::mem::take(&mut retry.files))
+            .unwrap_or_default();
+        for file in files {
+            if let Err(error) = remove_durably_with(&*self.syncs, &file) {
+                tracing::warn!(%meeting_id, %error, "a reading mark could not be removed at the exit");
+            }
         }
     }
 
@@ -388,6 +410,9 @@ impl ReadingMarks {
     /// any more. Syncs the disk: the async callers run it on the blocking
     /// pool and wait for it.
     pub fn exiting(&self) {
+        // Set before the released marks are taken, so a `release` that
+        // comes after the take sees it and removes its own.
+        self.open().exiting = true;
         let released: Vec<PathBuf> = self
             .found()
             .retrying
@@ -396,7 +421,6 @@ impl ReadingMarks {
             .flat_map(|retry| std::mem::take(&mut retry.files))
             .collect();
         let mut open = self.open();
-        open.exiting = true;
         open.files.extend(released);
         let syncs = &*self.syncs;
         open.files.retain(|file| {
@@ -705,6 +729,26 @@ mod tests {
         assert_eq!(on_disk(dir.path()), 0);
         assert!(marks.open().files.is_empty(), "nothing left to remove");
         drop(running);
+        assert!(!launch(dir.path(), &store).holds(meeting.id));
+    }
+
+    /// Process again that races the quit, released after the exit took
+    /// the released marks: `release` removes them itself, as the run will
+    /// not read, so the next launch holds nothing.
+    #[test]
+    fn a_release_after_the_exit_removes_its_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, meeting, _) = store_with_meeting(dir.path());
+        let master = dir.path().join("recording.m4a");
+        killed_in_a_read(&launch(dir.path(), &store), meeting.id, &master);
+        killed_in_a_read(&launch(dir.path(), &store), meeting.id, &master);
+        let marks = launch(dir.path(), &store);
+        assert!(marks.holds(meeting.id));
+        marks.exiting();
+        assert_eq!(on_disk(dir.path()), 2, "held, not released yet");
+        marks.release(meeting.id);
+        assert_eq!(on_disk(dir.path()), 0);
+        assert!(!marks.holds(meeting.id));
         assert!(!launch(dir.path(), &store).holds(meeting.id));
     }
 
