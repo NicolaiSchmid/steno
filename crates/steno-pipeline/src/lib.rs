@@ -33,8 +33,8 @@
 //! store's facade (`Store::reading`, `Store::writing`), so a write that
 //! waits for another process waits on the blocking pool, never on a
 //! runtime worker. The synchronous halves (the enqueues, the claims, the
-//! resumes, the phone intake's enqueue and the local intake the
-//! recorder's stop drives on its own thread) call the store directly.
+//! resumes and the local intake the recorder's stop drives on its own
+//! thread) call the store directly.
 //!
 //! One operation runs per meeting at a time; stage durations feed the
 //! `stageRate` table only when the meeting was alone in flight; every

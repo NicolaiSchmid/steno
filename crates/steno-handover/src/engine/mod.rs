@@ -304,9 +304,9 @@ pub struct Engine {
     /// there. Swift: none; the actor runs the check, `begin` and the
     /// receipt in one step.
     files: Mutex<()>,
-    /// The engine's own `Arc`, for the admission's task, which keeps the
-    /// engine and the `completing` mark until the admission ends
-    /// ([`Completing`]). Rust only.
+    /// A weak handle on the engine's own `Arc`, upgraded for the
+    /// admission's task, which keeps the engine and the `completing` mark
+    /// until the admission ends ([`Completing`]). Rust only.
     me: Weak<Engine>,
 }
 
@@ -1128,6 +1128,7 @@ fn join_error(error: &tokio::task::JoinError) -> store::StoreError {
 /// The `completing` mark, removed when the `complete` call returns, or,
 /// once the verified file went to the intake, when the admission's task
 /// ends ([`Completing::admit`]), whether or not the request still waits.
+/// Swift: `completing` and its `defer` in `RecordingHandler.complete`.
 pub(crate) struct Completing {
     engine: Arc<Engine>,
     recording_id: Uuid,

@@ -1264,10 +1264,13 @@ impl App {
     /// next launch processes it); the handover listener stops; and
     /// meeting detection stops ([`DetectionController::stop`]). Every
     /// write is a committed transaction by then, so the store has nothing
-    /// left to flush. A handover still waiting for its listener gets none
-    /// after this ([`ListenerHandover::close`]). Swift:
-    /// `AppController.shutdown`, whose pipeline died with the app, so the
-    /// next launch resumed its job.
+    /// left to flush, except a phone admission in flight at the stop: it
+    /// still finishes after this returns, or the exit cuts it as a crash
+    /// would, between the durable copy and the atomic commit. A handover
+    /// still waiting for its listener gets none after this
+    /// ([`ListenerHandover::close`]). Swift: `AppController.shutdown`,
+    /// whose pipeline died with the app, so the next launch resumed its
+    /// job.
     pub fn shutdown(&self) {
         self.pipeline.quit();
         self.recorder.stop_for_quit();

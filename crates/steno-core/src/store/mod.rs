@@ -827,7 +827,9 @@ mod tests {
     use crate::testing::WriteLockHold;
 
     /// What "live" means in the reader tests: well under the busy timeout
-    /// a waiting write runs out.
+    /// a waiting write runs out. The "P40 check" numbers below are the
+    /// acceptance table's in `.plans/2026-10-12-store-off-the-workers.md`,
+    /// whose services' checks take one second for "live" instead.
     const LIVE: Duration = Duration::from_millis(200);
 
     /// A file store and the host's handle on it.

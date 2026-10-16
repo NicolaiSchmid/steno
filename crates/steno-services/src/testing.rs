@@ -63,8 +63,8 @@ pub const HANG_GUARD: Duration = steno_audio::testing::HANG_GUARD;
 
 /// What "live" means in the held-store checks of
 /// `.plans/2026-10-12-store-off-the-workers.md`: one call or one hop that
-/// must not wait on the store. Five times under the busy timeout that
-/// every regression waits out, and loose enough for a loaded machine at
+/// must not wait on the store. A fifth of the busy timeout that every
+/// regression waits out, and loose enough for a loaded machine at
 /// `nice 19`.
 pub const LIVE: Duration = Duration::from_secs(1);
 

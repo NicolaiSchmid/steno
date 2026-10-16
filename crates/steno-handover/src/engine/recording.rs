@@ -751,7 +751,8 @@ impl Engine {
     /// the same recording id meanwhile (this one was revoked during the
     /// intake), only the verified file goes, and the rest is that phone's
     /// upload ([`Engine::discard_own`]); no other request creates the
-    /// verified file while this `complete` holds the `completing` mark. On
+    /// verified file while this admission holds the `completing` mark
+    /// ([`Completing::admit`]). On
     /// failure the verified file stays for the phone's retry and the reason
     /// is fixed text, because the error may name the file's path; unless
     /// memory holds a receipt of other bytes by then (the phone announced
@@ -821,6 +822,7 @@ impl Completing {
     /// retry gets a 409 listing every chunk while the mark is held, and is
     /// answered from that receipt once it is gone, with no second
     /// admission and no upload again. A panic in the task resumes here.
+    /// Rust only: hyper drops a request's future when the phone hangs up.
     async fn admit(
         self,
         file: PathBuf,
