@@ -38,9 +38,9 @@ export function Privacy() {
 						title="There is no Steno server."
 					>
 						Every row on the right is a design constraint, not a policy page.
-						Only transcript text leaves your computer, to the model endpoint you
-						configured. Beyond that, Steno only downloads its speech models and
-						checks for updates. Audio has no way out.
+						Apart from the transcript text sent to your model, Steno goes online
+						only to download its speech models and check for updates. Audio has
+						no way out.
 					</SectionHead>
 					<Checklist
 						items={[
