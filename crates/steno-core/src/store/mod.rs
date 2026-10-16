@@ -867,15 +867,20 @@ mod tests {
             }
         });
         read.recv().unwrap();
-        let started = Instant::now();
-        host.settings().unwrap();
-        assert!(
-            started.elapsed() < LIVE,
-            "the host's read waited {:?} for the shared reader",
-            started.elapsed()
-        );
+        // On a thread of its own, so a read that waits fails the test once
+        // the long read ends instead of waiting for it forever.
+        let (answered, answer) = mpsc::channel();
+        let host_read = thread::spawn(move || {
+            let started = Instant::now();
+            host.settings().unwrap();
+            answered.send(started.elapsed()).unwrap();
+        });
+        let took = answer.recv_timeout(LIVE);
         end.send(()).unwrap();
         long_read.join().unwrap().unwrap();
+        host_read.join().unwrap();
+        let took = took.expect("the host's read waited for the shared reader");
+        assert!(took < LIVE, "the host's read took {took:?}");
     }
 
     /// A write inside `read` fails with `SQLITE_READONLY` on every reader:
@@ -1025,12 +1030,18 @@ mod tests {
     /// check 15).
     #[test]
     fn the_in_memory_checkpoint_takes_its_one_lock_once() {
-        let store = Arc::new(Store::in_memory().unwrap());
-        let host = Arc::new(store.with_own_reader().unwrap());
+        let store = Store::in_memory().unwrap();
+        let host = store.with_own_reader().unwrap();
         let (done, checkpointed) = mpsc::channel();
-        for handle in [store, host] {
-            let done = done.clone();
-            thread::spawn(move || done.send(handle.checkpoint_durably()).unwrap());
+        // Both handles move to that thread, so a checkpoint that waits on
+        // its own lock fails the test instead of the handles' drop waiting
+        // with it.
+        thread::spawn(move || {
+            for handle in [&store, &host] {
+                done.send(handle.checkpoint_durably()).unwrap();
+            }
+        });
+        for _ in 0..2 {
             checkpointed
                 .recv_timeout(Duration::from_secs(1))
                 .expect("the checkpoint returns")
