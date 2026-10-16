@@ -270,8 +270,13 @@ fn only_the_recorders_layout_is_salvaged() {
     variants.push(("only the reserve", bytes[..PACKETS_AT].to_vec()));
     for (name, variant) in variants {
         let path = written(directory.path(), &format!("{name}.m4a"), &variant);
+        // A file with no `ftyp` is no MP4 to symphonia either: refused
+        // plainly before it reads a byte.
         assert!(
-            matches!(decode(&path), Err(CodecError::UnsupportedFormat(_))),
+            matches!(
+                decode(&path),
+                Err(CodecError::UnsupportedFormat(_) | CodecError::UnknownFormat)
+            ),
             "{name}: {:?}",
             decode(&path).map(|d| d.samples.len())
         );

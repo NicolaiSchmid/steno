@@ -209,11 +209,13 @@ impl Walk {
     /// any other file.
     fn start(&mut self) -> Option<Start> {
         let mut magic = [0u8; 12];
-        let read = read_at(&mut self.file, 0, &mut magic).is_some();
-        if read && &magic[..4] == b"caff" {
+        if read_at(&mut self.file, 0, &mut magic[..4]).is_some() && &magic[..4] == b"caff" {
             return Some(Start::Caf);
         }
-        if read && &magic[..4] == b"RIFF" && &magic[8..] == b"WAVE" {
+        if read_at(&mut self.file, 0, &mut magic).is_some()
+            && &magic[..4] == b"RIFF"
+            && &magic[8..] == b"WAVE"
+        {
             return Some(Start::Wav);
         }
         let mut boxes = Boxes::new(&mut self.file, 0, self.length);
@@ -643,4 +645,35 @@ fn entries_fit(found: Mp4Box, from: u64, count: u64, entry: u64) -> Result<(), S
 /// A four-character code as text.
 fn name(kind: [u8; 4]) -> String {
     String::from_utf8_lossy(&kind).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Symphonia reads a file that grew after the walk no further than the
+    /// walk measured it, from any seek.
+    #[test]
+    fn the_walked_file_ends_where_the_walk_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grown.caf");
+        std::fs::write(&path, b"caff\0\x01\0\0").unwrap();
+        let (start, mut walked) = check(&path).unwrap();
+        assert_eq!(start, Start::Caf);
+        let mut grown = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut grown, &[0; 100]).unwrap();
+        let mut bytes = Vec::new();
+        walked.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(walked.byte_len(), Some(8));
+        assert_eq!(walked.seek(SeekFrom::End(0)).unwrap(), 8);
+        assert_eq!(walked.seek(SeekFrom::Current(-4)).unwrap(), 4);
+        bytes.clear();
+        walked.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, [0, 1, 0, 0]);
+        assert!(walked.seek(SeekFrom::Current(-9)).is_err(), "before byte 0");
+    }
 }
