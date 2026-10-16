@@ -2219,24 +2219,25 @@ mod tests {
     }
 
     /// Onboarding's speech models row at the first launch after the Swift
-    /// app (stable plan, Rehearsal, "Nicolai's Mac"): the speech model in
-    /// place, the speaker models missing, and a meeting left waiting for
-    /// them. The row's Download, Settings' install of each id the row
-    /// lists, sent from the onboarding window, installs them and resumes
-    /// that meeting.
+    /// app (stable plan, "First launch after the handoff"): the speech
+    /// model in place, the speaker models missing, and a meeting left
+    /// waiting for them. The row's Download, Settings' install of each id
+    /// the row lists, sent from the onboarding window, installs them and
+    /// resumes that meeting once: a second Download processes nothing
+    /// again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_onboarding_rows_download_resumes_the_meeting_waiting_for_the_models() {
         use steno_bridge::{AssetIdParams, BridgeHost as _, BridgeTopic, BridgeWindow};
         use steno_host::speech::ModelAsset;
         let (dir, store) = temp_store();
         let (installed, check) = crate::model_gate::testing::flag(false);
+        let engine = Arc::new(FakeSpeechEngine::default());
         let make: MakeDependencies = {
             let store = store.clone();
+            let engine = engine.clone();
             Arc::new(move || {
-                let gated = crate::model_gate::GatedSpeechEngine::new(
-                    Arc::new(FakeSpeechEngine::default()),
-                    check.clone(),
-                );
+                let gated =
+                    crate::model_gate::GatedSpeechEngine::new(engine.clone(), check.clone());
                 Ok(on_the_sidecar(
                     fake_dependencies(&store, "fake-engine").with_speech_engine(
                         steno_pipeline::SharedSpeechEngine::new(Arc::new(gated)),
@@ -2277,12 +2278,16 @@ mod tests {
         .for_window(BridgeWindow::Onboarding);
         let row = host.snapshot(BridgeTopic::Onboarding).unwrap()["speechModels"].clone();
         assert_eq!(row["assetIDs"], serde_json::json!(["offlineDiarizer"]));
-        for asset_id in row["assetIDs"].as_array().unwrap() {
-            let asset_id = asset_id.as_str().unwrap().to_owned();
+        let download = |asset_id: &str| {
             tokio::task::block_in_place(|| {
-                host.settings_transcription_download(AssetIdParams { asset_id })
+                host.settings_transcription_download(AssetIdParams {
+                    asset_id: asset_id.to_owned(),
+                })
             })
             .unwrap();
+        };
+        for asset_id in row["assetIDs"].as_array().unwrap() {
+            download(asset_id.as_str().unwrap());
         }
         eventually(
             "the waiting meeting processed after the row's download",
@@ -2293,6 +2298,14 @@ mod tests {
             host.snapshot(BridgeTopic::Onboarding).unwrap()["speechModels"]["state"],
             "installed"
         );
+        current.current().wait_until_idle().await;
+        let processed = engine.transcriptions.count();
+        assert!(processed > 0);
+        download("offlineDiarizer");
+        current.resume_waiting();
+        current.current().wait_until_idle().await;
+        assert_eq!(engine.transcriptions.count(), processed, "processed again");
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
     }
 
     /// A speech engine whose first transcription decides its model is
