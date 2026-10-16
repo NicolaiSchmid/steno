@@ -518,8 +518,9 @@ after the port".
   - a v6 migration adds a nullable `pairedDevice.identityFingerprint`,
     written in the pairing's own durable transaction. Rows from before stay
     NULL, and a launch that serves the recorded identity fills them in with
-    the fingerprint it serves, so the pairing-time rule survives only for the one-time Swift import. Rust only,
-    with no `Migrations.swift` mirror after S9;
+    the fingerprint it serves, so the pairing-time rule survives only for
+    the one-time Swift import. Rust only, with no `Migrations.swift` mirror
+    after S9;
   - the import's done flag, `steno.swiftImport = "done"`, moves into
     `handover-identity.json`, written in the same replace that records the
     imported fingerprint. The keychain marker (`swift-import-done`) and
@@ -894,9 +895,9 @@ Every package is written in parallel except where a dependency is named:
         Settings > iPhone ends at "choose Pair again." and offers Pair again
         first. Two lines stop after "can't connect.": the one under the card
         after a Try again that still waits, and the listener's "Phone
-        handover is unavailable: ..." line. Where the clock went back (`clockBehind`),
-        Settings says to check the date and time, then Try again; Try again
-        leads, and Pair again stays the second button.
+        handover is unavailable: ..." line. Where the clock went back
+        (`clockBehind`), Settings says to check the date and time, then Try
+        again; Try again leads, and Pair again stays the second button.
       - The import's choice (`swift_import::choose_certificate`) asks the
         decision over every Swift certificate it found: of several, the
         rule decides, where none qualifies the import waits, and it never
