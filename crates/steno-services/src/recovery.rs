@@ -39,10 +39,12 @@
 //! power loss took before it was durable, a local recording whose meeting
 //! was deleted while it recorded. After the rows left `recording`, the
 //! launch adopts each such master where it is, as a meeting with its
-//! folder's id (`adopt_orphans`), and the main window says so. A phone
-//! copy that holds the upload it was noted for is adopted with that
+//! folder's id (`adopt_orphans`), and the main window says so. The noted
+//! copy of a phone upload that holds its upload whole is adopted with that
 //! upload's ledger row, so the phone's retry is answered with this
-//! meeting, not admitted as a second one. Only a master this install wrote is
+//! meeting, not admitted as a second one; when the ledger holds those
+//! bytes as a meeting the user deleted, the copy is removed, since the
+//! user deleted that audio. Only a master this install wrote is
 //! adopted: the record in [`crate::audio_folders`] names it from before
 //! its row until a launch finds that row durable, so a meeting folder
 //! another install put into a shared audio folder (a second computer
@@ -1007,14 +1009,27 @@ fn adopted(
 /// name is left alone ([`orphans`]), and nothing in the handover inbox is
 /// adopted: it holds files, not meeting folders.
 ///
-/// A phone copy noted with its upload ([`crate::audio_folders::uploads`])
-/// that holds that upload whole is adopted with the upload's ledger row
-/// ([`Store::adopt_upload_durably`]), so the phone's retry is answered
-/// with this meeting; when the ledger already holds the upload (a retry
-/// admitted it elsewhere first), nothing is written, the entry is
-/// forgotten and the copy stays where it is. A copy noted with no upload
-/// (an older build's), or one that holds other bytes, is adopted as any
-/// recording with no meeting.
+/// The noted copy of a phone upload ([`crate::audio_folders::uploads`])
+/// that holds that upload whole (its size and SHA-256) is adopted with the
+/// upload's ledger row ([`Store::adopt_upload_durably`]), so the phone's
+/// retry is answered with this meeting. When the ledger already holds the
+/// upload, nothing is written. If that row's meeting still exists (a
+/// retry admitted the bytes elsewhere first), the entry is forgotten and
+/// the copy stays where it is. If the user deleted that meeting, the copy
+/// is removed, the one exception to keeping audio here: a ledger row
+/// commits with its meeting, so a row whose meeting is gone means the
+/// user deleted these exact bytes, and the phone is answered "delivered"
+/// from that row. No delete can be undone: the host records a delete's
+/// entry again only when its rows did not go, so a meeting the
+/// transaction finds gone stays gone. The copy's folder goes as a delete
+/// removes a meeting's folder, its master first and durably, and its
+/// entries only once it is gone; a removal that fails keeps them for the
+/// next launch. Any doubt keeps the copy: one that cannot be read keeps
+/// its entries for the next launch, and a copy noted with no upload (an
+/// older build's), cut short or holding other bytes is adopted as any
+/// recording with no meeting. Noted uploads whose folder has no entry (a
+/// crash between the two notes) are forgotten
+/// ([`crate::audio_folders::forget_uploads_without_folders`]).
 ///
 /// An adopted master's entry stays: the insert commits under
 /// `synchronous = NORMAL`, so a power loss can still take it, and a later
@@ -1098,7 +1113,7 @@ pub(crate) fn adopt_orphans(
             adopted(orphan, &settings, zone, now, reading).and_then(|(meeting, asset, held)| {
                 let upload = uploads.get(&meeting_id);
                 adopt(store, pipeline, orphan, upload, &meeting, &asset, held)
-                    .map(|admitted| (admitted, held))
+                    .map(|committed| (committed, held))
             });
         // Warn names the meeting; an error, which can name its folder,
         // goes to debug.
@@ -1112,12 +1127,18 @@ pub(crate) fn adopt_orphans(
                 tracing::warn!(%meeting_id, "a recording with no meeting was recovered");
                 adopted_ids.push(meeting_id);
             }
-            Ok((AdmissionCommit::Earlier(admitted), _)) => {
-                // Unless the phone's retry admitted into this copy meanwhile.
-                if admitted != meeting_id {
-                    tracing::warn!(%meeting_id, %admitted, "a copy of a phone recording admitted as another meeting is left where it is");
+            Ok((
+                AdmissionCommit::Earlier {
+                    meeting_id: admitted,
+                    deleted,
+                },
+                _,
+            )) => {
+                if answered_by_the_ledger(orphan, admitted, deleted) {
+                    gone.push(meeting_id);
+                } else {
+                    unrecovered.push(meeting_id);
                 }
-                gone.push(meeting_id);
             }
             // A header and no audio: it holds no master either.
             Err(RecoveryError::Unrecoverable(Unrecoverable::Empty)) => {
@@ -1157,22 +1178,60 @@ pub(crate) fn adopt_orphans(
 
 /// The uploads noted for the phone copies under `support_directory`
 /// ([`crate::audio_folders::uploads`]); none when they cannot be read, so
-/// each copy is adopted as any recording with no meeting.
+/// each copy is adopted as any recording with no meeting. Those whose
+/// folder has no entry are forgotten
+/// ([`crate::audio_folders::forget_uploads_without_folders`]).
 fn noted_uploads(support_directory: &Path) -> BTreeMap<Uuid, NotedUpload> {
-    crate::audio_folders::uploads(support_directory).unwrap_or_else(|error| {
+    let uploads = crate::audio_folders::uploads(support_directory).unwrap_or_else(|error| {
         tracing::debug!(%error, "the noted uploads were not read; copies are adopted without them");
         BTreeMap::new()
-    })
+    });
+    if let Err(error) =
+        crate::audio_folders::forget_uploads_without_folders(support_directory, &uploads)
+    {
+        tracing::debug!(%error, "the noted uploads with no folder were not forgotten");
+    }
+    uploads
 }
 
-/// Saves `orphan` as `meeting` with `asset` and processes it, or, `held`
-/// ([`ReadingMarks`]), saves them failed and leaves it. With the ledger
-/// row of `upload` when the orphan is a phone copy noted with it that
-/// holds it whole ([`Store::adopt_upload_durably`]), which writes nothing
-/// when the ledger already held it. Otherwise as any recording with no
-/// meeting ([`save_adopted`]).
-/// A copy that cannot be read now is [`RecoveryError::Unreachable`], kept
-/// for the next launch.
+/// What becomes of the noted copy `orphan` when the ledger already held
+/// its bytes as the meeting `admitted`, `deleted` when the user deleted
+/// it ([`Store::adopt_upload_durably`]). Returns whether its entries go.
+/// The copy of a deleted meeting's bytes is removed ([`remove_copy`]):
+/// the user deleted that audio. One whose meeting exists is kept where it
+/// is, and only its entries go.
+fn answered_by_the_ledger(orphan: &Orphan, admitted: Uuid, deleted: bool) -> bool {
+    let meeting_id = orphan.meeting_id;
+    if !deleted {
+        // The retry admitted into this copy (same id), or the ledger holds
+        // the bytes as another meeting.
+        if admitted != meeting_id {
+            tracing::warn!(%meeting_id, %admitted, "a copy of a phone recording whose meeting exists is kept where it is; only its note is forgotten");
+        }
+        return true;
+    }
+    match remove_copy(orphan) {
+        Ok(()) => {
+            tracing::info!(%meeting_id, %admitted, "the copy of a phone recording whose meeting the user deleted was removed");
+            true
+        }
+        Err(error) => {
+            // The error can name the user's folder: debug alone.
+            tracing::debug!(%meeting_id, %error, "the copy of a deleted meeting's recording not removed");
+            false
+        }
+    }
+}
+
+/// Saves `orphan` as `meeting` with `asset` (its rows, [`adopted`]) and
+/// processes it, or, `held` ([`ReadingMarks`]), saves them failed and
+/// leaves it. With the ledger row of `upload` when the orphan is a phone
+/// copy noted with it that holds it whole
+/// ([`Store::adopt_upload_durably`]), which writes nothing when the ledger
+/// already held it. Otherwise as any recording with no meeting
+/// ([`save_adopted`]), whose [`AdmissionCommit::Wrote`] here means the
+/// meeting and its asset, with no ledger row. A copy that cannot be read now is
+/// [`RecoveryError::Unreachable`], kept for the next launch.
 fn adopt(
     store: &Store,
     pipeline: &steno_pipeline::ProcessingPipeline,
@@ -1183,8 +1242,7 @@ fn adopt(
     held: bool,
 ) -> Result<AdmissionCommit, RecoveryError> {
     let upload = match upload {
-        Some(upload) if meeting.source == MeetingSource::Phone => upload
-            .is_held_by(&orphan.master)
+        Some(upload) if meeting.source == MeetingSource::Phone => held_by(upload, orphan)
             .map_err(|error| {
                 tracing::debug!(meeting_id = %meeting.id, %error, "a phone copy could not be read");
                 RecoveryError::Unreachable
@@ -1214,6 +1272,37 @@ fn adopt(
         }
     }
     Ok(committed)
+}
+
+/// Whether `orphan`'s master holds `upload` whole
+/// ([`NotedUpload::is_held_by`]). The tests make a copy's read fail.
+fn held_by(upload: &NotedUpload, orphan: &Orphan) -> std::io::Result<bool> {
+    #[cfg(test)]
+    if UNREADABLE_COPIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&orphan.meeting_id)
+    {
+        return Err(std::io::Error::other("the copy cannot be read"));
+    }
+    upload.is_held_by(&orphan.master)
+}
+
+/// The meetings whose copy's read fails in [`held_by`].
+#[cfg(test)]
+pub(crate) static UNREADABLE_COPIES: std::sync::Mutex<Vec<Uuid>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Removes `orphan`'s meeting folder, as a delete removes a meeting's
+/// folder, its master first and durably, so a power loss cannot bring the
+/// audio back once its entries are forgotten. A folder already gone is
+/// removed.
+fn remove_copy(orphan: &Orphan) -> std::io::Result<()> {
+    crate::files::remove_durably(&orphan.master)?;
+    match std::fs::remove_dir_all(&orphan.layout.directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        outcome => outcome,
+    }
 }
 
 #[cfg(test)]

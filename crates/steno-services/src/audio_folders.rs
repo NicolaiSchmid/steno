@@ -1,5 +1,7 @@
-//! Where recordings were written, in two files under the support directory,
-//! beside the database and outside its schema, which the Swift app shares.
+//! Where recordings were written, in files under the support directory,
+//! beside the database and outside its schema. `RECORDED_FILE` and
+//! `KNOWN_FILE` are shared with the Swift app; `UPLOADS_FILE` is Rust's
+//! alone.
 //! Each write replaces its file in one durable write
 //! ([`files::write_json`]), so a crash leaves the old file or the new one.
 //! They are not read through [`files::read_json`], which starts afresh from
@@ -9,7 +11,7 @@
 //! | File | What it holds | Written by | Read by |
 //! |------|---------------|------------|---------|
 //! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written: a recording's from its start until its start fails (nothing was recorded), it is deleted (forgotten before its rows go, and recorded again when the delete is refused, its commit fails or a panic unwinds it) or a launch finds its row durable and no longer `recording`; a phone upload's from before its copy until its admission commits durably or its copy is gone (`AdmissionRecord`); one with no row until a launch adopts its master (from then on as any row's) or finds that its folder holds none (no master, a CAF short of one whole frame, or a header with no audio) | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first, and adopts only a recording with no meeting that this record names ([`crate::recovery`]) |
-//! | `UPLOADS_FILE` | The upload each phone admission's copy holds (recording id, size, SHA-256), by meeting id, from before the copy until its entry in `RECORDED_FILE` is forgotten. A file of its own, so an older build reads `RECORDED_FILE` as before and adopts the copy as before | `note_upload`, `forget` | `uploads`: the launch adopts a copy that holds its upload with the upload's ledger row ([`crate::recovery`]), and the phone's retry admits into the copy (`AdmissionRecord`); an entry missing or unreadable is today's adoption, with no ledger row |
+//! | `UPLOADS_FILE` | The upload each phone admission's copy holds (recording id, size, SHA-256), by meeting id, from before the copy until its entry in `RECORDED_FILE` is forgotten, the folder's note fails (the admission is refused), or a launch finds the upload with no entry in `RECORDED_FILE` (a crash between the two notes). A file of its own, so an older build reads `RECORDED_FILE` as before and adopts the copy as a recording with no meeting | `note_upload`, `forget`, `forget_uploads_without_folders` | `uploads`: the launch adopts the noted copy that holds its upload with the upload's ledger row, and removes it when the ledger holds those bytes as a meeting the user deleted, since the ledger row commits with its meeting and so names bytes the user deleted ([`crate::recovery`]); the phone's retry admits into the noted copy (`AdmissionRecord`). An entry missing or unreadable is an adoption as a recording with no meeting, without a ledger row |
 //! | `KNOWN_FILE` | Every audio folder a recording was written to or the setting left, oldest first | `remember` | `known`: crash recovery looks in these folders after the two that decide a meeting ([`crate::recovery`]) |
 //!
 //! A reader returns the error of a file that cannot be read or does not
@@ -93,19 +95,54 @@ pub(crate) fn forget(
             !forgotten.is_empty()
         },
     )?;
-    if let Err(error) = change(
+    if let Err(error) = forget_uploads(support_directory, |id, _| meeting_ids.contains(id)) {
+        tracing::debug!(%error, "the uploads of forgotten recording folders not forgotten");
+    }
+    Ok(forgotten)
+}
+
+/// Drops the noted uploads for which `goes` holds.
+fn forget_uploads(
+    support_directory: &Path,
+    mut goes: impl FnMut(&Uuid, &NotedUpload) -> bool,
+) -> std::io::Result<()> {
+    change(
         support_directory,
         UPLOADS_FILE,
         |_| BTreeMap::new(),
         |uploads: &mut BTreeMap<Uuid, NotedUpload>| {
             let before = uploads.len();
-            uploads.retain(|id, _| !meeting_ids.contains(id));
+            uploads.retain(|id, upload| !goes(id, upload));
             uploads.len() != before
         },
-    ) {
-        tracing::debug!(%error, "the uploads of forgotten recording folders not forgotten");
+    )
+}
+
+/// Drops the uploads in `seen` (the launch's read of `UPLOADS_FILE`) whose
+/// folder `RECORDED_FILE` does not name when they go: a crash between the
+/// upload's note and the folder's, or a `forget` whose second write
+/// failed. The folders are read under the lock every note takes, so an
+/// admission that noted its folder since is kept. One that noted its
+/// upload before `seen` was read and has not noted its folder yet loses
+/// only the upload, and its copy is adopted as a recording with no
+/// meeting. Once per launch ([`crate::recovery`]), so the record never
+/// grows.
+pub(crate) fn forget_uploads_without_folders(
+    support_directory: &Path,
+    seen: &BTreeMap<Uuid, NotedUpload>,
+) -> std::io::Result<()> {
+    if seen.is_empty() {
+        return Ok(());
     }
-    Ok(forgotten)
+    // Read once, under the lock the edit holds.
+    let mut folders = None;
+    forget_uploads(support_directory, |id, upload| {
+        let folders = folders.get_or_insert_with(|| recorded(support_directory));
+        seen.get(id) == Some(upload)
+            && folders
+                .as_ref()
+                .is_ok_and(|folders| !folders.contains_key(id))
+    })
 }
 
 /// The upload each phone admission's copy under `support_directory`
@@ -116,7 +153,7 @@ pub(crate) fn uploads(support_directory: &Path) -> std::io::Result<BTreeMap<Uuid
 
 /// Notes `upload` as the one meeting `meeting_id`'s copy holds. A record
 /// that does not parse is set aside and started afresh: its copies are
-/// adopted as before.
+/// adopted as recordings with no meeting, without a ledger row.
 pub(crate) fn note_upload(
     support_directory: &Path,
     meeting_id: Uuid,
@@ -141,7 +178,9 @@ pub(crate) struct AdmissionRecord {
 
 impl AdmissionFolders for AdmissionRecord {
     /// The upload first, so a folder this build records names its upload
-    /// unless that note failed; then the copy is adopted as before.
+    /// unless that note failed; then the copy is adopted as a recording
+    /// with no meeting, without a ledger row. When the folder cannot be
+    /// noted, the admission is refused and its upload is forgotten again.
     fn copying(
         &self,
         meeting_id: Uuid,
@@ -156,6 +195,10 @@ impl AdmissionFolders for AdmissionRecord {
             // folder: debug alone.
             tracing::warn!(%meeting_id, "a phone upload's folder could not be noted; the upload is refused for now");
             tracing::debug!(%meeting_id, %error, "an admission's folder not noted");
+            if let Err(error) = forget_uploads(&self.support_directory, |id, _| *id == meeting_id) {
+                // The next launch forgets an upload with no folder.
+                tracing::debug!(%meeting_id, %error, "a refused admission's upload not forgotten");
+            }
         })
     }
 
@@ -413,6 +456,41 @@ mod tests {
         folders.settled(meeting_id);
         assert_eq!(folders.noted_copy(&upload), None);
         assert!(uploads(dir.path()).unwrap().is_empty());
+    }
+
+    /// The launch forgets the uploads it read whose folder has no entry
+    /// (a crash between the two notes), and keeps one whose folder is
+    /// noted, one noted since its read, and one whose folder was noted
+    /// after its read.
+    #[test]
+    fn the_launch_forgets_the_uploads_with_no_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path();
+        let upload = |byte| NotedUpload {
+            recording_id: Uuid::new_v4(),
+            byte_count: 3,
+            sha256: vec![byte; 32],
+        };
+        let audio = dir.path().join("audio");
+        let (with_folder, without, late_folder, since) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for (id, byte) in [(with_folder, 1), (without, 2), (late_folder, 3)] {
+            note_upload(support, id, &upload(byte)).unwrap();
+        }
+        record(support, with_folder, &audio).unwrap();
+        let seen = uploads(support).unwrap();
+        note_upload(support, since, &upload(4)).unwrap();
+        record(support, late_folder, &audio).unwrap();
+
+        forget_uploads_without_folders(support, &seen).unwrap();
+        let left: Vec<Uuid> = uploads(support).unwrap().into_keys().collect();
+        let mut kept = vec![with_folder, late_folder, since];
+        kept.sort();
+        assert_eq!(left, kept);
     }
 
     /// Writers on many threads at once (phone admissions on several

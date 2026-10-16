@@ -179,9 +179,9 @@ impl NotedUpload {
 /// that drops `admit` (a phone that hung up mid-admit) leaves the
 /// admission to finish and its meeting enqueued (Rust only: hyper drops
 /// a request's future when the phone hangs up). The copy's folder is
-/// noted before the copy ([`AdmissionFolders`], Rust only). A copy an
-/// earlier admission of the same bytes noted and left with no meeting
-/// (its commit and its `failed` save both gave up under a lock another
+/// noted before the copy ([`AdmissionFolders`], Rust only). The noted copy
+/// an earlier admission of the same bytes left with no meeting (its
+/// commit and its `failed` save both gave up under a lock another
 /// process held) is admitted where it is, not copied again, and is never
 /// removed by this admission: the launch may be adopting it (Rust only).
 /// Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
@@ -365,8 +365,8 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
     let settings = store.settings()?;
     let timestamp = now();
     let upload = NotedUpload::of(metadata);
-    // A copy an earlier admission left: a second copy would be a second
-    // meeting once the launch adopts the first.
+    // The noted copy: a second copy would be a second meeting once the
+    // launch adopts the first.
     let reused = reusable_copy(store, folders.as_ref(), &upload, metadata.format)?;
     let is_reused = reused.is_some();
     let (meeting_id, layout, destination) = if let Some(reused) = reused {
@@ -430,7 +430,14 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
 
     let committed = match store.commit_admission_durably(&receipt, &meeting, &asset) {
         Ok(committed) => {
-            folders.settled(meeting_id);
+            // The noted copy, answered by the ledger as another meeting,
+            // stays noted: the launch decides what becomes of it
+            // (`steno_services`' recovery).
+            let answered_elsewhere = is_reused
+                && matches!(committed, AdmissionCommit::Earlier { meeting_id: admitted, .. } if admitted != meeting_id);
+            if !answered_elsewhere {
+                folders.settled(meeting_id);
+            }
             committed
         }
         Err(error) => {
@@ -442,8 +449,7 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
             // voids them when the WAL restarts, so the copy goes only once
             // that save is on the disk; otherwise it stays, still noted,
             // so the next launch adopts it unless a replay brings its
-            // meeting back. A copy an earlier admission left stays noted
-            // either way.
+            // meeting back. The noted copy stays noted either way.
             let copy_goes = matches!(error, StoreError::ReceiptOfAnotherUpload(_)) || {
                 receipt.state = HandoverState::Failed(format!("admit: {error}"));
                 save_failed_receipt(store, &receipt)
@@ -458,12 +464,14 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
     let _ = std::fs::remove_file(file);
     match committed {
         AdmissionCommit::Wrote => Ok(Admission::Admitted(Box::new((meeting, asset)))),
-        AdmissionCommit::Earlier(admitted) => {
+        AdmissionCommit::Earlier {
+            meeting_id: admitted,
+            ..
+        } => {
             // The ledger held these bytes with a meeting: the receipt is
             // complete with it. A new copy and its folder belong to no
-            // meeting. A copy an earlier admission left is that meeting's
-            // master when the launch adopted it meanwhile, and is left
-            // alone otherwise too.
+            // meeting. The noted copy is that meeting's master when the
+            // launch adopted it meanwhile, and is left alone otherwise too.
             if !is_reused {
                 let _ = std::fs::remove_file(&destination);
                 let _ = std::fs::remove_dir(&layout.directory);
@@ -491,6 +499,8 @@ fn reusable_copy(
     if store.meeting(meeting_id)?.is_some() {
         return Ok(None);
     }
+    #[cfg(feature = "testing")]
+    seams::after_the_reuse_check(meeting_id);
     let layout = RecordingLayout::new(&audio_folder, meeting_id);
     let master = layout.master(format);
     match upload.is_held_by(&master) {
@@ -499,6 +509,41 @@ fn reusable_copy(
             // The error can name the user's folder: debug alone.
             tracing::debug!(%meeting_id, ?held, "a noted copy of the upload is not admitted into");
             Ok(None)
+        }
+    }
+}
+
+/// The phone intake's test seam: the services' race tests hold a retry
+/// between its check that the noted copy has no meeting row and its
+/// commit, and let the launch run there. Test builds only.
+#[cfg(feature = "testing")]
+pub mod seams {
+    use std::sync::{Arc, Mutex};
+
+    use uuid::Uuid;
+
+    type Hook = Arc<dyn Fn(Uuid) + Send + Sync>;
+
+    static AFTER_THE_REUSE_CHECK: Mutex<Vec<Hook>> = Mutex::new(Vec::new());
+
+    /// Calls `hook` with the noted copy's meeting id each time a retry
+    /// found that it has no meeting row, before the retry reads the copy.
+    /// Every hook stays for the process, so each test's ignores the ids of
+    /// the others.
+    pub fn hold_after_the_reuse_check(hook: impl Fn(Uuid) + Send + Sync + 'static) {
+        AFTER_THE_REUSE_CHECK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Arc::new(hook));
+    }
+
+    pub(super) fn after_the_reuse_check(meeting_id: Uuid) {
+        let hooks = AFTER_THE_REUSE_CHECK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for hook in hooks {
+            hook(meeting_id);
         }
     }
 }

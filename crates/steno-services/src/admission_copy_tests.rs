@@ -2,8 +2,8 @@
 //! (its commit and its `failed` save both ran out the busy timeout), then
 //! a relaunch and the phone's retry, in either order: the recording is one
 //! meeting with one ledger row, and its audio is kept
-//! (`.plans/2026-10-07-stable-promotion.md`, "The copy an admission left
-//! is one meeting"). The copy is noted with the upload it holds
+//! (`.plans/2026-10-07-stable-promotion.md`, "P40 follow-up: the copy an
+//! admission left is one meeting"). The copy is noted with the upload it holds
 //! ([`crate::audio_folders::uploads`]): the launch adopts it with the
 //! upload's ledger row, and a retry before the launch admits into it. A
 //! note an older build wrote names no upload and keeps the adoption it
@@ -27,16 +27,16 @@ use crate::testing::{HANG_GUARD, an_hour_later, app_over_fakes, database_in, syn
 
 /// A paired phone, its verified upload in the inbox and its `verifying`
 /// receipt, over a store in `dir`.
-struct World {
-    dir: tempfile::TempDir,
-    device: PairedDevice,
-    metadata: RecordingMetadata,
-    upload: PathBuf,
-    bytes: Vec<u8>,
+pub(super) struct World {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) device: PairedDevice,
+    pub(super) metadata: RecordingMetadata,
+    pub(super) upload: PathBuf,
+    pub(super) bytes: Vec<u8>,
 }
 
 impl World {
-    fn new() -> (World, App) {
+    pub(super) fn new() -> (World, App) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(database_in(dir.path())).unwrap());
         let app = app_over_fakes(dir.path(), &store, synthetic_capture());
@@ -86,17 +86,17 @@ impl World {
         (world, app)
     }
 
-    fn support(&self) -> PathBuf {
+    pub(super) fn support(&self) -> PathBuf {
         self.dir.path().join("support")
     }
 
-    fn database(&self) -> PathBuf {
+    pub(super) fn database(&self) -> PathBuf {
         database_in(self.dir.path())
     }
 
     /// The phone's `complete` through the app's intake, bounded by
     /// [`HANG_GUARD`].
-    async fn admit(&self, app: &App) -> steno_core::protocols::BoundaryResult<Uuid> {
+    pub(super) async fn admit(&self, app: &App) -> steno_core::protocols::BoundaryResult<Uuid> {
         let intake = crate::app::handover_intake(
             app.store.clone(),
             app.pipeline.clone(),
@@ -115,7 +115,7 @@ impl World {
     /// takes and still holds, returned: the busy commit and the `failed`
     /// save that follows. Also returns the meeting id its copy is noted
     /// under, read as an older build reads the record.
-    async fn gave_up(&self, app: &App) -> (Uuid, WriteLockHold) {
+    pub(super) async fn gave_up(&self, app: &App) -> (Uuid, WriteLockHold) {
         let hold = WriteLockHold::new(&self.database());
         app.store
             .on_writer(|connection| connection.busy_timeout(Duration::from_millis(20)))
@@ -134,7 +134,7 @@ impl World {
     }
 
     /// The meeting folders in the audio folder that hold the upload.
-    fn copies(&self) -> Vec<Uuid> {
+    pub(super) fn copies(&self) -> Vec<Uuid> {
         let audio = self.dir.path().join("audio");
         let Ok(entries) = std::fs::read_dir(&audio) else {
             return Vec::new();
@@ -149,7 +149,7 @@ impl World {
 
     /// Exactly one meeting, `meeting_id`, with one ledger row for the
     /// upload, and the upload's bytes in its asset's master.
-    fn assert_one_meeting(&self, store: &Store, meeting_id: Uuid) {
+    pub(super) fn assert_one_meeting(&self, store: &Store, meeting_id: Uuid) {
         let meetings: Vec<Uuid> = store
             .all_meetings()
             .unwrap()
@@ -191,7 +191,7 @@ impl World {
 
 /// The app over the same directory again, launched as the product
 /// launches, once its launch work ran.
-async fn relaunch(world: &World) -> App {
+pub(super) async fn relaunch(world: &World) -> App {
     let store = Arc::new(Store::open(world.database()).unwrap());
     let mut app = app_over_fakes(world.dir.path(), &store, synthetic_capture());
     app.live_recording_check = an_hour_later();
@@ -204,7 +204,7 @@ async fn relaunch(world: &World) -> App {
 }
 
 /// `app` quit, its runs done first so none writes after.
-async fn quit(app: App) {
+pub(super) async fn quit(app: App) {
     tokio::time::timeout(HANG_GUARD, app.pipeline.current().wait_until_idle())
         .await
         .expect("the runs end within the guard");
@@ -262,8 +262,9 @@ async fn a_retry_admits_into_the_copy_an_admission_that_gave_up_left() {
 }
 
 /// A note an older build wrote names no upload: the launch adopts the
-/// copy as before, with no ledger row, and the phone's retry admits the
-/// recording again, as a second meeting. Nothing is lost.
+/// copy as a recording with no meeting, without a ledger row, and the
+/// phone's retry admits the recording again, as a second meeting. Nothing
+/// is lost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_copy_noted_without_its_upload_is_adopted_as_before() {
     let (world, app) = World::new();
@@ -290,5 +291,249 @@ async fn a_copy_noted_without_its_upload_is_adopted_as_before() {
     assert_ne!(retried, noted, "admitted again");
     assert_eq!(app.store.all_meetings().unwrap().len(), 2);
     assert_eq!(world.copies().len(), 2, "both copies kept");
+    quit(app).await;
+}
+
+impl World {
+    /// The upload's ledger row written as another meeting, with its own
+    /// asset elsewhere, as an older build's retry or another device's
+    /// upload of the same bytes leaves it; the user then deleted that
+    /// meeting when `deleted`. Returns its id.
+    fn ledger_holds_the_upload_as_another_meeting(&self, store: &Store, deleted: bool) -> Uuid {
+        let meeting = steno_core::Meeting {
+            id: Uuid::new_v4(),
+            source: steno_core::MeetingSource::Phone,
+            state: steno_core::MeetingState::Ready,
+            ..steno_core::testing::sample_data::meeting()
+        };
+        let master = self.dir.path().join("elsewhere").join("master.wav");
+        let asset = steno_core::AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: steno_core::paths::file_url(&master, false),
+            format: steno_core::AudioFormat::Wav16kInt16,
+            lanes: vec![steno_core::AudioLane::Mixed],
+            sidecars_16k: BTreeMap::new(),
+            mixdown_url: None,
+            retention: steno_core::AudioRetention::KeepForever,
+            expires_at: None,
+        };
+        assert_eq!(
+            store
+                .adopt_upload_durably(
+                    &meeting,
+                    &asset,
+                    self.metadata.recording_id,
+                    self.metadata.byte_count,
+                    &self.metadata.sha256,
+                )
+                .unwrap(),
+            steno_core::AdmissionCommit::Wrote
+        );
+        if deleted {
+            store.delete_meeting(meeting.id).unwrap();
+        }
+        meeting.id
+    }
+
+    /// The noted copy of `meeting_id`'s master.
+    fn master_of(&self, meeting_id: Uuid) -> PathBuf {
+        steno_core::RecordingLayout::new(&self.dir.path().join("audio"), meeting_id)
+            .master(self.metadata.format)
+    }
+
+    /// The noted copy of `meeting_id` with one byte of its audio changed:
+    /// the same size, other bytes.
+    fn corrupt(&self, meeting_id: Uuid) -> Vec<u8> {
+        let mut bytes = self.bytes.clone();
+        *bytes.last_mut().unwrap() ^= 0xFF;
+        std::fs::write(self.master_of(meeting_id), &bytes).unwrap();
+        bytes
+    }
+
+    /// How many folders and uploads are noted.
+    fn noted(&self) -> (usize, usize) {
+        (
+            crate::audio_folders::recorded(&self.support())
+                .unwrap()
+                .len(),
+            crate::audio_folders::uploads(&self.support())
+                .unwrap()
+                .len(),
+        )
+    }
+
+    /// The meeting ids in `store`.
+    fn meetings(store: &Store) -> Vec<Uuid> {
+        store
+            .all_meetings()
+            .unwrap()
+            .iter()
+            .map(|meeting| meeting.id)
+            .collect()
+    }
+}
+
+/// The ledger holds the noted copy's bytes as a meeting the user deleted:
+/// the launch removes the copy's folder, since the user deleted that
+/// audio, and forgets its notes. The ledger row stays, so the phone is
+/// answered "delivered" from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_noted_copy_of_bytes_whose_meeting_the_user_deleted_is_removed() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    let deleted = world.ledger_holds_the_upload_as_another_meeting(&app.store, true);
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    assert_eq!(
+        world.copies(),
+        Vec::<Uuid>::new(),
+        "the copy's folder is removed"
+    );
+    assert!(!world.master_of(noted).exists());
+    assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
+    assert_eq!(world.noted(), (0, 0));
+    assert_eq!(
+        app.store
+            .admitted_meeting(
+                world.metadata.recording_id,
+                world.metadata.byte_count,
+                &world.metadata.sha256
+            )
+            .unwrap(),
+        Some(deleted),
+        "the ledger row stays"
+    );
+    quit(app).await;
+}
+
+/// The ledger holds the noted copy's bytes as a meeting that still
+/// exists: the copy is not adopted and not removed; only its notes go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_noted_copy_of_bytes_whose_meeting_exists_is_kept() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    let existing = world.ledger_holds_the_upload_as_another_meeting(&app.store, false);
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    assert_eq!(world.copies(), [noted], "the copy is kept");
+    assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), world.bytes);
+    assert_eq!(World::meetings(&app.store), [existing]);
+    assert_eq!(world.noted(), (0, 0));
+    quit(app).await;
+}
+
+/// The noted copy holds other bytes of the same size, and the ledger
+/// holds the upload as a meeting the user deleted: the copy is not the
+/// upload, so it is kept and adopted as a recording with no meeting,
+/// without a ledger row, and stays noted until its row is durable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_noted_copy_holding_other_bytes_is_kept_though_the_uploads_meeting_was_deleted() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    world.ledger_holds_the_upload_as_another_meeting(&app.store, true);
+    let other_bytes = world.corrupt(noted);
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    assert_eq!(world.copies(), [noted], "the copy is kept");
+    assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), other_bytes);
+    assert_eq!(World::meetings(&app.store), [noted], "adopted");
+    assert_eq!(world.noted(), (1, 1), "still noted");
+    quit(app).await;
+}
+
+/// The noted copy cannot be read, and the ledger holds the upload as a
+/// meeting the user deleted: the copy is kept with its notes for the next
+/// launch, neither adopted nor removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_noted_copy_that_cannot_be_read_is_kept_though_the_uploads_meeting_was_deleted() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    world.ledger_holds_the_upload_as_another_meeting(&app.store, true);
+    quit(app).await;
+    crate::recovery::UNREADABLE_COPIES
+        .lock()
+        .unwrap()
+        .push(noted);
+
+    let app = relaunch(&world).await;
+    assert_eq!(world.copies(), [noted], "the copy is kept");
+    assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), world.bytes);
+    assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
+    assert_eq!(world.noted(), (1, 1), "still noted, for the next launch");
+    quit(app).await;
+}
+
+/// The noted copy holds other bytes of the same size: the retry does not
+/// admit into it but copies the upload afresh, and the launch adopts the
+/// noted copy as a recording with no meeting, without a ledger row. Both
+/// copies are kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_does_not_admit_into_a_noted_copy_holding_other_bytes() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    let other_bytes = world.corrupt(noted);
+
+    let retried = world.admit(&app).await.unwrap();
+    assert_ne!(retried, noted, "copied afresh");
+    assert_eq!(world.copies().len(), 2);
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    let mut meetings = World::meetings(&app.store);
+    meetings.sort();
+    let mut both = vec![noted, retried];
+    both.sort();
+    assert_eq!(meetings, both, "the noted copy is adopted too");
+    assert_eq!(
+        app.store
+            .admitted_meeting(
+                world.metadata.recording_id,
+                world.metadata.byte_count,
+                &world.metadata.sha256
+            )
+            .unwrap(),
+        Some(retried)
+    );
+    assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), other_bytes);
+    assert_eq!(
+        std::fs::read(world.master_of(retried)).unwrap(),
+        world.bytes
+    );
+    quit(app).await;
+}
+
+/// The retry admits into the noted copy and the ledger answers with
+/// another meeting that holds the same bytes: the retry gets that meeting,
+/// and the noted copy stays noted for the launch, which removes it once
+/// the user deleted that meeting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_noted_copy_the_ledger_answers_as_another_meeting_is_left_to_the_launch() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    let other = world.ledger_holds_the_upload_as_another_meeting(&app.store, false);
+
+    assert_eq!(world.admit(&app).await.unwrap(), other, "the retry");
+    assert_eq!(world.copies(), [noted], "the copy is kept");
+    assert_eq!(world.noted(), (1, 1), "and still noted");
+    app.store.delete_meeting(other).unwrap();
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    assert_eq!(
+        world.copies(),
+        Vec::<Uuid>::new(),
+        "removed with its meeting gone"
+    );
+    assert_eq!(world.noted(), (0, 0));
     quit(app).await;
 }

@@ -62,8 +62,14 @@ fn receipt_from_row(row: &Row<'_>) -> rusqlite::Result<HandoverReceipt> {
 pub enum AdmissionCommit {
     /// The meeting, its asset and the ledger row.
     Wrote,
-    /// None of them: the ledger already held the bytes, as this meeting.
-    Earlier(Uuid),
+    /// None of them: the ledger already held the bytes, as `meeting_id`.
+    Earlier {
+        meeting_id: Uuid,
+        /// The user deleted that meeting: it has no row, read in the same
+        /// transaction. Only the launch's adoption answers so; an
+        /// admission's commit answers only with a meeting that exists.
+        deleted: bool,
+    },
 }
 
 impl Store {
@@ -204,16 +210,21 @@ impl Store {
         Ok(
             match self.commit_admission_durably(receipt, meeting, asset)? {
                 AdmissionCommit::Wrote => meeting.id,
-                AdmissionCommit::Earlier(meeting_id) => meeting_id,
+                AdmissionCommit::Earlier { meeting_id, .. } => meeting_id,
             },
         )
     }
 
     /// [`Store::save_admission_durably`], saying whether it wrote `meeting`
     /// or the ledger answered: the phone intake's, whose meeting can share
-    /// its id with the ledger's when it admits into the copy an earlier
-    /// admission left (`RecordingIntake`), which the launch may have
-    /// adopted meanwhile ([`Store::adopt_upload_durably`]). Rust only.
+    /// its id with the ledger's when it admits into the noted copy an
+    /// earlier admission left (`RecordingIntake`), which the launch may
+    /// have adopted meanwhile ([`Store::adopt_upload_durably`]). Fails with
+    /// [`StoreError::MeetingExists`], writing nothing, when the ledger does
+    /// not answer and `meeting` already has a row: the launch adopted that
+    /// copy without the ledger row (its read of the noted uploads failed),
+    /// and an upsert would give the one master a second asset row under
+    /// another retention. Rust only.
     pub fn commit_admission_durably(
         &self,
         receipt: &HandoverReceipt,
@@ -264,7 +275,13 @@ impl Store {
                     ..receipt.clone()
                 };
                 save_receipt(transaction, &completed)?;
-                return Ok(AdmissionCommit::Earlier(meeting_id));
+                return Ok(AdmissionCommit::Earlier {
+                    meeting_id,
+                    deleted: false,
+                });
+            }
+            if meetings::has_row(transaction, meeting.id)? {
+                return Err(StoreError::MeetingExists(meeting.id));
             }
             meetings::save(transaction, meeting)?;
             assets::save(transaction, asset)?;
@@ -290,8 +307,12 @@ impl Store {
     /// ([`Store::write_durably`]). The phone's retry is then answered with
     /// this meeting from that row, as any admission's. When the ledger
     /// already holds those bytes, with a meeting or with one the user
-    /// deleted, nothing is written and the row's meeting id comes back:
-    /// the phone's retry is answered from that row anyway. Fails with
+    /// deleted, nothing is written and the row's meeting id comes back,
+    /// with whether that meeting is gone, read in this transaction: the
+    /// phone's retry is answered from that row anyway. The caller removes
+    /// the copy when the meeting is gone: a ledger row is written in the
+    /// transaction that writes its meeting, so a row whose meeting is gone
+    /// means the user deleted those bytes. Fails with
     /// [`StoreError::MeetingExists`], writing nothing, when `meeting` has
     /// a row (the phone's retry admitted into the copy meanwhile). The
     /// receipt is left as it is. Rust only: Swift had no recovery.
@@ -313,7 +334,10 @@ impl Store {
                 )
                 .optional()?;
             if let Some(meeting_id) = earlier {
-                return Ok(AdmissionCommit::Earlier(meeting_id));
+                return Ok(AdmissionCommit::Earlier {
+                    meeting_id,
+                    deleted: !meetings::has_row(transaction, meeting_id)?,
+                });
             }
             if meetings::has_row(transaction, meeting.id)? {
                 return Err(StoreError::MeetingExists(meeting.id));
@@ -335,7 +359,8 @@ impl Store {
     /// The meeting the phone recording `recording_id` of `byte_count` bytes
     /// hashing to `sha256` was admitted as, from the admission ledger
     /// (`handoverAdmission`, schema v5). A row is written in the
-    /// admission's own transaction ([`Store::save_admission_durably`]) and
+    /// admission's own transaction ([`Store::save_admission_durably`]), or
+    /// in the launch's adoption ([`Store::adopt_upload_durably`]), and
     /// never deleted: not by a revoke, whose cascade takes the receipts,
     /// nor by a meeting delete, so the meeting may be gone. The handover
     /// answers a phone that announces those bytes again "delivered" from

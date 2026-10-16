@@ -10,8 +10,9 @@ publish.workspace = true
 
 [features]
 # `fixtures::two_lane_call`, the recorded call the integration tests here
-# and in the services crate process, and `fixtures::CapturedLog`, what
-# their privacy tests read of the log.
+# and in the services crate process, `fixtures::CapturedLog`, what
+# their privacy tests read of the log, and `intake::seams`, where the
+# services' race tests hold a phone retry. Test targets only.
 testing = ["dep:tracing-subscriber"]
 
 [dependencies]
