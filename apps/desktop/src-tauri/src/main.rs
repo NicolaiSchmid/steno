@@ -1092,17 +1092,19 @@ mod tests {
     #[cfg(not(feature = "fixture-host"))]
     #[test]
     fn a_refusal_logs_no_path() {
-        let database = std::path::PathBuf::from("/Users/n/Library/Steno/steno.sqlite");
-        let setting = host::ShellHostError::Build(steno_services::BuildError::Setting {
-            database: database.clone(),
-            source: steno_core::StoreError::UndecodableSetting {
+        use host::ShellHostError::Build;
+        use steno_core::{DatabaseLockError, SettingProblem, StoreError};
+        use steno_services::BuildError;
+
+        let setting = Build(BuildError::Setting {
+            database: "/Users/n/Library/Steno/steno.sqlite".into(),
+            source: StoreError::UndecodableSetting {
                 key: "obsidian".to_owned(),
-                problem: steno_core::SettingProblem::WrongShape,
+                problem: SettingProblem::WrongShape,
             },
         });
-        let line = refusal_log_line(&setting);
         assert_eq!(
-            line,
+            refusal_log_line(&setting),
             "the stored setting obsidian holds a value this version of Steno does not understand"
         );
         assert!(
@@ -1111,37 +1113,27 @@ mod tests {
                 .contains("/Users/n/Library/Steno/steno.sqlite")
         );
         let lock = "/Users/n/Library/Steno/steno.lock";
+        let held = Build(BuildError::Lock(DatabaseLockError::Held(lock.into())));
+        assert_eq!(refusal_log_line(&held), "another Steno holds the database");
         let io = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         for error in [
             setting,
-            host::ShellHostError::Build(steno_services::BuildError::Lock(
-                steno_core::DatabaseLockError::Held(lock.into()),
-            )),
-            host::ShellHostError::Build(steno_services::BuildError::Lock(
-                steno_core::DatabaseLockError::Unsupported {
-                    path: lock.into(),
-                    source: io(),
-                },
-            )),
-            host::ShellHostError::Build(steno_services::BuildError::Lock(
-                steno_core::DatabaseLockError::Io {
-                    path: lock.into(),
-                    source: io(),
-                },
-            )),
-            host::ShellHostError::Build(steno_services::BuildError::Store(
-                steno_core::StoreError::PendingMigration("/Users/n/v9".to_owned()),
-            )),
+            held,
+            Build(BuildError::Lock(DatabaseLockError::Unsupported {
+                path: lock.into(),
+                source: io(),
+            })),
+            Build(BuildError::Lock(DatabaseLockError::Io {
+                path: lock.into(),
+                source: io(),
+            })),
+            Build(BuildError::Store(StoreError::PendingMigration(
+                "/Users/n/v9".to_owned(),
+            ))),
         ] {
             let line = refusal_log_line(&error);
             assert!(!line.contains('/'), "{line}");
         }
-        assert_eq!(
-            refusal_log_line(&host::ShellHostError::Build(
-                steno_services::BuildError::Lock(steno_core::DatabaseLockError::Held(lock.into()))
-            )),
-            "another Steno holds the database"
-        );
     }
 
     /// The Mac's query answers false for a bundle id no app carries.
