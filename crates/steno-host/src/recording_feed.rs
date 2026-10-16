@@ -253,7 +253,7 @@ fn without_level(snapshot: &RecordingSnapshot) -> RecordingSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Condvar, Mutex};
 
     use steno_bridge::{
         BridgeHost as _, CaptureMode, ListFilter, SetFilterParams, StartRecordingParams,
@@ -578,7 +578,7 @@ mod tests {
         // blocking receive parks the thread and would take the unpark
         // `page.ready` leaves for the next pass.
         #[derive(Default)]
-        struct Step(Mutex<u8>, std::sync::Condvar);
+        struct Step(Mutex<u8>, Condvar);
         impl Step {
             fn to(&self, step: u8) {
                 *self.0.lock().unwrap() = step;

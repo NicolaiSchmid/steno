@@ -2971,9 +2971,18 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::block_on;
+    use chrono::{DateTime, Utc};
+    use steno_bridge::BridgeTopic;
+    use steno_core::Store;
+    use uuid::Uuid;
+
+    use super::{Host, HostConfig, block_on};
+    use crate::fakes::FakeServices;
+    use crate::services::Clock;
 
     /// A boundary that sleeps, as a secret store with a timeout would,
     /// needs the host runtime's timer, here and on the helper thread:
@@ -2992,24 +3001,13 @@ mod tests {
     async fn a_boundary_may_use_the_timer_from_inside_a_runtime() {
         block_on(a_boundary_with_a_timeout());
     }
+
     /// A commit that lands while [`Host::new`] loads its view models (here
     /// from the clock, which the progress asks once the list has loaded)
     /// reaches the list at the first pass of the reload owner: the change
     /// mark is read before the loads, so the commit moved it.
     #[test]
     fn a_commit_during_the_hosts_loads_shows_at_the_first_pass() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::{Arc, Mutex};
-
-        use chrono::{DateTime, Utc};
-        use steno_bridge::BridgeTopic;
-        use steno_core::Store;
-        use uuid::Uuid;
-
-        use crate::fakes::FakeServices;
-        use crate::services::Clock;
-        use crate::{Host, HostConfig};
-
         /// Saves a new meeting on each reading while `committing`.
         struct CommittingClock {
             store: Arc<Store>,
