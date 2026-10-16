@@ -282,6 +282,28 @@ fn without_a_sane_qpc_the_largest_reading_is_counted_unfilled() {
     }
 }
 
+/// A ratio measured over one clean pair of packets errs over, never under:
+/// positions at 10 668 Hz, read to the whole position, advance 106 or 107
+/// a packet, and a loss of 18 packets after one pair counts at least the
+/// 8 640 frames lost.
+#[test]
+fn a_ratio_measured_over_one_pair_errs_over() {
+    for start in 0..48 {
+        let mut positions = DevicePositions::new(Some(48_000));
+        let at = |frames: u64| (start * 1_000 + frames) * 10_668 / 48_000;
+        let packet = |frames, discontinuity| Packet {
+            frames: 480,
+            position: at(frames),
+            discontinuity,
+            ..Packet::default()
+        };
+        assert!(positions.packet(packet(0, false)).is_none());
+        assert!(positions.packet(packet(480, false)).is_none());
+        let missed = positions.packet(packet(960 + 8_640, true));
+        assert!(missed.unfilled >= 8_640, "start {start}: {missed:?}");
+    }
+}
+
 /// A QPC that is not sane never fills, and is not read while the last clean
 /// pair's did not match its frames: one that runs at twice the time, one
 /// 2.5 % fast, one that never moves. One 1.5 % fast is sane.
@@ -691,7 +713,8 @@ fn a_follower_loss_is_counted_whatever_its_clocks_read() {
 }
 
 /// A drift underrun (the follower short by a packet, nothing flagged)
-/// stays in the underrun count and is not counted as missed.
+/// stays in the underrun count and is not counted as missed, after a
+/// discontinuity was counted too.
 #[test]
 fn a_drift_underrun_is_not_counted_as_missed() {
     let lanes = [AudioLane::Mic, AudioLane::System];
@@ -702,15 +725,59 @@ fn a_drift_underrun_is_not_counted_as_missed() {
     let mut staging = StreamBody::follower(Arc::clone(&follower), 4_800);
     let mic = vec![0.5f32; PERIOD];
     let tap = vec![0.25f32; 2 * PERIOD];
-    for tick in 0..300 {
-        // The follower's clock runs slow: it skips a packet every second.
-        if tick % 100 != 99 {
-            staging.handle(packet(&tap, 2));
-        }
-        master.handle(packet(&mic, 1));
-    }
+    let ticks =
+        |range: std::ops::Range<usize>, staging: &mut StreamBody, master: &mut StreamBody| {
+            for tick in range {
+                // The follower's clock runs slow: it skips a packet every second.
+                if tick % 100 != 99 {
+                    staging.handle(packet(&tap, 2));
+                }
+                master.handle(packet(&mic, 1));
+            }
+        };
+    ticks(0..300, &mut staging, &mut master);
     assert!(follower.underrun_frames() > 0);
     assert!(sink.filled_samples().is_empty() && sink.unfilled_samples().is_empty());
+    // A discontinuity with a loss its clocks read, counted once.
+    staging.write_missed(&packet(&tap, 2), filled(480));
+    ticks(300..310, &mut staging, &mut master);
+    assert_eq!(sink.filled_samples(), on_the_system(480));
+    let underrun = follower.underrun_frames();
+    ticks(310..600, &mut staging, &mut master);
+    assert!(follower.underrun_frames() > underrun);
+    assert_eq!(sink.filled_samples(), on_the_system(480), "nothing more");
+}
+
+/// The follower reports a discontinuity before it queues the packet: a
+/// master pull in between, with the lane still padding, takes nothing, and
+/// the pull that re-primes on the follower's audio takes the padding and
+/// the count together, once.
+#[test]
+fn a_discontinuity_waits_for_the_lane_to_prime() {
+    let follower = FollowerLane::for_streams(PERIOD, 4_800);
+    let tap = vec![0.25f32; 2 * PERIOD];
+    let mut scratch = vec![0.0f32; PERIOD];
+    let mut out = vec![0.0f32; PERIOD];
+    for _ in 0..4 {
+        follower.push(packet(&tap, 2), &mut scratch);
+    }
+    for _ in 0..53 {
+        follower.pull(&mut out);
+    }
+    assert_eq!(follower.underrun_frames(), 50 * PERIOD, "out for 50 pulls");
+    follower.record_missed(unfilled(24_000));
+    assert!(
+        follower.take_missed().is_none(),
+        "the lane is still padding"
+    );
+    for _ in 0..4 {
+        follower.push(packet(&tap, 2), &mut scratch);
+    }
+    follower.pull(&mut out);
+    let missed = follower.take_missed();
+    assert_eq!(missed.fill + missed.unfilled, 24_000, "{missed:?}");
+    assert!(missed.fill >= 23_000, "the padding is the fill: {missed:?}");
+    assert!(follower.take_missed().is_none(), "once");
 }
 
 /// The microphone's thread out for 1.5 s with no QPC, early or late in
