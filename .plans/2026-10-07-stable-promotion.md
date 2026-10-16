@@ -517,8 +517,8 @@ after the port".
   migration lands in the window:
   - a v6 migration adds a nullable `pairedDevice.identityFingerprint`,
     written in the pairing's own durable transaction. Rows from before stay
-    NULL, and a launch that serves the recorded identity binds them, so the
-    pairing-time rule survives only for the one-time Swift import. Rust only,
+    NULL, and a launch that serves the recorded identity fills them in with
+    the fingerprint it serves, so the pairing-time rule survives only for the one-time Swift import. Rust only,
     with no `Migrations.swift` mirror after S9;
   - the import's done flag, `steno.swiftImport = "done"`, moves into
     `handover-identity.json`, written in the same replace that records the
@@ -873,17 +873,28 @@ Every package is written in parallel except where a dependency is named:
         only when every paired phone knows it (each phone knows the newest
         identity whose certificate starts, a minute before its mint, at or
         before its `pairedAt`, both on this computer's clock); a recorded
-        fingerprint is never judged by it; two starts in one second are no
-        newest one; a time more than a second after now waits for the
-        clock. Every case, and every new one, is a row of the table.
+        fingerprint is never judged by it; two equal starts are no newest
+        one; over the times it can read, a time more than a second after now
+        waits for the clock (a time that cannot be read waits as unreadable
+        first). A Swift identity minted silently after a keychain reset,
+        which every phone predates, waits as replaced. Every case, and every
+        new one, is a row of the table.
+      - No decision destroys a stored identity: it writes no identity, the
+        import's choice writes nothing, and the Secret Service move writes at
+        most the record of the file's identity. Two writes outside it replace
+        a stored identity, by design: Pair again (the user's confirmed
+        choice, which removes every phone, and under the Secret Service also
+        drops the file's copy of the old identity), and the import's store
+        over a desktop-id build's identity, which logs the fingerprint
+        recorded for the old one and the imported one at warn.
       - The words. Where some phones know the identity and the others
         another or none, the import's step says "Some of your phones were
         paired before this Mac's pairing changed and can't connect. To
         reconnect them, choose Pair again in Settings > iPhone." The card in
         Settings > iPhone ends at "choose Pair again." and offers Pair again
-        first; the line under it after a Try again that still waits, and
-        "Phone handover is unavailable:" where the listener is shown, stop
-        after "can't connect." Where the clock went back (`clockBehind`),
+        first. Two lines stop after "can't connect.": the one under the card
+        after a Try again that still waits, and the listener's "Phone
+        handover is unavailable: ..." line. Where the clock went back (`clockBehind`),
         Settings says to check the date and time, then Try again; Try again
         leads, and Pair again stays the second button.
       - The import's choice (`swift_import::choose_certificate`) asks the
@@ -896,7 +907,8 @@ Every package is written in parallel except where a dependency is named:
         pins the file's identity where nothing is recorded, unless every
         paired phone was paired before that identity started; then it pins
         nothing, and the load judges the service's identity by the same
-        rule.
+        rule. It never writes, replaces or removes either identity; both
+        stay until Pair again.
   - **Login item** (D4). On macOS, `autostart.rs` uses `SMAppService.mainApp`.
     At the first launch after the handoff the new app registers its own
     identifier explicitly when the stored `launch_at_login` setting (shared
