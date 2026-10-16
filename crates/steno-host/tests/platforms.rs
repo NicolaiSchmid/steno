@@ -69,6 +69,7 @@ fn only_the_platforms_own_permissions_gate_onboarding_and_recording() {
         fakes
             .preferences
             .set_flag(OnboardingViewModel::COMPLETED_KEY, true);
+        install_speech_models(fakes);
     };
     let mac = Harness::builder().seed(deny_system_audio).build();
     assert!(mac.host.should_open_onboarding());
@@ -131,6 +132,7 @@ fn the_opener_counts_a_permission_missing_by_platform() {
                     fakes
                         .preferences
                         .set_flag(OnboardingViewModel::COMPLETED_KEY, completed);
+                    install_speech_models(fakes);
                 })
                 .build();
             assert_eq!(

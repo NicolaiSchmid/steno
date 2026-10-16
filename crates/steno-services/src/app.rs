@@ -3,6 +3,7 @@
 //! object graph, and [`App`], what it hands back. Swift: `AppEnvironment.live`
 //! and `AppController.launch`.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{FixedOffset, Local, Offset as _};
@@ -57,6 +58,34 @@ pub enum BuildError {
     Store(#[from] StoreError),
     #[error("Could not create the database folder: {0}")]
     DatabaseFolder(#[source] std::io::Error),
+    /// A stored setting cannot be read
+    /// ([`StoreError::UndecodableSetting`], or
+    /// [`StoreError::UndecodableSettings`]), with the database it is in,
+    /// so the dialog can say where it is ([`BuildError::unreadable_settings`]).
+    /// The text names the key and the problem, never the value or the
+    /// database's path: it goes into the log. The app refuses to start
+    /// rather than run on a default for it (a vault path, a retention
+    /// rule). Rust only.
+    #[error("{source}")]
+    Setting {
+        database: std::path::PathBuf,
+        source: StoreError,
+    },
+}
+
+impl BuildError {
+    /// For the stored settings that cannot be read: the store's error,
+    /// whose text names the key and the problem (or that the settings do
+    /// not read together) and never a value, and the database they are in,
+    /// which the "could not start" dialog says; `None` for every other
+    /// failure.
+    #[must_use]
+    pub fn unreadable_settings(&self) -> Option<(&StoreError, &Path)> {
+        match self {
+            BuildError::Setting { database, source } => Some((source, database)),
+            _ => None,
+        }
+    }
 }
 
 /// What differs between the shell, the CLI and the tests.
@@ -713,10 +742,16 @@ pub fn build_with_import(
     // The speech settings and the models directory are read once, here:
     // the pipeline (and every reload, which keeps its engine when it runs
     // where the last one did) and the model service share them.
-    let engines = Arc::new(SpeechEngines::new(SpeechSetup::new(
-        &store.settings()?,
-        &paths,
-    )));
+    let settings = store.settings().map_err(|error| match error {
+        StoreError::UndecodableSetting { .. } | StoreError::UndecodableSettings => {
+            BuildError::Setting {
+                database: database_path.clone(),
+                source: error,
+            }
+        }
+        other => BuildError::Store(other),
+    })?;
+    let engines = Arc::new(SpeechEngines::new(SpeechSetup::new(&settings, &paths)));
     let speech = engines.setup();
     // What the decoder replaced by silence per meeting, in the support
     // directory, which the detail reads through `HostPipeline`; a deleted
@@ -1547,7 +1582,7 @@ mod tests {
     use steno_bridge::BridgeTopic;
     use steno_core::{
         AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata, SecretKey, SecretStore,
-        async_trait, paths::file_url, protocols::BoundaryResult,
+        SettingProblem, async_trait, paths::file_url, protocols::BoundaryResult,
     };
     use steno_host::services::ListenerState;
     use steno_pipeline::MeetingEventBus;
@@ -1661,6 +1696,71 @@ mod tests {
                 .count(),
             1,
             "the transcribe rate was learned under the current engine's id"
+        );
+    }
+
+    /// One setting row the app cannot read stops the build (the stable
+    /// plan's "First launch after the handoff", row "A setting the new app
+    /// cannot read"): the error's text, which the log gets, names the row's
+    /// key and what is wrong and neither the value nor the database's path;
+    /// the dialog's parts add the database; the database keeps the row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_setting_names_its_key_and_the_database_and_not_its_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let database = StenoPaths::new(&support).database_path();
+        let value = "https://user:sk-secret@example.com";
+        {
+            let store = open_store(&database).unwrap();
+            store
+                .write(|transaction| {
+                    transaction.execute(
+                        "INSERT INTO setting (key, value) VALUES ('llmBaseURL', ?1)",
+                        [value],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let Err(error) = build(options_under(&support)) else {
+            panic!("the build went ahead over an unreadable setting");
+        };
+        let text = error.to_string();
+        assert_eq!(
+            text,
+            "the stored setting llmBaseURL is not in a form Steno can read"
+        );
+        assert!(!text.contains(&support.display().to_string()), "{text}");
+        assert!(!format!("{error:?}").contains("sk-secret"), "{error:?}");
+        let Some((
+            StoreError::UndecodableSetting {
+                key,
+                problem: SettingProblem::NotJson,
+            },
+            in_database,
+        )) = error.unreadable_settings()
+        else {
+            panic!("not an unreadable setting: {error:?}");
+        };
+        assert_eq!(
+            (key.as_str(), in_database),
+            ("llmBaseURL", database.as_path())
+        );
+        let kept: String = open_store(&database)
+            .unwrap()
+            .read(|connection| {
+                Ok(connection.query_row(
+                    "SELECT value FROM setting WHERE key = 'llmBaseURL'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(kept, value);
+        assert!(
+            BuildError::Store(StoreError::BlankPersonName)
+                .unreadable_settings()
+                .is_none()
         );
     }
 
@@ -3538,6 +3638,12 @@ mod tests {
         let summaries = asked.snapshot(BridgeTopic::SettingsSummaries);
         assert_eq!(summaries["hasAPIKey"], false);
         assert!(summaries.get("keyStore").is_none(), "{summaries}");
+        // No speech model is installed here, so onboarding waits on page 1
+        // with its speech models row; Continue shows the Summaries row.
+        let host = asked.host.clone();
+        on_own_thread(PATIENCE, "onboarding moved on", move || {
+            steno_bridge::BridgeHost::onboarding_advance(&host).unwrap();
+        });
         let onboarding = asked.snapshot(BridgeTopic::Onboarding);
         assert_eq!(
             onboarding["summaries"]["error"],

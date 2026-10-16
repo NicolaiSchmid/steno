@@ -534,9 +534,11 @@ pub(crate) mod real {
     }
 
     impl RealHost {
-        pub fn page_ready(&self) -> Result<(), BridgeError> {
+        /// For the window whose page is ready: the onboarding window's
+        /// starts its vault check.
+        pub fn page_ready(&self, label: &str) -> Result<(), BridgeError> {
             use steno_bridge::BridgeHost as _;
-            self.host.page_ready()
+            self.host.for_window(bridge_window(label)).page_ready()
         }
 
         /// A command from the window of `label`.
@@ -827,6 +829,16 @@ impl ShellHostError {
             ))
         )
     }
+
+    /// The stored settings the app cannot read: the store's error, which
+    /// names the key and the problem and never a value, and the database
+    /// ([`steno_services::BuildError::unreadable_settings`]).
+    pub fn unreadable_settings(&self) -> Option<(&steno_core::StoreError, &std::path::Path)> {
+        match self {
+            Self::Build(error) => error.unreadable_settings(),
+            _ => None,
+        }
+    }
 }
 
 /// The window a [`Host`] call answers for, as the host uses it: the real
@@ -1054,8 +1066,7 @@ impl Host {
         steno_host::assert_off_ui_thread("page.ready");
         #[cfg(not(feature = "fixture-host"))]
         {
-            let _ = window;
-            self.inner.page_ready()
+            self.inner.page_ready(window.label())
         }
         #[cfg(feature = "fixture-host")]
         {

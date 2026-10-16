@@ -681,6 +681,39 @@ pub fn drop_sample_summary(store: &Store) {
     store.replace_summary(&bare, &[], &[], &[]).unwrap();
 }
 
+/// Installs the models a meeting needs (the speech model and the
+/// diarizer), so onboarding shows no speech models row.
+pub fn install_speech_models(fakes: &FakeServices) {
+    for asset in steno_host::speech::ModelAsset::OFFERED {
+        fakes.speech_models.set_installed(asset, None);
+    }
+}
+
+/// Stores `path` as the vault, the other export settings left as they are
+/// by default.
+pub fn store_vault(store: &Store, path: &str) {
+    let mut settings = store.settings().unwrap();
+    settings.obsidian = Some(ObsidianSettings {
+        vault_path: path.to_owned(),
+        people_folder: None,
+        include_audio: false,
+        task_tag: None,
+        extra: serde_json::Map::new(),
+    });
+    store.save_settings(&settings).unwrap();
+}
+
+/// The onboarding topic last published with its `row` (`speechModels`,
+/// `vaultAccess`) in `state`.
+pub fn onboarding_row_is(row: &'static str, state: &'static str) -> impl Fn(&Harness) -> bool {
+    move |harness| {
+        harness
+            .sink
+            .last(BridgeTopic::Onboarding)
+            .is_some_and(|onboarding| onboarding[row]["state"] == state)
+    }
+}
+
 /// The settings with an LM Studio endpoint configured, no vault.
 pub fn configure_llm(store: &Store, model: &str) {
     let mut settings = store.settings().unwrap();

@@ -11,6 +11,17 @@
 //! Obsidian vault, both optional, written through the same view models the
 //! Settings sections use. The model owns the exit: Finish, or both rows
 //! handled on page 2, set the completed flag and `finished`.
+//!
+//! Page 1 has two more rows, Rust only, for the first launch after the
+//! Swift app (`.plans/2026-10-07-stable-promotion.md`, "The Sparkle
+//! handoff", "First launch after the handoff"): the speech models row
+//! while the models a meeting needs were missing when onboarding opened
+//! (the speaker models the Swift app never had, or every model on a fresh
+//! install), whose Download is Settings' install, and on the Mac the vault
+//! row, which writes the destination's probe to the stored vault (a hidden
+//! file, removed at once) so that macOS asks for its folder while the page
+//! shows rather than at the first export. While that row is checking or
+//! refused, page 1 does not move on by itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -19,20 +30,24 @@ use chrono::{DateTime, Utc};
 use steno_bridge::{
     OnboardingImport, OnboardingImportState, OnboardingPage, OnboardingPermissionStep,
     OnboardingSetupStep, OnboardingSetupStepKind, OnboardingSetupStepState, OnboardingSnapshot,
-    OnboardingVault, PermissionKind, PermissionState, Platform,
+    OnboardingSpeechModels, OnboardingVault, OnboardingVaultAccess, OnboardingVaultAccessState,
+    PermissionKind, PermissionState, Platform, TranscriptionAssetState,
 };
 use steno_core::protocols::BoundaryResult;
-use steno_core::{AudioRetention, Settings, Store};
+use steno_core::{AudioRetention, ObsidianSettings, Settings, Store};
 
-use crate::labels::retention_footnote;
+use crate::labels::{file_size, retention_footnote};
 use crate::services::{
-    CodexModel, CodexModelsError, Services, SwiftImportStage, SwiftImportStatus,
-    permission_is_missing, permission_is_required,
+    CodexModel, CodexModelsError, Services, SpeechModels, SwiftImportStage, SwiftImportStatus,
+    VaultRefusal, permission_is_missing, permission_is_required,
 };
 use crate::settings::llm::{CodexStatus, KeyRead, LlmPreset, LlmSettingsViewModel, url_host};
 use crate::settings::obsidian::ObsidianSettingsViewModel;
 use crate::settings::snapshots as settings_snapshots;
+use crate::settings::transcription::downloading_text;
+use crate::settings::{AssetState, SpeechSettingsViewModel};
 use crate::setup::{llm_configured, vault_configured};
+use crate::speech::{ModelAsset, SpeechEngineId};
 
 /// Swift: `OnboardingViewModel.Step`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +77,26 @@ impl SetupState {
     pub fn is_handled(&self) -> bool {
         *self != SetupState::Open
     }
+}
+
+/// Page 1's vault row: the stored vault's folder name and whether it took
+/// the probe write. Rust only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultCheck {
+    pub name: String,
+    pub access: VaultAccess,
+}
+
+/// Whether the stored vault took the probe write. Rust only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VaultAccess {
+    /// Check again was chosen after a refusal: the next check is due, and
+    /// the row reads checking until it has run.
+    Due,
+    /// The write runs; macOS may be asking for the folder.
+    Checking,
+    Writable,
+    Refused(VaultRefusal),
 }
 
 /// The two optional rows of page 2, in order.
@@ -96,6 +131,12 @@ pub struct OnboardingViewModel {
     pub import: Option<SwiftImportStatus>,
     /// The import's keychain prompts are up.
     pub importing: bool,
+    /// The models a meeting needs that were missing at the first `load`:
+    /// page 1's speech models row, which stays, reading installed, once
+    /// they arrive. Empty without the row. Rust only.
+    pub missing_models: Vec<ModelAsset>,
+    /// Page 1's vault row, once its check started. Rust only.
+    pub vault_check: Option<VaultCheck>,
     loaded: bool,
 }
 
@@ -108,6 +149,13 @@ impl Default for OnboardingViewModel {
 impl OnboardingViewModel {
     /// The preferences flag: this install has finished the two pages.
     pub const COMPLETED_KEY: &'static str = "steno.onboardingCompleted";
+
+    /// The preferences flag: this app's onboarding was closed or finished
+    /// once, so it has offered the speech models. Unlike
+    /// [`Self::COMPLETED_KEY`], the Swift import never copies it, so the
+    /// first launch after the Swift app opens onboarding while the models
+    /// are missing even when its grants were in place. Rust only.
+    pub const MODELS_OFFERED_KEY: &'static str = "steno.speechModelsOffered";
 
     /// Page 1 lists the permissions `platform` has.
     #[must_use]
@@ -135,6 +183,8 @@ impl OnboardingViewModel {
             obsidian: ObsidianSettingsViewModel::default(),
             import: None,
             importing: false,
+            missing_models: Vec::new(),
+            vault_check: None,
             loaded: false,
         }
     }
@@ -150,9 +200,16 @@ impl OnboardingViewModel {
     /// written and the window stays closed. Swift:
     /// `OnboardingViewModel.shouldOpen`, where every state but `granted`
     /// was missing. The import step opens it too, whatever the flag says,
-    /// until the identity came over (Rust only).
+    /// until the identity came over, and so do missing speech models until
+    /// this app's onboarding offered them once ([`Self::MODELS_OFFERED_KEY`])
+    /// (Rust only).
     pub fn should_open(store: &Store, services: &Services, platform: Platform) -> bool {
         if import_open(services).is_some() {
+            return true;
+        }
+        if !services.preferences.flag(Self::MODELS_OFFERED_KEY)
+            && !missing_models(store, services).is_empty()
+        {
             return true;
         }
         if PermissionKind::for_platform(platform)
@@ -204,6 +261,7 @@ impl OnboardingViewModel {
                 SetupState::Saved(Self::saved_line_vault(&self.obsidian)),
             );
         }
+        self.missing_models = missing_models(store, services);
         // The import step comes first while it has work left.
         self.import = import_open(services);
         if self.import.is_some() {
@@ -211,8 +269,9 @@ impl OnboardingViewModel {
             return;
         }
         // An install that has the permissions but never saw page 2 starts
-        // there; a fresh install starts on page 1.
-        if self.is_complete() {
+        // there, unless the models row waits on page 1; a fresh install
+        // starts on page 1.
+        if self.is_complete() && !self.models_pending(services) {
             self.page = OnboardingPage::Setup;
             self.finish_if_setup_handled(services);
         }
@@ -275,7 +334,7 @@ impl OnboardingViewModel {
             }
         }
         self.page = OnboardingPage::Permissions;
-        if self.is_complete() {
+        if self.is_complete() && !self.models_pending(services) {
             self.page = OnboardingPage::Setup;
             self.finish_if_setup_handled(services);
         }
@@ -319,6 +378,84 @@ impl OnboardingViewModel {
                 .all(|step| {
                     step.state == PermissionState::Granted || self.skipped.contains(&step.kind)
                 })
+    }
+
+    /// The speech models row shows a model that is not installed yet, so
+    /// page 1 neither starts on page 2 nor moves on by itself.
+    #[must_use]
+    pub fn models_pending(&self, services: &Services) -> bool {
+        self.missing_models
+            .iter()
+            .any(|asset| !services.speech_models.is_installed(*asset))
+    }
+
+    /// The vault row's check is due: on the Mac, on page 1, with a vault
+    /// stored, once per window and again after Check again. Marks the row
+    /// checking and returns the stored settings the host writes to with its
+    /// lock released ([`ExportValidator`](crate::services::ExportValidator)).
+    /// Never for a vault that is not stored; off the Mac there is no folder
+    /// prompt to bring forward, so nothing is checked.
+    pub fn begin_vault_check(&mut self, store: &Store) -> Option<ObsidianSettings> {
+        if self.platform != Platform::Macos
+            || self.page != OnboardingPage::Permissions
+            || self
+                .vault_check
+                .as_ref()
+                .is_some_and(|check| check.access != VaultAccess::Due)
+        {
+            return None;
+        }
+        let Some(obsidian) = store
+            .settings()
+            .ok()
+            .and_then(|settings| settings.obsidian)
+            .filter(|obsidian| !obsidian.vault_path.trim().is_empty())
+        else {
+            self.vault_check = None;
+            return None;
+        };
+        let name = Path::new(&obsidian.vault_path).file_name().map_or_else(
+            || obsidian.vault_path.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        self.vault_check = Some(VaultCheck {
+            name,
+            access: VaultAccess::Checking,
+        });
+        Some(obsidian)
+    }
+
+    /// The check's outcome, on the row it started on (a window closed
+    /// meanwhile starts a model without one, which this leaves alone).
+    pub fn finish_vault_check(&mut self, outcome: Result<(), VaultRefusal>) {
+        if let Some(check) = &mut self.vault_check
+            && check.access == VaultAccess::Checking
+        {
+            check.access = match outcome {
+                Ok(()) => VaultAccess::Writable,
+                Err(refusal) => VaultAccess::Refused(refusal),
+            };
+        }
+    }
+
+    /// "Check again" on page 1 makes the check of a refused vault due
+    /// again, after the user turned Steno on under Files and Folders or
+    /// brought the folder back.
+    pub fn retry_vault_check(&mut self) {
+        if let Some(check) = &mut self.vault_check
+            && matches!(check.access, VaultAccess::Refused(_))
+        {
+            check.access = VaultAccess::Due;
+        }
+    }
+
+    /// The vault row holds page 1: its check is due, runs, or was refused,
+    /// so the page does not move on by itself before the user saw it.
+    #[must_use]
+    pub fn vault_pending(&self) -> bool {
+        self.vault_check
+            .as_ref()
+            .is_some_and(|check| check.access != VaultAccess::Writable)
     }
 
     /// Both setup rows saved or skipped.
@@ -477,9 +614,13 @@ impl OnboardingViewModel {
 
     // Exit
 
-    /// The flag alone, for the window's close button.
+    /// The flags alone, for the window's close button: the pages were
+    /// seen, the speech models offered.
     pub fn mark_completed(services: &Services) {
         services.preferences.set_flag(Self::COMPLETED_KEY, true);
+        services
+            .preferences
+            .set_flag(Self::MODELS_OFFERED_KEY, true);
     }
 
     /// Finish, or both rows handled on page 2: the flag, then `finished`.
@@ -522,6 +663,133 @@ impl OnboardingViewModel {
     }
 }
 
+/// The models a meeting needs under the stored engine, the ones Settings'
+/// Transcription section lists, that are not installed.
+fn missing_models(store: &Store, services: &Services) -> Vec<ModelAsset> {
+    let engine = store
+        .settings()
+        .ok()
+        .and_then(|settings| settings.speech_engine_id.parse().ok())
+        .unwrap_or(SpeechEngineId::ParakeetV3);
+    [engine.asset(), ModelAsset::OfflineDiarizer]
+        .into_iter()
+        .filter(|asset| !services.speech_models.is_installed(*asset))
+        .collect()
+}
+
+/// The speech models row: one line for the models that were missing,
+/// over the download states Settings' Transcription section keeps, so a
+/// download started on either page shows on both.
+fn speech_models_snapshot(
+    model: &OnboardingViewModel,
+    speech: &SpeechSettingsViewModel,
+    models: &dyn SpeechModels,
+) -> Option<OnboardingSpeechModels> {
+    if model.missing_models.is_empty() {
+        return None;
+    }
+    let rows: Vec<(ModelAsset, AssetState, i64)> = model
+        .missing_models
+        .iter()
+        .map(|asset| {
+            (
+                *asset,
+                speech.state_of(*asset),
+                models.expected_bytes(*asset),
+            )
+        })
+        .collect();
+    let installed = |state: &AssetState| matches!(state, AssetState::Installed { .. });
+    if rows.iter().all(|(_, state, _)| installed(state)) {
+        return Some(OnboardingSpeechModels {
+            state: TranscriptionAssetState::Installed,
+            detail: "Installed".to_owned(),
+            asset_ids: Vec::new(),
+            download_fraction: None,
+            failure: None,
+        });
+    }
+    if rows
+        .iter()
+        .any(|(_, state, _)| matches!(state, AssetState::Downloading { .. }))
+    {
+        // The share of the bytes in place, an installed model counting whole.
+        let total: i64 = rows.iter().map(|(_, _, bytes)| bytes).sum();
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a share of a few hundred megabytes"
+        )]
+        let fraction = (total > 0).then(|| {
+            rows.iter()
+                .map(|(_, state, bytes)| {
+                    let done = match state {
+                        AssetState::Installed { .. } => 1.0,
+                        AssetState::Downloading { fraction, .. } => *fraction,
+                        AssetState::Absent | AssetState::Failed(_) => 0.0,
+                    };
+                    done * *bytes as f64
+                })
+                .sum::<f64>()
+                / total as f64
+        });
+        return Some(OnboardingSpeechModels {
+            state: TranscriptionAssetState::Downloading,
+            detail: downloading_text(fraction.unwrap_or(0.0)),
+            asset_ids: Vec::new(),
+            download_fraction: fraction,
+            failure: None,
+        });
+    }
+    // Neither installed nor downloading: Download or Retry starts the rest.
+    let failure = rows.iter().find_map(|(_, state, _)| match state {
+        AssetState::Failed(failure) => Some(failure.clone()),
+        _ => None,
+    });
+    let missing: Vec<_> = rows
+        .iter()
+        .filter(|(_, state, _)| !installed(state))
+        .collect();
+    Some(OnboardingSpeechModels {
+        state: if failure.is_some() {
+            TranscriptionAssetState::Failed
+        } else {
+            TranscriptionAssetState::Absent
+        },
+        detail: format!(
+            "Not downloaded · {}",
+            file_size(missing.iter().map(|(_, _, bytes)| bytes).sum())
+        ),
+        asset_ids: missing
+            .iter()
+            .map(|(asset, _, _)| asset.as_str().to_owned())
+            .collect(),
+        download_fraction: None,
+        failure,
+    })
+}
+
+/// The vault row as the page shows it.
+fn vault_access_snapshot(model: &OnboardingViewModel) -> Option<OnboardingVaultAccess> {
+    let check = model.vault_check.as_ref()?;
+    let (state, validation_message) = match &check.access {
+        VaultAccess::Due | VaultAccess::Checking => (OnboardingVaultAccessState::Checking, None),
+        VaultAccess::Writable => (OnboardingVaultAccessState::Writable, None),
+        VaultAccess::Refused(refusal) => (
+            if refusal.not_writable {
+                OnboardingVaultAccessState::Refused
+            } else {
+                OnboardingVaultAccessState::Unusable
+            },
+            Some(refusal.message.clone()),
+        ),
+    };
+    Some(OnboardingVaultAccess {
+        state,
+        name: check.name.clone(),
+        validation_message,
+    })
+}
+
 /// The import's status while it has work left (pending or waiting).
 fn import_open(services: &Services) -> Option<SwiftImportStatus> {
     services
@@ -551,9 +819,15 @@ fn import_snapshot(model: &OnboardingViewModel) -> Option<OnboardingImport> {
 }
 
 /// The onboarding window's topic. Page 2 only carries the Summaries form
-/// (the Settings snapshot without a sidebar subtitle) and the vault row.
+/// (the Settings snapshot without a sidebar subtitle) and the vault row;
+/// page 1's speech models row reads the download states of `speech`,
+/// Settings' Transcription section, and the sizes `models` expects.
 #[must_use]
-pub fn snapshot(model: &OnboardingViewModel) -> OnboardingSnapshot {
+pub fn snapshot(
+    model: &OnboardingViewModel,
+    speech: &SpeechSettingsViewModel,
+    models: &dyn SpeechModels,
+) -> OnboardingSnapshot {
     let on_setup = model.page == OnboardingPage::Setup;
     OnboardingSnapshot {
         page: model.page,
@@ -601,6 +875,8 @@ pub fn snapshot(model: &OnboardingViewModel) -> OnboardingSnapshot {
         }),
         retention_sentence: model.retention_sentence.clone(),
         swift_import: import_snapshot(model),
+        speech_models: speech_models_snapshot(model, speech, models),
+        vault_access: vault_access_snapshot(model),
         finished: model.finished,
     }
 }

@@ -272,6 +272,16 @@ const ONBOARDING_STATES: readonly OnboardingState[] = [
 		testId: "onboarding-done",
 	},
 	{
+		name: "page-1-handoff",
+		query: "scenario=onboarding-handoff",
+		testId: "onboarding-models-download",
+	},
+	{
+		name: "page-1-handoff-downloading",
+		query: "scenario=onboarding-handoff-downloading",
+		testId: "onboarding-models-progress",
+	},
+	{
 		name: "page-2",
 		query: "scenario=onboarding-setup-open",
 		testId: "onboarding-save-summaries",

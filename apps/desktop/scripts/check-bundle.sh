@@ -18,9 +18,13 @@
 #             byte for byte apps/desktop/src-tauri/linux/hyprland-steno.lua
 #   appimage  appimage/*.AppImage, unpacked with --appimage-extract, into
 #             usr/bin/
-#   app       macos/*.app, into Contents/MacOS/; also the bundle id and
-#             the Swift app's SUPublicEDKey, as tauri.conf.json and
-#             Info.plist give them, in the merged Info.plist. With
+#   app       macos/*.app, into Contents/MacOS/; also the bundle id, the
+#             Swift app's SUPublicEDKey and every purpose string a prompt
+#             shows (microphone, system audio, calendar, local network,
+#             and the Documents, Desktop and Downloads folders, external
+#             disks and network shares a vault may be on), as
+#             tauri.conf.json and Info.plist give them, in the merged
+#             Info.plist. With
 #             --signed, also the Developer ID signature, hardened
 #             runtime, timestamp and team of the app, its executable and
 #             the sidecar, the two entitlements, the stapled ticket and
@@ -189,6 +193,20 @@ release_signature() {
   sed -n 's/^TeamIdentifier=//p' <<< "$details"
 }
 
+# The purpose strings the merged Info.plist must carry (check_app).
+usage_keys=(
+  NSMicrophoneUsageDescription
+  NSAudioCaptureUsageDescription
+  NSCalendarsFullAccessUsageDescription
+  NSLocalNetworkUsageDescription
+  NSDocumentsFolderUsageDescription
+  NSDesktopFolderUsageDescription
+  NSDownloadsFolderUsageDescription
+  NSRemovableVolumesUsageDescription
+  NSNetworkVolumesUsageDescription
+  NSFileProviderDomainUsageDescription
+)
+
 # plist_value <file> <key>: the value under the top-level <key> of a plist
 # or a JSON file. plutil rather than PlistBuddy, since it also reads
 # tauri.conf.json; its `raw` form has been there since macOS 12, and
@@ -218,6 +236,12 @@ check_app() {
     "$(plist_value "$src_tauri/tauri.conf.json" identifier)"
   info_is "$app/Contents/Info.plist" SUPublicEDKey \
     "$(plist_value "$src_tauri/Info.plist" SUPublicEDKey)"
+  # The purpose strings: without one, macOS refuses the access its prompt
+  # would ask for, silently.
+  for key in "${usage_keys[@]}"; do
+    info_is "$app/Contents/Info.plist" "$key" \
+      "$(plist_value "$src_tauri/Info.plist" "$key" 2>/dev/null || true)"
+  done
   [[ "$signed" == true ]] || return 0
 
   codesign --verify --deep --strict --verbose=2 "$app" \

@@ -218,6 +218,27 @@ export function PhoneSection() {
 						label="Add a phone"
 					/>
 				)}
+				{words.localNetworkHelp ? (
+					<FormRow
+						control={
+							<Button
+								data-testid="phone-local-network-open"
+								onClick={() =>
+									send(client, "system.openSystemSettings", {
+										kind: "localNetwork",
+									})
+								}
+								size="sm"
+								variant="outline"
+							>
+								Open {words.systemSettings}
+							</Button>
+						}
+						data-testid="phone-local-network"
+						description={words.localNetworkHelp}
+						label="Local network"
+					/>
+				) : null}
 			</FormCard>
 
 			{phone.receipts.length > 0 ? (

@@ -727,6 +727,7 @@ const RETENTION_SENTENCE: &str = "Each recording is deleted 30 days after it was
 fn onboarding_permissions() {
     let harness = Harness::builder()
         .seed(|store, fakes| {
+            install_speech_models(fakes);
             set_retention(store, AudioRetention::KeepDays(30));
             for kind in PermissionKind::ALL {
                 fakes.permissions.set_state(*kind, PermissionState::Unknown);
@@ -809,6 +810,7 @@ fn onboarding_import() {
     let harness = Harness::builder()
         .with_swift_import(1)
         .seed(|store, fakes| {
+            install_speech_models(fakes);
             set_retention(store, AudioRetention::KeepDays(30));
             for kind in PermissionKind::ALL {
                 fakes.permissions.set_state(*kind, PermissionState::Unknown);
@@ -826,11 +828,50 @@ fn onboarding_import() {
     );
 }
 
+/// `onboarding.handoff` has no Swift sample (the Swift app has neither
+/// row); it is written in the recorder's format, and this proves the host
+/// produces it: page 1 at the first launch after the Swift app, with the
+/// `CoreML` speech model in place, the speaker models missing, and a
+/// vault in Documents whose write macOS refused.
+#[test]
+fn onboarding_handoff() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            set_retention(store, AudioRetention::KeepDays(30));
+            for kind in PermissionKind::ALL {
+                fakes.permissions.set_state(*kind, PermissionState::Unknown);
+            }
+            fakes
+                .speech_models
+                .set_installed(ModelAsset::ParakeetV3, Some(485_000_000));
+            store_vault(store, "/Users/nicolai/Documents/Work Vault");
+            fakes.export_validator.refuse_writes(
+                "The Obsidian vault at /Users/nicolai/Documents/Work Vault is not writable.",
+            );
+        })
+        .build();
+    harness
+        .host
+        .for_window(BridgeWindow::Onboarding)
+        .page_ready()
+        .unwrap();
+    harness.wait_for(
+        "the vault check",
+        onboarding_row_is("vaultAccess", "refused"),
+    );
+    assert_parity(
+        "onboarding.handoff",
+        &harness.snapshot(BridgeTopic::Onboarding),
+        &[],
+    );
+}
+
 #[test]
 fn onboarding_setup() {
     let harness = Harness::builder()
         .choose(Some("/Users/nicolai/Notes/Work Vault"))
         .seed(|store, fakes| {
+            install_speech_models(fakes);
             set_retention(store, AudioRetention::KeepDays(30));
             fakes
                 .permissions

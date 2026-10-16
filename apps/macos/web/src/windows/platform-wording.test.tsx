@@ -275,9 +275,20 @@ describe("onboarding", () => {
 			"Windows may ask to let Steno through the firewall when you pair the first phone. Optional.",
 		);
 		unmount();
-		renderWithBridge(<OnboardingWindow />, harness, platformFor("linux"));
+		const linux = renderWithBridge(
+			<OnboardingWindow />,
+			harness,
+			platformFor("linux"),
+		);
 		expect(screen.getByTestId("permission-localNetwork")).toHaveTextContent(
 			"The Steno iPhone app sends recordings over your Wi-Fi. Optional.",
+		);
+		linux.unmount();
+		// On the Mac the prompt comes when Steno starts listening, which
+		// after the update from the Swift app is at launch, not at a pairing.
+		renderWithBridge(<OnboardingWindow />, harness);
+		expect(screen.getByTestId("permission-localNetwork")).toHaveTextContent(
+			"macOS asks once, when Steno first listens for your phone. Optional.",
 		);
 	});
 

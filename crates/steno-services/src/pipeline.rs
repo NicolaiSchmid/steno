@@ -2218,6 +2218,96 @@ mod tests {
         assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
     }
 
+    /// Onboarding's speech models row at the first launch after the Swift
+    /// app (stable plan, "First launch after the handoff"): the speech
+    /// model in place, the speaker models missing, and a meeting left
+    /// waiting for them. The row's Download, Settings' install of each id
+    /// the row lists, sent from the onboarding window, installs them and
+    /// resumes that meeting once: a second Download processes nothing
+    /// again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_onboarding_rows_download_resumes_the_meeting_waiting_for_the_models() {
+        use steno_bridge::{AssetIdParams, BridgeHost as _, BridgeTopic, BridgeWindow};
+        use steno_host::speech::ModelAsset;
+        let (dir, store) = temp_store();
+        let (installed, check) = crate::model_gate::testing::flag(false);
+        let engine = Arc::new(FakeSpeechEngine::default());
+        let make: MakeDependencies = {
+            let store = store.clone();
+            let engine = engine.clone();
+            Arc::new(move || {
+                let gated =
+                    crate::model_gate::GatedSpeechEngine::new(engine.clone(), check.clone());
+                Ok(on_the_sidecar(
+                    fake_dependencies(&store, "fake-engine").with_speech_engine(
+                        steno_pipeline::SharedSpeechEngine::new(Arc::new(gated)),
+                    ),
+                ))
+            })
+        };
+        let current = Arc::new(CurrentPipeline::new(
+            make().unwrap(),
+            make,
+            tokio::runtime::Handle::current(),
+        ));
+        let waiting = enqueue_call(dir.path(), &current.current());
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
+
+        let models = steno_host::fakes::FakeSpeechModels::default();
+        models.set_installed(ModelAsset::ParakeetV3, None);
+        models.set_on_download(move |_| installed.store(true, Ordering::SeqCst));
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        let mut services = fakes.services();
+        services.speech_models = Arc::new(crate::model_gate::ResumingSpeechModels::resuming(
+            models,
+            current.clone(),
+        ));
+        let host = steno_host::Host::new(
+            store.clone(),
+            services,
+            steno_host::HostConfig {
+                version: "0".to_owned(),
+                zone: steno_host::labels::utc(),
+                platform: steno_bridge::Platform::Macos,
+                updates_managed: false,
+                installed_bundle: false,
+            },
+        )
+        .unwrap()
+        .for_window(BridgeWindow::Onboarding);
+        let row = host.snapshot(BridgeTopic::Onboarding).unwrap()["speechModels"].clone();
+        assert_eq!(row["assetIDs"], serde_json::json!(["offlineDiarizer"]));
+        let download = |asset_id: &str| {
+            tokio::task::block_in_place(|| {
+                host.settings_transcription_download(AssetIdParams {
+                    asset_id: asset_id.to_owned(),
+                })
+            })
+            .unwrap();
+        };
+        for asset_id in row["assetIDs"].as_array().unwrap() {
+            download(asset_id.as_str().unwrap());
+        }
+        eventually(
+            "the waiting meeting processed after the row's download",
+            || meeting_state(&store, waiting) == MeetingState::Ready,
+        )
+        .await;
+        assert_eq!(
+            host.snapshot(BridgeTopic::Onboarding).unwrap()["speechModels"]["state"],
+            "installed"
+        );
+        current.current().wait_until_idle().await;
+        let processed = engine.transcriptions.count();
+        assert!(processed > 0);
+        download("offlineDiarizer");
+        current.resume_waiting();
+        current.current().wait_until_idle().await;
+        assert_eq!(engine.transcriptions.count(), processed, "processed again");
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
+    }
+
     /// A speech engine whose first transcription decides its model is
     /// missing and waits at a gate (`entered`, then `open`) before it
     /// returns the refusal; every later call is refused at once.

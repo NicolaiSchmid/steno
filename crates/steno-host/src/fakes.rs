@@ -24,7 +24,8 @@ use crate::services::{
     ListenerState, LlmService, LoginItem, LoginItemStatus, Opener, PairingCode, Permissions,
     Pipeline, Preferences, ProcessAgainRefusal, QUITTING_REFUSAL, QrEncoder, Recorder,
     RecorderStatus, Services, SpeechModels, StartHold, SwiftImport, SwiftImportStage,
-    SwiftImportStatus, UpdateOutcome, Updater, WithheldApiKey, permission_is_required,
+    SwiftImportStatus, UpdateOutcome, Updater, VaultRefusal, WithheldApiKey,
+    permission_is_required,
 };
 use crate::speech::ModelAsset;
 
@@ -775,26 +776,37 @@ impl LlmService for FakeLlmService {
     }
 }
 
-/// Accepts every vault unless a failure text is set.
+/// Accepts every vault unless a refusal is set.
 #[derive(Debug, Default)]
 pub struct FakeExportValidator {
-    pub failure: Mutex<Option<String>>,
+    pub failure: Mutex<Option<VaultRefusal>>,
     pub validated: Mutex<Vec<ObsidianSettings>>,
 }
 
 impl FakeExportValidator {
-    /// Makes every validation fail with `text`; `None` accepts again.
+    /// Makes every validation fail with `text`, as for a vault that is not
+    /// there; `None` accepts again.
     pub fn fail_validation(&self, text: Option<&str>) {
-        *lock(&self.failure) = text.map(str::to_owned);
+        *lock(&self.failure) = text.map(|text| VaultRefusal {
+            message: text.to_owned(),
+            not_writable: false,
+        });
+    }
+
+    /// Makes every validation fail with `text` as a folder that refused
+    /// the write (Files and Folders off on the Mac).
+    pub fn refuse_writes(&self, text: &str) {
+        *lock(&self.failure) = Some(VaultRefusal {
+            message: text.to_owned(),
+            not_writable: true,
+        });
     }
 }
 
 impl ExportValidator for FakeExportValidator {
-    fn validate(&self, settings: &ObsidianSettings) -> BoundaryResult<()> {
+    fn validate(&self, settings: &ObsidianSettings) -> Result<(), VaultRefusal> {
         lock(&self.validated).push(settings.clone());
-        lock(&self.failure)
-            .clone()
-            .map_or(Ok(()), |text| Err(text.into()))
+        lock(&self.failure).clone().map_or(Ok(()), Err)
     }
 }
 

@@ -12,6 +12,19 @@ use crate::labels::file_size;
 use crate::services::{Services, SpeechModels};
 use crate::speech::{ModelAsset, SpeechEngineId};
 
+/// "Downloading… 40%", or "Downloading…" before the first share arrives.
+#[must_use]
+pub(crate) fn downloading_text(fraction: f64) -> String {
+    if fraction > 0.0 {
+        // A percentage in 0...100 fits any integer type.
+        #[allow(clippy::cast_possible_truncation)]
+        let percent = (fraction * 100.0).round() as i64;
+        format!("Downloading… {percent}%")
+    } else {
+        "Downloading…".to_owned()
+    }
+}
+
 /// Swift: `SpeechSettingsViewModel.AssetState`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssetState {
@@ -156,16 +169,7 @@ impl SpeechSettingsViewModel {
                     file_size(models.expected_bytes(asset))
                 )
             }
-            AssetState::Downloading { fraction, .. } => {
-                if fraction > 0.0 {
-                    // A percentage in 0...100 fits any integer type.
-                    #[allow(clippy::cast_possible_truncation)]
-                    let percent = (fraction * 100.0).round() as i64;
-                    format!("Downloading… {percent}%")
-                } else {
-                    "Downloading…".to_owned()
-                }
-            }
+            AssetState::Downloading { fraction, .. } => downloading_text(fraction),
             AssetState::Installed { bytes } => format!(
                 "Installed · {}",
                 file_size(bytes.unwrap_or_else(|| models.expected_bytes(asset)))

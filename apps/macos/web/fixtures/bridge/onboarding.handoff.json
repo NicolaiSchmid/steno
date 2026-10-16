@@ -1,0 +1,60 @@
+{
+  "canSaveSummaries" : false,
+  "finished" : false,
+  "page" : "permissions",
+  "permissions" : [
+    {
+      "isRequesting" : false,
+      "isRequired" : true,
+      "isSkipped" : false,
+      "kind" : "microphone",
+      "state" : "unknown"
+    },
+    {
+      "isRequesting" : false,
+      "isRequired" : true,
+      "isSkipped" : false,
+      "kind" : "systemAudio",
+      "state" : "unknown"
+    },
+    {
+      "isRequesting" : false,
+      "isRequired" : false,
+      "isSkipped" : false,
+      "kind" : "calendar",
+      "state" : "unknown"
+    },
+    {
+      "isRequesting" : false,
+      "isRequired" : false,
+      "isSkipped" : false,
+      "kind" : "localNetwork",
+      "state" : "unknown"
+    }
+  ],
+  "permissionsComplete" : false,
+  "retentionSentence" : "Each recording is deleted 30 days after it was processed and exported. Transcripts, summaries and exports are never deleted by this rule. Change this any time in Settings > Recording.",
+  "setup" : [
+    {
+      "kind" : "summaries",
+      "state" : "open"
+    },
+    {
+      "kind" : "vault",
+      "savedLine" : "Saved: Work Vault",
+      "state" : "saved"
+    }
+  ],
+  "speechModels" : {
+    "assetIDs" : [
+      "offlineDiarizer"
+    ],
+    "detail" : "Not downloaded · 22 MB",
+    "state" : "absent"
+  },
+  "vaultAccess" : {
+    "name" : "Work Vault",
+    "state" : "refused",
+    "validationMessage" : "The Obsidian vault at /Users/nicolai/Documents/Work Vault is not writable."
+  }
+}

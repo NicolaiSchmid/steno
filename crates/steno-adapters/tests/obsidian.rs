@@ -279,6 +279,126 @@ fn validate_rejects_missing_unwritable_and_bad_people_folder() {
     assert!(vault.list("").is_empty(), "the probe leaves nothing behind");
 }
 
+/// Every entry under `root`, recursively and without following links: a
+/// folder, a link with its target, a special file (never opened), or a
+/// file with its size and content.
+fn listing(root: &Path) -> BTreeMap<PathBuf, String> {
+    fn walk(root: &Path, folder: &Path, into: &mut BTreeMap<PathBuf, String>) {
+        for entry in fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if metadata.file_type().is_symlink() {
+                let target = fs::read_link(&path).unwrap();
+                into.insert(relative, format!("link to {}", target.display()));
+            } else if metadata.is_dir() {
+                into.insert(relative, "folder".to_owned());
+                walk(root, &path, into);
+            } else if !metadata.is_file() {
+                into.insert(relative, "special file".to_owned());
+            } else {
+                let content = String::from_utf8_lossy(&fs::read(&path).unwrap()).into_owned();
+                into.insert(relative, format!("{} bytes: {content}", metadata.len()));
+            }
+        }
+    }
+    let mut entries = BTreeMap::new();
+    walk(root, root, &mut entries);
+    entries
+}
+
+/// A vault as a user has it: Obsidian's folder, notes, a hidden note, and
+/// entries named like the probe that are not a probe's leftover (a file
+/// with content, another suffix, upper-case hex, a folder, one in a
+/// subfolder, and on Unix a link to a file outside the vault and a named
+/// pipe).
+fn lived_in_vault() -> Vault {
+    let vault = Vault::new();
+    for (relative, content) in [
+        (".obsidian/app.json", "{}"),
+        (".obsidian/plugins/sync/data.json", "{\"device\":\"mac\"}"),
+        (
+            "Meetings/2026-01-01 Standup/2026-01-01 Standup.md",
+            "# Standup",
+        ),
+        ("Inbox.md", "- [ ] call back"),
+        (".hidden.md", "private"),
+        (".steno-probe-cafebabe", "mine"),
+        (".steno-probe-notes.txt", "notes"),
+        (".steno-probe-ABCDEF12", ""),
+        ("Meetings/.steno-probe-deadbeef", ""),
+    ] {
+        let path = vault.path(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    fs::create_dir(vault.path(".steno-probe-12345678")).unwrap();
+    #[cfg(unix)]
+    {
+        let outside = vault.directory.path().join("outside.md");
+        fs::write(&outside, "").unwrap();
+        std::os::unix::fs::symlink(&outside, vault.path(".steno-probe-0badf00d")).unwrap();
+        let fifo = std::process::Command::new("mkfifo")
+            .arg(vault.path(".steno-probe-0f1f0f1f"))
+            .status()
+            .unwrap();
+        assert!(fifo.success(), "mkfifo: {fifo}");
+    }
+    vault
+}
+
+/// A check of a vault the user lives in leaves every entry as it was:
+/// the probe is created and removed, and nothing named like it is touched.
+#[test]
+fn a_vault_check_leaves_the_vault_as_it_was() {
+    let vault = lived_in_vault();
+    let before = listing(&vault.root);
+    vault.destination().validate_vault().unwrap();
+    vault.destination().validate_vault().unwrap();
+    assert_eq!(listing(&vault.root), before);
+    #[cfg(unix)]
+    assert!(vault.directory.path().join("outside.md").exists());
+}
+
+/// A refused check writes nothing and removes nothing.
+#[cfg(unix)]
+#[test]
+fn a_refused_vault_check_leaves_the_vault_as_it_was() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let vault = lived_in_vault();
+    fs::write(vault.path(".steno-probe-deadbeef"), "").unwrap();
+    let before = listing(&vault.root);
+    fs::set_permissions(&vault.root, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(vault.path("probe"), b"").is_ok() {
+        fs::set_permissions(&vault.root, fs::Permissions::from_mode(0o755)).unwrap();
+        return; // root
+    }
+    let refused = vault.destination().validate_vault();
+    fs::set_permissions(&vault.root, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        refused,
+        Err(ObsidianError::VaultNotWritable(
+            vault.root.to_string_lossy().into_owned()
+        ))
+    );
+    assert_eq!(listing(&vault.root), before);
+}
+
+/// The probe a crash left at the root (an empty file of exactly the probe's
+/// name) goes at the next check; the entries only named like it stay, a
+/// link and its target included.
+#[test]
+fn a_vault_check_removes_the_probe_a_crash_left_and_nothing_else() {
+    let vault = lived_in_vault();
+    let before = listing(&vault.root);
+    fs::write(vault.path(".steno-probe-deadbeef"), "").unwrap();
+    fs::write(vault.path(".steno-probe-0123abcd"), "").unwrap();
+    vault.destination().validate_vault().unwrap();
+    assert_eq!(listing(&vault.root), before);
+    #[cfg(unix)]
+    assert!(vault.directory.path().join("outside.md").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn validate_and_deliver_report_an_unwritable_vault() {

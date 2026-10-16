@@ -127,6 +127,7 @@ const FIXTURES: &[(&str, Reencode)] = &[
         reencode::<MeetingDetailSnapshot>,
     ),
     ("settings.iphone.waiting", reencode::<PhoneSettingsSnapshot>),
+    ("onboarding.handoff", reencode::<OnboardingSnapshot>),
 ];
 
 fn index() -> Vec<String> {
@@ -425,6 +426,14 @@ fn contract_ts_nested_onboarding_enums_match() {
     assert_eq!(
         nested(&[onboarding, "swiftImport: z", "state: z.enum(["]),
         raw(OnboardingImportState::ALL)
+    );
+    assert_eq!(
+        nested(&[onboarding, "vaultAccess: z", "state: z.enum(["]),
+        raw(OnboardingVaultAccessState::ALL)
+    );
+    assert_eq!(
+        nested(&[onboarding, "speechModels: z", "state: z.enum(["]),
+        raw(TranscriptionAssetState::ALL)
     );
     assert_eq!(
         nested(&["export const speakerOption = z", "kind: z.enum(["]),

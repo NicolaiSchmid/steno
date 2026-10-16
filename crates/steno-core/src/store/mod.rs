@@ -34,7 +34,7 @@ use uuid::Uuid;
 pub use assets::ExpiredAsset;
 pub use meetings::DeletedMeeting;
 pub use search::{SearchHit, fts5_pattern};
-pub use settings::PARAKEET_V3_ENGINE_ID;
+pub use settings::{PARAKEET_V3_ENGINE_ID, SettingProblem};
 pub use timings::StageRateRow;
 
 use crate::model::MeetingStateKind;
@@ -60,6 +60,22 @@ pub enum StoreError {
     /// [`convert::DbJson`] and surfaces as [`StoreError::Sqlite`].
     #[error("JSON column: {0}")]
     Json(#[from] serde_json::Error),
+    /// The `setting` path only: the row under `key` cannot be read as the
+    /// setting this build knows by that key (another build wrote it, or a
+    /// hand edit), so the settings do not load. The value is left out: a
+    /// setting can hold a server address or a folder path, and this text
+    /// goes into the log and the "could not start" dialog. Rust only.
+    #[error("the stored setting {key} {problem}")]
+    UndecodableSetting {
+        key: String,
+        problem: SettingProblem,
+    },
+    /// The `setting` path only: every row reads on its own as its setting,
+    /// but not all of them together. Like
+    /// [`StoreError::UndecodableSetting`], the text leaves the values out.
+    /// Rust only.
+    #[error("the stored settings cannot be read together")]
+    UndecodableSettings,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("meeting {0} not found")]
@@ -122,12 +138,20 @@ impl StoreError {
     /// with the call, and a caller that can wait should retry it.
     #[must_use]
     pub fn is_busy(&self) -> bool {
+        matches!(
+            self.sqlite_code(),
+            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+        )
+    }
+
+    /// SQLite's result code, for an error SQLite raised: a word such as
+    /// `NotADatabase` or `CannotOpen` that names no path and no value, so
+    /// a log line may carry it. Rust only.
+    #[must_use]
+    pub fn sqlite_code(&self) -> Option<ErrorCode> {
         match self {
-            StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)) => matches!(
-                error.code,
-                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
-            ),
-            _ => false,
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)) => Some(error.code),
+            _ => None,
         }
     }
 }
