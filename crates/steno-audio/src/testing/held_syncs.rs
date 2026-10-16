@@ -6,7 +6,7 @@
 //! only: Swift synced at the close alone.
 
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use steno_core::AudioLane;
 
@@ -32,8 +32,8 @@ struct Gate {
 #[derive(Debug, Default)]
 struct State {
     released: bool,
-    /// Syncs that have begun, held or let through.
-    begun: usize,
+    /// Whether a sync has begun, held or let through.
+    began: bool,
 }
 
 impl Gate {
@@ -60,21 +60,12 @@ impl HeldSyncs {
     /// no release came; whether one did.
     #[must_use]
     pub fn wait_until_one_began(&self, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        let mut state = self.gate.lock();
-        while state.begun == 0 {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return false;
-            }
-            state = self
-                .gate
-                .changed
-                .wait_timeout(state, left)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
-        }
-        true
+        let (state, _) = self
+            .gate
+            .changed
+            .wait_timeout_while(self.gate.lock(), timeout, |state| !state.began)
+            .unwrap_or_else(PoisonError::into_inner);
+        state.began
     }
 
     /// Lets the held syncs go, and every later one through.
@@ -101,16 +92,14 @@ impl RecordingWriting for HeldWriter {
 
     fn sync(&mut self) -> std::io::Result<()> {
         let mut state = self.gate.lock();
-        state.begun += 1;
+        state.began = true;
         self.gate.changed.notify_all();
-        while !state.released {
-            state = self
-                .gate
+        drop(
+            self.gate
                 .changed
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-        drop(state);
+                .wait_while(state, |state| !state.released)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
         self.writer.sync()
     }
 
