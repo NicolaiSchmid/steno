@@ -1337,7 +1337,8 @@ fn a_wav_is_walked_up_to_its_audio() {
 /// is let through), and a `LIST` of odd size, which symphonia pads twice
 /// and so fails on even when it is padded as the format says; the crate's
 /// own reader, which `steno process` checks a file with, refuses it too.
-/// An even `LIST` with an odd value at its end reads.
+/// An even `LIST` with an odd value at its end reads, and so does an odd
+/// one after the audio.
 #[test]
 fn a_wav_chunk_symphonia_reads_out_of_step_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -1381,14 +1382,21 @@ fn a_wav_chunk_symphonia_reads_out_of_step_is_refused() {
             (b"data", ramp16(), None),
         ],
     );
-    let read = SymphoniaAudioCodec::read_channel(
-        &write(dir.path(), "even.wav", &even),
-        0,
-        AudioLane::Mixed,
-    )
-    .unwrap();
-    assert_eq!(read.samples.len(), 1_600);
-    for bytes in [even, pcm_wav()] {
+    // After the audio, where neither reader looks, an odd one reads too.
+    let after = wav(
+        None,
+        &[
+            (b"fmt ", pcm16_format(), None),
+            (b"data", ramp16(), None),
+            (b"LIST", b"INFOA".to_vec(), None),
+        ],
+    );
+    for (name, bytes) in [("even.wav", &even), ("after.wav", &after)] {
+        let path = write(dir.path(), name, bytes);
+        let read = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
+        assert_eq!(read.samples.len(), 1_600, "{name}");
+    }
+    for bytes in [even, after, pcm_wav()] {
         assert_eq!(WavFile::read_bytes(&bytes).unwrap().frame_count(), 1_600);
     }
 }
