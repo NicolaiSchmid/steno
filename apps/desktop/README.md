@@ -1619,26 +1619,28 @@ release>` and `desktop-stable`. Releases up to `0.1.0-rc.3` are tagged
 version, whose tag moves the lanes as usual.
 
 The first stable release, `v0.11.0`, leaves `desktop-stable` no earlier
-release to go back to. Delete the lane's manifest instead, so stable
-installs are offered nothing: their check fails on the missing manifest,
-and Settings > General reads "Could not check for updates", until the fix
-forward writes the lane again:
+release to go back to. Delete the lane's manifest instead:
 
 ```sh
 gh release delete-asset desktop-stable latest.json --yes
 ```
 
+Until the fix forward writes the lane again, stable installs are offered
+nothing: their check fails on the missing manifest, and Settings > General
+reads "Could not check for updates".
+
 When fresh downloads are bad too, take the release out of "latest" with
 `gh release edit v<version> --prerelease`. For a later stable release,
 `releases/latest` then falls back to the previous one, and the site stays
-as it is. For `v0.11.0`, which has no stable release before it,
-`releases/latest` answers 404, so in the same hour set every listed
-desktop's flag in `apps/site/src/lib/site.ts` back to false, not only the
-bad one's, and take them off the root README's desktop badge: a listed
-desktop's download button opens `releases/latest`, an unlisted one's opens
-the releases page. The 404 also reaches the feed of build 244
-(`v0.9.0-rc.1`), the one Swift build that reads `releases/latest`; the
-later Swift builds read the `appcast` branch. A bad handoff item has steps of its own: Rollback in
+as it is. For `v0.11.0`, `releases/latest` answers 404. A listed desktop's
+download button opens `releases/latest` and an unlisted one's the releases
+page, so in the same hour set every listed desktop's flag in
+`apps/site/src/lib/site.ts` back to false, not only the bad one's, and
+take them all off the root README's desktop badge. The 404 also reaches
+the feed of build 244 (`v0.9.0-rc.1`), the one Swift build that reads
+`releases/latest`; the later Swift builds read the `appcast` branch.
+
+A bad handoff item has steps of its own: Rollback in
 `.plans/2026-10-07-stable-promotion.md`.
 
 ### Secrets
