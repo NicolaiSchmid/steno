@@ -20,7 +20,7 @@ use steno_core::AudioLane;
 use super::configuration::CaptureError;
 use super::layout::StreamLayout;
 use crate::SAMPLE_RATE;
-use crate::realtime::{CycleClock, FollowerLane};
+use crate::realtime::{CycleClock, FollowerLane, Missed};
 
 /// One of the two capture streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -129,38 +129,206 @@ pub fn frames_from_hundred_nanoseconds(duration: i64, sample_rate: f64) -> usize
     (duration as f64 * sample_rate / 10_000_000.0).round() as usize
 }
 
-/// The clock that reads a stream's device positions (`GetBuffer`'s, for
-/// the audio its thread missed: A18, the design in
-/// [`realtime::missed`](crate::realtime::missed)). The positions count
-/// frames at the engine's rate, the shared-mode mix format's
-/// (`engine_rate`; `None` when the client gives none, which takes 48 kHz),
-/// while the packets carry the 48 kHz frames the stream asked for
-/// (`AUTOCONVERTPCM`), so the clock converts the one to the other with
-/// [`CycleClock::rescale`], as PipeWire's does its graph's ticks.
-/// Microsoft's documentation leaves the unit open under `AUTOCONVERTPCM`,
-/// and the Windows gate checks it with a 44.1 kHz device; read in the
-/// wrong unit, a jump is misjudged by the ratio of the rates (9 % at
-/// 44.1 kHz), and none is invented: a packet's position is then off by 42
-/// frames in 480, under the half packet a jump needs, and the clock
-/// follows on from each packet.
+/// How many delivered frames [`DevicePositions`] measures the device
+/// positions over before it decides whether to trust them: two seconds of
+/// the stream's 48 kHz frames.
+pub const POSITION_CALIBRATION_FRAMES: u64 = 2 * SAMPLE_RATE as u64;
+
+/// What [`DevicePositions`] decided about a stream's device positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionVerdict {
+    /// Fewer than [`POSITION_CALIBRATION_FRAMES`] delivered: nothing is
+    /// filled yet.
+    Measuring,
+    /// The positions advance by one per delivered frame, or by the engine's
+    /// rate against 48 kHz, within 1 %: a discontinuity's jump is filled
+    /// and counted.
+    Fills,
+    /// Neither, or the engine's rate is unknown: a discontinuity is counted
+    /// and its loss shows only in the recording's length against wall time
+    /// (the recorder's note reads that too).
+    CountsOnly,
+}
+
+/// The device positions of one WASAPI stream (`GetBuffer`'s), read for the
+/// audio its thread missed (A18, the design in
+/// [`realtime::missed`](crate::realtime::missed)). Microsoft's
+/// documentation leaves their unit open under `AUTOCONVERTPCM`: they may
+/// count the 48 kHz frames the stream asked for or the engine's frames at
+/// the shared-mode mix format's rate (`engine_rate`; `None` when the client
+/// gives no mix format, as process loopback may). Read in the wrong unit,
+/// a jump on a 16 kHz hands-free headset is written three times over, and
+/// above 48 kHz a jump is missed. So the positions are measured first: over
+/// the first [`POSITION_CALIBRATION_FRAMES`] of clean packets (no
+/// discontinuity, a valid position), how far they advance against the
+/// frames delivered. Within 1 % of one a frame, or of the engine's rate
+/// against 48 kHz, the jumps are read in that unit with a [`CycleClock`]
+/// and filled; otherwise, or with no mix format, nothing is filled
+/// ([`PositionVerdict`]). The sums run on to the stop, which logs them.
+/// Real-time safe: integer arithmetic on plain fields.
 ///
 /// ```
-/// use steno_audio::capture::split_streams::device_position_clock;
+/// use steno_audio::capture::split_streams::{DevicePositions, PositionVerdict};
 ///
-/// // 10 ms packets on a 44.1 kHz engine: 441 positions each, then a
-/// // packet whose position is 0.5 s on.
-/// let mut clock = device_position_clock(Some(44_100));
-/// clock.advance(0, 480);
-/// clock.advance(441, 480);
-/// assert_eq!(clock.advance(882 + 22_050, 480).fill, 24_000);
+/// // 10 ms packets of 48 kHz frames on a 44.1 kHz engine whose positions
+/// // count 441 a packet: two seconds measured, then a packet flagged as a
+/// // discontinuity half a second on.
+/// let mut positions = DevicePositions::new(Some(44_100));
+/// let mut position = 0;
+/// for _ in 0..=200 {
+///     assert!(positions.packet(Some(position), 480, false).is_none());
+///     position += 441;
+/// }
+/// assert_eq!(positions.verdict(), PositionVerdict::Fills);
+/// assert_eq!(positions.packet(Some(position + 22_050), 480, true).fill, 24_000);
 /// ```
-#[must_use]
-pub fn device_position_clock(engine_rate: Option<u32>) -> CycleClock {
-    let mut clock = CycleClock::new(SAMPLE_RATE);
-    if let Some(rate) = engine_rate {
-        clock.rescale(SAMPLE_RATE as u64, u64::from(rate));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DevicePositions {
+    engine_rate: Option<u32>,
+    verdict: PositionVerdict,
+    /// Reads the jumps once the verdict is [`PositionVerdict::Fills`].
+    clock: CycleClock,
+    /// The last packet's position and frames; `None` before the first and
+    /// after a position the engine flagged invalid.
+    last: Option<(u64, usize)>,
+    /// How far the positions advanced across clean packets, and the frames
+    /// delivered across them.
+    advanced: u64,
+    delivered: u64,
+}
+
+impl DevicePositions {
+    /// The positions of a stream on an engine at `engine_rate`.
+    #[must_use]
+    pub fn new(engine_rate: Option<u32>) -> Self {
+        Self {
+            engine_rate,
+            verdict: PositionVerdict::Measuring,
+            clock: CycleClock::new(SAMPLE_RATE),
+            last: None,
+            advanced: 0,
+            delivered: 0,
+        }
     }
-    clock
+
+    /// One packet of `frames` at `position` (`None` when the engine flagged
+    /// it as invalid, `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`), flagged as a
+    /// discontinuity or not: the frames missed before it, read only on a
+    /// discontinuity and only once the positions are trusted.
+    pub fn packet(&mut self, position: Option<u64>, frames: usize, discontinuity: bool) -> Missed {
+        let Some(position) = position else {
+            self.last = None;
+            self.clock.reset();
+            return Missed::default();
+        };
+        if let Some((last, last_frames)) = self.last.replace((position, frames))
+            && !discontinuity
+        {
+            // A position behind the last one is no advance.
+            let advanced = position.wrapping_sub(last);
+            if advanced <= u64::MAX / 2 {
+                self.advanced = self.advanced.saturating_add(advanced);
+                self.delivered = self.delivered.saturating_add(last_frames as u64);
+            }
+        }
+        match self.verdict {
+            PositionVerdict::Measuring => {
+                if self.delivered >= POSITION_CALIBRATION_FRAMES {
+                    self.decide();
+                    self.clock.advance(position, frames);
+                }
+                Missed::default()
+            }
+            PositionVerdict::Fills => {
+                let missed = self.clock.advance(position, frames);
+                if discontinuity {
+                    missed
+                } else {
+                    Missed::default()
+                }
+            }
+            PositionVerdict::CountsOnly => Missed::default(),
+        }
+    }
+
+    /// Whether the jumps are filled.
+    #[must_use]
+    pub fn verdict(&self) -> PositionVerdict {
+        self.verdict
+    }
+
+    /// The rate the client's mix format names, if it gave one.
+    #[must_use]
+    pub fn engine_rate(&self) -> Option<u32> {
+        self.engine_rate
+    }
+
+    /// How far the positions advanced per delivered frame across the clean
+    /// packets so far; `None` before two of them.
+    #[must_use]
+    pub fn ratio(&self) -> Option<f64> {
+        (self.delivered > 0).then(|| self.advanced as f64 / self.delivered as f64)
+    }
+
+    /// Fills when the sums are within 1 % of one position a frame, or of
+    /// the engine's rate against 48 kHz, read in that unit from here on.
+    fn decide(&mut self) {
+        let within = |measured: u128, expected: u128| measured.abs_diff(expected) * 100 <= expected;
+        let (advanced, delivered) = (u128::from(self.advanced), u128::from(self.delivered));
+        let scale = match self.engine_rate {
+            Some(_) if within(advanced, delivered) => Some((1, 1)),
+            Some(rate) if within(advanced * 48_000, delivered * u128::from(rate)) => {
+                Some((SAMPLE_RATE as u64, u64::from(rate)))
+            }
+            _ => None,
+        };
+        self.verdict = match scale {
+            Some((frames, ticks)) => {
+                self.clock.rescale(frames, ticks);
+                self.clock.reset();
+                PositionVerdict::Fills
+            }
+            None => PositionVerdict::CountsOnly,
+        };
+    }
+}
+
+/// The stop's account of the positions: how far they advanced against the
+/// frames delivered, the engine's rate, and the verdict.
+///
+/// ```
+/// use steno_audio::capture::split_streams::DevicePositions;
+///
+/// let mut positions = DevicePositions::new(None);
+/// positions.packet(Some(0), 480, false);
+/// positions.packet(Some(160), 480, false);
+/// assert_eq!(
+///     positions.to_string(),
+///     "device positions advanced 160 over 480 frames delivered (0.3333 a frame, \
+///      no mix format), still measuring"
+/// );
+/// ```
+impl std::fmt::Display for DevicePositions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "device positions advanced {} over {} frames delivered (",
+            self.advanced, self.delivered
+        )?;
+        match self.ratio() {
+            Some(ratio) => write!(f, "{ratio:.4} a frame, ")?,
+            None => write!(f, "no ratio, ")?,
+        }
+        match self.engine_rate {
+            Some(rate) => write!(f, "engine at {rate} Hz), ")?,
+            None => write!(f, "no mix format), ")?,
+        }
+        f.write_str(match self.verdict {
+            PositionVerdict::Measuring => "still measuring",
+            PositionVerdict::Fills => "jumps filled",
+            PositionVerdict::CountsOnly => "jumps not filled",
+        })
+    }
 }
 
 /// The input and output latencies a two-stream capture reports, in frames.

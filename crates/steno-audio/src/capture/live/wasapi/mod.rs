@@ -76,7 +76,9 @@
 //! as a discontinuity, the first one aside) is counted, and what the
 //! packet's device position says was lost before it goes to the stream's
 //! body ([`StreamBody::write_missed`]; A18, the design in
-//! [`realtime::missed`](crate::realtime::missed)). At the stop each thread
+//! [`realtime::missed`](crate::realtime::missed)) once the positions' unit
+//! is measured ([`DevicePositions`]): a stream whose positions no unit
+//! explains fills nothing, and its stop logs their ratio at `warn`. At the stop each thread
 //! drains its stream once more, so a jump in what the engine still holds
 //! is read too.
 //! The count and the seconds are logged at stop, as are the follower's
@@ -96,7 +98,9 @@ use steno_core::AudioLane;
 use self::com::{Apartment, CaptureClient, ComError, Enumerator, LoopbackKind, ProAudioThread};
 use super::{AudioDeviceInfo, chosen_or_default};
 use crate::SAMPLE_RATE;
-use crate::capture::split_streams::{StreamSizes, far_end_latencies};
+use crate::capture::split_streams::{
+    DevicePositions, PositionVerdict, StreamSizes, far_end_latencies,
+};
 use crate::capture::start_log::{self, start_log};
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
@@ -532,6 +536,7 @@ fn run_stream(
             return;
         }
     };
+    let loopback = info.loopback;
     let _ = events.send(StreamEvent::Opened(Ok(info)));
     // `start` drops the sender when it gives up.
     let Ok(mut body) = bodies.recv() else {
@@ -576,10 +581,31 @@ fn run_stream(
             client.missed_frames() as f64 / SAMPLE_RATE
         );
     }
+    log_positions(source, loopback, client.positions());
     drop(pro_audio);
     drop(client);
     drop(enumerator);
     drop(apartment);
+}
+
+/// The stop's line about `source`'s device positions (`DevicePositions`'s
+/// `Display`), on `loopback` for the system stream: at `info`, or at `warn`
+/// when their unit could not be explained and no jump was filled.
+fn log_positions(
+    source: StreamSource,
+    loopback: Option<LoopbackKind>,
+    positions: &DevicePositions,
+) {
+    let on = loopback.map_or_else(String::new, |kind| format!(" on {kind:?} loopback"));
+    if positions.verdict() == PositionVerdict::CountsOnly {
+        tracing::warn!(
+            "{} stream{on}: {positions}; what its discontinuities lost was not written, the \
+             recording's length against wall time counts it",
+            source.as_str()
+        );
+    } else {
+        tracing::info!("{} stream{on}: {positions}", source.as_str());
+    }
 }
 
 /// Every packet the client holds into `body`, each after what was missed

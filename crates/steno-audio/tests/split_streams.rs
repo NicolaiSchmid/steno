@@ -18,8 +18,8 @@
 use std::sync::Arc;
 
 use steno_audio::capture::split_streams::{
-    MAX_BUFFER_FRAMES, StreamSizes, device_position_clock, far_end_latencies,
-    frames_from_hundred_nanoseconds, stream_sizes,
+    DevicePositions, MAX_BUFFER_FRAMES, POSITION_CALIBRATION_FRAMES, PositionVerdict, StreamSizes,
+    far_end_latencies, frames_from_hundred_nanoseconds, stream_sizes,
 };
 use steno_audio::capture::{ChannelRef, SplitStreamPlan, StreamSource};
 use steno_audio::realtime::{
@@ -129,37 +129,160 @@ fn no_lanes_is_refused() {
     ));
 }
 
-/// WASAPI's device positions count the engine's frames: on a 44.1 kHz
-/// engine 441 of them are a 10 ms packet of 48 kHz frames, a jump is
-/// counted in 48 kHz frames up to the fill limit and past it, and a client
-/// without a mix format counts at 48 kHz (A18 of
-/// `.plans/2026-10-07-stable-promotion.md`).
+/// `positions` fed `packets` clean 10 ms packets of 48 kHz frames from
+/// `position` on, advancing `per_packet` each: none reports a loss. Returns
+/// where the next packet's position is.
+fn measure(positions: &mut DevicePositions, position: u64, per_packet: u64, packets: usize) -> u64 {
+    let mut position = position;
+    for _ in 0..packets {
+        assert!(
+            positions.packet(Some(position), 480, false).is_none(),
+            "a clean packet at {position}"
+        );
+        position += per_packet;
+    }
+    position
+}
+
+/// The packets that measure `POSITION_CALIBRATION_FRAMES`: one more than
+/// the 10 ms packets in it, since each advance is read at the next packet.
+const CALIBRATION_PACKETS: usize = POSITION_CALIBRATION_FRAMES as usize / 480 + 1;
+
+/// WASAPI's device positions read in the unit they are measured in (A18 of
+/// `.plans/2026-10-07-stable-promotion.md`): on a 44.1 kHz engine whose
+/// positions count 441 a packet of 48 kHz frames, a jump is counted in
+/// 48 kHz frames up to the fill limit and past it; nothing is filled while
+/// they are measured, a discontinuity then (its advance left out of the
+/// sums) included.
 #[test]
 fn device_positions_count_at_the_engines_rate() {
-    let mut clock = device_position_clock(Some(44_100));
-    let mut position = 0;
-    for _ in 0..1_000 {
-        assert!(clock.advance(position, 480).is_none(), "at {position}");
-        position += 441;
-    }
-    assert_eq!(clock.advance(position + 4_410, 480).fill, 4_800);
+    let mut positions = DevicePositions::new(Some(44_100));
+    let mut position = measure(&mut positions, 0, 441, 100);
+    assert!(
+        positions
+            .packet(Some(position + 4_410), 480, true)
+            .is_none(),
+        "a discontinuity while measuring is not filled"
+    );
+    position = measure(
+        &mut positions,
+        position + 4_410 + 441,
+        441,
+        CALIBRATION_PACKETS - 100,
+    );
+    assert_eq!(positions.verdict(), PositionVerdict::Fills);
+    assert_eq!(
+        positions.ratio(),
+        Some(441.0 / 480.0),
+        "the jump is not in the sums"
+    );
+    assert_eq!(
+        positions.packet(Some(position + 4_410), 480, true).fill,
+        4_800
+    );
+    position += 4_410 + 441;
+    assert!(
+        positions
+            .packet(Some(position + 4_410), 480, false)
+            .is_none(),
+        "a jump on a packet not flagged is not read"
+    );
     position += 4_410 + 441;
     assert_eq!(
-        clock.advance(position + 44_100, 480).fill,
+        positions.packet(Some(position + 44_100), 480, true).fill,
         48_000,
         "a second at 44.1 kHz is the limit"
     );
     position += 44_100 + 441;
     assert_eq!(
-        clock.advance(position + 88_200, 480),
+        positions.packet(Some(position + 88_200), 480, true),
         Missed {
             fill: 0,
             unfilled: 96_000
         }
     );
-    let mut clock = device_position_clock(None);
-    clock.advance(0, 480);
-    assert_eq!(clock.advance(480 + 4_800, 480).fill, 4_800, "48 kHz");
+}
+
+/// Half a second lost before a flagged packet, read on an engine at
+/// `engine_rate` whose positions advance `per_packet` a 10 ms packet: what
+/// the packet reports, and the verdict.
+fn half_a_second_lost(engine_rate: Option<u32>, per_packet: u64) -> (Missed, PositionVerdict) {
+    let mut positions = DevicePositions::new(engine_rate);
+    let position = measure(&mut positions, 1_000_000, per_packet, CALIBRATION_PACKETS);
+    let missed = positions.packet(Some(position + 50 * per_packet), 480, true);
+    (missed, positions.verdict())
+}
+
+/// Whichever unit the positions count in, the 48 kHz frames delivered or
+/// the engine's, a jump is written for the half second it lost and no more:
+/// a hands-free headset at 16 or 8 kHz writes no extra zeros, and a device
+/// above 48 kHz misses no jump.
+#[test]
+fn device_positions_in_either_unit_fill_exactly_what_was_lost() {
+    let filled = |fill| (Missed { fill, unfilled: 0 }, PositionVerdict::Fills);
+    for rate in [8_000, 16_000, 44_100, 48_000, 96_000, 192_000] {
+        assert_eq!(
+            half_a_second_lost(Some(rate), 480),
+            filled(24_000),
+            "48 kHz frames on a {rate} Hz engine"
+        );
+        assert_eq!(
+            half_a_second_lost(Some(rate), u64::from(rate) / 100),
+            filled(24_000),
+            "the engine's frames at {rate} Hz"
+        );
+    }
+}
+
+/// Positions whose advance neither unit explains fill nothing: at 16 kHz
+/// or 96 kHz against a 48 kHz engine (one third and two positions a
+/// frame), an engine whose rate is unknown (process loopback with no mix
+/// format), or one off by more than 1 %. The loss then shows in the
+/// recording's length against wall time, and the stop logs the ratio at
+/// `warn`.
+#[test]
+fn device_positions_no_unit_explains_fill_nothing() {
+    let counts_only = (Missed::default(), PositionVerdict::CountsOnly);
+    assert_eq!(half_a_second_lost(Some(48_000), 160), counts_only, "16 kHz");
+    assert_eq!(half_a_second_lost(Some(48_000), 960), counts_only, "96 kHz");
+    assert_eq!(half_a_second_lost(None, 480), counts_only, "no mix format");
+    assert_eq!(
+        half_a_second_lost(Some(44_100), 446),
+        counts_only,
+        "441 + 1.1 %"
+    );
+    assert_eq!(
+        half_a_second_lost(Some(44_100), 445).1,
+        PositionVerdict::Fills,
+        "441 + 0.9 %"
+    );
+    let mut positions = DevicePositions::new(Some(48_000));
+    measure(&mut positions, 0, 160, CALIBRATION_PACKETS);
+    assert_eq!(
+        positions.to_string(),
+        "device positions advanced 32000 over 96000 frames delivered (0.3333 a frame, engine at \
+         48000 Hz), jumps not filled"
+    );
+}
+
+/// A position the engine flags as invalid starts the clock afresh: the
+/// packet after it reports nothing, the one after that reads on.
+#[test]
+fn an_invalid_device_position_reports_nothing_and_starts_afresh() {
+    let mut positions = DevicePositions::new(Some(48_000));
+    let position = measure(&mut positions, 0, 480, CALIBRATION_PACKETS);
+    assert!(positions.packet(None, 480, true).is_none());
+    assert!(
+        positions
+            .packet(Some(position + 9_600), 480, true)
+            .is_none()
+    );
+    assert_eq!(
+        positions
+            .packet(Some(position + 9_600 + 480 + 960), 480, true)
+            .fill,
+        960
+    );
 }
 
 #[test]

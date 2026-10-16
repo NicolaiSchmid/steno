@@ -88,11 +88,9 @@ use windows_core::implement;
 
 use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
-use crate::capture::split_streams::{
-    BUFFER_DURATION, StreamSizes, device_position_clock, stream_sizes,
-};
+use crate::capture::split_streams::{BUFFER_DURATION, DevicePositions, StreamSizes, stream_sizes};
 use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
-use crate::realtime::{CycleClock, Missed, SliceView};
+use crate::realtime::{Missed, SliceView};
 
 /// A failed COM or WASAPI call: which one, its `HRESULT`, the system's
 /// message for it.
@@ -511,8 +509,8 @@ pub struct CaptureClient {
     /// No packet drained yet: loopback streams commonly flag their first
     /// packet as a discontinuity, which is not a late thread.
     first_packet: bool,
-    /// Where the delivered audio ends in device position.
-    clock: CycleClock,
+    /// The device positions, measured and read for what the engine lost.
+    positions: DevicePositions,
     /// Frames the discontinuities lost, as the device positions tell them,
     /// filled or not (handed to the body).
     missed_frames: usize,
@@ -563,8 +561,8 @@ impl CaptureClient {
         event_driven: bool,
     ) -> Result<Self, ComError> {
         let format = float_format(channels);
-        // Read before `Initialize`: the engine's rate, which the device
-        // positions count in.
+        // Read before `Initialize`: the engine's rate, one of the units the
+        // device positions may count in.
         let engine_rate = mix_format(&client).map(|(_, rate)| rate);
         let flags = if event_driven {
             flags | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
@@ -629,7 +627,7 @@ impl CaptureClient {
             sizes: stream_sizes(buffer_frames, period, latency),
             discontinuities: 0,
             first_packet: true,
-            clock: device_position_clock(engine_rate),
+            positions: DevicePositions::new(engine_rate),
             missed_frames: 0,
         })
     }
@@ -654,6 +652,12 @@ impl CaptureClient {
     #[must_use]
     pub fn missed_frames(&self) -> usize {
         self.missed_frames
+    }
+
+    /// The device positions so far, for the stop's log.
+    #[must_use]
+    pub fn positions(&self) -> &DevicePositions {
+        &self.positions
     }
 
     /// Starts the stream.
@@ -685,12 +689,10 @@ impl CaptureClient {
     /// the engine lost right before it: on a packet flagged
     /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` (the first one aside, see
     /// `first_packet`), how far its device position passed where the
-    /// delivered audio ends ([`CycleClock`]); nothing otherwise and for a
+    /// delivered audio ends, once the positions are measured and their unit
+    /// explained ([`DevicePositions`]); nothing otherwise and for a
     /// position the engine flags as invalid
-    /// (`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`).
-    /// The position counts frames at the engine's rate, converted to the
-    /// stream's 48 kHz ([`device_position_clock`]; not run on hardware: see
-    /// the module doc of `capture::live::wasapi`). The real-time part: no
+    /// (`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`). The real-time part: no
     /// allocation and no lock here on success (the `windows` error values
     /// are built only on failure); `handle` must keep it so.
     pub fn drain(&mut self, mut handle: impl FnMut(SliceView<'_>, Missed)) -> Result<(), ComError> {
@@ -730,17 +732,10 @@ impl CaptureClient {
             }
             self.first_packet = false;
             let count = frames as usize;
-            let missed = if flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0 {
-                self.clock.reset();
-                Missed::default()
-            } else {
-                let missed = self.clock.advance(position, count);
-                if discontinuity {
-                    missed
-                } else {
-                    Missed::default()
-                }
-            };
+            let valid = flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 == 0;
+            let missed = self
+                .positions
+                .packet(valid.then_some(position), count, discontinuity);
             self.missed_frames = self
                 .missed_frames
                 .saturating_add(missed.fill)

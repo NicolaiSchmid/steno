@@ -8,10 +8,12 @@
 //! Each backend's callback says where its first frame sits on the device's
 //! or the graph's clock: PipeWire's `pw_time` ticks, the IOProc's input
 //! sample time on macOS, WASAPI's device position on a packet flagged as a
-//! discontinuity. A capture thread the scheduler held up misses cycles: the
-//! daemon, the HAL or the engine runs on, the audio of those cycles is gone,
-//! and the next callback's position sits past where the audio delivered so
-//! far ends. [`CycleClock::advance`] turns that jump into frames
+//! discontinuity, once its unit is measured
+//! ([`DevicePositions`](crate::capture::split_streams::DevicePositions)).
+//! A capture thread the scheduler held up misses cycles: the daemon, the
+//! HAL or the engine runs on, the audio of those cycles is gone, and the
+//! next callback's position sits past where the audio delivered so far
+//! ends. [`CycleClock::advance`] turns that jump into frames
 //! ([`Missed`]) when it is more than half the last callback: cycles are
 //! missed whole, and less is a resampler's rounding.
 //!
@@ -25,10 +27,10 @@
 //! The first callback, one after a reset, a clock that goes back, a rate
 //! that changes and, on PipeWire, a quantum that changes start the clock
 //! afresh. Every start and rebuild begins a new clock, so the session's gap
-//! between two streams is never counted again; and a thread that wakes
-//! from a stall the session's watch thread reported, and counts it as a
-//! jump before the rebuild's stop, leaves it to that gap (see
-//! [`CaptureSession`](crate::capture::CaptureSession)).
+//! between two streams is never counted again. A thread that wakes from a
+//! stall the session's watch thread reported, and counts it as a jump
+//! before the rebuild's stop, counts it once with that gap
+//! ([the session's rule](crate::capture::session#missed-audio)).
 //!
 //! # Writing it
 //!
