@@ -1523,8 +1523,7 @@ fn runs_realtime(stat: &str) -> Option<bool> {
 /// neither `RLIMIT_RTPRIO` nor RealtimeKit. A busy computer can then hold
 /// the thread up long enough to miss graph cycles, which the capture
 /// writes as silence, or past the fill limit only counts (see the module
-/// doc). `/proc` is read only
-/// until the line was logged. Rust only.
+/// doc). `/proc` is read only until the line was logged. Rust only.
 fn warn_without_realtime() {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.load(Ordering::Relaxed)

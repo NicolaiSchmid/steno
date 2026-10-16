@@ -1260,10 +1260,13 @@ impl StoppedRun {
     /// missed included, and the audio it counted and left out, against the
     /// wall time: at most 0.15 s shorter than from the end of the start to
     /// the stop, at most 0.15 s longer than from before the start to the
-    /// end of the stop. This bounds every count from above as well: a busy
-    /// host's thread misses cycles besides the stops, which are counted too,
-    /// so a count above the stops' length is no fault, but one counted
-    /// twice or written and counted unfilled passes the wall time.
+    /// end of the stop. This bounds the written audio and the unfilled
+    /// count from above: a busy host's thread misses cycles besides the
+    /// stops, which are counted too, so a count above the stops' length is
+    /// no fault, but zeros written twice, or written and counted unfilled,
+    /// pass the wall time. A filled count recorded without its zeros, or
+    /// twice, leaves the master's length as it is: only the sink's unit
+    /// tests bound the filled count from above.
     fn assert_on_wall_time(&self) {
         let held = self.statistics.duration + self.statistics.unfilled_seconds;
         assert!(

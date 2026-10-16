@@ -71,8 +71,9 @@
 //! - When the master's thread resumes first after such an outage, the
 //!   follower's kept packets land late, as after the follower's own
 //!   outage, until the queue slips back to the target within two slip
-//!   windows.
-//! - The master's thread alone out for 1.2 to 2.5 s: the follower's queue
+//!   windows, at most 3 840 frames (80 ms) slipped per outage.
+//! - The master's thread alone out for 1.2 to 2.5 s (a suspension of the
+//!   whole process does not make this): the follower's queue
 //!   then passes the raised ceiling at the first pull of the master's kept
 //!   packets and slips at once, so about 100 ms of microphone audio pairs
 //!   with system audio from up to 1.3 s later, and the system audio
@@ -184,7 +185,9 @@ impl FollowerLane {
     /// missed as silence ([`StreamBody::write_missed`]), as the WASAPI
     /// backend's does: it can run late by its buffer and by up to
     /// [`MISSED_FILL_LIMIT`] more, whose fill pulls the follower's audio
-    /// queued meanwhile, so that queue must not slip at once.
+    /// queued meanwhile, so that queue must not slip at once. The limit is
+    /// counted at 48 kHz, the rate both WASAPI streams deliver at whatever
+    /// the engine's.
     #[must_use]
     pub fn for_streams_filling(period: usize, master_buffer: usize) -> Self {
         let fill_limit = (MISSED_FILL_LIMIT.as_secs_f64() * SAMPLE_RATE) as usize;
