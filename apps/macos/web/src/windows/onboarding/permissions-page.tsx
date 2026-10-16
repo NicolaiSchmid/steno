@@ -169,7 +169,7 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 		case "refused":
 			icon = <XCircleIcon aria-hidden="true" />;
 			tone = "warning";
-			description = `Steno cannot write your meeting notes to ${vault.name}. In ${words.systemSettings}, under Files & Folders, turn on the folder's switch below Steno, then choose Check again.`;
+			description = `Steno cannot write your meeting notes to ${vault.name}. If macOS asked about the folder and you chose Don't Allow, turn on the folder's switch below Steno in ${words.systemSettings}, under Files & Folders. Otherwise, check that the folder is not read-only. Then choose Check again.`;
 			control = (
 				<>
 					<Button
