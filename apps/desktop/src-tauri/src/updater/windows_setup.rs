@@ -348,10 +348,17 @@ mod tests {
         assert_eq!(WATCHER_START_LIMIT, Duration::from_secs(10));
     }
 
+    /// The longest a watcher test waits: long enough that only a hang
+    /// reaches it, the value of `steno_audio::testing::HANG_GUARD`. A test
+    /// passes it as the wait's limit when the limit is not what it checks,
+    /// so a loaded machine that starts `sh` or `cmd.exe` late cannot fail
+    /// it; what it checks is why the wait ended, never how fast.
+    const HANG_GUARD: Duration = Duration::from_secs(120);
+
     /// A watcher under `sh` that runs `script` with its start file, in a
     /// new folder, as `$1`.
     #[cfg(unix)]
-    fn sh(script: &str) -> (tempfile::TempDir, std::path::PathBuf, std::process::Child) {
+    fn sh(script: &str) -> (tempfile::TempDir, std::path::PathBuf, Watcher) {
         let folder = tempfile::tempdir().unwrap();
         let started = folder.path().join(STARTED_FILE);
         let watcher = std::process::Command::new("sh")
@@ -359,60 +366,55 @@ mod tests {
             .arg(&started)
             .spawn()
             .expect("sh starts");
-        (folder, started, watcher)
+        (folder, started, Watcher(watcher))
     }
 
-    /// A watcher that creates the file is running: the wait ends at once.
+    /// A test's watcher, ended and reaped when the test ends, a failed
+    /// assert included, so no `sleep` outlives the test.
+    #[cfg(unix)]
+    struct Watcher(std::process::Child);
+
+    #[cfg(unix)]
+    impl Drop for Watcher {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A watcher that creates the file is running: the wait ends on the
+    /// file, while the watcher still runs, not at its exit or the limit.
     #[cfg(unix)]
     #[test]
     fn a_watcher_that_says_it_runs_ends_the_wait() {
-        let (_folder, started, mut watcher) = sh(r#"touch "$1"; sleep 5"#);
-        let begun = std::time::Instant::now();
-        assert_eq!(
-            wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT),
-            Ok(())
-        );
-        assert!(
-            begun.elapsed() < Duration::from_secs(4),
-            "{:?}",
-            begun.elapsed()
-        );
-        assert!(watcher.try_wait().unwrap().is_none(), "left running");
-        let _ = watcher.kill();
-        let _ = watcher.wait();
+        let (_folder, started, mut watcher) = sh(r#"touch "$1"; exec sleep 120"#);
+        assert_eq!(wait_for_start(&mut watcher.0, &started, HANG_GUARD), Ok(()));
+        assert!(started.exists(), "ended on the file");
+        assert!(watcher.0.try_wait().unwrap().is_none(), "left running");
     }
 
     /// A watcher that ends without the file (a policy that turns off the
-    /// command prompt) fails the wait at once.
+    /// command prompt) fails the wait at its exit, not at the limit.
     #[cfg(unix)]
     #[test]
     fn a_watcher_that_ends_without_saying_so_fails_the_wait() {
         let (_folder, started, mut watcher) = sh("exit 3");
-        let begun = std::time::Instant::now();
-        let error = wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT).unwrap_err();
+        let error = wait_for_start(&mut watcher.0, &started, HANG_GUARD).unwrap_err();
         assert!(error.contains("ended before it ran"), "{error}");
-        assert!(
-            begun.elapsed() < Duration::from_secs(4),
-            "{:?}",
-            begun.elapsed()
-        );
     }
 
     /// A watcher still silent at the limit is ended, and the wait fails.
     #[cfg(unix)]
     #[test]
     fn a_silent_watcher_is_ended_at_the_limit() {
-        let (_folder, started, mut watcher) = sh("sleep 30");
+        let (_folder, started, mut watcher) = sh("exec sleep 120");
         let limit = Duration::from_millis(300);
         let begun = std::time::Instant::now();
-        let error = wait_for_start(&mut watcher, &started, limit).unwrap_err();
+        let error = wait_for_start(&mut watcher.0, &started, limit).unwrap_err();
         let waited = begun.elapsed();
         assert!(error.contains("did not run"), "{error}");
-        assert!(
-            waited >= limit && waited < Duration::from_secs(3),
-            "{waited:?}"
-        );
-        assert!(watcher.try_wait().unwrap().is_some(), "ended");
+        assert!(waited >= limit && waited < HANG_GUARD, "{waited:?}");
+        assert!(watcher.0.try_wait().unwrap().is_some(), "ended");
         assert!(!started.exists());
     }
 
@@ -617,7 +619,7 @@ fn main() {
             watcher.env("STENO_TEST_EXIT_CODE", code.to_string());
             let mut watcher = spawn(watcher);
             assert_eq!(
-                wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT),
+                wait_for_start(&mut watcher, &started, HANG_GUARD),
                 Ok(()),
                 "{case}"
             );
@@ -638,7 +640,7 @@ fn main() {
             assert_eq!(arguments, expected, "{case}");
 
             if relaunches {
-                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let deadline = std::time::Instant::now() + HANG_GUARD;
                 while ran(&app).is_none() {
                     assert!(std::time::Instant::now() < deadline, "{case}: no relaunch");
                     std::thread::sleep(Duration::from_millis(50));
@@ -660,14 +662,8 @@ fn main() {
         for stub in [&nsis, &app] {
             let _ = std::fs::remove_file(stub.with_extension("ran"));
         }
-        let begun = std::time::Instant::now();
-        let error = wait_for_start(&mut spawn(watcher), &started, WATCHER_START_LIMIT).unwrap_err();
+        let error = wait_for_start(&mut spawn(watcher), &started, HANG_GUARD).unwrap_err();
         assert!(error.contains("ended before it ran"), "{error}");
-        assert!(
-            begun.elapsed() < Duration::from_secs(5),
-            "{:?}",
-            begun.elapsed()
-        );
         std::thread::sleep(Duration::from_secs(1));
         assert!(ran(&nsis).is_none() && ran(&app).is_none(), "nothing ran");
     }
