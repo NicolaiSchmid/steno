@@ -2166,7 +2166,8 @@ fn only_the_latest_of_two_vault_saves_stores() {
         .unwrap();
     model.load(&harness.store);
     assert_eq!(
-        model.vault_path, "/Vaults/Second",
+        model.draft().map(|draft| draft.vault_path).as_deref(),
+        Some("/Vaults/Second"),
         "the reload kept the form"
     );
 
@@ -2175,8 +2176,14 @@ fn only_the_latest_of_two_vault_saves_stores() {
     let stored = harness.store.settings().unwrap().obsidian.unwrap();
     assert_eq!(stored.vault_path, "/Vaults/Second");
     assert!(model.saved);
+    let mut settings = harness.store.settings().unwrap();
+    settings.obsidian.as_mut().unwrap().vault_path = "/Vaults/Elsewhere".to_owned();
+    harness.store.save_settings(&settings).unwrap();
     model.load(&harness.store);
-    assert_eq!(model.vault_path, "/Vaults/Second", "loads again once saved");
+    assert_eq!(
+        model.vault_path, "/Vaults/Elsewhere",
+        "loads again once saved"
+    );
 }
 
 /// The unknown fields may belong to the vault, so choosing another vault
