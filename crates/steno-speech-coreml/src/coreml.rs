@@ -69,25 +69,21 @@ pub fn contained<T>(work: impl FnOnce() -> Result<T, SpeechError>) -> Result<T, 
 /// The error for a caught exception: an `NSException`'s name and reason;
 /// any other object thrown (the runtime allows it) by its class.
 fn exception_error(exception: Option<Retained<Exception>>) -> SpeechError {
-    let Some(exception) = exception else {
-        return SpeechError::Exception {
-            name: "nil".to_owned(),
-            reason: String::new(),
-        };
-    };
-    match NSException::from_exception(exception) {
-        Ok(exception) => SpeechError::Exception {
-            name: exception.name().to_string(),
-            reason: exception
+    let (name, reason) = match exception.map(NSException::from_exception) {
+        Some(Ok(exception)) => (
+            exception.name().to_string(),
+            exception
                 .reason()
                 .map(|reason| reason.to_string())
                 .unwrap_or_default(),
-        },
-        Err(other) => SpeechError::Exception {
-            name: other.class().name().to_string_lossy().into_owned(),
-            reason: String::new(),
-        },
-    }
+        ),
+        Some(Err(other)) => (
+            other.class().name().to_string_lossy().into_owned(),
+            String::new(),
+        ),
+        None => ("nil".to_owned(), String::new()),
+    };
+    SpeechError::Exception { name, reason }
 }
 
 /// Where a model runs. The names are CoreML's; FluidAudio's defaults for
