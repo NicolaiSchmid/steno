@@ -109,8 +109,10 @@ impl AdmissionFolders for () {
 /// commit in one durable transaction ([`Store::save_admission_durably`]),
 /// so no crash, full disk or busy store leaves a `complete` receipt
 /// without its meeting. When that commit fails, the receipt is saved
-/// `failed` durably ([`Store::save_handover_receipt_durably`]), and the
-/// copy is removed only once that save succeeds: a failed commit can still
+/// `failed` durably ([`Store::save_handover_receipt_durably`], tried again
+/// while the database is busy, up to
+/// [`RecordingIntake::FAILED_SAVE_ATTEMPTS`] in all), and the copy is
+/// removed only once that save succeeds: a failed commit can still
 /// be replayed after a crash, and its meeting then needs the copy. The
 /// phone keeps its own copy either way. Bytes the admission ledger already
 /// holds with a meeting (another device's upload of them, taken over
@@ -118,7 +120,10 @@ impl AdmissionFolders for () {
 /// with it, the copy goes, and nothing is enqueued.
 /// The enqueue after the commit is [`ProcessingPipeline::enqueue_saved`]
 /// in [`RecordingIntake::over`]; its failure does not undo the admission,
-/// the meeting waits `queued` for the next launch's resume. The copy's
+/// the meeting waits `queued` for the next launch's resume. The
+/// admission, the enqueue included, runs in a task of its own, so a caller
+/// that drops `admit` (a phone that hung up mid-admit) leaves the
+/// admission to finish and its meeting enqueued. The copy's
 /// folder is noted before the copy ([`AdmissionFolders`], Rust only).
 /// Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
 pub struct RecordingIntake {
@@ -130,6 +135,13 @@ pub struct RecordingIntake {
 }
 
 impl RecordingIntake {
+    /// How many times the `failed` receipt save after a failed admission
+    /// commit is tried while another connection holds the database: each
+    /// try already waits out the store's five-second busy timeout. The
+    /// copy goes only once that save is on the disk, so every try shortens
+    /// the hold that leaves a copy for the launch to adopt. Rust only.
+    pub const FAILED_SAVE_ATTEMPTS: usize = 3;
+
     #[must_use]
     pub fn new(store: Arc<Store>, enqueue: Enqueue, now: Now, zone: FixedOffset) -> Self {
         RecordingIntake {
@@ -175,7 +187,9 @@ enum Admission {
 impl HandoverIntake for RecordingIntake {
     /// The reads, the durable copy and the commit are one step on the
     /// store's facade (`Store::writing`): the copy is blocking file I/O,
-    /// and the commit must follow it. The enqueue runs after it.
+    /// and the commit must follow it. The enqueue runs after it, in the
+    /// same task, which a dropped `admit` does not cancel: the enqueue
+    /// survives a dropped request. A panic in the task resumes here.
     async fn admit(
         &self,
         file: &Path,
@@ -190,22 +204,42 @@ impl HandoverIntake for RecordingIntake {
             zone: self.zone,
             folders: self.folders.clone(),
         };
-        let admission = self
-            .store
-            .writing(move |store| Ok(admit_on(store, &step)))
-            .await??;
-        match admission {
-            Admission::Answered(meeting_id) => Ok(meeting_id),
-            Admission::Admitted(admitted) => {
-                let (meeting, asset) = *admitted;
-                let meeting_id = meeting.id;
-                // Admitted: a pipeline that cannot take the meeting now
-                // leaves it `queued`, and the next launch resumes it.
-                if let Err(failure) = (self.enqueue)(meeting, asset).await {
-                    tracing::warn!(%meeting_id, stage = failure.stage.as_str(), "admitted meeting not enqueued");
-                }
-                Ok(meeting_id)
+        let admitted = tokio::spawn(admit_and_enqueue(
+            self.store.clone(),
+            self.enqueue.clone(),
+            step,
+        ));
+        match admitted.await {
+            Ok(outcome) => outcome,
+            Err(join) => match join.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                Err(cancelled) => Err(cancelled.into()),
+            },
+        }
+    }
+}
+
+/// [`RecordingIntake::admit`]'s task: the store step, then the enqueue of
+/// a meeting it committed.
+async fn admit_and_enqueue(
+    store: Arc<Store>,
+    enqueue: Enqueue,
+    step: AdmitStep,
+) -> BoundaryResult<Uuid> {
+    let admission = store
+        .writing(move |store| Ok(admit_on(store, &step)))
+        .await??;
+    match admission {
+        Admission::Answered(meeting_id) => Ok(meeting_id),
+        Admission::Admitted(admitted) => {
+            let (meeting, asset) = *admitted;
+            let meeting_id = meeting.id;
+            // Admitted: a pipeline that cannot take the meeting now
+            // leaves it `queued`, and the next launch resumes it.
+            if let Err(failure) = enqueue(meeting, asset).await {
+                tracing::warn!(%meeting_id, stage = failure.stage.as_str(), "admitted meeting not enqueued");
             }
+            Ok(meeting_id)
         }
     }
 }
@@ -338,7 +372,7 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
                 // so the next launch adopts it unless a replay brings
                 // its meeting back.
                 receipt.state = HandoverState::Failed(format!("admit: {error}"));
-                if store.save_handover_receipt_durably(&receipt).is_ok() {
+                if save_failed_receipt(store, &receipt) {
                     let _ = std::fs::remove_file(&destination);
                     folders.settled(meeting_id);
                 }
@@ -356,6 +390,23 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
         return Ok(Admission::Answered(admitted));
     }
     Ok(Admission::Admitted(Box::new((meeting, asset))))
+}
+
+/// The durable `failed` save of `receipt` after a failed admission commit,
+/// tried again while the database is busy, up to
+/// [`RecordingIntake::FAILED_SAVE_ATTEMPTS`] in all: whether it is on the
+/// disk.
+fn save_failed_receipt(store: &Store, receipt: &HandoverReceipt) -> bool {
+    for attempt in 1..=RecordingIntake::FAILED_SAVE_ATTEMPTS {
+        match store.save_handover_receipt_durably(receipt) {
+            Ok(()) => return true,
+            Err(error) if error.is_busy() => {
+                tracing::debug!(attempt, "the failed receipt's save found the database busy");
+            }
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 /// Copies the verified upload `file` durably into the new meeting folder of
