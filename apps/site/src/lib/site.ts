@@ -71,7 +71,8 @@ export const listedLinuxTargets = linuxTargets.filter((t) => t.released);
 
 /**
  * Every release carries every desktop's build, so an unlisted desktop's note
- * says only that its build is not yet checked.
+ * says only that its build is not yet checked, and its download button names
+ * that build.
  */
 function desktop(name: string, released: boolean, note: string) {
 	return {

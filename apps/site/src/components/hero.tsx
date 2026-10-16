@@ -66,7 +66,7 @@ export function Hero() {
 					</a>
 					{platforms.mac.released && (
 						<div className="hidden flex-wrap items-center justify-center gap-x-2 gap-y-2 text-[13px] text-fg-dim tracking-[-0.005em] sm:inline-flex">
-							<span>Also via Homebrew:</span>
+							<span>On macOS, also via Homebrew:</span>
 							<Command command={site.brew} />
 						</div>
 					)}

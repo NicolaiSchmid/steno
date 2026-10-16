@@ -20,8 +20,8 @@ function detectPlatform(): Platform {
 /**
  * The primary download: labelled for the visitor's platform once hydrated,
  * macOS on the server so the static HTML is never wrong for the main build.
- * An unlisted desktop says its build is not yet checked and opens the
- * releases page, which carries it.
+ * An unlisted desktop's button names its build, not yet checked, and opens
+ * the releases page, which carries it.
  */
 export function DownloadButton({
 	className,
@@ -45,7 +45,7 @@ export function DownloadButton({
 		>
 			<Icon className="size-3.5 shrink-0" />
 			<span>
-				{released ? `Download for ${name}` : `${name}: not yet checked`}
+				{released ? `Download for ${name}` : `${name} build, not yet checked`}
 			</span>
 		</a>
 	);

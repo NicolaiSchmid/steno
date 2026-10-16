@@ -24,7 +24,9 @@ const jsonLd = {
 	operatingSystem: listed.join(", ") || undefined,
 	offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
 	license: "https://opensource.org/licenses/MIT",
-	downloadUrl: site.download,
+	// With no desktop listed, as after a `v0.11.0` rollback, `releases/latest`
+	// may answer 404, so the buttons and this point at the releases page.
+	downloadUrl: listed.length > 0 ? site.download : site.releases,
 	softwareHelp: site.repo,
 	author: {
 		"@type": "Person",
