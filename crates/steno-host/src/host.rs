@@ -44,23 +44,19 @@
 //! must not run a command from inside `emit`.
 //!
 //! The `recording` topic is not published: a thread the host owns sends
-//! it ([`recording_feed`]), at most at 20 Hz, woken
-//! by [`Host::recorder_changed`], the start and `page.ready`, asleep
-//! otherwise, gone with the last clone of the host. It reads only the
-//! recorder and takes none of the host's locks.
+//! it ([`recording_feed`]), at most at 20 Hz, woken by
+//! [`Host::recorder_changed`], the start and `page.ready`.
 //!
 //! # Reloads
 //!
 //! One owner runs the reloads: the services' poll task, which runs
 //! [`Host::reload_pass`] on its two-second tick and on each
-//! [`Host::request_reload`]. A pass runs its light part every time (the
-//! pairing poll, which sends `settings.phone` each time, the subtitles,
-//! the withheld key, the system audio rows' wait for the recording) and
-//! reloads the rows and the stored settings
-//! only when a reload was asked for or the store's change mark
-//! ([`Store::change_mark`]) moved: an idle app reloads nothing. The event
-//! follower asks after it applied an event, the `recording` feed when the
-//! recorder's state or meeting moved. [`Host::store_changed`] runs a
+//! [`Host::request_reload`]. A pass runs its light part, which follows
+//! what the store does not hold, every time, and reloads the rows and the
+//! stored settings only when a reload was asked for or the store's change
+//! mark ([`Store::change_mark`]) moved: an idle app reloads nothing. The
+//! event follower asks after it applied an event, the `recording` feed
+//! when the recorder's state or meeting moved. [`Host::store_changed`] runs a
 //! forced pass on the caller's thread, for the launch, the reread after a
 //! keyring answer and the tests. What the mark does not see shows at the
 //! next forced pass: a recording's files removed outside Steno, a default
@@ -74,8 +70,9 @@
 //! marks with [`mark_ui_thread`](crate::mark_ui_thread). The services'
 //! event follower and their reload owner ([`Host::apply_meeting_event`],
 //! [`Host::reload_pass`]) call from their runtime's blocking pool, so a
-//! reload that waits never holds a runtime worker, and so do the update schedule's `Host::updates_changed` and
-//! the gated handover's `Host::phones_changed`, which wait for the
+//! reload that waits never holds a runtime worker, and so do the update
+//! schedule's `Host::updates_changed` and the gated handover's
+//! `Host::phones_changed`, which wait for the
 //! view-model lock a settings save may hold through its busy wait. Under
 //! the lock the host reads on a reader of its own
 //! ([`Store::with_own_reader`]), so no read there waits for a write. One
@@ -115,18 +112,18 @@
 //! lock held, so they must not call back into the host (the `services`
 //! module doc has the rule), except for the calls that run with it
 //! released: the recorder's commands, whose changes reach the host
-//! (`Host::recorder_changed`), the permission prompts,
-//! the LLM probe, the Codex calls, the model download and onboarding's
-//! vault check, the prompts, the probe and the check with their busy state
-//! published first. `settings.transcription.download` replies after its
-//! first publish and keeps publishing from its own thread until the
-//! download ends; a second download of the asset reattaches to that thread
-//! instead of starting one. The feed's thread starts in [`Host::new`] and
-//! ends with the last clone. The core's async boundaries (the secret
-//! store) are awaited on the host's own runtime. A call that arrives
-//! inside a tokio runtime anyway (a `#[tokio::test]`, a command that
-//! skipped `spawn_blocking`) awaits the secret store on a helper thread
-//! instead of panicking, and still blocks that worker.
+//! (`Host::recorder_changed`), the permission prompts, the LLM probe, the
+//! Codex calls, the model download and onboarding's vault check, the
+//! prompts, the probe and the check with their busy state published first.
+//! `settings.transcription.download` replies after its first publish and
+//! keeps publishing from its own thread until the download ends; a second
+//! download of the asset reattaches to that thread instead of starting one.
+//! The feed's thread starts in [`Host::new`] and ends with the last clone.
+//! The core's async boundaries (the secret store) are awaited on the host's
+//! own runtime. A call that arrives inside a tokio runtime anyway (a
+//! `#[tokio::test]`, a command that skipped `spawn_blocking`) awaits the
+//! secret store on a helper thread instead of panicking, and still blocks
+//! that worker.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
