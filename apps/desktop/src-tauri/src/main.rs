@@ -336,7 +336,7 @@ impl Refusal {
                  Quit it, then open Steno again."
             }
             Refusal::UnreadableSetting => {
-                "Steno could not read one of its settings. Your meetings are safe."
+                "Steno could not read its settings. Your meetings are safe."
             }
             Refusal::Unavailable => {
                 "Steno could not open your meetings. They are safe. Open Steno again."
@@ -374,6 +374,8 @@ impl Refused {
     /// [`refusal_log_line`].
     #[cfg(not(feature = "fixture-host"))]
     fn after(error: &host::ShellHostError) -> Self {
+        use steno_core::StoreError;
+
         let log_line = refusal_log_line(error);
         if error.is_database_held() {
             return Self::plain(Refusal::DatabaseHeld, log_line);
@@ -383,15 +385,34 @@ impl Refused {
         };
         let database = database.display();
         let detail = match source {
-            steno_core::StoreError::UndecodableSetting { key, problem } => format!(
+            StoreError::UndecodableSetting { key, problem } => format!(
                 "The setting {key} {problem}. It is stored in the database at {database}. \
                  Steno has not changed it: fix or remove it there, then open Steno again."
             ),
-            _ => format!(
-                "Each setting reads on its own, but not all of them together. They are \
-                 stored in the database at {database}. Steno has not changed them: fix or \
-                 remove the one that is wrong there, then open Steno again."
+            StoreError::UndecodableSettings => format!(
+                "The stored settings cannot be read together, though each reads on its own. \
+                 They are stored in the database at {database}. Steno has not changed them: \
+                 check the settings there, then open Steno again."
             ),
+            // Not built today (`steno_services::BuildError::Setting` holds
+            // the two above only); named so a new variant must choose.
+            StoreError::Sqlite(_)
+            | StoreError::Json(_)
+            | StoreError::Io(_)
+            | StoreError::MeetingNotFound(_)
+            | StoreError::SpeakerNotFound(_)
+            | StoreError::PersonNotFound(_)
+            | StoreError::SpeakersInDifferentMeetings(..)
+            | StoreError::BlankPersonName
+            | StoreError::MeetingBusy(..)
+            | StoreError::NotRecording(..)
+            | StoreError::MeetingExists(_)
+            | StoreError::ReceiptOfAnotherUpload(_)
+            | StoreError::PendingMigration(_)
+            | StoreError::ForeignKeyViolations { .. }
+            | StoreError::JournalModeNotWal(_) => {
+                return Self::plain(Refusal::Unavailable, log_line);
+            }
         };
         let refusal = Refusal::UnreadableSetting;
         Self {
@@ -1120,7 +1141,7 @@ mod tests {
         assert_eq!(Refusal::UnreadableSetting.title(), "Steno could not start");
         assert_eq!(
             one.message,
-            "Steno could not read one of its settings. Your meetings are safe.\n\n\
+            "Steno could not read its settings. Your meetings are safe.\n\n\
              The setting llmBaseURL is not in a form Steno can read. It is stored in the \
              database at /Users/n/Steno/steno.sqlite. Steno has not changed it: fix or \
              remove it there, then open Steno again."
@@ -1129,10 +1150,15 @@ mod tests {
         assert_eq!(together.refusal, Refusal::UnreadableSetting);
         assert_eq!(
             together.message,
-            "Steno could not read one of its settings. Your meetings are safe.\n\n\
-             Each setting reads on its own, but not all of them together. They are stored \
-             in the database at /Users/n/Steno/steno.sqlite. Steno has not changed them: \
-             fix or remove the one that is wrong there, then open Steno again."
+            "Steno could not read its settings. Your meetings are safe.\n\n\
+             The stored settings cannot be read together, though each reads on its own. \
+             They are stored in the database at /Users/n/Steno/steno.sqlite. Steno has not \
+             changed them: check the settings there, then open Steno again."
+        );
+        let other = refused(steno_core::StoreError::BlankPersonName);
+        assert_eq!(
+            other,
+            Refused::plain(Refusal::Unavailable, "a person needs a name".to_owned())
         );
     }
 
