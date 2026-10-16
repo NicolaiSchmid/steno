@@ -28,8 +28,9 @@ interface LinuxTarget {
 	/** How it is installed, for the note: "GNOME (.deb · AppImage)". */
 	via: string;
 	released: boolean;
-	/** The install line; `shell` is false for a line in a config file. */
-	install: { line: string; shell: boolean };
+	install: string;
+	/** False for a line in a config file: no `$` prompt. */
+	shell?: false;
 }
 
 /**
@@ -42,22 +43,20 @@ const linuxTargets: LinuxTarget[] = [
 		name: "GNOME",
 		via: ".deb · AppImage",
 		released: false,
-		install: {
-			line: "sudo apt install ./steno-desktop_*_amd64.deb",
-			shell: true,
-		},
+		install: "sudo apt install ./steno-desktop_*_amd64.deb",
 	},
 	{
 		name: "Omarchy",
 		via: "AUR",
 		released: false,
-		install: { line: "yay -S steno-desktop-bin", shell: true },
+		install: "yay -S steno-desktop-bin",
 	},
 	{
 		name: "NixOS",
 		via: "flake",
 		released: false,
-		install: { line: "programs.steno.enable = true;", shell: false },
+		install: "programs.steno.enable = true;",
+		shell: false,
 	},
 ];
 
