@@ -38,12 +38,13 @@ Cloudflare Pages or a plain web server, upload `out/`.
 
 URLs, install commands and the platforms (name, whether a build is released,
 the note under it) live in `src/lib/site.ts`. Change them there, nowhere else.
-A desktop is listed once its gate in `.plans/2026-10-07-stable-promotion.md`
-has passed: macOS by `macReleased`, Windows by `windowsReleased`, each Linux
+A desktop is listed (its download button opens the latest release, and its
+note replaces "In each release · not yet checked") once its gate in
+`.plans/2026-10-07-stable-promotion.md` has passed: macOS by `macReleased`, Windows by `windowsReleased`, each Linux
 target (GNOME, Omarchy, NixOS) by its own `released` in `linuxTargets`. A
 listed Linux target adds its name to the Linux note and its install line to
-the closing section. A Rollback of `v0.11.0` sets every flag back to false
-("A bad release" in `apps/desktop/README.md`). The root README's desktop badge
+the closing section. A Rollback that takes `v0.11.0` out of "latest" sets
+every flag back to false ("A bad release" in `apps/desktop/README.md`). The root README's desktop badge
 names the same desktops; change it in the same commit when a desktop is added
 or removed.
 
