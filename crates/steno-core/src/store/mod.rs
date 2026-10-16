@@ -199,10 +199,11 @@ const OWN_READER: usize = 1;
 ///   writer: in WAL mode it reads its snapshot while another connection
 ///   writes, so a read never waits for a write. Each reader is one mutex,
 ///   held only for its closure. Nothing is taken under it, except by the
-///   checkpoint, which takes both readers after the writer. The handle [`Store::open`] returns reads on the shared
-///   reader (the detection poll, the pipeline, the handover, the delivery,
-///   the CLI); the host's handle ([`Store::with_own_reader`]) reads on a
-///   connection of its own, so its reads never queue behind theirs.
+///   checkpoint, which takes both readers after the writer. The handle
+///   [`Store::open`] returns reads on the shared reader (the detection
+///   poll, the pipeline, the handover, the delivery, the CLI); the host's
+///   handle ([`Store::with_own_reader`]) reads on a connection of its own,
+///   so its reads never queue behind theirs.
 /// - **The checkpoint** takes the writer, then the shared reader, then
 ///   the host's: a read in flight ends first, and no new one starts until
 ///   it returns. Under another process's lock it keeps both readers

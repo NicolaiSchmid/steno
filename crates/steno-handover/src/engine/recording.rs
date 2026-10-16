@@ -596,8 +596,7 @@ impl Engine {
     /// since this one read the receipt. 401 when the device was revoked
     /// since `complete` took `revocation`; only the admission task's start
     /// lies between that check and the intake call: an admission past this
-    /// check may still finish;
-    /// the revoke's discard can also make it fail.
+    /// check may still finish; the revoke's discard can also make it fail.
     async fn verified_file(
         &self,
         receipt: &mut HandoverReceipt,
