@@ -1116,6 +1116,8 @@ pub(crate) fn adopt_orphans(
                 tracing::warn!(%meeting_id, "a recording with no meeting was recovered");
                 adopted_ids.push(meeting_id);
             }
+            // The phone's retry admitted into this copy meanwhile.
+            Ok((Some(admitted), _)) if admitted == meeting_id => gone.push(meeting_id),
             Ok((Some(admitted), _)) => {
                 tracing::warn!(%meeting_id, %admitted, "a copy of a phone recording admitted as another meeting is left where it is");
                 gone.push(meeting_id);
