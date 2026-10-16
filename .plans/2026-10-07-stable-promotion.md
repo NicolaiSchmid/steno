@@ -1825,6 +1825,30 @@ The table above names each package and its owner. Their tests:
   in `rust-ci.yml`'s Linux hosted job ("Desktop stop under a locked store").
   P40 closes with #304. The feed's checks hold 100 ms, and check 20 allows
   one 2 s poll and 1 s.
+- **P40 follow-up: the copy an admission left is one meeting** (Nicolai's
+  ruling, 2026-10-16; the same as main before it, and nothing was lost). A
+  phone admission whose commit and `failed` save both give up under a lock
+  held past about 20 s leaves its noted copy; the next launch adopted it with
+  no ledger row, and the phone's retry admitted a second meeting. Decided:
+  the intake notes the upload the copy holds (recording id, size, SHA-256)
+  beside the copy's folder, in a file of its own
+  (`admission-uploads.json` in the support directory), so the record of
+  recording folders keeps the shape older builds read; Swift reads neither.
+  The launch adopts a copy that holds its noted upload whole with the
+  upload's ledger row, in one durable transaction
+  (`Store::adopt_upload_durably`), so the phone's retry is answered with that
+  meeting from the ledger; a retry before the launch, or while the lock is
+  still held, admits into the noted copy instead of copying again, and never
+  removes it. Bytes the ledger already holds are not adopted, and their copy
+  stays where it is. A note with no upload (an older build's), or a copy
+  that holds other bytes, is adopted as before. No schema change. Where:
+  `crates/steno-pipeline/src/intake.rs` (`NotedUpload`, `reusable_copy`),
+  `crates/steno-services/src/audio_folders.rs`,
+  `crates/steno-services/src/recovery.rs` (`adopt`),
+  `crates/steno-core/src/store/handover.rs`; tests in
+  `crates/steno-services/src/admission_copy_tests.rs` (with a 20 ms busy
+  timeout through `Store::on_writer`), `crates/steno-core/tests/handover_store.rs`
+  and `audio_folders.rs`.
 
 ### X: the Linux targets (D6)
 
