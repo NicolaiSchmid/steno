@@ -55,6 +55,9 @@ rusqlite.workspace = true
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-pipeline = { path = ".", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+# A layer that tells the back-off test when a try of the `failed` save
+# found the database busy.
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

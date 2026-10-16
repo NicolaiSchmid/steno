@@ -854,13 +854,14 @@ mod tests {
         }
     }
 
-    /// A write of this process that queues for the writer while the
-    /// `failed` save waits out another connection's lock runs between the
-    /// save's tries, not after all of them: it ends, busy, within about one
-    /// busy timeout behind the try it queued behind, plus its own. Once the
-    /// lock goes, the next try saves.
+    /// A write of this process that comes for the writer between two tries
+    /// of the `failed` save, while another connection holds the lock, gets
+    /// it at once: the save backs off holding nothing. The write ends, busy,
+    /// after its own busy timeout, not after the next try's as well. Once
+    /// the lock goes, the next try saves.
     #[test]
     fn a_write_queued_behind_the_failed_save_runs_between_its_tries() {
+        use tracing_subscriber::layer::SubscriberExt as _;
         /// The store's busy timeout.
         const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
         let dir = tempfile::tempdir().unwrap();
@@ -875,26 +876,49 @@ mod tests {
             now,
         );
         let settings = store.settings().unwrap();
+        let (busy, first_busy) = std::sync::mpsc::sync_channel(1);
         let hold = WriteLockHold::new(&path);
         let saving = std::thread::spawn({
             let store = store.clone();
-            move || save_failed_receipt(&store, &receipt)
+            move || {
+                let said = tracing_subscriber::registry().with(SaysBusy(busy));
+                tracing::subscriber::with_default(said, || save_failed_receipt(&store, &receipt))
+            }
         });
-        // The first try waits out the lock by now.
-        std::thread::sleep(RecordingIntake::FAILED_SAVE_BACK_OFF * 3);
+        first_busy
+            .recv_timeout(2 * BUSY_TIMEOUT)
+            .expect("the first try found the database busy");
+        // Inside the back-off: the next try has not started.
+        std::thread::sleep(RecordingIntake::FAILED_SAVE_BACK_OFF / 2);
         let queued = std::time::Instant::now();
         let written = store.save_settings(&settings);
         let waited = queued.elapsed();
         drop(hold);
         assert!(written.is_err_and(|error| error.is_busy()));
-        // Most of a busy timeout behind the first try, then its own. A
-        // write that also waited out the second try waits a busy timeout
-        // more; a load of 40 to 70 adds well under the margin.
+        // Its own busy timeout. A write that also waited out the second
+        // try waits at least the rest of it, so two busy timeouts less
+        // half a back-off.
         assert!(
-            waited < 2 * BUSY_TIMEOUT + Duration::from_secs(2),
+            waited < BUSY_TIMEOUT + Duration::from_secs(3),
             "the write waited {waited:?}"
         );
         assert!(saving.join().unwrap(), "the try after the write saved");
+    }
+
+    /// Says once on its channel that a try of the `failed` save found the
+    /// database busy.
+    struct SaysBusy(std::sync::mpsc::SyncSender<()>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SaysBusy {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() == module_path!().trim_end_matches("::tests") {
+                let _ = self.0.try_send(());
+            }
+        }
     }
 
     #[tokio::test]
