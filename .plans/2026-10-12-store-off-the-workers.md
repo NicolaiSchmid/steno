@@ -693,6 +693,52 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
 - **Tests:** checks 1 and 2 (the settings-save cases), 16, 18, 19, 20, 21, 22
   and 23; check 12 keeps passing with the poll as the owner.
 
+**As built** (PR 2c):
+
+- **A third flag in the feed.** Beside "page ready" and "resend", a "poked"
+  flag that the hook and the start set and each pass swaps; `page.ready`
+  sets "resend" and unparks without it. A poke sends the status even
+  when it did not move, throttled, so every hook still gets its snapshot
+  (check 1: the synthetic tone's levels repeat exactly). A wake with
+  neither flag set and no snapshot held back (the unpark of a poke an
+  earlier pass already answered) sends nothing, so no duplicate goes
+  out. It starts set, so the first pass reads the status even when a
+  move came before the thread could be woken.
+- **What goes at once.** A snapshot whose anything but the levels differs
+  from the last one sent (the countdown and the denied permissions as
+  well as the state, the meeting and the messages); otherwise it waits
+  out the interval.
+- **The owner is one function,** `own_the_reloads(host, every)` in
+  `crates/steno-services/src/app.rs`, which the launch spawns with the
+  2 s interval. Checks 19, 20, 22 and 23 drive it over a host directly;
+  check 19's owner ticks every 50 ms and counts ten passes by their
+  `settings.phone`.
+- **The host's API.** `Host::reload_pass` is the pass; `store_changed`
+  is the same pass forced, and runs the light part too.
+  `Host::refresh_pairing` goes into the light part.
+  `Host::reload_requested` is what the owner awaits beside its tick, and
+  `Host::reload_requests` (hidden) counts the requests for check 23.
+- **The in-memory mark** is the commit count alone: no other connection
+  can reach a private in-memory database. The commit hook runs just
+  before a commit is visible, so a mark can count a commit a read still
+  misses; on a file the reader's `data_version` moves only once it is
+  visible, so the next pass reloads again (the `Store::change_mark` doc).
+- **The bounds.** "Live" is `LIVE` (1 s) in the services' checks as for
+  2a, and check 20 waits one poll interval and `LIVE`; checks 16 and 21
+  keep 100 ms. Check 23's stopped row is "out of `recording`": the
+  pipeline may have taken it up before the pass ran.
+- **Check 12** holds forced passes, since an idle tick no longer reloads:
+  an event's request, then one the test makes. The burst test commits
+  every 100 ms meanwhile, so each tick reloads.
+- **Host tests that changed besides the three named:** `page.ready`'s
+  order test, the doc example and the harness wait for the feed's first
+  `recording`; the onboarding test of the system audio row's wait and the
+  pairing test run a pass. `GatedPipeline` moved to the services' testing
+  kit, whose `TimedSink` keeps the thread that sent each snapshot.
+- **The recorder's hook rule** holds in the code as it is
+  (`CaptureRecorder::notify` runs with the recorder's locks released);
+  nothing in the recorder changed.
+
 ## Acceptance
 
 Each check that needs the lock holds another connection's write transaction
