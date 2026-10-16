@@ -2949,3 +2949,55 @@ fn kept_incomplete_never_hides_another_status() {
         "keptUntilExportSucceeds"
     );
 }
+
+/// The host reads on a reader of its own (`Store::with_own_reader`), held
+/// with its view models: a reload does not wait for a read held open on
+/// the shared reader (a long export, say), and a second host over the same
+/// store is refused while the first lives.
+#[test]
+fn the_host_reads_on_a_reader_of_its_own() {
+    let harness = Harness::builder().build();
+    let (reading, read) = std::sync::mpsc::channel::<()>();
+    let (end, ended) = std::sync::mpsc::channel::<()>();
+    let long_read = std::thread::spawn({
+        let store = harness.store.clone();
+        move || {
+            store.read(|_| {
+                reading.send(()).unwrap();
+                let _ = ended.recv();
+                Ok(())
+            })
+        }
+    });
+    read.recv().unwrap();
+    let (reloaded, reload) = std::sync::mpsc::channel();
+    let reloading = std::thread::spawn({
+        let host = harness.host.clone();
+        move || {
+            host.store_changed();
+            reloaded.send(()).unwrap();
+        }
+    });
+    // A second, five times under the busy timeout; a reload on the shared
+    // reader waits until the long read ends.
+    let answered = reload.recv_timeout(std::time::Duration::from_secs(1));
+    end.send(()).unwrap();
+    long_read.join().unwrap().unwrap();
+    reloading.join().unwrap();
+    answered.expect("the reload waited for the shared reader");
+
+    let second = steno_host::Host::new(
+        harness.store.clone(),
+        harness.fakes.services(),
+        steno_host::HostConfig::default(),
+    );
+    assert!(
+        matches!(
+            second,
+            Err(steno_host::host::HostError::Store(
+                steno_core::StoreError::OwnReaderOpen
+            ))
+        ),
+        "a second host while the first lives"
+    );
+}
