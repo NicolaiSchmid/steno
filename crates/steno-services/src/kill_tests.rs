@@ -1166,7 +1166,7 @@ fn killed_in_the_decode(dir: &Path, bad: &steno_core::AudioAsset, kills: usize) 
     for kill in 1..=kills {
         let reading = dir.join("reading");
         let _ = std::fs::remove_file(&reading);
-        let mut child = spawn_test("kill_tests::child_decodes_until_killed", dir, Gate::Open);
+        let mut child = spawn_test("kill_tests::child_decodes_until_killed", dir, Gate::Open.name());
         kill_when(&mut child, dir, "the decode", || reading.exists());
         assert_eq!(
             std::fs::read_dir(&marks).unwrap().count(),
