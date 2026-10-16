@@ -38,7 +38,7 @@
 //! longer one (a process stopped for seconds, a computer that slept) is
 //! [`Missed::unfilled`]: nothing is written, the master falls short of wall
 //! time by it, and it is counted. The session reports both, per lane at each
-//! stream's rate, as [`CaptureStatistics::missed_seconds`] and
+//! stream's rate, as [`CaptureStatistics::filled_seconds`] and
 //! [`CaptureStatistics::unfilled_seconds`] and logs them at `warn` after the
 //! stop; the recorder's note "About N seconds of the recording are missing"
 //! adds them to the gaps.
@@ -74,7 +74,7 @@
 //! Real-time safe: integer arithmetic on plain fields, nothing else.
 //!
 //! [`LaneFrameSink::write_missed`]: super::LaneFrameSink::write_missed
-//! [`CaptureStatistics::missed_seconds`]: crate::capture::CaptureStatistics::missed_seconds
+//! [`CaptureStatistics::filled_seconds`]: crate::capture::CaptureStatistics::filled_seconds
 //! [`CaptureStatistics::unfilled_seconds`]: crate::capture::CaptureStatistics::unfilled_seconds
 //! [`CaptureSession::STALL_TIMEOUT`]: crate::capture::CaptureSession::STALL_TIMEOUT
 

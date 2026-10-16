@@ -791,7 +791,7 @@ fn no_audio_warning(stalled: Option<&str>) -> String {
 ///
 /// - the silence written in place of audio: the rebuilds' gaps
 ///   (`gap_seconds`) and the cycles the capture's thread missed
-///   (`missed_seconds`, A18 of `.plans/2026-10-07-stable-promotion.md`);
+///   (`filled_seconds`, A18 of `.plans/2026-10-07-stable-promotion.md`);
 /// - and the audio the master does not hold, the larger of two readings of
 ///   it: the jumps the capture's thread missed that were too long to fill
 ///   (`unfilled_seconds`), and the wall time `duration` falls short of
@@ -804,7 +804,7 @@ fn no_audio_warning(stalled: Option<&str>) -> String {
 /// Rust only.
 fn missing_seconds(statistics: &CaptureStatistics, wall: f64) -> f64 {
     let short = (wall - statistics.duration - wall * CLOCK_DRIFT).max(0.0);
-    statistics.gap_seconds + statistics.missed_seconds + statistics.unfilled_seconds.max(short)
+    statistics.gap_seconds + statistics.filled_seconds + statistics.unfilled_seconds.max(short)
 }
 
 /// The note after a recording whose master holds `missing` seconds of
@@ -3420,7 +3420,7 @@ mod tests {
         let hour = CaptureStatistics {
             duration: 3_598.5,
             gap_seconds: 0.5,
-            missed_seconds: 0.25,
+            filled_seconds: 0.25,
             unfilled_seconds: 1.5,
             ..statistics()
         };
@@ -5150,7 +5150,7 @@ mod tests {
             ended_on_device_loss: false,
             device_changes: 0,
             gap_seconds: 0.0,
-            missed_seconds: 0.0,
+            filled_seconds: 0.0,
             unfilled_seconds: 0.0,
         }
     }

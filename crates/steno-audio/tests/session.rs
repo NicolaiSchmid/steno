@@ -5411,7 +5411,7 @@ fn warnings() -> String {
 /// zeros on both lanes at the same frames, and 2.5 s two seconds in, past
 /// the fill limit and the session's stall timeout, which is counted and
 /// left out. The master holds the five seconds less the 2.5 s, both lanes
-/// alike; the filled frames count as missed, the rest as unfilled, neither
+/// alike; the frames written count as filled, the rest as unfilled, neither
 /// as dropped or as a gap, and the stop logs both at `warn`.
 #[test]
 fn missed_cycles_are_written_as_silence_on_every_lane_and_counted() {
@@ -5446,7 +5446,7 @@ fn missed_cycles_are_written_as_silence_on_every_lane_and_counted() {
     let statistics = &result.statistics;
     assert!(statistics.dropped_frames.is_empty(), "{statistics:?}");
     assert_eq!(statistics.gap_seconds, 0.0);
-    assert_eq!(statistics.missed_seconds, 0.1, "the 100 ms filled");
+    assert_eq!(statistics.filled_seconds, 0.1, "the 100 ms filled");
     assert_eq!(statistics.unfilled_seconds, 2.5, "the 2.5 s counted");
     assert!(
         (statistics.duration - 2.5).abs() < 0.02,
@@ -5508,7 +5508,7 @@ fn missed_cycles_before_a_rebuild_count_at_the_old_streams_rate() {
     backend.wait_until_finished();
     let result = session.stop().unwrap();
     assert_eq!(result.statistics.device_changes, 1);
-    assert_eq!(result.statistics.missed_seconds, 0.05);
+    assert_eq!(result.statistics.filled_seconds, 0.05);
 }
 
 /// A stalled stream whose thread wakes once the watch thread reported the

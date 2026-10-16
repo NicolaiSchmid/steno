@@ -542,7 +542,7 @@ fn the_missed_cycle_fill_allocates_nothing() {
     );
     let missed = 9 * CYCLE;
     assert_eq!(
-        sink.missed_samples(),
+        sink.filled_samples(),
         BTreeMap::from([(AudioLane::Mic, missed), (AudioLane::System, missed)]),
     );
     assert!(sink.dropped_samples().is_empty());
@@ -606,7 +606,7 @@ fn the_missed_cycle_fill_allocates_nothing() {
         "50 periods and the 4 missed"
     );
     assert_eq!(
-        sink.missed_samples(),
+        sink.filled_samples(),
         BTreeMap::from([(AudioLane::Mic, 4 * CYCLE), (AudioLane::System, 2 * CYCLE)]),
         "the master's zeros on its lane, the follower's count on its own"
     );

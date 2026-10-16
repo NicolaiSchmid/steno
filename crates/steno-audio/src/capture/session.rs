@@ -169,7 +169,7 @@
 //! Audio the backend's own thread missed while its stream ran (cycles the
 //! scheduler did not give it) is no stall: the backend writes it as zeros
 //! or counts it, and the session folds those counts per lane at each
-//! stream's rate into [`CaptureStatistics::missed_seconds`] and
+//! stream's rate into [`CaptureStatistics::filled_seconds`] and
 //! [`CaptureStatistics::unfilled_seconds`], logged at `warn` after the
 //! stop. A stall the watch thread reported whose thread wakes before the
 //! rebuild's stop counts its time as an unfilled jump that the rebuild's
@@ -477,7 +477,7 @@ impl LaneCounts {
 #[derive(Default)]
 struct RingCounts {
     dropped: LaneCounts,
-    missed: LaneCounts,
+    filled: LaneCounts,
     unfilled: LaneCounts,
 }
 
@@ -486,7 +486,7 @@ impl RingCounts {
     /// stream that wrote it.
     fn fold(&mut self, sink: &LaneFrameSink, rate: f64) {
         self.dropped.fold(sink.dropped_samples(), rate);
-        self.missed.fold(sink.missed_samples(), rate);
+        self.filled.fold(sink.filled_samples(), rate);
         self.unfilled.fold(sink.unfilled_samples(), rate);
     }
 
@@ -516,9 +516,9 @@ impl RingCounts {
     }
 
     /// Seconds of zeros written for missed audio on the lane that missed
-    /// most, for [`CaptureStatistics::missed_seconds`].
-    fn missed_seconds(&self) -> f64 {
-        self.missed.most_seconds()
+    /// most, for [`CaptureStatistics::filled_seconds`].
+    fn filled_seconds(&self) -> f64 {
+        self.filled.most_seconds()
     }
 
     /// Seconds of missed audio not written on the lane that lost most, for
@@ -530,14 +530,14 @@ impl RingCounts {
     /// The `warn` line after the stop, when the capture's thread missed
     /// anything: the seconds and every lane's samples, filled and not.
     fn log_missed(&self) {
-        let (missed, unfilled) = (self.missed_seconds(), self.unfilled_seconds());
-        if missed > 0.0 || unfilled > 0.0 {
+        let (filled, unfilled) = (self.filled_seconds(), self.unfilled_seconds());
+        if filled > 0.0 || unfilled > 0.0 {
             tracing::warn!(
-                missed = ?self.missed.at_output_rate,
+                filled = ?self.filled.at_output_rate,
                 unfilled = ?self.unfilled.at_output_rate,
-                "the capture's thread missed {:.3} s of audio: {missed:.3} s written as \
+                "the capture's thread missed {:.3} s of audio: {filled:.3} s written as \
                  silence, {unfilled:.3} s too long to fill and left out",
-                missed + unfilled
+                filled + unfilled
             );
         }
     }
@@ -1526,7 +1526,7 @@ impl Core {
             ended_on_device_loss: active.ended_on_device_loss,
             device_changes: active.device_changes,
             gap_seconds: active.gap_seconds,
-            missed_seconds: active.ring_counts.missed_seconds(),
+            filled_seconds: active.ring_counts.filled_seconds(),
             unfilled_seconds: active.ring_counts.unfilled_seconds(),
         };
         active.ring_counts.log_missed();
@@ -2568,15 +2568,15 @@ mod tests {
     #[test]
     fn missed_audio_counts_on_the_lane_that_missed_most_at_each_streams_rate() {
         let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
-        sink.ring(0).record_missed(4_800);
-        sink.ring(1).record_missed(2_400);
+        sink.ring(0).record_filled(4_800);
+        sink.ring(1).record_filled(2_400);
         sink.ring(1).record_unfilled(48_000);
         let mut counts = RingCounts::default();
         counts.fold(&sink, 24_000.0);
-        sink.ring(1).record_missed(7_200);
+        sink.ring(1).record_filled(7_200);
         counts.fold(&sink, SAMPLE_RATE);
         assert_eq!(
-            counts.missed_seconds(),
+            counts.filled_seconds(),
             0.25,
             "the system lane: 2 400 at 24 kHz and 7 200 at 48 kHz, above the microphone's 0.2 s"
         );

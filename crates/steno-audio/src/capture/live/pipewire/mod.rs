@@ -1881,7 +1881,7 @@ mod tests {
                 [0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
             );
         }
-        assert_eq!(sink.missed_samples()[&AudioLane::System], 3);
+        assert_eq!(sink.filled_samples()[&AudioLane::System], 3);
         assert_eq!(sink.unfilled_samples()[&AudioLane::Mic], 50);
     }
 

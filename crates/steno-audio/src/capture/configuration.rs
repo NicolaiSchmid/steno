@@ -383,7 +383,7 @@ pub struct CaptureStatistics {
     /// lane that missed most; part of `duration`, as the gaps are. 0 when
     /// the capture's thread runs on time. A18, the design in
     /// [`realtime::missed`](crate::realtime::missed); Rust only.
-    pub missed_seconds: f64,
+    pub filled_seconds: f64,
     /// Seconds of audio the capture's thread missed in jumps too long to
     /// fill ([`Missed::unfilled`](crate::realtime::Missed::unfilled)), on
     /// the lane that lost most: not in `duration`, which falls short of

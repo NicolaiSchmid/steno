@@ -186,7 +186,7 @@ impl LaneFrameSink {
         }
         for lane in 0..self.lanes.len() {
             self.write_silence(lane);
-            self.ring(lane).record_missed(frames);
+            self.ring(lane).record_filled(frames);
         }
         self.end_callback();
         true
@@ -273,12 +273,12 @@ impl LaneFrameSink {
     /// missed, in samples at the rings' rate; lanes without are absent.
     /// Counted across restarts until [`Self::clear`], as the overruns are.
     #[must_use]
-    pub fn missed_samples(&self) -> BTreeMap<AudioLane, usize> {
-        self.by_lane(self.rings.missed_samples())
+    pub fn filled_samples(&self) -> BTreeMap<AudioLane, usize> {
+        self.by_lane(self.rings.filled_samples())
     }
 
     /// Samples per lane of audio the backend's thread missed and did not
-    /// write ([`Missed::unfilled`]); as [`Self::missed_samples`].
+    /// write ([`Missed::unfilled`]); as [`Self::filled_samples`].
     #[must_use]
     pub fn unfilled_samples(&self) -> BTreeMap<AudioLane, usize> {
         self.by_lane(self.rings.unfilled_samples())
@@ -321,26 +321,26 @@ mod tests {
         assert_eq!(&mic[10..], [0.0; 6]);
         assert_eq!(&system[10..], [0.0; 6]);
         assert_eq!(
-            sink.missed_samples(),
+            sink.filled_samples(),
             BTreeMap::from([(AudioLane::Mic, 6), (AudioLane::System, 6)])
         );
         assert_eq!(sink.frames_offered(), 16, "a fill is delivery");
         assert!(sink.dropped_samples().is_empty());
-        sink.ring(1).record_missed(4);
-        assert_eq!(sink.missed_samples()[&AudioLane::System], 10);
+        sink.ring(1).record_filled(4);
+        assert_eq!(sink.filled_samples()[&AudioLane::System], 10);
         sink.write_missed(Missed {
             fill: 2,
             unfilled: 9,
         });
         assert_eq!(sink.available_to_read(), 2, "the fill, not the unfilled");
-        assert_eq!(sink.missed_samples()[&AudioLane::Mic], 8);
+        assert_eq!(sink.filled_samples()[&AudioLane::Mic], 8);
         assert_eq!(
             sink.unfilled_samples(),
             BTreeMap::from([(AudioLane::Mic, 9), (AudioLane::System, 9)])
         );
         sink.clear();
         assert!(
-            sink.missed_samples().is_empty() && sink.unfilled_samples().is_empty(),
+            sink.filled_samples().is_empty() && sink.unfilled_samples().is_empty(),
             "cleared with the rings"
         );
     }
@@ -351,7 +351,7 @@ mod tests {
         // 1 000 samples of ring, rounded up to 1 024.
         let sink = LaneFrameSink::with_handler(&lanes, 1_000.0, 1.0, Box::new(|_| {}));
         assert!(!sink.fill_missed(1_025));
-        assert!(sink.missed_samples().is_empty());
+        assert!(sink.filled_samples().is_empty());
         assert_eq!(
             sink.dropped_samples(),
             BTreeMap::from([(AudioLane::Mixed, 1_025)])

@@ -500,7 +500,7 @@ impl PacketRouter {
                     }
                     let missed = lane.take_missed();
                     if missed.fill > 0 {
-                        sink.ring(*index).record_missed(missed.fill);
+                        sink.ring(*index).record_filled(missed.fill);
                     }
                     if missed.unfilled > 0 {
                         sink.ring(*index).record_unfilled(missed.unfilled);
@@ -519,7 +519,7 @@ impl PacketRouter {
 
     /// What the master's thread missed before `next`, its next packet. The
     /// fill goes in as a silent packet of `next`'s channels: zeros on the
-    /// master's lanes, counted as missed, and the follower's frames for the
+    /// master's lanes, counted as filled, and the follower's frames for the
     /// same time on its lane (it kept delivering). The unfilled frames
     /// count on the master's lanes, and the follower's audio queued for
     /// that time is dropped and counted on its lane
@@ -537,7 +537,7 @@ impl PacketRouter {
             let written = self.route(silent, sink);
             if written > 0 {
                 for lane in masters.clone() {
-                    sink.ring(lane).record_missed(written);
+                    sink.ring(lane).record_filled(written);
                 }
             }
         }

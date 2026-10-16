@@ -9,8 +9,9 @@
 //! A write that does not fit is refused as a whole (the caller keeps lanes
 //! aligned by refusing every lane of that callback) and counted in
 //! `dropped_samples`. Beside it the ring counts what its producer reported
-//! of audio its thread missed (`missed_samples`, written as zeros;
-//! `unfilled_samples`, not written: [`CycleClock`](super::CycleClock)).
+//! of audio its thread missed (`filled_samples`, written as zeros;
+//! `unfilled_samples`, not written: [`CycleClock`](super::CycleClock)), so
+//! the audio missed is the filled plus the unfilled.
 //!
 //! # Safety model
 //!
@@ -36,7 +37,7 @@ pub struct LaneRingBuffer {
     write_index: AtomicUsize,
     read_index: AtomicUsize,
     dropped: AtomicUsize,
-    missed: AtomicUsize,
+    filled: AtomicUsize,
     unfilled: AtomicUsize,
 }
 
@@ -70,7 +71,7 @@ impl LaneRingBuffer {
             write_index: AtomicUsize::new(0),
             read_index: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
-            missed: AtomicUsize::new(0),
+            filled: AtomicUsize::new(0),
             unfilled: AtomicUsize::new(0),
         }
     }
@@ -99,8 +100,8 @@ impl LaneRingBuffer {
     }
 
     /// Zeros written in place of audio the producer's thread missed.
-    pub fn missed_samples(&self) -> usize {
-        self.missed.load(Ordering::Relaxed)
+    pub fn filled_samples(&self) -> usize {
+        self.filled.load(Ordering::Relaxed)
     }
 
     /// Audio the producer's thread missed and did not write: a jump past
@@ -126,8 +127,8 @@ impl LaneRingBuffer {
     /// Producer side. Records `count` zeros written in place of audio the
     /// producer's thread missed.
     #[inline(always)]
-    pub fn record_missed(&self, count: usize) {
-        self.missed.fetch_add(count, Ordering::Relaxed);
+    pub fn record_filled(&self, count: usize) {
+        self.filled.fetch_add(count, Ordering::Relaxed);
     }
 
     /// Producer side. Records `count` samples the producer's thread missed
@@ -302,7 +303,7 @@ impl LaneRingBuffer {
         self.read_index.store(0, Ordering::SeqCst);
         self.write_index.store(0, Ordering::SeqCst);
         self.dropped.store(0, Ordering::SeqCst);
-        self.missed.store(0, Ordering::SeqCst);
+        self.filled.store(0, Ordering::SeqCst);
         self.unfilled.store(0, Ordering::SeqCst);
     }
 }

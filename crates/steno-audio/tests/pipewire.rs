@@ -933,7 +933,7 @@ fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
     let result = session.stop().expect("the recording");
     assert!(!result.statistics.ended_on_device_loss);
     assert_eq!(result.statistics.device_changes, 1);
-    let missed = result.statistics.missed_seconds + result.statistics.unfilled_seconds;
+    let missed = result.statistics.filled_seconds + result.statistics.unfilled_seconds;
     println!(
         "the master: {:.2} s, gap {:.2} s, {missed:.3} s missed",
         result.statistics.duration, result.statistics.gap_seconds
@@ -1062,7 +1062,7 @@ fn a_daemon_killed_and_started_again_resumes_the_recording() {
     let result = session.stop().expect("the recording");
     let wall = began.elapsed().as_secs_f64();
     let statistics = &result.statistics;
-    let missed = statistics.missed_seconds + statistics.unfilled_seconds;
+    let missed = statistics.filled_seconds + statistics.unfilled_seconds;
     println!(
         "the master: {:.3} s against {stopping:.3} to {wall:.3} s of wall time, gap {:.3} s, \
          {missed:.3} s missed",
@@ -1159,7 +1159,7 @@ fn probing_a_chosen_source_costs_the_recording_nothing() {
     let master = statistics.duration;
     // The cycles the capture's thread missed are in the master as zeros,
     // so it stays on wall time however busy the machine is.
-    let missed = statistics.missed_seconds;
+    let missed = statistics.filled_seconds;
     println!(
         "the master: {master:.3} s against {stopping:.3} to {wall:.3} s of wall time, \
          {missed:.3} s of it for missed cycles"
@@ -1317,7 +1317,7 @@ fn stopped_run(stops: &[f64], length: Duration) -> StoppedRun {
          changes, dropped {:?}, lanes {:?} samples at 16 kHz",
         run.stops,
         statistics.duration,
-        statistics.missed_seconds,
+        statistics.filled_seconds,
         statistics.unfilled_seconds,
         statistics.gap_seconds,
         statistics.device_changes,
@@ -1330,7 +1330,7 @@ fn stopped_run(stops: &[f64], length: Duration) -> StoppedRun {
         "{:?}",
         statistics.dropped_frames
     );
-    if statistics.missed_seconds + statistics.unfilled_seconds > 0.0 {
+    if statistics.filled_seconds + statistics.unfilled_seconds > 0.0 {
         let logs = LOGS.lock().unwrap_or_else(PoisonError::into_inner);
         assert!(
             logs.lines()
@@ -1350,9 +1350,9 @@ fn a_recording_stopped_three_times_fills_and_counts_what_it_missed() {
     let run = stopped_run(&[0.6, 0.6, 0.6], Duration::from_secs(6));
     let (statistics, stopped) = (&run.statistics, run.stopped());
     assert!(
-        (stopped - 0.3..=stopped + 0.05).contains(&statistics.missed_seconds),
+        (stopped - 0.3..=stopped + 0.05).contains(&statistics.filled_seconds),
         "{:.3} s counted for {stopped:.3} s stopped",
-        statistics.missed_seconds
+        statistics.filled_seconds
     );
     assert_eq!(statistics.unfilled_seconds, 0.0);
     let master = statistics.duration;
@@ -1407,7 +1407,7 @@ fn a_recording_stopped_too_long_to_fill_counts_what_it_missed() {
 fn a_recording_stopped_just_before_its_stop_counts_what_it_missed() {
     let run = stopped_run(&[0.6], Duration::from_millis(1_300));
     let (statistics, stopped) = (&run.statistics, run.stopped());
-    let counted = statistics.missed_seconds + statistics.unfilled_seconds;
+    let counted = statistics.filled_seconds + statistics.unfilled_seconds;
     assert!(
         (stopped - 0.2..=stopped + 0.1).contains(&counted),
         "{counted:.3} s counted for {stopped:.3} s stopped at the end"
@@ -1477,13 +1477,13 @@ fn a_daemon_stopped_across_the_recordings_stop_is_counted_by_the_stop() {
          {:.3} s against {stopping:.3} to {wall:.3} s of wall time, {:.3} s missed and filled, \
          {:.3} s missed and not, gap {:.3} s, {} device changes, dropped {:?}",
         statistics.duration,
-        statistics.missed_seconds,
+        statistics.filled_seconds,
         statistics.unfilled_seconds,
         statistics.gap_seconds,
         statistics.device_changes,
         statistics.dropped_frames
     );
-    let counted = statistics.missed_seconds + statistics.unfilled_seconds;
+    let counted = statistics.filled_seconds + statistics.unfilled_seconds;
     assert!(
         (held - 0.15..=held + 0.1).contains(&counted),
         "{counted:.3} s counted for the daemon stopped {held:.3} s before the stop"

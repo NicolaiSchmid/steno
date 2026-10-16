@@ -301,7 +301,7 @@ fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> CallR
         first.map(|first| first + (started - starting)),
         stream.sample_rate,
         sink.dropped_samples(),
-        sink.missed_samples(),
+        sink.filled_samples(),
         sink.unfilled_samples(),
         stopping.elapsed()
     );

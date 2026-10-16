@@ -104,10 +104,10 @@ impl LaneRings {
     /// Zeros written per channel in place of audio the producer's thread
     /// missed.
     #[must_use]
-    pub fn missed_samples(&self) -> Vec<usize> {
+    pub fn filled_samples(&self) -> Vec<usize> {
         self.rings
             .iter()
-            .map(LaneRingBuffer::missed_samples)
+            .map(LaneRingBuffer::filled_samples)
             .collect()
     }
 

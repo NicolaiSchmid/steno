@@ -303,7 +303,7 @@ impl Record {
         println!("gap filled: {:.2} s", result.statistics.gap_seconds);
         println!(
             "missed cycles filled: {:.2} s",
-            result.statistics.missed_seconds
+            result.statistics.filled_seconds
         );
         println!(
             "missed cycles not filled: {:.2} s",

@@ -900,8 +900,8 @@ struct Outage {
     /// with the period: the target (960) when the follower's thread runs
     /// first in each period, a period more when the master's does.
     lags: Vec<(usize, i64)>,
-    mic_missed: usize,
-    system_missed: usize,
+    mic_filled: usize,
+    system_filled: usize,
     mic_unfilled: usize,
     system_unfilled: usize,
     system_dropped: usize,
@@ -1038,8 +1038,8 @@ fn run_outage_in_order(follower_out: usize, master_out: usize, master_first: boo
     let of = |counts: &std::collections::BTreeMap<AudioLane, usize>, lane| {
         counts.get(&lane).copied().unwrap_or(0)
     };
-    let (missed, unfilled) = (sink.missed_samples(), sink.unfilled_samples());
-    let (mic_missed, system_missed) = (of(&missed, AudioLane::Mic), of(&missed, AudioLane::System));
+    let (missed, unfilled) = (sink.filled_samples(), sink.unfilled_samples());
+    let (mic_filled, system_filled) = (of(&missed, AudioLane::Mic), of(&missed, AudioLane::System));
     let (mic_unfilled, system_unfilled) = (
         of(&unfilled, AudioLane::Mic),
         of(&unfilled, AudioLane::System),
@@ -1049,15 +1049,15 @@ fn run_outage_in_order(follower_out: usize, master_out: usize, master_first: boo
     let short = wall - seconds(mic_out.len());
     Outage {
         lags,
-        mic_missed,
-        system_missed,
+        mic_filled,
+        system_filled,
         mic_unfilled,
         system_unfilled,
         system_dropped: of(&sink.dropped_samples(), AudioLane::System),
         slipped: follower.slipped_frames(),
-        note: seconds(mic_missed.max(system_missed))
+        note: seconds(mic_filled.max(system_filled))
             + seconds(mic_unfilled.max(system_unfilled)).max(short - wall * 0.001),
-        truth: short + seconds(mic_missed),
+        truth: short + seconds(mic_filled),
     }
 }
 
@@ -1081,14 +1081,14 @@ fn a_stall_of_both_threads_keeps_the_lanes_aligned() {
             (0, 0),
             "{outage:?}"
         );
-        assert_eq!((outage.mic_missed, outage.system_missed), (lost, lost));
+        assert_eq!((outage.mic_filled, outage.system_filled), (lost, lost));
         let outage = run_outage_in_order(out, out, true);
         let (base, (period, lag)) = (outage.lags[0], *outage.lags.last().unwrap());
         assert_eq!(base, (40, 1_440), "master first, {out} periods: {outage:?}");
         assert_eq!(lag, base.1, "{outage:?}");
         assert!(period <= OUTAGE_START + out + 100, "{outage:?}");
         assert_eq!((outage.slipped, outage.system_dropped), (3_840, 3_840));
-        assert_eq!((outage.mic_missed, outage.system_missed), (lost, lost));
+        assert_eq!((outage.mic_filled, outage.system_filled), (lost, lost));
         assert!((outage.note - outage.truth).abs() < 1e-9, "{outage:?}");
     }
 }
@@ -1113,7 +1113,7 @@ fn an_outage_of_both_threads_past_the_fill_limit_counts_once() {
                 "{context}"
             );
             assert_eq!(
-                (outage.mic_missed, outage.system_missed),
+                (outage.mic_filled, outage.system_filled),
                 (0, 0),
                 "{context}"
             );
@@ -1150,8 +1150,8 @@ fn a_stall_of_the_master_alone_keeps_the_lanes_aligned() {
         assert_eq!(outage.lags, [(40, 960)], "{out} periods: {outage:?}");
         assert_eq!(outage.slipped, 0, "{outage:?}");
         assert_eq!(outage.system_dropped, 0, "{outage:?}");
-        assert_eq!(outage.mic_missed, (out - ENGINE_PERIODS) * PERIOD);
-        assert_eq!(outage.system_missed, 0);
+        assert_eq!(outage.mic_filled, (out - ENGINE_PERIODS) * PERIOD);
+        assert_eq!(outage.system_filled, 0);
     }
 }
 
@@ -1225,8 +1225,8 @@ fn an_unfilled_jump_of_the_master_drops_the_follower_audio_of_that_time() {
 fn a_stall_of_the_follower_alone_stages_no_zeros() {
     for out in [15, 20, 30] {
         let outage = run_outage(out, 0);
-        assert_eq!(outage.system_missed, (out - ENGINE_PERIODS) * PERIOD);
-        assert_eq!(outage.mic_missed, 0);
+        assert_eq!(outage.system_filled, (out - ENGINE_PERIODS) * PERIOD);
+        assert_eq!(outage.mic_filled, 0);
         assert_eq!(
             (outage.slipped, outage.system_dropped),
             (3_840, 3_840),
