@@ -118,7 +118,7 @@ homebrew.casks = [ "nicolaischmid/tap/steno" ];
 </details>
 
 <details>
-<summary><b>Nix details: nix-darwin, home-manager, updates on macOS</b></summary>
+<summary><b>Nix details: nix-darwin, Home Manager, updates on macOS</b></summary>
 <br>
 
 On `aarch64-darwin`, `flake.nix` installs the released `Steno.app` unchanged (no rebuild,
@@ -126,17 +126,18 @@ no re-signing).
 
 With nix-darwin, add the flake as an input and put `steno.packages.aarch64-darwin.steno`
 in `environment.systemPackages`; nix-darwin copies `Applications/Steno.app` into
-`/Applications/Nix Apps`. With home-manager use `home.packages`; Home Manager 25.11 and
-later (by `home.stateVersion`) copies the app into `~/Applications/Home Manager Apps`,
+`/Applications/Nix Apps`. With Home Manager, use `home.packages`; from state version
+25.11 (`home.stateVersion`) it copies the app into `~/Applications/Home Manager Apps`,
 and with an earlier state version turn on `targets.darwin.copyApps` or link the app
 yourself. `nix run` does not apply: the output is an app bundle with no `bin/`.
 
-The app runs from a copy that Nix manages (from the Nix store itself with `nix profile`).
-Its updater still offers each update and asks for an administrator password to install
-it: decline. Update instead by bumping `release.version` and `release.hash` at the top
-of `flake.nix` (the release workflow prints both in its job summary) or by moving the
-flake input that pins this repository, then rebuild. To stop the daily offer, turn off
-*Check for updates automatically* in Settings > General.
+With nix-darwin or Home Manager the app runs from a copy that Nix manages; with
+`nix profile`, from the Nix store itself. Its updater still offers each update and asks
+for an administrator password to install it: decline. Update instead by bumping
+`release.version` and `release.hash` at the top of `flake.nix` (the release workflow
+prints both in its job summary) or by moving the flake input that pins this repository,
+then rebuild. To stop the daily offer, turn off *Check for updates automatically* in
+Settings > General.
 
 nix-darwin users who want in-app updates can use the Homebrew cask through
 `homebrew.casks` instead; it installs into `/Applications`, where the updater can write.
@@ -172,7 +173,7 @@ Ubuntu 24.04 or Debian 13, or newer. The release has two builds:
   place, without a password.
 
 Download your build, its `.asc` (the `.sig` beside it is the updater's), `SHA256SUMS`
-and `SHA256SUMS.asc` into one directory, then check and install them there:
+and `SHA256SUMS.asc` into one directory, then check them and install your build there:
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/NicolaiSchmid/steno/v<version>/apps/desktop/release-signing-key.asc
@@ -248,7 +249,7 @@ switch again. Without the module,
 
 Under Hyprland, the recording bubble and the meeting prompt need window rules. The
 desktop README's [Hyprland](apps/desktop/README.md#hyprland) section has them and says
-where NixOS puts the file; its
+where NixOS puts their file; its
 [Nix package and NixOS module](apps/desktop/README.md#the-nix-package-and-the-nixos-module)
 section has the module's other options.
 
