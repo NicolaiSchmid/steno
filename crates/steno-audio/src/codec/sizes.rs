@@ -400,7 +400,12 @@ impl Walk {
                         u32::from_be_bytes(fields[at..at + 4].try_into().unwrap_or_default())
                     };
                     let (bytes, frames, bits) = (field(0), field(4), field(12));
-                    self.packet_no_larger_than_the_file(u64::from(bytes))?;
+                    if u64::from(bytes) > self.length {
+                        return Err(format!(
+                            "the description gives packets of {bytes} bytes, more than the file's {}",
+                            self.length
+                        ));
+                    }
                     // Uncompressed (chunks.rs:180): read 1 152 frames at a time.
                     if bits != 0 && u64::from(bytes) > MAX_PCM_FRAME {
                         return Err(format!(
@@ -475,16 +480,6 @@ impl Walk {
             if framed {
                 varint()?;
             }
-        }
-        Ok(())
-    }
-
-    fn packet_no_larger_than_the_file(&self, size: u64) -> Result<(), String> {
-        if size > self.length {
-            return Err(format!(
-                "the description gives packets of {size} bytes, more than the file's {}",
-                self.length
-            ));
         }
         Ok(())
     }

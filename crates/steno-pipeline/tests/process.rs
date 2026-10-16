@@ -1303,15 +1303,16 @@ async fn the_reads_of_a_recording_are_marked_while_they_run() {
         let seen = seen.lock().unwrap().clone();
         let decode = ("decode", vec!["decode".to_owned()]);
         let transcribe = ("transcribe", speech.clone());
-        let mut expected = vec![("prepare", speech)];
         // The transcript's two lanes, then the mic lane for the diarizer.
-        expected.extend([
+        let expected = [
+            ("prepare", speech),
             decode.clone(),
             transcribe.clone(),
             decode.clone(),
             transcribe,
-        ]);
-        expected.extend([decode, ("mixdown", vec!["mixdown".to_owned()])]);
+            decode,
+            ("mixdown", vec!["mixdown".to_owned()]),
+        ];
         assert_eq!(seen, expected, "in process: {in_process}");
     }
 }
