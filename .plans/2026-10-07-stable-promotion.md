@@ -339,8 +339,9 @@ why and the alternative.
     fix it, we don't need a bridge. currently i'm the only user."): the Swift
     app ships no further build and runs again only as a rollback
     (`v0.10.0-rc.2`). The move from the Swift app to the Rust app on Nicolai's
-    Mac must be seamless; anything that could make it not seamless blocks the
-    handoff and goes to his gate list as a step he runs. The fixtures the
+    Mac must be seamless: anything that could break it is fixed before the
+    handoff, or, where only his Mac can show it, is a step on his gate list.
+    The fixtures the
     Swift side owes ("Bridge") are dropped at S9, when the Rust fixtures
     become the contract.
 - **D10 A new crate, `steno-macos`, joins `AGENTS.md`'s `unsafe` list, and the
@@ -440,7 +441,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P32 | Preferences, the panel anchor and the Codex sign-in: each is written atomically, and the Codex `auth.json` is synced | pipeline, store and export (`wp-pse-*`) |
 | P33 | Another phone's upload: the first announce's discard, and a re-announce whose hash differs, leave other devices' files alone; an old device's 409 hands over cleanly (with P2) | handover (#219, #212) |
 | P34 | Recordings on the phone: the mobile queue index rebuilds after a failed load, and recorder files left by the audio module are found again (#223) | handover (#223) |
-| P35 | Pairings: the identity-fingerprint guard gets a macOS test (#213 makes the pairing writes durable and the intake one transaction). The test is #282, over the secrets file standing in for the Keychain: a keychain that comes back empty (Create New Keychain after a password reset) or holding another identity, through the graph and Settings' iPhone section; the live Keychain check on a spare account is still to run. The Swift mirror is dropped: #284 closed unmerged, as no Swift build ships again (D9). Until the cutover the Swift app still mints a new identity after a keychain reset, which the rollback window accepts. The guard's rule is one pure decision (`steno_handover::identity::decision::decide`, Nicolai's decision of 2026-10-15), which the load, the Swift import's choice and the Secret Service move all ask; its truth table, `crates/steno-handover/tests/fixtures/identity-decisions.json`, is the statement of the rule (S6) | handover (#282, #294) |
+| P35 | Pairings: the identity-fingerprint guard gets a macOS test (#213 makes the pairing writes durable and the intake one transaction). The test is #282, over the secrets file standing in for the Keychain: a keychain that comes back empty (Create New Keychain after a password reset) or holding another identity, through the graph and Settings' iPhone section; the live Keychain check on a spare account is still to run. The Swift mirror is dropped: #284 closed unmerged, as no Swift build ships again (D9). Until the handoff, and after a rollback to `v0.10.0-rc.2`, the Swift app still mints a new identity after a keychain reset: a Swift-only path, which closes with the handoff (D3). The guard's rule is one pure decision (`steno_handover::identity::decision::decide`, Nicolai's decision of 2026-10-15), which the load, the Swift import's choice and the Secret Service move all ask; its truth table, `crates/steno-handover/tests/fixtures/identity-decisions.json`, is the statement of the rule (S6) | handover (#282, #294) |
 | P36 | Secrets and files on Windows: credentials persist on this computer (`CRED_PERSIST_LOCAL_MACHINE`, not with the roaming profile; the `keyring` crate's roaming credentials move there on their first read, keeping the stored blob, #262), and renames are durable (#242: the durable writes in `steno_pipeline::files` rename with `MOVEFILE_WRITE_THROUGH` or with std, then flush the renamed file and the folders; a failed flush answers the phone 500, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS, or on a network drive) | handover (#242, #262) |
 | P37 | A recording through a cancelled logout: a cancelled logout does not stop the recording; only where the app saves as soon as the logout is announced (Xfce on Wayland) and the session then goes on does it stop, and it says so and relaunches, ready to record. Xfce's Quit Program saves before xfce4-session's kill, and its Save Session never stops the recording (#220) | Linux desktop (#220) |
 | P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks write one `crash-<UTC>.log` file per panic in the support directory, with the message, the location and the backtrace; the newest 20 are kept | capture and recovery (`wp-cap-*`) |
@@ -513,8 +514,8 @@ after the port".
   again on the others alone. After stable; until then the Rust app waits, and
   Pair again pairs every phone again.
 - The handover identity from evidence, not times (Nicolai's decision of
-  2026-10-15). After the cutover (S9) and its 14-day rollback window, as no
-  migration lands in the window:
+  2026-10-15). After the handoff, its 14-day rollback window and the Swift
+  removal (S9), as no migration lands in the window:
   - a v6 migration adds a nullable `pairedDevice.identityFingerprint`,
     written in the pairing's own durable transaction. Rows from before stay
     NULL, and a launch that serves the recorded identity fills them in with
@@ -525,7 +526,8 @@ after the port".
     `handover-identity.json`, written in the same replace that records the
     imported fingerprint. The keychain marker (`swift-import-done`) and
     `steno.swiftImportRan` are still read for good, and still written while
-    a rollback to the Swift app stays possible.
+    a Rust build that reads only them could be installed again after a
+    rollback.
 - The speech settings without a Settings row, which
   `.plans/2026-10-07-speech-settings-ui.md` plans; the untested `steno-llm`
   cleanup paths.
@@ -872,11 +874,11 @@ Every package is written in parallel except where a dependency is named:
         and the Secret Service move ask it, and none keeps a rule of its
         own. In short: an identity found with nothing recorded is recorded
         only when every paired phone knows it (each phone knows the newest
-        identity whose certificate starts, a minute before its mint, at or
+        identity whose certificate starts (a minute before its mint) at or
         before its `pairedAt`, both on this computer's clock); a recorded
         fingerprint is never judged by it; two equal starts are no newest
         one; over the times it can read, a time more than a second after now
-        waits for the clock (a time that cannot be read waits as unreadable
+        waits for the clock (a time that cannot be read waits on its read
         first). A Swift identity minted silently after a keychain reset,
         which every phone predates, waits as replaced. Every case, and every
         new one, is a row of the table.
