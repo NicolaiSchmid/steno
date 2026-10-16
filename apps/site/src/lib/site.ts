@@ -35,8 +35,10 @@ interface LinuxTarget {
 
 /**
  * The Linux targets, each listed once its gate has passed on a real machine
- * (stable plan D6, "The Linux gates"): flipping its `released` is the whole
- * change. Linux counts as released once one target is.
+ * (`.plans/2026-10-07-stable-promotion.md`, D6 and "The Linux gates").
+ * Flipping its `released` is the whole change here; the desktop badge in the
+ * root README changes in the same commit. Linux counts as released once one
+ * target is.
  */
 const linuxTargets: LinuxTarget[] = [
 	{
@@ -62,7 +64,12 @@ const linuxTargets: LinuxTarget[] = [
 
 export const listedLinuxTargets = linuxTargets.filter((t) => t.released);
 
-/** Windows is listed once its gate passes: flipping this is the whole change. */
+/**
+ * macOS and Windows, each listed once its gate passes: flipping one is the
+ * whole change here, plus the desktop badge in the root README. A Rollback
+ * that takes a bad release out of "latest" sets the flag back to false.
+ */
+const macReleased = true;
 const windowsReleased = false;
 
 function desktop(name: string, released: boolean, note: string) {
@@ -77,7 +84,7 @@ export const platforms: Record<
 	Platform,
 	{ name: string; released: boolean; note: string }
 > = {
-	mac: desktop("macOS", true, "Apple Silicon · notarised"),
+	mac: desktop("macOS", macReleased, "Apple Silicon · notarised"),
 	win: desktop("Windows", windowsReleased, "x64 · installer not code-signed"),
 	linux: desktop(
 		"Linux",

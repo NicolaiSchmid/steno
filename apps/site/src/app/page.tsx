@@ -9,6 +9,10 @@ import { OpenSource } from "@/components/open-source";
 import { Privacy } from "@/components/privacy";
 import { platformIds, platforms, site } from "@/lib/site";
 
+const listed = platformIds
+	.filter((id) => platforms[id].released)
+	.map((id) => platforms[id].name);
+
 const jsonLd = {
 	"@context": "https://schema.org",
 	"@type": "SoftwareApplication",
@@ -16,10 +20,8 @@ const jsonLd = {
 	description: site.description,
 	url: site.url,
 	applicationCategory: "BusinessApplication",
-	operatingSystem: platformIds
-		.filter((id) => platforms[id].released)
-		.map((id) => platforms[id].name)
-		.join(", "),
+	// Undefined, and so left out of the JSON, while no desktop is listed.
+	operatingSystem: listed.length > 0 ? listed.join(", ") : undefined,
 	offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
 	license: "https://opensource.org/licenses/MIT",
 	downloadUrl: site.download,
