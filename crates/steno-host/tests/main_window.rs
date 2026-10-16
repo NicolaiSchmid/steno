@@ -72,17 +72,13 @@ fn page_ready_publishes_every_topic_once_and_the_first_meeting_flips_the_app() {
     // `recording` comes from the feed's thread, every other topic from the
     // publish, in order.
     harness.sink.wait_for_recording(1);
-    let published: Vec<BridgeTopic> = harness
-        .sink
-        .topics()
-        .into_iter()
-        .filter(|topic| *topic != BridgeTopic::Recording)
-        .collect();
-    let every_other: Vec<BridgeTopic> = TOPICS
-        .into_iter()
-        .filter(|topic| *topic != BridgeTopic::Recording)
-        .collect();
-    assert_eq!(published, every_other);
+    let published = |topics: Vec<BridgeTopic>| {
+        topics
+            .into_iter()
+            .filter(|topic| *topic != BridgeTopic::Recording)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(published(harness.sink.topics()), published(TOPICS.to_vec()));
     assert_eq!(harness.sink.count(BridgeTopic::Recording), 1);
     assert_eq!(
         harness.sink.last(BridgeTopic::MeetingDetail),
