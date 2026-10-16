@@ -1354,6 +1354,51 @@ fn the_environment_decides_a_managed_install_before_the_build() {
     assert!(!managed_by(Some("NIX"), None));
 }
 
+/// A binary in the Nix store is managed, by its path or through a link
+/// that resolves into the store (the flake's Mac bundle linked into
+/// `~/Applications`); one in `/Applications` is not, and neither is a
+/// directory whose name only starts like the store's.
+#[test]
+fn a_binary_in_the_nix_store_is_managed() {
+    let store = Path::new(NIX_STORE);
+    assert!(runs_from_store(
+        Path::new("/nix/store/aaaa-steno/Applications/Steno.app/Contents/MacOS/steno-desktop"),
+        store,
+    ));
+    assert!(!runs_from_store(
+        Path::new("/Applications/Steno.app/Contents/MacOS/steno-desktop"),
+        store,
+    ));
+    assert!(!runs_from_store(
+        Path::new("/nix/storefront/steno-desktop"),
+        store,
+    ));
+}
+
+/// A link that resolves into the store counts as the store; the link
+/// itself lies outside it.
+#[cfg(unix)]
+#[test]
+fn a_link_into_the_nix_store_is_managed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let store = root.join("nix/store");
+    let bundle = store.join("aaaa-steno/Applications/Steno.app");
+    let macos = bundle.join("Contents/MacOS");
+    std::fs::create_dir_all(&macos).unwrap();
+    std::fs::write(macos.join("steno-desktop"), b"").unwrap();
+    let applications = root.join("Applications");
+    std::fs::create_dir_all(&applications).unwrap();
+    std::os::unix::fs::symlink(&bundle, applications.join("Steno.app")).unwrap();
+    let linked = applications.join("Steno.app/Contents/MacOS/steno-desktop");
+    assert!(!linked.starts_with(&store));
+    assert!(runs_from_store(&linked, &store));
+    let copied = root.join("Copied/Steno.app/Contents/MacOS");
+    std::fs::create_dir_all(&copied).unwrap();
+    std::fs::write(copied.join("steno-desktop"), b"").unwrap();
+    assert!(!runs_from_store(&copied.join("steno-desktop"), &store));
+}
+
 /// A time in the future (the clock was set back) is due, so a bad stored
 /// time cannot stop the checks.
 #[tokio::test]

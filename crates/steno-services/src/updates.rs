@@ -89,7 +89,8 @@
 //!   The schedule keeps the downloaded package until an install takes it,
 //!   and frees it when a check finds another version, or none.
 //! - **Packaged installs** ([`updates_are_managed`], stable plan X5): no
-//!   schedule, and no check, the user's included.
+//!   schedule, and no check, the user's included. A binary running from
+//!   the Nix store counts as one, as the flake's Mac bundle does.
 //!
 //! The network is the updater's: the schedule reads the same lane manifests
 //! as the tray's Check for Updates, and sends nothing else.
@@ -161,19 +162,37 @@ pub const MANAGED_CHECK: &str = steno_host::settings::snapshots::MANAGED_UPDATES
 /// ([`updates_are_managed`]).
 pub const DISTRIBUTION_VARIABLE: &str = "STENO_DISTRIBUTION";
 
+/// Where Nix keeps its builds, read-only to everything but Nix itself.
+pub const NIX_STORE: &str = "/nix/store";
+
 /// Whether a package manager delivers this app's updates (stable plan X5):
-/// [`DISTRIBUTION_VARIABLE`] is `aur` or `nix`. The environment (the AUR
+/// [`DISTRIBUTION_VARIABLE`] is `aur` or `nix`, or the running binary lies
+/// in [`NIX_STORE`] once its links are resolved. The environment (the AUR
 /// wrapper) wins over the value the build was given (the Nix package), so a
-/// Nix build can be told otherwise at run time.
+/// Nix build can be told otherwise at run time; a binary in the store is
+/// managed whatever the variable says, since an update would have to
+/// rewrite the store. The store check is what covers the flake's Mac
+/// bundle, unpacked from the release image with no build that could set the
+/// variable, and any Linux launch that loses the wrapper's environment.
 pub fn updates_are_managed() -> bool {
     managed_by(
         std::env::var(DISTRIBUTION_VARIABLE).ok().as_deref(),
         option_env!("STENO_DISTRIBUTION"),
-    )
+    ) || std::env::current_exe()
+        .is_ok_and(|executable| runs_from_store(&executable, Path::new(NIX_STORE)))
 }
 
 fn managed_by(environment: Option<&str>, build: Option<&str>) -> bool {
     matches!(environment.or(build), Some("aur" | "nix"))
+}
+
+/// Whether `executable`, with every link resolved, lies under `store`. A
+/// path that cannot be resolved is taken as it is.
+fn runs_from_store(executable: &Path, store: &Path) -> bool {
+    std::fs::canonicalize(executable)
+        .as_deref()
+        .unwrap_or(executable)
+        .starts_with(store)
 }
 
 /// What an install holds ([`InstallGate::try_hold`]): until it is dropped
