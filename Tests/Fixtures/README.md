@@ -25,7 +25,8 @@ case-insensitive by default.
 The compressed audio fixtures, read by the Rust tests through
 `CARGO_MANIFEST_DIR/../../Tests/Fixtures`, not `Fixtures.url`. The first five
 come from ffmpeg 8.1.1 (libavformat 62.12.101), which reproduces them byte for
-byte; the sixth is the first with three packets overwritten. The encoder
+byte, and so do the fragmented and the PCM ones; the damaged one is the first
+with three packets overwritten. The encoder
 priming the Rust tests trim (1 024 samples, from the edit list) depends on
 the encoder, so another version is a reviewed change.
 
@@ -41,6 +42,15 @@ the encoder, so another version is a reviewed change.
   `ffmpeg -f lavfi -i "aevalsrc='if(gte(n,8820),0.5*sin(2*PI*440*(n-8820)/44100),0)|if(gte(n,11025),0.5*sin(2*PI*1000*(n-11025)/44100),0)':s=44100:d=0.5" -c:a aac -b:a 96k tone-440-1000-44k1-stereo-onset.m4a`.
 - `tone-440-44k1-500ms-mp3.mp4`: the MP3 in an MP4 container (an edit list of
   1 105 samples): `ffmpeg -i tone-440-44k1-500ms.mp3 -c:a copy -f mp4 tone-440-44k1-500ms-mp3.mp4`.
+- `tone-440-44k1-500ms-fragmented.m4a`: the AAC fixture's packets as a
+  fragmented MP4 (an empty `moov` with `mvex`/`trex`, a `moof` with
+  `tfhd`/`trun` before each `mdat`, an `mfra` at the end), for the size
+  check's fragment rules (`codec::sizes`):
+  `ffmpeg -i tone-440-44k1-500ms.m4a -c:a copy -movflags frag_keyframe+empty_moov+default_base_moof -frag_duration 100000 -f mp4 tone-440-44k1-500ms-fragmented.m4a`.
+- `tone-440-16k-250ms-pcm.mov`: a quarter second of the sine at 16 kHz as
+  16-bit big-endian PCM in a QuickTime movie (a `wide` box, the `mdat`
+  before the `moov`, a constant `stsz` size):
+  `ffmpeg -f lavfi -i "aevalsrc=0.5*sin(2*PI*440*t):s=16000:d=0.25" -c:a pcm_s16be -f mov tone-440-16k-250ms-pcm.mov`.
 - `tone-440-44k1-500ms-damaged.m4a`: `tone-440-44k1-500ms.m4a` with the
   payload of three of its 23 AAC packets overwritten, for the decoder's
   silence in place of a packet it cannot decode: packet 9 (bytes 2 593 to

@@ -4,90 +4,120 @@
 //! and a failed allocation aborts the process, which no `catch_unwind`
 //! stops: on Linux a 1 TiB `ilst` `data` atom or CAF `kuki` chunk aborts
 //! every read, and the sample tables of any MP4 file do on a machine that
-//! cannot back 16 to 64 GiB. [`check`] walks an MP4 file's boxes or a CAF
-//! file's chunks, reading only headers and the sample tables, and refuses
-//! the file as an ordinary decode error ([`CodecError::UnsupportedFormat`]:
-//! the meeting fails, retryably, and the file is kept) when:
+//! cannot back 16 to 64 GiB.
+//!
+//! [`check`] first tells which reader symphonia opens the file with
+//! ([`Start`]), and the probe opens that reader at byte 0, where the walk
+//! starts too, so the walk and the read see the same bytes: an MP4 file is
+//! a run of well-formed top-level boxes from byte 0 that holds an `ftyp`
+//! (a `free` or `wide` box may come first), a CAF file starts with `caff`.
+//! Any other file is not walked, and the probe offers it only to
+//! symphonia's WAV, MP3 and ADTS readers, which size nothing from the file
+//! unchecked. Symphonia's own probe would scan the first MiB for an `ftyp`
+//! and read from there, past junk, an ID3 tag or into a `free` box, where
+//! the walk never looked; and it fails on a box before the `ftyp`, which
+//! the MP4 reader opened at byte 0 seeks past.
+//!
+//! The walk reads only headers and the sample tables, follows boxes only
+//! where symphonia reads them (`isomp4` `atoms/*.rs`, named at each rule),
+//! and refuses the file as an ordinary decode error
+//! ([`CodecError::UnsupportedFormat`]: the meeting fails, retryably, and
+//! the file is kept) when:
 //!
 //! - a box or chunk is larger than the file or than the box that holds it,
-//!   or shorter than its own header; except the media data at the top
-//!   level (`mdat`, a CAF's `data`, which a CAF may also leave open with a
-//!   size of -1): a file cut off ends inside it, and symphonia reads it a
-//!   packet at a time, never in one allocation;
+//!   or shorter than its own header. A top-level box symphonia only seeks
+//!   past (anything but [`PARSED_AT_TOP`]: `mdat`, `free`, `skip`, `wide`
+//!   and the rest) may run past the file's end, as a file cut off inside
+//!   it does; so may a CAF's `data`, which may also be left open with a
+//!   size of -1. Symphonia never reads such a box in one allocation;
 //! - a sample table (`stts`, `stsc`, `stsz`, `stco`, `co64`, a fragment's
 //!   `trun`) counts more entries than its box holds, or a sample (in
 //!   `stsz`, `trun`, or as a `tfhd` or `trex` default) is larger than the
 //!   file: symphonia reads each sample into an allocation of its size;
 //! - a box symphonia subtracts a fixed header from is shorter than it
-//!   (`hdlr` 24 bytes, an `ilst` item's `data` 8, `mean` and `name` 4);
+//!   (`hdlr` 24 bytes, `meta` 4, an `ilst` item's `data` 8, `mean` and
+//!   `name` 4);
 //! - a CAF packet table (`pakt`) counts more packets than its entries could
-//!   describe: one byte each at least, two where both the packet's size and
-//!   its frames vary, and none for a constant bit rate.
+//!   describe (one byte each at least, two where both the packet's size and
+//!   its frames vary, none for a constant bit rate), or gives a packet
+//!   larger than the file; or a CAF description gives a packet larger than
+//!   the file, or uncompressed frames larger than [`MAX_PCM_FRAME`]
+//!   (symphonia reads 1 152 of them into one allocation).
 //!
-//! The walk follows symphonia's own reading: the same containers, `meta`
-//! as a full box, an `ilst` item's children, and the one sample entry it
-//! reads in `stsd`, whose child boxes start after the audio sample entry's
-//! fields for its version (28, 44 or 64 bytes). WAV and MP3 are not walked:
-//! symphonia's RIFF reader checks a chunk against its parent, and MP3 has
-//! no sized boxes. What the walk does not bound, and why that is safe:
+//! What the walk does not bound, and why that is safe:
 //!
-//! - an `esds` descriptor's length (`atoms/esds.rs` reads a
-//!   `DecoderSpecificInfo` of that length): it is encoded in at most four
-//!   bytes of seven bits, so at most 256 MiB;
-//! - a FLAC metadata block (`atoms/flac.rs`): 24 bits, at most 16 MiB;
+//! - an audio sample entry's children: an `esds` descriptor's length
+//!   (`atoms/esds.rs` reads a `DecoderSpecificInfo` of that length) is
+//!   encoded in at most four bytes of seven bits, so at most 256 MiB; a
+//!   FLAC metadata block (`atoms/flac.rs`) has 24 bits, at most 16 MiB; an
+//!   ALAC cookie is 24 or 48 bytes and an Opus header is capped
+//!   (`atoms/alac.rs`, `atoms/opus.rs`);
 //! - a CAF channel layout (`chan`): symphonia collects its descriptions
-//!   without reserving their count.
+//!   without reserving their count;
+//! - the reservations a bounded count still allows: symphonia reserves 32
+//!   bytes a `pakt` packet (`chunks.rs:434`), up to 32 times the table's
+//!   size at one byte a packet, and 16 bytes a 12-byte `stsc` entry
+//!   (`atoms/stsc.rs:71`), 1.3 times; every other table reserves no more
+//!   than its own size, so a file reserves at most 32 times its length.
 //!
 //! Rust only: AVFoundation, which the Swift app used, reported such a file
 //! as unreadable.
 
 use std::fs::File;
+use std::io::{BufReader, Read as _, Seek as _, SeekFrom};
 use std::path::Path;
 
 use super::CodecError;
 use super::priming::{BoxError, Boxes, Mp4Box, read_at};
 
-/// How deep the walk follows boxes; symphonia's deepest is about eight.
-const MAX_DEPTH: usize = 12;
+/// Which of symphonia's readers opens a file, as [`check`] found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Start {
+    /// MP4: well-formed top-level boxes from byte 0, one of them `ftyp`.
+    Mp4,
+    /// CAF: `caff` at byte 0.
+    Caf,
+    /// Anything else, not walked.
+    Other,
+}
 
-/// The boxes whose body is boxes, as symphonia reads them.
-const CONTAINERS: [&[u8; 4]; 13] = [
-    b"moov", b"trak", b"mdia", b"minf", b"stbl", b"udta", b"edts", b"dinf", b"mvex", b"moof",
-    b"traf", b"mfra", b"ilst",
+/// The top-level boxes symphonia parses: `ftyp`, `moov`, `sidx` and
+/// `meta` as it opens the file (`demuxer.rs:350-395`), `moof` as it reads
+/// the fragments (`demuxer.rs:186-198`). It seeks past every other one.
+const PARSED_AT_TOP: [&[u8; 4]; 5] = [b"ftyp", b"moov", b"sidx", b"meta", b"moof"];
+
+/// The `ilst` items symphonia reads (`atoms/ilst.rs:625-762`, less the two
+/// it skips, `©art` and `hdvd`); it skips every other item unread.
+const ITEMS: [&[u8; 4]; 43] = [
+    b"rtng", b"aART", b"\xa9alb", b"\xa9ART", b"catg", b"\xa9cmt", b"cpil", b"\xa9wrt", b"cprt",
+    b"covr", b"\xa9gen", b"\xa9day", b"desc", b"disk", b"\xa9enc", b"\xa9too", b"pgap", b"gnre",
+    b"\xa9grp", b"egid", b"keyw", b"ldes", b"\xa9lyr", b"stik", b"ownr", b"pcst", b"purd", b"rate",
+    b"soaa", b"soal", b"soar", b"soco", b"sonm", b"tmpo", b"trkn", b"\xa9nam", b"tven", b"tves",
+    b"tvnn", b"tvsn", b"tvsh", b"purl", b"----",
 ];
 
-/// The audio sample entries symphonia reads, whose children it walks.
-const AUDIO_ENTRIES: [&[u8; 4]; 16] = [
-    b"mp4a", b"alac", b"fLaC", b"Opus", b".mp3", b"lpcm", b"sowt", b"twos", b"in24", b"in32",
-    b"fl32", b"fl64", b"raw ", b"ulaw", b"alaw", b"ac-3",
-];
+/// The largest uncompressed CAF frame the walk lets through: symphonia
+/// plays at most 32 channels of 8 bytes (256 bytes), and reads 1 152
+/// frames into one allocation (`symphonia-format-caf` `demuxer.rs:83`).
+pub(crate) const MAX_PCM_FRAME: u64 = 4_096;
 
-/// Refuses the file at `path` when symphonia would allocate from a size the
-/// file cannot hold; see the module doc. Anything but an MP4 or CAF file
-/// passes, and so does a file too short to tell.
-pub(crate) fn check(path: &Path) -> Result<(), CodecError> {
+/// Finds where symphonia's reader for the file at `path` starts, and
+/// refuses the file when that reader would allocate from a size the file
+/// cannot hold; see the module doc. Hands on the file it opened, at byte 0.
+pub(crate) fn check(path: &Path) -> Result<(Start, File), CodecError> {
+    let io = |error: std::io::Error| CodecError::Io(format!("{}: {error}", path.display()));
     let refused = |why: String| CodecError::UnsupportedFormat(format!("{}: {why}", path.display()));
-    let mut file =
-        File::open(path).map_err(|error| CodecError::Io(format!("{}: {error}", path.display())))?;
-    let length = file
-        .metadata()
-        .map_err(|error| CodecError::Io(format!("{}: {error}", path.display())))?
-        .len();
-    let mut magic = [0u8; 8];
-    if read_at(&mut file, 0, &mut magic).is_none() {
-        return Ok(());
-    }
+    let file = File::open(path).map_err(io)?;
+    let length = file.metadata().map_err(io)?.len();
     let mut walk = Walk { file, length };
-    if &magic[..4] == b"caff" {
-        walk.caf().map_err(refused)
-    } else if [b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide"]
-        .iter()
-        .any(|kind| magic[4..] == kind[..])
-    {
-        walk.mp4(0, length, 0, None).map_err(refused)
-    } else {
-        Ok(())
+    let start = walk.start();
+    match start {
+        Start::Mp4 => walk.mp4(0, length, &[]).map_err(refused)?,
+        Start::Caf => walk.caf().map_err(refused)?,
+        Start::Other => {}
     }
+    walk.file.rewind().map_err(io)?;
+    Ok((start, walk.file))
 }
 
 struct Walk {
@@ -96,24 +126,34 @@ struct Walk {
 }
 
 impl Walk {
-    /// The boxes in `start..end`, `depth` deep, inside `parent`.
-    fn mp4(
-        &mut self,
-        start: u64,
-        end: u64,
-        depth: usize,
-        parent: Option<[u8; 4]>,
-    ) -> Result<(), String> {
-        if depth > MAX_DEPTH {
-            return Ok(());
+    /// `caff` at byte 0, or an `ftyp` among well-formed top-level boxes
+    /// from byte 0.
+    fn start(&mut self) -> Start {
+        let mut magic = [0u8; 4];
+        if read_at(&mut self.file, 0, &mut magic).is_some() && &magic == b"caff" {
+            return Start::Caf;
         }
-        let children = match self.boxes(start, end, depth == 0) {
+        let mut boxes = Boxes::new(&mut self.file, 0, self.length);
+        loop {
+            match boxes.next_sized() {
+                Ok(Some(found)) if &found.kind == b"ftyp" => return Start::Mp4,
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return Start::Other,
+            }
+        }
+    }
+
+    /// The boxes in `start..end` inside `ancestors`, outermost first.
+    fn mp4(&mut self, start: u64, end: u64, ancestors: &[&[u8; 4]]) -> Result<(), String> {
+        let children = match self.boxes(start, end, ancestors.is_empty()) {
             Ok(children) => children,
             Err(BoxError::Oversized { kind, at, size }) => {
                 return Err(format!(
                     "the `{}` box at byte {at} declares {size} bytes, more than {} holds",
                     name(kind),
-                    parent.map_or_else(|| "the file".to_owned(), |p| format!("`{}`", name(p)))
+                    ancestors
+                        .last()
+                        .map_or_else(|| "the file".to_owned(), |p| format!("`{}`", name(**p)))
                 ));
             }
             Err(BoxError::Unreadable) => {
@@ -121,18 +161,13 @@ impl Walk {
             }
         };
         for found in children {
-            self.mp4_box(found, depth, parent)?;
+            self.mp4_box(found, ancestors)?;
         }
         Ok(())
     }
 
-    /// One box's own sizes, then its children.
-    fn mp4_box(
-        &mut self,
-        found: Mp4Box,
-        depth: usize,
-        parent: Option<[u8; 4]>,
-    ) -> Result<(), String> {
+    /// One box's own sizes, then its children, where symphonia reads them.
+    fn mp4_box(&mut self, found: Mp4Box, ancestors: &[&[u8; 4]]) -> Result<(), String> {
         let body = found.end - found.start;
         let kind = &found.kind;
         let at_least = |bytes: u64| {
@@ -145,23 +180,34 @@ impl Walk {
                 Ok(())
             }
         };
-        let inside = Some(found.kind);
-        match kind {
-            _ if CONTAINERS.contains(&kind) || parent.as_ref() == Some(b"ilst") => {
-                self.mp4(found.start, found.end, depth + 1, inside)
+        let inside: Vec<&[u8; 4]> = ancestors.iter().copied().chain([kind]).collect();
+        match (ancestors, kind) {
+            // demuxer.rs:350-395 and :186-198; moov.rs:61-72; trak.rs:41-48;
+            // mdia.rs:36-43; minf.rs:38-42; moof.rs:43-47; meta.rs:57;
+            // ilst.rs:625-762.
+            ([], b"moov" | b"moof")
+            | ([b"moov"], b"trak" | b"mvex" | b"udta")
+            | ([b"moov", b"trak"], b"mdia")
+            | ([b"moov", b"trak", b"mdia"], b"minf")
+            | ([b"moov", b"trak", b"mdia", b"minf"], b"stbl")
+            | ([b"moof"], b"traf")
+            | ([.., b"meta"], b"ilst") => self.mp4(found.start, found.end, &inside),
+            ([.., b"ilst"], item) if ITEMS.contains(&item) => {
+                self.mp4(found.start, found.end, &inside)
             }
-            b"meta" => {
+            // A full box (meta.rs:45), at the top and in `moov/udta`
+            // (demuxer.rs:384, udta.rs:44).
+            ([] | [b"moov", b"udta"], b"meta") => {
                 at_least(4)?;
-                self.mp4(found.start + 4, found.end, depth + 1, inside)
+                self.mp4(found.start + 4, found.end, &inside)
             }
-            b"hdlr" => at_least(24),
-            b"data" => at_least(8),
-            b"mean" | b"name" => at_least(4),
-            b"stsd" => {
-                at_least(8)?;
-                self.sample_entries(found, depth)
-            }
-            b"stts" | b"stsc" | b"stco" | b"co64" => {
+            // hdlr.rs:75, read in `mdia` only.
+            ([b"moov", b"trak", b"mdia"], b"hdlr") => at_least(24),
+            // ilst.rs:594-601, inside an item.
+            ([.., b"ilst", _], b"data") => at_least(8),
+            ([.., b"ilst", _], b"mean" | b"name") => at_least(4),
+            // stbl.rs:47-71.
+            ([.., b"stbl"], b"stts" | b"stsc" | b"stco" | b"co64") => {
                 at_least(8)?;
                 let entry = match kind {
                     b"stts" | b"co64" => 8,
@@ -171,18 +217,19 @@ impl Walk {
                 let count = u64::from(self.u32_at(found.start + 4)?);
                 entries_fit(found, found.start + 8, count, entry)
             }
-            b"stsz" => {
+            ([.., b"stbl"], b"stsz") => {
                 at_least(12)?;
                 self.sample_sizes(found)
             }
-            b"trun" => {
+            // traf.rs:42-46.
+            ([b"moof", b"traf"], b"trun") => {
                 at_least(8)?;
                 self.fragment_run(found)
             }
             // `tfhd`: version and flags, track id, then the optional fields
             // its flags name, the default sample size after the base data
             // offset (8), the description index (4) and the duration (4).
-            b"tfhd" => {
+            ([b"moof", b"traf"], b"tfhd") => {
                 at_least(8)?;
                 let flags = self.u32_at(found.start)? & 0x00ff_ffff;
                 if flags & 0x10 == 0 {
@@ -196,50 +243,15 @@ impl Walk {
                 }
                 self.sample_size(found, at)
             }
-            // `trex`: version and flags, then track id, description index,
-            // duration, and the default sample size.
-            b"trex" => self.sample_size(found, found.start + 16),
+            // `trex` (mvex.rs:41): version and flags, then track id,
+            // description index, duration, and the default sample size.
+            ([b"moov", b"mvex"], b"trex") => self.sample_size(found, found.start + 16),
             _ => Ok(()),
         }
     }
 
-    /// The sample entries of `stsd`, and the child boxes of an audio entry.
-    fn sample_entries(&mut self, stsd: Mp4Box, depth: usize) -> Result<(), String> {
-        let entries = match self.boxes(stsd.start + 8, stsd.end, false) {
-            Ok(entries) => entries,
-            Err(BoxError::Oversized { kind, at, size }) => {
-                return Err(format!(
-                    "the `{}` sample entry at byte {at} declares {size} bytes, more than `stsd` holds",
-                    name(kind)
-                ));
-            }
-            Err(BoxError::Unreadable) => return Err("a sample entry cannot be read".to_owned()),
-        };
-        for entry in entries
-            .into_iter()
-            .filter(|entry| AUDIO_ENTRIES.contains(&&entry.kind))
-        {
-            let mut version = [0u8; 2];
-            if read_at(&mut self.file, entry.start + 8, &mut version).is_none() {
-                continue;
-            }
-            let fields = match u16::from_be_bytes(version) {
-                0 => 28,
-                1 => 44,
-                2 => 64,
-                // Symphonia refuses any other version itself.
-                _ => continue,
-            };
-            if entry.start + fields <= entry.end {
-                self.mp4(entry.start + fields, entry.end, depth + 1, Some(entry.kind))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The boxes in `start..end`, in order; at the `top` level, one `mdat`
-    /// running past the file ends the list, as a file cut off inside its
-    /// media data does.
+    /// The boxes in `start..end`, in order; at the `top` level, a box
+    /// symphonia only seeks past may run past the file, and ends the list.
     fn boxes(&mut self, start: u64, end: u64, top: bool) -> Result<Vec<Mp4Box>, BoxError> {
         let mut found = Vec::new();
         let mut boxes = Boxes::new(&mut self.file, start, end);
@@ -247,7 +259,7 @@ impl Walk {
             match boxes.next_sized() {
                 Ok(Some(next)) => found.push(next),
                 Ok(None) => return Ok(found),
-                Err(BoxError::Oversized { kind, .. }) if top && &kind == b"mdat" => {
+                Err(BoxError::Oversized { kind, .. }) if top && !PARSED_AT_TOP.contains(&&kind) => {
                     return Ok(found);
                 }
                 Err(error) => return Err(error),
@@ -379,26 +391,38 @@ impl Walk {
                 ));
             };
             match &kind {
-                b"desc" if end - body >= 24 => {
-                    let mut fields = [0u8; 8];
+                // chunks.rs:97-124: rate, format, flags, then these.
+                b"desc" if end - body >= 32 => {
+                    let mut fields = [0u8; 16];
                     read_at(&mut self.file, body + 16, &mut fields)
                         .ok_or_else(|| "the description cannot be read".to_owned())?;
-                    packets = Some((
-                        u32::from_be_bytes(fields[..4].try_into().unwrap_or_default()),
-                        u32::from_be_bytes(fields[4..].try_into().unwrap_or_default()),
-                    ));
+                    let field = |at: usize| {
+                        u32::from_be_bytes(fields[at..at + 4].try_into().unwrap_or_default())
+                    };
+                    let (bytes, frames, bits) = (field(0), field(4), field(12));
+                    self.packet_no_larger_than_the_file(u64::from(bytes))?;
+                    // Uncompressed (chunks.rs:180): read 1 152 frames at a time.
+                    if bits != 0 && u64::from(bytes) > MAX_PCM_FRAME {
+                        return Err(format!(
+                            "the description gives frames of {bytes} bytes, more than {MAX_PCM_FRAME}"
+                        ));
+                    }
+                    packets = Some((bytes, frames));
                 }
                 b"pakt" if end - body >= 24 => {
                     let mut count = [0u8; 8];
                     read_at(&mut self.file, body, &mut count)
                         .ok_or_else(|| "the packet table cannot be read".to_owned())?;
                     let count = u64::try_from(i64::from_be_bytes(count)).unwrap_or(0);
-                    let entry = match packets {
-                        Some((0, 0)) => 2,
-                        Some((0, _) | (_, 0)) => 1,
+                    // The varints of a packet (chunks.rs:436-480): its
+                    // size where it varies, its frames where they vary.
+                    let (sized, entry) = match packets {
+                        Some((0, 0)) => (true, 2),
+                        Some((0, _)) => (true, 1),
+                        Some((_, 0)) => (false, 1),
                         // Constant: no entries (symphonia refuses a count),
                         // or no description yet (symphonia refuses that).
-                        _ => u64::MAX,
+                        _ => (false, u64::MAX),
                     };
                     let room = end - body - 24;
                     if count > 0 && count.saturating_mul(entry) > room {
@@ -406,10 +430,61 @@ impl Walk {
                             "the packet table counts {count} packets in {room} bytes"
                         ));
                     }
+                    if sized {
+                        self.packet_sizes(body + 24, count, entry == 2)?;
+                    }
                 }
                 _ => {}
             }
             at = end;
+        }
+        Ok(())
+    }
+
+    /// The `count` packets of a CAF packet table from `from`, read as
+    /// symphonia reads them (`chunks.rs:535-551`: up to nine bytes of seven
+    /// bits, the size first, then the frames if `framed`): each no larger
+    /// than the file.
+    fn packet_sizes(&mut self, from: u64, count: u64, framed: bool) -> Result<(), String> {
+        self.file
+            .seek(SeekFrom::Start(from))
+            .map_err(|_| "the packet table cannot be read".to_owned())?;
+        let length = self.length;
+        let mut bytes = BufReader::new(&mut self.file).bytes();
+        let mut varint = || {
+            let mut value = 0u64;
+            for _ in 0..9 {
+                let Some(Ok(byte)) = bytes.next() else {
+                    return Err("the packet table runs past the file".to_owned());
+                };
+                value |= u64::from(byte & 0x7f);
+                if byte & 0x80 == 0 {
+                    return Ok(value);
+                }
+                value <<= 7;
+            }
+            Err("the packet table holds an unterminated size".to_owned())
+        };
+        for _ in 0..count {
+            let size = varint()?;
+            if size > length {
+                return Err(format!(
+                    "the packet table gives a packet of {size} bytes, more than the file's {length}"
+                ));
+            }
+            if framed {
+                varint()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn packet_no_larger_than_the_file(&self, size: u64) -> Result<(), String> {
+        if size > self.length {
+            return Err(format!(
+                "the description gives packets of {size} bytes, more than the file's {}",
+                self.length
+            ));
         }
         Ok(())
     }

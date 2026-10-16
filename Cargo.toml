@@ -93,6 +93,10 @@ uuid = { version = "1", features = ["serde", "v4"] }
 zmij = "1"
 # The audio crate: decoding of recordings and phone files in pure Rust.
 symphonia = { version = "0.5", default-features = false, features = ["aac", "caf", "isomp4", "mp3", "pcm", "wav"] }
+# Its ID3v2 reader, which `symphonia` does not re-export: the probe of a file
+# that is neither MP4 nor CAF registers it beside the WAV, MP3 and ADTS
+# readers, as symphonia's default probe does (A17). Already in the lock.
+symphonia-metadata = "0.5"
 # The WASAPI capture backend and the audio-session enumeration behind meeting
 # detection on Windows (WP10a); `windows-core` for its `#[implement]` macro.
 # Already in the tree through Tauri, so no new crate is fetched.

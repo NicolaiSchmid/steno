@@ -117,7 +117,7 @@ use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, Packet};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use symphonia::core::probe::{Hint, Probe};
 use symphonia::core::units::TimeBase;
 
 use priming::{APPLE_PRIMING, Priming};
@@ -763,36 +763,25 @@ impl SymphoniaFrames {
 
     fn probe(path: &Path) -> Result<Self, CodecError> {
         // Before symphonia sees a byte: a size it would allocate that the
-        // file cannot hold aborts the process ([`sizes`]).
-        sizes::check(path)?;
-        let file = std::fs::File::open(path).map_err(|e| io_error(path, &e))?;
+        // file cannot hold aborts the process ([`sizes`]). The reader opens
+        // the file where the walk started.
+        let (start, file) = sizes::check(path)?;
         let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(extension);
         }
-        // A panic in the probe is caught as its failure, as `decode_packet`
-        // catches the decoder's: symphonia 0.5.5's MP4 reader adds a box's
-        // size to its offset unchecked, which panics in a debug build on a
-        // 64-bit size near 2^64, and subtracts the 4 bytes of version and
-        // flags from a `mean` or `name` box's length unchecked, which in a
-        // release build wraps into a capacity overflow (ilst.rs:536). The
-        // size check above refuses both now; the catch stays for whatever
-        // it does not model. Nothing the probe built outlives it.
-        let probed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crash_log::expected(|| {
-                symphonia::default::get_probe().format(
-                    &hint,
-                    stream,
-                    // Gapless: trims the encoder delay and padding where the
-                    // container declares them (MP3's LAME tag; not MP4 yet).
-                    &FormatOptions {
-                        enable_gapless: true,
-                        ..FormatOptions::default()
-                    },
-                    &MetadataOptions::default(),
-                )
-            })
+        // A panic in the demuxer is caught as its failure, as
+        // `decode_packet` catches the decoder's: symphonia 0.5.5's MP4
+        // reader adds a box's size to its offset unchecked, which panics in
+        // a debug build on a 64-bit size near 2^64, and subtracts the 4
+        // bytes of version and flags from a `mean` or `name` box's length
+        // unchecked, which in a release build wraps into a capacity overflow
+        // (ilst.rs:536). The size check above refuses both now; the catch
+        // stays for whatever it does not model. Nothing the demuxer built
+        // outlives it.
+        let format = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crash_log::expected(|| demuxer(start, stream, &hint))
         }))
         .map_err(|panic| {
             format!(
@@ -800,9 +789,8 @@ impl SymphoniaFrames {
                 crash_log::panic_message(panic.as_ref())
             )
         })
-        .and_then(|probed| probed.map_err(|e| e.to_string()))
+        .and_then(|format| format.map_err(|e| e.to_string()))
         .map_err(|e| CodecError::UnsupportedFormat(format!("{}: {e}", path.display())))?;
-        let format = probed.format;
         let track = format
             .default_track()
             .ok_or_else(|| CodecError::UnsupportedFormat("no audio track".into()))?;
@@ -1009,6 +997,48 @@ impl SymphoniaFrames {
     fn primed(&self, ts: u64, frames: usize) -> usize {
         self.priming
             .map_or(0, |trim| trim.frames_before(ts, frames))
+    }
+}
+
+/// Symphonia's reader for a file the size walk found to be `start`: the
+/// MP4 or CAF reader at byte 0, where the walk started, never at a marker
+/// the walk did not see; any other file through a probe that knows only the
+/// WAV, MP3 and ADTS readers (and an ID3v2 tag in front, as symphonia's
+/// default probe does).
+fn demuxer(
+    start: sizes::Start,
+    mut stream: MediaSourceStream,
+    hint: &Hint,
+) -> symphonia::core::errors::Result<Box<dyn FormatReader>> {
+    use symphonia::core::io::ReadBytes as _;
+    use symphonia::default::formats::{AdtsReader, CafReader, IsoMp4Reader, MpaReader, WavReader};
+    // Gapless: trims the encoder delay and padding where the container
+    // declares them (MP3's LAME tag; not MP4 yet).
+    let options = FormatOptions {
+        enable_gapless: true,
+        ..FormatOptions::default()
+    };
+    match start {
+        sizes::Start::Mp4 => {
+            // As symphonia's probe leaves the stream: past the first box's
+            // size, from where the reader steps back 4 bytes.
+            stream.ignore_bytes(4)?;
+            Ok(Box::new(IsoMp4Reader::try_new(stream, &options)?))
+        }
+        sizes::Start::Caf => Ok(Box::new(CafReader::try_new(stream, &options)?)),
+        sizes::Start::Other => {
+            static PROBE: std::sync::LazyLock<Probe> = std::sync::LazyLock::new(|| {
+                let mut probe = Probe::default();
+                probe.register_all::<WavReader>();
+                probe.register_all::<MpaReader>();
+                probe.register_all::<AdtsReader>();
+                probe.register_all::<symphonia_metadata::id3v2::Id3v2Reader>();
+                probe
+            });
+            Ok(PROBE
+                .format(hint, stream, &options, &MetadataOptions::default())?
+                .format)
+        }
     }
 }
 
