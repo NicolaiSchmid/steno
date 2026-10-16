@@ -1630,14 +1630,16 @@ gh release delete-asset desktop-stable latest.json --yes
 ```
 
 When fresh downloads are bad too, take the release out of "latest" with
-`gh release edit v<version> --prerelease`, and in the same hour set the
-platform's flag in `apps/site/src/lib/site.ts` back to false and take it
-off the root README's desktop badge. For a later release, `releases/latest`
-then falls back to the previous stable release. For `v0.11.0`, which has
-no stable release before it, it answers 404: for every desktop's download
-button, and for the feed of build 244 (`v0.9.0-rc.1`), the one Swift
-build that reads `releases/latest`; the later Swift builds read the
-`appcast` branch. A bad handoff item has steps of its own: Rollback in
+`gh release edit v<version> --prerelease`. For a later stable release,
+`releases/latest` then falls back to the previous one, and the site stays
+as it is. For `v0.11.0`, which has no stable release before it,
+`releases/latest` answers 404, so in the same hour set every listed
+desktop's flag in `apps/site/src/lib/site.ts` back to false, not only the
+bad one's, and take them off the root README's desktop badge: a listed
+desktop's download button opens `releases/latest`, an unlisted one's opens
+the releases page. The 404 also reaches the feed of build 244
+(`v0.9.0-rc.1`), the one Swift build that reads `releases/latest`; the
+later Swift builds read the `appcast` branch. A bad handoff item has steps of its own: Rollback in
 `.plans/2026-10-07-stable-promotion.md`.
 
 ### Secrets
