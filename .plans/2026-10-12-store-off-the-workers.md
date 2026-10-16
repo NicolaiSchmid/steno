@@ -766,11 +766,14 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
 - **No settings row fails a stop's save.** The save reads only the
   `defaultRetention` row: a missing one is the default, and one that
   cannot be read saves the asset kept forever, which deletes nothing, with
-  a warning that names the key and not the value. Before, any bad row,
-  of any key, failed the save and left the meeting `recording` until the
-  row was fixed, on `main` as well; the launch already refuses a bad row
-  (#295), so this covers a row that went bad mid-session. Recovery's
-  `complete(None)` takes the same path.
+  a warning that names the key and not the value. The run after it fails
+  on the same row, so the meeting shows failed with its audio kept;
+  Process again works once the row is fixed. Before, any bad row, of any
+  key, failed the save and left the meeting `recording` until the row was
+  fixed, on `main` as well; the launch already refuses a bad row (#295),
+  so this covers a row that went bad mid-session. Recovery's
+  `complete(None)` takes the same path; its test is
+  `a_recovered_recording_with_an_unreadable_default_retention_is_kept_forever`.
 - **Small tests beside the checks:** a forced pass runs the light part
   (`a_forced_pass_follows_what_the_store_does_not_hold`), `Host::new`
   reads the mark before its loads

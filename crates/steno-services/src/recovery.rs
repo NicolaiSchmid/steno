@@ -2231,6 +2231,54 @@ mod tests {
         }
     }
 
+    /// A default retention row that cannot be read does not keep a
+    /// recovered recording `recording`: it is queued with its audio kept
+    /// forever, as the stop's save does. The run after it fails on the
+    /// same row, so the meeting shows failed with its master kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recovered_recording_with_an_unreadable_default_retention_is_kept_forever() {
+        let harness = Harness::new();
+        let meeting = harness.begin(MeetingSource::MacCall);
+        let mut writer = harness.writer(&meeting);
+        write_frames(&mut writer, 150);
+        drop(writer);
+        harness
+            .store
+            .write(|transaction| {
+                transaction.execute(
+                    "INSERT OR REPLACE INTO setting (key, value) \
+                     VALUES ('defaultRetention', 'not json')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(harness.store.settings().is_err(), "the row is unreadable");
+
+        let recovered = recover(
+            &harness.intake(),
+            &[harness.audio_folder()],
+            meeting.id,
+            meeting.source,
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovered.state, MeetingState::Queued);
+        assert_eq!(
+            harness.store.asset(meeting.id).unwrap().unwrap().retention,
+            AudioRetention::KeepForever
+        );
+
+        harness.pipeline.current().wait_until_idle().await;
+        assert!(matches!(
+            harness.state(&meeting),
+            MeetingState::Failed { .. }
+        ));
+        let master = RecordingLayout::new(&harness.audio_folder(), meeting.id)
+            .master(AudioFormat::Caf48kFloat32);
+        assert!(master.is_file(), "{}", master.display());
+    }
+
     /// Two databases over one audio folder (two computers syncing it, a
     /// second database the CLI was pointed at): the second one's launch
     /// adopts nothing of the first's, neither a processed meeting nor one

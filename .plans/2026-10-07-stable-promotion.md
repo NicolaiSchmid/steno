@@ -1659,7 +1659,9 @@ The table above names each package and its owner. Their tests:
   stop during a slow reload finishes its files at once and saves within 1
   s, with both readers held, since its save reads on the writer; no
   settings row fails a stop's save (one unreadable `defaultRetention` row
-  keeps the audio forever, with a warning); the `recording` feed sends
+  keeps the audio forever, with a warning, and the run after it fails on
+  the same row, so the meeting shows failed with its audio kept; Process
+  again works once the row is fixed); the `recording` feed sends
   nothing before `page.ready` and keeps sending while the view-model lock
   is held; an idle app sends no list, detail or progress; another
   process's commit shows within one poll; a command that reaches the host
@@ -1944,10 +1946,11 @@ and also:
 
 The AUR package is X6; its first push is **Nicolai**'s, in G3. In S7,
 `flake.nix`'s macOS output gets the new URL, checks for
-`Contents/MacOS/steno-desktop` and `bundleId = "com.nicolaischmid.steno.desktop"`, and
-its UPDATES text says a Nix-installed Steno offers no update and Settings,
-under General, says "Updates come from your package manager." (#305); X7
-adds the Linux outputs. The flake bump stays a manual PR made from the job summary.
+`Contents/MacOS/steno-desktop` and
+`bundleId = "com.nicolaischmid.steno.desktop"`, and its UPDATES text says
+a Nix-installed Steno offers no update and Settings, under General, says
+"Updates come from your package manager." (#305); X7 adds the Linux
+outputs. The flake bump stays a manual PR made from the job summary.
 
 ## The Sparkle handoff
 
