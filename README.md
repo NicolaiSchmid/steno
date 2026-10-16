@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner.svg" alt="Steno, the bot-free meeting recorder" width="100%">
+  <img src="docs/assets/banner.svg" alt="Steno: meeting notes without the bot. On-device, for macOS, Windows and Linux." width="100%">
 </p>
 
 <p align="center">
@@ -55,12 +55,14 @@ person and their friends, with files instead of lock-in.
 Every release carries the builds for all three desktops, on the
 [latest release](https://github.com/NicolaiSchmid/steno/releases/latest) page. The desktop
 badge above and the [site](https://steno.nicolaischmid.com) list only the desktops whose
-build has passed its checks on a real machine. Pick the section for your system.
+build has passed its checks on a real machine. On Linux, the three sections below are the
+setups those checks run on: GNOME on Ubuntu or Debian, Omarchy, and NixOS.
 
-On first launch Steno walks you through what it needs: the microphone, the system audio
-of your calls and, on macOS, optionally your calendar for meeting titles and attendee
-names. Then point it at your Obsidian vault and an OpenAI-compatible endpoint, and you
-are done.
+On first launch Steno walks you through what it needs: on every system, the microphone.
+On macOS it also asks for the system audio of your calls, the local network for the
+phone and, optionally, your calendar for meeting titles and attendee names; on Windows,
+the firewall asks once to let the phone connect. Then point Steno at your Obsidian vault
+and an OpenAI-compatible endpoint, and you are done. Pick the section for your system.
 
 ### macOS
 
@@ -85,12 +87,12 @@ nix profile install github:NicolaiSchmid/steno#steno
 ```
 
 Installed with Homebrew or from the disk image, Steno updates itself: it checks once a
-day and offers Install and Relaunch. Settings > General has *Check for updates
+day and offers *Install and Relaunch*. Settings > General has *Check for updates
 automatically* and *Install updates automatically*. A Nix install updates with the flake
 instead (Nix details below).
 
 Already running the Swift app, version 0.10 or earlier? Install nothing. It offers 0.11.0
-as an update within a week (the rollout is phased; Check for Updates gets it at once) and
+as an update within a week (the rollout is phased; *Check for Updates* gets it at once) and
 installs it at the same path. macOS then asks once more for its permissions, and for the
 login keychain password once per stored secret (choose *Always Allow*).
 
@@ -123,14 +125,15 @@ With nix-darwin, add the flake as an input and put `steno.packages.aarch64-darwi
 in `environment.systemPackages`; nix-darwin links `Applications/Steno.app` into
 `/Applications/Nix Apps`. With home-manager use `home.packages` and link the app yourself
 (`home.file` into `~/Applications`, or the `mac-app-util` module); home-manager does not
-link `Applications/` on its own. `nix run` does not apply, the output is an app bundle
+link `Applications/` on its own. `nix run` does not apply: the output is an app bundle
 with no `bin/`.
 
-The app runs from the read-only Nix store, so its updater can download a new version but
-cannot install it. Update by bumping `release.version` and `release.hash` at the top of
-`flake.nix` (the release workflow prints both in its job summary) or by moving the flake
-input that pins this repository, then rebuild. To stop the daily check from offering updates
-it cannot apply, turn off *Check for updates automatically* in Settings > General.
+The app runs from the Nix store, which Nix manages. Its updater still offers each update
+and asks for an administrator password to install it: decline. Update instead by bumping
+`release.version` and `release.hash` at the top of `flake.nix` (the release workflow
+prints both in its job summary) or by moving the flake input that pins this repository,
+then rebuild. To stop the daily offer, turn off *Check for updates automatically* in
+Settings > General.
 
 nix-darwin users who want in-app updates can use the Homebrew cask through
 `homebrew.casks` instead; it installs into `/Applications`, where the updater can write.
@@ -158,9 +161,15 @@ PC"; choose *More info*, then *Run anyway*). Steno updates itself from then on.
 
 ### Linux: GNOME
 
-Ubuntu 24.04 or Debian 13, or newer. Download `steno-desktop_<version>_amd64.deb` (or the
-`.AppImage`), its `.asc` (the `.sig` beside it is the updater's), `SHA256SUMS` and
-`SHA256SUMS.asc` into one directory, then check and install them there:
+Ubuntu 24.04 or Debian 13, or newer. Two builds, both checked the same way:
+
+- `steno-desktop_<version>_amd64.deb` installs Steno for the whole system and asks for
+  your password at each update. Take this one unless you have a reason not to.
+- `steno-desktop_<version>_amd64.AppImage` runs from wherever you keep it and updates in
+  place, without a password.
+
+Download your build, its `.asc` (the `.sig` beside it is the updater's), `SHA256SUMS`
+and `SHA256SUMS.asc` into one directory, then check and install them there:
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/NicolaiSchmid/steno/v<version>/apps/desktop/release-signing-key.asc
@@ -177,12 +186,11 @@ every file you downloaded; the warning that the key is not certified by a truste
 signature is expected. For the AppImage, verify it the same way, then
 `chmod +x steno-desktop_<version>_amd64.AppImage` and run it.
 
-The tray icon needs GNOME's AppIndicator extension: on by default on Ubuntu, and on
-Debian `sudo apt install gnome-shell-extension-appindicator`, then log out and in and turn
-it on in the Extensions app. Without it there is no tray, and closing the main window
-quits Steno, saving a recording first. If `ufw` is on, `sudo ufw allow 23820/tcp` lets the
-phone reach Steno. Both builds update themselves: the AppImage in place, the `.deb` after
-asking for your password each time.
+- The tray icon needs GNOME's AppIndicator extension: on by default on Ubuntu, and on
+  Debian `sudo apt install gnome-shell-extension-appindicator`, then log out and in and
+  turn it on in the Extensions app. Without it there is no tray, and closing the main
+  window quits Steno, saving a recording first.
+- If `ufw` is on, `sudo ufw allow 23820/tcp` lets the phone reach Steno.
 
 ### Linux: Omarchy
 
@@ -190,16 +198,16 @@ Omarchy, or Arch with Hyprland:
 
 ```sh
 yay -S steno-desktop-bin
-sudo ufw allow Steno
 ```
 
 `yay` checks the package against the release key; if it reports an unknown public key,
 run `gpg --keyserver keyserver.ubuntu.com --recv-keys 048B527950E4F609B90E63495F8810A6E6D4DB46`
-and install again. The `ufw` rule lets the phone reach Steno.
+and install again. If `ufw` is on, `sudo ufw allow Steno` lets the phone reach Steno.
 
-- Start Steno from the Omarchy launcher, or with `uwsm-app -- steno-desktop` from a
-  terminal or a key binding. Started by an `exec-once` line instead, a logout while the
-  session is still starting can cut a recording's save short.
+- On a uwsm session (Omarchy's), start Steno from the app launcher, or with
+  `uwsm-app -- steno-desktop` from a terminal or a key binding. If an `exec-once` line
+  starts it instead, a logout while the session is still starting can cut a recording's
+  save short.
 - The tray icon sits in the bar's drawer. A right click opens its menu, which holds every
   action.
 - The recording bubble and the meeting prompt need Hyprland window rules to float, stay
@@ -231,11 +239,11 @@ opens the phone's port and mDNS in the firewall, and turns on PipeWire and, unle
 Secret Service or SSH agent runs, GNOME Keyring for Steno's secrets. Log out and in once
 after the first switch. To update, move the input to the new tag and switch again. Without
 the module, `nix profile install github:NicolaiSchmid/steno/v<version>#steno` installs the
-app alone. Under Hyprland, the panels need the window rules in the desktop README's
-[Hyprland](apps/desktop/README.md#hyprland) section, which also says where NixOS puts the
-file. The desktop README's
+app alone. Under Hyprland, the recording bubble and the meeting prompt need the window
+rules in the desktop README's [Hyprland](apps/desktop/README.md#hyprland) section, which
+also says where NixOS puts the file; its
 [Nix package and NixOS module](apps/desktop/README.md#the-nix-package-and-the-nixos-module)
-has the rest.
+section has the rest.
 
 ## How it works
 
@@ -267,7 +275,8 @@ flowchart LR
    fixes the Denglish, writes the summary from a template and extracts tasks with
    assignee, priority and due date.
 3. **Deliver.** The finished meeting is pushed into your vault as Markdown, VTT and JSON.
-   Re-export at any time; Steno overwrites only the files it wrote.
+   Re-export at any time: a note you edited stays as it is, and the new version is
+   written beside it.
 
 ## What lands in your vault
 
@@ -347,8 +356,9 @@ macOS, phone calls taken via Continuity.
 <td width="50%" valign="top">
 
 **Everything on your computer**<br>
-Transcription, diarization and speaker matching run on-device. The only network traffic
-Steno generates is transcript text to the LLM endpoint you chose.
+Transcription, diarization and speaker matching run on-device. Only transcript text
+leaves your computer, to the LLM endpoint you chose; otherwise Steno downloads its speech
+models and checks for updates.
 
 </td>
 </tr>
@@ -357,7 +367,7 @@ Steno generates is transcript text to the LLM endpoint you chose.
 
 **Remembers voices**<br>
 Name a speaker once and Steno recognises them next time. Unknown speakers come with name
-suggestions from the conversation and the calendar invite.
+suggestions from the conversation and, on macOS, the calendar invite.
 
 </td>
 <td valign="top">
@@ -396,7 +406,8 @@ forever, with a per-meeting override.
 
 **Bring your own model**<br>
 Any OpenAI-compatible endpoint works for post-processing, from a hosted API to a model
-running on the same computer. Base URL and API key, nothing else.
+running on the same computer: a base URL and an API key, nothing else. Or use your ChatGPT
+plan, through the sign-in the Codex CLI saved.
 
 </td>
 </tr>
