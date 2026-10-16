@@ -279,6 +279,8 @@ fn spawn_child(directory: &Path, gate: Gate) -> ChildGuard {
 
 /// Starts the ignored test `name` of this binary as the child over
 /// `directory` with the gate named `gate`, its output in files there.
+/// Some children read no gate (the warm-up's), so for them `gate` changes
+/// nothing.
 fn spawn_test(name: &str, directory: &Path, gate: &str) -> ChildGuard {
     let output = |name: &str| Stdio::from(std::fs::File::create(directory.join(name)).unwrap());
     let child = Command::new(std::env::current_exe().unwrap())
