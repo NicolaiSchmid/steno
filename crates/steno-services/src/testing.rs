@@ -752,6 +752,27 @@ impl Drop for HeldStore {
     }
 }
 
+/// Waits up to `within` of `released` until `meeting_id` was saved: out
+/// of `recording` and not failed.
+pub fn saved_within(store: &Store, meeting_id: uuid::Uuid, released: Instant, within: Duration) {
+    let deadline = released + within;
+    loop {
+        let state = store.meeting(meeting_id).unwrap().unwrap().state;
+        if state != steno_core::MeetingState::Recording {
+            assert!(
+                !matches!(state, steno_core::MeetingState::Failed { .. }),
+                "handed to processing, got {state:?}"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "saved within {within:?} of the lock going"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// The time a snapshot arrived, its topic and its payload.
 type Arrival = (Instant, steno_bridge::BridgeTopic, serde_json::Value);
 
@@ -878,13 +899,5 @@ impl Hosted {
             .filter(|call| call.began >= since)
             .cloned()
             .collect()
-    }
-
-    /// The longest any of the hook's calls since `since` took, and how many
-    /// there were.
-    pub fn slowest_hook_since(&self, since: Instant) -> (Duration, usize) {
-        let calls = self.hooks_since(since);
-        let slowest = calls.iter().map(|call| call.took).max().unwrap_or_default();
-        (slowest, calls.len())
     }
 }

@@ -722,12 +722,6 @@ enum DeleteGate {
 }
 
 impl DeleteGate {
-    const ALL: [DeleteGate; 3] = [
-        DeleteGate::BeforeCommit,
-        DeleteGate::AfterCommit,
-        DeleteGate::BeforeRestore,
-    ];
-
     fn name(self) -> &'static str {
         match self {
             DeleteGate::BeforeCommit => "before-commit",
@@ -737,10 +731,14 @@ impl DeleteGate {
     }
 
     fn named(name: &str) -> Self {
-        DeleteGate::ALL
-            .into_iter()
-            .find(|gate| gate.name() == name)
-            .expect("a known gate")
+        [
+            DeleteGate::BeforeCommit,
+            DeleteGate::AfterCommit,
+            DeleteGate::BeforeRestore,
+        ]
+        .into_iter()
+        .find(|gate| gate.name() == name)
+        .expect("a known gate")
     }
 }
 

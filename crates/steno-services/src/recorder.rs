@@ -4359,27 +4359,6 @@ mod tests {
         crate::testing::database_in(harness.dir.path())
     }
 
-    /// Waits up to `within` of `released` until `meeting_id` was saved,
-    /// out of `recording` and not failed.
-    fn saved_within(harness: &Harness, meeting_id: Uuid, released: Instant, within: Duration) {
-        let deadline = released + within;
-        loop {
-            let state = harness.store.meeting(meeting_id).unwrap().unwrap().state;
-            if state != steno_core::MeetingState::Recording {
-                assert!(
-                    !matches!(state, steno_core::MeetingState::Failed { .. }),
-                    "handed to processing, got {state:?}"
-                );
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "saved within {within:?} of the lock going"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
     /// P40 check 4 (`.plans/2026-10-12-store-off-the-workers.md`): a stop
     /// while another process holds the write lock, and a write of this
     /// process waits behind it, shows `Stopping` in the host within 100 ms
@@ -4416,7 +4395,7 @@ mod tests {
         );
 
         let released = held.release_after_hold();
-        saved_within(&harness, meeting_id, released, Duration::from_secs(1));
+        crate::testing::saved_within(&harness.store, meeting_id, released, Duration::from_secs(1));
         stopping.join().unwrap();
         reload.join().unwrap();
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
@@ -4487,7 +4466,12 @@ mod tests {
             answered < LIVE,
             "a command took {answered:?} during the start"
         );
-        let (slowest, _) = hosted.slowest_hook_since(since);
+        let slowest = hosted
+            .hooks_since(since)
+            .iter()
+            .map(|call| call.took)
+            .max()
+            .unwrap_or_default();
         assert!(slowest < LIVE, "a change's hook took {slowest:?}");
 
         starting.join().unwrap();

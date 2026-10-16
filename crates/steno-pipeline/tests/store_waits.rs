@@ -1112,12 +1112,12 @@ async fn an_admit_under_a_held_lock_leaves_the_worker_free() {
     };
     let upload = dir.path().join("upload.m4a");
     std::fs::write(&upload, b"aac bytes").unwrap();
-    let intake = Arc::new(steno_pipeline::RecordingIntake::new(
+    let intake = steno_pipeline::RecordingIntake::new(
         store.clone(),
         Arc::new(|_, _| Box::pin(async { Ok(()) })),
         Arc::new(move || now),
         chrono::FixedOffset::east_opt(0).unwrap(),
-    ));
+    );
     let ticked = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let timer = tokio::spawn({
         let ticked = ticked.clone();
@@ -1131,12 +1131,7 @@ async fn an_admit_under_a_held_lock_leaves_the_worker_free() {
 
     let hold = WriteLockHold::new(&path);
     let admit = tokio::spawn({
-        let (intake, upload, metadata, device) = (
-            intake.clone(),
-            upload.clone(),
-            metadata.clone(),
-            device.clone(),
-        );
+        let metadata = metadata.clone();
         async move { intake.admit(&upload, &metadata, &device).await }
     });
     let held_until = std::time::Instant::now() + Duration::from_secs(2);

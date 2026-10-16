@@ -573,6 +573,7 @@ async fn an_auto_stop_under_a_held_lock_saves_once_the_lock_goes() {
     let recording = recording();
     let hosted = crate::testing::hosted(&recording.store, &recording.recorder);
     recording.start(CaptureMode::Call, None);
+    let meeting_id = recording.recorder.status().meeting_id.unwrap();
     recording.opened(Some("Zen"));
     recording.released();
     recording.sleepers(1);
@@ -595,28 +596,19 @@ async fn an_auto_stop_under_a_held_lock_saves_once_the_lock_goes() {
     );
 
     let released = held.release_after_hold();
-    let deadline = released + Duration::from_secs(1);
-    let saved = loop {
-        let meetings = recording.meetings();
-        if meetings
-            .first()
-            .is_some_and(|meeting| meeting.state != MeetingState::Recording)
-        {
-            break meetings[0].clone();
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the meeting was saved within a second of the lock going"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    assert!(
-        !matches!(saved.state, MeetingState::Failed { .. }),
-        "handed to processing, got {:?}",
-        saved.state
+    crate::testing::saved_within(
+        &recording.store,
+        meeting_id,
+        released,
+        Duration::from_secs(1),
     );
     assert_eq!(
-        saved.end_reason,
+        recording
+            .store
+            .meeting(meeting_id)
+            .unwrap()
+            .unwrap()
+            .end_reason,
         Some(RecordingEndReason::CallEnded {
             app_name: Some("Zen".to_owned())
         })
