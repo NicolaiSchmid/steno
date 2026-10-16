@@ -2645,7 +2645,7 @@ fn phones_pair_list_and_revoke_devices() {
         .as_ref()
         .unwrap()
         .pair(paired_phone());
-    harness.host.refresh_pairing();
+    harness.host.reload_pass();
     let phone = harness.snapshot(BridgeTopic::SettingsPhone);
     assert!(phone.get("pairing").is_none());
     assert_eq!(phone["devices"][0]["name"], "Nicolai's iPhone");
@@ -2693,7 +2693,7 @@ fn phones_pair_list_and_revoke_devices() {
     // A code that runs out with no phone closes itself.
     harness.host.settings_phone_begin_pairing().unwrap();
     harness.fakes.clock.set(date("2026-09-29T12:55:00.000Z"));
-    harness.host.refresh_pairing();
+    harness.host.reload_pass();
     assert!(
         harness
             .snapshot(BridgeTopic::SettingsPhone)

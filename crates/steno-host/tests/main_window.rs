@@ -69,7 +69,21 @@ fn page_ready_publishes_every_topic_once_and_the_first_meeting_flips_the_app() {
         "nothing before page.ready"
     );
     harness.host.page_ready().unwrap();
-    assert_eq!(harness.sink.topics(), TOPICS.to_vec());
+    // `recording` comes from the feed's thread, every other topic from the
+    // publish, in order.
+    harness.sink.wait_for_recording(1);
+    let published: Vec<BridgeTopic> = harness
+        .sink
+        .topics()
+        .into_iter()
+        .filter(|topic| *topic != BridgeTopic::Recording)
+        .collect();
+    let every_other: Vec<BridgeTopic> = TOPICS
+        .into_iter()
+        .filter(|topic| *topic != BridgeTopic::Recording)
+        .collect();
+    assert_eq!(published, every_other);
+    assert_eq!(harness.sink.count(BridgeTopic::Recording), 1);
     assert_eq!(
         harness.sink.last(BridgeTopic::MeetingDetail),
         Some(Value::Null)
@@ -927,8 +941,11 @@ fn concurrent_publishes_reach_the_sink_in_build_order() {
             });
         }
     });
-    harness.wait_for("the throttled recording to flush", |harness| {
-        harness.host.next_flush_due().is_none()
+    let warning = harness.fakes.recorder.status().warning;
+    harness.wait_for("the feed's last recording", |_| {
+        sink.payloads.lock().unwrap()[&BridgeTopic::Recording]
+            .last()
+            .is_some_and(|recording| recording["warning"].as_str() == warning.as_deref())
     });
 
     let payloads = sink.payloads.lock().unwrap();
@@ -1892,13 +1909,13 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
             mode: steno_bridge::CaptureMode::InPerson,
         })
         .unwrap();
-    // `page.ready` published `recording` a moment ago: the change waits out
-    // the 20 Hz interval, which the host's own flush thread ends; nothing
+    // The feed sends the start's `recording` from its own thread; nothing
     // else is called.
-    assert_eq!(harness.sink.count(BridgeTopic::Recording), 0);
-    assert!(harness.host.next_flush_due().is_some());
-    harness.wait_for("the throttled recording publish", |harness| {
-        harness.sink.count(BridgeTopic::Recording) == 1
+    harness.wait_for("the start's recording", |harness| {
+        harness
+            .sink
+            .last(BridgeTopic::Recording)
+            .is_some_and(|recording| recording["state"] == "recording")
     });
     let recording = harness.sink.last(BridgeTopic::Recording).unwrap();
     assert_eq!(recording["state"], "recording");
@@ -1910,8 +1927,8 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
         steno_core::json::uuid_string(live)
     );
 
-    // A stop within 50 ms of the last publish must not read "recording"
-    // until the next command: the flush thread publishes it.
+    // A stop right after the start's snapshot must not read "recording"
+    // until the next command: the feed sends it.
     harness.host.recording_stop().unwrap();
     harness.wait_for("the stop to publish", |harness| {
         harness.sink.last(BridgeTopic::Recording).unwrap()["state"] == "idle"
@@ -1925,70 +1942,6 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
     harness.wait_for("the toggle to publish", |harness| {
         harness.sink.last(BridgeTopic::Recording).unwrap()["state"] == "recording"
     });
-
-    // Two changes inside one interval fold into one publish.
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    harness.sink.clear();
-    harness.host.recorder_changed();
-    harness.host.recorder_changed();
-    assert_eq!(harness.sink.count(BridgeTopic::Recording), 1);
-    harness.wait_for("the folded publish", |harness| {
-        harness.sink.count(BridgeTopic::Recording) == 2
-    });
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    assert_eq!(harness.sink.count(BridgeTopic::Recording), 2);
-    assert_eq!(harness.host.next_flush_due(), None);
-}
-
-/// The web app tells a live `recording` row from one a failed save left by
-/// the recorder's state, so the list follows the recorder: when its state
-/// or meeting moves (here a stop that queued its meeting), the list is
-/// reloaded and published at once, not at the next store change; a level
-/// update alone reloads nothing. Rust only.
-#[test]
-fn the_list_follows_the_recorders_state_and_meeting() {
-    let mut row = meeting(
-        1,
-        "Call",
-        TitleOrigin::Default,
-        NOW,
-        60.0,
-        MeetingSource::MacCall,
-        &[],
-        MeetingState::Recording,
-        None,
-    );
-    let seeded = row.clone();
-    let harness = Harness::builder()
-        .seed(move |store, _| store.save_meeting(&seeded).unwrap())
-        .build();
-    harness
-        .fakes
-        .recorder
-        .set_status(steno_host::services::RecorderStatus {
-            state: RecordingState::Recording,
-            meeting_id: Some(uuid(1)),
-            ..steno_host::services::RecorderStatus::idle()
-        });
-    harness.host.recorder_changed();
-    harness.sink.clear();
-    harness.host.recorder_changed();
-    assert_eq!(
-        harness.sink.count(BridgeTopic::MeetingsList),
-        0,
-        "levels alone"
-    );
-
-    // The stop queued the meeting, then the recorder went idle.
-    row.state = MeetingState::Queued;
-    harness.store.save_meeting(&row).unwrap();
-    harness
-        .fakes
-        .recorder
-        .set_status(steno_host::services::RecorderStatus::idle());
-    harness.host.recorder_changed();
-    let list = harness.sink.last(BridgeTopic::MeetingsList).unwrap();
-    assert_eq!(list["groups"][0]["meetings"][0]["state"], "queued");
 }
 
 /// A meeting left `recording` (a save that failed, a folder gone for

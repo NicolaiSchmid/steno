@@ -1085,10 +1085,12 @@ fn the_system_audio_test_is_refused_while_recording() {
         }
     }
 
-    // The recording ends: both rows drop the line before any press.
+    // The recording ends: both rows drop the line before any press, at
+    // the reload owner's next pass, which the move asks for.
     harness.fakes.recorder.set_status(RecorderStatus::idle());
     harness.sink.clear();
     harness.host.recorder_changed();
+    harness.host.reload_pass();
     for topic in [BridgeTopic::Onboarding, BridgeTopic::SettingsRecording] {
         let published = harness.sink.all(topic);
         let row = &published.last().expect("published")["permissions"][1];

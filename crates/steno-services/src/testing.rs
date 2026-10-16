@@ -799,19 +799,27 @@ pub fn saved_within(store: &Store, meeting_id: uuid::Uuid, released: Instant, wi
     }
 }
 
-/// The time a snapshot arrived, its topic and its payload.
-type Arrival = (Instant, steno_bridge::BridgeTopic, serde_json::Value);
+/// The time a snapshot arrived, its topic, its payload and the name of
+/// the thread that emitted it.
+type Arrival = (
+    Instant,
+    steno_bridge::BridgeTopic,
+    serde_json::Value,
+    Option<String>,
+);
 
-/// A sink that keeps every snapshot with the time it arrived.
+/// A sink that keeps every snapshot with the time it arrived and the
+/// thread that sent it.
 #[derive(Default)]
 pub struct TimedSink(Mutex<Vec<Arrival>>);
 
 impl steno_bridge::EventSink for TimedSink {
     fn emit(&self, event: steno_bridge::BridgeEvent) {
+        let thread = std::thread::current().name().map(str::to_owned);
         self.0
             .lock()
             .unwrap()
-            .push((Instant::now(), event.topic, event.payload));
+            .push((Instant::now(), event.topic, event.payload, thread));
     }
 }
 
@@ -823,12 +831,24 @@ impl TimedSink {
         topic: steno_bridge::BridgeTopic,
         since: Instant,
     ) -> Vec<(Instant, serde_json::Value)> {
+        self.since_on(topic, since)
+            .into_iter()
+            .map(|(at, payload, _)| (at, payload))
+            .collect()
+    }
+
+    /// [`Self::since`] with the name of the thread that sent each.
+    pub fn since_on(
+        &self,
+        topic: steno_bridge::BridgeTopic,
+        since: Instant,
+    ) -> Vec<(Instant, serde_json::Value, Option<String>)> {
         self.0
             .lock()
             .unwrap()
             .iter()
-            .filter(|(at, arrived, _)| *arrived == topic && *at >= since)
-            .map(|(at, _, payload)| (*at, payload.clone()))
+            .filter(|(at, arrived, _, _)| *arrived == topic && *at >= since)
+            .map(|(at, _, payload, thread)| (*at, payload.clone(), thread.clone()))
             .collect()
     }
 
@@ -874,9 +894,21 @@ pub struct Hosted {
 /// the recorder's changes routed into it as `App::launch` routes them, and
 /// a [`TimedSink`]. The page is ready, so every publish reaches the sink.
 pub fn hosted(store: &Arc<Store>, recorder: &Arc<crate::recorder::CaptureRecorder>) -> Hosted {
+    hosted_over(store, recorder, None)
+}
+
+/// [`hosted`], over `pipeline` in place of the fake's when there is one.
+pub fn hosted_over(
+    store: &Arc<Store>,
+    recorder: &Arc<crate::recorder::CaptureRecorder>,
+    pipeline: Option<Arc<dyn steno_host::services::Pipeline>>,
+) -> Hosted {
     use steno_bridge::BridgeHost as _;
     let mut services = steno_host::fakes::FakeServices::new(chrono::Utc::now()).services();
     services.recorder = recorder.clone();
+    if let Some(pipeline) = pipeline {
+        services.pipeline = pipeline;
+    }
     let host = Arc::new(
         steno_host::Host::new(store.clone(), services, steno_host::HostConfig::default()).unwrap(),
     );
@@ -909,8 +941,8 @@ pub fn hosted(store: &Arc<Store>, recorder: &Arc<crate::recorder::CaptureRecorde
 }
 
 impl Hosted {
-    /// A reload in flight, as the two-second poll runs one, on a thread of
-    /// its own.
+    /// A forced reload in flight, as the reload owner runs one, on a
+    /// thread of its own.
     pub fn reload_in_flight(&self) -> std::thread::JoinHandle<()> {
         let host = self.host.clone();
         std::thread::spawn(move || host.store_changed())
@@ -925,5 +957,136 @@ impl Hosted {
             .filter(|call| call.began >= since)
             .cloned()
             .collect()
+    }
+}
+
+/// A pipeline whose `export_keeps_failing`, which the detail's reload
+/// asks, waits at a gate while the gate is armed: a reload held there
+/// stands for one that waits on the store behind another process's
+/// write lock. Everything else is the host's fake.
+#[derive(Default)]
+pub struct GatedPipeline {
+    fake: steno_host::fakes::FakePipeline,
+    pub gate: ReloadGate,
+}
+
+#[derive(Default)]
+pub struct ReloadGate {
+    state: std::sync::Mutex<GateState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+pub struct GateState {
+    armed: bool,
+    /// Reloads waiting at the gate now.
+    pub held: usize,
+    /// Reloads the gate has held, in all.
+    pub entered: usize,
+    /// Reloads that passed the gate or reached it, in all.
+    pub reloads: usize,
+}
+
+impl ReloadGate {
+    fn state(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.state.lock().unwrap()
+    }
+
+    fn pass(&self) {
+        let mut state = self.state();
+        state.reloads += 1;
+        if state.armed {
+            state.held += 1;
+            state.entered += 1;
+            self.changed.notify_all();
+            while state.armed {
+                state = self.changed.wait(state).unwrap();
+            }
+            state.held -= 1;
+        }
+        self.changed.notify_all();
+    }
+
+    pub fn reloads(&self) -> usize {
+        self.state().reloads
+    }
+
+    /// Waits up to `patience` for `reached`; whether it was.
+    pub fn wait_for(
+        &self,
+        patience: std::time::Duration,
+        reached: impl Fn(&GateState) -> bool,
+    ) -> bool {
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(self.state(), patience, |state| !reached(state))
+            .unwrap();
+        reached(&state)
+    }
+
+    /// Arms the gate; the next reload waits there until the guard
+    /// drops, also when the test fails.
+    pub fn arm(&self) -> ArmedGate<'_> {
+        self.state().armed = true;
+        ArmedGate(self)
+    }
+}
+
+pub struct ArmedGate<'a>(&'a ReloadGate);
+
+impl Drop for ArmedGate<'_> {
+    fn drop(&mut self) {
+        self.0.state().armed = false;
+        self.0.changed.notify_all();
+    }
+}
+
+impl steno_host::services::Pipeline for GatedPipeline {
+    fn rerun_summary(
+        &self,
+        meeting_id: uuid::Uuid,
+        template_id: &str,
+    ) -> steno_core::protocols::BoundaryResult<()> {
+        self.fake.rerun_summary(meeting_id, template_id)
+    }
+
+    fn redeliver(&self, meeting_id: uuid::Uuid) -> steno_core::protocols::BoundaryResult<()> {
+        self.fake.redeliver(meeting_id)
+    }
+
+    fn export_keeps_failing(&self, meeting_id: uuid::Uuid) -> bool {
+        self.gate.pass();
+        self.fake.export_keeps_failing(meeting_id)
+    }
+
+    fn process_again(
+        &self,
+        meeting_id: uuid::Uuid,
+    ) -> Result<(), steno_host::services::ProcessAgainRefusal> {
+        self.fake.process_again(meeting_id)
+    }
+
+    fn damaged_audio(&self, meeting_id: uuid::Uuid) -> steno_core::AudioDamage {
+        self.fake.damaged_audio(meeting_id)
+    }
+
+    fn audio_may_be_damaged(&self, meeting_id: uuid::Uuid) -> bool {
+        self.fake.audio_may_be_damaged(meeting_id)
+    }
+
+    fn apply_retention(
+        &self,
+        meeting_id: uuid::Uuid,
+        rule: steno_core::AudioRetention,
+    ) -> steno_core::protocols::BoundaryResult<()> {
+        self.fake.apply_retention(meeting_id, rule)
+    }
+
+    fn reload(&self) -> steno_core::protocols::BoundaryResult<()> {
+        self.fake.reload()
+    }
+
+    fn keep_all_recordings(&self) -> steno_core::protocols::BoundaryResult<i64> {
+        self.fake.keep_all_recordings()
     }
 }
