@@ -6,10 +6,11 @@
 //! which also ends onboarding on a finished `onboarding` snapshot and moves
 //! the tray and the panels on a `recording` one, so a host never closes a
 //! window itself. They go out from the main thread (`WindowSink`): the
-//! host emits under its `publishing` lock, the main thread can be waiting
-//! for a thread that holds it (a Stop from the tray joins the recorder's
-//! level thread, which publishes), and the tray's setters wait for the
-//! main thread when called from another. With the opt-in `fixture-host`
+//! host emits under its `publishing` lock (from a command or a reload
+//! pass) and the `recording` feed from a thread of its own, and the
+//! tray's setters wait for the main thread when called from another, so
+//! a snapshot delivered on the emitting thread would hold the lock, or
+//! the feed, until the main thread is free. With the opt-in `fixture-host`
 //! feature every window gets the recorded snapshots on `page.ready` and
 //! commands are answered as `apps/macos/web/src/bridge/mock-transport.ts`
 //! answers them, so the UI runs without a database.
@@ -319,14 +320,14 @@ pub(crate) mod real {
     /// keeps the topics it shows, and the tray and the panels follow the
     /// `recording` one (`bridge::emit`). `emit` queues the snapshot and
     /// returns without waiting: the host emits under its `publishing` lock
-    /// (from a command, its flush thread or the recorder's level thread),
-    /// the main thread can be waiting for a thread that holds it (a Stop
-    /// from the tray joins the recorder's level thread, which publishes),
-    /// and the tray's setters wait for the main thread when called from
-    /// another. One queue keeps the snapshots in emit order whichever
-    /// thread emits them, also when an emit on the main thread runs
-    /// before a task posted earlier, and one drain at a time empties it, so
-    /// every window gets them in that order.
+    /// (from a command or a reload pass) and the `recording` feed from a
+    /// thread of its own, and the tray's setters wait for the main thread
+    /// when called from another, so a delivery on the emitting thread
+    /// would hold the lock, or the feed, until the main thread is free.
+    /// One queue keeps the snapshots in emit order whichever thread emits
+    /// them, also when an emit on the main thread runs before a task posted
+    /// earlier, and one drain at a time empties it, so every window gets
+    /// them in that order.
     ///
     /// Swift: `WebBridge.emit`, `@MainActor`
     /// (`apps/macos/Steno/Web/WebBridge.swift`).
@@ -669,12 +670,12 @@ pub(crate) mod real {
             }
         }
 
-        /// The tray's Stop: the main thread waits for a thread that holds
-        /// the `publishing` lock (it joins the level thread) while the flush
-        /// thread emits under it. The emit returns without the main thread,
-        /// and the snapshot is delivered there once the lock is free; an
-        /// emit that delivered on its own thread would have waited for the
-        /// main thread inside the tray's setters, under the lock.
+        /// The tray's Stop: the main thread waits for another thread (it
+        /// joins the level thread) while the `recording` feed's thread
+        /// emits. The emit returns without the main thread, and the
+        /// snapshot is delivered there once it is free; an emit that
+        /// delivered on its own thread would have waited for the main
+        /// thread inside the tray's setters.
         #[test]
         fn a_snapshot_is_delivered_on_the_main_thread_and_the_emit_never_waits_for_it() {
             bounded(|| {

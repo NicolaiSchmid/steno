@@ -1154,18 +1154,19 @@ fn log_operation_failure(event: &MeetingEvent) {
     }
 }
 
-/// How often the launch's poll reloads the meetings and the pairing
-/// ([`App::launch`]).
+/// How often the reload owner's pass runs when nothing asked for one
+/// ([`own_the_reloads`]).
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What the event follower does with one event from the pipeline's bus,
-/// on the blocking pool ([`App::launch`]): the host applies it, then
-/// reloads where the event changed rows the progress does not carry. A
-/// retention applied also sweeps first. `None` is a follower that fell
-/// behind the bus and missed events: it reloads everything.
+/// on the blocking pool ([`App::launch`]): the host applies it, then asks
+/// the reload owner for a pass where the event changed what the progress
+/// does not carry, rows or the pipeline's own flags, with or without a
+/// commit. A retention applied also sweeps first. `None` is a follower
+/// that fell behind the bus and missed events: it asks for a reload too.
 fn follow_event(host: &Host, sweep: &RetentionSweep, event: Option<&MeetingEvent>) {
     let Some(event) = event else {
-        host.store_changed();
+        host.request_reload();
         return;
     };
     host.apply_meeting_event(event);
@@ -1173,15 +1174,41 @@ fn follow_event(host: &Host, sweep: &RetentionSweep, event: Option<&MeetingEvent
         MeetingEvent::Progress { .. } => {}
         MeetingEvent::RetentionApplied { .. } => {
             run_sweep(sweep);
-            host.store_changed();
+            host.request_reload();
         }
         MeetingEvent::SpeakersNeedReview { .. }
         | MeetingEvent::Deleted { .. }
         | MeetingEvent::ModelsMissing { .. }
-        | MeetingEvent::StoreBusy { .. } => host.store_changed(),
+        | MeetingEvent::StoreBusy { .. } => host.request_reload(),
         MeetingEvent::OperationFailed { .. } => {
             log_operation_failure(event);
-            host.store_changed();
+            host.request_reload();
+        }
+    }
+}
+
+/// The reload owner (P40 decision 3, `.plans/2026-10-12-store-off-the-workers.md`):
+/// one [`Host::reload_pass`] on each tick of `every` and on each request
+/// ([`Host::request_reload`]), whichever comes first, on the blocking
+/// pool, so a pass that waits holds no runtime worker. A tick that waited
+/// is followed by the next one a full interval later, never by a burst;
+/// requests made while a pass runs fold into one more pass. Ends when the
+/// runtime shuts down. The pass reloads only when asked or when the
+/// store's change mark moved: stage writes post no events of their own,
+/// and another process's commits none at all, so the tick is what finds
+/// them (the Swift app had GRDB observation). The same tick is the
+/// pairing poll Swift's Phones pane ran every two seconds.
+pub(crate) async fn own_the_reloads(host: Arc<Host>, every: std::time::Duration) {
+    let mut interval = tokio::time::interval(every);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            () = host.reload_requested() => {}
+        }
+        let pass = host.clone();
+        if !off_the_workers(move || pass.reload_pass()).await {
+            return;
         }
     }
 }
@@ -1293,7 +1320,8 @@ impl App {
     ///
     /// 1. The pipeline's events are subscribed and routed into the host,
     ///    the recorder's changes into the host and the detection
-    ///    controller, and meeting detection starts following its setting
+    ///    controller, the reload owner starts (`own_the_reloads`), and
+    ///    meeting detection starts following its setting
     ///    ([`DetectionController::run`]).
     /// 2. The meetings left `recording`, the folder each was recorded into
     ///    and the known audio folders ([`crate::audio_folders`]) are
@@ -1367,7 +1395,8 @@ impl App {
         // write lock. So both tasks hand the host to the blocking pool and
         // await it there, one event at a time in the bus's order, and no
         // wait holds a runtime worker, which the pipeline's runs, the
-        // handover and the timers need.
+        // handover and the timers need. The follower asks the reload owner
+        // for its reloads.
         let mut receiver = self.events.subscribe();
         let sweep = self.sweep.clone();
         let event_host = host.clone();
@@ -1384,29 +1413,7 @@ impl App {
                 }
             }
         });
-        // Stage writes do not post events of their own; the list follows
-        // the meeting rows through a slow poll until the store observes
-        // itself (the Swift app had GRDB observation). The same tick is
-        // the pairing poll Swift's Phones pane ran every two seconds: a
-        // phone that paired closes the code, a code that ran out closes.
-        // A tick that waited is followed by the next one a full interval
-        // later, never by a burst.
-        let poll_host = host.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(POLL_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                let host = poll_host.clone();
-                let tick = move || {
-                    host.store_changed();
-                    host.refresh_pairing();
-                };
-                if !off_the_workers(tick).await {
-                    return;
-                }
-            }
-        });
+        tokio::spawn(own_the_reloads(host.clone(), POLL_INTERVAL));
 
         let reconcile = self.reconcile_listed(host);
         let work = self.recover_at_launch(host, reconcile);
@@ -1630,7 +1637,8 @@ mod tests {
     use super::*;
     use crate::secrets::KeyringUnavailable;
     use crate::testing::{
-        HANG_GUARD, PATIENCE, built, fake_dependencies, on_own_thread, options_under, temp_store,
+        GatedPipeline, HANG_GUARD, LIVE, PATIENCE, TimedSink, built, fake_dependencies,
+        found_within, on_own_thread, options_under, temp_store,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4118,132 +4126,6 @@ mod tests {
         server.stop();
     }
 
-    /// A pipeline whose `export_keeps_failing`, which the detail's reload
-    /// asks, waits at a gate while the gate is armed: a reload held there
-    /// stands for one that waits on the store behind another process's
-    /// write lock. Everything else is the host's fake.
-    #[derive(Default)]
-    struct GatedPipeline {
-        fake: steno_host::fakes::FakePipeline,
-        gate: ReloadGate,
-    }
-
-    #[derive(Default)]
-    struct ReloadGate {
-        state: std::sync::Mutex<GateState>,
-        changed: std::sync::Condvar,
-    }
-
-    #[derive(Default)]
-    struct GateState {
-        armed: bool,
-        /// Reloads waiting at the gate now.
-        held: usize,
-        /// Reloads the gate has held, in all.
-        entered: usize,
-        reloads: usize,
-    }
-
-    impl ReloadGate {
-        fn state(&self) -> std::sync::MutexGuard<'_, GateState> {
-            self.state.lock().unwrap()
-        }
-
-        fn pass(&self) {
-            let mut state = self.state();
-            state.reloads += 1;
-            if state.armed {
-                state.held += 1;
-                state.entered += 1;
-                self.changed.notify_all();
-                while state.armed {
-                    state = self.changed.wait(state).unwrap();
-                }
-                state.held -= 1;
-            }
-            self.changed.notify_all();
-        }
-
-        fn reloads(&self) -> usize {
-            self.state().reloads
-        }
-
-        /// Waits up to `patience` for `reached`; whether it was.
-        fn wait_for(
-            &self,
-            patience: std::time::Duration,
-            reached: impl Fn(&GateState) -> bool,
-        ) -> bool {
-            let (state, _) = self
-                .changed
-                .wait_timeout_while(self.state(), patience, |state| !reached(state))
-                .unwrap();
-            reached(&state)
-        }
-
-        /// Arms the gate; the next reload waits there until the guard
-        /// drops, also when the test fails.
-        fn arm(&self) -> ArmedGate<'_> {
-            self.state().armed = true;
-            ArmedGate(self)
-        }
-    }
-
-    struct ArmedGate<'a>(&'a ReloadGate);
-
-    impl Drop for ArmedGate<'_> {
-        fn drop(&mut self) {
-            self.0.state().armed = false;
-            self.0.changed.notify_all();
-        }
-    }
-
-    impl steno_host::services::Pipeline for GatedPipeline {
-        fn rerun_summary(&self, meeting_id: uuid::Uuid, template_id: &str) -> BoundaryResult<()> {
-            self.fake.rerun_summary(meeting_id, template_id)
-        }
-
-        fn redeliver(&self, meeting_id: uuid::Uuid) -> BoundaryResult<()> {
-            self.fake.redeliver(meeting_id)
-        }
-
-        fn export_keeps_failing(&self, meeting_id: uuid::Uuid) -> bool {
-            self.gate.pass();
-            self.fake.export_keeps_failing(meeting_id)
-        }
-
-        fn process_again(
-            &self,
-            meeting_id: uuid::Uuid,
-        ) -> Result<(), steno_host::services::ProcessAgainRefusal> {
-            self.fake.process_again(meeting_id)
-        }
-
-        fn damaged_audio(&self, meeting_id: uuid::Uuid) -> steno_core::AudioDamage {
-            self.fake.damaged_audio(meeting_id)
-        }
-
-        fn audio_may_be_damaged(&self, meeting_id: uuid::Uuid) -> bool {
-            self.fake.audio_may_be_damaged(meeting_id)
-        }
-
-        fn apply_retention(
-            &self,
-            meeting_id: uuid::Uuid,
-            rule: steno_core::AudioRetention,
-        ) -> BoundaryResult<()> {
-            self.fake.apply_retention(meeting_id, rule)
-        }
-
-        fn reload(&self) -> BoundaryResult<()> {
-            self.fake.reload()
-        }
-
-        fn keep_all_recordings(&self) -> BoundaryResult<i64> {
-            self.fake.keep_all_recordings()
-        }
-    }
-
     /// Fails unless the timer behind `ticked` keeps ticking for `length`:
     /// no gap of 200 ms or more between its ticks, read from the test's
     /// own thread, which is not one of the runtime's.
@@ -4281,46 +4163,46 @@ mod tests {
         }
     }
 
-    /// The launch's two tasks, the event follower and the two-second
-    /// poll, reload the host on the blocking pool: while a reload is held
-    /// (the detail asks the pipeline whether its export keeps failing, at
-    /// a gate), a task spawned on the services runtime, which has one
-    /// worker, still runs. Run on that worker, a held reload would stop
-    /// every task there: the pipeline's runs, the handover, the timers.
-    /// Only the gate decides; every wait is bounded for hangs alone.
+    /// The launch's two tasks, the event follower and the reload owner
+    /// (the two-second poll), reach the host on the blocking pool: while
+    /// a reload is held (the detail asks the pipeline whether its export
+    /// keeps failing, at a gate), a task spawned on the services runtime,
+    /// which has one worker, still runs. Run on that worker, a held reload
+    /// would stop every task there: the pipeline's runs, the handover, the
+    /// timers. An idle tick reloads nothing, so each held reload is a
+    /// forced pass of the owner's: one an event asked for, while the
+    /// follower's next event waits behind the host's lock, then one the
+    /// test asks for. Only the gate decides; every wait is bounded for
+    /// hangs alone.
     #[test]
     fn the_poll_and_the_events_task_never_block_a_worker() {
         let runtime = one_worker_runtime();
         let dir = tempfile::tempdir().unwrap();
-        let (app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let (app, pipeline, host) = launched_over_a_gated_pipeline(&runtime, dir.path());
         let gate = &pipeline.gate;
 
-        // Right after a poll's reload, so the next one is two seconds off:
-        // the reload the gate holds is most likely the event follower's.
-        // Either way the follower's reload is then at the gate or behind
-        // the host's lock.
-        let before = gate.reloads();
-        assert!(
-            gate.wait_for(HANG_GUARD, |state| state.reloads > before),
-            "the poll reloads"
-        );
         let armed = gate.arm();
         app.events.post(MeetingEvent::Deleted {
             meeting_id: uuid::Uuid::new_v4(),
         });
         assert!(
             gate.wait_for(HANG_GUARD, |state| state.entered == 1),
-            "the event follower's reload reaches the gate"
+            "the event's reload reaches the gate"
         );
+        app.events.post(MeetingEvent::Deleted {
+            meeting_id: uuid::Uuid::new_v4(),
+        });
         assert_the_worker_runs(&runtime, "the event follower");
         drop(armed);
         assert!(
             gate.wait_for(HANG_GUARD, |state| state.held == 0),
-            "the event follower's reload goes on"
+            "the event's reload goes on"
         );
+        settled(&host);
 
-        // No event now: the next reload the gate holds is the poll's.
+        // No event now: the reload the gate holds is the one asked for.
         let armed = gate.arm();
+        host.request_reload();
         assert!(
             gate.wait_for(HANG_GUARD, |state| state.entered == 2),
             "the poll's reload reaches the gate"
@@ -4328,6 +4210,15 @@ mod tests {
         assert_the_worker_runs(&runtime, "the poll");
         drop(armed);
         runtime.shutdown_background();
+    }
+
+    /// Waits until the reload owner has nothing left to reload: a forced
+    /// pass on this thread loads at the latest change mark, and the
+    /// owner's passes asked for before it are over.
+    fn settled(host: &Host) {
+        host.store_changed();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        host.store_changed();
     }
 
     /// The update and phone hooks reach the host on the blocking pool:
@@ -4424,7 +4315,8 @@ mod tests {
     }
 
     /// The launch on `runtime`, under `dir`, over a [`GatedPipeline`],
-    /// with one meeting's detail shown, so each reload asks the gate.
+    /// with one meeting's detail shown, so each reload asks the gate, and
+    /// the launch's own reloads over ([`settled`]).
     fn launched_over_a_gated_pipeline(
         runtime: &tokio::runtime::Runtime,
         dir: &std::path::Path,
@@ -4444,6 +4336,7 @@ mod tests {
             app.launch(&host);
         }
         runtime.block_on(app.launch_finished());
+        settled(&host);
         (app, pipeline, host)
     }
 
@@ -4459,12 +4352,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
         let gate = &pipeline.gate;
-        let patience = std::time::Duration::from_secs(5);
-        let before = gate.reloads();
-        assert!(
-            gate.wait_for(patience, |state| state.reloads > before),
-            "the poll reloads"
-        );
         let armed = gate.arm();
         app.events.post(MeetingEvent::Deleted {
             meeting_id: uuid::Uuid::new_v4(),
@@ -4562,12 +4449,14 @@ mod tests {
     /// A poll tick that waited is followed by one overdue tick, then the
     /// next a full interval later, never by a burst of the ticks it
     /// missed (`MissedTickBehavior::Delay`). The poll's reload is held for
-    /// two intervals and a half.
+    /// two intervals and a half. Commits keep coming meanwhile, as a busy
+    /// pipeline's stage writes do, so every tick reloads.
     #[test]
     fn a_held_poll_is_not_followed_by_a_burst() {
         let runtime = one_worker_runtime();
         let dir = tempfile::tempdir().unwrap();
-        let (_app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let (app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let _commits = KeepCommitting::on(&app.store);
         let gate = &pipeline.gate;
         let patience = std::time::Duration::from_secs(5);
         // How many passes one tick makes, unheld.
@@ -4595,5 +4484,342 @@ mod tests {
             after < 2 * per_tick,
             "the held tick was followed by a burst: {after} passes, {per_tick} per tick"
         );
+    }
+
+    /// A thread that commits to the store every 100 ms until dropped.
+    struct KeepCommitting {
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl KeepCommitting {
+        fn on(store: &Arc<Store>) -> Self {
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (store, stopped) = (store.clone(), stop.clone());
+            let thread = std::thread::spawn(move || {
+                while !stopped.load(Ordering::SeqCst) {
+                    let settings = store.settings().unwrap();
+                    store.save_settings(&settings).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            });
+            KeepCommitting {
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for KeepCommitting {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// A host over `store` and the fakes, with `pipeline` in place of the
+    /// fake's when there is one, the page ready and the sample meeting's
+    /// detail shown, and its [`TimedSink`].
+    fn idle_host(
+        store: &Arc<Store>,
+        fakes: &steno_host::fakes::FakeServices,
+        pipeline: Option<Arc<GatedPipeline>>,
+    ) -> (Arc<Host>, Arc<TimedSink>) {
+        use steno_bridge::BridgeHost as _;
+        let meeting = steno_core::testing::sample_data::meeting();
+        store.save_meeting(&meeting).unwrap();
+        let mut services = fakes.services();
+        if let Some(pipeline) = pipeline {
+            services.pipeline = pipeline;
+        }
+        let host = Arc::new(
+            Host::new(store.clone(), services, steno_host::HostConfig::default()).unwrap(),
+        );
+        let sink = Arc::new(TimedSink::default());
+        host.attach(sink.clone());
+        host.page_ready().unwrap();
+        host.request_meeting(meeting.id);
+        (host, sink)
+    }
+
+    /// Waits until `n` passes of the reload owner ran since `since`: each
+    /// publishes `settings.phone` (the pairing poll).
+    fn passes(sink: &TimedSink, since: std::time::Instant, n: usize) {
+        found_within(PATIENCE, "the reload owner's passes", || {
+            (sink.since(BridgeTopic::SettingsPhone, since).len() >= n).then_some(())
+        });
+    }
+
+    /// P40 check 19: with the page ready and nothing committed, ten passes
+    /// of the reload owner send no `meetings.list`, `meeting.detail` or
+    /// `progress` snapshot (the light part's `settings.phone` goes out
+    /// each time). The owner ticks every 50 ms here, two seconds in the
+    /// app.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn an_idle_app_sends_no_list_detail_or_progress() {
+        let (_dir, store) = temp_store();
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        let (host, sink) = idle_host(&store, &fakes, None);
+        let since = std::time::Instant::now();
+        let owner = tokio::spawn(own_the_reloads(
+            host.clone(),
+            std::time::Duration::from_millis(50),
+        ));
+        passes(&sink, since, 10);
+        owner.abort();
+        for topic in [
+            BridgeTopic::MeetingsList,
+            BridgeTopic::MeetingDetail,
+            BridgeTopic::Progress,
+        ] {
+            assert_eq!(
+                sink.since(topic, since).len(),
+                0,
+                "{topic:?} sent by an idle app"
+            );
+        }
+    }
+
+    /// P40 check 20 over `store`: `writer` retitles the sample meeting, and
+    /// the list carries the title within one poll interval and [`LIVE`].
+    fn a_retitle_shows_within_one_poll(store: &Arc<Store>, writer: &Store) {
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        let (host, sink) = idle_host(store, &fakes, None);
+        let owner = tokio::spawn(own_the_reloads(host.clone(), POLL_INTERVAL));
+        passes(&sink, std::time::Instant::now(), 1);
+        let since = std::time::Instant::now();
+        let meeting = steno_core::testing::sample_data::meeting();
+        writer
+            .update_meeting(meeting.id, Utc::now(), |meeting| {
+                "Retitled".clone_into(&mut meeting.title);
+                meeting.title_origin = steno_core::TitleOrigin::User;
+                Ok(())
+            })
+            .unwrap();
+        let shown = found_within(POLL_INTERVAL + LIVE, "the retitled meeting listed", || {
+            sink.since(BridgeTopic::MeetingsList, since)
+                .into_iter()
+                .find(|(_, list)| list.to_string().contains("Retitled"))
+                .map(|(at, _)| at)
+        });
+        let took = shown.duration_since(since);
+        assert!(
+            took < POLL_INTERVAL + LIVE,
+            "the list carried the title {took:?} after the commit"
+        );
+        owner.abort();
+    }
+
+    /// P40 check 20, a guard for the gate: a second connection to the
+    /// database (another process: the Swift app, the CLI) retitles a
+    /// meeting, which this process's commit hook never sees, and the list
+    /// carries the title within one poll interval, through the host
+    /// reader's `data_version`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_commit_from_another_process_shows_within_one_poll() {
+        let (dir, store) = temp_store();
+        let other = Store::open(crate::testing::database_in(dir.path())).unwrap();
+        a_retitle_shows_within_one_poll(&store, &other);
+    }
+
+    /// P40 check 20, the in-process side: a commit through the in-memory
+    /// store's writer, whose one connection's `data_version` does not move
+    /// for its own commits, shows within one poll interval, through the
+    /// writer's commit count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn an_in_process_commit_shows_within_one_poll() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        a_retitle_shows_within_one_poll(&store, &store);
+    }
+
+    /// P40 check 22, a guard for the gate: an event that commits nothing
+    /// (`StoreBusy`, `OperationFailed`, `ModelsMissing`, each for a meeting
+    /// the detail does not show) still reloads, since the pipeline's own
+    /// flags that the detail reads moved: the detail and the progress reach
+    /// the sink within [`LIVE`], from a forced pass whose reload the gate
+    /// counts.
+    #[test]
+    fn an_event_without_a_commit_still_reloads() {
+        use steno_bridge::BridgeHost as _;
+        let runtime = one_worker_runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let (app, pipeline, host) = launched_over_a_gated_pipeline(&runtime, dir.path());
+        let sink = Arc::new(TimedSink::default());
+        host.attach(sink.clone());
+        host.page_ready().unwrap();
+        let other = uuid::Uuid::new_v4();
+        for event in [
+            MeetingEvent::StoreBusy { meeting_id: other },
+            MeetingEvent::OperationFailed {
+                meeting_id: other,
+                operation: steno_core::MeetingOperation::Reexport,
+                stage: steno_core::PipelineStage::Deliver,
+                failure: "deliver: the vault is gone".to_owned(),
+            },
+            MeetingEvent::ModelsMissing { meeting_id: other },
+        ] {
+            let name = format!("{event:?}");
+            let before = pipeline.gate.reloads();
+            let since = std::time::Instant::now();
+            app.events.post(event);
+            for topic in [BridgeTopic::MeetingDetail, BridgeTopic::Progress] {
+                let at = found_within(PATIENCE, "the event's snapshots", || {
+                    sink.since(topic, since).first().map(|(at, _)| *at)
+                });
+                let took = at.duration_since(since);
+                assert!(
+                    took < LIVE,
+                    "{name}: {topic:?} came {took:?} after the event"
+                );
+            }
+            assert!(
+                pipeline.gate.reloads() > before,
+                "{name}: the detail reloaded"
+            );
+        }
+        runtime.shutdown_background();
+    }
+
+    /// P40 check 22: what the light part follows shows within one poll
+    /// with nothing committed: a microphone permission granted in the
+    /// system's settings changes the Recording section's subtitle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_permission_granted_outside_the_app_shows_within_one_poll() {
+        use steno_bridge::{PermissionKind, PermissionState};
+        let (_dir, store) = temp_store();
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        fakes
+            .permissions
+            .states
+            .lock()
+            .unwrap()
+            .insert(PermissionKind::Microphone, PermissionState::Denied);
+        let (host, sink) = idle_host(&store, &fakes, None);
+        let denied = host.snapshot(BridgeTopic::SettingsRecording).unwrap()["subtitle"].clone();
+        let owner = tokio::spawn(own_the_reloads(host.clone(), POLL_INTERVAL));
+        passes(&sink, std::time::Instant::now(), 1);
+        let since = std::time::Instant::now();
+        fakes
+            .permissions
+            .states
+            .lock()
+            .unwrap()
+            .insert(PermissionKind::Microphone, PermissionState::Granted);
+        let shown = found_within(POLL_INTERVAL + LIVE, "the granted microphone", || {
+            sink.since(BridgeTopic::SettingsRecording, since)
+                .into_iter()
+                .find(|(_, section)| section["subtitle"] != denied)
+                .map(|(at, _)| at)
+        });
+        let took = shown.duration_since(since);
+        assert!(
+            took < POLL_INTERVAL + LIVE,
+            "shown {took:?} after the grant"
+        );
+        owner.abort();
+    }
+
+    /// A forced pass runs the light part too: with no reload owner, a
+    /// microphone permission granted in the system's settings shows at
+    /// the next [`Host::store_changed`].
+    #[test]
+    fn a_forced_pass_follows_what_the_store_does_not_hold() {
+        use steno_bridge::{PermissionKind, PermissionState};
+        let (_dir, store) = temp_store();
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        let states = &fakes.permissions.states;
+        states
+            .lock()
+            .unwrap()
+            .insert(PermissionKind::Microphone, PermissionState::Denied);
+        let (host, _sink) = idle_host(&store, &fakes, None);
+        let denied = host.snapshot(BridgeTopic::SettingsRecording).unwrap()["subtitle"].clone();
+        states
+            .lock()
+            .unwrap()
+            .insert(PermissionKind::Microphone, PermissionState::Granted);
+        host.store_changed();
+        assert_ne!(
+            host.snapshot(BridgeTopic::SettingsRecording).unwrap()["subtitle"],
+            denied,
+            "the grant shows after a forced pass"
+        );
+    }
+
+    /// A request that races a tick is honoured with nothing committed: the
+    /// owner here ticks every millisecond, so most requests land beside a
+    /// tick, and each one still reloads the detail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_request_beside_a_tick_still_reloads() {
+        let (_dir, store) = temp_store();
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        let pipeline = Arc::new(GatedPipeline::default());
+        let (host, sink) = idle_host(&store, &fakes, Some(pipeline.clone()));
+        let owner = tokio::spawn(own_the_reloads(
+            host.clone(),
+            std::time::Duration::from_millis(1),
+        ));
+        passes(&sink, std::time::Instant::now(), 3);
+        for request in 1..=20 {
+            let before = pipeline.gate.reloads();
+            host.request_reload();
+            assert!(
+                pipeline.gate.wait_for(LIVE, |state| state.reloads > before),
+                "request {request} reloaded nothing"
+            );
+        }
+        owner.abort();
+    }
+
+    /// P40 check 23: ten requests made while a pass is held run exactly
+    /// one more forced reload once it goes on: the pass took the flag
+    /// before it read the mark, and the `Notify`'s stored permit wakes the
+    /// owner once. Counted in reloads, not passes, since a tick may land
+    /// beside the permit; the owner here ticks once an hour.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn reload_requests_during_a_pass_run_one_more_pass() {
+        let (_dir, store) = temp_store();
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        let pipeline = Arc::new(GatedPipeline::default());
+        let (host, sink) = idle_host(&store, &fakes, Some(pipeline.clone()));
+        let gate = &pipeline.gate;
+        let owner = tokio::spawn(own_the_reloads(
+            host.clone(),
+            std::time::Duration::from_secs(3600),
+        ));
+        passes(&sink, std::time::Instant::now(), 1);
+
+        // What one forced reload asks the gate.
+        let before = gate.reloads();
+        host.request_reload();
+        assert!(gate.wait_for(PATIENCE, |state| state.reloads > before));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let per_reload = gate.reloads() - before;
+
+        let base = gate.reloads();
+        let armed = gate.arm();
+        host.request_reload();
+        assert!(
+            gate.wait_for(PATIENCE, |state| state.entered == 1),
+            "the pass is held"
+        );
+        for _ in 0..10 {
+            host.request_reload();
+        }
+        drop(armed);
+        let expected = base + 2 * per_reload;
+        assert!(
+            gate.wait_for(PATIENCE, |state| state.reloads >= expected),
+            "one more reload ran"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            gate.reloads(),
+            expected,
+            "the ten requests ran one more reload, {per_reload} gate calls each"
+        );
+        owner.abort();
     }
 }

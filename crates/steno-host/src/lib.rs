@@ -10,7 +10,8 @@
 //!
 //! - [`host`]: [`Host`], [`HostConfig`], the dialog closures and the
 //!   lifecycle calls the shell makes between commands.
-//! - [`publisher`]: the coalescing of topics and the 20 Hz throttle.
+//! - [`publisher`]: the coalescing of topics; [`recording_feed`]: the
+//!   `recording` topic's own thread and its 20 Hz throttle.
 //! - [`services`] and `fakes`: the seams to the shell, the pipeline and
 //!   the other crates, and a fake for each (behind the `fakes` feature).
 //! - [`main_window`], [`settings`], [`onboarding`], [`speakers`]: the view
@@ -48,13 +49,15 @@
 //!
 //! The view models are plain state machines behind the [`Host`]'s mutex,
 //! which is what the Swift `@MainActor` amounted to. Where Swift followed
-//! the store through GRDB observation, the Rust host reloads on
-//! [`Host::store_changed`], which the pipeline and the shell call after a
-//! write; where Swift republished a topic through observation tracking,
-//! each command here names the topics it changed and the
+//! the store through GRDB observation, the Rust host reloads in
+//! [`Host::reload_pass`], which the services' poll task runs every two
+//! seconds and on each [`Host::request_reload`], and which reloads only
+//! when the store's change mark moved or a reload was asked for; where
+//! Swift republished a topic through observation tracking, each command
+//! here names the topics it changed and the
 //! [`TopicPublisher`](publisher::TopicPublisher) coalesces them into one
-//! full snapshot per topic, `recording` at most at 20 Hz, as
-//! `TopicPublisher.swift` did.
+//! full snapshot per topic, as `TopicPublisher.swift` did. `recording`
+//! comes from its own feed, at most at 20 Hz.
 
 // Bridge snapshots and recorder status values carry many flags each; the
 // shape is the contract's, not a design choice to lint.
@@ -67,6 +70,7 @@ pub mod labels;
 pub mod main_window;
 pub mod onboarding;
 pub mod publisher;
+pub mod recording_feed;
 pub mod services;
 pub mod settings;
 pub mod setup;

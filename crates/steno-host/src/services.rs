@@ -24,7 +24,8 @@
 //!
 //! Most services are called with the host's view-model lock held: the
 //! pipeline from the detail commands and every Save, the recorder's
-//! `status` for each `recording` snapshot, the clip player's `playing`
+//! `status` in a reload pass (the `recording` feed reads it with no host
+//! lock held), the clip player's `playing`
 //! while the detail is built, the handover, devices, folder usage, updater
 //! and login item from the Settings commands, and the secret store when
 //! the Settings sections reload. An implementation therefore must not
@@ -228,13 +229,15 @@ impl RecorderStatus {
 
 /// The one recorder (WP5 wires the capture session behind it). A change
 /// reaches the host through
-/// [`Host::recorder_changed`](crate::Host::recorder_changed), never while
-/// holding a lock `status` takes, since `status` is called with the host's
-/// lock held (see the module doc). The commands are called with no host
-/// lock held, so they may report their change from inside, on the calling
-/// thread, as `steno_services`' capture recorder does. The fake runs the
-/// state machine without a session and records every start, stop and
-/// keep. Swift: `RecordingController`.
+/// [`Host::recorder_changed`](crate::Host::recorder_changed), which only
+/// wakes the `recording` feed. The recorder never calls it while holding
+/// a lock `status` takes: the hook the services wire also reads `status`,
+/// and the host's reload pass calls it with the host's lock held (see the
+/// module doc). The commands are called with no host lock held, so they
+/// may report their change from inside, on the calling thread, as
+/// `steno_services`' capture recorder does. The fake runs the state
+/// machine without a session and records every start, stop and keep.
+/// Swift: `RecordingController`.
 pub trait Recorder: Send + Sync {
     fn status(&self) -> RecorderStatus;
     /// Starts a recording; `call_app` is the app the detection prompt named.
@@ -338,9 +341,9 @@ pub struct LeftRecording {
 /// What the view models ask the processing pipeline and the retention
 /// sweep for (WP6b implements it). Called with the host's lock held (see
 /// the module doc): the pipeline reports its work through
-/// [`Host::store_changed`](crate::Host::store_changed) and
-/// [`Host::apply_meeting_event`](crate::Host::apply_meeting_event) from its
-/// own thread, never from inside these methods, and never while holding a
+/// [`Host::apply_meeting_event`](crate::Host::apply_meeting_event) and
+/// [`Host::request_reload`](crate::Host::request_reload) from its own
+/// thread, never from inside these methods, and never while holding a
 /// lock these methods take. The fake records every call. Swift:
 /// `ProcessingPipeline` and `RetentionSweep` through `AppEnvironment`.
 pub trait Pipeline: Send + Sync {

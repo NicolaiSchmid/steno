@@ -668,7 +668,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   through `ExportValidator`, which WP7's Obsidian destination implements.
 - [x] `settings.iphone.beginPairing`, `.cancelPairing`, `.revoke`: through `Handover`,
   which WP7 implements; the two-second pairing poll is the shell's timer calling
-  `Host::refresh_pairing`.
+  `Host::refresh_pairing` (since P40 PR 2c, #304, the reload pass's light part).
 - [x] `onboarding.request` (the page sees `isRequesting` while the prompt is up),
   `.skip`, `.refresh`, `.advance`, `.back`, `.saveSummaries`,
   `.confirmSummariesWithCodex`, `.chooseVault`, `.saveVault`, `.skipSetup`, `.finish`.
@@ -824,7 +824,8 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The web app follows the store through a two-second poll (`App::launch`) where the
   Swift app had GRDB observation; a row written by the pipeline shows within that
   interval. Observation inside the Rust store, or a change hook on `Store::write`,
-  removes the poll.
+  removes the poll. (Since P40 PR 2c, #304, the writer's commit hook and
+  `data_version` gate the poll, so an idle tick reloads nothing; the poll stays.)
 - The recorder starts with the calendar lookup (S3 of
   `.plans/2026-10-07-stable-promotion.md`), on a thread of its own so it never holds a
   start up (see the parity list's calendar item). The auto-stop grace after a call ends
@@ -1598,13 +1599,15 @@ still has to draw the window side. `[ ]` is not ported yet.
     first Linux release).
 - The host emits under its `publishing` lock, the main thread can be waiting for a
   thread that holds it (a Stop from the tray joins the recorder's level thread, which
-  publishes), and the tray's setters wait for the main thread when called from
-  another. So the shell's window sink queues every snapshot and delivers it on the
-  main thread, in emit order (`WindowSink` in `apps/desktop/src-tauri/src/host.rs`);
-  before, a Stop from the tray froze the app.
+  publishes; since P40 PR 2c, #304, the level thread only pokes the `recording`
+  feed, which sends from a thread of its own), and the tray's setters wait for the
+  main thread when called from another. So the shell's window sink queues every
+  snapshot and delivers it on the main thread, in emit order (`WindowSink` in
+  `apps/desktop/src-tauri/src/host.rs`); before, a Stop from the tray froze the app.
 - The host calls the recorder's commands with its lock released: the recorder reports
-  each change through `Host::recorder_changed`, which takes that lock, so a failed
-  start, whose permission re-read ran under it, froze the caller.
+  each change through `Host::recorder_changed`, which took that lock (since P40 PR 2c,
+  #304, it takes none), so a failed start, whose permission re-read ran under it,
+  froze the caller.
 - The shell's seams WP6b leaves open, each with the package that closes it: (1) closed
   by S2: the services' `DetectionController` raises and clears the prompt through
   `panels::set_prompt` (`host::ShellPromptPanel`) and hears of its X and its Record
@@ -1623,9 +1626,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   code (an audio output), not wiring, and follows the stable release
   (`.plans/2026-10-07-stable-promotion.md`, D3); the QR encoder, the other half of
   this seam, landed with S4.
-- The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
-  `App::launch` and runs whether or not a code is shown, where Swift ran it only while
-  the Phones pane showed one.
+- The two-second pairing poll (`Host::refresh_pairing`, since P40 PR 2c, #304, the
+  reload pass's light part) rides on the store poll in `App::launch` and runs whether
+  or not a code is shown, where Swift ran it only while the Phones pane showed one.
 - At `warn`, the default level, a log line carries ids, stages, counts and error kinds,
   never transcript or model text, audio, a file path or a secret; the full text goes to
   `debug` (`steno_services::log_to_stderr`). The CLI prints a failed run once, as Swift

@@ -623,6 +623,47 @@ fn a_held_vault_check_on_page_two_leaves_the_host_live() {
     );
 }
 
+/// Page 2: vault A chosen and accepted, then vault B chosen and refused:
+/// the row does not say B is saved, since the second save began unsaved,
+/// and the store keeps A. Rust only.
+#[test]
+fn a_refused_vault_after_an_accepted_one_is_not_marked_saved() {
+    let harness = builder()
+        .choose_in_turn(&["/Vaults/A", "/Vaults/B"])
+        .build();
+    harness.host.onboarding_choose_vault().unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["setup"][1]["savedLine"],
+        "Saved: A"
+    );
+
+    harness
+        .fakes
+        .export_validator
+        .fail_validation(Some("The vault at /Vaults/B is not there."));
+    harness.host.onboarding_choose_vault().unwrap();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_ne!(
+        onboarding["setup"][1]["savedLine"], "Saved: B",
+        "{onboarding}"
+    );
+    assert_eq!(
+        onboarding["vault"]["validationMessage"],
+        "The vault at /Vaults/B is not there."
+    );
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Vaults/A",
+        "the store keeps the accepted vault"
+    );
+}
+
 /// Page 2: another vault chosen, then the stored one again while the
 /// first choice's check runs: the stored vault stays, as the row shows.
 /// Rust only: Swift's checks ran one at a time.
@@ -1085,10 +1126,12 @@ fn the_system_audio_test_is_refused_while_recording() {
         }
     }
 
-    // The recording ends: both rows drop the line before any press.
+    // The recording ends: both rows drop the line before any press, at
+    // the reload owner's next pass, which the move asks for.
     harness.fakes.recorder.set_status(RecorderStatus::idle());
     harness.sink.clear();
     harness.host.recorder_changed();
+    harness.host.reload_pass();
     for topic in [BridgeTopic::Onboarding, BridgeTopic::SettingsRecording] {
         let published = harness.sink.all(topic);
         let row = &published.last().expect("published")["permissions"][1];

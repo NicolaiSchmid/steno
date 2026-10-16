@@ -27,7 +27,7 @@ mod transcript;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -237,6 +237,16 @@ pub struct Store {
     reader: usize,
 }
 
+/// Where a database stands ([`Store::change_mark`]): equal marks from one
+/// handle mean nothing committed between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeMark {
+    /// The writer's commits, from its commit hook.
+    commits: u64,
+    /// `PRAGMA data_version` on the handle's reader; 0 in memory.
+    data_version: i64,
+}
+
 /// What every handle on one database shares.
 struct Connections {
     writer: Mutex<Connection>,
@@ -248,6 +258,9 @@ struct Connections {
     readers: [Mutex<Option<Connection>>; READERS],
     /// Whether the handle [`Store::with_own_reader`] returned is alive.
     own_reader_open: AtomicBool,
+    /// The writer's commits since the store opened, which its commit hook
+    /// counts ([`Store::change_mark`]).
+    commits: Arc<AtomicU64>,
     /// [`Store::probe_commits`].
     #[cfg(any(test, feature = "testing"))]
     commit_probe: std::sync::OnceLock<CommitProbe>,
@@ -344,15 +357,25 @@ impl Store {
     }
 
     /// The store over a writer that is set up and at the current schema,
-    /// with the shared reader opened on `path`.
+    /// with the shared reader opened on `path` and the writer's commit hook
+    /// counting its commits from now on.
     fn over(writer: Connection, path: Option<&Path>) -> Result<Store> {
         let shared = path.map(open_reader).transpose()?;
+        let commits = Arc::new(AtomicU64::new(0));
+        let counted = commits.clone();
+        // Inside the writer's commit: it takes no lock and calls nothing,
+        // and `false` lets the commit go on.
+        writer.commit_hook(Some(move || {
+            counted.fetch_add(1, Ordering::AcqRel);
+            false
+        }))?;
         Ok(Store {
             connections: Arc::new(Connections {
                 writer: Mutex::new(writer),
                 path: path.map(Path::to_owned),
                 readers: [Mutex::new(shared), Mutex::new(None)],
                 own_reader_open: AtomicBool::new(false),
+                commits,
                 #[cfg(any(test, feature = "testing"))]
                 commit_probe: std::sync::OnceLock::new(),
             }),
@@ -396,6 +419,53 @@ impl Store {
             *lock(&connections.readers[OWN_READER]) = Some(open_reader(path)?);
         }
         Ok(own)
+    }
+
+    /// Where the database stands, for a reload that runs only when it
+    /// moved: two marks read on this handle compare unequal once anything
+    /// committed between them. It joins two counts. The writer's commit
+    /// hook counts this process's commits, which is all an in-memory store
+    /// has: its one connection's `data_version` does not move for its own
+    /// commits. `PRAGMA data_version` on this handle's reader moves when
+    /// any other connection commits, the other processes' included (the
+    /// Swift app, the CLI), and the writer's own too.
+    ///
+    /// The hook runs just before a commit is visible, so a mark read in
+    /// between can count a commit whose rows a read still misses; the
+    /// reader's `data_version` moves only once it is visible, so the next
+    /// mark differs again. In memory, a read waits for the commit on the
+    /// one connection. A commit that changed nothing, or failed after the
+    /// hook, moves it too.
+    ///
+    /// Takes this handle's reader for one pragma, never the writer. Rust
+    /// only: the Swift app followed the database through GRDB's
+    /// observation.
+    ///
+    /// ```
+    /// # fn main() -> steno_core::store::Result<()> {
+    /// let store = steno_core::Store::in_memory()?;
+    /// let before = store.change_mark()?;
+    /// store.settings()?;
+    /// assert_eq!(store.change_mark()?, before, "a read moves nothing");
+    /// let settings = store.settings()?;
+    /// store.save_settings(&settings)?;
+    /// assert_ne!(store.change_mark()?, before);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn change_mark(&self) -> Result<ChangeMark> {
+        let _inside = Inside::enter(&self.connections);
+        let data_version = match &self.connections.path {
+            None => 0,
+            Some(_) => lock(&self.connections.readers[self.reader])
+                .as_ref()
+                .expect("a file store's handle has its reader open")
+                .query_row("PRAGMA data_version", [], |row| row.get(0))?,
+        };
+        Ok(ChangeMark {
+            commits: self.connections.commits.load(Ordering::Acquire),
+            data_version,
+        })
     }
 
     /// The writer. A panic while a caller held it has already rolled its
@@ -1164,5 +1234,46 @@ mod tests {
             error.to_string(),
             "the database is in journal mode delete, not wal"
         );
+    }
+
+    /// P40 check 20, the store's side: a commit on another connection to
+    /// the file (another process: the Swift app, the CLI) moves the host
+    /// handle's change mark, through its reader's `data_version`, which
+    /// this store's commit hook never sees.
+    #[test]
+    fn a_commit_from_another_connection_moves_the_change_mark() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_store, host, path) = file_store(&directory);
+        let other = Store::open(&path).unwrap();
+        let before = host.change_mark().unwrap();
+        assert_eq!(host.change_mark().unwrap(), before, "nothing committed");
+        let settings = other.settings().unwrap();
+        other.save_settings(&settings).unwrap();
+        assert_ne!(host.change_mark().unwrap(), before);
+    }
+
+    /// P40 check 20, the store's side: this process's commit moves the
+    /// mark on every handle, the in-memory store's included, whose one
+    /// connection's `data_version` stays put for its own commits, so only
+    /// the writer's commit hook counts it there. A read moves nothing. The
+    /// marks of two handles are not compared: each reads its own reader.
+    #[test]
+    fn an_in_process_commit_moves_the_change_mark_and_a_read_does_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let (file, file_host, _) = file_store(&directory);
+        let memory = Arc::new(Store::in_memory().unwrap());
+        let memory_host = memory.with_own_reader().unwrap();
+        for (name, store, host) in [
+            ("the file store", &file, &file_host),
+            ("the in-memory store", &memory, &memory_host),
+        ] {
+            let before = host.change_mark().unwrap();
+            let settings = store.settings().unwrap();
+            host.settings().unwrap();
+            assert_eq!(host.change_mark().unwrap(), before, "{name}: a read");
+            store.save_settings(&settings).unwrap();
+            let after = host.change_mark().unwrap();
+            assert_ne!(after, before, "{name}: a commit");
+        }
     }
 }

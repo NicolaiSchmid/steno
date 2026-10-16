@@ -81,6 +81,19 @@ impl RecordingSink {
     pub fn count(&self, topic: BridgeTopic) -> usize {
         self.all(topic).len()
     }
+
+    /// Waits until `n` `recording` snapshots arrived: the feed sends them
+    /// from its own thread. Panics after five seconds.
+    pub fn wait_for_recording(&self, n: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.count(BridgeTopic::Recording) < n {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waited five seconds for recording snapshot {n}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
 }
 
 impl EventSink for RecordingSink {
@@ -99,7 +112,7 @@ pub struct Harness {
     pub host: Host,
     pub sink: Arc<RecordingSink>,
     /// The host as the `confirm_with` prompt sees it; emptied on drop, so
-    /// the prompt's handle does not keep the host (and its flush thread)
+    /// the prompt's handle does not keep the host (and its feed thread)
     /// alive past the test.
     prompt_host: Arc<Mutex<Option<Host>>>,
 }
@@ -263,6 +276,9 @@ impl HarnessBuilder {
         host.attach(sink.clone());
         if self.page_ready {
             host.page_ready().unwrap();
+            // The feed's `recording` comes from its own thread; cleared
+            // with the rest once it came.
+            sink.wait_for_recording(1);
             sink.clear();
         }
         Harness {

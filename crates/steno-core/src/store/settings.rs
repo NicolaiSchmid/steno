@@ -18,14 +18,14 @@
 //! (Whisper, Parakeet Ultra and the German Parakeet the Swift app offered)
 //! to it. Rust only.
 
-use rusqlite::{OptionalExtension as _, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::Deserialize;
 use serde::de::{self, Deserializer, Visitor};
 use serde_json::Value;
 
 use super::{Result, Store, StoreError, execute_cached, query_all};
 use crate::json;
-use crate::model::Settings;
+use crate::model::{AudioRetention, Settings};
 
 /// The one engine the Rust app runs, a Swift engine too: what
 /// [`Store::retire_speech_engine`] stores in place of any other id.
@@ -39,6 +39,9 @@ const SPEECH_ENGINE_KEY: &str = "speechEngineID";
 /// The key [`Settings::handover_port`] is stored under, the one users type
 /// by hand (`apps/desktop/README.md`).
 const HANDOVER_PORT_KEY: &str = "handoverPort";
+
+/// The key [`Settings::default_retention`] is stored under.
+const DEFAULT_RETENTION_KEY: &str = "defaultRetention";
 
 /// What is wrong with a stored setting
 /// ([`StoreError::UndecodableSetting`]), in words that never quote the
@@ -136,6 +139,62 @@ fn undecodable_row(defaults: &Settings, merged: &Value) -> Option<StoreError> {
         })
 }
 
+/// Every stored setting row, as key and JSON text.
+fn stored_rows(connection: &Connection) -> Result<Vec<(String, String)>> {
+    query_all(connection, "SELECT key, value FROM setting", [], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })
+}
+
+/// `defaults` overlaid with `rows` ([`Store::settings_with_defaults`]).
+fn overlaid(defaults: &Settings, rows: Vec<(String, String)>) -> Result<Settings> {
+    let mut merged = object(defaults)?;
+    for (key, value) in rows {
+        if key == HANDOVER_PORT_KEY && json::from_column_str::<Option<u16>>(&value).is_err() {
+            tracing::warn!(
+                target: "steno::store",
+                "the stored {HANDOVER_PORT_KEY} is not a port from 0 to 65535, so it is ignored"
+            );
+            continue;
+        }
+        let Ok(value) = json::from_column_str(&value) else {
+            return Err(StoreError::UndecodableSetting {
+                key,
+                problem: SettingProblem::NotJson,
+            });
+        };
+        merged.insert(key, value);
+    }
+    decode(defaults, &Value::Object(merged))
+}
+
+/// The default retention as stored, read on `connection` from its own row
+/// alone: inside the stop's save ([`Store::save_stopped_recording`]), so
+/// the save needs no reader and no other setting can fail it. A missing
+/// row is [`Settings::default`]'s. A row that cannot be read as a
+/// retention rule is [`AudioRetention::KeepForever`], which deletes
+/// nothing, with a warning that names the key and never the value. Rust
+/// only: the Swift app loaded every setting and failed on any of them.
+pub(super) fn default_retention(connection: &Connection) -> Result<AudioRetention> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value FROM setting WHERE key = ?1",
+            params![DEFAULT_RETENTION_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(stored) = stored else {
+        return Ok(Settings::default().default_retention);
+    };
+    Ok(json::from_column_str(&stored).unwrap_or_else(|_| {
+        tracing::warn!(
+            target: "steno::store",
+            "the stored {DEFAULT_RETENTION_KEY} is not a retention rule, so this recording's audio is kept"
+        );
+        AudioRetention::KeepForever
+    }))
+}
+
 impl Store {
     /// The defaults overlaid with every stored row.
     pub fn settings(&self) -> Result<Settings> {
@@ -145,29 +204,8 @@ impl Store {
     /// [`Store::settings`] over explicit defaults (tests pass one with a
     /// known audio folder).
     pub fn settings_with_defaults(&self, defaults: &Settings) -> Result<Settings> {
-        let rows = self.read(|connection| {
-            query_all(connection, "SELECT key, value FROM setting", [], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-        })?;
-        let mut merged = object(defaults)?;
-        for (key, value) in rows {
-            if key == HANDOVER_PORT_KEY && json::from_column_str::<Option<u16>>(&value).is_err() {
-                tracing::warn!(
-                    target: "steno::store",
-                    "the stored {HANDOVER_PORT_KEY} is not a port from 0 to 65535, so it is ignored"
-                );
-                continue;
-            }
-            let Ok(value) = json::from_column_str(&value) else {
-                return Err(StoreError::UndecodableSetting {
-                    key,
-                    problem: SettingProblem::NotJson,
-                });
-            };
-            merged.insert(key, value);
-        }
-        decode(defaults, &Value::Object(merged))
+        let rows = self.read(stored_rows)?;
+        overlaid(defaults, rows)
     }
 
     /// Writes every property and removes the rows of known properties that

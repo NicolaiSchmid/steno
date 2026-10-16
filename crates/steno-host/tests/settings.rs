@@ -2220,23 +2220,32 @@ fn include_audio(host: &steno_host::Host, on: bool) {
 }
 
 /// Include audio turned on, then off again while the first save's vault
-/// check runs: the export stores off, as the form shows. Rust only: Swift's
-/// checks ran one at a time.
+/// check runs: the export stores off, as the form shows, and the first
+/// check, refused once the undo stored, shows no refusal: a stale save
+/// reports nothing. Rust only: Swift's checks ran one at a time.
 #[test]
 fn audio_turned_off_while_its_check_runs_is_stored_off() {
     let harness = Harness::builder()
         .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
         .build();
+    let refuse = harness.fakes.export_validator.clone();
     undo_while_the_check_runs(
         &harness,
         |host| include_audio(host, true),
-        |host| include_audio(host, false),
+        move |host| {
+            include_audio(host, false);
+            refuse.fail_validation(Some("The vault is gone."));
+        },
     );
     let stored = harness.store.settings().unwrap().obsidian.unwrap();
     let export = harness.snapshot(BridgeTopic::SettingsExport);
     assert_eq!(export["includeAudio"], false);
     assert!(!stored.include_audio, "the store holds what the form shows");
     assert_eq!(export["saved"], true);
+    assert!(
+        export["validationMessage"].is_null(),
+        "the stale check's refusal shows nothing: {export}"
+    );
 }
 
 /// The export turned on, then off again while its vault check runs: it
@@ -2645,7 +2654,7 @@ fn phones_pair_list_and_revoke_devices() {
         .as_ref()
         .unwrap()
         .pair(paired_phone());
-    harness.host.refresh_pairing();
+    harness.host.reload_pass();
     let phone = harness.snapshot(BridgeTopic::SettingsPhone);
     assert!(phone.get("pairing").is_none());
     assert_eq!(phone["devices"][0]["name"], "Nicolai's iPhone");
@@ -2693,7 +2702,7 @@ fn phones_pair_list_and_revoke_devices() {
     // A code that runs out with no phone closes itself.
     harness.host.settings_phone_begin_pairing().unwrap();
     harness.fakes.clock.set(date("2026-09-29T12:55:00.000Z"));
-    harness.host.refresh_pairing();
+    harness.host.reload_pass();
     assert!(
         harness
             .snapshot(BridgeTopic::SettingsPhone)

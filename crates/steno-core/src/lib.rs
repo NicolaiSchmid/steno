@@ -10,11 +10,12 @@
 //!   `EchoCanceller`, `LanguageModel`, `Destination`, `SecretStore`,
 //!   `SpeakerMemory` and the pipeline stage traits), one trait per file,
 //!   with the async-trait decision documented once in its module doc.
-//! - [`store`]: the SQLite store, its writer and reader connections, and
-//!   its migrations; [`store::convert`] holds the column codecs a query
-//!   outside the crate uses. With the `tokio` feature, `Store::reading`
-//!   and `Store::writing` run a store step from async code on tokio's
-//!   blocking pool.
+//! - [`store`]: the SQLite store, its writer and reader connections, its
+//!   migrations, and its change mark (`Store::change_mark`), which the
+//!   host's reload pass compares; [`store::convert`] holds the column
+//!   codecs a query outside the crate uses. With the `tokio` feature,
+//!   `Store::reading` and `Store::writing` run a store step from async
+//!   code on tokio's blocking pool.
 //! - `testing` (feature `testing`): deterministic fakes for every
 //!   boundary, so the pipeline, the CLI and the shell test without models.
 //!   The feature also adds `Store::probe_commits`, which lets a test read
@@ -75,6 +76,7 @@ pub use protocols::{
 };
 pub use recording_layout::RecordingLayout;
 pub use store::{
-    DeletedMeeting, ExpiredAsset, SearchHit, SettingProblem, StageRateRow, Store, StoreError,
+    ChangeMark, DeletedMeeting, ExpiredAsset, SearchHit, SettingProblem, StageRateRow, Store,
+    StoreError,
 };
 pub use string_enum::UnknownCase;

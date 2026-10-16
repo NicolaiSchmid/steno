@@ -30,7 +30,9 @@ directories = "6"
 # `statvfs` and `GetDiskFreeSpaceExW` behind a safe call (the recorder's
 # disk watch).
 fs4 = "1"
-rusqlite = { version = "0.40", features = ["bundled"] }
+# `hooks`: the writer's commit hook behind `Store::change_mark`, which the
+# host's reload pass reads (P40 decision 3).
+rusqlite = { version = "0.40", features = ["bundled", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
