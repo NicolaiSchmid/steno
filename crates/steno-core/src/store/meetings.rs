@@ -879,6 +879,97 @@ mod tests {
         (value, text)
     }
 
+    /// The stop's save writes each column it owns. The row turns `queued`
+    /// with the duration, the end reason and `now`; the asset is saved for
+    /// the meeting, takes the settings' default retention as stored at the
+    /// commit unless the caller names one, and never keeps an
+    /// `expires_at`. A second save of the same row is refused and writes
+    /// nothing.
+    #[test]
+    fn the_stopped_recordings_save_writes_its_columns() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("steno.sqlite")).unwrap();
+        let mut settings = store.settings().unwrap();
+        settings.default_retention = AudioRetention::KeepDays(3);
+        store.save_settings(&settings).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-09-24T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for (named, kept) in [
+            (None, AudioRetention::KeepDays(3)),
+            (
+                Some(AudioRetention::DeleteAfterProcessing),
+                AudioRetention::DeleteAfterProcessing,
+            ),
+        ] {
+            let meeting = a_recording_row(&store);
+            // Pointed at another meeting: the save points it at its own.
+            let mut captured = asset(Uuid::new_v4(), "file:///audio/x/master.caf");
+            captured.id = Uuid::new_v4();
+            captured.expires_at = Some(now);
+            let saved = store
+                .save_stopped_recording(
+                    meeting.id,
+                    12.5,
+                    RecordingEndReason::Manual,
+                    &captured,
+                    named,
+                    now,
+                )
+                .unwrap();
+            let stored = store.meeting(meeting.id).unwrap().unwrap();
+            assert_eq!(saved, stored);
+            assert_eq!(stored.state, MeetingState::Queued);
+            assert_eq!(stored.duration, 12.5);
+            assert_eq!(stored.end_reason, Some(RecordingEndReason::Manual));
+            assert_eq!(stored.updated_at, now);
+            let written = store.asset(meeting.id).unwrap().unwrap();
+            assert_eq!(written.id, captured.id);
+            assert_eq!(written.meeting_id, meeting.id);
+            assert_eq!(written.retention, kept);
+            assert_eq!(written.expires_at, None);
+            let error = store
+                .save_stopped_recording(
+                    meeting.id,
+                    99.0,
+                    RecordingEndReason::Failed,
+                    &captured,
+                    None,
+                    now,
+                )
+                .unwrap_err();
+            assert!(matches!(error, StoreError::NotRecording(_, _)), "{error}");
+            assert_eq!(store.meeting(meeting.id).unwrap().unwrap(), stored);
+        }
+    }
+
+    /// Another connection holding the write lock (the Swift app, the CLI)
+    /// for less than the busy timeout makes the stop's save wait, not
+    /// fail: its transaction begins `IMMEDIATE`, where a deferred one that
+    /// read first would be refused at once, past the busy handler.
+    #[test]
+    fn the_stopped_recordings_save_waits_out_another_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("steno.sqlite");
+        let store = Store::open(&path).unwrap();
+        let meeting = a_recording_row(&store);
+        let hold = crate::testing::WriteLockHold::new(&path);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(hold);
+        });
+        let saved = store.save_stopped_recording(
+            meeting.id,
+            1.0,
+            RecordingEndReason::Manual,
+            &asset(meeting.id, "file:///audio/x/master.caf"),
+            None,
+            Utc::now(),
+        );
+        release.join().unwrap();
+        assert_eq!(saved.unwrap().state, MeetingState::Queued);
+    }
+
     /// A default retention row that cannot be read, not JSON or of the
     /// wrong shape, does not fail the stop's save: the meeting is saved
     /// `queued` and its audio kept forever, which deletes nothing, and the
