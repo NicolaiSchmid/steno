@@ -1619,6 +1619,21 @@ release>` and `desktop-stable`. Releases up to `0.1.0-rc.3` are tagged
 **Update lanes** moves the lanes back to it. Then fix forward with a higher
 version, whose tag moves the lanes as usual.
 
+The first stable release, `v0.11.0`, leaves `desktop-stable` no earlier
+release to go back to. Delete the lane's manifest instead, so stable
+installs find no update until the fix forward writes the lane again:
+
+```sh
+gh release delete-asset desktop-stable latest.json --yes
+```
+
+When fresh downloads are bad too, take the release out of "latest" with
+`gh release edit v<version> --prerelease`, and in the same hour take the
+platform off the site's released list (`apps/site/src/lib/site.ts`).
+`releases/latest` then answers 404, for the download button and for the
+Swift app's feed alike. A bad handoff item has steps of its own: Rollback
+in `.plans/2026-10-07-stable-promotion.md`.
+
 ### Secrets
 
 | Secret | Used by | What it is |
@@ -2079,30 +2094,18 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 
 ## Not here yet
 
-The Swift app's removal is planned in `.plans/2026-10-04-mac-cutover.md`
-(S9 of `.plans/2026-10-07-stable-promotion.md`); until a Swift install
-takes the handoff item, the desktop app installs beside it on the Mac. WP6b
-filled the host's half of the WP8 seams except four; S4 and S2 of
-`.plans/2026-10-07-stable-promotion.md` later filled the updater, the
-QR half of the fourth and the detection controller, which leaves the
-permissions and the clip player (the plan's "Pipeline and services
-(WP6b)" list gives each one's reason and what closes it): the host's
-`Permissions` stay the services' fake (all granted),
-because `permissions` answers `unknown` off the Mac and for the Mac's
-system audio, which the host's onboarding opener counts as missing, so
-onboarding would open at every launch until the audio probe (WP5) and a
-rule for `unknown` land; and the clip player is a fake, which needs an
-audio output and follows the stable release. The host may treat the main
-window as always present: a close hides it, or ends the process when no
-tray stands, so publishing to it never fails for want of a window.
-What the Swift app's login item does once this app replaced it is for
-the real handoff to show (R3 of `.plans/2026-10-07-stable-promotion.md`).
-The macOS menu bar has no Record menu yet (`⌘⇧R` and Record In Person are
-the tray's and the sidebar's), and no Find Meetings (`⌘F`). On macOS the
-system audio permission has no status API; the audio crate's probe (WP5)
-records it and until then it reads `unknown`. The panels are re-tuned on
-the Mac once they run there beside the Swift ones (the plan's risk
-list). Linux and Windows keep their native title bar; macOS gets the
+The Swift app leaves the repository in S9 of
+`.plans/2026-10-07-stable-promotion.md` (planned in
+`.plans/2026-10-04-mac-cutover.md`), after the stable release's rollback
+window. The clip player is still a fake: it needs an audio output, must
+ask `steno_audio::Playback` before every clip, since the call capture's
+tap includes Steno's own process, and follows the stable release (that
+plan's "What follows"). The host may treat the main window as always
+present: a close hides it, or ends the process when no tray stands, so
+publishing to it never fails for want of a window. The macOS menu bar has
+no Record menu yet (`⌘⇧R` and Record In Person are the tray's and the
+sidebar's), and no Find Meetings (`⌘F`); both follow the stable release
+too. Linux and Windows keep their native title bar; macOS gets the
 overlay title bar the Swift windows have, and only there does the page
 leave the traffic lights their inset (`titleBarInset` in
 `apps/macos/web/src/lib/platform.tsx`). On Linux every destroyed webview
