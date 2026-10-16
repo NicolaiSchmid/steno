@@ -689,10 +689,10 @@ impl CaptureClient {
     /// the engine lost right before it: on a packet flagged
     /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` (the first one aside, see
     /// `first_packet`), how far its device position passed where the
-    /// delivered audio ends, once the positions are measured and their unit
-    /// explained ([`DevicePositions`]); nothing otherwise and for a
-    /// position the engine flags as invalid
-    /// (`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`). The real-time part: no
+    /// delivered audio ends, filled once the positions are measured and
+    /// their unit explained, counted unfilled otherwise
+    /// ([`DevicePositions`]); nothing for a position the engine flags as
+    /// invalid (`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`). The real-time part: no
     /// allocation and no lock here on success (the `windows` error values
     /// are built only on failure); `handle` must keep it so.
     pub fn drain(&mut self, mut handle: impl FnMut(SliceView<'_>, Missed)) -> Result<(), ComError> {
