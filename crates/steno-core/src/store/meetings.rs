@@ -943,21 +943,35 @@ mod tests {
         }
     }
 
-    /// Another connection holding the write lock (the Swift app, the CLI)
-    /// for less than the busy timeout makes the stop's save wait, not
-    /// fail: its transaction begins `IMMEDIATE`, where a deferred one that
-    /// read first would be refused at once, past the busy handler.
+    /// Another connection's write (the Swift app, the CLI) that holds the
+    /// lock for less than the busy timeout and then commits makes the
+    /// stop's save wait, not fail, and the save reads what it committed:
+    /// its transaction begins `IMMEDIATE`. A deferred one would read
+    /// first, and its write would then be refused at once, its snapshot
+    /// stale.
     #[test]
     fn the_stopped_recordings_save_waits_out_another_writer() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("steno.sqlite");
         let store = Store::open(&path).unwrap();
         let meeting = a_recording_row(&store);
-        let hold = crate::testing::WriteLockHold::new(&path);
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            drop(hold);
+        let other = Store::open(&path).unwrap();
+        let (held, holding) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            other
+                .write(|transaction| {
+                    transaction.execute(
+                        "INSERT OR REPLACE INTO setting (key, value) \
+                         VALUES ('defaultRetention', ?1)",
+                        params![crate::json::to_column_string(&AudioRetention::KeepDays(3))?],
+                    )?;
+                    held.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    Ok(())
+                })
+                .unwrap();
         });
+        holding.recv().unwrap();
         let saved = store.save_stopped_recording(
             meeting.id,
             1.0,
@@ -966,8 +980,13 @@ mod tests {
             None,
             Utc::now(),
         );
-        release.join().unwrap();
+        writer.join().unwrap();
         assert_eq!(saved.unwrap().state, MeetingState::Queued);
+        assert_eq!(
+            store.asset(meeting.id).unwrap().unwrap().retention,
+            AudioRetention::KeepDays(3),
+            "read after the other write committed"
+        );
     }
 
     /// A default retention row that cannot be read, not JSON or of the
