@@ -27,6 +27,7 @@
     clippy::cast_lossless
 )]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use steno_audio::capture::{ChannelRef, LaneSource, SplitStreamPlan, StreamLayout};
@@ -542,7 +543,7 @@ fn the_missed_cycle_fill_allocates_nothing() {
     let missed = 9 * CYCLE;
     assert_eq!(
         sink.missed_samples(),
-        std::collections::BTreeMap::from([(AudioLane::Mic, missed), (AudioLane::System, missed)]),
+        BTreeMap::from([(AudioLane::Mic, missed), (AudioLane::System, missed)]),
     );
     assert!(sink.dropped_samples().is_empty());
 
@@ -593,10 +594,7 @@ fn the_missed_cycle_fill_allocates_nothing() {
     );
     assert_eq!(
         sink.missed_samples(),
-        std::collections::BTreeMap::from([
-            (AudioLane::Mic, 4 * CYCLE),
-            (AudioLane::System, 2 * CYCLE)
-        ]),
+        BTreeMap::from([(AudioLane::Mic, 4 * CYCLE), (AudioLane::System, 2 * CYCLE)]),
         "the master's zeros on its lane, the follower's on its own"
     );
 }

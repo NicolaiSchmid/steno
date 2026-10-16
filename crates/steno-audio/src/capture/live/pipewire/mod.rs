@@ -52,8 +52,9 @@
 //! quantum the ticks jump by up to two of its cycles while the wall clock
 //! does not: 1 792 frames at 256 to 1 024, 3 584 at 512 to 2 048, on the
 //! private daemon), and `pw_stream` keeps the ticks continuous when the
-//! driver changes, so none of those reads as a jump. `pw_stream_get_time_n` copies the time `pw_stream` stored for
-//! the cycle (a sequence-locked copy, no system call). The client context
+//! driver changes, so none of those reads as a jump.
+//! `pw_stream_get_time_n` copies the time `pw_stream` stored for the cycle
+//! (a sequence-locked copy, no system call). The client context
 //! loads PipeWire's `module-rt` from `client.conf`, which asks for
 //! real-time scheduling of the data-loop thread (directly under
 //! `RLIMIT_RTPRIO`, or through RealtimeKit); [`LiveCaptureBackend`]'s
@@ -1689,6 +1690,11 @@ impl Drop for LiveCaptureBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::sync::mpsc::TrySendError;
+
+    use super::*;
+
     /// `process`'s reading of the stream time: ticks at the graph's rate
     /// become the stream's 48 kHz frames, a graph that changes its rate
     /// starts afresh, and a time that could not be read, or has no rate,
@@ -1737,11 +1743,6 @@ mod tests {
         assert_eq!(cycle(3_328, 1_024), 0);
         assert_eq!(cycle(5_376, 1_024), 1_024, "a missed cycle after it counts");
     }
-
-    use std::cell::Cell;
-    use std::sync::mpsc::TrySendError;
-
-    use super::*;
 
     thread_local! {
         /// Run once by the thread's next [`Gate::report`], after it saw the

@@ -1087,10 +1087,9 @@ fn a_daemon_killed_and_started_again_resumes_the_recording() {
 /// no dropped frame. Its master, the cycles the capture's thread missed in
 /// it as zeros (A18 of the stable-promotion plan), is at most 0.1 s
 /// shorter than the wall time from the end of its start to its stop, and
-/// at most 0.1 s longer
-/// than the wall time from before its start to the end of its stop. The
-/// probe's own stream is not the recording's, so a stopped owner that
-/// wedges what it is linked to wedges the probe alone.
+/// at most 0.1 s longer than the wall time from before its start to the
+/// end of its stop. The probe's own stream is not the recording's, so a
+/// stopped owner that wedges what it is linked to wedges the probe alone.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn probing_a_chosen_source_costs_the_recording_nothing() {
