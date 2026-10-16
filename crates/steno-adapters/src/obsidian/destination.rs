@@ -51,7 +51,7 @@ fn is_probe_name(name: &str) -> bool {
         hex.len() == 8
             && hex
                 .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
     })
 }
 
