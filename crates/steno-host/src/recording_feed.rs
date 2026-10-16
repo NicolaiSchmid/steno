@@ -11,8 +11,8 @@
 //! - **Each pass** reads "page ready" first, then swaps "poked" to false,
 //!   and "resend" too once the page is ready, then reads `status()` (the
 //!   recorder's status lock, released before anything else), and sends
-//!   nothing unless the page was ready when the pass began. A snapshot goes out
-//!   at once when "resend" was set or when anything but its levels differs
+//!   nothing unless the page was ready when the pass began. A snapshot goes
+//!   out at once when "resend" was set or when anything but its levels differs
 //!   from the last one sent; after a poke, one that moved only the levels,
 //!   or did not move, waits out the rest of [`RECORDING_INTERVAL`] and goes
 //!   out when it ends, so every hook still gets its snapshot. Only a

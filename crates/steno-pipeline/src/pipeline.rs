@@ -1338,11 +1338,10 @@ impl ProcessingPipeline {
 
     /// [`ProcessingPipeline::enqueue`] of the Mac recording `meeting_id`
     /// that stopped with `result`, the local intake's: the rows are written
-    /// through [`Store::save_stopped_recording`], with the asset's
-    /// `retention`, else the settings' default, so only while the meeting
-    /// is still `recording`, and the row and the settings are read in the
-    /// commit's own transaction, on the writer. Returns the meeting as
-    /// saved. Rust only.
+    /// through [`Store::save_stopped_recording`], so only while the meeting
+    /// is still `recording`, the asset with `retention`, else the settings'
+    /// default; the row and the settings are read in the commit's own
+    /// transaction, on the writer. Returns the meeting as saved. Rust only.
     pub fn enqueue_stopped_recording(
         &self,
         meeting_id: Uuid,

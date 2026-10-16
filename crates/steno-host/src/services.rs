@@ -233,12 +233,11 @@ impl RecorderStatus {
 /// wakes the `recording` feed. The recorder never calls it while holding
 /// a lock `status` takes: the hook the services wire also reads `status`,
 /// and the host's reload pass calls it with the host's lock held (see the
-/// module doc). The
-/// commands are called with no host lock held, so they may report their
-/// change from inside, on the calling thread, as `steno_services`'
-/// capture recorder does. The fake runs the
-/// state machine without a session and records every start, stop and
-/// keep. Swift: `RecordingController`.
+/// module doc). The commands are called with no host lock held, so they
+/// may report their change from inside, on the calling thread, as
+/// `steno_services`' capture recorder does. The fake runs the state
+/// machine without a session and records every start, stop and keep.
+/// Swift: `RecordingController`.
 pub trait Recorder: Send + Sync {
     fn status(&self) -> RecorderStatus;
     /// Starts a recording; `call_app` is the app the detection prompt named.

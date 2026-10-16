@@ -324,10 +324,10 @@ pub(crate) mod real {
     /// thread of its own, and the tray's setters wait for the main thread
     /// when called from another, so a delivery on the emitting thread
     /// would hold the lock, or the feed, until the main thread is free.
-    /// One queue keeps the snapshots in emit order whichever
-    /// thread emits them, also when an emit on the main thread runs
-    /// before a task posted earlier, and one drain at a time empties it, so
-    /// every window gets them in that order.
+    /// One queue keeps the snapshots in emit order whichever thread emits
+    /// them, also when an emit on the main thread runs before a task posted
+    /// earlier, and one drain at a time empties it, so every window gets
+    /// them in that order.
     ///
     /// Swift: `WebBridge.emit`, `@MainActor`
     /// (`apps/macos/Steno/Web/WebBridge.swift`).

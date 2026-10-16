@@ -59,8 +59,8 @@
 //! when the recorder's state or meeting moved. [`Host::store_changed`]
 //! runs a forced pass on the caller's thread, for the launch and the
 //! tests. What the mark does not see shows at the next forced pass: a
-//! recording's files removed outside Steno, a default
-//! title that turns from a weekday into a date.
+//! recording's files removed outside Steno, a default title that turns
+//! from a weekday into a date.
 //!
 //! # Threads
 //!
@@ -90,9 +90,9 @@
 //! then the view models, then the store's writer, then a reader (the
 //! shared one, then the host's; held only inside its closure; nothing is
 //! taken under a reader, except by the checkpoint, which takes both after
-//! the writer), and last the leaves,
-//! each taken alone and briefly: the sink slot, the recorder's status
-//! lock, the secret store's read in `reload_sections`. The rules it needs:
+//! the writer), and last the leaves, each taken alone and briefly: the
+//! sink slot, the recorder's status lock, the secret store's read in
+//! `reload_sections`. The rules it needs:
 //!
 //! - The `recording` feed and the recorder's hook take no host lock: the
 //!   feed takes the recorder's status lock, releases it, then the sink
@@ -970,10 +970,10 @@ impl Host {
 
     /// Asks the reload owner (the services' poll task) for a forced pass:
     /// sets a flag and wakes it, and takes no lock of the host's, so any
-    /// thread may ask,
-    /// with any lock held. Requests made while a pass runs fold into one
-    /// more pass. The event follower asks after it applied an event, the
-    /// recording feed when the recorder's state or meeting moved.
+    /// thread may ask, with any lock held. Requests made while a pass runs
+    /// fold into one more pass. The event follower asks after it applied
+    /// an event, the recording feed when the recorder's state or meeting
+    /// moved.
     pub fn request_reload(&self) {
         self.shared.request_reload();
     }
