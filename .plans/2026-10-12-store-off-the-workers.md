@@ -552,6 +552,15 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   `one_host_reader_at_a_time`, and `the_host_reads_on_a_reader_of_its_own`
   (`crates/steno-host/tests/main_window.rs`), which pins the host on its
   own reader.
+- **The vault save checks the vault with the lock released.** The Export
+  section's and onboarding page 2's save ran the destination's check, which
+  creates and removes a probe file in the vault, under the view-model lock,
+  so a slow folder or the Mac's Files and Folders prompt held the levels
+  and the stop. The save now begins under the lock, checks outside it and
+  stores under it, as page 1's vault check (#295) already ran on a thread
+  of its own; only the latest of two overlapping saves stores
+  (`a_held_vault_check_leaves_the_host_live`, its page 2 twin, and
+  `only_the_latest_of_two_vault_saves_stores` in `crates/steno-host/tests/`).
 
 ### WP2b: the facade and the async call sites (PR 2b, or with 2a)
 
@@ -592,8 +601,8 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
 **As built** (#299, with 2a):
 
 - **About 55 store calls became 36 facade steps:** 27 in `pipeline.rs`, 1
-  in `RecordingIntake::admit` (the reads, the durable copy and the commit),
-  1 in the speaker memory, 5 in the delivery coordinator and 2 in the
+  in `RecordingIntake::admit` (the reads, the durable copy, the commit and
+  the `failed` save), 1 in the speaker memory, 5 in the delivery coordinator and 2 in the
   handover. `retention.rs`, `lib.rs`, `sample_clips.rs`, `recovery.rs` and
   the services' `handover.rs` had no async store call: recovery's async
   functions run under `block_on` on the launch's blocking task, and the
@@ -613,11 +622,13 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   while the admission still waits gets the 409 that lists every chunk. An
   admission in flight when the app stops (its phone hung up, or the
   listener closed its connection by force) is not waited for: it still
-  finishes after the stop, or the exit cuts it as a crash would, between
-  the durable copy and the atomic commit.
+  finishes after the stop, or the exit cuts it as a crash would: a copy
+  without its commit is noted, and the next launch adopts it (the
+  follow-up's duplicate, never a loss).
 - **The `failed` receipt save is tried again** while the database is busy,
   up to `RecordingIntake::FAILED_SAVE_ATTEMPTS` (3) in all, as the local
-  intake's commit is: the copy goes only once that save is on the disk.
+  intake's commit is, there without a back-off: the copy goes only once
+  that save is on the disk.
   Before each try the intake waits `FAILED_SAVE_BACK_OFF` (200 ms) with the
   writer free, so a write of this process queued behind the commit or the
   try before runs in between and waits at most one busy timeout behind
