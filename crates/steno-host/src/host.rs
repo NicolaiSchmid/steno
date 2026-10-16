@@ -121,7 +121,7 @@ use crate::main_window::{
 };
 use crate::onboarding::{self, OnboardingViewModel};
 use crate::publisher::{RECORDING_INTERVAL, TopicPublisher};
-use crate::services::Services;
+use crate::services::{Services, VaultRefusal};
 use crate::settings::{
     AudioSettingsViewModel, GeneralSettingsViewModel, KeyRead, LlmPreset, LlmSettingsViewModel,
     ObsidianSettingsViewModel, PhonesSettingsViewModel, SpeechSettingsViewModel, llm::Probe,
@@ -1350,14 +1350,14 @@ impl Host {
                 host.finish_vault_check(outcome);
             });
         if let Err(error) = spawned {
-            self.finish_vault_check(Err(crate::services::VaultRefusal {
+            self.finish_vault_check(Err(VaultRefusal {
                 message: format!("The vault could not be checked: {error}"),
                 not_writable: false,
             }));
         }
     }
 
-    fn finish_vault_check(&self, outcome: Result<(), crate::services::VaultRefusal>) {
+    fn finish_vault_check(&self, outcome: Result<(), VaultRefusal>) {
         self.command(&[BridgeTopic::Onboarding], |inner| {
             inner.onboarding.finish_vault_check(outcome);
         });

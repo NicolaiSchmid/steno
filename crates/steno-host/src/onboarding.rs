@@ -453,12 +453,9 @@ impl OnboardingViewModel {
     /// so the page does not move on by itself before the user saw it.
     #[must_use]
     pub fn vault_pending(&self) -> bool {
-        self.vault_check.as_ref().is_some_and(|check| {
-            matches!(
-                check.access,
-                VaultAccess::Due | VaultAccess::Checking | VaultAccess::Refused(_)
-            )
-        })
+        self.vault_check
+            .as_ref()
+            .is_some_and(|check| check.access != VaultAccess::Writable)
     }
 
     /// Both setup rows saved or skipped.
