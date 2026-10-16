@@ -70,6 +70,12 @@ pub enum StoreError {
         key: String,
         problem: SettingProblem,
     },
+    /// The `setting` path only: every row reads on its own as its setting,
+    /// but not all of them together. Like
+    /// [`StoreError::UndecodableSetting`], the text leaves the values out.
+    /// Rust only.
+    #[error("the stored settings cannot be read together")]
+    UndecodableSettings,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("meeting {0} not found")]

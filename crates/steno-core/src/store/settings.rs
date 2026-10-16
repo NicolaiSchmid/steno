@@ -56,8 +56,8 @@ pub enum SettingProblem {
 impl std::fmt::Display for SettingProblem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            SettingProblem::NotJson => "is not valid JSON",
-            SettingProblem::WrongShape => "does not have the form this version of Steno reads",
+            SettingProblem::NotJson => "is not in a form Steno can read",
+            SettingProblem::WrongShape => "holds a value this version of Steno does not understand",
         })
     }
 }
@@ -106,11 +106,19 @@ impl<'de> Deserializer<'de> for FieldNames<'_> {
     }
 }
 
+/// `merged` (the defaults with every stored row over them) as `Settings`.
+/// A failure never carries serde's message, which quotes the value it
+/// choked on: it names the first row that fails on its own
+/// ([`StoreError::UndecodableSetting`]), or, when every row decodes on its
+/// own (two rows that only fail together), none
+/// ([`StoreError::UndecodableSettings`]).
+fn decode(defaults: &Settings, merged: &Value) -> Result<Settings> {
+    Settings::deserialize(merged)
+        .map_err(|_| undecodable_row(defaults, merged).unwrap_or(StoreError::UndecodableSettings))
+}
+
 /// The first stored key whose value alone over `defaults` does not decode
-/// as `Settings`, as the error that names it: the merged object failed as a
-/// whole, and serde's message quotes the value it choked on. `None` when
-/// each row decodes on its own (two rows that only fail together), which
-/// leaves serde's error.
+/// as `Settings`, as the error that names it; `None` when there is none.
 fn undecodable_row(defaults: &Settings, merged: &Value) -> Option<StoreError> {
     let defaults = object(defaults).ok()?;
     merged
@@ -159,9 +167,7 @@ impl Store {
             };
             merged.insert(key, value);
         }
-        let merged = Value::Object(merged);
-        Settings::deserialize(&merged)
-            .map_err(|error| undecodable_row(defaults, &merged).unwrap_or_else(|| error.into()))
+        decode(defaults, &Value::Object(merged))
     }
 
     /// Writes every property and removes the rows of known properties that
@@ -196,11 +202,13 @@ impl Store {
     /// When an engine id other than [`PARAKEET_V3_ENGINE_ID`] is stored
     /// (an engine the Swift app offered and the Rust app does not run),
     /// calls `before_rewrite`, then stores `parakeet-v3` in its place, in
-    /// one transaction; returns whether it did. No id, or `parakeet-v3`,
-    /// changes nothing and calls nothing. The app calls it at launch,
-    /// before anything reads the engine, and records the one-time notice
-    /// in `before_rewrite`, so a crash between the two shows the notice
-    /// once too often rather than switching the engine without a word.
+    /// one transaction; returns whether it did. No id, `parakeet-v3`, or a
+    /// row that is not a JSON string (which [`Store::settings`] refuses as
+    /// [`StoreError::UndecodableSetting`]) changes nothing and calls
+    /// nothing. The app calls it at launch, before anything reads the
+    /// engine, and records the one-time notice in `before_rewrite`, so a
+    /// crash between the two shows the notice once too often rather than
+    /// switching the engine without a word.
     pub fn retire_speech_engine(&self, before_rewrite: impl FnOnce()) -> Result<bool> {
         self.write(|transaction| {
             let stored: Option<String> = transaction
@@ -210,11 +218,14 @@ impl Store {
                     |row| row.get(0),
                 )
                 .optional()?;
-            let Some(stored) = stored else {
+            // A row that is not a JSON string is no engine id: the settings
+            // load refuses it by its key, so it is left as it is.
+            let Some(Value::String(id)) =
+                stored.and_then(|stored| json::from_column_str(&stored).ok())
+            else {
                 return Ok(false);
             };
-            let id: Value = json::from_column_str(&stored)?;
-            if id.as_str() == Some(PARAKEET_V3_ENGINE_ID) {
+            if id == PARAKEET_V3_ENGINE_ID {
                 return Ok(false);
             }
             before_rewrite();
@@ -318,6 +329,69 @@ mod tests {
             );
             assert_eq!(text, format!("the stored setting {key} {problem}"));
             assert!(!text.contains("sk-secret"), "{text}");
+            assert!(!format!("{error:?}").contains("sk-secret"), "{error:?}");
+        }
+        // Words for whoever fixes the row, not a parser's.
+        assert_eq!(
+            SettingProblem::NotJson.to_string(),
+            "is not in a form Steno can read"
+        );
+        assert_eq!(
+            SettingProblem::WrongShape.to_string(),
+            "holds a value this version of Steno does not understand"
+        );
+    }
+
+    /// Settings that fail as a whole while no row fails on its own (no
+    /// such pair exists today; a value that is not an object stands in)
+    /// give an error without serde's message, which would quote the value.
+    #[test]
+    fn settings_that_fail_together_name_no_value() {
+        let error = decode(&Settings::default(), &Value::from("sk-secret")).unwrap_err();
+        assert!(
+            matches!(error, StoreError::UndecodableSettings),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "the stored settings cannot be read together"
+        );
+        assert!(!format!("{error:?}").contains("sk-secret"));
+    }
+
+    /// A speech engine id that is not a string is the load's to refuse: the
+    /// retirement leaves it and calls nothing, so it is never quietly
+    /// replaced by Parakeet v3.
+    #[test]
+    fn a_speech_engine_id_that_is_not_a_string_is_refused_not_replaced() {
+        for (value, problem) in [
+            ("4242424242", SettingProblem::WrongShape),
+            ("parakeet-v3", SettingProblem::NotJson),
+        ] {
+            let store = store_with_row(SPEECH_ENGINE_KEY, value);
+            assert!(
+                !store
+                    .retire_speech_engine(|| panic!("called for {value}"))
+                    .unwrap()
+            );
+            let stored: String = store
+                .read(|connection| {
+                    Ok(connection.query_row(
+                        "SELECT value FROM setting WHERE key = ?1",
+                        params![SPEECH_ENGINE_KEY],
+                        |row| row.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(stored, value);
+            assert!(
+                matches!(
+                    store.settings(),
+                    Err(StoreError::UndecodableSetting { ref key, problem: found })
+                        if key == SPEECH_ENGINE_KEY && found == problem
+                ),
+                "{value}"
+            );
         }
     }
 

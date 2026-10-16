@@ -69,5 +69,7 @@ pub use protocols::{
     SecretPlace, SecretStore, SpeakerMemory, SpeechEngine, TranscriptCleaner, async_trait,
 };
 pub use recording_layout::RecordingLayout;
-pub use store::{DeletedMeeting, ExpiredAsset, SearchHit, StageRateRow, Store, StoreError};
+pub use store::{
+    DeletedMeeting, ExpiredAsset, SearchHit, SettingProblem, StageRateRow, Store, StoreError,
+};
 pub use string_enum::UnknownCase;
