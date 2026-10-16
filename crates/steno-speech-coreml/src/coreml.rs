@@ -507,7 +507,7 @@ impl Array {
 
 /// The inputs of one prediction: a dictionary feature provider over
 /// arrays the caller still owns. The arrays must outlive the call, which
-/// the borrow in [`inputs`] guarantees.
+/// the borrow in `inputs` guarantees.
 pub struct Inputs {
     inner: Retained<MLDictionaryFeatureProvider>,
 }
