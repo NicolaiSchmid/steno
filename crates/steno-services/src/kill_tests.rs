@@ -1264,8 +1264,9 @@ async fn a_read_killed_twice_quarantines_its_meeting_and_the_launch_runs_the_oth
     assert_eq!(std::fs::read_dir(&marks).unwrap().count(), 0);
 }
 
-/// The child's decoder for the quit test: a decode says so in `reading`
-/// and waits until `open` is there.
+/// The decoder of the quit test: a decode says so in `reading` and waits
+/// until `open` is there, or for 30 seconds, so a test that fails before it
+/// opens the decode does not wait on it for ever.
 struct DecodeUntilOpened {
     reading: PathBuf,
     open: PathBuf,
@@ -1279,7 +1280,8 @@ impl steno_core::AudioDecoder for DecodeUntilOpened {
         _: steno_core::AudioLane,
     ) -> steno_core::BoundaryResult<steno_core::AudioBuffer16k> {
         Reports::append(&self.reading, b"1");
-        while !self.open.exists() {
+        let started = Instant::now();
+        while !self.open.exists() && started.elapsed() < Duration::from_secs(30) {
             std::thread::sleep(Duration::from_millis(5));
         }
         Err("the app quit".into())
@@ -1313,15 +1315,6 @@ async fn the_apps_quit_during_a_read_leaves_no_mark() {
         open: open.clone(),
     });
     let app = app_decoding(dir.path(), &store, decoder);
-    // Opens the decode however the test ends, before the app drops, so a
-    // failed assertion fails the test instead of waiting on the decode.
-    struct Opens(PathBuf);
-    impl Drop for Opens {
-        fn drop(&mut self) {
-            let _ = std::fs::write(&self.0, b"");
-        }
-    }
-    let opens = Opens(open);
     let pipeline = app.pipeline.current();
     let processing = tokio::spawn(async move { pipeline.process(asset.id).await });
     let marks = dir
@@ -1343,7 +1336,7 @@ async fn the_apps_quit_during_a_read_leaves_no_mark() {
         0,
         "the quit removed it"
     );
-    drop(opens);
+    std::fs::write(&open, b"").unwrap();
     let _ = processing.await;
     drop(app);
 
