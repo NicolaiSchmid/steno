@@ -1066,11 +1066,7 @@ pub(crate) fn adopt_orphans(
     };
     let mut recorded = listed_at_launch.clone();
     recorded.retain(|meeting_id, _| read_again.contains_key(meeting_id));
-    let uploads =
-        crate::audio_folders::uploads(&interrupted.support_directory).unwrap_or_else(|error| {
-            tracing::debug!(%error, "the noted uploads were not read; copies are adopted without them");
-            BTreeMap::new()
-        });
+    let uploads = noted_uploads(&interrupted.support_directory);
     let others = other_folders(store, &interrupted.known_folders).unwrap_or_else(|error| {
         tracing::debug!(%error, "the stored assets' folders were not listed");
         interrupted.known_folders.clone()
@@ -1116,10 +1112,11 @@ pub(crate) fn adopt_orphans(
                 tracing::warn!(%meeting_id, "a recording with no meeting was recovered");
                 adopted_ids.push(meeting_id);
             }
-            // The phone's retry admitted into this copy meanwhile.
-            Ok((Some(admitted), _)) if admitted == meeting_id => gone.push(meeting_id),
             Ok((Some(admitted), _)) => {
-                tracing::warn!(%meeting_id, %admitted, "a copy of a phone recording admitted as another meeting is left where it is");
+                // Unless the phone's retry admitted into this copy meanwhile.
+                if admitted != meeting_id {
+                    tracing::warn!(%meeting_id, %admitted, "a copy of a phone recording admitted as another meeting is left where it is");
+                }
                 gone.push(meeting_id);
             }
             // A header and no audio: it holds no master either.
@@ -1156,6 +1153,16 @@ pub(crate) fn adopt_orphans(
         tracing::debug!(%error, "recording folders with no master not forgotten");
     }
     adopted_ids
+}
+
+/// The uploads noted for the phone copies under `support_directory`
+/// ([`crate::audio_folders::uploads`]); none when they cannot be read, so
+/// each copy is adopted as any recording with no meeting.
+fn noted_uploads(support_directory: &Path) -> BTreeMap<Uuid, NotedUpload> {
+    crate::audio_folders::uploads(support_directory).unwrap_or_else(|error| {
+        tracing::debug!(%error, "the noted uploads were not read; copies are adopted without them");
+        BTreeMap::new()
+    })
 }
 
 /// Saves `orphan` as `meeting` with `asset` and processes it, or, `held`
