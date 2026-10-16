@@ -17,8 +17,8 @@ use steno_core::{MeetingSource, Store};
 use super::*;
 use crate::auto_stop::MicrophoneActivity;
 use crate::testing::{
-    HANG_GUARD, PATIENCE, SyntheticRecorder, eventually_within, on_own_thread, synthetic_recorder,
-    temp_store,
+    HANG_GUARD, LIVE, PATIENCE, SyntheticRecorder, eventually_within, on_own_thread,
+    synthetic_recorder, temp_store,
 };
 
 #[derive(Default)]
@@ -88,7 +88,7 @@ impl FakePanel {
 }
 
 struct Harness {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     store: Arc<Store>,
     activity: FakeProcessAudioActivity,
     clock: Arc<ManualClock>,
@@ -134,7 +134,7 @@ fn harness_over(recorder: Arc<dyn CallRecorder>, fake: Arc<FakeRecorder>) -> Har
     let (controller, panel, clock) =
         controller_over(recorder, store.clone(), Arc::new(activity.clone()));
     Harness {
-        _dir: dir,
+        dir,
         store,
         activity,
         clock,
@@ -446,6 +446,31 @@ fn events_while_recording_reach_the_recorder_with_the_name_resolved() {
         None,
         "a prompt that could not name the app attributes nothing"
     );
+}
+
+/// P40 check 10 (`.plans/2026-10-12-store-off-the-workers.md`): while
+/// another process holds the write lock and a write of this process waits
+/// behind it, the detection poll's read of the setting answers live, on the
+/// shared reader, and turns detection off as the setting says.
+#[test]
+fn the_detection_poll_reads_the_settings_while_a_write_waits() {
+    let harness = harness();
+    harness.controller.follow_settings();
+    assert!(harness.controller.is_detecting());
+    let mut settings = harness.store.settings().unwrap();
+    settings.meeting_detection_enabled = false;
+    harness.store.save_settings(&settings).unwrap();
+
+    let mut held = crate::testing::HeldStore::with_a_write_waiting(
+        &harness.store,
+        &crate::testing::database_in(harness.dir.path()),
+    );
+    let asked = std::time::Instant::now();
+    harness.controller.follow_settings();
+    let answered = asked.elapsed();
+    assert!(answered < LIVE, "the setting took {answered:?} to read");
+    assert!(!harness.controller.is_enabled(), "the setting was read");
+    held.release_after_hold();
 }
 
 /// Swift's `testSettingsChangesFollowThroughToTheDetector`, and a detector

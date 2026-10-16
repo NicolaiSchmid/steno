@@ -5,8 +5,11 @@
 //! phone, a recording it delivered, a store that keeps the last phone, a
 //! fingerprint record that refuses writes, the waits that fail a test
 //! instead of hanging it ([`PATIENCE`] for the tests' own fakes and gates,
-//! [`HANG_GUARD`] for real capture work), and
-//! [`warnings`], what a call logs at `warn` and above.
+//! [`HANG_GUARD`] for real capture work),
+//! [`warnings`], what a call logs at `warn` and above, and what the checks
+//! of `.plans/2026-10-12-store-off-the-workers.md` run under: a store held
+//! by another connection ([`HeldStore`]) and a host whose sink keeps the
+//! time of each snapshot ([`hosted`]).
 //!
 //! A test that writes models gives the app an explicit models directory in
 //! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
@@ -14,8 +17,10 @@
 //! the directory `STENO_MODELS_DIR` names, so no test overwrites the
 //! models a developer keeps for the real-model tests.
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use steno_adapters::DeliveryCoordinator;
 use steno_audio::SymphoniaAudioCodec;
@@ -56,6 +61,19 @@ pub const PATIENCE: Duration = Duration::from_secs(5);
 /// `ManualClock::wait_for_sleepers` wait too.
 pub const HANG_GUARD: Duration = steno_audio::testing::HANG_GUARD;
 
+/// What "live" means in the held-store checks of
+/// `.plans/2026-10-12-store-off-the-workers.md`: one call or one hop that
+/// must not wait on the store. A fifth of the busy timeout that every
+/// regression waits out, and loose enough for a loaded machine at
+/// `nice 19`.
+pub const LIVE: Duration = Duration::from_secs(1);
+
+/// The coarse bound of a held-store check from the user's side, the
+/// action to what the host shows: generous for a loaded machine (a load
+/// of 40 to 70), and still well under the five-second freeze a wait on
+/// the store would show.
+pub const END_TO_END: Duration = Duration::from_secs(2);
+
 /// The synthetic backends a test's capture built with their outages held
 /// (`SyntheticOptions::hold_outages`), so that the test lets each outage
 /// go once it saw what comes before it.
@@ -94,8 +112,13 @@ impl HeldOutages {
 /// A fresh store; the directory lives as long as the guard.
 pub fn temp_store() -> (tempfile::TempDir, Arc<Store>) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+    let store = Arc::new(Store::open(database_in(dir.path())).unwrap());
     (dir, store)
+}
+
+/// The database [`temp_store`] opens in `dir`.
+pub fn database_in(dir: &Path) -> PathBuf {
+    dir.join("steno.sqlite")
 }
 
 /// Fakes over `store`, the engine named `engine_id` so a run shows which
@@ -222,7 +245,7 @@ pub struct SyntheticRecorder {
     pub store: Arc<Store>,
     pipeline: Arc<CurrentPipeline>,
     pub recorder: Arc<crate::recorder::CaptureRecorder>,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 /// A [`SyntheticRecorder`] on the current runtime.
@@ -253,11 +276,16 @@ pub fn synthetic_recorder_over(make_session: MakeCaptureSession) -> SyntheticRec
         store,
         pipeline,
         recorder,
-        _dir: dir,
+        dir,
     }
 }
 
 impl SyntheticRecorder {
+    /// The database file the store is over.
+    pub fn database(&self) -> PathBuf {
+        database_in(self.dir.path())
+    }
+
     /// Starts a recording in `mode` for `call_app` on a thread of its own,
     /// as the host calls it, and returns once the start returned, refused
     /// or not, failing the test as hung after [`HANG_GUARD`].
@@ -593,6 +621,19 @@ pub async fn eventually_within(patience: Duration, what: &str, mut done: impl Fn
     .expect(what);
 }
 
+/// What `found` returns once it returns something, polled on this thread,
+/// failing the test with `what` after `patience`.
+pub fn found_within<T>(patience: Duration, what: &str, mut found: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + patience;
+    loop {
+        if let Some(value) = found() {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Calls `f` on a thread of its own, as the host calls its services,
 /// failing the test with `what` unless it returns within `patience`. Not
 /// a `spawn_blocking` task: the runtime waits for those when it shuts
@@ -663,4 +704,226 @@ pub fn warnings<T>(run: impl FnOnce() -> T) -> (T, String) {
     let value = tracing::subscriber::with_default(subscriber, run);
     let logged = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
     (value, logged)
+}
+
+/// What the checks of `.plans/2026-10-12-store-off-the-workers.md` run
+/// under ("Acceptance"): another connection holds the database's write
+/// lock, as another process does, for [`HeldStore::HOLD`]. With
+/// [`HeldStore::with_a_write_waiting`] a write of this process waits out
+/// its busy timeout behind it meanwhile, as a pipeline write does, and so
+/// holds the store's writer. Dropped, it lets the lock go, and the waiting
+/// write commits.
+pub struct HeldStore {
+    since: Instant,
+    released: Arc<AtomicBool>,
+    hold: Option<steno_core::testing::WriteLockHold>,
+    waiting: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HeldStore {
+    /// How long a check holds the lock: past the five-second busy timeout,
+    /// so a write that waits for it fails once and tries again.
+    pub const HOLD: Duration = Duration::from_secs(7);
+
+    /// The lock held on the database at `path`, and no write waiting.
+    pub fn lock_only(path: &Path) -> HeldStore {
+        HeldStore {
+            since: Instant::now(),
+            released: Arc::new(AtomicBool::new(false)),
+            hold: Some(steno_core::testing::WriteLockHold::new(path)),
+            waiting: None,
+        }
+    }
+
+    /// The lock held on the database at `path`, and a write through
+    /// `store`, which is over it, waiting behind it, tried again whenever
+    /// its busy timeout runs out, until the lock goes. Returns once that
+    /// write is in its wait.
+    pub fn with_a_write_waiting(store: &Arc<Store>, path: &Path) -> HeldStore {
+        let mut held = HeldStore::lock_only(path);
+        let (store, released) = (store.clone(), held.released.clone());
+        held.waiting = Some(std::thread::spawn(move || {
+            while !released.load(Ordering::SeqCst) {
+                let _ = store.write(|_| Ok(()));
+            }
+        }));
+        // The write's busy wait has begun by now; nothing reports it.
+        std::thread::sleep(Duration::from_millis(100));
+        held
+    }
+
+    /// Waits until [`Self::HOLD`] has passed since the lock was taken, then
+    /// lets it go; returns when it did.
+    pub fn release_after_hold(&mut self) -> Instant {
+        std::thread::sleep((self.since + Self::HOLD).saturating_duration_since(Instant::now()));
+        self.release()
+    }
+
+    /// Lets the lock go, and waits for the waiting write to commit; returns
+    /// when the lock went.
+    pub fn release(&mut self) -> Instant {
+        self.released.store(true, Ordering::SeqCst);
+        drop(self.hold.take());
+        let released = Instant::now();
+        if let Some(waiting) = self.waiting.take() {
+            waiting.join().unwrap();
+        }
+        released
+    }
+}
+
+impl Drop for HeldStore {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Waits up to `within` of `released` until `meeting_id` was saved: out
+/// of `recording` and not failed.
+pub fn saved_within(store: &Store, meeting_id: uuid::Uuid, released: Instant, within: Duration) {
+    let deadline = released + within;
+    loop {
+        let state = store.meeting(meeting_id).unwrap().unwrap().state;
+        if state != steno_core::MeetingState::Recording {
+            assert!(
+                !matches!(state, steno_core::MeetingState::Failed { .. }),
+                "handed to processing, got {state:?}"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "saved within {within:?} of the lock going"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The time a snapshot arrived, its topic and its payload.
+type Arrival = (Instant, steno_bridge::BridgeTopic, serde_json::Value);
+
+/// A sink that keeps every snapshot with the time it arrived.
+#[derive(Default)]
+pub struct TimedSink(Mutex<Vec<Arrival>>);
+
+impl steno_bridge::EventSink for TimedSink {
+    fn emit(&self, event: steno_bridge::BridgeEvent) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((Instant::now(), event.topic, event.payload));
+    }
+}
+
+impl TimedSink {
+    /// The snapshots of `topic` that arrived at or after `since`, with
+    /// when each did.
+    pub fn since(
+        &self,
+        topic: steno_bridge::BridgeTopic,
+        since: Instant,
+    ) -> Vec<(Instant, serde_json::Value)> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(at, arrived, _)| *arrived == topic && *at >= since)
+            .map(|(at, _, payload)| (*at, payload.clone()))
+            .collect()
+    }
+
+    /// When the first `recording` snapshot in `state` (`"stopping"`, say)
+    /// that arrived at or after `since` did, waiting up to `patience` for
+    /// it.
+    pub fn recording_in(&self, state: &str, since: Instant, patience: Duration) -> Option<Instant> {
+        let deadline = Instant::now() + patience;
+        loop {
+            let reached = self
+                .since(steno_bridge::BridgeTopic::Recording, since)
+                .into_iter()
+                .find(|(_, payload)| payload["state"] == state)
+                .map(|(at, _)| at);
+            if reached.is_some() || Instant::now() >= deadline {
+                return reached;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// One `recorder_changed` the recorder's hook made: when it began, how
+/// long it took, on which thread, and the recorder's state and whether its
+/// auto-stop was armed once it returned.
+#[derive(Debug, Clone)]
+pub struct HookCall {
+    pub began: Instant,
+    pub took: Duration,
+    pub thread: Option<String>,
+    pub state: steno_bridge::RecordingState,
+    pub armed: bool,
+}
+
+/// A host over `store`, as [`hosted`] builds it.
+pub struct Hosted {
+    pub host: Arc<steno_host::Host>,
+    pub sink: Arc<TimedSink>,
+    hooks: Arc<Mutex<Vec<HookCall>>>,
+}
+
+/// A host over `store` and the fakes, whose recorder is `recorder`, with
+/// the recorder's changes routed into it as `App::launch` routes them, and
+/// a [`TimedSink`]. The page is ready, so every publish reaches the sink.
+pub fn hosted(store: &Arc<Store>, recorder: &Arc<crate::recorder::CaptureRecorder>) -> Hosted {
+    use steno_bridge::BridgeHost as _;
+    let mut services = steno_host::fakes::FakeServices::new(chrono::Utc::now()).services();
+    services.recorder = recorder.clone();
+    let host = Arc::new(
+        steno_host::Host::new(store.clone(), services, steno_host::HostConfig::default()).unwrap(),
+    );
+    let sink = Arc::new(TimedSink::default());
+    host.attach(sink.clone());
+    host.page_ready().unwrap();
+    let hooks = Arc::new(Mutex::new(Vec::new()));
+    let (hooked, watched, calls) = (
+        Arc::downgrade(&host),
+        Arc::downgrade(recorder),
+        hooks.clone(),
+    );
+    recorder.on_change(Arc::new(move || {
+        let (Some(host), Some(recorder)) = (hooked.upgrade(), watched.upgrade()) else {
+            return;
+        };
+        let began = Instant::now();
+        host.recorder_changed();
+        let took = began.elapsed();
+        let status = recorder.status();
+        calls.lock().unwrap().push(HookCall {
+            began,
+            took,
+            thread: std::thread::current().name().map(str::to_owned),
+            state: status.state,
+            armed: status.auto_stop.is_some(),
+        });
+    }));
+    Hosted { host, sink, hooks }
+}
+
+impl Hosted {
+    /// A reload in flight, as the two-second poll runs one, on a thread of
+    /// its own.
+    pub fn reload_in_flight(&self) -> std::thread::JoinHandle<()> {
+        let host = self.host.clone();
+        std::thread::spawn(move || host.store_changed())
+    }
+
+    /// The hook's calls that began at or after `since`.
+    pub fn hooks_since(&self, since: Instant) -> Vec<HookCall> {
+        self.hooks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.began >= since)
+            .cloned()
+            .collect()
+    }
 }

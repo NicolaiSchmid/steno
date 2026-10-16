@@ -1,5 +1,6 @@
 //! Export: `Settings::obsidian` (`None` means off), validated on save
-//! through the destination; its messages are shown verbatim.
+//! through the destination with the host's lock released; its messages
+//! are shown verbatim.
 //! Swift: `Settings/ObsidianSettingsViewModel.swift`.
 
 use std::path::{Path, PathBuf};
@@ -7,7 +8,7 @@ use std::path::{Path, PathBuf};
 use steno_core::{ObsidianSettings, Store};
 
 use super::{SectionError, update_settings};
-use crate::services::Services;
+use crate::services::{Services, VaultRefusal};
 
 #[derive(Debug, Default)]
 pub struct ObsidianSettingsViewModel {
@@ -21,10 +22,44 @@ pub struct ObsidianSettingsViewModel {
     /// True after a save; cleared by saving again.
     pub saved: bool,
     stored: Option<ObsidianSettings>,
+    /// Counts the saves begun, so that each has a number.
+    saves: u64,
+    /// The number of the save whose vault check runs now: only that save
+    /// stores, and a load while it runs leaves the form to it.
+    in_flight: Option<u64>,
+}
+
+/// A save begun under the host's lock, whose vault check runs with the
+/// lock released ([`ObsidianSettingsViewModel::begin_save`]). Rust only:
+/// Swift validated on the main actor, which blocked nothing else.
+#[derive(Debug)]
+pub struct VaultSave {
+    /// The settings to store; `None` turns the export off.
+    draft: Option<ObsidianSettings>,
+    /// Its number among the view model's saves.
+    number: u64,
+}
+
+impl VaultSave {
+    /// The destination's check of the draft: it writes and removes a probe
+    /// file in the vault, which a slow folder, or the Mac while its Files
+    /// and Folders prompt is up, can hold. Turning the export off checks
+    /// nothing.
+    pub fn validate(&self, services: &Services) -> Result<(), VaultRefusal> {
+        self.draft
+            .as_ref()
+            .map_or(Ok(()), |draft| services.export_validator.validate(draft))
+    }
 }
 
 impl ObsidianSettingsViewModel {
+    /// Loads the stored settings into the form. A save whose vault check
+    /// runs keeps the form: it stores the draft the user chose, and a load
+    /// would show the settings it replaces.
     pub fn load(&mut self, store: &Store) {
+        if self.in_flight.is_some() {
+            return;
+        }
         match store.settings() {
             Ok(settings) => {
                 self.stored.clone_from(&settings.obsidian);
@@ -89,43 +124,67 @@ impl ObsidianSettingsViewModel {
         })
     }
 
-    pub fn set_enabled(&mut self, on: bool, store: &Store, services: &Services) {
+    pub fn set_enabled(&mut self, on: bool) -> Option<VaultSave> {
         self.enabled = on;
-        self.commit(store, services);
+        self.commit()
     }
 
-    pub fn choose_vault(&mut self, folder: &Path, store: &Store, services: &Services) {
+    pub fn choose_vault(&mut self, folder: &Path) -> Option<VaultSave> {
         self.vault_path = folder.to_string_lossy().into_owned();
-        self.commit(store, services);
+        self.commit()
     }
 
-    pub fn set_include_audio(&mut self, on: bool, store: &Store, services: &Services) {
+    pub fn set_include_audio(&mut self, on: bool) -> Option<VaultSave> {
         self.include_audio = on;
-        self.commit(store, services);
+        self.commit()
     }
 
-    /// Saves when the draft differs from what is stored. On without a
-    /// vault waits for the chooser and saves nothing.
-    pub fn commit(&mut self, store: &Store, services: &Services) {
-        if self.needs_vault() || self.draft() == self.stored {
+    /// Begins a save when the draft differs from what is stored, or when
+    /// a check runs: an edit undone while it runs saves the stored value
+    /// again, so the earlier save does not store what the form no longer
+    /// shows. On without a vault waits for the chooser and saves nothing.
+    pub fn commit(&mut self) -> Option<VaultSave> {
+        if self.needs_vault() || (self.in_flight.is_none() && self.draft() == self.stored) {
             self.validation_message = None;
-            return;
+            return None;
         }
-        self.save(store, services);
+        Some(self.begin_save())
     }
 
-    /// Validates through the destination and stores the settings; a failed
-    /// validation stores nothing and reports the destination's message.
-    pub fn save(&mut self, store: &Store, services: &Services) {
+    /// Begins a save of the draft: [`VaultSave::validate`] checks it
+    /// through the destination, which writes and removes a probe file in
+    /// the vault, so the host runs it with its lock released, and
+    /// [`finish_save`](Self::finish_save) stores it.
+    pub fn begin_save(&mut self) -> VaultSave {
         self.saved = false;
         self.validation_message = None;
-        let draft = self.draft();
-        if let Some(draft) = &draft
-            && let Err(message) = services.export_validator.validate(draft)
-        {
+        self.saves += 1;
+        self.in_flight = Some(self.saves);
+        VaultSave {
+            draft: self.draft(),
+            number: self.saves,
+        }
+    }
+
+    /// Stores the settings `save` validated; a failed validation stores
+    /// nothing and reports the destination's message. A save that another
+    /// save followed while its check ran stores nothing: the later one
+    /// decides what is stored.
+    pub fn finish_save(
+        &mut self,
+        save: VaultSave,
+        validated: Result<(), VaultRefusal>,
+        store: &Store,
+    ) {
+        if self.in_flight != Some(save.number) {
+            return;
+        }
+        self.in_flight = None;
+        if let Err(message) = validated {
             self.validation_message = Some(message.to_string());
             return;
         }
+        let draft = save.draft;
         let result = update_settings(store, |settings| {
             // The unknown fields as stored now, not as loaded: another
             // writer may have added some since. They may belong to the

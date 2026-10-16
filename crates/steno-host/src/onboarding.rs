@@ -42,7 +42,7 @@ use crate::services::{
     VaultRefusal, permission_is_missing, permission_is_required,
 };
 use crate::settings::llm::{CodexStatus, KeyRead, LlmPreset, LlmSettingsViewModel, url_host};
-use crate::settings::obsidian::ObsidianSettingsViewModel;
+use crate::settings::obsidian::{ObsidianSettingsViewModel, VaultSave};
 use crate::settings::snapshots as settings_snapshots;
 use crate::settings::transcription::downloading_text;
 use crate::settings::{AssetState, SpeechSettingsViewModel};
@@ -592,16 +592,29 @@ impl OnboardingViewModel {
     }
 
     /// A folder from the chooser becomes the vault and is saved at once.
-    pub fn choose_vault(&mut self, folder: &Path, store: &Store, services: &Services) {
+    pub fn choose_vault(&mut self, folder: &Path) -> VaultSave {
         self.obsidian.vault_path = folder.to_string_lossy().into_owned();
-        self.save_vault(store, services);
+        self.begin_save_vault()
     }
 
-    /// Saves through the Obsidian view model (validated by the destination)
-    /// and collapses the row on success.
-    pub fn save_vault(&mut self, store: &Store, services: &Services) {
+    /// Begins a save through the Obsidian view model; the host validates
+    /// it through the destination with its lock released, then
+    /// [`finish_save_vault`](Self::finish_save_vault) stores it.
+    pub fn begin_save_vault(&mut self) -> VaultSave {
         self.obsidian.enabled = true;
-        self.obsidian.save(store, services);
+        self.obsidian.begin_save()
+    }
+
+    /// Stores the save [`begin_save_vault`](Self::begin_save_vault) began
+    /// and collapses the row on success.
+    pub fn finish_save_vault(
+        &mut self,
+        save: VaultSave,
+        validated: Result<(), VaultRefusal>,
+        store: &Store,
+        services: &Services,
+    ) {
+        self.obsidian.finish_save(save, validated, store);
         if !self.obsidian.saved || self.obsidian.errors.error.is_some() {
             return;
         }

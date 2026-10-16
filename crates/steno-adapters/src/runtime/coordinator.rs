@@ -21,8 +21,11 @@ pub type DestinationFactory = dyn Fn(&Settings) -> Vec<Arc<dyn Destination>> + S
 /// destination is a `Failed` row and the next destination still runs. There
 /// is no separate re-export path: the pipeline's redeliver calls
 /// [`DeliveryDispatcher::deliver_all`] again. The Obsidian destination
-/// runs its file I/O on tokio's blocking pool, so `deliver_all` needs a
-/// tokio runtime; the store calls it makes still block the calling thread.
+/// runs its file I/O on tokio's blocking pool, and `deliver_all` its store
+/// calls (`Store::reading`, `Store::writing`), so it needs a tokio runtime
+/// and never holds a worker while the store waits.
+/// [`DeliveryDispatcher::mark_pending`] is synchronous and calls the store
+/// on the calling thread: the pipeline calls it from the blocking pool.
 pub struct DeliveryCoordinator {
     store: Arc<Store>,
     destinations: Box<DestinationFactory>,
@@ -96,16 +99,36 @@ impl DeliveryCoordinator {
     /// Fails every stored row with `reason`: settings that do not load
     /// cannot say where to deliver, and silence would leave the meeting
     /// `ready` with stale rows and no trace of the failure.
-    fn fail_all(&self, existing: Vec<Delivery>, reason: &str) -> Vec<Delivery> {
-        existing
+    async fn fail_all(&self, existing: Vec<Delivery>, reason: &str) -> Vec<Delivery> {
+        let failed: Vec<Delivery> = existing
             .into_iter()
             .map(|mut delivery| {
                 delivery.status = DeliveryStatus::Failed(reason.to_owned());
                 delivery.last_attempt_at = Some((self.now)());
-                let _ = self.store.save_delivery(&delivery);
                 delivery
             })
-            .collect()
+            .collect();
+        let saved = failed.clone();
+        let _ = self
+            .store
+            .writing(move |store| {
+                for delivery in &saved {
+                    let _ = store.save_delivery(delivery);
+                }
+                Ok(())
+            })
+            .await;
+        failed
+    }
+
+    /// Saves `delivery`, through the store's facade; a failed save is
+    /// dropped, as every delivery write here is.
+    async fn save(&self, delivery: &Delivery) {
+        let delivery = delivery.clone();
+        let _ = self
+            .store
+            .writing(move |store| store.save_delivery(&delivery))
+            .await;
     }
 }
 
@@ -139,10 +162,23 @@ impl DeliveryDispatcher for DeliveryCoordinator {
     }
 
     async fn deliver_all(&self, meeting_id: Uuid) -> Vec<Delivery> {
-        let existing = self.store.deliveries(meeting_id).unwrap_or_default();
-        let settings = match self.store.settings() {
+        let (existing, settings) = self
+            .store
+            .reading(move |store| {
+                Ok((
+                    store.deliveries(meeting_id).unwrap_or_default(),
+                    store.settings(),
+                ))
+            })
+            .await
+            .unwrap_or_else(|error| (Vec::new(), Err(error)));
+        let settings = match settings {
             Ok(settings) => settings,
-            Err(error) => return self.fail_all(existing, &format!("settings failed: {error}")),
+            Err(error) => {
+                return self
+                    .fail_all(existing, &format!("settings failed: {error}"))
+                    .await;
+            }
         };
         let targets = (self.destinations)(&settings);
         // A row that still says an export is outstanding for a destination
@@ -159,11 +195,17 @@ impl DeliveryDispatcher for DeliveryCoordinator {
             })
             .map(|delivery| delivery.id)
             .collect();
-        let _ = self.store.delete_deliveries(&stale);
+        let _ = self
+            .store
+            .writing(move |store| store.delete_deliveries(&stale))
+            .await;
         if targets.is_empty() {
             return Vec::new();
         }
-        let export = self.store.export(meeting_id);
+        let export = self
+            .store
+            .reading(move |store| store.export(meeting_id))
+            .await;
 
         let mut results = Vec::with_capacity(targets.len());
         for destination in &targets {
@@ -184,7 +226,7 @@ impl DeliveryDispatcher for DeliveryCoordinator {
                     delivery.status = DeliveryStatus::Failed(format!("export failed: {error}"));
                 }
                 Ok(export) => {
-                    let _ = self.store.save_delivery(&delivery);
+                    self.save(&delivery).await;
                     match destination.deliver(export, previous.as_ref()).await {
                         Ok(receipt) => {
                             delivery.receipt = Some(receipt);
@@ -194,7 +236,7 @@ impl DeliveryDispatcher for DeliveryCoordinator {
                     }
                 }
             }
-            let _ = self.store.save_delivery(&delivery);
+            self.save(&delivery).await;
             results.push(delivery);
         }
         results

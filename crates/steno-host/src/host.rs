@@ -58,9 +58,12 @@
 //! event follower and their two-second poll ([`Host::apply_meeting_event`],
 //! [`Host::store_changed`], [`Host::refresh_pairing`]) call from their
 //! runtime's blocking pool, so a reload that waits never holds a runtime
-//! worker. The update schedule's `Host::updates_changed` and the gated
-//! handover's `Host::phones_changed` still call from runtime workers;
-//! both only read, and P40's readers end their wait. One exemption: the
+//! worker, and so do the update schedule's `Host::updates_changed` and
+//! the gated handover's `Host::phones_changed`, which wait for the
+//! view-model lock a settings save may hold through its busy wait. Under
+//! the lock the host reads on a reader of its own
+//! ([`Store::with_own_reader`]), so no read there waits for a write. One
+//! exemption: the
 //! launch (`steno_services::App::launch`, with
 //! [`Host::should_open_onboarding`] before it) runs on the shell's main
 //! thread during setup, once the main window is built and before the
@@ -125,7 +128,7 @@ use crate::services::{Services, VaultRefusal};
 use crate::settings::{
     AudioSettingsViewModel, GeneralSettingsViewModel, KeyRead, LlmPreset, LlmSettingsViewModel,
     ObsidianSettingsViewModel, PhonesSettingsViewModel, SpeechSettingsViewModel, llm::Probe,
-    overview, snapshots as settings_snapshots,
+    obsidian::VaultSave, overview, snapshots as settings_snapshots,
 };
 use crate::setup::engine_notice;
 use crate::speakers::{OptionKind, SpeakerOption as ModelOption};
@@ -226,6 +229,12 @@ where
 
 /// The view models and the controller state behind the host's mutex.
 struct Inner {
+    /// The host's handle on the store ([`Store::with_own_reader`]): its
+    /// reads use a reader connection of the host's own, so a read under
+    /// this lock never waits for a write, nor for a read elsewhere in the
+    /// process. Its writes are the shared writer's. Only the holder of this
+    /// lock reads on it.
+    store: Arc<Store>,
     app: AppState,
     /// Whether the list had meetings at its last publish; the `app` topic
     /// reads this so it republishes when the list empties or fills, not
@@ -474,36 +483,41 @@ fn no_selection() -> BridgeError {
 
 impl Host {
     /// Loads every view model from the store and the services. Nothing is
-    /// published until a sink is attached and `page.ready` arrives.
+    /// published until a sink is attached and `page.ready` arrives. The
+    /// host reads on a reader of its own ([`Store::with_own_reader`]), held
+    /// with its view models until the last clone is dropped; a second host
+    /// over the same store fails with [`StoreError::OwnReaderOpen`] until
+    /// then.
     pub fn new(
         store: Arc<Store>,
         services: Services,
         config: HostConfig,
     ) -> Result<Self, HostError> {
+        let own = Arc::new(store.with_own_reader()?);
         let key = KeyRead::from(block_on(services.secrets.secret(&SecretKey::llm_api_key())));
         let mut general = GeneralSettingsViewModel::new(&services);
-        general.load(&store, &services);
+        general.load(&own, &services);
         let mut audio = AudioSettingsViewModel::new();
-        audio.load(&store, &services);
+        audio.load(&own, &services);
         let mut speech = SpeechSettingsViewModel::new();
-        speech.load(&store, &services);
+        speech.load(&own, &services);
         let mut llm = LlmSettingsViewModel::new();
-        llm.load(&store, &services, key.clone());
+        llm.load(&own, &services, key.clone());
         let mut obsidian = ObsidianSettingsViewModel::default();
-        obsidian.load(&store);
+        obsidian.load(&own);
         let mut phones = PhonesSettingsViewModel::new(&services);
         phones.load(&services);
         phones.refresh(&services);
-        let subtitles = overview::refresh(&store, &services, config.platform, &config.version);
+        let subtitles = overview::refresh(&own, &services, config.platform, &config.version);
         let mut onboarding = OnboardingViewModel::new(config.platform);
-        onboarding.load(&store, &services, key);
+        onboarding.load(&own, &services, key);
         let mut list = MeetingListViewModel::new(config.zone);
-        list.reload(&store);
+        list.reload(&own);
         let mut progress = ProcessingProgressModel::default();
         progress.meetings_changed(&list.all, services.clock.now());
         let app = AppState {
             speech_engine_notice: services.preferences.flag(engine_notice::PENDING_KEY),
-            stored_settings: store.settings().ok(),
+            stored_settings: own.settings().ok(),
             phone: Self::phone_card(&services),
             ..AppState::default()
         };
@@ -522,6 +536,7 @@ impl Host {
             services,
             config,
             inner: Mutex::new(Inner {
+                store: own,
                 app,
                 has_meetings: false,
                 pending_selection: None,
@@ -607,6 +622,8 @@ impl Host {
         &self.shared.services
     }
 
+    /// The shared store, the one the host was built over, for code that
+    /// runs without the host's lock: its reads use the shared reader.
     #[must_use]
     pub fn store(&self) -> &Arc<Store> {
         &self.shared.store
@@ -830,7 +847,7 @@ impl Host {
             let mut detail =
                 MeetingDetailViewModel::new(selection, inner.app.stored_settings.as_ref());
             detail.reload(
-                &self.shared.store,
+                &inner.store,
                 &*self.shared.services.file_system,
                 &*self.shared.services.pipeline,
             );
@@ -861,11 +878,11 @@ impl Host {
             let mut guard = self.lock();
             let inner = &mut *guard;
             let now = self.now();
-            inner.list.reload(&self.shared.store);
+            inner.list.reload(&inner.store);
             inner.progress.meetings_changed(&inner.list.all, now);
             if let Some(detail) = inner.detail.as_mut() {
                 detail.reload(
-                    &self.shared.store,
+                    &inner.store,
                     &*self.shared.services.file_system,
                     &*self.shared.services.pipeline,
                 );
@@ -1089,7 +1106,7 @@ impl Host {
         {
             let mut inner = self.lock();
             let mut fresh = OnboardingViewModel::new(self.shared.config.platform);
-            fresh.load(&self.shared.store, &self.shared.services, key);
+            fresh.load(&inner.store, &self.shared.services, key);
             inner.onboarding = fresh;
             inner.publisher.schedule(BridgeTopic::Onboarding);
         }
@@ -1133,30 +1150,41 @@ impl Host {
 
     fn with_detail<R>(
         inner: &mut Inner,
-        body: impl FnOnce(&mut MeetingDetailViewModel) -> R,
+        body: impl FnOnce(&mut MeetingDetailViewModel, &Store) -> R,
     ) -> Outcome<R> {
-        inner.detail.as_mut().map(body).ok_or_else(no_selection)
+        let store = &inner.store;
+        inner
+            .detail
+            .as_mut()
+            .map(|detail| body(detail, store))
+            .ok_or_else(no_selection)
     }
 
     /// A command on the selected meeting's detail (`no_selection` without
     /// one) that changes only the detail's own state: the detail topic
     /// republishes.
     fn detail_command<R>(&self, body: impl FnOnce(&mut MeetingDetailViewModel) -> R) -> Outcome<R> {
-        self.on_detail(body, |inner| {
-            inner.publisher.schedule(BridgeTopic::MeetingDetail);
-        })
+        self.on_detail(
+            |detail, _| body(detail),
+            |inner| {
+                inner.publisher.schedule(BridgeTopic::MeetingDetail);
+            },
+        )
     }
 
     /// A command on the selected meeting's detail after which the detail,
     /// or the pipeline on its behalf, wrote to the store: the detail and
     /// the list reload before publishing.
-    fn detail_write<R>(&self, body: impl FnOnce(&mut MeetingDetailViewModel) -> R) -> Outcome<R> {
+    fn detail_write<R>(
+        &self,
+        body: impl FnOnce(&mut MeetingDetailViewModel, &Store) -> R,
+    ) -> Outcome<R> {
         self.on_detail(body, |inner| self.reload_detail(inner))
     }
 
     fn on_detail<R>(
         &self,
-        body: impl FnOnce(&mut MeetingDetailViewModel) -> R,
+        body: impl FnOnce(&mut MeetingDetailViewModel, &Store) -> R,
         after: impl FnOnce(&mut Inner),
     ) -> Outcome<R> {
         let outcome = {
@@ -1185,12 +1213,12 @@ impl Host {
     fn reload_detail(&self, inner: &mut Inner) {
         if let Some(detail) = inner.detail.as_mut() {
             detail.reload(
-                &self.shared.store,
+                &inner.store,
                 &*self.shared.services.file_system,
                 &*self.shared.services.pipeline,
             );
         }
-        inner.list.reload(&self.shared.store);
+        inner.list.reload(&inner.store);
         inner.publisher.schedule(BridgeTopic::MeetingsList);
         inner.publisher.schedule(BridgeTopic::MeetingDetail);
     }
@@ -1199,7 +1227,7 @@ impl Host {
     /// republishes every section, as the observed map did.
     fn refresh_subtitles(&self, inner: &mut Inner) {
         let next = overview::refresh(
-            &self.shared.store,
+            &inner.store,
             &self.shared.services,
             self.shared.config.platform,
             &self.shared.config.version,
@@ -1219,7 +1247,7 @@ impl Host {
     /// as Swift's did when its window opened. The subtitles follow either
     /// way.
     fn follow_settings(&self, inner: &mut Inner, reload_sections: bool) {
-        let latest = self.shared.store.settings().ok();
+        let latest = inner.store.settings().ok();
         if latest != inner.app.stored_settings {
             inner.app.stored_settings = latest;
             inner.publisher.schedule(BridgeTopic::App);
@@ -1273,7 +1301,7 @@ impl Host {
     /// window waits until the user answers it. A `SecretStore` must not call
     /// back into the host.
     fn reload_sections(&self, inner: &mut Inner) {
-        let store = &self.shared.store;
+        let store = &inner.store;
         let services = &self.shared.services;
         let key = self.read_key();
         inner.general.load(store, services);
@@ -1331,8 +1359,9 @@ impl Host {
     /// Back from page 2) checks then.
     fn check_vault_if_due(&self) {
         let settings = {
-            let mut inner = self.lock();
-            let settings = inner.onboarding.begin_vault_check(&self.shared.store);
+            let mut guard = self.lock();
+            let inner = &mut *guard;
+            let settings = inner.onboarding.begin_vault_check(&inner.store);
             if settings.is_some() {
                 inner.publisher.schedule(BridgeTopic::Onboarding);
             }
@@ -1360,6 +1389,42 @@ impl Host {
     fn finish_vault_check(&self, outcome: Result<(), VaultRefusal>) {
         self.command(&[BridgeTopic::Onboarding], |inner| {
             inner.onboarding.finish_vault_check(outcome);
+        });
+    }
+
+    /// A command on the Export section whose `edit` may begin a save: the
+    /// vault check ([`VaultSave::validate`]) writes and removes a probe
+    /// file in the vault, so it runs with the lock released, and the save
+    /// lands under it again. Rust only: Swift validated on the main actor.
+    fn export_command(
+        &self,
+        edit: impl FnOnce(&mut ObsidianSettingsViewModel) -> Option<VaultSave>,
+    ) {
+        let mut save = None;
+        self.settings_command(BridgeTopic::SettingsExport, |inner| {
+            save = edit(&mut inner.obsidian);
+        });
+        let Some(save) = save else {
+            return;
+        };
+        let validated = save.validate(&self.shared.services);
+        self.settings_command(BridgeTopic::SettingsExport, |inner| {
+            inner.obsidian.finish_save(save, validated, &inner.store);
+        });
+    }
+
+    /// Page 2's vault save, checked with the lock released as
+    /// [`export_command`](Self::export_command) checks the Export section's.
+    fn onboarding_vault_command(&self, begin: impl FnOnce(&mut OnboardingViewModel) -> VaultSave) {
+        let save = self.onboarding_command(|inner| begin(&mut inner.onboarding));
+        let validated = save.validate(&self.shared.services);
+        self.onboarding_command(|inner| {
+            inner.onboarding.finish_save_vault(
+                save,
+                validated,
+                &inner.store,
+                &self.shared.services,
+            );
         });
     }
 
@@ -1448,11 +1513,12 @@ impl Host {
     fn summaries_command(
         &self,
         window: BridgeWindow,
-        body: impl FnOnce(&mut LlmSettingsViewModel),
+        body: impl FnOnce(&mut LlmSettingsViewModel, &Store),
     ) {
         {
             let mut inner = self.lock();
-            body(inner.llm_mut(window));
+            let store = inner.store.clone();
+            body(inner.llm_mut(window), &store);
             inner.publisher.schedule(Self::summaries_topic(window));
             self.follow_settings(&mut inner, window == BridgeWindow::Onboarding);
         }
@@ -1529,13 +1595,13 @@ impl Host {
         }
         let outcome = {
             let mut inner = self.lock();
-            if self.shared.store.meeting(meeting_id)?.is_none() {
+            if inner.store.meeting(meeting_id)?.is_none() {
                 return Err(no_such_meeting());
             }
             let applied = detail::set_keep_audio(
                 meeting_id,
                 keep,
-                &self.shared.store,
+                &inner.store,
                 &*self.shared.services.pipeline,
             );
             let outcome = match (applied, inner.detail.as_mut()) {
@@ -1599,12 +1665,12 @@ impl Host {
     /// changed: the API key the Summaries sections read and the listener
     /// the Phones section and the main window's phone card show.
     fn finish_swift_import(&self, status: crate::services::SwiftImportStatus, skipped: bool) {
-        let (store, services) = (&self.shared.store, &self.shared.services);
+        let services = &self.shared.services;
         self.onboarding_command(|inner| {
             let key = self.read_key();
             inner
                 .onboarding
-                .finish_import(status, skipped, store, services, key);
+                .finish_import(status, skipped, &inner.store, services, key);
             self.reload_sections(inner);
             inner.phones.load(services);
             inner.phones.refresh(services);
@@ -1755,10 +1821,10 @@ impl Drop for ForgottenEntry<'_> {
         let Some(folder) = self.folder.take() else {
             return;
         };
-        let _inner = self.host.lock();
-        let shared = &self.host.shared;
-        if !matches!(shared.store.meeting(self.meeting_id), Ok(None)) {
-            shared
+        let inner = self.host.lock();
+        if !matches!(inner.store.meeting(self.meeting_id), Ok(None)) {
+            self.host
+                .shared
                 .services
                 .recorder
                 .restore_recording(self.meeting_id, &folder);
@@ -1800,7 +1866,7 @@ impl BridgeHost for Host {
 
     fn meetings_set_query(&self, params: SetQueryParams) -> Outcome<()> {
         self.command(&[BridgeTopic::MeetingsList], |inner| {
-            inner.list.set_query(params.query, &self.shared.store);
+            inner.list.set_query(params.query, &inner.store);
         });
         Ok(())
     }
@@ -1897,12 +1963,12 @@ impl BridgeHost for Host {
                 |inner| {
                     let deleted = inner.list.delete(
                         params.meeting_id,
-                        &self.shared.store,
+                        &inner.store,
                         &*self.shared.services.file_system,
                         left.as_ref(),
                         recording,
                     );
-                    inner.list.reload(&self.shared.store);
+                    inner.list.reload(&inner.store);
                     // The store's `deleted` event, posted only when the rows
                     // went: a queued meeting's progress entry goes with it,
                     // and the forgotten entry is not recorded again.
@@ -1930,15 +1996,15 @@ impl BridgeHost for Host {
     fn meeting_set_tags(&self, params: SetTagsParams) -> Outcome<()> {
         let tags = MeetingDetailViewModel::tags_from(&params.tags);
         let now = self.now();
-        self.detail_write(|detail| detail.set_tags(tags, &self.shared.store, now))
+        self.detail_write(|detail, store| detail.set_tags(tags, store, now))
     }
 
     fn meeting_set_template(&self, params: SetTemplateParams) -> Outcome<()> {
         let now = self.now();
-        self.detail_write(|detail| {
+        self.detail_write(|detail, store| {
             detail.set_template(
                 &params.template_id,
-                &self.shared.store,
+                store,
                 now,
                 &*self.shared.services.pipeline,
             );
@@ -1946,11 +2012,11 @@ impl BridgeHost for Host {
     }
 
     fn meeting_rerun_summary(&self) -> Outcome<()> {
-        self.detail_write(|detail| detail.rerun_summary(&*self.shared.services.pipeline))
+        self.detail_write(|detail, _| detail.rerun_summary(&*self.shared.services.pipeline))
     }
 
     fn meeting_reexport(&self) -> Outcome<()> {
-        self.detail_write(|detail| detail.reexport(&*self.shared.services.pipeline))
+        self.detail_write(|detail, _| detail.reexport(&*self.shared.services.pipeline))
     }
 
     /// "Process again" on the selected meeting, after
@@ -1969,7 +2035,7 @@ impl BridgeHost for Host {
             return Ok(());
         }
         let platform = self.shared.config.platform;
-        self.detail_write(|detail| {
+        self.detail_write(|detail, _| {
             if detail.id == meeting_id {
                 detail.process_again(&*self.shared.services.pipeline, platform);
             }
@@ -2058,10 +2124,10 @@ impl BridgeHost for Host {
         let outcome = {
             let mut inner = self.lock();
             let option = Self::model_option(&params.option, &inner)?;
-            let outcome = Self::with_detail(&mut inner, |detail| {
+            let outcome = Self::with_detail(&mut inner, |detail, store| {
                 if detail
                     .speakers
-                    .select(&option, params.speaker_id, &self.shared.store, now)
+                    .select(&option, params.speaker_id, store, now)
                 {
                     detail.speakers_changed();
                 }
@@ -2159,11 +2225,9 @@ impl BridgeHost for Host {
 
     fn settings_general_set_launch_at_login(&self, params: SetBoolParams) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsGeneral, |inner| {
-            inner.general.set_launch_at_login(
-                params.value,
-                &self.shared.store,
-                &self.shared.services,
-            );
+            inner
+                .general
+                .set_launch_at_login(params.value, &inner.store, &self.shared.services);
         });
         Ok(())
     }
@@ -2172,7 +2236,7 @@ impl BridgeHost for Host {
         self.settings_command(BridgeTopic::SettingsGeneral, |inner| {
             inner
                 .general
-                .set_detection_enabled(params.value, &self.shared.store);
+                .set_detection_enabled(params.value, &inner.store);
         });
         Ok(())
     }
@@ -2181,7 +2245,7 @@ impl BridgeHost for Host {
         self.settings_command(BridgeTopic::SettingsGeneral, |inner| {
             inner
                 .general
-                .set_default_template(&params.template_id, &self.shared.store);
+                .set_default_template(&params.template_id, &inner.store);
         });
         Ok(())
     }
@@ -2231,7 +2295,7 @@ impl BridgeHost for Host {
     fn settings_recording_set_input_device(&self, params: SetStringParams) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsRecording, |inner| {
             let uid = (!params.value.is_empty()).then_some(params.value);
-            inner.audio.set_input_device(uid, &self.shared.store);
+            inner.audio.set_input_device(uid, &inner.store);
         });
         Ok(())
     }
@@ -2251,7 +2315,7 @@ impl BridgeHost for Host {
             self.settings_command(BridgeTopic::SettingsRecording, |inner| {
                 inner
                     .audio
-                    .set_audio_folder(folder, &self.shared.store, &self.shared.services);
+                    .set_audio_folder(folder, &inner.store, &self.shared.services);
             });
         }))
     }
@@ -2266,7 +2330,7 @@ impl BridgeHost for Host {
             inner.audio.set_retention(
                 params.retention.mode,
                 params.retention.days,
-                &self.shared.store,
+                &inner.store,
                 &self.shared.services,
             );
         });
@@ -2304,7 +2368,7 @@ impl BridgeHost for Host {
         self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
             inner
                 .speech
-                .set_engine(engine, &self.shared.store, &self.shared.services);
+                .set_engine(engine, &inner.store, &self.shared.services);
         });
         Ok(())
     }
@@ -2358,38 +2422,40 @@ impl BridgeHost for Host {
             BridgeError::invalid_params(format!("Unknown summaries service {}.", params.value))
         })?;
         let now = self.now();
-        self.summaries_command(self.window, |llm| {
-            llm.select_preset(preset, &self.shared.store, &self.shared.services, now);
+        self.summaries_command(self.window, |llm, store| {
+            llm.select_preset(preset, store, &self.shared.services, now);
         });
         Ok(())
     }
 
     fn settings_summaries_update(&self, params: SummariesUpdateParams) -> Outcome<()> {
-        self.summaries_command(self.window, |llm| llm.apply_update(&params));
+        self.summaries_command(self.window, |llm, _| llm.apply_update(&params));
         Ok(())
     }
 
     fn settings_summaries_save(&self) -> Outcome<()> {
         let now = self.now();
-        self.summaries_command(BridgeWindow::Settings, |llm| {
-            llm.commit(&self.shared.store, &self.shared.services, now);
+        self.summaries_command(BridgeWindow::Settings, |llm, store| {
+            llm.commit(store, &self.shared.services, now);
         });
         Ok(())
     }
 
     fn settings_summaries_test(&self) -> Outcome<()> {
-        self.summaries_command(self.window, LlmSettingsViewModel::request_probe);
+        self.summaries_command(self.window, |llm, _| llm.request_probe());
         Ok(())
     }
 
     /// The confirmation is saved under the lock, the model list fetched
     /// with it released, then the pick saved and probed.
     fn settings_summaries_confirm_codex(&self) -> Outcome<()> {
-        let (store, services) = (&self.shared.store, &self.shared.services);
+        let services = &self.shared.services;
         self.outside_lock(
             BridgeTopic::SettingsSummaries,
             |inner| {
-                let fetch = inner.llm.begin_confirm_codex(store, services, self.now());
+                let fetch = inner
+                    .llm
+                    .begin_confirm_codex(&inner.store, services, self.now());
                 self.follow_settings(inner, false);
                 fetch.then_some(())
             },
@@ -2397,7 +2463,7 @@ impl BridgeHost for Host {
             |inner, (account, models)| {
                 inner
                     .llm
-                    .finish_confirm_codex(account, models, store, services, self.now());
+                    .finish_confirm_codex(account, models, &inner.store, services, self.now());
                 self.follow_settings(inner, false);
             },
         );
@@ -2408,7 +2474,7 @@ impl BridgeHost for Host {
     fn settings_summaries_refresh_codex_status(&self) -> Outcome<()> {
         // A file read, outside the lock all the same.
         let account = self.shared.services.llm.codex_account();
-        self.summaries_command(self.window, |llm| llm.apply_codex_account(account));
+        self.summaries_command(self.window, |llm, _| llm.apply_codex_account(account));
         Ok(())
     }
 
@@ -2425,21 +2491,16 @@ impl BridgeHost for Host {
 
     fn settings_summaries_select_codex_model(&self, params: SetStringParams) -> Outcome<()> {
         let now = self.now();
-        self.summaries_command(BridgeWindow::Settings, |llm| {
-            llm.select_codex_model(
-                &params.value,
-                &self.shared.store,
-                &self.shared.services,
-                now,
-            );
+        self.summaries_command(BridgeWindow::Settings, |llm, store| {
+            llm.select_codex_model(&params.value, store, &self.shared.services, now);
         });
         Ok(())
     }
 
     fn settings_summaries_stop_using_codex(&self) -> Outcome<()> {
         let now = self.now();
-        self.summaries_command(BridgeWindow::Settings, |llm| {
-            llm.stop_using_codex(&self.shared.store, &self.shared.services, now);
+        self.summaries_command(BridgeWindow::Settings, |llm, store| {
+            llm.stop_using_codex(store, &self.shared.services, now);
         });
         Ok(())
     }
@@ -2447,50 +2508,34 @@ impl BridgeHost for Host {
     // settings.export
 
     fn settings_export_set_enabled(&self, params: SetBoolParams) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsExport, |inner| {
-            inner
-                .obsidian
-                .set_enabled(params.value, &self.shared.store, &self.shared.services);
-        });
+        self.export_command(|obsidian| obsidian.set_enabled(params.value));
         Ok(())
     }
 
     fn settings_export_choose_vault(&self) -> Outcome<ChosenPathReply> {
         let current = self.lock().obsidian.vault_url();
         Ok(self.choose(current.as_deref(), |folder| {
-            self.settings_command(BridgeTopic::SettingsExport, |inner| {
-                inner
-                    .obsidian
-                    .choose_vault(folder, &self.shared.store, &self.shared.services);
-            });
+            self.export_command(|obsidian| obsidian.choose_vault(folder));
         }))
     }
 
     fn settings_export_update(&self, params: ExportUpdateParams) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsExport, |inner| {
+        self.export_command(|obsidian| {
             if let Some(people) = params.people_folder {
-                inner.obsidian.people_folder = people;
+                obsidian.people_folder = people;
             }
             if let Some(tag) = params.task_tag {
-                inner.obsidian.task_tag = tag;
+                obsidian.task_tag = tag;
             }
-            if let Some(include) = params.include_audio {
-                inner.obsidian.set_include_audio(
-                    include,
-                    &self.shared.store,
-                    &self.shared.services,
-                );
-            }
+            params
+                .include_audio
+                .and_then(|include| obsidian.set_include_audio(include))
         });
         Ok(())
     }
 
     fn settings_export_save(&self) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsExport, |inner| {
-            inner
-                .obsidian
-                .commit(&self.shared.store, &self.shared.services);
-        });
+        self.export_command(ObsidianSettingsViewModel::commit);
         Ok(())
     }
 
@@ -2595,7 +2640,7 @@ impl BridgeHost for Host {
             // Loaded at start, so the key is not read again.
             inner
                 .onboarding
-                .load(&self.shared.store, &self.shared.services, KeyRead::Absent);
+                .load(&inner.store, &self.shared.services, KeyRead::Absent);
             inner.onboarding.retry_vault_check();
             self.advance_if_handled(inner);
         });
@@ -2617,7 +2662,7 @@ impl BridgeHost for Host {
         self.onboarding_command(|inner| {
             inner
                 .onboarding
-                .save_summaries(&self.shared.store, &self.shared.services, now);
+                .save_summaries(&inner.store, &self.shared.services, now);
         });
         Ok(())
     }
@@ -2625,12 +2670,12 @@ impl BridgeHost for Host {
     /// As [`Self::settings_summaries_confirm_codex`], on the onboarding
     /// page's Summaries row.
     fn onboarding_confirm_summaries_with_codex(&self) -> Outcome<()> {
-        let (store, services) = (&self.shared.store, &self.shared.services);
+        let services = &self.shared.services;
         self.outside_lock(
             BridgeTopic::Onboarding,
             |inner| {
                 let fetch = inner.onboarding.begin_confirm_summaries_with_codex(
-                    store,
+                    &inner.store,
                     services,
                     self.now(),
                 );
@@ -2642,7 +2687,7 @@ impl BridgeHost for Host {
                 inner.onboarding.finish_confirm_summaries_with_codex(
                     account,
                     models,
-                    store,
+                    &inner.store,
                     services,
                     self.now(),
                 );
@@ -2656,20 +2701,12 @@ impl BridgeHost for Host {
     fn onboarding_choose_vault(&self) -> Outcome<ChosenPathReply> {
         let current = self.lock().onboarding.obsidian.vault_url();
         Ok(self.choose(current.as_deref(), |folder| {
-            self.onboarding_command(|inner| {
-                inner
-                    .onboarding
-                    .choose_vault(folder, &self.shared.store, &self.shared.services);
-            });
+            self.onboarding_vault_command(|onboarding| onboarding.choose_vault(folder));
         }))
     }
 
     fn onboarding_save_vault(&self) -> Outcome<()> {
-        self.onboarding_command(|inner| {
-            inner
-                .onboarding
-                .save_vault(&self.shared.store, &self.shared.services);
-        });
+        self.onboarding_vault_command(OnboardingViewModel::begin_save_vault);
         Ok(())
     }
 

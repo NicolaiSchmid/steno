@@ -1856,6 +1856,55 @@ fn the_codex_preset_stores_nothing_until_confirmed_and_picks_the_first_model() {
     );
 }
 
+/// The vault check writes and removes a probe file in the vault, which a
+/// slow folder or the Mac's Files and Folders prompt can hold, so the host
+/// runs it with its lock released: while a check is held, the recorder's
+/// level hook and another command reach the host within [`LIVE`] and the
+/// section reads unsaved; once the check answers, the vault is stored.
+/// Rust only: Swift validated on the main actor.
+#[test]
+fn a_held_vault_check_leaves_the_host_live() {
+    let harness = Harness::builder()
+        .choose(Some("/Users/nicolai/Notes/Work Vault"))
+        .build();
+    harness
+        .host
+        .settings_export_set_enabled(SetBoolParams { value: true })
+        .unwrap();
+    let (checking, release) = hold_vault_checks(&harness);
+    let saving = std::thread::spawn({
+        let host = harness.host.clone();
+        move || host.settings_export_choose_vault()
+    });
+    checking
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the vault check began");
+    let since = std::time::Instant::now();
+    harness.host.recorder_changed();
+    let levels = since.elapsed();
+    let since = std::time::Instant::now();
+    harness.host.settings_recording_refresh_devices().unwrap();
+    let command = since.elapsed();
+    let during = harness.snapshot(BridgeTopic::SettingsExport);
+    release.send(()).unwrap();
+    saving.join().unwrap().unwrap();
+
+    assert!(levels < LIVE, "the level hook took {levels:?}");
+    assert!(command < LIVE, "the Settings command took {command:?}");
+    assert_eq!(during["saved"], false);
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Users/nicolai/Notes/Work Vault"
+    );
+    assert_eq!(harness.snapshot(BridgeTopic::SettingsExport)["saved"], true);
+}
+
 /// Swift: `testObsidianValidationSurfacesTheDestinationMessageVerbatim`,
 /// `testObsidianDisabledSavesNilWithoutValidating`, `testObsidianCommitWaitsForAVaultAndSavesOnChoice`.
 #[test]
@@ -2098,6 +2147,232 @@ fn an_export_edit_keeps_unknown_rows_and_obsidian_fields() {
             .contains("futureFolder"),
         "the bridge shows only the fields it knows"
     );
+}
+
+/// Two vault saves whose checks overlap: only the later one stores,
+/// whichever check answers first, and a reload while a check runs keeps
+/// the form the user chose. Rust only: Swift's checks did not overlap.
+#[test]
+fn only_the_latest_of_two_vault_saves_stores() {
+    let harness = Harness::builder().build();
+    let mut model = steno_host::settings::ObsidianSettingsViewModel::default();
+    model.load(&harness.store);
+    assert!(model.set_enabled(true).is_none(), "no vault yet");
+    let first = model
+        .choose_vault(std::path::Path::new("/Vaults/First"))
+        .unwrap();
+    let second = model
+        .choose_vault(std::path::Path::new("/Vaults/Second"))
+        .unwrap();
+    model.load(&harness.store);
+    assert_eq!(
+        model.draft().map(|draft| draft.vault_path).as_deref(),
+        Some("/Vaults/Second"),
+        "the reload kept the form"
+    );
+
+    model.finish_save(second, Ok(()), &harness.store);
+    model.finish_save(first, Ok(()), &harness.store);
+    let stored = harness.store.settings().unwrap().obsidian.unwrap();
+    assert_eq!(stored.vault_path, "/Vaults/Second");
+    assert!(model.saved);
+    let mut settings = harness.store.settings().unwrap();
+    settings.obsidian.as_mut().unwrap().vault_path = "/Vaults/Elsewhere".to_owned();
+    harness.store.save_settings(&settings).unwrap();
+    model.load(&harness.store);
+    assert_eq!(
+        model.vault_path, "/Vaults/Elsewhere",
+        "loads again once saved"
+    );
+}
+
+/// The stored export settings the undo tests start from: on, the vault
+/// at `/Vaults/Stored`, without the audio.
+const STORED_OBSIDIAN: &str = r#"{"includeAudio":false,"vaultPath":"/Vaults/Stored"}"#;
+
+/// Runs `edit` on another thread with its vault check held, runs `undo`
+/// while the check runs, then lets the check answer.
+fn undo_while_the_check_runs(
+    harness: &Harness,
+    edit: impl FnOnce(&steno_host::Host) + Send + 'static,
+    undo: impl FnOnce(&steno_host::Host),
+) {
+    let (checking, release) = hold_the_first_vault_check(harness);
+    let editing = std::thread::spawn({
+        let host = harness.host.clone();
+        move || edit(&host)
+    });
+    checking
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the vault check began");
+    undo(&harness.host);
+    release.send(()).unwrap();
+    editing.join().unwrap();
+}
+
+fn include_audio(host: &steno_host::Host, on: bool) {
+    host.settings_export_update(ExportUpdateParams {
+        people_folder: None,
+        include_audio: Some(on),
+        task_tag: None,
+    })
+    .unwrap();
+}
+
+/// Include audio turned on, then off again while the first save's vault
+/// check runs: the export stores off, as the form shows. Rust only: Swift's
+/// checks ran one at a time.
+#[test]
+fn audio_turned_off_while_its_check_runs_is_stored_off() {
+    let harness = Harness::builder()
+        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
+        .build();
+    undo_while_the_check_runs(
+        &harness,
+        |host| include_audio(host, true),
+        |host| include_audio(host, false),
+    );
+    let stored = harness.store.settings().unwrap().obsidian.unwrap();
+    let export = harness.snapshot(BridgeTopic::SettingsExport);
+    assert_eq!(export["includeAudio"], false);
+    assert!(!stored.include_audio, "the store holds what the form shows");
+    assert_eq!(export["saved"], true);
+}
+
+/// The export turned on, then off again while its vault check runs: it
+/// stays off, as the form shows. Rust only.
+#[test]
+fn the_export_turned_off_while_its_check_runs_stays_off() {
+    let harness = Harness::builder()
+        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
+        .build();
+    harness
+        .host
+        .settings_export_set_enabled(SetBoolParams { value: false })
+        .unwrap();
+    assert_eq!(harness.store.settings().unwrap().obsidian, None);
+    undo_while_the_check_runs(
+        &harness,
+        |host| {
+            host.settings_export_set_enabled(SetBoolParams { value: true })
+                .unwrap();
+        },
+        |host| {
+            host.settings_export_set_enabled(SetBoolParams { value: false })
+                .unwrap();
+        },
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsExport)["enabled"],
+        false
+    );
+    assert_eq!(
+        harness.store.settings().unwrap().obsidian,
+        None,
+        "the store holds what the form shows"
+    );
+}
+
+/// Another vault chosen, then the stored one again while the first
+/// choice's check runs: the stored vault stays, as the form shows. Rust
+/// only.
+#[test]
+fn the_stored_vault_chosen_again_while_a_check_runs_stays_stored() {
+    let harness = Harness::builder()
+        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
+        .choose_in_turn(&["/Vaults/Other", "/Vaults/Stored"])
+        .build();
+    undo_while_the_check_runs(
+        &harness,
+        |host| {
+            host.settings_export_choose_vault().unwrap();
+        },
+        |host| {
+            host.settings_export_choose_vault().unwrap();
+        },
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsExport)["vaultName"],
+        "Stored"
+    );
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Vaults/Stored",
+        "the store holds what the form shows"
+    );
+}
+
+/// Two overlapping vault saves whose checks answer in the order they began:
+/// the earlier one stores nothing, the later one stores. Rust only.
+#[test]
+fn the_later_vault_save_stores_when_the_earlier_check_answers_first() {
+    let harness = Harness::builder().build();
+    let mut model = steno_host::settings::ObsidianSettingsViewModel::default();
+    model.load(&harness.store);
+    model.set_enabled(true);
+    let first = model
+        .choose_vault(std::path::Path::new("/Vaults/First"))
+        .unwrap();
+    let second = model
+        .choose_vault(std::path::Path::new("/Vaults/Second"))
+        .unwrap();
+    model.finish_save(first, Ok(()), &harness.store);
+    assert_eq!(
+        harness.store.settings().unwrap().obsidian,
+        None,
+        "the earlier save stores nothing"
+    );
+    model.finish_save(second, Ok(()), &harness.store);
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Vaults/Second"
+    );
+    assert!(model.saved);
+}
+
+/// A refused vault check ends the save: a later write by another window
+/// or process loads into the form again.
+#[test]
+fn after_a_refused_check_a_store_change_reloads_the_form() {
+    let harness = Harness::builder()
+        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
+        .build();
+    harness
+        .fakes
+        .export_validator
+        .fail_validation(Some("The Obsidian vault at /Vaults/Stored does not exist."));
+    include_audio(&harness.host, true);
+    assert!(
+        !harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .include_audio,
+        "the refused save stored nothing"
+    );
+    put_setting_row(
+        &harness.store,
+        "obsidian",
+        r#"{"includeAudio":false,"peopleFolder":"Team","vaultPath":"/Vaults/Stored"}"#,
+    );
+    harness.host.store_changed();
+    let export = harness.snapshot(BridgeTopic::SettingsExport);
+    assert_eq!(export["peopleFolder"], "Team");
+    assert_eq!(export["includeAudio"], false);
 }
 
 /// The unknown fields may belong to the vault, so choosing another vault

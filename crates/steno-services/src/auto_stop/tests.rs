@@ -14,7 +14,7 @@ use steno_host::services::Recorder as _;
 
 use super::*;
 use crate::testing::{
-    HANG_GUARD, HeldOutages, PATIENCE, SyntheticRecorder, eventually, eventually_within,
+    HANG_GUARD, HeldOutages, LIVE, PATIENCE, SyntheticRecorder, eventually, eventually_within,
     on_own_thread, synthetic_recorder, synthetic_recorder_over,
 };
 
@@ -561,6 +561,60 @@ async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
         steno_core::paths::file_url_path(&asset.url).is_some_and(|path| path.exists()),
         "the recording is kept on disk"
     );
+}
+
+/// P40 check 3 (`.plans/2026-10-12-store-off-the-workers.md`): a countdown
+/// that runs out while another process holds the write lock, and a write
+/// of this process waits behind it, shows `Stopping` live in the host,
+/// with a reload in flight as the poll runs one, and the meeting is saved
+/// within a second of the lock going.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn an_auto_stop_under_a_held_lock_saves_once_the_lock_goes() {
+    let recording = recording();
+    let hosted = crate::testing::hosted(&recording.store, &recording.recorder);
+    recording.start(CaptureMode::Call, None);
+    let meeting_id = recording.recorder.status().meeting_id.unwrap();
+    recording.opened(Some("Zen"));
+    recording.released();
+    recording.sleepers(1);
+    recording.clock.advance(Duration::from_secs(89));
+    recording.sleepers(1);
+
+    let mut held =
+        crate::testing::HeldStore::with_a_write_waiting(&recording.store, &recording.database());
+    let reload = hosted.reload_in_flight();
+    let since = std::time::Instant::now();
+    recording.clock.advance(Duration::from_secs(1));
+    let stopping = hosted
+        .sink
+        .recording_in("stopping", since, PATIENCE)
+        .expect("the countdown's stop reached the host");
+    let shown = stopping.duration_since(since);
+    assert!(
+        shown < LIVE,
+        "Stopping reached the host {shown:?} after the countdown ran out"
+    );
+
+    let released = held.release_after_hold();
+    crate::testing::saved_within(
+        &recording.store,
+        meeting_id,
+        released,
+        Duration::from_secs(1),
+    );
+    assert_eq!(
+        recording
+            .store
+            .meeting(meeting_id)
+            .unwrap()
+            .unwrap()
+            .end_reason,
+        Some(RecordingEndReason::CallEnded {
+            app_name: Some("Zen".to_owned())
+        })
+    );
+    reload.join().unwrap();
+    recording.idle("the stop ended").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

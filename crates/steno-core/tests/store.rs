@@ -1105,7 +1105,7 @@ fn an_opened_store_checkpoints_with_fullfsync() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
     let checkpoint_fullfsync: bool = store
-        .read(|connection| {
+        .write(|connection| {
             Ok(connection.query_row("PRAGMA checkpoint_fullfsync", [], |row| row.get(0))?)
         })
         .unwrap();
@@ -1113,7 +1113,7 @@ fn an_opened_store_checkpoints_with_fullfsync() {
 }
 
 /// `synchronous` and `fullfsync` as the connection has them now.
-fn sync_levels(connection: &rusqlite::Connection) -> steno_core::store::Result<(i64, bool)> {
+fn sync_levels(connection: &rusqlite::Transaction<'_>) -> steno_core::store::Result<(i64, bool)> {
     let synchronous = connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
     let fullfsync = connection.query_row("PRAGMA fullfsync", [], |row| row.get(0))?;
     Ok((synchronous, fullfsync))
@@ -1129,7 +1129,7 @@ fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
     let normal = (1, false);
-    assert_eq!(store.read(sync_levels).unwrap(), normal);
+    assert_eq!(store.write(sync_levels).unwrap(), normal);
 
     let inside = store
         .write_durably(|transaction| {
@@ -1139,11 +1139,10 @@ fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
         })
         .unwrap();
     assert_eq!(inside, (2, true), "the transaction runs under FULL");
-    assert_eq!(store.read(sync_levels).unwrap(), normal, "after a commit");
     assert_eq!(
-        store.write(|transaction| sync_levels(transaction)).unwrap(),
+        store.write(sync_levels).unwrap(),
         normal,
-        "a plain write stays NORMAL"
+        "after a commit, a plain write stays NORMAL"
     );
 
     let missing = uuid(MEETING_ID);
@@ -1153,17 +1152,16 @@ fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
         })
         .unwrap_err();
     assert!(matches!(error, StoreError::MeetingNotFound(id) if id == missing));
-    assert_eq!(store.read(sync_levels).unwrap(), normal, "after a failure");
+    assert_eq!(store.write(sync_levels).unwrap(), normal, "after a failure");
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         store.write_durably(|_| -> steno_core::store::Result<()> { panic!("in the body") })
     }));
     assert!(panicked.is_err());
-    assert_eq!(store.read(sync_levels).unwrap(), normal, "after a panic");
     assert_eq!(
-        store.write(|transaction| sync_levels(transaction)).unwrap(),
+        store.write(sync_levels).unwrap(),
         normal,
-        "the lock the panic poisoned is reused at NORMAL"
+        "after a panic, the lock it poisoned is reused at NORMAL"
     );
 }
 
@@ -1184,7 +1182,7 @@ fn a_durable_checkpoint_copies_every_commit_into_the_database_file() {
         .unwrap();
 
     store.checkpoint_durably().unwrap();
-    assert_eq!(store.read(sync_levels).unwrap(), (1, false));
+    assert_eq!(store.write(sync_levels).unwrap(), (1, false));
 
     let copy = dir.path().join("copy.sqlite");
     std::fs::copy(&path, &copy).unwrap();
@@ -1205,16 +1203,16 @@ fn a_checkpoint_another_connection_blocks_fails_as_busy() {
     let path = dir.path().join("steno.sqlite");
     let store = Store::open(&path).unwrap();
     store
-        .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
+        .write(|transaction| Ok(transaction.busy_timeout(std::time::Duration::ZERO)?))
         .unwrap();
     let writer = rusqlite::Connection::open(&path).unwrap();
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
 
     let error = store.checkpoint_durably().unwrap_err();
     assert!(error.is_busy(), "{error}");
-    assert_eq!(store.read(sync_levels).unwrap(), (1, false));
 
     writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(store.write(sync_levels).unwrap(), (1, false));
     store.checkpoint_durably().unwrap();
 }
 
@@ -1272,7 +1270,7 @@ fn a_durable_checkpoint_restarts_the_wal() {
         "the WAL file holds the header and the write's frames only: it was truncated first"
     );
     assert_eq!(store.schema_dump().unwrap(), schema);
-    assert_eq!(store.read(sync_levels).unwrap(), (1, false));
+    assert_eq!(store.write(sync_levels).unwrap(), (1, false));
 }
 
 /// A reader still in the WAL blocks the checkpoint, on an older snapshot
@@ -1286,7 +1284,7 @@ fn a_reader_in_the_wal_blocks_the_checkpoint() {
     let path = dir.path().join("steno.sqlite");
     let store = Store::open(&path).unwrap();
     store
-        .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
+        .write(|transaction| Ok(transaction.busy_timeout(std::time::Duration::ZERO)?))
         .unwrap();
     let insert = |value: i64| {
         store

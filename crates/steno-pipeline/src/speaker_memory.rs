@@ -36,7 +36,8 @@ impl SpeakerMemory for StoreSpeakerMemory {
         let probe = embedding.normalized();
         let mut ranked: Vec<SpeakerMatch> = self
             .store
-            .persons()?
+            .reading(Store::persons)
+            .await?
             .into_iter()
             .filter_map(|person| {
                 let known = person.embedding.as_ref()?;

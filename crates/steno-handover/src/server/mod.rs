@@ -225,7 +225,12 @@ impl HandoverServer {
     /// its response; any still busy after [`STOP_GRACE`] by force) and
     /// withdraws the Bonjour record. Its port is free when it returns. No
     /// task of the listener outlives it, except store writes already in
-    /// line, which finish unless the runtime shuts down first.
+    /// line, which finish unless the runtime shuts down first. An admission
+    /// in flight at the stop (its phone hung up, or its connection was
+    /// closed by force) is one of them: it still copies, commits and
+    /// enqueues, or the exit cuts it as a crash would: a copy without its
+    /// commit is noted, and the next launch adopts it (at worst a
+    /// duplicate meeting, never a lost one).
     /// Swift: `HandoverServer.stop` (`group.shutdownGracefully()` closes the
     /// child channels).
     pub async fn stop(self) {
@@ -517,14 +522,14 @@ mod tests {
         configuration: &HandoverConfiguration,
         identity: &Arc<HandoverIdentity>,
     ) -> Arc<Engine> {
-        Arc::new(Engine::new(
+        Engine::new(
             configuration.clone(),
             identity.clone(),
             Arc::new(Store::in_memory().unwrap()),
             Arc::new(FakeHandoverIntake::default()),
             watch::channel(Vec::new()).0,
             Arc::new(Utc::now),
-        ))
+        )
     }
 
     /// A listener on every IPv4 address that serves loopback and `lan`,

@@ -14,7 +14,8 @@ publish.workspace = true
 testing = []
 
 [dependencies]
-steno-core = { path = "../steno-core" }
+# `Store::reading` and `Store::writing`, the store's facade for async code.
+steno-core = { path = "../steno-core", features = ["tokio"] }
 
 async-trait.workspace = true
 chrono.workspace = true

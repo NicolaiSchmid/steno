@@ -105,6 +105,8 @@ mod keychain_reset_tests;
 #[cfg(test)]
 mod kill_tests;
 pub mod llm;
+#[cfg(test)]
+mod locked_store_tests;
 pub mod logs;
 pub mod model_gate;
 pub mod permissions;

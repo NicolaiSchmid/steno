@@ -9,11 +9,15 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-steno-core = { path = "../steno-core" }
+# `Store::reading` and `Store::writing`, the store's facade for async code.
+steno-core = { path = "../steno-core", features = ["tokio"] }
 
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+# A panic in a store call through the facade, as the I/O error a request
+# answers with (`catch_unwind` over its future).
+futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
@@ -47,6 +51,10 @@ windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 [dev-dependencies]
 # The fake intake the tests admit through.
 steno-core = { path = "../steno-core", features = ["testing"] }
+# The real phone intake behind the service, for the admission under a held
+# lock (`tests/admission_under_a_held_lock.rs`). No cycle: steno-pipeline
+# does not depend on steno-handover.
+steno-pipeline = { path = "../steno-pipeline" }
 
 flume.workspace = true
 regex.workspace = true
