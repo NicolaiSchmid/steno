@@ -135,6 +135,63 @@ mod tests {
 
     use super::*;
 
+    /// Two asset rows for one master, one kept forever and one expired
+    /// after processing (a fault's leftover): the sweep removes nothing,
+    /// leaves both rows as they are, and removes the master once the other
+    /// row is due too.
+    #[test]
+    fn the_sweep_keeps_a_master_another_asset_row_still_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let now = Utc::now();
+        let mut meeting = sample_data::meeting();
+        meeting.state = MeetingState::Ready;
+        let layout = RecordingLayout::new(&dir.path().join("audio"), meeting.id);
+        layout.create_directories(true).unwrap();
+        let master = layout.master(AudioFormat::Wav16kInt16);
+        std::fs::write(&master, b"wav").unwrap();
+        let kept = AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: file_url(&master, false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: vec![AudioLane::Mixed],
+            sidecars_16k: BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepForever,
+            expires_at: None,
+        };
+        let expired = AudioAsset {
+            id: Uuid::new_v4(),
+            retention: AudioRetention::DeleteAfterProcessing,
+            expires_at: Some(now - Duration::hours(1)),
+            ..kept.clone()
+        };
+        store.save_meeting_with_asset(&meeting, &kept).unwrap();
+        store.save_asset(&expired).unwrap();
+        let rows = || {
+            let mut rows = store.assets().unwrap();
+            rows.sort_by_key(|asset| asset.id);
+            rows
+        };
+        let before = rows();
+
+        let removed = RetentionSweep::new(store.clone()).run(now).unwrap();
+        assert_eq!(removed, Vec::<PathBuf>::new());
+        assert!(master.exists(), "the kept row's master stays");
+        assert_eq!(rows(), before, "neither row changes");
+
+        store
+            .save_asset(&AudioAsset {
+                retention: AudioRetention::KeepDays(1),
+                expires_at: Some(now - Duration::hours(1)),
+                ..kept
+            })
+            .unwrap();
+        RetentionSweep::new(store.clone()).run(now).unwrap();
+        assert!(!master.exists(), "both rows due: the master goes");
+    }
+
     #[test]
     fn the_sweep_removes_the_clips_of_confirmed_speakers_and_keeps_the_others() {
         let dir = tempfile::tempdir().unwrap();

@@ -74,6 +74,26 @@ fn expired_sql(filter: &str) -> String {
     )
 }
 
+/// The id of another asset row that names `asset`'s master and is not due
+/// at `now` itself ([`expired_sql`]), if any: it still needs that file.
+fn keeper_of_master(
+    connection: &Connection,
+    asset: &AudioAsset,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<Uuid>> {
+    Ok(connection
+        .query_row(
+            "SELECT o.id FROM audioAsset o JOIN meeting m ON m.id = o.meetingID \
+             WHERE o.url = ?1 AND o.id != ?2 \
+             AND NOT (o.expiresAt IS NOT NULL AND o.expiresAt <= ?3 \
+             AND m.state NOT IN ('recording', 'queued', 'processing')) \
+             ORDER BY o.id LIMIT 1",
+            params![asset.url, DbUuid(asset.id), DbDate(now)],
+            |row| row.col::<DbUuid>("id"),
+        )
+        .optional()?)
+}
+
 /// What [`Store::sweep_expired_asset`] hands its `remove`, read in the
 /// write that removes the files. Rust only.
 #[derive(Debug, Clone, PartialEq)]
@@ -191,7 +211,16 @@ impl Store {
     /// as stored, removes the asset's files and the clips of
     /// [`ExpiredAsset::confirmed_with_clips`], and returns whether every one
     /// went; then those speakers lose `sampleClipURL` and the asset loses
-    /// `expiresAt`. Returns whether the asset was swept. The write lock is
+    /// `expiresAt`. Returns whether the asset was swept. An asset whose
+    /// master another asset row names and still needs (that row is not due
+    /// itself: kept forever, not stamped yet or not expired yet, or its
+    /// meeting recording, queued or processing) is not swept: `remove` is
+    /// not called, nothing changes, and the next sweep checks again, so the
+    /// master goes once every row naming it is due. Two rows name one master
+    /// only after a fault, such as a phone retry's commit into a copy the
+    /// launch adopted without its ledger row, which
+    /// [`Store::commit_admission_durably`] refuses; the sweep still never
+    /// deletes audio another row keeps. The write lock is
     /// held from the check through the removal, so a run that `enqueue` or
     /// `reprocess` saves `queued` in a write of its own comes either before
     /// the check, and the asset is skipped, or after the files are gone. The
@@ -215,6 +244,15 @@ impl Store {
             else {
                 return Ok(false);
             };
+            if let Some(keeper) = keeper_of_master(transaction, &asset, now)? {
+                tracing::info!(
+                    asset_id = %asset.id,
+                    meeting_id = %asset.meeting_id,
+                    %keeper,
+                    "an expired recording is kept: another asset row still needs its master"
+                );
+                return Ok(false);
+            }
             let expired = ExpiredAsset {
                 speakers: people::speakers_of_meeting(transaction, asset.meeting_id)?,
                 sample_clip_urls: people::sample_clip_urls(transaction)?,
