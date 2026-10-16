@@ -2208,24 +2208,19 @@ it:
   `RUST_LOG=steno_audio=info`; `tests/live_windows.rs` prints them). Measure
   the slip rate on a USB headset against built-in speakers; a plan decides
   whether to resample instead.
-- **Engine data loss is filled from the device position** (A18). On a packet
-  the engine flags as a discontinuity (the capture thread was late and the
-  engine lost data), the first aside, the frames its device position skipped
-  are filled or counted as on the other backends (see the Audio item above),
-  and the packets and the seconds are logged at stop. Microsoft leaves the
-  position's unit open under `AUTOCONVERTPCM`, so it is measured, and filled
-  only when the measurement explains it (`split_streams::DevicePositions`):
-  over the first two seconds of clean packets the position must advance
-  within 1 % of one a delivered frame, or of the mix format's rate against
-  48 kHz. Otherwise, and with no mix format, nothing is filled: the jump
-  is counted unfilled at the measured ratio, or at one position a frame
-  while the stream is still measured, so the note says it. A clean packet
-  that advances more than either unit explains stays out of the
-  measurement. The stop logs each stream's ratio, at `warn` when it had
-  discontinuities and filled none. The
-  engine is taken to keep the oldest packets of a stall. Step 9 of the
-  stable plan's Windows gate checks both on hardware, at 48 and 44.1 kHz,
-  on a hands-free headset and above 48 kHz, and names the loopback.
+- **Engine data loss is filled from the QPC** (A18). On a packet the
+  engine flags as a discontinuity (the capture thread was late and the
+  engine lost data), the first aside, the loss is read from the packet's
+  QPC and device position by the rule `split_streams::DevicePositions`
+  states: filled up to a second, as on the other backends (see the Audio
+  item above), only once the QPC measures within 2 % of real time; counted
+  unfilled otherwise, at the largest of the QPC's and the device position's
+  readings, so the note says it. The packets and the seconds are logged at
+  stop, with both clocks' ratios, at `warn` when the stream had
+  discontinuities and filled none. The engine is taken to keep the oldest
+  packets of a stall. Step 9 of the stable plan's Windows gate checks it on
+  hardware, at 48 and 44.1 kHz, on a hands-free headset and above 48 kHz,
+  and names the loopback.
 - **A system-only capture skips silence.** With the `[System]` lane
   override the system stream is the master, and endpoint loopback
   delivers no packet while nothing plays, so the recording is shorter than
