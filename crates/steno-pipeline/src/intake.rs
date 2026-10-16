@@ -8,6 +8,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use steno_core::{
@@ -150,7 +151,7 @@ impl RecordingIntake {
     /// writer behind the busy commit or the try before (a host write, a
     /// pipeline step) takes it meanwhile, so none waits more than one busy
     /// timeout behind the admission. Rust only.
-    pub const FAILED_SAVE_BACK_OFF: std::time::Duration = std::time::Duration::from_millis(200);
+    pub const FAILED_SAVE_BACK_OFF: Duration = Duration::from_millis(200);
 
     #[must_use]
     pub fn new(store: Arc<Store>, enqueue: Enqueue, now: Now, zone: FixedOffset) -> Self {
@@ -861,7 +862,7 @@ mod tests {
     #[test]
     fn a_write_queued_behind_the_failed_save_runs_between_its_tries() {
         /// The store's busy timeout.
-        const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("steno.sqlite");
         let store = Arc::new(Store::open(&path).unwrap());
@@ -890,7 +891,7 @@ mod tests {
         // write that also waited out the second try waits a busy timeout
         // more; a load of 40 to 70 adds well under the margin.
         assert!(
-            waited < 2 * BUSY_TIMEOUT + std::time::Duration::from_secs(2),
+            waited < 2 * BUSY_TIMEOUT + Duration::from_secs(2),
             "the write waited {waited:?}"
         );
         assert!(saving.join().unwrap(), "the try after the write saved");
@@ -1032,7 +1033,7 @@ mod tests {
         let path = dir.path().join("steno.sqlite");
         let store = Arc::new(Store::open(&path).unwrap());
         store
-            .on_writer(|connection| connection.busy_timeout(std::time::Duration::from_millis(20)))
+            .on_writer(|connection| connection.busy_timeout(Duration::from_millis(20)))
             .unwrap();
 
         let (meeting, result) = a_recording(&store, dir.path());
@@ -1124,7 +1125,7 @@ mod tests {
 
         let path = dir.path().join("steno.sqlite");
         store
-            .on_writer(|connection| connection.busy_timeout(std::time::Duration::from_millis(20)))
+            .on_writer(|connection| connection.busy_timeout(Duration::from_millis(20)))
             .unwrap();
         let (meeting, result) = a_recording(&store, dir.path());
         let hold = WriteLockHold::new(&path);
