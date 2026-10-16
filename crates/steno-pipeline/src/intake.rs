@@ -399,11 +399,10 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
 fn save_failed_receipt(store: &Store, receipt: &HandoverReceipt) -> bool {
     for attempt in 1..=RecordingIntake::FAILED_SAVE_ATTEMPTS {
         match store.save_handover_receipt_durably(receipt) {
-            Ok(()) => return true,
             Err(error) if error.is_busy() => {
                 tracing::debug!(attempt, "the failed receipt's save found the database busy");
             }
-            Err(_) => return false,
+            saved => return saved.is_ok(),
         }
     }
     false
