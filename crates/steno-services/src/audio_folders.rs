@@ -190,7 +190,9 @@ impl AdmissionFolders for AdmissionRecord {
         if let Err(error) = note_upload(&self.support_directory, meeting_id, upload) {
             tracing::debug!(%meeting_id, %error, "an admission's upload not noted");
         }
-        record(&self.support_directory, meeting_id, audio_folder).inspect_err(|error| {
+        #[cfg(test)]
+        crate::admission_kill_tests::gate("after-upload-note");
+        let recorded = record(&self.support_directory, meeting_id, audio_folder).inspect_err(|error| {
             // The admission is refused; the error can name the user's
             // folder: debug alone.
             tracing::warn!(%meeting_id, "a phone upload's folder could not be noted; the upload is refused for now");
@@ -199,10 +201,17 @@ impl AdmissionFolders for AdmissionRecord {
                 // The next launch forgets an upload with no folder.
                 tracing::debug!(%meeting_id, %error, "a refused admission's upload not forgotten");
             }
-        })
+        });
+        #[cfg(test)]
+        if recorded.is_ok() {
+            crate::admission_kill_tests::gate("after-folder-note");
+        }
+        recorded
     }
 
     fn settled(&self, meeting_id: Uuid) {
+        #[cfg(test)]
+        crate::admission_kill_tests::gate("before-settled");
         if let Err(error) = forget(&self.support_directory, &[meeting_id]) {
             // The next launch forgets an entry whose meeting has a row.
             tracing::debug!(%meeting_id, %error, "an admission's folder not forgotten");

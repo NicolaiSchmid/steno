@@ -95,6 +95,8 @@
 
 #[cfg(test)]
 mod admission_copy_tests;
+#[cfg(test)]
+mod admission_kill_tests;
 pub mod app;
 pub mod audio_folders;
 pub mod auto_stop;

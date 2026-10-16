@@ -1264,6 +1264,8 @@ fn adopt(
         )
         .map_err(|error| RecoveryError::NotSaved(error.into()))?;
     if committed == AdmissionCommit::Wrote {
+        #[cfg(test)]
+        crate::admission_kill_tests::gate("after-adoption-commit");
         // Saved: a pipeline that cannot take it now leaves it `queued`
         // for the next launch's resume; one `held` is saved failed and
         // left.
