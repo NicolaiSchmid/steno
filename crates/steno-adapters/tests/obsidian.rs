@@ -280,7 +280,8 @@ fn validate_rejects_missing_unwritable_and_bad_people_folder() {
 }
 
 /// Every entry under `root`, recursively and without following links: a
-/// folder, a link with its target, or a file with its size and content.
+/// folder, a link with its target, a special file (never opened), or a
+/// file with its size and content.
 fn listing(root: &Path) -> BTreeMap<PathBuf, String> {
     fn walk(root: &Path, folder: &Path, into: &mut BTreeMap<PathBuf, String>) {
         for entry in fs::read_dir(folder).unwrap() {
@@ -293,6 +294,8 @@ fn listing(root: &Path) -> BTreeMap<PathBuf, String> {
             } else if metadata.is_dir() {
                 into.insert(relative, "folder".to_owned());
                 walk(root, &path, into);
+            } else if !metadata.is_file() {
+                into.insert(relative, "special file".to_owned());
             } else {
                 let content = String::from_utf8_lossy(&fs::read(&path).unwrap()).into_owned();
                 into.insert(relative, format!("{} bytes: {content}", metadata.len()));
@@ -307,7 +310,8 @@ fn listing(root: &Path) -> BTreeMap<PathBuf, String> {
 /// A vault as a user has it: Obsidian's folder, notes, a hidden note, and
 /// entries named like the probe that are not a probe's leftover (a file
 /// with content, another suffix, upper-case hex, a folder, one in a
-/// subfolder, and on Unix a link to a file outside the vault).
+/// subfolder, and on Unix a link to a file outside the vault and a named
+/// pipe).
 fn lived_in_vault() -> Vault {
     let vault = Vault::new();
     for (relative, content) in [
@@ -334,6 +338,11 @@ fn lived_in_vault() -> Vault {
         let outside = vault.directory.path().join("outside.md");
         fs::write(&outside, "").unwrap();
         std::os::unix::fs::symlink(&outside, vault.path(".steno-probe-0badf00d")).unwrap();
+        let fifo = std::process::Command::new("mkfifo")
+            .arg(vault.path(".steno-probe-0f1f0f1f"))
+            .status()
+            .unwrap();
+        assert!(fifo.success(), "mkfifo: {fifo}");
     }
     vault
 }

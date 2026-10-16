@@ -296,30 +296,39 @@ impl ObsidianFolderDestination {
     /// only if no entry has that name and removed at once, so nothing in
     /// the vault changes, and a vault that syncs never sees a stray file:
     /// - a probe a crash left behind (an empty regular file of exactly that
-    ///   name pattern) is removed first; a link, a folder or a file with
-    ///   content of that name is the user's and stays;
+    ///   name pattern) is removed first; a link, a folder, a special file
+    ///   or a file with content of that name is the user's and stays;
     /// - the vault is writable once the create worked: a remove that then
-    ///   fails leaves the empty probe for the next check, not an error.
+    ///   fails leaves the empty probe for the next check, not an error;
+    /// - a leftover that cannot be removed (a root that refuses deletes)
+    ///   makes the vault not writable, without a new probe, so the probes
+    ///   never pile up.
     pub fn validate_vault(&self) -> Result<(), ObsidianError> {
-        self.validate_vault_with(|path| fs::remove_file(path))
+        self.validate_vault_with(
+            &format!("{PROBE_PREFIX}{}", AtomicFileWriter::random_hex()),
+            |path| fs::remove_file(path),
+        )
     }
 
-    /// [`Self::validate_vault`] with the probe's remove passed in, so a
-    /// test can make it fail.
+    /// [`Self::validate_vault`] with the probe's name and the remove (of
+    /// the probe and of the leftovers) passed in, so a test can plant a
+    /// file at the name or make the remove fail.
     fn validate_vault_with(
         &self,
-        remove: impl FnOnce(&Path) -> std::io::Result<()>,
+        probe: &str,
+        remove: impl Fn(&Path) -> std::io::Result<()>,
     ) -> Result<(), ObsidianError> {
         self.check_vault()?;
-        self.remove_probe_leftovers();
-        let path = self
-            .sink
-            .path(&format!("{PROBE_PREFIX}{}", AtomicFileWriter::random_hex()));
+        let not_writable = || ObsidianError::VaultNotWritable(self.settings.vault_path.clone());
+        if !self.remove_probe_leftovers(&remove) {
+            return Err(not_writable());
+        }
+        let path = self.sink.path(probe);
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
-            .map_err(|_| ObsidianError::VaultNotWritable(self.settings.vault_path.clone()))?;
+            .map_err(|_| not_writable())?;
         // Another check in this process may have removed it as a leftover
         // already; either way the folder took the write.
         let _ = remove(&path);
@@ -329,21 +338,30 @@ impl ObsidianFolderDestination {
     /// Removes the probes an earlier check left at the vault's root (a
     /// crash between create and remove): empty regular files whose name is
     /// exactly [`PROBE_PREFIX`] and eight lowercase hex digits, read with
-    /// `symlink_metadata`, so a link of that name is never followed. A
-    /// root that cannot be listed is left alone.
-    fn remove_probe_leftovers(&self) {
+    /// `symlink_metadata`, so a link of that name is never followed. False
+    /// when one stays because its remove failed (one already gone, removed
+    /// by another check, counts as removed). A root that cannot be listed
+    /// is left alone.
+    fn remove_probe_leftovers(&self, remove: impl Fn(&Path) -> std::io::Result<()>) -> bool {
         let Ok(entries) = fs::read_dir(self.sink.root()) else {
-            return;
+            return true;
         };
+        let mut removed = true;
         for entry in entries.flatten() {
             let path = entry.path();
             let leftover = entry.file_name().to_str().is_some_and(is_probe_name)
                 && fs::symlink_metadata(&path)
                     .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() == 0);
             if leftover {
-                let _ = fs::remove_file(&path);
+                removed &= remove(&path)
+                    .or_else(|error| match error.kind() {
+                        std::io::ErrorKind::NotFound => Ok(()),
+                        _ => Err(error),
+                    })
+                    .is_ok();
             }
         }
+        removed
     }
 
     /// [`Destination::deliver`] without the boundary error wrapper and on
@@ -979,18 +997,64 @@ mod tests {
         fs::write(vault.join("Inbox.md"), "- [ ] call back").unwrap();
         let destination = destination_at(vault);
 
-        let failed = destination
-            .validate_vault_with(|_| Err(std::io::Error::from(ErrorKind::PermissionDenied)));
+        let failed = destination.validate_vault_with(".steno-probe-0000abcd", refuse_remove);
         assert_eq!(failed, Ok(()));
-        let left = names(vault);
-        assert_eq!(left.len(), 2, "{left:?}");
-        assert!(left.iter().any(|name| is_probe_name(name)), "{left:?}");
+        assert_eq!(names(vault), [".steno-probe-0000abcd", "Inbox.md"]);
 
         destination.validate_vault().unwrap();
         assert_eq!(names(vault), ["Inbox.md"]);
         assert_eq!(
             fs::read_to_string(vault.join("Inbox.md")).unwrap(),
             "- [ ] call back"
+        );
+    }
+
+    fn refuse_remove(_: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::from(ErrorKind::PermissionDenied))
+    }
+
+    /// A leftover the check cannot remove makes the vault not writable,
+    /// and the check adds no probe beside it, so a root that refuses
+    /// deletes holds one leftover at most.
+    #[test]
+    fn a_leftover_that_cannot_be_removed_refuses_without_another_probe() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path();
+        fs::write(vault.join(".steno-probe-0000abcd"), "").unwrap();
+        let destination = destination_at(vault);
+
+        for probe in [".steno-probe-1111abcd", ".steno-probe-2222abcd"] {
+            assert_eq!(
+                destination.validate_vault_with(probe, refuse_remove),
+                Err(ObsidianError::VaultNotWritable(
+                    vault.to_string_lossy().into_owned()
+                ))
+            );
+            assert_eq!(names(vault), [".steno-probe-0000abcd"]);
+        }
+        destination.validate_vault().unwrap();
+        assert_eq!(names(vault), Vec::<String>::new());
+    }
+
+    /// An entry of the user's at the probe's very name refuses the check
+    /// and stays as it was: the probe is created only where nothing is.
+    #[test]
+    fn an_entry_at_the_probe_name_refuses_and_stays() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = directory.path();
+        fs::write(vault.join(".steno-probe-0000abcd"), "mine").unwrap();
+        let destination = destination_at(vault);
+
+        assert_eq!(
+            destination.validate_vault_with(".steno-probe-0000abcd", |path| fs::remove_file(path)),
+            Err(ObsidianError::VaultNotWritable(
+                vault.to_string_lossy().into_owned()
+            ))
+        );
+        assert_eq!(names(vault), [".steno-probe-0000abcd"]);
+        assert_eq!(
+            fs::read_to_string(vault.join(".steno-probe-0000abcd")).unwrap(),
+            "mine"
         );
     }
 
