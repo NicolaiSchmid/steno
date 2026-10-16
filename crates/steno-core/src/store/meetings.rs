@@ -259,6 +259,7 @@ impl Store {
             assets::save(
                 transaction,
                 &AudioAsset {
+                    meeting_id,
                     retention,
                     expires_at: None,
                     ..asset.clone()
