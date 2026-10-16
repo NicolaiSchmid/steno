@@ -1643,7 +1643,9 @@ download button opens `releases/latest`, and an unlisted desktop's opens
 the releases page. So in the same hour, set every listed desktop's flag
 in `apps/site/src/lib/site.ts` back to false, not only the bad one's,
 and remove the desktop badge's line from the root README until the fix
-forward lists a desktop again. The 404 also reaches the feed of build
+forward lists a desktop again. Until then the site shows every desktop as
+unlisted, and the root README's status banner and "latest release" links
+still point at the pulled release. The 404 also reaches the feed of build
 244 (`v0.9.0-rc.1`), the one Swift build that reads `releases/latest`;
 the later Swift builds read the `appcast` branch.
 
