@@ -16,7 +16,7 @@ use steno_core::{
 };
 use uuid::Uuid;
 
-use super::{Engine, HandoverRequest, HandoverResponse};
+use super::{Completing, Engine, HandoverRequest, HandoverResponse};
 use crate::pinning::constant_time_equals;
 use crate::upload::MetadataValidation;
 use crate::upload::receiving_file;
@@ -541,7 +541,7 @@ impl Engine {
         // its own timeout, and a second verify or admission of the same file
         // must not start while the first is in flight. The phone answers a
         // 409 whose status lists every chunk by backing off.
-        let Some(_completing) = self.begin_completing(recording_id) else {
+        let Some(completing) = self.begin_completing(recording_id) else {
             return HandoverResponse::json(StatusCode::CONFLICT, &Self::status_of(&receipt));
         };
         let Some(metadata) = self.inbox.load_metadata(recording_id) else {
@@ -552,7 +552,11 @@ impl Engine {
             .await
         {
             Verification::Answered(response) => response,
-            Verification::File(file) => self.admit(&file, &metadata, device, &mut receipt).await,
+            Verification::File(file) => {
+                completing
+                    .admit(file, metadata, device.clone(), receipt)
+                    .await
+            }
         }
     }
 
@@ -590,8 +594,9 @@ impl Engine {
     /// with no chunk listed: the hash must be of the file the intake gets.
     /// 200 with the meeting when another `complete` admitted the recording
     /// since this one read the receipt. 401 when the device was revoked
-    /// since `complete` took `revocation`; nothing yields between that check
-    /// and the intake call: an admission past this check may still finish;
+    /// since `complete` took `revocation`; only the admission task's start
+    /// lies between that check and the intake call: an admission past this
+    /// check may still finish;
     /// the revoke's discard can also make it fail.
     async fn verified_file(
         &self,
@@ -809,6 +814,39 @@ impl Engine {
     }
 }
 
+impl Completing {
+    /// [`Engine::admit`] in a task of its own, which holds this mark until
+    /// the admission ends. A phone that hangs up mid-admit drops the
+    /// request, not the admission: the meeting commits and is enqueued, and
+    /// the receipt in memory ends `complete` (or `failed`). The phone's
+    /// retry gets a 409 listing every chunk while the mark is held, and is
+    /// answered from that receipt once it is gone, with no second
+    /// admission and no upload again. A panic in the task resumes here.
+    async fn admit(
+        self,
+        file: PathBuf,
+        metadata: RecordingMetadata,
+        device: PairedDevice,
+        mut receipt: HandoverReceipt,
+    ) -> HandoverResponse {
+        let admission = tokio::spawn(async move {
+            let response = self
+                .engine
+                .admit(&file, &metadata, &device, &mut receipt)
+                .await;
+            drop(self);
+            response
+        });
+        match admission.await {
+            Ok(response) => response,
+            Err(join) => match join.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                Err(cancelled) => HandoverResponse::internal_error("the intake", &cancelled),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! White-box checks of what a request on another worker thread can
@@ -841,7 +879,7 @@ mod tests {
         }
     }
 
-    fn engine(directory: &std::path::Path, store: Arc<Store>, now: DateTime<Utc>) -> Engine {
+    fn engine(directory: &std::path::Path, store: Arc<Store>, now: DateTime<Utc>) -> Arc<Engine> {
         let configuration = HandoverConfiguration {
             service_name: "Test".to_owned(),
             advertise: false,
@@ -1217,5 +1255,25 @@ mod tests {
             "Y's partial starts empty"
         );
         assert_eq!(engine.inbox.load_metadata(recording_id), Some(ours));
+    }
+
+    /// A store call through the engine that panics is an I/O error, as a
+    /// failed one is: the request answers 500 and the connection lives on,
+    /// where the panic resumed in the request would unwind its connection.
+    #[tokio::test]
+    async fn a_store_call_that_panics_is_an_io_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = engine(
+            directory.path(),
+            Arc::new(Store::in_memory().unwrap()),
+            Utc::now(),
+        );
+        let read = engine
+            .with_store(|_| -> steno_core::store::Result<()> { panic!("in the read") })
+            .await;
+        assert!(
+            matches!(read, Err(steno_core::StoreError::Io(_))),
+            "{read:?}"
+        );
     }
 }

@@ -18,7 +18,7 @@
 mod recording;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use bytes::Bytes;
 use chrono::Duration;
@@ -200,7 +200,8 @@ struct State {
     /// stream carries.
     active_receipts: BTreeMap<Uuid, HandoverReceipt>,
     /// Recordings whose `complete` is between the `verifying` write and the
-    /// intake's answer. The verify and the admit yield, so a retried
+    /// end of its admission, which a dropped request does not cut short
+    /// ([`Completing`]). The verify and the admit yield, so a retried
     /// `complete` must not start a second verify or admission.
     completing: BTreeSet<Uuid>,
     /// Devices revoked since start and not paired again: their receipts
@@ -303,6 +304,10 @@ pub struct Engine {
     /// there. Swift: none; the actor runs the check, `begin` and the
     /// receipt in one step.
     files: Mutex<()>,
+    /// The engine's own `Arc`, for the admission's task, which keeps the
+    /// engine and the `completing` mark until the admission ends
+    /// ([`Completing`]). Rust only.
+    me: Weak<Engine>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -348,8 +353,8 @@ impl Engine {
         intake: Arc<dyn HandoverIntake>,
         receipts: watch::Sender<Vec<HandoverReceipt>>,
         now: Clock,
-    ) -> Self {
-        Engine {
+    ) -> Arc<Self> {
+        Arc::new_cyclic(|me| Engine {
             inbox: Inbox::new(configuration.inbox_directory.clone()),
             configuration,
             identity,
@@ -359,7 +364,8 @@ impl Engine {
             receipts,
             state: Mutex::default(),
             files: Mutex::default(),
-        }
+            me: me.clone(),
+        })
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -1033,13 +1039,16 @@ impl Engine {
     }
 
     /// Marks `recording_id` as completing; `None` when it already is.
-    pub(crate) fn begin_completing(&self, recording_id: Uuid) -> Option<Completing<'_>> {
+    pub(crate) fn begin_completing(&self, recording_id: Uuid) -> Option<Completing> {
         // The guard is built only once the lock is released: its `Drop`
         // takes the same lock, and `then_some` would build (and drop) it
         // eagerly.
         let inserted = self.state().completing.insert(recording_id);
         inserted.then(|| Completing {
-            engine: self,
+            engine: self
+                .me
+                .upgrade()
+                .expect("a request reaches the engine through its Arc"),
             recording_id,
         })
     }
@@ -1116,13 +1125,15 @@ fn join_error(error: &tokio::task::JoinError) -> store::StoreError {
     store::StoreError::Io(std::io::Error::other(error.to_string()))
 }
 
-/// The `completing` mark, removed when the `complete` call returns.
-pub(crate) struct Completing<'a> {
-    engine: &'a Engine,
+/// The `completing` mark, removed when the `complete` call returns, or,
+/// once the verified file went to the intake, when the admission's task
+/// ends ([`Completing::admit`]), whether or not the request still waits.
+pub(crate) struct Completing {
+    engine: Arc<Engine>,
     recording_id: Uuid,
 }
 
-impl Drop for Completing<'_> {
+impl Drop for Completing {
     fn drop(&mut self) {
         self.engine.state().completing.remove(&self.recording_id);
     }

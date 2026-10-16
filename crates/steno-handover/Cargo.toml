@@ -51,6 +51,10 @@ windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 [dev-dependencies]
 # The fake intake the tests admit through.
 steno-core = { path = "../steno-core", features = ["testing"] }
+# The real phone intake behind the service, for the admission under a held
+# lock (`tests/admission_under_a_held_lock.rs`). No cycle: steno-pipeline
+# does not depend on steno-handover.
+steno-pipeline = { path = "../steno-pipeline" }
 
 flume.workspace = true
 regex.workspace = true

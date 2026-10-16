@@ -128,14 +128,14 @@ impl HandoverService {
     ) -> Self {
         let (listener_states, _) = watch::channel(ListenerState::Stopped);
         let (receipt_updates, _) = watch::channel(Vec::new());
-        let engine = Arc::new(Engine::new(
+        let engine = Engine::new(
             configuration.clone(),
             identity.clone(),
             store,
             intake,
             receipt_updates.clone(),
             now,
-        ));
+        );
         HandoverService {
             configuration,
             identity,

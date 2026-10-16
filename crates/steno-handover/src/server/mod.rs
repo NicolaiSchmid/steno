@@ -517,14 +517,14 @@ mod tests {
         configuration: &HandoverConfiguration,
         identity: &Arc<HandoverIdentity>,
     ) -> Arc<Engine> {
-        Arc::new(Engine::new(
+        Engine::new(
             configuration.clone(),
             identity.clone(),
             Arc::new(Store::in_memory().unwrap()),
             Arc::new(FakeHandoverIntake::default()),
             watch::channel(Vec::new()).0,
             Arc::new(Utc::now),
-        ))
+        )
     }
 
     /// A listener on every IPv4 address that serves loopback and `lan`,
