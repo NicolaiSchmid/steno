@@ -18,18 +18,77 @@
 #![allow(clippy::cast_ptr_alignment)]
 
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 use objc2::AnyThread;
+use objc2::exception::Exception;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2_core_ml::{
     MLComputeUnits, MLDictionaryFeatureProvider, MLFeatureProvider, MLFeatureValue, MLModel,
     MLModelConfiguration, MLMultiArray, MLMultiArrayDataType,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
+use objc2_foundation::{NSArray, NSDictionary, NSException, NSNumber, NSString, NSURL};
 
 use crate::SpeechError;
+
+/// Runs `work`, one model call with its inputs and output reads or a
+/// model load, inside one autorelease pool and an Objective-C `@catch`
+/// (objc2's [`objc2::exception::catch`]). Every CoreML call the crate makes
+/// goes through here ([`crate::backend`]), so the recorder's warm-up and a
+/// job's load are covered as well as each prediction.
+///
+/// - **The pool**: CoreML returns its feature values and output arrays at
+///   +0, and objc2 retains them through the fast autorelease handshake,
+///   which an unlucky inlining can miss and a build with debug assertions
+///   always skips; a missed one is autoreleased into the calling thread's
+///   pool, which nothing drained while a transcription ran. With debug
+///   assertions, 10 minutes of audio left about 6 300 IOSurface regions
+///   behind, and the next file failed to allocate one and aborted. One pool
+///   per call drains them before the next call, so the footprint stays
+///   flat (A15 of `.plans/2026-10-07-stable-promotion.md`).
+/// - **The catch**: an exception that reached a Rust frame without it
+///   aborts the process ("Rust cannot catch foreign exceptions"). Caught, it
+///   becomes [`SpeechError::Exception`] with its name and reason, so the
+///   meeting fails like any other speech failure and its audio is kept.
+///   A C++ exception or an abort inside CoreML is not an Objective-C
+///   exception and still ends the process; the pipeline's working marker
+///   (A17) keeps that from repeating at every launch.
+pub fn contained<T>(work: impl FnOnce() -> Result<T, SpeechError>) -> Result<T, SpeechError> {
+    // Unwind safety, asserted: an exception unwinds `work` midway (objc2
+    // runs the Rust destructors on the way, releasing what was retained),
+    // so whatever `work` was building is dropped half done. `work` only
+    // reads the shared models and builds fresh arrays, and the engine drops
+    // its models after an exception (`CoreMlParakeetEngine`), so nothing
+    // half updated is used again.
+    objc2::exception::catch(AssertUnwindSafe(|| autoreleasepool(|_| work())))
+        .unwrap_or_else(|exception| Err(exception_error(exception)))
+}
+
+/// The error for a caught exception: an `NSException`'s name and reason;
+/// any other object thrown (the runtime allows it) by its class.
+fn exception_error(exception: Option<Retained<Exception>>) -> SpeechError {
+    let Some(exception) = exception else {
+        return SpeechError::Exception {
+            name: "nil".to_owned(),
+            reason: String::new(),
+        };
+    };
+    match NSException::from_exception(exception) {
+        Ok(exception) => SpeechError::Exception {
+            name: exception.name().to_string(),
+            reason: exception
+                .reason()
+                .map(|reason| reason.to_string())
+                .unwrap_or_default(),
+        },
+        Err(other) => SpeechError::Exception {
+            name: other.class().name().to_string_lossy().into_owned(),
+            reason: String::new(),
+        },
+    }
+}
 
 /// Where a model runs. The names are CoreML's; FluidAudio's defaults for
 /// the Parakeet bundles are in [`crate::backend::ComputeUnitsPlan`].
@@ -122,7 +181,7 @@ impl Model {
     /// Load the compiled bundle at `path` (a `.mlmodelc` directory) with
     /// `units`; CoreML compiles for the Neural Engine on first load and
     /// caches the result, so a cold load takes seconds and a warm one
-    /// about one.
+    /// about one. Run it inside [`contained`].
     pub fn load(path: &Path, units: ComputeUnits) -> Result<Model, SpeechError> {
         let load_error = |message: String| SpeechError::ModelLoad {
             path: path.to_path_buf(),
@@ -159,22 +218,19 @@ impl Model {
         self.units
     }
 
-    /// One prediction. The autorelease pool drains the temporaries CoreML
-    /// returns at +0 (feature values, the output provider's internals)
-    /// before the next call; the outputs themselves are retained and
-    /// outlive the pool.
+    /// One prediction. Run it inside [`contained`] with the building of
+    /// its inputs and the reading of its outputs, so one pool drains what
+    /// all three leave autoreleased and an exception stays out of Rust.
     pub fn predict(&self, inputs: &Inputs) -> Result<Outputs, SpeechError> {
-        autoreleasepool(|_| {
-            let provider: &ProtocolObject<dyn MLFeatureProvider> =
-                ProtocolObject::from_ref(&*inputs.inner);
-            // SAFETY: `predictionFromFeatures_error` takes a feature
-            // provider whose arrays we allocated and filled completely
-            // (`Array` zero-fills at allocation), and returns a retained
-            // provider or a retained error. The model is not mutated.
-            let outputs = unsafe { self.inner.predictionFromFeatures_error(provider) }
-                .map_err(|error| SpeechError::CoreMl(ns_error(&error)))?;
-            Ok(Outputs { inner: outputs })
-        })
+        let provider: &ProtocolObject<dyn MLFeatureProvider> =
+            ProtocolObject::from_ref(&*inputs.inner);
+        // SAFETY: `predictionFromFeatures_error` takes a feature provider
+        // whose arrays we allocated and filled completely (`Array`
+        // zero-fills at allocation), and returns a retained provider or a
+        // retained error. The model is not mutated.
+        let outputs = unsafe { self.inner.predictionFromFeatures_error(provider) }
+            .map_err(|error| SpeechError::CoreMl(ns_error(&error)))?;
+        Ok(Outputs { inner: outputs })
     }
 }
 
@@ -571,5 +627,82 @@ impl EncoderView {
             *slot = unsafe { base.add(offset).read() };
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    fn raise(name: &str, reason: &str) -> ! {
+        NSException::new(
+            &NSString::from_str(name),
+            Some(&NSString::from_str(reason)),
+            None,
+        )
+        .expect("an exception object")
+        .raise()
+    }
+
+    /// Sets its flag when dropped, so a test sees the Rust frames inside
+    /// `contained` unwound.
+    struct Dropped<'a>(&'a Cell<bool>);
+
+    impl Drop for Dropped<'_> {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    /// An `NSException` raised inside comes out as an ordinary error with
+    /// its name and reason, the Rust values on the way are dropped, and the
+    /// process carries on.
+    #[test]
+    fn an_exception_inside_becomes_an_error_with_its_name_and_reason() {
+        let dropped = Cell::new(false);
+        let error = contained(|| -> Result<(), SpeechError> {
+            let _guard = Dropped(&dropped);
+            raise("StenoTestException", "thrown on purpose")
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                SpeechError::Exception { name, reason }
+                    if name == "StenoTestException" && reason == "thrown on purpose"
+            ),
+            "{error:?}"
+        );
+        assert!(error.is_exception());
+        assert!(dropped.get(), "the frames inside were unwound");
+        assert_eq!(contained(|| Ok(7)).unwrap(), 7);
+    }
+
+    /// The runtime lets any object be thrown; one that is not an
+    /// `NSException` is named by its class.
+    #[test]
+    fn a_thrown_object_that_is_not_an_exception_is_named_by_its_class() {
+        let thrown = NSString::from_str("not an exception");
+        // SAFETY: `Exception` is a transparent wrapper over any object, and
+        // `throw` hands the retained object to the unwinder unchanged.
+        let thrown = unsafe { Retained::cast_unchecked::<Exception>(thrown) };
+        let error = contained(|| -> Result<(), SpeechError> { objc2::exception::throw(thrown) })
+            .unwrap_err();
+        assert!(
+            matches!(&error, SpeechError::Exception { name, reason } if name.contains("String") && reason.is_empty()),
+            "{error:?}"
+        );
+    }
+
+    /// Without an exception, `contained` hands back what the work returned.
+    #[test]
+    fn a_result_passes_through() {
+        let error = contained(|| -> Result<(), SpeechError> {
+            Err(SpeechError::CoreMl("refused".to_owned()))
+        })
+        .unwrap_err();
+        assert!(matches!(error, SpeechError::CoreMl(text) if text == "refused"));
     }
 }
