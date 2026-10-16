@@ -36,7 +36,7 @@ impl Store {
         self: &Arc<Self>,
         body: impl FnOnce(&Store) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.off_the_workers(body).await
+        self.on_the_blocking_pool(body).await
     }
 
     /// Runs `body`, a step that writes, on tokio's blocking pool with this
@@ -48,12 +48,12 @@ impl Store {
         self: &Arc<Self>,
         body: impl FnOnce(&Store) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.off_the_workers(body).await
+        self.on_the_blocking_pool(body).await
     }
 
     /// `body` on the blocking pool. A runtime that shuts down before the
     /// pool ran it cancels it, which surfaces as an I/O error.
-    async fn off_the_workers<T: Send + 'static>(
+    async fn on_the_blocking_pool<T: Send + 'static>(
         self: &Arc<Self>,
         body: impl FnOnce(&Store) -> Result<T> + Send + 'static,
     ) -> Result<T> {
@@ -71,9 +71,11 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     use crate::Store;
+    use crate::store::StoreError;
     use crate::testing::WriteLockHold;
 
     /// A write that waits out another connection's lock waits on the
@@ -103,6 +105,32 @@ mod tests {
         assert!(!write.is_finished(), "the write still waits");
         drop(hold);
         write.await.unwrap().unwrap();
+    }
+
+    /// A step the pool never ran, because its runtime shut down first, is
+    /// an I/O error, not a panic, and its body never runs.
+    #[test]
+    fn a_step_the_pool_never_ran_is_an_io_error() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        runtime.shutdown_background();
+        let store = Arc::new(Store::in_memory().unwrap());
+        let ran = Arc::new(AtomicBool::new(false));
+        let body = {
+            let ran = ran.clone();
+            move |_: &Store| {
+                ran.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        };
+        let outcome = handle.block_on(store.writing(body));
+        assert!(
+            matches!(outcome, Err(StoreError::Io(_))),
+            "cancelled: {outcome:?}"
+        );
+        assert!(!ran.load(Ordering::SeqCst), "the body did not run");
     }
 
     /// A panic in the body resumes in the caller.

@@ -134,9 +134,9 @@ pub enum StoreError {
     #[error("the database is in journal mode {0}, not wal")]
     JournalModeNotWal(String),
     /// [`Store::with_own_reader`] while the handle an earlier call returned
-    /// is still alive: a process opens at most [`READERS`] readers. Rust
+    /// is still alive: a store opens at most [`READERS`] readers. Rust
     /// only.
-    #[error("the store's own reader is already open")]
+    #[error("the host's reader is already open")]
     OwnReaderOpen,
 }
 
@@ -172,7 +172,7 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 /// `MeetingStore.onDisk`; GRDB's own default fails at once.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The most reader connections a process opens: the shared reader, which
+/// The most reader connections a store opens: the shared reader, which
 /// [`Store::read`] uses on every handle but one, and the host's own
 /// ([`Store::with_own_reader`]). An upper bound: the CLI opens only the
 /// first, and an in-memory store none.
@@ -198,15 +198,20 @@ const OWN_READER: usize = 1;
 ///   transaction open between calls, and a read never falls back to the
 ///   writer: in WAL mode it reads its snapshot while another connection
 ///   writes, so a read never waits for a write. Each reader is one mutex,
-///   held only for its closure, with nothing taken under it but by the
-///   checkpoint. The handle [`Store::open`] returns reads on the shared
+///   held only for its closure. Nothing is taken under it, except by the
+///   checkpoint, which takes both readers after the writer. The handle [`Store::open`] returns reads on the shared
 ///   reader (the detection poll, the pipeline, the handover, the delivery,
 ///   the CLI); the host's handle ([`Store::with_own_reader`]) reads on a
 ///   connection of its own, so its reads never queue behind theirs.
 /// - **The checkpoint** takes the writer, then the shared reader, then
 ///   the host's: a read in flight ends first, and no new one starts until
-///   it returns.
-/// - **In memory** one connection serves every role, since separate
+///   it returns. Under another process's lock it keeps both readers
+///   through `wal_checkpoint`'s busy wait, up to the five-second busy
+///   timeout. That is accepted: its only callers are the launch and the
+///   recorder's fallbacks when a recording's folder record cannot be
+///   written or forgotten (a stop, a delete), none of them on a path the
+///   UI waits on.
+/// - **In memory**, one connection serves every role, since separate
 ///   connections to `:memory:` do not share a database. Every handle locks
 ///   it, and [`Store::read`] turns `query_only` on for its closure only.
 ///
@@ -363,6 +368,19 @@ impl Store {
     /// it is dropped, its connection closes and a new host can open
     /// another. In memory the handle reads on the one connection. Rust
     /// only: the Swift host read through the pool's readers.
+    ///
+    /// ```
+    /// # fn main() -> steno_core::store::Result<()> {
+    /// use steno_core::{Store, StoreError};
+    ///
+    /// let store = Store::in_memory()?;
+    /// let host = store.with_own_reader()?;
+    /// assert!(matches!(store.with_own_reader(), Err(StoreError::OwnReaderOpen)));
+    /// drop(host);
+    /// store.with_own_reader()?.settings()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_own_reader(&self) -> Result<Store> {
         let connections = &self.connections;
         if connections.own_reader_open.swap(true, Ordering::AcqRel) {
@@ -389,17 +407,18 @@ impl Store {
     /// sees the same snapshot of the file (an export's seven selects read
     /// one meeting, not a meeting another process is rewriting between
     /// them), as GRDB's `reader.read` did. Nothing is written; the
-    /// transaction is rolled back when `body` returns. `body` must not
-    /// begin a transaction of its own: SQLite does not nest them, so its
-    /// `BEGIN` fails.
+    /// transaction is rolled back when `body` returns. It runs on this
+    /// handle's reader, which is `query_only`, so a write in `body` fails
+    /// with `SQLITE_READONLY`; in memory it runs on the one connection
+    /// with `query_only` on for the closure. `body` must not begin a
+    /// transaction of its own: SQLite does not nest them, so its `BEGIN`
+    /// fails.
     pub fn read<T>(&self, body: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         self.snapshot(|transaction| body(transaction))
     }
 
     /// [`Store::read`] for a body that wants the transaction itself, so its
     /// signature says every query runs inside the one snapshot.
-    /// It runs on this handle's reader or, in memory, on the one
-    /// connection with `query_only` on for the closure.
     fn snapshot<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let _inside = Inside::enter(&self.connections);
         if self.connections.path.is_none() {
@@ -1021,6 +1040,55 @@ mod tests {
         finish.send(()).unwrap();
         checkpoint.join().unwrap().unwrap();
         for read in new_reads {
+            read.join().unwrap();
+        }
+    }
+
+    /// The checkpoint takes the writer before the readers: one that waits
+    /// for the writer, held by a write in another connection's busy wait,
+    /// holds no reader meanwhile, so a read on either reader still
+    /// answers. Taken the other way round, both reads would wait out the
+    /// write's busy timeout. The bound is a second, five times under it.
+    #[test]
+    fn a_checkpoint_waiting_for_the_writer_holds_no_reader() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, host, path) = file_store(&directory);
+        let host = Arc::new(host);
+        let hold = WriteLockHold::new(&path);
+        let writer = thread::spawn({
+            let store = store.clone();
+            move || store.rebuild_search_index()
+        });
+        // The write is in its busy wait by now, holding the writer.
+        thread::sleep(LIVE);
+        let checkpoint = thread::spawn({
+            let store = store.clone();
+            move || store.checkpoint_durably()
+        });
+        // The checkpoint waits for the writer by now.
+        thread::sleep(LIVE);
+
+        let (done, read) = mpsc::channel::<&'static str>();
+        let reads: Vec<_> = [(store.clone(), "shared"), (host.clone(), "host's")]
+            .into_iter()
+            .map(|(reader, name)| {
+                let done = done.clone();
+                thread::spawn(move || {
+                    reader.settings().unwrap();
+                    done.send(name).unwrap();
+                })
+            })
+            .collect();
+        for _ in 0..2 {
+            read.recv_timeout(Duration::from_secs(1))
+                .expect("a read waited behind the checkpoint");
+        }
+        assert!(!checkpoint.is_finished(), "the checkpoint still waits");
+
+        drop(hold);
+        writer.join().unwrap().unwrap();
+        checkpoint.join().unwrap().unwrap();
+        for read in reads {
             read.join().unwrap();
         }
     }
