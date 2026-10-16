@@ -411,7 +411,8 @@ impl Refused {
             | StoreError::ReceiptOfAnotherUpload(_)
             | StoreError::PendingMigration(_)
             | StoreError::ForeignKeyViolations { .. }
-            | StoreError::JournalModeNotWal(_) => {
+            | StoreError::JournalModeNotWal(_)
+            | StoreError::OwnReaderOpen => {
                 return Self::plain(Refusal::Unavailable, log_line);
             }
         };
