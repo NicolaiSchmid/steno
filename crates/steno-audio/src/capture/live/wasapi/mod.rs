@@ -587,7 +587,7 @@ fn run_stream(
 fn drain_into(client: &mut CaptureClient, body: &mut StreamBody) -> Result<(), ComError> {
     client.drain(|packet, missed| {
         if !missed.is_none() {
-            body.write_missed(packet.channels, missed);
+            body.write_missed(&packet, missed);
         }
         body.handle(packet);
     })

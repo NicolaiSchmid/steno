@@ -20,7 +20,7 @@ use steno_core::AudioLane;
 use super::configuration::CaptureError;
 use super::layout::StreamLayout;
 use crate::SAMPLE_RATE;
-use crate::realtime::FollowerLane;
+use crate::realtime::{CycleClock, FollowerLane};
 
 /// One of the two capture streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,6 +127,40 @@ pub fn frames_from_hundred_nanoseconds(duration: i64, sample_rate: f64) -> usize
         return 0;
     }
     (duration as f64 * sample_rate / 10_000_000.0).round() as usize
+}
+
+/// The clock that reads a stream's device positions (`GetBuffer`'s, for
+/// the audio its thread missed: A18, the design in
+/// [`realtime::missed`](crate::realtime::missed)). The positions count
+/// frames at the engine's rate, the shared-mode mix format's
+/// (`engine_rate`; `None` when the client gives none, which takes 48 kHz),
+/// while the packets carry the 48 kHz frames the stream asked for
+/// (`AUTOCONVERTPCM`), so the clock converts the one to the other with
+/// [`CycleClock::rescale`], as PipeWire's does its graph's ticks.
+/// Microsoft's documentation leaves the unit open under `AUTOCONVERTPCM`,
+/// and the Windows gate checks it with a 44.1 kHz device; read in the
+/// wrong unit, a jump is misjudged by the ratio of the rates (9 % at
+/// 44.1 kHz), and none is invented: a packet's position is then off by 42
+/// frames in 480, under the half packet a jump needs, and the clock
+/// follows on from each packet.
+///
+/// ```
+/// use steno_audio::capture::split_streams::device_position_clock;
+///
+/// // 10 ms packets on a 44.1 kHz engine: 441 positions each, then a
+/// // packet whose position is 0.5 s on.
+/// let mut clock = device_position_clock(Some(44_100));
+/// clock.advance(0, 480);
+/// clock.advance(441, 480);
+/// assert_eq!(clock.advance(882 + 22_050, 480).fill, 24_000);
+/// ```
+#[must_use]
+pub fn device_position_clock(engine_rate: Option<u32>) -> CycleClock {
+    let mut clock = CycleClock::new(SAMPLE_RATE);
+    if let Some(rate) = engine_rate {
+        clock.rescale(SAMPLE_RATE as u64, u64::from(rate));
+    }
+    clock
 }
 
 /// The input and output latencies a two-stream capture reports, in frames.

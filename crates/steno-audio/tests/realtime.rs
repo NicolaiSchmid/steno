@@ -548,8 +548,10 @@ fn the_missed_cycle_fill_allocates_nothing() {
     assert!(sink.dropped_samples().is_empty());
 
     // The two-stream bodies: the master misses 4 periods and the
-    // follower 2, each told before its next packet.
+    // follower 2, each told before its next packet, then each a jump past
+    // the fill limit.
     let filled = |fill| Missed { fill, unfilled: 0 };
+    let unfilled = |unfilled| Missed { fill: 0, unfilled };
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let follower = Arc::new(FollowerLane::for_streams(CYCLE, 4_800));
@@ -564,24 +566,34 @@ fn the_missed_cycle_fill_allocates_nothing() {
     let mut staging = StreamBody::follower(Arc::clone(&follower), 4_800);
     let mic = vec![0.5f32; CYCLE];
     let tap = vec![0.25f32; 2 * CYCLE];
+    let (mono, stereo) = (
+        SliceView {
+            frames: CYCLE,
+            channels: 1,
+            samples: Some(&mic),
+        },
+        SliceView {
+            frames: CYCLE,
+            channels: 2,
+            samples: Some(&tap),
+        },
+    );
     let allocations = CountingAllocator::allocations_during(|| {
         for period in 0..50 {
             if period == 20 {
-                staging.write_missed(2, filled(2 * CYCLE));
+                staging.write_missed(&stereo, filled(2 * CYCLE));
             }
-            staging.handle(SliceView {
-                frames: CYCLE,
-                channels: 2,
-                samples: Some(&tap),
-            });
+            if period == 35 {
+                staging.write_missed(&stereo, unfilled(150 * CYCLE));
+            }
+            staging.handle(stereo);
             if period == 30 {
-                master.write_missed(1, filled(4 * CYCLE));
+                master.write_missed(&mono, filled(4 * CYCLE));
             }
-            master.handle(SliceView {
-                frames: CYCLE,
-                channels: 1,
-                samples: Some(&mic),
-            });
+            if period == 40 {
+                master.write_missed(&mono, unfilled(200 * CYCLE));
+            }
+            master.handle(mono);
         }
     });
     assert_eq!(
@@ -597,6 +609,14 @@ fn the_missed_cycle_fill_allocates_nothing() {
         sink.missed_samples(),
         BTreeMap::from([(AudioLane::Mic, 4 * CYCLE), (AudioLane::System, 2 * CYCLE)]),
         "the master's zeros on its lane, the follower's count on its own"
+    );
+    assert_eq!(
+        sink.unfilled_samples(),
+        BTreeMap::from([
+            (AudioLane::Mic, 200 * CYCLE),
+            (AudioLane::System, 150 * CYCLE)
+        ]),
+        "each thread's jump past the limit on its own lane, nothing written"
     );
 }
 

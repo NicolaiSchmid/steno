@@ -88,7 +88,9 @@ use windows_core::implement;
 
 use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
-use crate::capture::split_streams::{BUFFER_DURATION, StreamSizes, stream_sizes};
+use crate::capture::split_streams::{
+    BUFFER_DURATION, StreamSizes, device_position_clock, stream_sizes,
+};
 use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
 use crate::realtime::{CycleClock, Missed, SliceView};
 
@@ -397,18 +399,7 @@ impl Endpoint {
     /// The shared-mode mix format's channels and rate.
     #[must_use]
     pub fn mix_format(&self) -> Option<(usize, u32)> {
-        let client = self.audio_client().ok()?;
-        // SAFETY: on success the format is ours to free; it is read by
-        // value (the struct is packed, so unaligned) before the free.
-        unsafe {
-            let format = client.GetMixFormat().ok()?;
-            if format.is_null() {
-                return None;
-            }
-            let value = format.read_unaligned();
-            CoTaskMemFree(Some(format.cast_const().cast::<c_void>()));
-            Some((usize::from(value.nChannels), value.nSamplesPerSec))
-        }
+        mix_format(&self.audio_client().ok()?)
     }
 
     fn audio_client(&self) -> Result<IAudioClient, ComError> {
@@ -489,6 +480,23 @@ pub enum LoopbackKind {
     Endpoint,
 }
 
+/// `client`'s shared-mode mix format: its channels and rate; `None` when
+/// the client gives none (the process-loopback client may not implement
+/// it).
+fn mix_format(client: &IAudioClient) -> Option<(usize, u32)> {
+    // SAFETY: on success the format is ours to free; it is read by value
+    // (the struct is packed, so unaligned) before the free.
+    unsafe {
+        let format = client.GetMixFormat().ok()?;
+        if format.is_null() {
+            return None;
+        }
+        let value = format.read_unaligned();
+        CoTaskMemFree(Some(format.cast_const().cast::<c_void>()));
+        Some((usize::from(value.nChannels), value.nSamplesPerSec))
+    }
+}
+
 /// One initialised shared-mode capture stream: the client, its capture
 /// service, the event it signals.
 pub struct CaptureClient {
@@ -555,6 +563,9 @@ impl CaptureClient {
         event_driven: bool,
     ) -> Result<Self, ComError> {
         let format = float_format(channels);
+        // Read before `Initialize`: the engine's rate, which the device
+        // positions count in.
+        let engine_rate = mix_format(&client).map(|(_, rate)| rate);
         let flags = if event_driven {
             flags | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
         } else {
@@ -618,7 +629,7 @@ impl CaptureClient {
             sizes: stream_sizes(buffer_frames, period, latency),
             discontinuities: 0,
             first_packet: true,
-            clock: CycleClock::new(SAMPLE_RATE),
+            clock: device_position_clock(engine_rate),
             missed_frames: 0,
         })
     }
@@ -677,8 +688,8 @@ impl CaptureClient {
     /// delivered audio ends ([`CycleClock`]); nothing otherwise and for a
     /// position the engine flags as invalid
     /// (`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`).
-    /// The position counts the stream's frames, as Microsoft's
-    /// documentation of `GetBuffer` describes it (not run on hardware: see
+    /// The position counts frames at the engine's rate, converted to the
+    /// stream's 48 kHz ([`device_position_clock`]; not run on hardware: see
     /// the module doc of `capture::live::wasapi`). The real-time part: no
     /// allocation and no lock here on success (the `windows` error values
     /// are built only on failure); `handle` must keep it so.

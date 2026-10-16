@@ -18,14 +18,15 @@
 use std::sync::Arc;
 
 use steno_audio::capture::split_streams::{
-    MAX_BUFFER_FRAMES, StreamSizes, far_end_latencies, frames_from_hundred_nanoseconds,
-    stream_sizes,
+    MAX_BUFFER_FRAMES, StreamSizes, device_position_clock, far_end_latencies,
+    frames_from_hundred_nanoseconds, stream_sizes,
 };
 use steno_audio::capture::{ChannelRef, SplitStreamPlan, StreamSource};
 use steno_audio::realtime::{
-    FollowerLane, LaneFrameSink, Missed, PacketRouter, SliceView, StreamBody, deliver_slices,
+    FollowerLane, LaneFrameSink, MISSED_FILL_LIMIT, Missed, PacketRouter, SliceView, StreamBody,
+    deliver_slices,
 };
-use steno_audio::{CaptureError, CaptureMode};
+use steno_audio::{CaptureError, CaptureMode, SAMPLE_RATE};
 use steno_core::AudioLane;
 
 /// `frames` mono frames counting up from `start`.
@@ -126,6 +127,39 @@ fn no_lanes_is_refused() {
         SplitStreamPlan::new(&[]),
         Err(CaptureError::UnexpectedStreamLayout(_))
     ));
+}
+
+/// WASAPI's device positions count the engine's frames: on a 44.1 kHz
+/// engine 441 of them are a 10 ms packet of 48 kHz frames, a jump is
+/// counted in 48 kHz frames up to the fill limit and past it, and a client
+/// without a mix format counts at 48 kHz (A18 of
+/// `.plans/2026-10-07-stable-promotion.md`).
+#[test]
+fn device_positions_count_at_the_engines_rate() {
+    let mut clock = device_position_clock(Some(44_100));
+    let mut position = 0;
+    for _ in 0..1_000 {
+        assert!(clock.advance(position, 480).is_none(), "at {position}");
+        position += 441;
+    }
+    assert_eq!(clock.advance(position + 4_410, 480).fill, 4_800);
+    position += 4_410 + 441;
+    assert_eq!(
+        clock.advance(position + 44_100, 480).fill,
+        48_000,
+        "a second at 44.1 kHz is the limit"
+    );
+    position += 44_100 + 441;
+    assert_eq!(
+        clock.advance(position + 88_200, 480),
+        Missed {
+            fill: 0,
+            unfilled: 96_000
+        }
+    );
+    let mut clock = device_position_clock(None);
+    clock.advance(0, 480);
+    assert_eq!(clock.advance(480 + 4_800, 480).fill, 4_800, "48 kHz");
 }
 
 #[test]
@@ -862,29 +896,73 @@ const ENGINE_PERIODS: usize = 10;
 #[derive(Debug)]
 struct Outage {
     /// The microphone's frame less the system's at each sink position that
-    /// holds both (the lag the echo canceller expects is the target, 960),
-    /// once before the outage and at every change after it, with the period.
+    /// holds both, once before the outage and at every change after it,
+    /// with the period: the target (960) when the follower's thread runs
+    /// first in each period, a period more when the master's does.
     lags: Vec<(usize, i64)>,
     mic_missed: usize,
     system_missed: usize,
+    mic_unfilled: usize,
+    system_unfilled: usize,
     system_dropped: usize,
     slipped: usize,
+    /// The seconds the recorder's note would say are missing, as the
+    /// session and the recorder count them: the lane that missed most's
+    /// zeros, plus the larger of the lane that left most unfilled and the
+    /// master's shortfall to wall time beyond the drift allowance.
+    note: f64,
+    /// The seconds truly missing: the master's shortfall to wall time, plus
+    /// the microphone's zeros for what its thread missed.
+    truth: f64,
+}
+
+/// The period [`run_outage`]'s outages start in.
+const OUTAGE_START: usize = 50;
+
+/// Period `t` of a stream's thread that is out for `out` periods from
+/// [`OUTAGE_START`] (0: never): its packet; nothing while it is out; once
+/// it is back, the ten oldest packets the engine kept, then `lost` (what
+/// its device position says) and its packet.
+fn outage_period<'a>(
+    body: &mut StreamBody,
+    t: usize,
+    out: usize,
+    packet: impl Fn(usize) -> SliceView<'a>,
+    lost: Missed,
+) {
+    let back = OUTAGE_START + out;
+    if out == 0 || t < OUTAGE_START || t > back {
+        body.handle(packet(t));
+    } else if t == back {
+        for kept in OUTAGE_START..OUTAGE_START + ENGINE_PERIODS.min(out) {
+            body.handle(packet(kept));
+        }
+        body.write_missed(&packet(t), lost);
+        body.handle(packet(t));
+    }
+}
+
+/// [`run_outage_in_order`] with the follower's thread running first in
+/// each period.
+fn run_outage(follower_out: usize, master_out: usize) -> Outage {
+    run_outage_in_order(follower_out, master_out, false)
 }
 
 /// The two stream bodies as the WASAPI backend builds them (the follower
 /// behind a master with a 100 ms buffer that fills what it missed), over
-/// 400 periods in which source frame `f` of either stream is
-/// `f + 1`. From period 50 the follower's thread is out for
-/// `follower_out` periods and the master's for `master_out` (0: never);
-/// each resumes with the ten oldest packets the engine kept, then reports
-/// what its device position says was lost before the next one, as
-/// `run_stream` does.
-fn run_outage(follower_out: usize, master_out: usize) -> Outage {
+/// 400 periods in which source frame `f` of either stream is `f + 1`: the
+/// follower's thread out for `follower_out` periods and the master's for
+/// `master_out` ([`outage_period`]), what each missed filled up to
+/// [`MISSED_FILL_LIMIT`] and unfilled past it, as `run_stream` hands it
+/// over. In each period the master's thread runs first when
+/// `master_first`, the follower's otherwise.
+#[allow(clippy::too_many_lines)]
+fn run_outage_in_order(follower_out: usize, master_out: usize, master_first: bool) -> Outage {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let follower = Arc::new(FollowerLane::for_streams_filling(PERIOD, 4_800));
-    let mut master = StreamBody::Master {
+    let mut master_body = StreamBody::Master {
         router: PacketRouter::new(
             plan.layout.sources.clone(),
             Some(Arc::clone(&follower)),
@@ -908,32 +986,36 @@ fn run_outage(follower_out: usize, master_out: usize) -> Outage {
         channels: 1,
         samples: Some(&mic[t * PERIOD..(t + 1) * PERIOD]),
     };
-    let lost = |out: usize| Missed {
-        fill: out.saturating_sub(ENGINE_PERIODS) * PERIOD,
-        unfilled: 0,
+    let limit = MISSED_FILL_LIMIT.as_millis() as usize * PERIOD / 10;
+    let lost = |out: usize| {
+        let frames = out.saturating_sub(ENGINE_PERIODS) * PERIOD;
+        if frames <= limit {
+            Missed {
+                fill: frames,
+                unfilled: 0,
+            }
+        } else {
+            Missed {
+                fill: 0,
+                unfilled: frames,
+            }
+        }
     };
-    let start = 50;
+    let start = OUTAGE_START;
     let (mut mic_out, mut system_out) = (Vec::new(), Vec::new());
     for t in 0..periods {
-        let follower_back = start + follower_out;
-        if follower_out == 0 || t < start || t > follower_back {
-            staging.handle(tap_packet(t));
-        } else if t == follower_back {
-            for kept in start..start + ENGINE_PERIODS.min(follower_out) {
-                staging.handle(tap_packet(kept));
-            }
-            staging.write_missed(2, lost(follower_out));
-            staging.handle(tap_packet(t));
-        }
-        let master_back = start + master_out;
-        if master_out == 0 || t < start || t > master_back {
-            master.handle(mic_packet(t));
-        } else if t == master_back {
-            for kept in start..start + ENGINE_PERIODS.min(master_out) {
-                master.handle(mic_packet(kept));
-            }
-            master.write_missed(1, lost(master_out));
-            master.handle(mic_packet(t));
+        let run_follower = |body: &mut StreamBody| {
+            outage_period(body, t, follower_out, tap_packet, lost(follower_out));
+        };
+        let run_master = |body: &mut StreamBody| {
+            outage_period(body, t, master_out, mic_packet, lost(master_out));
+        };
+        if master_first {
+            run_master(&mut master_body);
+            run_follower(&mut staging);
+        } else {
+            run_follower(&mut staging);
+            run_master(&mut master_body);
         }
         let queued = sink.available_to_read();
         let (mut a, mut b) = (vec![0.0f32; queued], vec![0.0f32; queued]);
@@ -953,35 +1035,107 @@ fn run_outage(follower_out: usize, master_out: usize) -> Outage {
             lags.push((position / PERIOD, now));
         }
     }
-    let missed = sink.missed_samples();
+    let of = |counts: &std::collections::BTreeMap<AudioLane, usize>, lane| {
+        counts.get(&lane).copied().unwrap_or(0)
+    };
+    let (missed, unfilled) = (sink.missed_samples(), sink.unfilled_samples());
+    let (mic_missed, system_missed) = (of(&missed, AudioLane::Mic), of(&missed, AudioLane::System));
+    let (mic_unfilled, system_unfilled) = (
+        of(&unfilled, AudioLane::Mic),
+        of(&unfilled, AudioLane::System),
+    );
+    let seconds = |frames: usize| frames as f64 / SAMPLE_RATE;
+    let wall = seconds(periods * PERIOD);
+    let short = wall - seconds(mic_out.len());
     Outage {
         lags,
-        mic_missed: missed.get(&AudioLane::Mic).copied().unwrap_or(0),
-        system_missed: missed.get(&AudioLane::System).copied().unwrap_or(0),
-        system_dropped: sink
-            .dropped_samples()
-            .get(&AudioLane::System)
-            .copied()
-            .unwrap_or(0),
+        mic_missed,
+        system_missed,
+        mic_unfilled,
+        system_unfilled,
+        system_dropped: of(&sink.dropped_samples(), AudioLane::System),
         slipped: follower.slipped_frames(),
+        note: seconds(mic_missed.max(system_missed))
+            + seconds(mic_unfilled.max(system_unfilled)).max(short - wall * 0.001),
+        truth: short + seconds(mic_missed),
     }
 }
 
 /// Both threads out for 200 and 300 ms, as a stopped process is: the
-/// master fills its lost half, which pulls the system audio queued for
+/// master fills its lost part, which pulls the system audio queued for
 /// that time; the follower only counts its own, which the master's pulls
-/// pad with zeros. The system lane stays the target behind the
-/// microphone, nothing slips and nothing is counted twice.
+/// pad with zeros, and nothing is counted twice. When the follower's
+/// thread wakes first the system lane stays where it was behind the
+/// microphone and nothing slips. When the master's does, its kept packets
+/// find the follower's not yet queued, and the follower's land late, as
+/// after an outage of the follower alone: the queue slips them back within
+/// two slip windows, and the lag ends where it started.
 #[test]
 fn a_stall_of_both_threads_keeps_the_lanes_aligned() {
     for out in [20, 30] {
-        let outage = run_outage(out, out);
         let lost = (out - ENGINE_PERIODS) * PERIOD;
+        let outage = run_outage(out, out);
         assert_eq!(outage.lags, [(40, 960)], "{out} periods: {outage:?}");
-        assert_eq!(outage.slipped, 0, "{outage:?}");
-        assert_eq!(outage.system_dropped, 0, "{outage:?}");
-        assert_eq!(outage.mic_missed, lost, "{outage:?}");
-        assert_eq!(outage.system_missed, lost, "{outage:?}");
+        assert_eq!(
+            (outage.slipped, outage.system_dropped),
+            (0, 0),
+            "{outage:?}"
+        );
+        assert_eq!((outage.mic_missed, outage.system_missed), (lost, lost));
+        let outage = run_outage_in_order(out, out, true);
+        let (base, (period, lag)) = (outage.lags[0], *outage.lags.last().unwrap());
+        assert_eq!(base, (40, 1_440), "master first, {out} periods: {outage:?}");
+        assert_eq!(lag, base.1, "{outage:?}");
+        assert!(period <= OUTAGE_START + out + 100, "{outage:?}");
+        assert_eq!((outage.slipped, outage.system_dropped), (3_840, 3_840));
+        assert_eq!((outage.mic_missed, outage.system_missed), (lost, lost));
+        assert!((outage.note - outage.truth).abs() < 1e-9, "{outage:?}");
+    }
+}
+
+/// Both threads out past the fill limit, 1.5 and 2.5 s, in either order:
+/// the microphone's lane counts its jump unfilled and the system lane the
+/// follower's, so the note counts the time once, as truly missing, and the
+/// lag ends where it started. With the follower's thread first, the
+/// packet it queued for the time the master resumes at stays queued: the
+/// target it held from before the outage (20 ms) pairs with the master's
+/// first two packets after it, and from the third the lag is back.
+#[test]
+fn an_outage_of_both_threads_past_the_fill_limit_counts_once() {
+    for out in [150, 250] {
+        let lost = (out - ENGINE_PERIODS) * PERIOD;
+        for master_first in [false, true] {
+            let outage = run_outage_in_order(out, out, master_first);
+            let context = format!("{out} periods, master first {master_first}: {outage:?}");
+            assert!((outage.note - outage.truth).abs() < 0.01, "{context}");
+            assert!(
+                (outage.truth - lost as f64 / SAMPLE_RATE).abs() < 1e-9,
+                "{context}"
+            );
+            assert_eq!(
+                (outage.mic_missed, outage.system_missed),
+                (0, 0),
+                "{context}"
+            );
+            assert_eq!((outage.mic_unfilled, outage.system_unfilled), (lost, lost));
+            assert_eq!(outage.lags.last().unwrap().1, outage.lags[0].1, "{context}");
+        }
+        let outage = run_outage(out, out);
+        let resumed = OUTAGE_START + ENGINE_PERIODS;
+        assert_eq!(outage.lags.len(), 3, "{outage:?}");
+        assert_eq!(outage.lags[1].0, resumed, "{outage:?}");
+        assert_eq!(outage.lags[2], (resumed + 2, 960), "{outage:?}");
+        // One thread alone: the master's loss is the microphone's, the
+        // follower's the system audio's, and the note says either once.
+        for (follower_out, master_out) in [(out, 0), (0, out)] {
+            let outage = run_outage(follower_out, master_out);
+            let context = format!("{follower_out} and {master_out} periods: {outage:?}");
+            assert!(
+                (outage.note - lost as f64 / SAMPLE_RATE).abs() < 0.01,
+                "{context}"
+            );
+            assert_eq!(outage.lags.last().unwrap().1, 960, "{context}");
+        }
     }
 }
 
@@ -1003,8 +1157,8 @@ fn a_stall_of_the_master_alone_keeps_the_lanes_aligned() {
 
 /// A jump the master's thread missed too long to fill counts on its lane
 /// and drops the system audio queued for that time, counted on the system
-/// lane, so the follower's lane loses the same span; the target stays
-/// queued.
+/// lane, so the follower's lane loses the same span; the target and the
+/// next packet's pull stay queued, the next packet's own time.
 #[test]
 fn an_unfilled_jump_of_the_master_drops_the_follower_audio_of_that_time() {
     let lanes = [AudioLane::Mic, AudioLane::System];
@@ -1038,19 +1192,23 @@ fn an_unfilled_jump_of_the_master_drops_the_follower_audio_of_that_time() {
     }
     assert_eq!(follower.queued(), 960 + 100 * PERIOD);
     router.write_missed(
-        1,
+        &mono,
         Missed {
             fill: 0,
             unfilled: 100 * PERIOD,
         },
         &sink,
     );
-    assert_eq!(follower.queued(), 960, "back to the target");
+    assert_eq!(
+        follower.queued(),
+        960 + PERIOD,
+        "back to the target and the next packet's pull"
+    );
     assert_eq!(
         sink.unfilled_samples(),
         std::collections::BTreeMap::from([
             (AudioLane::Mic, 100 * PERIOD),
-            (AudioLane::System, 100 * PERIOD)
+            (AudioLane::System, 99 * PERIOD)
         ])
     );
     assert_eq!(sink.available_to_read(), PERIOD, "nothing written for it");

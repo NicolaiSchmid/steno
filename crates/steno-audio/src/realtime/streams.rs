@@ -56,9 +56,28 @@
 //! master fills it as a silent packet that still pulls the follower's
 //! frames for that time, and its kept packets do not slip that audio first
 //! ([`FollowerLane::for_streams_filling`]); the follower only counts it,
-//! since the master's pulls already pad its lane with zeros while it is
-//! out. A master's jump too long to fill drops the follower's audio for
-//! that time with it.
+//! filled and unfilled apart, since the master's pulls already pad its
+//! lane with zeros while it is out. A master's jump too long to fill drops
+//! the follower's audio for that time with it
+//! ([`FollowerLane::skip_unfilled`]), and the lanes keep their lag. Three
+//! shapes stay, each counted, none lost silently:
+//!
+//! - Both threads out (a stopped process) for less than the fill limit
+//!   count the time once on each lane. Out longer, the master's unfilled
+//!   jump and the follower's count the same time, and the session takes
+//!   the lane that lost most, so it counts once too; a follower out for
+//!   less than the fill limit inside a master's longer outage counts its
+//!   part on top (an overcount, never a loss).
+//! - When the master's thread resumes first after such an outage, the
+//!   follower's kept packets land late, as after the follower's own
+//!   outage, until the queue slips back to the target within two slip
+//!   windows.
+//! - The master's thread alone out for 1.2 to 2.5 s: the follower's queue
+//!   then passes the raised ceiling at the first pull of the master's kept
+//!   packets and slips at once, so about 100 ms of microphone audio pairs
+//!   with system audio from up to 1.3 s later, and the system audio
+//!   slipped is counted as dropped. The Windows gate step of the stable
+//!   plan checks it on hardware.
 //!
 //! Real-time: [`StreamBody::handle`] and [`StreamBody::write_missed`]
 //! allocate nothing and take no lock; the scratch buffers are allocated
@@ -99,9 +118,10 @@ pub struct FollowerLane {
     window_low: AtomicUsize,
     /// Staging overflows already handed to the sink's drop count.
     reported_overflow: AtomicUsize,
-    /// Frames the follower's thread missed, not yet handed to the sink's
-    /// count ([`Self::take_missed`]).
-    missed: AtomicUsize,
+    /// Frames the follower's thread missed, filled and unfilled apart, not
+    /// yet handed to the sink's counts ([`Self::take_missed`]).
+    missed_fill: AtomicUsize,
+    missed_unfilled: AtomicUsize,
 }
 
 impl FollowerLane {
@@ -134,7 +154,8 @@ impl FollowerLane {
             window_pulled: AtomicUsize::new(0),
             window_low: AtomicUsize::new(usize::MAX),
             reported_overflow: AtomicUsize::new(0),
-            missed: AtomicUsize::new(0),
+            missed_fill: AtomicUsize::new(0),
+            missed_unfilled: AtomicUsize::new(0),
         }
     }
 
@@ -259,35 +280,46 @@ impl FollowerLane {
         }
     }
 
-    /// Producer (follower thread). Counts `frames` the follower's thread
-    /// missed, filled or not ([`Missed`]), for [`Self::take_missed`]. It
-    /// stages nothing: while the follower is out the master's pulls pad its
-    /// lane with zeros, which keeps the lanes aligned, so these frames are
-    /// already silence in the sink.
+    /// Producer (follower thread). Counts what the follower's thread
+    /// missed, the fill and the unfilled frames apart, for
+    /// [`Self::take_missed`]. It stages nothing: while the follower is out
+    /// the master's pulls pad its lane with zeros, which keeps the lanes
+    /// aligned, so the filled frames are already silence in the sink. A
+    /// master out too (a stopped process) counts its own unfilled jump for
+    /// the same time, and the session takes the lane that lost most, so
+    /// that time counts once.
     #[inline(always)]
-    pub fn record_missed(&self, frames: usize) {
-        self.missed.fetch_add(frames, Ordering::Relaxed);
+    pub fn record_missed(&self, missed: Missed) {
+        self.missed_fill.fetch_add(missed.fill, Ordering::Relaxed);
+        self.missed_unfilled
+            .fetch_add(missed.unfilled, Ordering::Relaxed);
     }
 
-    /// Consumer (master thread). The frames [`Self::record_missed`]
-    /// counted since the last call, for the sink's count of the follower's
-    /// lane.
+    /// Consumer (master thread). What [`Self::record_missed`] counted since
+    /// the last call, for the sink's counts of the follower's lane.
     #[inline(always)]
-    pub fn take_missed(&self) -> usize {
-        self.missed.swap(0, Ordering::Relaxed)
+    pub fn take_missed(&self) -> Missed {
+        Missed {
+            fill: self.missed_fill.swap(0, Ordering::Relaxed),
+            unfilled: self.missed_unfilled.swap(0, Ordering::Relaxed),
+        }
     }
 
-    /// Consumer (master thread). Drops what is queued beyond the target:
-    /// the follower's audio for a stretch the master's thread missed and
-    /// did not fill, so the follower's lane loses the same span as the
-    /// master's. Returns the frames dropped.
+    /// Consumer (master thread), before the master's packet of `next`
+    /// frames that follows a stretch its thread missed and did not fill.
+    /// Drops what is queued beyond the target and that packet, as a pull
+    /// finds it in steady state: the follower's audio for that stretch, so
+    /// the follower's lane loses the same span as the master's, while a
+    /// packet the follower already queued for the time of `next` stays,
+    /// and the lane keeps its lag. Returns the frames dropped.
     #[inline(always)]
-    pub fn skip_unfilled(&self) -> usize {
+    pub fn skip_unfilled(&self, next: usize) -> usize {
         let queued = self.ring.available_to_read();
-        if queued <= self.target {
+        let keep = self.target.saturating_add(next);
+        if queued <= keep {
             return 0;
         }
-        self.ring.discard(queued - self.target)
+        self.ring.discard(queued - keep)
     }
 
     /// Consumer (master thread). Fills `out` with the follower's next
@@ -467,8 +499,11 @@ impl PacketRouter {
                         sink.ring(*index).record_drop(lost);
                     }
                     let missed = lane.take_missed();
-                    if missed > 0 {
-                        sink.ring(*index).record_missed(missed);
+                    if missed.fill > 0 {
+                        sink.ring(*index).record_missed(missed.fill);
+                    }
+                    if missed.unfilled > 0 {
+                        sink.ring(*index).record_unfilled(missed.unfilled);
                     }
                     delivered
                 }
@@ -482,20 +517,20 @@ impl PacketRouter {
         written
     }
 
-    /// What the master's thread missed before its next packet, whose
-    /// packets carry `channels` channels. The fill goes in as a silent
-    /// packet: zeros on the master's lanes, counted as missed, and the
-    /// follower's frames for the same time on its lane (it kept
-    /// delivering). The unfilled frames count on the master's lanes, and
-    /// the follower's audio queued for that time is dropped and counted on
-    /// its lane ([`FollowerLane::skip_unfilled`]).
+    /// What the master's thread missed before `next`, its next packet. The
+    /// fill goes in as a silent packet of `next`'s channels: zeros on the
+    /// master's lanes, counted as missed, and the follower's frames for the
+    /// same time on its lane (it kept delivering). The unfilled frames
+    /// count on the master's lanes, and the follower's audio queued for
+    /// that time is dropped and counted on its lane
+    /// ([`FollowerLane::skip_unfilled`]).
     #[inline(always)]
-    pub fn write_missed(&mut self, channels: usize, missed: Missed, sink: &LaneFrameSink) {
+    pub fn write_missed(&mut self, next: &SliceView<'_>, missed: Missed, sink: &LaneFrameSink) {
         let follower = self.follower.as_ref().map(|(_, index)| *index);
         let masters = (0..self.sources.len()).filter(move |lane| Some(*lane) != follower);
         if missed.fill > 0 {
             let silent = SliceView {
-                channels,
+                channels: next.channels,
                 frames: missed.fill,
                 samples: None,
             };
@@ -511,7 +546,7 @@ impl PacketRouter {
                 sink.ring(lane).record_unfilled(missed.unfilled);
             }
             if let Some((lane, index)) = &self.follower {
-                let skipped = lane.skip_unfilled();
+                let skipped = lane.skip_unfilled(next.frames);
                 if skipped > 0 {
                     sink.ring(*index).record_unfilled(skipped);
                 }
@@ -560,17 +595,15 @@ impl StreamBody {
         }
     }
 
-    /// What the thread missed before its next packet, whose packets carry
-    /// `channels` channels: [`PacketRouter::write_missed`] on the master,
+    /// What the thread missed before `next`, its next packet:
+    /// [`PacketRouter::write_missed`] on the master,
     /// [`FollowerLane::record_missed`] on the follower (see the module doc).
     /// Real-time safe.
     #[inline(always)]
-    pub fn write_missed(&mut self, channels: usize, missed: Missed) {
+    pub fn write_missed(&mut self, next: &SliceView<'_>, missed: Missed) {
         match self {
-            StreamBody::Master { router, sink } => router.write_missed(channels, missed, sink),
-            StreamBody::Follower { lane, .. } => {
-                lane.record_missed(missed.fill.saturating_add(missed.unfilled));
-            }
+            StreamBody::Master { router, sink } => router.write_missed(next, missed, sink),
+            StreamBody::Follower { lane, .. } => lane.record_missed(missed),
         }
     }
 }
