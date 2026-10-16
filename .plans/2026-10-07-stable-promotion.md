@@ -334,9 +334,16 @@ why and the alternative.
     Nicolai's Mac.
   - The Swift defects under "Store", "Adapters", "Handover", "LLM" and "Audio"
     and the CLI's `--title`, and the parity notes' other "before cutover" ports
-    to Swift, close with the handoff. If a bridge release ships (Release
-    mechanics), it carries them. The fixtures the Swift side owes ("Bridge") are
-    dropped at S9, when the Rust fixtures become the contract.
+    to Swift, close with the handoff. No Swift bridge release ships (Nicolai,
+    2026-10-15: "if it migrates seamlessly in mac, or at least i can make codex
+    fix it, we don't need a bridge. currently i'm the only user."): the Swift
+    app ships no further build and runs again only as a rollback
+    (`v0.10.0-rc.2`). The move from the Swift app to the Rust app on Nicolai's
+    Mac must be seamless: anything that could break it is fixed before the
+    handoff, or, where only his Mac can show it, is a step on his gate list.
+    The fixtures the
+    Swift side owes ("Bridge") are dropped at S9, when the Rust fixtures
+    become the contract.
 - **D10 A new crate, `steno-macos`, joins `AGENTS.md`'s `unsafe` list, and the
   list is brought in line with the code.** Confirmed.
   - Two packages call Mac frameworks that have no safe binding: the identity
@@ -434,7 +441,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P32 | Preferences, the panel anchor and the Codex sign-in: each is written atomically, and the Codex `auth.json` is synced | pipeline, store and export (`wp-pse-*`) |
 | P33 | Another phone's upload: the first announce's discard, and a re-announce whose hash differs, leave other devices' files alone; an old device's 409 hands over cleanly (with P2) | handover (#219, #212) |
 | P34 | Recordings on the phone: the mobile queue index rebuilds after a failed load, and recorder files left by the audio module are found again (#223) | handover (#223) |
-| P35 | Pairings: the identity-fingerprint guard gets a macOS test and its Swift mirror (#213 makes the pairing writes durable and the intake one transaction). The test is #282, over the secrets file standing in for the Keychain: a keychain that comes back empty (Create New Keychain after a password reset) or holding another identity, through the graph and Settings' iPhone section; the live Keychain check on a spare account is still to run. The Swift mirror is #284, with its own `swift-handover-identity.json`; until it lands the Swift app mints a new identity after a keychain reset | handover (#282, #284) |
+| P35 | Pairings: the identity-fingerprint guard gets a macOS test (#213 makes the pairing writes durable and the intake one transaction). The test is #282, over the secrets file standing in for the Keychain: a keychain that comes back empty (Create New Keychain after a password reset) or holding another identity, through the graph and Settings' iPhone section; the live Keychain check on a spare account is still to run. The Swift mirror is dropped: #284 closed unmerged, as no Swift build ships again (D9). Until the handoff, and after a rollback to `v0.10.0-rc.2`, the Swift app still mints a new identity after a keychain reset: a Swift-only path, which closes with the handoff (D3). The guard's rule is one pure decision (`steno_handover::identity::decision::decide`, Nicolai's decision of 2026-10-15), which the load, the Swift import's choice and the Secret Service move all ask; its truth table, `crates/steno-handover/tests/fixtures/identity-decisions.json`, is the statement of the rule (S6) | handover (#282, #294) |
 | P36 | Secrets and files on Windows: credentials persist on this computer (`CRED_PERSIST_LOCAL_MACHINE`, not with the roaming profile; the `keyring` crate's roaming credentials move there on their first read, keeping the stored blob, #262), and renames are durable (#242: the durable writes in `steno_pipeline::files` rename with `MOVEFILE_WRITE_THROUGH` or with std, then flush the renamed file and the folders; a failed flush answers the phone 500, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS, or on a network drive) | handover (#242, #262) |
 | P37 | A recording through a cancelled logout: a cancelled logout does not stop the recording; only where the app saves as soon as the logout is announced (Xfce on Wayland) and the session then goes on does it stop, and it says so and relaunches, ready to record. Xfce's Quit Program saves before xfce4-session's kill, and its Save Session never stops the recording (#220) | Linux desktop (#220) |
 | P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks write one `crash-<UTC>.log` file per panic in the support directory, with the message, the location and the backtrace; the newest 20 are kept | capture and recovery (`wp-cap-*`) |
@@ -504,8 +511,23 @@ after the port".
 - Pair this phone again, per phone. In the mixed case (some phones paired
   before the identity changed, the others after it) Settings could keep the
   newest identity and the phones that know it, and offer Pair this phone
-  again on the others alone. After stable; until then both apps wait, and
+  again on the others alone. After stable; until then the Rust app waits, and
   Pair again pairs every phone again.
+- The handover identity from evidence, not times (Nicolai's decision of
+  2026-10-15). After the handoff, its 14-day rollback window and the Swift
+  removal (S9), as no migration lands in the window:
+  - a v6 migration adds a nullable `pairedDevice.identityFingerprint`,
+    written in the pairing's own durable transaction. Rows from before stay
+    NULL, and a launch that serves the recorded identity fills them in with
+    the fingerprint it serves, so the pairing-time rule survives only for
+    the one-time Swift import. Rust only, with no `Migrations.swift` mirror
+    after S9;
+  - the import's done flag, `steno.swiftImport = "done"`, moves into
+    `handover-identity.json`, written in the same replace that records the
+    imported fingerprint. The keychain marker (`swift-import-done`) and
+    `steno.swiftImportRan` are still read for good, and still written while
+    a Rust build that reads only them could be installed again after a
+    rollback.
 - The speech settings without a Settings row, which
   `.plans/2026-10-07-speech-settings-ui.md` plans; the untested `steno-llm`
   cleanup paths.
@@ -783,11 +805,10 @@ Every package is written in parallel except where a dependency is named:
       what the old one stored, and that the user should choose Always Allow.
       Then it reads the API key through `keyring` (one prompt; the item stays as
       it is, shared with the Swift app, which still reads it after a rollback),
-      and exports the handover identity: the certificate by label (of
-      several, which there are one per keychain in the search list, as
-      after an old login keychain was added back: the one the Swift app's
-      own record names, `swift-handover-identity.json`, read only, else the
-      one the paired phones know, below), `SecIdentityCreateWithCertificate` through
+      and exports the handover identity: the certificate by label (when
+      there are several, one per keychain in the search list as after an
+      old login keychain was added back, the one the paired phones know,
+      below), `SecIdentityCreateWithCertificate` through
       `security-framework`,
       `SecItemExport` as PKCS#12 through `steno-macos` (one prompt), decoded by a
       PKCS#12 crate (for example `p12-keystore`, which reads Apple's legacy
@@ -843,38 +864,54 @@ Every package is written in parallel except where a dependency is named:
       locked keychain), `handover_listener` waits with Try again and never mints
       over it; it mints only where #221's guard allows (no identity, no recorded
       fingerprint and no paired phone), or when the user chooses Pair again.
-      - An identity found with nothing recorded (by the import, or by a
-        read after a lost record) is recorded only when every paired phone
-        knows it: each phone knows the newest identity whose certificate
-        starts (`notValidBefore`, a minute before its mint) at or before its
-        `pairedAt`, both from this computer's clock, and with no phone
-        paired the newest is recorded. A recorded fingerprint is never
-        judged by this rule. A Swift identity minted silently after a
-        keychain reset, which every phone predates, waits as replaced. The
-        other cases (some phones knowing another identity, a time more than
-        a second after now, two starts in one second, a time that cannot be
-        read) and their waiting reasons are tabled on
-        `HandoverIdentity::known_by_every_phone`.
+      - The rule is one pure decision
+        (`steno_handover::identity::decision::decide`), and its truth table,
+        `crates/steno-handover/tests/fixtures/identity-decisions.json`, is
+        the statement of it (Nicolai's decision of 2026-10-15): from what
+        the reads found (the identities, the record, the paired phones, the
+        clock) it serves, mints or waits, with idempotent writes in order.
+        The load (`HandoverIdentity::load_or_create`), the import's choice
+        and the Secret Service move ask it, and none keeps a rule of its
+        own. In short: an identity found with nothing recorded is recorded
+        only when every paired phone knows it (each phone knows the newest
+        identity whose certificate starts (a minute before its mint) at or
+        before its `pairedAt`, both on this computer's clock); a recorded
+        fingerprint is never judged by it; two equal starts are no newest
+        one; over the times it can read, a time more than a second after now
+        waits for the clock (a time that cannot be read waits on its read
+        first). A Swift identity minted silently after a keychain reset,
+        which every phone predates, waits as replaced. Every case, and every
+        new one, is a row of the table.
+      - No decision destroys a stored identity: it writes no identity, the
+        import's choice writes nothing, and the Secret Service move writes at
+        most the record of the file's identity. Two writes outside it replace
+        a stored identity, by design: Pair again (the user's confirmed
+        choice, which removes every phone, and under the Secret Service also
+        drops the file's copy of the old identity), and the import's store
+        over a desktop-id build's identity, which logs the fingerprint
+        recorded for the old one and the imported one at warn.
       - The words. Where some phones know the identity and the others
-        another or none, the handover waits with "Phone handover is
-        unavailable: Some of your phones were paired before this Mac's
-        pairing changed and can't connect. To reconnect them, choose Pair
-        again in Settings > iPhone." The card in Settings > iPhone ends at
-        "choose Pair again." and offers Pair again first. The first sentence
-        is the Swift app's word for word; the second names the Rust app's
-        button, because the Swift app asks at launch instead. Where the
-        clock went back (`clockBehind`), Settings says to check the date
-        and time, then Try again; Try again leads, and Pair again stays the
-        second button.
-      - The import's choice (`swift_import::choose_certificate`). Of several
-        Swift certificates, the one the Swift app's record names comes over
-        without the rule; a record naming a certificate the keychain no
-        longer holds waits as replaced, with one certificate or several;
-        otherwise the rule decides, and the import never takes the first.
-        The guards never read each other's file. The Rust import reads the
-        Swift record read-only, only to choose the Swift certificate it
-        brings over, and never writes, moves or deletes it
-        (`fix/swift-certificate-choice`).
+        another or none, the import's step says "Some of your phones were
+        paired before this Mac's pairing changed and can't connect. To
+        reconnect them, choose Pair again in Settings > iPhone." The card in
+        Settings > iPhone ends at "choose Pair again." and offers Pair again
+        first. Two lines stop after "can't connect.": the one under the card
+        after a Try again that still waits, and the listener's "Phone
+        handover is unavailable: ..." line. Where the clock went back
+        (`clockBehind`), Settings says to check the date and time, then Try
+        again; Try again leads, and Pair again stays the second button.
+      - The import's choice (`swift_import::choose_certificate`) asks the
+        decision over every Swift certificate it found: of several, the
+        rule decides, where none qualifies the import waits, and it never
+        takes the first. It reads no Swift record:
+        `swift-handover-identity.json` was #284's, which closed unmerged, so
+        no Swift build writes it (Nicolai's decision of 2026-10-15).
+      - The Secret Service move (Linux, `pin_file_identity`) asks it too. It
+        pins the file's identity where nothing is recorded, unless every
+        paired phone was paired before that identity started; then it pins
+        nothing, and the load judges the service's identity by the same
+        rule. It never writes, replaces or removes either identity; both
+        stay until Pair again.
   - **Login item** (D4). On macOS, `autostart.rs` uses `SMAppService.mainApp`.
     At the first launch after the handoff the new app registers its own
     identifier explicitly when the stored `launch_at_login` setting (shared
@@ -882,8 +919,9 @@ Every package is written in parallel except where a dependency is named:
     left to macOS. If R3 shows that it stays as a second "Steno" in Login Items,
     the onboarding step and the release notes tell the user to remove it in
     System Settings > General > Login Items. If it launches a Swift copy, or
-    blocks the new app's registration, a Swift bridge release unregisters it
-    before installing (Release mechanics).
+    blocks the new app's registration, the same words tell the user to remove
+    it, since no Swift bridge release ships to unregister it (D9); R3 checks
+    that the step's words lead there.
   - **Tests.**
     - A fixture plist covers the launch half, a missing key and an existing
       `preferences.json`. A second run is a no-op; with the import pending, the
@@ -1815,12 +1853,11 @@ item. The Swift scripts the desktop workflow still calls stay in
 `apps/macos/scripts/` until S9, where `ReleaseScriptsTests` and
 `AppcastScriptsTests` keep testing them.
 
-If the rehearsal shows that a Swift build cannot take the handoff, or that the
-Swift Login Items entry must be unregistered by the Swift app itself (S6), a
-dedicated PR restores `release.yml` with a `swift-v*` trigger for a bridge
-release. It must ship before the handoff item exists, because the item must
-carry the highest `sparkle:version` on the appcast; Swift installs that skip it
-(offline, or on `v0.9.0-rc.1`'s feed) still take the handoff directly.
+No Swift bridge release ships (D9): `release.yml` is not restored. If the
+rehearsal shows that a Swift build cannot take the handoff, the fix is on the
+Rust side or in the handoff item, and it blocks the handoff; the Swift Login
+Items entry is the user's to remove, as the onboarding step and the release
+notes say (S6).
 
 ### Homebrew, AUR and Nix
 
@@ -2602,6 +2639,13 @@ first candidate, every migration until S9 is mirrored in `Migrations.swift`, and
 none merges in the window. The last Swift release and every Rust build from P2
 on open a newer database, so going back stays possible until the Swift app is
 removed.
+
+**Pair again in the Rust app, then a rollback.** A Pair again in the Rust app,
+phones paired over the new identity, then a rollback to `v0.10.0-rc.2` leaves
+those phones listed in the Swift app, which still serves the old identity they
+no longer know. Nothing is lost: the Rust app's identity, the one the phones
+pinned, stays in its keychain entry, and going forward again reconnects them.
+But rc.2 cannot tell, so it shows the phones as paired while they cannot send.
 
 **The Swift app's retention sweep** does not check an asset again before it
 removes its files, a race #228 closed in Rust only. It stays moot after a

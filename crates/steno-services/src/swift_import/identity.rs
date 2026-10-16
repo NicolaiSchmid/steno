@@ -73,6 +73,14 @@ pub fn decode_pkcs12(
 /// identity. A record that fails after the secret was written is
 /// [`ImportedIdentityError::Record`]: the import is not done then, as the
 /// guard refuses the identity until a store records its fingerprint.
+///
+/// Replacing a desktop-id build's identity is one of the two writes that
+/// destroy a stored identity by design (the other is Pair again), so the
+/// store says so at warn first, naming the fingerprint recorded for the
+/// identity it replaces and the imported one, never the identity itself.
+/// It reads the record, not the secret store, so it adds no keychain
+/// prompt; over the same fingerprint (a rerun) or nothing recorded it says
+/// nothing.
 pub async fn store_imported_identity(
     secrets: &dyn SecretStore,
     record: &dyn FingerprintRecord,
@@ -80,6 +88,16 @@ pub async fn store_imported_identity(
 ) -> Result<(), ImportedIdentityError> {
     let identity = HandoverIdentity::from_pem(bundle)
         .map_err(|error| ImportedIdentityError::Unusable(error.to_string()))?;
+    let imported = steno_handover::identity::hex(&identity.fingerprint());
+    if let Ok(Some(recorded)) = record.recorded()
+        && recorded != imported
+    {
+        tracing::warn!(
+            %recorded,
+            %imported,
+            "the Swift import replaces the handover identity recorded here (a desktop-id build's)"
+        );
+    }
     identity
         .store(secrets, record)
         .await

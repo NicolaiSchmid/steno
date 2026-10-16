@@ -594,21 +594,16 @@ fn host_handover(
 }
 
 /// The import's onboarding step, which chooses the Swift certificate by
-/// the Swift app's record in the support directory of `paths` and the
-/// phones paired in `store`, and reloads the pipeline whenever the key gate
-/// opens, so the passes get the key it read.
+/// the phones paired in `store`, and reloads the pipeline whenever the key
+/// gate opens, so the passes get the key it read.
 fn import_step(
     import: &GraphImport,
     pipeline: &Arc<CurrentPipeline>,
     store: &Arc<Store>,
-    paths: &StenoPaths,
     runtime: &tokio::runtime::Handle,
 ) -> Arc<ImportStep> {
     let pipeline = pipeline.clone();
     let choice = crate::swift_import::CertificateChoice {
-        swift_record: crate::swift_import::SwiftRecord::in_support_directory(
-            &paths.support_directory,
-        ),
         store: store.clone(),
         now: chrono::Utc::now,
     };
@@ -689,7 +684,7 @@ pub fn build_with_import(
     ));
     let pending = import(preferences.clone());
     let store = open_store(&database_path)?;
-    let (platform, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
+    let (platform, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths, &store);
     let (import, graph_secrets) =
         gated_secrets(pending, &preferences, platform, &paths, !options.keyring);
     let secrets = graph_secrets.secrets.clone();
@@ -783,7 +778,7 @@ pub fn build_with_import(
     );
     let step = import
         .as_ref()
-        .map(|import| import_step(import, &pipeline, &store, &paths, &runtime));
+        .map(|import| import_step(import, &pipeline, &store, &runtime));
     let gated_handover = import
         .as_ref()
         .zip(step.as_ref())

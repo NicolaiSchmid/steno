@@ -697,6 +697,23 @@ async fn a_pair_again_stopped_after_the_write_is_finished_by_the_next_load() {
             assert_eq!(next, Some(hex(&new.fingerprint())), "{case}: the note");
             assert_eq!(listed.len(), usize::from(!refuse_record), "{case}");
 
+            if stop == "after the write" {
+                // The load finishing it removes the phones before it
+                // records: a removal refused there leaves the old record
+                // and the note, so the next load finishes it again rather
+                // than serving the new identity beside a phone that knew
+                // the old one.
+                places.keep_the_last_phone();
+                let error = places.load("x").await.unwrap_err();
+                assert!(matches!(error, IdentityError::Store(_)), "{case}: {error}");
+                assert_eq!(
+                    places.places(),
+                    (stored.clone(), old.clone(), next.clone(), listed.clone()),
+                    "{case}: the phones go before the record"
+                );
+                places.let_the_last_phone_go();
+            }
+
             let loaded = places.load("x").await.unwrap();
             assert_eq!(loaded.fingerprint(), new.fingerprint(), "{case}");
             assert_eq!(
@@ -971,8 +988,8 @@ async fn an_unrecorded_identity_whose_times_cannot_be_read_is_not_recorded() {
 
 /// A recorded identity is adopted without the pairing-time rule, even when
 /// every phone (or some) predates its start or a time is after now, as the
-/// Swift import may record one the Swift app's record named: it loads,
-/// writes nothing and keeps the phones.
+/// Swift import records what it brings over: it loads, writes nothing and
+/// keeps the phones.
 #[tokio::test]
 async fn a_recorded_identity_the_phones_predate_loads_without_the_rule() {
     for (phones, now) in [
