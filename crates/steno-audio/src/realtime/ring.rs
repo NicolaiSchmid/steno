@@ -290,9 +290,10 @@ impl LaneRingBuffer {
     }
 
     /// Empties the ring, zeroes its storage so a restart never replays
-    /// stale frames, and zeroes its counts. Only while no producer and no consumer runs; the
-    /// `&mut` borrow is not required because the session holds the ring in
-    /// an `Arc`, so the contract is documented rather than typed.
+    /// stale frames, and zeroes its counts. Only while no producer and no
+    /// consumer runs; the `&mut` borrow is not required because the session
+    /// holds the ring in an `Arc`, so the contract is documented rather
+    /// than typed.
     pub fn clear(&self) {
         for cell in &self.storage {
             // SAFETY: by contract nobody else touches the storage now.

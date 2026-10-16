@@ -1159,13 +1159,7 @@ fn probing_a_chosen_source_costs_the_recording_nothing() {
     );
 }
 
-/// A call recording of about `length` whose whole process a child shell
-/// stops (`SIGSTOP`) for each of `stops` seconds and resumes (`SIGCONT`),
-/// the first one second in and one second apart: the stable plan's gate
-/// procedure for A18 (`.plans/2026-10-07-stable-promotion.md`), which no
-/// load does as surely. The test thread is stopped with the rest, so the
-/// recording's stop comes once it wakes at `length` or after the last
-/// stop, whichever is later.
+/// What [`stopped_run`] recorded.
 struct StoppedRun {
     statistics: steno_audio::capture::CaptureStatistics,
     /// The wall time from the end of the start to the stop, and from
@@ -1176,6 +1170,14 @@ struct StoppedRun {
     lanes: Vec<usize>,
 }
 
+/// A call recording of about `length` whose whole process a child shell
+/// stops (`SIGSTOP`) for each of `stops` seconds and resumes (`SIGCONT`),
+/// the first one second in and one second apart: the stable plan's gate
+/// procedure for A18 (`.plans/2026-10-07-stable-promotion.md`), which no
+/// load does as surely. The test thread is stopped with the rest, so the
+/// recording's stop comes once it wakes at `length` or after the last
+/// stop, whichever is later. Both lanes hold the same length and nothing
+/// is dropped.
 fn stopped_run(stops: &[f64], length: Duration) -> StoppedRun {
     show_logs();
     let directory = tempfile::tempdir().expect("tempdir");

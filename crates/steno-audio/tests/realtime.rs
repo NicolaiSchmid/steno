@@ -5,13 +5,13 @@
 //! capture threads' two stream bodies (`FollowerLane` and
 //! `PacketRouter`), the fill of audio a capture thread missed (`CycleClock`
 //! and `write_missed`, A18 of `.plans/2026-10-07-stable-promotion.md`), the
-//! macOS IOProc's first-callback mark, the
-//! processing loop with the real Speex canceller, its far-end delay line,
-//! metering, the raw-mic copy and the relay hand-off run one second of
-//! audio on the test's thread under the counting allocator and allocate
-//! nothing, as does the macOS call capture's silent output IOProc body
-//! (`silence_output`). `tests/pipewire.rs` counts
-//! the real data-loop thread against a PipeWire daemon on Linux.
+//! macOS IOProc's first-callback mark, the processing loop with the real
+//! Speex canceller, its far-end delay line, metering, the raw-mic copy and
+//! the relay hand-off run one second of audio on the test's thread under
+//! the counting allocator and allocate nothing, as does the macOS call
+//! capture's silent output IOProc body (`silence_output`).
+//! `tests/pipewire.rs` counts the real data-loop thread against a PipeWire
+//! daemon on Linux.
 //! Swift: `Tests/StenoAudioTests/RealTimeAllocationTests.swift` (Darwin's
 //! `malloc_logger` hook); here the crate's own `#[global_allocator]`, so it
 //! runs on every OS. Plan invariant 5.

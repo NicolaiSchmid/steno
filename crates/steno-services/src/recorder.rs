@@ -3447,10 +3447,11 @@ mod tests {
     }
 
     /// Cycles the capture's thread missed (A18 of
-    /// `.plans/2026-10-07-stable-promotion.md`), which the session writes as silence, count in the note after
-    /// the stop as the rebuilds' gaps do: the synthetic producer misses
-    /// 0.75 s twice, 1.5 s that the master holds as zeros and the wall time
-    /// does not show, and the note says about 2 seconds are missing.
+    /// `.plans/2026-10-07-stable-promotion.md`), which the session writes
+    /// as silence, count in the note after the stop as the rebuilds' gaps
+    /// do: the synthetic producer misses 0.75 s twice, 1.5 s that the
+    /// master holds as zeros and the wall time does not show, and the note
+    /// says about 2 seconds are missing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn missed_cycles_count_in_the_note_after_the_stop() {
         let capture: MakeCaptureSession = Arc::new(|configuration: CaptureConfiguration| {
