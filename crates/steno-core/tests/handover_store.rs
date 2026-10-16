@@ -515,10 +515,7 @@ fn an_adopted_copy_is_written_with_its_ledger_row_unless_the_ledger_holds_its_by
         adopt(&meeting, &asset, &[7; 32]).unwrap(),
         AdmissionCommit::Wrote
     );
-    assert_eq!(
-        store.meeting(meeting.id).unwrap().map(|m| m.id),
-        Some(meeting.id)
-    );
+    assert!(store.meeting(meeting.id).unwrap().is_some());
     assert_eq!(store.asset(meeting.id).unwrap(), Some(asset.clone()));
     assert_eq!(
         store

@@ -271,7 +271,9 @@ impl Store {
             save_receipt(transaction, receipt)?;
             save_admission_row(
                 transaction,
-                (receipt.recording_id, receipt.byte_count, &receipt.sha256),
+                receipt.recording_id,
+                receipt.byte_count,
+                &receipt.sha256,
                 meeting.id,
                 receipt.updated_at,
             )?;
@@ -320,7 +322,9 @@ impl Store {
             assets::save(transaction, asset)?;
             save_admission_row(
                 transaction,
-                (recording_id, byte_count, sha256),
+                recording_id,
+                byte_count,
+                sha256,
                 meeting.id,
                 meeting.created_at,
             )?;
@@ -382,7 +386,9 @@ const BACKFILL_ADMISSIONS: &str = "INSERT OR IGNORE INTO \"handoverAdmission\" \
 /// meeting that still exists stays; one whose meeting is gone moves.
 fn save_admission_row(
     connection: &Connection,
-    (recording_id, byte_count, sha256): (Uuid, i64, &[u8]),
+    recording_id: Uuid,
+    byte_count: i64,
+    sha256: &[u8],
     meeting_id: Uuid,
     at: DateTime<Utc>,
 ) -> Result<()> {
