@@ -1329,7 +1329,10 @@ impl ProcessingPipeline {
 
     /// Sets the pipeline's [`QuitLatch`] for the app's exit, which quits
     /// every pipeline sharing it; `enqueue` still saves the meeting
-    /// `queued` with its asset.
+    /// `queued` with its asset. Then removes the reading marks the exit
+    /// leaves ([`ReadingMarks::exiting`]), which syncs the disk: an async
+    /// caller runs it with `spawn_blocking(..).await`, so the exit waits
+    /// for the removals off the workers.
     pub fn quit(&self) {
         self.inner.dependencies.quit_latch.set();
         // The exit, not a recording, ends the reads still running.
@@ -2311,7 +2314,8 @@ impl ProcessingPipeline {
                     Box::pin(self.process_until_persist(&asset, meeting)),
                 )
                 .await;
-                if !self.quitting() {
+                // Ok: every stage ran, so every read returned, quit or not.
+                if until_persist.is_ok() || !self.quitting() {
                     self.read_through(meeting_id).await;
                 }
                 let persisted = match until_persist {

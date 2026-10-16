@@ -631,10 +631,11 @@ fn on_exit_signal(
 /// the session manager's end saves first (`session_end`), and on every
 /// desktop the display closing does (`display_lost`). On macOS a logout
 /// goes through `RunEvent::Exit` instead.
-/// Each signal quits the pipeline here, off the main thread, before it asks
-/// for the exit (`Host::quit_pipeline`), so a job a busy main thread would
-/// let fail first stays resumable. A second SIGTERM or a second SIGINT
-/// ends the process at once, unsaved (`forced_exit`), so a run loop that no
+/// Each signal quits the pipeline here, on the blocking pool, off the main
+/// thread and the async workers (the quit syncs the disk), and waits for
+/// it before it asks for the exit (`Host::quit_pipeline`), so a job a busy
+/// main thread would let fail first stays resumable. A second SIGTERM or a
+/// second SIGINT ends the process at once, unsaved (`forced_exit`), so a run loop that no
 /// longer answers still ends with a plain `kill` or Ctrl-C twice; a SIGHUP
 /// never does, so the one that follows a session scope's SIGTERM still
 /// saves. A signal the app inherited ignored stays ignored (`ignored`).
@@ -664,12 +665,25 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
                 }
             };
             while arrivals.recv().await.is_some() {
-                let forced = on_exit_signal(
-                    signal,
-                    &seen,
-                    || host::host(&app).quit_pipeline(),
-                    || actions::quit(&app),
-                );
+                // On the blocking pool, and waited for: the pipeline's quit
+                // removes its reading marks, which syncs the disk.
+                let (app, seen) = (app.clone(), seen.clone());
+                let forced = tokio::task::spawn_blocking(move || {
+                    on_exit_signal(
+                        signal,
+                        &seen,
+                        || host::host(&app).quit_pipeline(),
+                        || actions::quit(&app),
+                    )
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(
+                        signal = signal.name,
+                        "the exit signal's quit did not finish"
+                    );
+                    None
+                });
                 if let Some(code) = forced {
                     steno_services::flush_logs();
                     std::process::exit(code);

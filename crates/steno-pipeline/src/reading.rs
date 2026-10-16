@@ -26,7 +26,9 @@
 //!   diarizer run in a child, whose abort ends only the child.
 //! - **An orderly exit** ([`ReadingMarks::exiting`], from
 //!   [`ProcessingPipeline::quit`]) removes the marks of the reads still
-//!   running and writes no more: the exit ended them, not the file.
+//!   running, and those of a meeting Process again released, and writes no
+//!   more: the exit ended them, not the file. A run that finishes after
+//!   the quit began still reads through.
 //! - **The launch check** ([`ReadingMarks::at_launch`]): every mark left
 //!   in the folder is a read that ended with the app (the database lock
 //!   keeps a second process out). A force quit, a power loss or a restart
@@ -46,7 +48,8 @@
 //!   A mark whose meeting has no row yet (an orphan the launch was
 //!   adopting) counts the same for the adoption, which adopts a
 //!   quarantined recording failed and unread; one whose meeting and file
-//!   are both gone is removed.
+//!   are both gone is removed. So is one beside a meeting that is ready, or
+//!   failed for another reason: only a run that returned writes those.
 //! - **Never touched again automatically.** A quarantined meeting's
 //!   marks stay on disk: they are the quarantine. The launch resume, the
 //!   resumes after a model install or a busy store, and the adoption skip
@@ -54,14 +57,21 @@
 //! - **Process again** (the app's, and `steno process --meeting` or
 //!   `steno reprocess`) releases the meeting ([`ReadingMarks::release`])
 //!   and tries once more, as a second attempt: a crash in it quarantines
-//!   the meeting again.
+//!   the meeting again, a quit does not.
 //!
 //! The cost of a false alarm: two unclean ends in a row while the same
 //! recording is read fail that one meeting with Process again offered, and
-//! nothing is lost. So does a `CoreML` abort in another meeting's
-//! transcription while this one waits for its turn at the engine
-//! (`OneCallAtATime` in `steno-services`, which the pipeline cannot see):
-//! the Transcribe mark spans the wait.
+//! nothing is lost. Two more cases count a crash against a recording that
+//! did not cause it:
+//! - a `CoreML` abort in another meeting's transcription while this one
+//!   waits for its turn at the engine (`OneCallAtATime` in
+//!   `steno-services`, which the pipeline cannot see): the Transcribe mark
+//!   spans the wait;
+//! - a crash in a resumed meeting's read while the launch reads an
+//!   orphan's length beside it: the adoption runs last, on a blocking
+//!   task, so a folder that is slow to answer delays no resume
+//!   (`reconcile_at_launch` in `steno-services`). Twice in a row, and the
+//!   orphan is listed failed and unread, its file kept.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -152,6 +162,9 @@ struct Retry {
     files: Vec<PathBuf>,
     /// Whether a read of the second attempt began.
     read: bool,
+    /// Released by Process again: an orderly exit removes the marks too,
+    /// so a quit before the run reads through does not quarantine it again.
+    released: bool,
 }
 
 #[derive(Debug, Default)]
@@ -209,6 +222,14 @@ impl ReadingMarks {
             let asset_id = left.iter().find_map(|mark| mark.asset_id);
             let started = left.iter().map(|mark| mark.started_at).min();
             match store.meeting(meeting_id) {
+                // A run that returned wrote this state: no read of it
+                // ended with the app, whatever an exit left on disk.
+                Ok(Some(meeting)) if finished(&meeting.state) => {
+                    for file in files {
+                        let _ = remove_durably_with(&*syncs, &file);
+                    }
+                    continue;
+                }
                 Ok(Some(meeting)) if second => {
                     tracing::warn!(%meeting_id, ?asset_id, ?stages, ?started, "Steno stopped twice while reading this recording; it is kept and not read again until Process again");
                     quarantine(store, &meeting, now);
@@ -224,9 +245,13 @@ impl ReadingMarks {
                 }
                 Ok(_) => {
                     tracing::warn!(%meeting_id, ?asset_id, ?stages, ?started, "Steno stopped while reading this recording; it is read once more");
-                    found
-                        .retrying
-                        .insert(meeting_id, Retry { files, read: false });
+                    found.retrying.insert(
+                        meeting_id,
+                        Retry {
+                            files,
+                            ..Retry::default()
+                        },
+                    );
                     continue;
                 }
                 Err(error) => {
@@ -249,14 +274,20 @@ impl ReadingMarks {
     /// Process again: `meeting_id` is no longer held, and its next run
     /// reads the recording once more, as a second attempt. Its marks stay
     /// on disk until that run reads through, so a crash before it reads
-    /// quarantines it again. Writes nothing: callers need not leave the
-    /// async workers.
+    /// quarantines it again; an orderly exit removes them
+    /// ([`exiting`](Self::exiting)). Writes nothing: callers need not leave
+    /// the async workers.
     pub fn release(&self, meeting_id: Uuid) {
         let mut found = self.found();
         if let Some(files) = found.held.remove(&meeting_id) {
-            found
-                .retrying
-                .insert(meeting_id, Retry { files, read: false });
+            found.retrying.insert(
+                meeting_id,
+                Retry {
+                    files,
+                    read: false,
+                    released: true,
+                },
+            );
         }
     }
 
@@ -352,11 +383,21 @@ impl ReadingMarks {
         value
     }
 
-    /// The orderly exit: the marks of the reads still running go, and no
-    /// read is marked any more.
+    /// The orderly exit: the marks of the reads still running go, and so
+    /// do those of a meeting Process again released, and no read is marked
+    /// any more. Syncs the disk: the async callers run it on the blocking
+    /// pool and wait for it.
     pub fn exiting(&self) {
+        let released: Vec<PathBuf> = self
+            .found()
+            .retrying
+            .values_mut()
+            .filter(|retry| retry.released)
+            .flat_map(|retry| std::mem::take(&mut retry.files))
+            .collect();
         let mut open = self.open();
         open.exiting = true;
+        open.files.extend(released);
         let syncs = &*self.syncs;
         open.files.retain(|file| {
             remove_durably_with(syncs, file)
@@ -431,6 +472,17 @@ fn read_folder(folder: &Path) -> Vec<(PathBuf, Mark)> {
         .collect()
 }
 
+/// Whether `state` is one only a run that returned writes: `ready`, or
+/// `failed` for any reason but [`READ_STOPPED`]. A run's meeting is
+/// `queued` or `processing` before its first read, both written first.
+fn finished(state: &MeetingState) -> bool {
+    match state {
+        MeetingState::Ready => true,
+        MeetingState::Failed { reason } => reason != READ_STOPPED,
+        _ => false,
+    }
+}
+
 /// Fails `meeting` with [`READ_STOPPED`] unless it already says so, and
 /// takes its asset's retention stamp, so no sweep removes the file.
 fn quarantine(store: &Store, meeting: &steno_core::Meeting, now: DateTime<Utc>) {
@@ -462,12 +514,13 @@ mod tests {
 
     use super::*;
 
-    /// A store with one ready meeting whose asset carries a retention
-    /// stamp, its master written under `dir`.
+    /// A store with one meeting in processing, as while its recording is
+    /// read, whose asset carries a retention stamp, its master written
+    /// under `dir`.
     fn store_with_meeting(dir: &Path) -> (Store, steno_core::Meeting, AudioAsset) {
         let store = Store::open(dir.join("steno.sqlite")).unwrap();
         let mut meeting = steno_core::testing::sample_data::meeting();
-        meeting.state = MeetingState::Ready;
+        meeting.state = MeetingState::Processing;
         let master = dir.join("recording.m4a");
         std::fs::write(&master, b"audio").unwrap();
         let asset = AudioAsset {
@@ -534,7 +587,7 @@ mod tests {
         assert!(!once.holds(meeting.id), "a first crash costs nothing");
         assert_eq!(
             store.meeting(meeting.id).unwrap().unwrap().state,
-            MeetingState::Ready
+            MeetingState::Processing
         );
         assert_eq!(on_disk(dir.path()), 1, "kept until a run reads through");
         killed_in_a_read(&once, meeting.id, &master);
@@ -630,6 +683,62 @@ mod tests {
         assert!(!launched.holds(meeting.id));
         drop(launched.reading(meeting.id, None, &master, ReadStage::Decode));
         assert_eq!(on_disk(dir.path()), 0);
+    }
+
+    /// A released meeting's marks go with an orderly exit, as an open
+    /// read's do, and the exit forgets every mark it removed: Process
+    /// again, then a quit before the run reads, holds nothing at the next
+    /// launch.
+    #[test]
+    fn the_exit_removes_a_released_meetings_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, meeting, _) = store_with_meeting(dir.path());
+        let master = dir.path().join("recording.m4a");
+        killed_in_a_read(&launch(dir.path(), &store), meeting.id, &master);
+        killed_in_a_read(&launch(dir.path(), &store), meeting.id, &master);
+        let marks = launch(dir.path(), &store);
+        assert!(marks.holds(meeting.id));
+        marks.release(meeting.id);
+        let running = marks.reading(meeting.id, None, &master, ReadStage::Decode);
+        assert_eq!(on_disk(dir.path()), 3);
+        marks.exiting();
+        assert_eq!(on_disk(dir.path()), 0);
+        assert!(marks.open().files.is_empty(), "nothing left to remove");
+        drop(running);
+        assert!(!launch(dir.path(), &store).holds(meeting.id));
+    }
+
+    /// Marks left beside a meeting that a run finished, ready or failed for
+    /// another reason, are no crash: the launch removes them and leaves the
+    /// meeting as it is. A meeting failed for a read that ended with the
+    /// app stays held.
+    #[test]
+    fn marks_beside_a_finished_meeting_are_removed() {
+        let failed = |reason: &str| MeetingState::Failed {
+            reason: reason.to_owned(),
+        };
+        for state in [
+            MeetingState::Ready,
+            failed("decode: the file is damaged"),
+            failed(READ_STOPPED),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (store, meeting, _) = store_with_meeting(dir.path());
+            let master = dir.path().join("recording.m4a");
+            killed_in_a_read(&launch(dir.path(), &store), meeting.id, &master);
+            killed_in_a_read(&launch(dir.path(), &store), meeting.id, &master);
+            store
+                .set_state(meeting.id, state.clone(), Utc::now())
+                .unwrap();
+            let held = state == failed(READ_STOPPED);
+            assert_eq!(
+                launch(dir.path(), &store).holds(meeting.id),
+                held,
+                "{state:?}"
+            );
+            assert_eq!(store.meeting(meeting.id).unwrap().unwrap().state, state);
+            assert_eq!(on_disk(dir.path()), if held { 2 } else { 0 }, "{state:?}");
+        }
     }
 
     /// The syncs of the tests below: the disk's, with the folder's sync
