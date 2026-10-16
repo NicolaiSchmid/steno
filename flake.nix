@@ -54,22 +54,21 @@
       '';
 
       # The in-app updater stays in the bundle (changing the bundle would
-      # invalidate the signature) but cannot replace an app inside the
-      # read-only Nix store. The note tells a Nix user how to turn the daily
-      # check off; bumping `release` above and rebuilding is the update path.
+      # invalidate the signature), but the app sees that it runs from a
+      # folder Nix fills (the store, or the copy nix-darwin or home-manager
+      # makes) and never offers an update. The note tells a Nix user how
+      # updates arrive: moving `release` above, or the flake input, and
+      # rebuilding.
       postInstall = ''
         mkdir -p $out/share/doc/steno
         cat > $out/share/doc/steno/UPDATES.md <<EOF
         # Updating a Nix-installed Steno
 
-        This Steno.app runs from the read-only Nix store, so its updater
-        can download a new version but cannot install it. Update by bumping
+        This Steno.app comes from the Nix store, and Nix delivers its
+        updates. Steno never offers one itself: Settings, under General,
+        says "Updates come from your package manager." Update it by bumping
         \`release.version\` and \`release.hash\` in flake.nix (or by
         updating the flake input that pins this repository) and rebuilding.
-
-        To stop the daily check from offering updates it cannot apply, turn
-        off "Check for updates automatically" in Steno's Settings, under
-        General.
 
         Homebrew users (\`brew install nicolaischmid/tap/steno\`) keep the
         in-app updater.
