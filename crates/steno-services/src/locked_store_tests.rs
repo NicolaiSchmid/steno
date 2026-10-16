@@ -97,9 +97,9 @@ fn levels_flow(sink: &crate::testing::TimedSink, since: Instant) {
 }
 
 /// P40 check 1: while a pipeline write waits, and while a settings save
-/// waits with the view-model lock held, each level update's
-/// `recorder_changed` returns live, and a `recording` snapshot reaches the
-/// sink within [`LIVE`] of it, for the whole hold.
+/// waits with the view-model lock held, the level updates keep reaching
+/// the hook all through the hold, each `recorder_changed` returns live,
+/// and a `recording` snapshot reaches the sink within [`LIVE`] of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn levels_keep_flowing_while_another_process_holds_the_write_lock() {
     let capture = synthetic_recorder();
@@ -133,6 +133,23 @@ fn levels_flow_while(waiting: Waiting, capture: &SyntheticRecorder, hosted: &Hos
         calls.len() >= 3,
         "{waiting:?}: the levels kept calling the hook: {} calls",
         calls.len()
+    );
+    // A hook stuck from before the hold began would leave the calls a
+    // gap instead: one begins within `LIVE` of the last all through it.
+    let mut last = since;
+    for call in &calls {
+        let gap = call.began.duration_since(last);
+        assert!(
+            gap < LIVE,
+            "{waiting:?}: no level update reached the hook for {gap:?}, {:?} into the hold",
+            last.duration_since(since)
+        );
+        last = call.began;
+    }
+    let tail = released.saturating_duration_since(last);
+    assert!(
+        tail < 2 * LIVE,
+        "{waiting:?}: the hook's calls stopped {tail:?} before the lock went"
     );
     for call in &calls {
         assert!(

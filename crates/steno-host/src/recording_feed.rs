@@ -461,8 +461,9 @@ mod tests {
         assert_eq!(sent.wait(&warned, false, ms(52)), None);
         assert_eq!(sent.wait(&at(0.4), true, ms(53)), None);
 
-        // Through the feed: a level update right after a send is held,
-        // and still goes out once the interval ends.
+        // Through the feed: a level update 30 ms after a send is held, and
+        // goes out once the interval since that send ends. Had the hold
+        // stamped the interval, each wake would hold it again.
         let (host, fakes, sink) = host();
         host.page_ready().unwrap();
         sink.nth_recording(1, PATIENCE)
@@ -470,11 +471,17 @@ mod tests {
         thread::sleep(2 * RECORDING_INTERVAL);
         recording_with(&fakes, 0.1);
         host.recorder_changed();
-        sink.nth_recording(2, PATIENCE).expect("the first level");
+        let (first, _) = sink.nth_recording(2, PATIENCE).expect("the first level");
+        thread::sleep(RECORDING_INTERVAL * 3 / 5);
         recording_with(&fakes, 0.2);
         host.recorder_changed();
-        let (_, level) = sink.nth_recording(3, PATIENCE).expect("the held level");
+        let (held, level) = sink.nth_recording(3, PATIENCE).expect("the held level");
         assert_eq!(level["level"]["mic"], 0.2);
+        let after = held.duration_since(first);
+        assert!(
+            after < RECORDING_INTERVAL + LIVE,
+            "the held level went out {after:?} after the send before it"
+        );
     }
 
     /// P40 check 18: a command that reaches the host before `page.ready`
