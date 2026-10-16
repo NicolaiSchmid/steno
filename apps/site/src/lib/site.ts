@@ -23,6 +23,16 @@ export const platformIds = ["mac", "win", "linux"] as const;
 
 export type Platform = (typeof platformIds)[number];
 
+/**
+ * Each desktop, and each Linux target, is listed once its gate in
+ * `.plans/2026-10-07-stable-promotion.md` has passed on a real machine (D6,
+ * "The Linux gates"). Flipping its flag is the whole change here; the desktop
+ * badge in the root README changes in the same commit. A Rollback that takes
+ * a bad release out of "latest" sets the flag back to false.
+ */
+const macReleased = true;
+const windowsReleased = false;
+
 interface LinuxTarget {
 	name: string;
 	/** How it is installed, for the note: "GNOME (.deb · AppImage)". */
@@ -33,13 +43,7 @@ interface LinuxTarget {
 	shell?: false;
 }
 
-/**
- * The Linux targets, each listed once its gate has passed on a real machine
- * (`.plans/2026-10-07-stable-promotion.md`, D6 and "The Linux gates").
- * Flipping its `released` is the whole change here; the desktop badge in the
- * root README changes in the same commit. Linux counts as released once one
- * target is.
- */
+/** Linux counts as released once one target is. */
 const linuxTargets: LinuxTarget[] = [
 	{
 		name: "GNOME",
@@ -63,14 +67,6 @@ const linuxTargets: LinuxTarget[] = [
 ];
 
 export const listedLinuxTargets = linuxTargets.filter((t) => t.released);
-
-/**
- * macOS and Windows, each listed once its gate passes: flipping one is the
- * whole change here, plus the desktop badge in the root README. A Rollback
- * that takes a bad release out of "latest" sets the flag back to false.
- */
-const macReleased = true;
-const windowsReleased = false;
 
 function desktop(name: string, released: boolean, note: string) {
 	return { name, released, note: released ? note : "Not released yet" };
