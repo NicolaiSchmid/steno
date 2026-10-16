@@ -186,9 +186,8 @@ sudo apt install ./steno-desktop_<version>_amd64.deb
 Each `gpg --verify` must report "Good signature" from
 `048B 5279 50E4 F609 B90E  6349 5F88 10A6 E6D4 DB46`, and `sha256sum` must print OK for
 your build; the warning that the key is not certified by a trusted signature is expected.
-For the AppImage, run the same lines with its file name in the last `gpg --verify` and
-without `sudo apt install`, then `chmod +x steno-desktop_<version>_amd64.AppImage` and
-run it.
+For the AppImage, use its file name in the last `gpg --verify` and skip
+`sudo apt install`, then `chmod +x steno-desktop_<version>_amd64.AppImage` and run it.
 
 - The tray icon needs GNOME's AppIndicator extension: on by default on Ubuntu, and on
   Debian `sudo apt install gnome-shell-extension-appindicator`, then log out and in and

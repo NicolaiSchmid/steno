@@ -1631,7 +1631,7 @@ reads "Could not check for updates".
 
 When fresh downloads are bad too, take the release out of "latest" with
 `gh release edit v<version> --prerelease`, and out of the package
-channels: revert the flake bump here, the cask commit in
+channels: revert the flake bump in this repository, the cask commit in
 `NicolaiSchmid/homebrew-tap` and the AUR bump (Rollback step 3 in
 `.plans/2026-10-07-stable-promotion.md`). For a later stable release,
 `releases/latest` then falls back to the previous one, and the site stays
