@@ -536,11 +536,12 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   through its busy wait, up to 5 s, accepted for its few callers (Risks,
   and the `Store` doc). One that waits for the writer holds no reader
   (`a_checkpoint_waiting_for_the_writer_holds_no_reader`).
-- **"Live" is 1 s** (`steno_services::testing::LIVE`), not 200 ms: five
-  times under the busy timeout every regression waits out, and loose
-  enough for a machine at a load of 40 to 70 under `nice 19`, where 200 ms
-  flaked. Checks 2 and 4 add a coarse bound from the user's side,
-  `END_TO_END` (2 s): check 4 from the stop to `Stopping` in the host,
+- **In the services' checks "live" is 1 s** (`steno_services::testing::LIVE`),
+  not 200 ms: a fifth of the busy timeout every regression waits out, and
+  loose enough for a machine at a load of 40 to 70 under `nice 19`, where
+  200 ms flaked. The store's reader tests (checks 10 and 15) keep 200 ms.
+  Checks 2 and 4 add a coarse bound from the user's side, `END_TO_END`
+  (2 s): check 4 from the stop to `Stopping` in the host,
   check 2 from the device change's first notice to the countdown armed
   again. Each fails with the stop sleeping 3 s before its notice, or the
   re-arm waiting on a store write. Check 4's narrow bound runs from the
@@ -602,16 +603,27 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   its reads to its enqueue in one poll. Through the facade it awaits, and
   hyper drops a request's future when the phone hangs up, which its 10 s
   timeout does under a long busy wait. So `RecordingIntake::admit` runs the
-  admission (the step, the commit and the enqueue) in a task of its own that
-  the request awaits but cannot cancel, and the handover's `Engine::admit`
+  admission (the store step, its commit included, then the enqueue) in a
+  task of its own that the request awaits but cannot cancel, and the
+  handover's `Engine::admit`
   runs in one too, which holds the `completing` mark and ends the receipt in
   memory `complete` or `failed`. A phone that hangs up
   mid-admit leaves its meeting committed and enqueued once, and its retry
   is answered from that receipt with no upload again
-  (`tests/admission_under_a_held_lock.rs` in `steno-handover`).
+  (`tests/admission_under_a_held_lock.rs` in `steno-handover`); a retry
+  while the admission still waits gets the 409 that lists every chunk. An
+  admission in flight when the app stops (its phone hung up, or the
+  listener closed its connection by force) is not waited for: it still
+  finishes after the stop, or the exit cuts it as a crash would, between
+  the durable copy and the atomic commit.
 - **The `failed` receipt save is tried again** while the database is busy,
   up to `RecordingIntake::FAILED_SAVE_ATTEMPTS` (3) in all, as the local
   intake's commit is: the copy goes only once that save is on the disk.
+  Before each try the intake waits `FAILED_SAVE_BACK_OFF` (200 ms) with the
+  writer free, so a write of this process queued behind the commit or the
+  try before runs in between and waits at most one busy timeout behind
+  the admission, not three.
+- **The resumes are synchronous** and call the store directly.
 - **The two notifications log a panic.** `updates_changed` and
   `phones_changed` run on the blocking pool with nothing awaiting them, so
   a panic in either is logged at error, by name, without its message.
@@ -671,8 +683,9 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
 Each check that needs the lock holds another connection's write transaction
 (`WriteLockHold`, from #278) for 7 s. Each one runs on a runtime with one
 worker, so a wait on that worker shows as a missed deadline. "Live" means the
-observed thing happens within 200 ms during the hold. As built, "live" is 1 s,
-checks 2 and 4 add a 2 s bound from the user's side, and check 11 holds 2 s
+observed thing happens within 200 ms during the hold. As built, "live" is 1 s
+in the services' checks (200 ms in the store's checks 10 and 15), checks 2
+and 4 add a 2 s bound from the user's side, and check 11 holds 2 s
 (WP2a's and WP2b's as-built). Every check fails without its PR, on `main`,
 except the guards (checks 17, 18, 20 and 22), which pass on `main` and fail on
 a PR that breaks what they pin. The numbers are the plan's
@@ -685,7 +698,7 @@ as an outcome, and checks 19 to 23 are new.
 | 1 | Levels to the UI wait on the host lock | `levels_keep_flowing_while_another_process_holds_the_write_lock`: during a pipeline write's wait, and during a settings save's wait (the save stays under the view-model lock), each `recorder_changed` returns and its `recording` snapshot reaches the sink live | new `crates/steno-services/src/locked_store_tests.rs` | 2a, 2c |
 | 2 | Recorder status, the `recording` topic, device notices and the disk watch's warnings (the same hook) | `a_device_notice_reaches_the_host_while_a_write_waits`: the notices thread's hook returns live, and the auto-stop's resume is armed on time, for the same two waits | same file | 2a, 2c |
 | 3 | Auto-stop countdown | `an_auto_stop_under_a_held_lock_saves_once_the_lock_goes`: the countdown's stop shows `Stopping` live, and the meeting is `queued` within 1 s of the release | `crates/steno-services/src/auto_stop/tests.rs` | 2a |
-| 4 | Stop and save | `a_stop_under_a_held_lock_shows_stopping_at_once_and_saves_once_the_lock_goes` (`Stopping` within 100 ms, `queued` within 1 s of the release), and `a_stop_saves_while_every_runtime_worker_is_blocked`, which pins decision 4 | `crates/steno-services/src/recorder.rs` tests | 2a |
+| 4 | Stop and save | `a_stop_under_a_held_lock_shows_stopping_at_once_and_saves_once_the_lock_goes` (`Stopping` within `LIVE` of the stop's notice and within `END_TO_END` of the stop, `queued` within 1 s of the release), and `a_stop_saves_while_every_runtime_worker_is_blocked`, which pins decision 4 | `crates/steno-services/src/recorder.rs` tests | 2a |
 | 5 | UI Stop button and command workers | `a_held_host_call_leaves_the_command_workers_free`: while a gated fake's call is held, another command on the same one-worker runtime answers | `apps/desktop/src-tauri/src/bridge.rs` tests | 1 (passes) |
 | 6 | The UI's commands answer | `a_command_answers_while_a_write_waits`: `meetings.select` and a Settings read answer live during a pipeline write's wait. Narrowed: the case of another window's settings save moves to the host actor, since the save keeps the lock until then | `locked_store_tests.rs` | 2a |
 | 7 | Tray and menu Record, Stop and Launch at login on the main thread | `the_trays_record_returns_before_the_stop_ends`, `the_trays_launch_at_login_returns_before_the_host_answers` and `the_tray_reads_stopping_while_the_stop_still_runs` (gated fakes); in click order on the lane, `two_quick_tray_clicks_reach_the_host_in_click_order`, `a_record_clicked_during_a_held_stop_runs_after_it`, `a_second_launch_at_login_click_undoes_the_first`, `two_window_requests_reach_the_host_in_the_order_they_came` and `the_lane_runs_its_jobs_in_order_and_past_a_panic`; the Quit, `a_quit_waits_for_the_stop_clicked_before_it`, `a_quit_goes_ahead_once_its_patience_has_passed` (within 1.5 s of a 200 ms patience), `a_quit_refuses_starts_and_retitles_the_tray_at_once`, `a_record_queued_before_a_quit_is_refused_before_the_exit`, `the_record_rows_read_quitting_once_quit_was_chosen`, `quit_sets_the_quitting_rows_and_the_snapshots_after_it_keep_them` and `only_a_snapshot_that_moves_a_row_sets_the_rows`, and in the services `a_start_after_a_menu_quit_is_refused_with_a_message`, `a_stop_under_way_at_a_menu_quit_still_tries_its_commit_again` and `the_pages_record_during_a_menu_quit_is_refused_and_says_why`; a request owed to a page before a later one, `an_owed_request_goes_out_before_a_later_one`; off the caller's thread, `a_window_request_is_published_off_the_callers_thread` and `the_onboarding_close_reaches_the_host_off_the_closing_thread`; `a_host_call_on_the_marked_ui_thread_asserts`, and one fixture-host test per shell entry point that fails without its assert (`a_command_…`, `a_page_load_…`, `a_window_request_…`, `the_onboarding_close_on_the_ui_thread_asserts`); and the measured smoke `apps/desktop/scripts/locked-store-linux.sh` (about 25 s on atlas), in `rust-ci.yml`'s Linux job as "Desktop stop under a locked store" | `actions.rs`, `windows.rs`, `main.rs`, `tray.rs` and the shell's `host.rs` tests, `crates/steno-host/src/ui_thread.rs` (the assert), the script | 1 (passes) |
