@@ -2,13 +2,13 @@
 //! from the recording writer, a 16 kHz WAV master, and the sinc resampler
 //! on a 44.1 kHz tone; plus the phone path's containers on committed
 //! synthetic fixtures in `Tests/Fixtures/audio/` (ffmpeg encodes of half a
-//! second of a 440 Hz sine, `tone-440-44k1-500ms.{m4a,mp3}`; of the same
+//! second of a 440 Hz sine, `tone-440-44k1-500ms.m4a`; of the same
 //! sine after 0.2 s of silence, mono and with a second channel,
 //! `tone-440-44k1-onset-200ms.m4a` and `tone-440-1000-44k1-stereo-onset.m4a`;
 //! and two files from Apple's encoder in the phone recorder's layout,
 //! `tone-440-44k1-onset-200ms-apple.m4a` and
-//! `silence-44k1-avaudiorecorder.m4a`; there is no AAC or MP3 encoder in
-//! pure Rust to build them in setup).
+//! `silence-44k1-avaudiorecorder.m4a`; there is no AAC encoder in pure
+//! Rust to build them in setup).
 //! Swift: `Tests/StenoAudioTests/AVFoundationAudioCodecTests.swift`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
@@ -455,16 +455,17 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The phone path's containers: half a second of a 440 Hz sine at 0.5,
-/// mono 44.1 kHz, as AAC-LC and as MP3 (96 kbps, ffmpeg). Frequency,
-/// level and the exact-length rule hold through `decode_path`, and both
-/// start on the encoder's first sample: symphonia trims the MP3 priming
-/// (the LAME tag, with `enable_gapless`), the decoder the AAC priming the
-/// MP4 edit list declares (1 024 samples, which the lane used to start
-/// with). The onset fixture below pins the AAC cut to the sample.
+/// The phone path's container: half a second of a 440 Hz sine at 0.5,
+/// mono 44.1 kHz, as AAC-LC (ffmpeg). Frequency, level and the
+/// exact-length rule hold through `decode_path`, and it starts on the
+/// encoder's first sample: the decoder trims the AAC priming the MP4 edit
+/// list declares (1 024 samples, which the lane used to start with). The
+/// onset fixture below pins the AAC cut to the sample. The same sine as an
+/// MP3 is no kind of file Steno reads (`tests/codec_sizes.rs`).
 #[test]
-fn aac_and_mp3_fixtures_decode_from_their_first_sample() {
-    for name in ["tone-440-44k1-500ms.m4a", "tone-440-44k1-500ms.mp3"] {
+fn the_aac_fixture_decodes_from_its_first_sample() {
+    {
+        let name = "tone-440-44k1-500ms.m4a";
         let path = fixture(name);
         let source = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
         assert_eq!((source.sample_rate, source.channels), (44_100, 1), "{name}");

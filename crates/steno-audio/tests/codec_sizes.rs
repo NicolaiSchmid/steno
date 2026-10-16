@@ -1,10 +1,11 @@
 //! The sizes symphonia allocates from, checked before its demuxer opens a
 //! file (`codec::sizes`, A17 of `.plans/2026-10-07-stable-promotion.md`).
 //! Every case measured or crafted to abort the process on Linux is refused
-//! as an ordinary error; every fixture, and every healthy variant a writer
-//! makes that symphonia reads, still reads; and a fuzz pass that sets the
-//! size and count fields of the fixtures' boxes, chunks and tables to
-//! random and boundary values aborts nothing. On Linux the fuzz runs in a
+//! as an ordinary error, and a file that is no MP4, CAF or WAV from its
+//! first byte is refused before symphonia reads it; every fixture, and
+//! every healthy variant a writer makes that symphonia reads, still reads;
+//! and a fuzz pass that sets the size and count fields of the fixtures'
+//! boxes, chunks and tables to random and boundary values aborts nothing. On Linux the fuzz runs in a
 //! child of this binary whose address space is held to 8 GiB, a machine
 //! that cannot back the allocations the measurement found. Without the
 //! check, the first cases below abort this test binary.
@@ -397,6 +398,124 @@ fn one_packet_caf(frames: u32, entry: &[u8], open: bool) -> Vec<u8> {
     ])
 }
 
+/// A CAF of `format` whose `data` is left open (-1): its edit count, then
+/// `tail` where the audio would be, which symphonia reads on for chunks
+/// (`chunks.rs:203-205`).
+fn open_data_then(format: &str, tail: &[u8]) -> Vec<u8> {
+    let (description, cookie) = match format {
+        "s16le" => (desc(*b"lpcm", 2, 2, 1, 16), false),
+        "f32be" => (desc(*b"lpcm", 1, 4, 1, 32), false),
+        "f32le" => (desc(*b"lpcm", 3, 4, 1, 32), false),
+        _ => (desc(*b"aac ", 0, 0, 1024, 0), true),
+    };
+    let mut chunks = vec![(b"desc", description, None)];
+    if cookie {
+        chunks.push((b"kuki", vec![0x12, 0x08], None));
+    }
+    let audio = [&[0u8; 4][..], tail].concat();
+    chunks.push((b"data", audio, Some(-1)));
+    caf(&chunks)
+}
+
+/// A CAF chunk header and `body` as `tail` for [`open_data_then`].
+fn chunk_in_the_audio(kind: [u8; 4], declared: u64, body: &[u8]) -> Vec<u8> {
+    [&kind[..], &declared.to_be_bytes(), body].concat()
+}
+
+/// A WAV: `RIFF` (of `riff` bytes, else as many as follow), `WAVE`, then
+/// `(type, body, declared size)` chunks, each padded to an even byte.
+fn wav(riff: Option<u32>, chunks: &[(&[u8; 4], Vec<u8>, Option<u32>)]) -> Vec<u8> {
+    let mut body = b"WAVE".to_vec();
+    for (kind, chunk, declared) in chunks {
+        body.extend_from_slice(*kind);
+        let size = declared.unwrap_or(u32::try_from(chunk.len()).unwrap());
+        body.extend_from_slice(&size.to_le_bytes());
+        body.extend_from_slice(chunk);
+        if chunk.len() % 2 == 1 {
+            body.push(0);
+        }
+    }
+    let size = riff.unwrap_or(u32::try_from(body.len()).unwrap());
+    [b"RIFF".as_slice(), &size.to_le_bytes(), &body].concat()
+}
+
+/// A `fmt ` body: 16-bit PCM, mono, 16 kHz.
+fn pcm16_format() -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in [1u16, 1] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [16_000u32, 32_000] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [2u16, 16] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+/// A `LIST` `INFO` body with one value of each `(type, text)`.
+fn info(values: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    let mut out = b"INFO".to_vec();
+    for (kind, text) in values {
+        out.extend_from_slice(*kind);
+        out.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(text);
+        if text.len() % 2 == 1 {
+            out.push(0);
+        }
+    }
+    out
+}
+
+/// 0.1 s of a 16-bit ramp.
+fn ramp16() -> Vec<u8> {
+    (0..1_600u16)
+        .flat_map(|index| index.wrapping_mul(37).to_le_bytes())
+        .collect()
+}
+
+/// A `fmt ` body: 16-bit PCM, mono, 16 kHz, in the extensible format's
+/// 40 bytes.
+fn extensible_format() -> Vec<u8> {
+    let mut out = pcm16_format();
+    out[..2].copy_from_slice(&0xfffeu16.to_le_bytes());
+    out.extend_from_slice(&22u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(&4u32.to_le_bytes());
+    // KSDATAFORMAT_SUBTYPE_PCM.
+    out.extend_from_slice(&[
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b,
+        0x71,
+    ]);
+    out
+}
+
+/// 0.1 s of a ramp in the extensible format.
+fn extensible_wav() -> Vec<u8> {
+    wav(
+        None,
+        &[
+            (b"fmt ", extensible_format(), None),
+            (b"data", ramp16(), None),
+        ],
+    )
+}
+
+/// A 16-bit WAV with an `INFO` list before its audio and one after it, as
+/// ffmpeg and Audacity write them: 0.1 s of a ramp.
+fn pcm_wav() -> Vec<u8> {
+    wav(
+        None,
+        &[
+            (b"fmt ", pcm16_format(), None),
+            (b"LIST", info(&[(b"INAM", b"tone")]), None),
+            (b"data", ramp16(), None),
+            (b"LIST", info(&[(b"ICMT", b"after the audio")]), None),
+        ],
+    )
+}
+
 fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, bytes).unwrap();
@@ -420,6 +539,18 @@ fn refused(path: &Path) -> String {
     duration.to_string()
 }
 
+/// The plain refusal of a file that is no MP4, CAF or WAV from its first
+/// byte, as every path sees it.
+fn unknown(path: &Path) {
+    let duration = SymphoniaAudioCodec::declared_duration(path).unwrap_err();
+    let decode = SymphoniaAudioCodec::read_channel(path, 0, AudioLane::Mixed).unwrap_err();
+    let mixdown =
+        SymphoniaAudioCodec::mixdown_path(path, &path.with_extension("mix.wav")).unwrap_err();
+    for error in [duration, decode, mixdown] {
+        assert_eq!(error, CodecError::UnknownFormat, "{}", path.display());
+    }
+}
+
 /// The file reads, or fails as symphonia fails on it, never by the walk.
 fn not_refused(path: &Path) {
     for error in [
@@ -436,6 +567,8 @@ fn not_refused(path: &Path) {
             "entries of",
             "more than the file",
             "packet",
+            "symphonia reads",
+            "cannot read this kind",
         ] {
             assert!(!text.contains(walk), "{}: {text}", path.display());
         }
@@ -456,12 +589,15 @@ fn measured_bad() -> [(&'static str, Vec<u8>); 2] {
     ]
 }
 
-/// The cases the measurement found aborting on Linux, and those the review
-/// crafted, each refused before symphonia allocates: a 1 TiB and a 64 GiB
-/// `ilst` `data` atom, the sample tables counting 2^32 - 1 entries, a
-/// sample larger than the file, the CAF magic cookie of 1 TiB, packet
-/// tables of 2^32 and 2^40 packets or with a packet of 2^40 or 2^50 bytes,
-/// and packets or uncompressed frames of 2^28 and 2^31 bytes.
+/// The cases measured or crafted to abort on Linux, each refused before
+/// symphonia allocates: a 1 TiB and a 64 GiB `ilst` `data` atom, in
+/// `moov/udta` and in a top-level `meta`, the sample tables counting
+/// 2^32 - 1 entries, a sample larger than the file, the CAF magic cookie
+/// of 1 TiB, packet tables of 2^32 and 2^40 packets or with a packet of
+/// 2^40 or 2^50 bytes, packets or uncompressed frames of 2^28 and 2^31
+/// bytes, the same cookie and packet tables in the audio of an open
+/// `data` chunk, where symphonia reads on for chunks, and a WAV `LIST`
+/// whose `INFO` value declares 4 GiB in a file of 3 KiB.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn every_size_measured_to_abort_is_refused() {
@@ -577,35 +713,97 @@ fn every_size_measured_to_abort_is_refused() {
         with_moov_child(&phone, &tag_with(&atom(*b"data", &[0; 4]))),
         "fewer than its 8",
     ));
+    // A top-level `meta`, after the media data, as some taggers put it.
+    for exponent in [40, 36] {
+        let item = atom(*b"\xa9nam", &huge_data(exponent));
+        cases.push((
+            "top-meta.m4a".into(),
+            [phone.as_slice(), &itunes_meta(&item)].concat(),
+            "the `data` box",
+        ));
+    }
+    // An open `data` chunk, and chunks read out of its audio.
+    let mut table = (1i64 << 32).to_be_bytes().to_vec();
+    table.extend_from_slice(&[0; 16]);
+    table.push(0x10);
+    for format in ["s16le", "f32be", "aac"] {
+        for exponent in [40, 33] {
+            cases.push((
+                format!("open-{format}-kuki-2e{exponent}.caf"),
+                open_data_then(
+                    format,
+                    &chunk_in_the_audio(*b"kuki", 1 << exponent, &[0; 64]),
+                ),
+                "the `kuki` chunk",
+            ));
+        }
+        for exponent in [32, 40] {
+            let mut pakt = table.clone();
+            pakt[..8].copy_from_slice(&(1i64 << exponent).to_be_bytes());
+            cases.push((
+                format!("open-{format}-pakt-2e{exponent}.caf"),
+                open_data_then(format, &chunk_in_the_audio(*b"pakt", 25, &pakt)),
+                "the packet table counts",
+            ));
+        }
+    }
+    // A RIFF and `LIST` declaring 4 GiB, an `INFO` value 4 GiB less 128 KiB.
+    let mut list = b"INFO".to_vec();
+    list.extend_from_slice(b"INAM");
+    list.extend_from_slice(&0xfffe_0000u32.to_le_bytes());
+    list.extend_from_slice(&[b'x'; 16]);
+    cases.push((
+        "info.wav".into(),
+        wav(
+            Some(u32::MAX),
+            &[
+                (b"fmt ", pcm16_format(), None),
+                (b"LIST", list, Some(0xffff_0000)),
+                (b"data", ramp16(), None),
+            ],
+        ),
+        "the `LIST` chunk",
+    ));
     for (index, (name, bytes, says)) in cases.iter().enumerate() {
         let path = write(dir.path(), &format!("{index}-{name}"), bytes);
         let error = refused(&path);
         assert!(error.contains(says), "{name}: {error}");
+    }
+    // Little-endian Float32 is the crate's own reader's, which reads the
+    // audio as audio; symphonia still reads the declared length.
+    for tail in [
+        chunk_in_the_audio(*b"kuki", 1 << 40, &[0; 64]),
+        chunk_in_the_audio(*b"pakt", 25, &table),
+    ] {
+        let path = write(
+            dir.path(),
+            "open-f32le.caf",
+            &open_data_then("f32le", &tail),
+        );
+        let error = SymphoniaAudioCodec::declared_duration(&path).unwrap_err();
+        assert!(matches!(error, CodecError::UnsupportedFormat(_)), "{error}");
     }
 }
 
 /// Symphonia's own probe scans the first MiB for an `ftyp` and reads from
 /// there, past junk or an ID3 tag, or into a `free` box. The walk starts at
 /// byte 0, and so does the MP4 reader; a file that does not start with
-/// well-formed boxes never reaches the MP4 reader, and a movie hidden in a
-/// leading box is never read.
+/// well-formed boxes is refused before symphonia reads it, and a movie
+/// hidden in a leading box is never read.
 #[test]
 fn a_movie_the_walk_did_not_see_is_never_read() {
     let dir = tempfile::tempdir().unwrap();
     let phone = std::fs::read(fixture(PHONE)).unwrap();
-    let id3 = [b"ID3".as_slice(), &[4, 0, 0, 0, 0, 0, 10], &[0; 10]].concat();
     for (label, bad) in measured_bad() {
         let mdat = find(&bad, *b"mdat");
         let hidden = bad[..mdat.at].to_vec();
-        for (prefix, lead) in [
-            ("junk8", b"JUNKJUNK".to_vec()),
-            ("junk3", vec![1, 2, 3]),
-            ("id3", id3.clone()),
-            ("free", atom(*b"free", &hidden)),
-            ("skip", atom(*b"skip", &hidden)),
-        ] {
+        for (prefix, lead) in prefixes() {
             let alone = [lead.as_slice(), &bad].concat();
-            let path = write(dir.path(), &format!("{prefix}-{label}.m4a"), &alone);
+            unknown(&write(dir.path(), &format!("{prefix}-{label}.m4a"), &alone));
+        }
+        for kind in [*b"free", *b"skip"] {
+            let alone = [atom(kind, &hidden).as_slice(), &bad].concat();
+            let path = write(dir.path(), &format!("in-a-box-{label}.m4a"), &alone);
             refused(&path);
         }
         // A fake movie in a leading box, then a healthy file: the reader
@@ -617,6 +815,51 @@ fn a_movie_the_walk_did_not_see_is_never_read() {
             assert_ne!(read.samples.len(), 0);
         }
     }
+}
+
+/// Junk, an ID3v2.4 and an ID3v2.3 tag, an MP3 frame's sync and an ADTS
+/// header, as they may sit in front of a file.
+fn prefixes() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("junk8", b"JUNKJUNK".to_vec()),
+        ("junk3", vec![1, 2, 3]),
+        (
+            "id3v24",
+            [b"ID3".as_slice(), &[4, 0, 0, 0, 0, 0, 10], &[0; 10]].concat(),
+        ),
+        (
+            "id3v23",
+            [b"ID3".as_slice(), &[3, 0, 0, 0, 0, 0, 10], &[0; 10]].concat(),
+        ),
+        ("mp3", [&[0xff, 0xfb, 0x90, 0x64][..], &[0; 60]].concat()),
+        (
+            "adts",
+            [&[0xff, 0xf1, 0x50, 0x80, 0x02, 0x1f, 0xfc][..], &[0; 9]].concat(),
+        ),
+    ]
+}
+
+/// Steno reads MP4, CAF and WAV files, from their first byte, and nothing
+/// else: a phone file behind a prefix, which symphonia 0.5.5's probe did
+/// not read either, an MP3, and an empty file all fail with the one plain
+/// sentence, before symphonia reads a byte, the file kept.
+#[test]
+fn a_file_that_is_no_mp4_caf_or_wav_from_its_first_byte_is_refused_plainly() {
+    let dir = tempfile::tempdir().unwrap();
+    let phone = std::fs::read(fixture(PHONE)).unwrap();
+    for (prefix, lead) in prefixes() {
+        let bytes = [lead.as_slice(), &phone].concat();
+        let path = write(dir.path(), &format!("{prefix}.m4a"), &bytes);
+        unknown(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{prefix}: kept");
+    }
+    unknown(&fixture("tone-440-44k1-500ms.mp3"));
+    unknown(&write(dir.path(), "empty.m4a", &[]));
+    unknown(&write(dir.path(), "riff-only.wav", b"RIFF\x04\0\0\0WAVX"));
+    assert_eq!(
+        CodecError::UnknownFormat.to_string(),
+        "Steno cannot read this kind of file; the recording is kept."
+    );
 }
 
 /// A box larger than the one holding it and one shorter than its header
@@ -690,7 +933,7 @@ fn a_box_shorter_than_the_header_symphonia_takes_off_is_refused() {
 /// The sample sizes a fragmented file gives, in a run (`trun`), as a
 /// fragment's default (`tfhd`) or a track's (`trex`), and a constant
 /// `stsz` size: each larger than the file is refused, one as large is not.
-/// A `co64` table counting one entry more than it holds is refused.
+/// Each table counting one entry more than it holds is refused.
 #[test]
 fn every_sample_size_and_offset_table_is_checked() {
     let dir = tempfile::tempdir().unwrap();
@@ -761,11 +1004,67 @@ fn every_sample_size_and_offset_table_is_checked() {
     );
     let error = refused(&write(dir.path(), "co64.m4a", &one_more));
     assert!(error.contains("entries of 8 bytes"), "{error}");
+    for (kind, entry) in [(*b"stts", 8), (*b"stsc", 12), (*b"stco", 4)] {
+        let table = find(&phone, kind);
+        let entries = (table.end - table.at - table.header - 8) / entry;
+        let mut one_more = phone.clone();
+        set32(
+            &mut one_more,
+            table.at + table.header + 4,
+            u32::try_from(entries + 1).unwrap(),
+        );
+        let error = refused(&write(dir.path(), "one-more.m4a", &one_more));
+        assert!(
+            error.contains(&format!("entries of {entry} bytes")),
+            "{error}"
+        );
+    }
+}
+
+/// A size is read where the flags put it, past the fields they add: a
+/// fragment's base data offset (0x1) before its default size (0x10); a
+/// run's first sample's flags (0x4) before its sizes (0x200), and each
+/// sample's duration (0x100) before its size. Each larger than the file
+/// is refused.
+#[test]
+fn a_size_past_the_fields_its_flags_add_is_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let fragmented = std::fs::read(fixture("tone-440-44k1-500ms-fragmented.m4a")).unwrap();
+    let length = u32::try_from(fragmented.len()).unwrap();
+    let past = length + 1;
+    let words =
+        |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+    let tfhd = [words(&[0x11, 1]), vec![0; 8], words(&[past])].concat();
+    let fragments = [
+        (
+            &[b"traf", b"tfhd"],
+            atom(*b"tfhd", &tfhd),
+            "`tfhd` box gives a sample",
+        ),
+        (
+            &[b"traf", b"trun"],
+            atom(*b"trun", &words(&[0x204, 1, 0, past])),
+            "`trun` box gives a sample",
+        ),
+        (
+            &[b"traf", b"trun"],
+            atom(*b"trun", &words(&[0x300, 1, 1_024, past])),
+            "`trun` box gives a sample",
+        ),
+    ];
+    for (path, with, says) in fragments {
+        let bytes = with_box_at(&fragmented, path, &with);
+        let error = refused(&write(dir.path(), "flags.m4a", &bytes));
+        assert!(error.contains(says), "{error}");
+    }
 }
 
 /// Media data cut off by the file's end is no allocation, so the check
 /// lets it through: a finished file whose `mdat` is cut short, a CAF whose
-/// `data` runs to the end (size -1) or past it.
+/// `data` runs past it. A CAF whose `data` is left open (-1) has its audio
+/// read for chunks, as symphonia reads it (`chunks.rs:203-205`): samples
+/// are no chunks, and symphonia 0.5.5 fails such a file either way ("no
+/// decodable audio"); the crate's own reader takes Steno's own masters.
 #[test]
 fn media_data_cut_off_still_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -785,9 +1084,94 @@ fn media_data_cut_off_still_reads() {
     open[data + 4..data + 12].copy_from_slice(&(-1i64).to_be_bytes());
     let mut past = pcm;
     past[data + 4..data + 12].copy_from_slice(&(1i64 << 20).to_be_bytes());
-    for (name, bytes) in [("cut.m4a", cut), ("open.caf", open), ("past.caf", past)] {
+    for (name, bytes) in [("cut.m4a", cut), ("past.caf", past)] {
         not_refused(&write(dir.path(), name, &bytes));
     }
+    let open = write(dir.path(), "open.caf", &open);
+    assert!(SymphoniaAudioCodec::declared_duration(&open).is_err());
+}
+
+/// A WAV's chunks are walked up to its audio, where symphonia's reader
+/// stops: one before the audio that runs past the file is refused, and so
+/// is a `fmt ` symphonia would read short (an extensible format of more
+/// than 40 bytes); a list after the audio, whatever it declares, an odd
+/// chunk padded to an even byte, audio cut off by the file's end, and the
+/// sizes ffmpeg writes to a pipe (2^32 - 1) all read.
+#[test]
+fn a_wav_is_walked_up_to_its_audio() {
+    let dir = tempfile::tempdir().unwrap();
+    let padded = [extensible_format().as_slice(), &[0; 4]].concat();
+    let reads = [
+        ("pcm.wav", pcm_wav()),
+        ("extensible.wav", extensible_wav()),
+        (
+            "list-after.wav",
+            wav(
+                None,
+                &[
+                    (b"fmt ", pcm16_format(), None),
+                    (b"data", ramp16(), None),
+                    (b"LIST", info(&[(b"INAM", b"x")]), Some(0xffff_0000)),
+                ],
+            ),
+        ),
+        (
+            "odd.wav",
+            wav(
+                None,
+                &[
+                    (b"fmt ", pcm16_format(), None),
+                    (b"junk", vec![1, 2, 3], None),
+                    (b"data", ramp16(), None),
+                ],
+            ),
+        ),
+        (
+            "cut.wav",
+            wav(
+                Some(4 + 8 + 16 + 8 + (1 << 20)),
+                &[
+                    (b"fmt ", pcm16_format(), None),
+                    (b"data", ramp16(), Some(1 << 20)),
+                ],
+            ),
+        ),
+        (
+            "piped.wav",
+            wav(
+                Some(u32::MAX),
+                &[
+                    (b"fmt ", pcm16_format(), None),
+                    (b"data", ramp16(), Some(u32::MAX)),
+                ],
+            ),
+        ),
+    ];
+    for (name, bytes) in reads {
+        let read = SymphoniaAudioCodec::read_channel(
+            &write(dir.path(), name, &bytes),
+            0,
+            AudioLane::Mixed,
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(read.samples.len(), 1_600, "{name}");
+    }
+    let past = wav(
+        None,
+        &[
+            (b"fmt ", pcm16_format(), None),
+            (b"LIST", info(&[(b"INAM", b"x")]), Some(1 << 20)),
+            (b"data", ramp16(), None),
+        ],
+    );
+    let error = refused(&write(dir.path(), "past.wav", &past));
+    assert!(error.contains("the `LIST` chunk at byte 36"), "{error}");
+    let short = wav(None, &[(b"fmt ", padded, None), (b"data", ramp16(), None)]);
+    let error = refused(&write(dir.path(), "short.wav", &short));
+    assert!(
+        error.contains("holds 44 bytes, of which symphonia reads 40"),
+        "{error}"
+    );
 }
 
 /// A final top-level box that runs past the file's end is let through when
@@ -818,15 +1202,41 @@ fn a_final_box_cut_off_is_refused_only_where_symphonia_parses_it() {
 }
 
 /// The healthy variants a writer makes that symphonia reads, which the
-/// walk read wrongly once: `QuickTime`'s `meta` (no version and flags) in
-/// `moov` or a track, a one-letter track or movie name in `udta`, an item
-/// symphonia skips with a short `data`, a `free`, `skip` or `wide` box
-/// before `ftyp`, and the chunk offsets in `co64`.
+/// walk would read wrongly with a rule out of place: `QuickTime`'s `meta`
+/// (no version and flags) in `moov` or a track, a one-letter track or
+/// movie name in `udta`, an item symphonia skips with a short `data`, a
+/// `free`, `skip` or `wide` box before `ftyp`, the chunk offsets in
+/// `co64`; and bytes in places symphonia does not read: a track's `udta`
+/// that holds no boxes, a short `hdlr` in a `meta`, a short top-level
+/// `data` box.
 fn healthy_variants() -> Vec<(String, Vec<u8>)> {
     let phone = std::fs::read(fixture(PHONE)).unwrap();
     let name = atom(*b"udta", &atom(*b"name", b"A"));
     let skipped_item = atom(*b"xxxx", &atom(*b"data", &[0; 2]));
+    let mut short_hdlr = vec![0u8; 4];
+    short_hdlr.extend_from_slice(&atom(*b"hdlr", &[0; 12]));
+    short_hdlr.extend_from_slice(&atom(*b"ilst", &[]));
     let mut out = vec![
+        (
+            "trak-udta-raw.m4a".to_owned(),
+            with_child_at(
+                &phone,
+                &[b"trak"],
+                &atom(*b"udta", &[0, 0, 0, 100, b'x', b'y', b'z', b'w']),
+            ),
+        ),
+        (
+            "meta-short-hdlr.m4a".to_owned(),
+            with_child_at(
+                &phone,
+                &[b"moov"],
+                &atom(*b"udta", &atom(*b"meta", &short_hdlr)),
+            ),
+        ),
+        (
+            "top-data.m4a".to_owned(),
+            [phone.as_slice(), &atom(*b"data", &[0; 2])].concat(),
+        ),
         (
             "moov-meta.m4a".to_owned(),
             with_child_at(&phone, &[b"moov"], &quicktime_meta()),
@@ -869,10 +1279,14 @@ fn healthy_variants() -> Vec<(String, Vec<u8>)> {
 #[test]
 fn every_fixture_still_reads() {
     let dir = tempfile::tempdir().unwrap();
+    // The MP3 is refused plainly: Steno makes none.
     let mut files: Vec<PathBuf> = std::fs::read_dir(fixture(""))
         .unwrap()
         .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_none_or(|ext| ext != "mp3"))
         .collect();
+    files.push(write(dir.path(), "pcm.wav", &pcm_wav()));
+    files.push(write(dir.path(), "extensible.wav", &extensible_wav()));
     files.push(write(dir.path(), "pcm.caf", &pcm_caf()));
     files.push(write(dir.path(), "float.caf", &float_caf()));
     for (name, bytes) in healthy_variants() {
@@ -902,13 +1316,23 @@ fn every_fixture_still_reads() {
 // The fuzz pass.
 
 /// A field of a fixture the fuzz sets: where it is, its width in bytes,
-/// and whether it holds a CAF variable-length integer (written in exactly
-/// `width` bytes of seven bits) rather than a big-endian one.
+/// and how it is written.
 #[derive(Debug, Clone, Copy)]
 struct Field {
     at: usize,
     width: usize,
-    varint: bool,
+    coding: Coding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Coding {
+    /// MP4 and CAF.
+    BigEndian,
+    /// WAV.
+    LittleEndian,
+    /// A CAF variable-length integer, written in exactly `width` bytes of
+    /// seven bits.
+    Varint,
 }
 
 impl Field {
@@ -916,21 +1340,31 @@ impl Field {
         Self {
             at,
             width,
-            varint: false,
+            coding: Coding::BigEndian,
+        }
+    }
+
+    fn little(at: usize, width: usize) -> Self {
+        Self {
+            at,
+            width,
+            coding: Coding::LittleEndian,
         }
     }
 
     fn set(self, bytes: &mut [u8], value: u64) {
         let target = &mut bytes[self.at..self.at + self.width];
-        if self.varint {
-            for (index, byte) in target.iter_mut().enumerate() {
-                let shift = 7 * (self.width - 1 - index);
-                let group = u8::try_from((value >> shift.min(63)) & 0x7f).unwrap();
-                let more = if index + 1 < self.width { 0x80 } else { 0 };
-                *byte = group | more;
+        match self.coding {
+            Coding::Varint => {
+                for (index, byte) in target.iter_mut().enumerate() {
+                    let shift = 7 * (self.width - 1 - index);
+                    let group = u8::try_from((value >> shift.min(63)) & 0x7f).unwrap();
+                    let more = if index + 1 < self.width { 0x80 } else { 0 };
+                    *byte = group | more;
+                }
             }
-        } else {
-            target.copy_from_slice(&value.to_be_bytes()[8 - self.width..]);
+            Coding::BigEndian => target.copy_from_slice(&value.to_be_bytes()[8 - self.width..]),
+            Coding::LittleEndian => target.copy_from_slice(&value.to_le_bytes()[..self.width]),
         }
     }
 }
@@ -951,7 +1385,7 @@ fn fields(bytes: &[u8]) -> Vec<Field> {
                     out.push(Field {
                         at: at + 36,
                         width: 6,
-                        varint: true,
+                        coding: Coding::Varint,
                     });
                 }
             }
@@ -959,10 +1393,43 @@ fn fields(bytes: &[u8]) -> Vec<Field> {
                 // Bytes and frames a packet, bits a channel.
                 out.extend([28, 32, 40].map(|offset| Field::new(at + offset, 4)));
             }
+            // An open `data`: symphonia reads on after its edit count.
+            if kind == b"data" && size == -1 {
+                at += 16;
+                continue;
+            }
             let Ok(size) = usize::try_from(size) else {
                 break;
             };
             at += 12 + size;
+        }
+        return out;
+    }
+    if bytes.starts_with(b"RIFF") {
+        let le32 = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        out.push(Field::little(4, 4));
+        let mut at = 12;
+        while at + 8 <= bytes.len() {
+            let size = le32(at + 4);
+            out.push(Field::little(at + 4, 4));
+            let body = at + 8;
+            match &bytes[at..at + 4] {
+                // Channels, block alignment, the extra size.
+                b"fmt " if size >= 18 => {
+                    out.extend([2, 12, 16].map(|offset| Field::little(body + offset, 2)));
+                }
+                b"LIST" => {
+                    let end = (body + size).min(bytes.len());
+                    let mut inner = body + 4;
+                    while inner + 8 <= end {
+                        out.push(Field::little(inner + 4, 4));
+                        let value = le32(inner + 4);
+                        inner += 8 + value + value % 2;
+                    }
+                }
+                _ => {}
+            }
+            at = body + size + size % 2;
         }
         return out;
     }
@@ -1050,7 +1517,8 @@ fn value(random: &mut Random, width: usize, length: u64) -> u64 {
 /// The fixtures the fuzz mutates: every MP4 file (the phone recorder's,
 /// killed and not, Apple's encoder with its `ilst`, ffmpeg's with an edit
 /// list, a fragmented one, PCM in a `QuickTime` movie), the healthy variants,
-/// and the CAFs symphonia reads.
+/// the CAFs symphonia reads, two with chunks in the audio of an open `data`,
+/// and the WAVs, with lists before and after their audio.
 fn fuzz_fixtures() -> Vec<(String, Vec<u8>)> {
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(fixture(""))
         .unwrap()
@@ -1070,6 +1538,17 @@ fn fuzz_fixtures() -> Vec<(String, Vec<u8>)> {
     out.push(("float.caf".to_owned(), float_caf()));
     out.push(("aac.caf".to_owned(), aac_caf()));
     out.push(("framed.caf".to_owned(), aac_caf_with(true)));
+    let mut table = 1i64.to_be_bytes().to_vec();
+    table.extend_from_slice(&[0; 16]);
+    table.push(6);
+    for (name, tail) in [
+        ("open-free.caf", chunk_in_the_audio(*b"free", 8, &[0; 8])),
+        ("open-pakt.caf", chunk_in_the_audio(*b"pakt", 25, &table)),
+    ] {
+        out.push((name.to_owned(), open_data_then("aac", &tail)));
+    }
+    out.push(("pcm.wav".to_owned(), pcm_wav()));
+    out.push(("extensible.wav".to_owned(), extensible_wav()));
     out
 }
 
@@ -1093,7 +1572,11 @@ fn fuzz(cases: u64, seed: u64) {
         let mut changed = Vec::new();
         for _ in 0..=random.below(3) {
             let field = fields[random.below(fields.len())];
-            let width = if field.varint { 8 } else { field.width };
+            let width = if field.coding == Coding::Varint {
+                8
+            } else {
+                field.width
+            };
             let value = value(&mut random, width, bytes.len() as u64);
             field.set(&mut bytes, value);
             changed.push((field.at, value));

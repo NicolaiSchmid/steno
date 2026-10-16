@@ -6,17 +6,25 @@
 //! every read, and the sample tables of any MP4 file do on a machine that
 //! cannot back 16 to 64 GiB.
 //!
-//! [`check`] first tells which reader symphonia opens the file with
-//! ([`Start`]), and the probe opens that reader at byte 0, where the walk
+//! [`check`] tells from a file's first bytes which of symphonia's readers
+//! opens it ([`Start`]), and that reader opens it at byte 0, where the walk
 //! starts too, so the walk and the read see the same bytes: an MP4 file is
 //! a run of well-formed top-level boxes from byte 0 that holds an `ftyp`
-//! (a `free` or `wide` box may come first), a CAF file starts with `caff`.
-//! Any other file is not walked, and the probe offers it only to
-//! symphonia's WAV, MP3 and ADTS readers, which size nothing from the file
-//! unchecked. Symphonia's own probe would scan the first MiB for an `ftyp`
-//! and read from there, past junk, an ID3 tag or into a `free` box, where
-//! the walk never looked; and it fails on a box before the `ftyp`, which
-//! the MP4 reader opened at byte 0 seeks past.
+//! (a `free` or `wide` box may come first), a CAF file starts with `caff`,
+//! a WAV file with `RIFF` and, at byte 8, `WAVE`. No probe runs: symphonia's
+//! would scan the first MiB for any reader's marker and read from there,
+//! past junk, an ID3 tag or into a `free` box, where the walk never looked.
+//! Any other file is refused before symphonia reads a byte
+//! ([`CodecError::UnknownFormat`], the file kept). Steno reads no other
+//! kind: the Mac records CAF, the phone AAC in an m4a, the sidecars and
+//! `steno process` take WAV, and no path takes a file of the user's
+//! choosing in any other format (the app's dialogs pick folders only, the
+//! inbox takes only a paired phone's uploads, the phone has no file
+//! import, recovery adopts only the masters this install wrote, and
+//! `steno process` takes only a WAV its own reader accepts). So an MP3 or
+//! an ADTS stream, which Steno never makes, and an m4a behind a prefix,
+//! which symphonia 0.5.5 did not read either ("end of stream"), fail with
+//! one plain sentence.
 //!
 //! The walk reads only headers and the sample tables, follows boxes only
 //! where symphonia reads them (`isomp4` `atoms/*.rs`, named at each rule),
@@ -28,8 +36,23 @@
 //!   or shorter than its own header. A top-level box symphonia only seeks
 //!   past (anything but [`PARSED_AT_TOP`]: `mdat`, `free`, `skip`, `wide`
 //!   and the rest) may run past the file's end, as a file cut off inside
-//!   it does; so may a CAF's `data`, which may also be left open with a
-//!   size of -1. Symphonia never reads such a box in one allocation;
+//!   it does; so may a CAF's `data` and a WAV's `data`. Symphonia never
+//!   reads such a box in one allocation. A CAF's `data` may also be left
+//!   open with a size of -1: symphonia reads its edit count and then reads
+//!   on for chunks from there, out of the audio (`chunks.rs:203-205`,
+//!   `demuxer.rs:312-372`), and so does the walk;
+//! - in a WAV, a chunk before `data` (`fmt `, `LIST` with its `INFO`
+//!   values, any other) is larger than the file; symphonia's reader stops
+//!   at `data` (`wave/mod.rs:93-155`), so what follows the audio, a `LIST`
+//!   as ffmpeg and Audacity write it, is never read and never refused, and
+//!   `data` may run past the file (a recording cut off, or ffmpeg's
+//!   streamed 2^32 - 1). Symphonia checks a chunk against the one holding
+//!   it before reading it (`common.rs:146`), so the `INFO` values it reads
+//!   whole (`wave/chunks.rs:538`) stay within their `LIST`, and so within
+//!   the file. A `fmt ` chunk symphonia reads fewer bytes of than it holds
+//!   (an extensible format past 40 bytes, an ADPCM, A-law or µ-law format
+//!   whose extra size disagrees) is refused too: symphonia would read the
+//!   next chunk's header out of the format, where the walk never looked;
 //! - a sample table (`stts`, `stsc`, `stsz`, `stco`, `co64`, a fragment's
 //!   `trun`) counts more entries than its box holds, or a sample (in
 //!   `stsz`, `trun`, or as a `tfhd` or `trex` default) is larger than the
@@ -54,6 +77,8 @@
 //!   (`atoms/alac.rs`, `atoms/opus.rs`);
 //! - a CAF channel layout (`chan`): symphonia collects its descriptions
 //!   without reserving their count;
+//! - a WAV packet: symphonia reads at most 1 152 blocks of a `u16` block
+//!   alignment at once (`common.rs:345-351`), about 75 MiB;
 //! - the reservations a bounded count still allows: symphonia reserves 32
 //!   bytes a `pakt` packet (`chunks.rs:434`), up to 32 times the table's
 //!   size at one byte a packet, and 16 bytes a 12-byte `stsc` entry
@@ -64,8 +89,10 @@
 //! as unreadable.
 
 use std::fs::File;
-use std::io::{BufReader, Read as _, Seek as _, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+
+use symphonia::core::io::MediaSource;
 
 use super::CodecError;
 use super::priming::{BoxError, Boxes, Mp4Box, read_at};
@@ -77,8 +104,8 @@ pub(crate) enum Start {
     Mp4,
     /// CAF: `caff` at byte 0.
     Caf,
-    /// Anything else, not walked.
-    Other,
+    /// WAV: `RIFF` at byte 0, `WAVE` at byte 8.
+    Wav,
 }
 
 /// The top-level boxes symphonia parses: `ftyp`, `moov`, `sidx` and
@@ -101,23 +128,74 @@ const ITEMS: [&[u8; 4]; 43] = [
 /// frames into one allocation (`symphonia-format-caf` `demuxer.rs:83`).
 pub(crate) const MAX_PCM_FRAME: u64 = 4_096;
 
-/// Finds where symphonia's reader for the file at `path` starts, and
+/// Finds which of symphonia's readers opens the file at `path`, and
 /// refuses the file when that reader would allocate from a size the file
-/// cannot hold; see the module doc. Hands on the file it opened, at byte 0.
-pub(crate) fn check(path: &Path) -> Result<(Start, File), CodecError> {
+/// cannot hold, or when none of them is the file's; see the module doc.
+/// Hands on the file it opened, at byte 0, as long as the walk found it.
+pub(crate) fn check(path: &Path) -> Result<(Start, Walked), CodecError> {
     let io = |error: std::io::Error| CodecError::Io(format!("{}: {error}", path.display()));
     let refused = |why: String| CodecError::UnsupportedFormat(format!("{}: {why}", path.display()));
     let file = File::open(path).map_err(io)?;
     let length = file.metadata().map_err(io)?.len();
     let mut walk = Walk { file, length };
-    let start = walk.start();
+    let start = walk.start().ok_or(CodecError::UnknownFormat)?;
     match start {
         Start::Mp4 => walk.mp4(0, length, &[]).map_err(refused)?,
         Start::Caf => walk.caf().map_err(refused)?,
-        Start::Other => {}
+        Start::Wav => walk.wav().map_err(refused)?,
     }
     walk.file.rewind().map_err(io)?;
-    Ok((start, walk.file))
+    let walked = Walked {
+        file: walk.file,
+        length,
+        at: 0,
+    };
+    Ok((start, walked))
+}
+
+/// The file the walk read, as symphonia reads it: no further than the
+/// length the walk measured, so a file that grows meanwhile shows
+/// symphonia no box the walk did not see.
+pub(crate) struct Walked {
+    file: File,
+    length: u64,
+    /// Where the next read starts.
+    at: u64,
+}
+
+impl Read for Walked {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let room = usize::try_from(self.length.saturating_sub(self.at)).unwrap_or(usize::MAX);
+        let take = buffer.len().min(room);
+        let read = self.file.read(&mut buffer[..take])?;
+        self.at += read as u64;
+        Ok(read)
+    }
+}
+
+impl Seek for Walked {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        let at = match to {
+            SeekFrom::Start(at) => Some(at),
+            SeekFrom::End(delta) => self.length.checked_add_signed(delta),
+            SeekFrom::Current(delta) => self.at.checked_add_signed(delta),
+        }
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "a seek before byte 0")
+        })?;
+        self.at = self.file.seek(SeekFrom::Start(at))?;
+        Ok(self.at)
+    }
+}
+
+impl MediaSource for Walked {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        Some(self.length)
+    }
 }
 
 struct Walk {
@@ -126,19 +204,24 @@ struct Walk {
 }
 
 impl Walk {
-    /// `caff` at byte 0, or an `ftyp` among well-formed top-level boxes
-    /// from byte 0.
-    fn start(&mut self) -> Start {
-        let mut magic = [0u8; 4];
-        if read_at(&mut self.file, 0, &mut magic).is_some() && &magic == b"caff" {
-            return Start::Caf;
+    /// `caff` at byte 0; `RIFF` at byte 0 and `WAVE` at byte 8; or an
+    /// `ftyp` among well-formed top-level boxes from byte 0. `None` for
+    /// any other file.
+    fn start(&mut self) -> Option<Start> {
+        let mut magic = [0u8; 12];
+        let read = read_at(&mut self.file, 0, &mut magic).is_some();
+        if read && &magic[..4] == b"caff" {
+            return Some(Start::Caf);
+        }
+        if read && &magic[..4] == b"RIFF" && &magic[8..] == b"WAVE" {
+            return Some(Start::Wav);
         }
         let mut boxes = Boxes::new(&mut self.file, 0, self.length);
         loop {
             match boxes.next_sized() {
-                Ok(Some(found)) if &found.kind == b"ftyp" => return Start::Mp4,
+                Ok(Some(found)) if &found.kind == b"ftyp" => return Some(Start::Mp4),
                 Ok(Some(_)) => {}
-                Ok(None) | Err(_) => return Start::Other,
+                Ok(None) | Err(_) => return None,
             }
         }
     }
@@ -371,8 +454,12 @@ impl Walk {
             let data = &kind == b"data";
             let end = match u64::try_from(size) {
                 Ok(size) => body.checked_add(size),
-                // -1: the data runs to the end of the file.
-                Err(_) if data && size == -1 => return Ok(()),
+                // -1: the audio runs to the end of the file, but symphonia
+                // reads the edit count, then reads on for chunks from there.
+                Err(_) if data && size == -1 => {
+                    at = body + 4;
+                    continue;
+                }
                 Err(_) => {
                     return Err(format!(
                         "the `{}` chunk at byte {at} declares {size} bytes",
@@ -385,10 +472,7 @@ impl Walk {
                     // Cut off inside its audio.
                     return Ok(());
                 }
-                return Err(format!(
-                    "the `{}` chunk at byte {at} declares {size} bytes, more than the file holds",
-                    name(kind)
-                ));
+                return Err(past_the_file(kind, at, size));
             };
             match &kind {
                 // chunks.rs:97-124: rate, format, flags, then these.
@@ -446,6 +530,57 @@ impl Walk {
         Ok(())
     }
 
+    /// A WAV's chunks before `data`, where symphonia's reader stops
+    /// (`wave/mod.rs:93-155`), each within the file; see the module doc.
+    fn wav(&mut self) -> Result<(), String> {
+        let mut at = 12u64;
+        while at + 8 <= self.length {
+            let mut header = [0u8; 8];
+            read_at(&mut self.file, at, &mut header)
+                .ok_or_else(|| format!("the chunk at byte {at} cannot be read"))?;
+            let kind: [u8; 4] = header[..4].try_into().unwrap_or_default();
+            let size = u32::from_le_bytes(header[4..].try_into().unwrap_or_default());
+            if &kind == b"data" {
+                return Ok(());
+            }
+            let body = at + 8;
+            let end = body + u64::from(size);
+            if end > self.length {
+                return Err(past_the_file(kind, at, size));
+            }
+            if &kind == b"fmt " {
+                self.wav_format(body, size)?;
+            }
+            // Chunks start on an even byte.
+            at = end + u64::from(size % 2);
+        }
+        Ok(())
+    }
+
+    /// A WAV's `fmt ` chunk of `size` bytes at `body`: symphonia reads all
+    /// of it (`wave/chunks.rs:46-345`), or one whose format it refuses.
+    fn wav_format(&mut self, body: u64, size: u32) -> Result<(), String> {
+        let mut fields = [0u8; 18];
+        if size < 18 || read_at(&mut self.file, body, &mut fields).is_none() {
+            return Ok(());
+        }
+        let tag = u16::from_le_bytes([fields[0], fields[1]]);
+        let extra = u32::from(u16::from_le_bytes([fields[16], fields[17]]));
+        let read = match tag {
+            // Extensible: 40 bytes, whatever the chunk holds.
+            0xfffe => 40,
+            // ADPCM, A-law, µ-law: the base, the extra size, the extra.
+            0x0002 | 0x0006 | 0x0007 | 0x0011 => 18 + extra,
+            _ => return Ok(()),
+        };
+        if read != size {
+            return Err(format!(
+                "the `fmt ` chunk holds {size} bytes, of which symphonia reads {read}"
+            ));
+        }
+        Ok(())
+    }
+
     /// The `count` packets of a CAF packet table from `from`, read as
     /// symphonia reads them (`chunks.rs:535-551`: up to nine bytes of seven
     /// bits, the size first, then the frames if `framed`): each no larger
@@ -483,6 +618,14 @@ impl Walk {
         }
         Ok(())
     }
+}
+
+/// The refusal of a chunk of `size` bytes at `at`, past the file's end.
+fn past_the_file(kind: [u8; 4], at: u64, size: impl std::fmt::Display) -> String {
+    format!(
+        "the `{}` chunk at byte {at} declares {size} bytes, more than the file holds",
+        name(kind)
+    )
 }
 
 /// `count` entries of `entry` bytes from `from` fit in `found`.

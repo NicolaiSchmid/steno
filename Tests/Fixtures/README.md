@@ -33,7 +33,9 @@ the encoder, so another version is a reviewed change.
 - `tone-440-44k1-500ms.m4a` and `.mp3`: half a second of a 440 Hz sine at 0.5,
   mono 44.1 kHz, AAC-LC and MP3 at 96 kbps:
   `ffmpeg -f lavfi -i "aevalsrc=0.5*sin(2*PI*440*t):s=44100:d=0.5" -c:a aac -b:a 96k tone-440-44k1-500ms.m4a`,
-  and the same with `-c:a libmp3lame` for `.mp3`.
+  and the same with `-c:a libmp3lame` for `.mp3`. The Rust decoder refuses
+  the bare MP3 as a kind of file Steno does not read (`codec::sizes`); it
+  reads the MP3 in an MP4 below.
 - `tone-440-44k1-onset-200ms.m4a`: the same sine after 0.2 s of silence (from
   sample 8 820), for the AAC priming trim:
   `ffmpeg -f lavfi -i "aevalsrc='if(gte(n,8820),0.5*sin(2*PI*440*(n-8820)/44100),0)':s=44100:d=0.5" -c:a aac -b:a 96k tone-440-44k1-onset-200ms.m4a`.

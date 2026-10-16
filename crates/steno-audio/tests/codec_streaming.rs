@@ -5,8 +5,9 @@
 //! sidecars, an unfinished master, CAF (Float32) and WAV (16-bit and
 //! float) at 8, 16, 22.05, 44.1, 48 and 96 kHz, mono and stereo, lengths around the FIR's
 //! 480-sample frame and the decoder's 32 768-frame block, an empty file,
-//! the phone's AAC and MP3 fixtures (each AAC less its encoder priming, which
-//! the streaming decoder drops and the whole-file one kept), and sidecars
+//! the phone's AAC fixtures and an MP3 in an MP4 (each AAC less its encoder
+//! priming, which the streaming decoder drops and the whole-file one kept;
+//! a bare MP3 is no kind of file Steno reads), and sidecars
 //! that are missing, empty, unfinished or the wrong shape. With `STENO_FLEURS_DIR` set the FLEURS
 //! recordings are compared too.
 
@@ -332,14 +333,15 @@ async fn wav_masters_decode_through_symphonia_as_before() {
         )
         .await;
     }
+    // Not audio: the whole-file decoder's probe fails on it, and the
+    // streaming one refuses it before symphonia reads a byte (A17).
     let garbage = directory.path().join("garbage.wav");
     std::fs::write(&garbage, [0x41u8; 4_000]).unwrap();
-    assert_file_matches(
-        "not audio",
-        &asset(&garbage, AudioFormat::M4aAac, &[AudioLane::Mixed], &[]),
-        directory.path(),
-    )
-    .await;
+    assert!(whole_file::read_channel(&garbage, 0, AudioLane::Mixed).is_err());
+    assert_eq!(
+        SymphoniaAudioCodec::read_channel(&garbage, 0, AudioLane::Mixed),
+        Err(CodecError::UnknownFormat)
+    );
     let missing = directory.path().join("missing.m4a");
     assert_file_matches(
         "no file",
@@ -355,18 +357,18 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The phone's MP3, and the same MP3 in an MP4 container whose edit list
-/// declares 1 105 samples (which only an AAC track's trim would act on),
-/// decode as before. Each AAC decodes as before less exactly its encoder
+/// An MP3 in an MP4 container whose edit list declares 1 105 samples
+/// (which only an AAC track's trim would act on) decodes as before. Each AAC decodes as before less exactly its encoder
 /// priming: the 1 024 samples ffmpeg's edit list declares, or Apple's
 /// 2 112 for the file in the phone recorder's layout, which declares
 /// none. The reference is the whole-file decode of the m4a with those
 /// samples dropped from every channel, written as a float WAV at the
 /// m4a's rate, which the whole-file decoder reads back bit for bit.
 #[tokio::test]
-async fn the_phones_aac_and_mp3_decode_as_before() {
+async fn the_phones_aac_and_an_mp3_in_mp4_decode_as_before() {
     let directory = scratch();
-    for name in ["tone-440-44k1-500ms.mp3", "tone-440-44k1-500ms-mp3.mp4"] {
+    {
+        let name = "tone-440-44k1-500ms-mp3.mp4";
         assert_file_matches(
             name,
             &asset(

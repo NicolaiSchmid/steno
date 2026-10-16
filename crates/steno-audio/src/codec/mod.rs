@@ -3,8 +3,8 @@
 //!
 //! `decode` returns the lane's 16 kHz sidecar when it is present, complete
 //! and as long as the master, else reads the master (the crate's own CAF
-//! reader for the writer's masters, `symphonia` for CAF, WAV, m4a/AAC and
-//! mp3) and resamples channel n (lane n of the master) to 16 kHz mono: the
+//! reader for the writer's masters, `symphonia` for CAF, WAV and m4a/AAC)
+//! and resamples channel n (lane n of the master) to 16 kHz mono: the
 //! exact 3:1 FIR for 48 kHz material, a windowed-sinc polyphase resampler
 //! ([`sinc::SincResampler`]) for every other rate (the phone records
 //! 44.1 kHz).
@@ -35,9 +35,8 @@
 //!   uses `AVAudioRecorder` with `kAudioFormatMPEG4AAC`) decode as LC and
 //!   sound wrong. Not seen in practice.
 //! - **Encoder priming.** AVFoundation trimmed the encoder's priming
-//!   samples; symphonia 0.5 trims them for MP3 (the LAME tag, with
-//!   `enable_gapless`) but not for MP4, whose edit list it parses and
-//!   ignores. For AAC in MP4 the decoder finds the priming itself
+//!   samples; symphonia 0.5 does not for MP4, whose edit list it parses
+//!   and ignores. For AAC in MP4 the decoder finds the priming itself
 //!   ([`priming`]: the edit list, else iTunes' gapless tag, else the
 //!   2 112 samples AVFoundation assumes, but only in the layout of the
 //!   phone's `AVAudioRecorder`, whose files need it; any other undeclared
@@ -93,11 +92,13 @@
 //!   frame through the crate's own CAF reader (the chunk walk
 //!   [`CafFile`](crate::writer::CafFile) uses) before symphonia is
 //!   tried, as the Swift test demands.
-//! - **Sizes symphonia allocates from**: before its demuxer opens an MP4
-//!   or CAF file, the boxes or chunks and the sample tables are walked
+//! - **Sizes symphonia allocates from**: before its demuxer opens an MP4,
+//!   CAF or WAV file, the boxes or chunks and the sample tables are walked
 //!   (`sizes`), and a size the file cannot hold fails the decode as an
 //!   unsupported file, since symphonia would reserve it and a failed
-//!   allocation aborts the process. Rust only.
+//!   allocation aborts the process. The reader is the one the file's first
+//!   bytes name, with no probe; any other kind of file, an MP3 included,
+//!   fails with [`CodecError::UnknownFormat`]. Rust only.
 
 pub mod priming;
 pub mod resample;
@@ -116,8 +117,6 @@ use symphonia::core::codecs::{CODEC_TYPE_AAC, CodecParameters, Decoder, DecoderO
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, Packet};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::{Hint, Probe};
 use symphonia::core::units::TimeBase;
 
 use priming::{APPLE_PRIMING, Priming};
@@ -147,6 +146,11 @@ pub enum CodecError {
     /// Symphonia could not probe or decode the container or codec.
     #[error("unsupported audio format: {0}")]
     UnsupportedFormat(String),
+    /// Not a kind of file Steno reads: not an MP4, CAF or WAV file from its
+    /// first byte. Refused before symphonia reads a byte; one sentence, as
+    /// a meeting's list shows only the first.
+    #[error("Steno cannot read this kind of file; the recording is kept.")]
+    UnknownFormat,
     /// Decoding stopped mid-file.
     #[error("audio conversion failed: {0}")]
     ConversionFailed(String),
@@ -767,10 +771,6 @@ impl SymphoniaFrames {
         // the file where the walk started.
         let (start, file) = sizes::check(path)?;
         let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
-        let mut hint = Hint::new();
-        if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(extension);
-        }
         // A panic in the demuxer is caught as its failure, as
         // `decode_packet` catches the decoder's: symphonia 0.5.5's MP4
         // reader adds a box's size to its offset unchecked, which panics in
@@ -781,7 +781,7 @@ impl SymphoniaFrames {
         // stays for whatever it does not model. Nothing the demuxer built
         // outlives it.
         let format = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crash_log::expected(|| demuxer(start, stream, &hint))
+            crash_log::expected(|| demuxer(start, stream))
         }))
         .map_err(|panic| {
             format!(
@@ -1000,46 +1000,31 @@ impl SymphoniaFrames {
     }
 }
 
-/// Symphonia's reader for a file the size walk found to be `start`: the
-/// MP4 or CAF reader at byte 0, where the walk started, never at a marker
-/// the walk did not see; any other file through a probe that knows only the
-/// WAV, MP3 and ADTS readers (and an ID3v2 tag in front, as symphonia's
-/// default probe does).
+/// Symphonia's reader for a file the size walk found to be `start`, at
+/// byte 0, where the walk started: no probe, which would scan for a marker
+/// the walk did not see.
 fn demuxer(
     start: sizes::Start,
     mut stream: MediaSourceStream,
-    hint: &Hint,
 ) -> symphonia::core::errors::Result<Box<dyn FormatReader>> {
     use symphonia::core::io::ReadBytes as _;
-    use symphonia::default::formats::{AdtsReader, CafReader, IsoMp4Reader, MpaReader, WavReader};
-    // Gapless: trims the encoder delay and padding where the container
-    // declares them (MP3's LAME tag; not MP4 yet).
+    use symphonia::default::formats::{CafReader, IsoMp4Reader, WavReader};
+    // Gapless, as the probe opened them.
     let options = FormatOptions {
         enable_gapless: true,
         ..FormatOptions::default()
     };
-    match start {
+    Ok(match start {
         sizes::Start::Mp4 => {
             // As symphonia's probe leaves the stream: past the first box's
             // size, from where the reader steps back 4 bytes.
             stream.ignore_bytes(4)?;
-            Ok(Box::new(IsoMp4Reader::try_new(stream, &options)?))
+            Box::new(IsoMp4Reader::try_new(stream, &options)?)
         }
-        sizes::Start::Caf => Ok(Box::new(CafReader::try_new(stream, &options)?)),
-        sizes::Start::Other => {
-            static PROBE: std::sync::LazyLock<Probe> = std::sync::LazyLock::new(|| {
-                let mut probe = Probe::default();
-                probe.register_all::<WavReader>();
-                probe.register_all::<MpaReader>();
-                probe.register_all::<AdtsReader>();
-                probe.register_all::<symphonia_metadata::id3v2::Id3v2Reader>();
-                probe
-            });
-            Ok(PROBE
-                .format(hint, stream, &options, &MetadataOptions::default())?
-                .format)
-        }
-    }
+        sizes::Start::Caf => Box::new(CafReader::try_new(stream, &options)?),
+        // It reads the `RIFF` marker itself (`wave/mod.rs:67`).
+        sizes::Start::Wav => Box::new(WavReader::try_new(stream, &options)?),
+    })
 }
 
 /// The salvage's packets of the file at `path`, when it is a phone
