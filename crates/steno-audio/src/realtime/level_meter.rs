@@ -4,6 +4,7 @@
 
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+use super::wake::Wake;
 use crate::capture::{LaneLevel, LaneLevels};
 
 /// A value type the processing thread mutates in place; `flush()` reads
@@ -79,7 +80,8 @@ impl LevelMeter {
 }
 
 /// The latest [`LaneLevels`] written by the processing thread as atomic bit
-/// patterns, read by whoever publishes them (the session's writer thread).
+/// patterns, read by whoever publishes them (the session's
+/// [`LevelPublisher`](super::LevelPublisher)), whom each publish wakes.
 /// The reader may observe a torn pair across a publish; levels feed a
 /// meter, nothing else, so no lock is worth it.
 #[derive(Debug)]
@@ -90,6 +92,7 @@ pub struct LevelSlot {
     system_peak: AtomicU32,
     has_system: bool,
     generation: AtomicUsize,
+    wake: Wake,
 }
 
 impl LevelSlot {
@@ -105,10 +108,12 @@ impl LevelSlot {
             system_peak: AtomicU32::new(silence.peak.to_bits()),
             has_system,
             generation: AtomicUsize::new(0),
+            wake: Wake::new(),
         }
     }
 
-    /// The processing thread's levels for the next reader.
+    /// The processing thread's levels for the next reader, whom it wakes
+    /// (one more [`Wake::signal`], the cost the relay's wake already has).
     #[inline(always)]
     pub fn publish(&self, mic: LaneLevel, system: Option<LaneLevel>) {
         self.mic_rms.store(mic.rms.to_bits(), Ordering::Relaxed);
@@ -120,6 +125,13 @@ impl LevelSlot {
                 .store(system.peak.to_bits(), Ordering::Relaxed);
         }
         self.generation.fetch_add(1, Ordering::Release);
+        self.wake.signal();
+    }
+
+    /// The reader's wake-up, signalled by every [`publish`](Self::publish).
+    #[must_use]
+    pub fn wake(&self) -> &Wake {
+        &self.wake
     }
 
     /// The publish count so far; a reader republishes when it changed.

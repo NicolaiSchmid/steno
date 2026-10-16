@@ -51,8 +51,7 @@
 //!   │
 //!   ▼
 //! writer thread                `WriterThread`: `RecordingWriter`,
-//!   │  `Resampler48kTo16k`, files, a sync of every file every 5 s;
-//!   │  republishes `LevelSlot` on change
+//!   │  `Resampler48kTo16k`, files, a sync of every file every 5 s
 //!   ▼
 //! `CaptureSession`             state machine, `states`, `levels` and
 //!                              `notices` channels, the asset on `stop()`
@@ -70,14 +69,16 @@
 //! thread stages its packets into a `realtime::FollowerLane` that the
 //! router pulls from.
 //!
-//! Beside the diagram, off the real-time path, the session runs a watch
-//! thread over a backend that delivers continuously (`steno-watch`: it
-//! samples the sink's count of frames offered and reports a stream that
-//! stalled), a rebuild thread per device change (`steno-rebuild`), and on
-//! Linux, while the session records the default input in place of a
-//! chosen microphone, a probe thread now and then (`steno-probe`: a
-//! second PipeWire stream on a connection of its own, asking whether the
-//! chosen one delivers). See `capture::session`.
+//! Beside the diagram, off the real-time path, the session runs a level
+//! publisher (`steno-levels`: woken by each publish into `LevelSlot`, it
+//! hands the levels to the session, so a slow sync on the writer thread
+//! never freezes the meter), a watch thread over a backend that delivers
+//! continuously (`steno-watch`: it samples the sink's count of frames
+//! offered and reports a stream that stalled), a rebuild thread per device
+//! change (`steno-rebuild`), and on Linux, while the session records the
+//! default input in place of a chosen microphone, a probe thread now and
+//! then (`steno-probe`: a second PipeWire stream on a connection of its
+//! own, asking whether the chosen one delivers). See `capture::session`.
 //!
 //! The synthetic backend ([`testing::SyntheticCaptureBackend`]) is a
 //! producer thread speaking the `LaneFrameSink` protocol in place of the
