@@ -256,6 +256,12 @@ why and the alternative.
   follows (What follows). The blocking list holds the paths found in the plans
   and by the data-loss audit of the Rust app's code. Alternative: the earlier gate, which also
   blocked core flows and silent failures but not every unlikely loss.
+  - A crash loop counts as data loss (A17): an app that stops at every
+    launch records nothing. A recording that takes the app down while it is
+    read is quarantined at the next launch, failed with its file kept and
+    Process again offered, never read again automatically; a quarantine
+    after a power loss or a force quit mid-read is the accepted false alarm
+    (one click, nothing lost).
 - **D4 The login item stays `SMAppService.mainApp` on macOS.** Confirmed. It is
   the Mac's own login item, the one the Swift app uses, and it keeps the General
   section's `requiresApproval` copy. The shell registers, reads and removes it
@@ -469,7 +475,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
 | A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
-| A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured; a durable working marker, and quarantine at launch ("Steno stopped while reading this recording") with the file kept and Process again offered; kill tests; the allocations bounded only if a real trigger exists | audio, after #263 |
+| A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured; a durable working marker, and quarantine at launch ("Steno stopped while reading this recording") with the file kept and Process again offered; kill tests; the allocations bounded only if a real trigger exists (`fix/a17-crash-loop-breaker`: a real trigger exists on Linux, none on the Mac; the marker and the quarantine built for every read, the in-process CoreML stage included; bounding the allocations waits for main's ruling) | audio, after #263 |
 | A20 | The level meter never freezes behind a sync of the files: the levels go out from a thread of their own (`steno-levels`, woken by each publish into `LevelSlot`) instead of from the writer thread, whose periodic `sync_data` (P21; `FlushFileBuffers` on Windows) froze the meter and the `recording` snapshot for as long as it took, 1.0 to 1.3 s on a hosted runner; the sync, its cadence and the files are unchanged | audio |
 
 **Per Linux target, blocking that target's listing (D6):**
@@ -1569,6 +1575,48 @@ Each lands before `0.11.0-rc.1`.
     kept and never touched again automatically, and Process again is
     offered; kill tests (a child killed or aborted with the marker written);
     the allocations bounded only if the measurement finds a real trigger.
+  - Measured (`fix/a17-crash-loop-breaker`), one process per entry point
+    (recovery's declared length, the decode, the mixdown, the pipeline's
+    asset decode) over files with one field patched: on Linux, in a 1-CPU
+    container on a host with 50 GB and 25 GB of swap, a 1 TiB `data` atom
+    in an m4a's `ilst` or a 1 TiB CAF `kuki` aborts all four, and a CAF
+    `pakt` of 2^32 packets aborts the declared length; with the address
+    space held to 8 GiB (a machine that cannot back the allocation) every
+    m4a's sample tables abort too (`stco` or `stsz` at 2^32 - 1 entries,
+    16 GiB; `stts`, 32 GiB; `stsc`, 64 GiB). On the Mac none aborts: the
+    reservation succeeds lazily and the read ends at the file's end with an
+    error. Windows, which does not overcommit, is expected to behave like
+    the limited Linux run (not measured). Every m4a carries the tables; the
+    Swift app's mixdowns carry an `ilst` (the gapless tag). Steno's own
+    readers size nothing from a field: the salvage's `CafHeader` and the
+    priming reader.
+  - Built: `steno_pipeline::ReadingMarks`. Before each read of a recording
+    in the app's process (each lane's decode for the transcript and the
+    diarizer, the mixdown, recovery's declared length of an adopted
+    recording) and, where the speech engine runs in the app (CoreML on the
+    Mac), around the job's load of the engine and each transcription, a
+    marker naming the meeting, the asset, the file and the stage is written
+    durably to `reading/` in the support directory, and removed when the
+    read returns; the orderly exit removes the open ones and marks no more.
+    The launch reads the folder beside A15's warm-up mark (`SupportFiles`):
+    each marker left quarantines its meeting, which fails with "Steno
+    stopped while reading this recording; the recording is kept.", loses a
+    retention stamp, and is logged once; the markers stay as the quarantine,
+    so the launch resume, the resumes after an install or a busy store, and
+    the adoption skip it, and an orphan whose length read stopped is listed
+    failed and unread. Process again (and `steno process --meeting`)
+    releases it and reads once more, marked again. The CLI's writing
+    commands, which hold the database lock, mark their reads and run the
+    same launch check. Kill tests: a child SIGKILLed in a decode (an abort
+    ends the process at the same point, nothing runs after) leaves its
+    marker; the next launch quarantines that meeting, keeps its files byte
+    for byte, processes the other queued meeting, and Process again makes
+    it ready; an orphan whose length read stopped is listed failed and
+    unread, then processed by Process again.
+  - Not built: bounding the allocations (part c). The measurement found a
+    real trigger, so the choice between pre-checking the box and chunk sizes
+    against the file's length and moving the probe and decode into a child
+    is main's.
   - Owner: audio. It blocks stable (D3).
 - **A20 The level meter never freezes behind a sync of the files.** Found
   by P40's check 1 (`locked_store_tests`), which failed on Windows with no
