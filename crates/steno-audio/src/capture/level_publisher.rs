@@ -1,21 +1,21 @@
 //! The level publisher: a thread of its own that hands the processing
 //! thread's levels on whenever their generation in [`LevelSlot`] changed,
 //! woken by each publish into the slot (10 Hz, every 100 ms of audio).
-//! Swift: the level republish in `Sources/StenoAudio/Writer/WriterThread.swift`.
+//! Swift: `publishLevelsIfChanged` in `Sources/StenoAudio/Writer/WriterThread.swift`.
 //!
-//! Rust only: Swift's writer thread republishes the levels between its
-//! writes, and the Rust writer did too until A20 of
+//! Rust only: Swift's writer thread does that between its writes, and the
+//! Rust writer did too until A20 of
 //! `.plans/2026-10-07-stable-promotion.md`. The Rust writer syncs the files
 //! every 5 s of audio ([`SYNC_INTERVAL_FRAMES`]), and a sync can take
-//! seconds (`FlushFileBuffers` on Windows, a slow or external disk); on
-//! the writer the meter, and the session's level stream with it, froze for
-//! that long. Here a sync holds up nothing but the files: the publisher
-//! takes no lock the writer holds, and the levels mean what they meant,
-//! at the same cadence.
+//! seconds (`FlushFileBuffers` on Windows, a slow or external disk);
+//! while the writer published them, the meter, and the session's level
+//! stream with it, froze for that long. Here a sync holds up nothing but
+//! the files: the publisher takes no lock the writer holds, and the levels
+//! mean what they meant, at the same cadence.
 //!
-//! The thread waits on the slot's [`Wake`](super::Wake), and at least every
-//! [`LevelPublisher::POLL`] in case a wake landed just before it parked,
-//! so a level reaches the handler at most that much late. `stop` raises a
+//! The thread waits on the slot's [`Wake`](crate::realtime::Wake), and at
+//! least every [`LevelPublisher::POLL`] in case a wake landed just before
+//! it parked, so a level reaches the handler at most that much late. `stop` raises a
 //! flag, wakes the thread and joins it; the thread hands on a last change
 //! before it ends, so the meter's final level is the slot's. The drop
 //! stops it too.
@@ -27,8 +27,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use super::level_meter::LevelSlot;
-use crate::capture::LaneLevels;
+use super::LaneLevels;
+use crate::realtime::LevelSlot;
 
 /// Runs on the publisher's thread with each change of the levels.
 pub type LevelsHandler = Box<dyn Fn(LaneLevels) + Send>;
@@ -41,7 +41,8 @@ pub struct LevelPublisher {
 }
 
 impl LevelPublisher {
-    /// The longest the thread sleeps without a wake: one level interval.
+    /// The longest the thread sleeps without a wake, in case one was
+    /// lost: the default level interval, 100 ms.
     pub const POLL: Duration = Duration::from_millis(100);
 
     /// Spawns the thread over `slot`; it calls `on_levels` with every

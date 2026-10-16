@@ -249,13 +249,13 @@ use super::configuration::{
     CaptureConfiguration, CaptureError, CaptureNotice, CaptureResult, CaptureState,
     CaptureStatistics, DeviceChangeReason, LaneLevel, LaneLevels,
 };
+use super::level_publisher::LevelPublisher;
 use super::start_log::{self, start_log};
 use crate::aec::SpeexEchoCanceller;
 use crate::clock::{Cancel, Clock, SystemClock};
 use crate::playback::{Playback, RecordingHold};
 use crate::realtime::{
-    FrameRelay, LaneFrameSink, LevelPublisher, LevelSlot, ProcessingConfiguration,
-    ProcessingThread, RateConverter,
+    FrameRelay, LaneFrameSink, LevelSlot, ProcessingConfiguration, ProcessingThread, RateConverter,
 };
 use crate::writer::{RecordingWriter, RecordingWriting, WriterThread};
 use crate::{FRAME_SIZE, FRAMES_PER_SECOND, SAMPLE_RATE};

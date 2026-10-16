@@ -5,9 +5,9 @@
 //! - [`aec`]: echo cancellation, Speex's MDF filter over the vendored
 //!   SpeexDSP and a passthrough, with the ERLE metrics.
 //! - [`capture`]: the [`CaptureSession`] state machine over a
-//!   [`CaptureBackend`], the configuration and results, the stream layout,
-//!   and the live backend (Core Audio on macOS, PipeWire on Linux, WASAPI
-//!   on Windows).
+//!   [`CaptureBackend`], its level publisher, the configuration and
+//!   results, the stream layout, and the live backend (Core Audio on
+//!   macOS, PipeWire on Linux, WASAPI on Windows).
 //! - [`codec`]: [`SymphoniaAudioCodec`], decoding recordings and phone
 //!   files to 16 kHz mono a block at a time (an AAC file's encoder priming
 //!   dropped), and the mixdown.

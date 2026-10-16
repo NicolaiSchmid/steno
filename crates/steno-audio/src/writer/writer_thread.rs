@@ -2,7 +2,7 @@
 //! each frame to the [`RecordingWriting`] implementation.
 //! Swift: `Sources/StenoAudio/Writer/WriterThread.swift`, which also
 //! republishes the levels; in Rust the session's
-//! [`LevelPublisher`](crate::realtime::LevelPublisher) does, on a thread of
+//! [`LevelPublisher`](crate::capture::LevelPublisher) does, on a thread of
 //! its own, so a slow sync here does not freeze the meter (A20 of
 //! `.plans/2026-10-07-stable-promotion.md`).
 //!
