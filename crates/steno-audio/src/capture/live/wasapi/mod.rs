@@ -74,12 +74,11 @@
 //! only producer, so a start that fails has written nothing. Data the
 //! engine itself lost because a capture thread was late (a packet flagged
 //! as a discontinuity, the first one aside) is counted, and what the
-//! packet's device position says was lost before it is written as zeros
-//! before it (A18 of `.plans/2026-10-07-stable-promotion.md`;
-//! [`StreamBody::fill_missed`]): on the master, as a silent packet that
-//! still pulls the follower's frames for that time, so the lanes stay
-//! aligned and the master on wall time; on the follower, into its staging
-//! ring. Both count in the sink as missed, for the session's statistics.
+//! packet's device position says was lost before it goes to the stream's
+//! body ([`StreamBody::write_missed`]; A18, the design in
+//! [`realtime::missed`](crate::realtime::missed)). At the stop each thread
+//! drains its stream once more, so a jump in what the engine still holds
+//! is read too.
 //! The count and the seconds are logged at stop, as are the follower's
 //! underrun, slip and trim counts. All of these logs are at `info`, below
 //! the shell's default filter: set `RUST_LOG=steno_audio=info` to see them.
@@ -94,7 +93,7 @@ use std::time::{Duration, Instant};
 
 use steno_core::AudioLane;
 
-use self::com::{Apartment, CaptureClient, Enumerator, LoopbackKind, ProAudioThread};
+use self::com::{Apartment, CaptureClient, ComError, Enumerator, LoopbackKind, ProAudioThread};
 use super::{AudioDeviceInfo, chosen_or_default};
 use crate::SAMPLE_RATE;
 use crate::capture::split_streams::{StreamSizes, far_end_latencies};
@@ -104,7 +103,7 @@ use crate::capture::{
     SplitStreamPlan, StreamSource,
 };
 use crate::detection::EndpointFlow;
-use crate::realtime::{FollowerLane, LaneFrameSink, PacketRouter, StreamBody};
+use crate::realtime::{FollowerLane, LaneFrameSink, MISSED_FILL_LIMIT, PacketRouter, StreamBody};
 
 /// How long `start` waits, in total, for the stream threads to open and
 /// start their streams (process loopback activation included) and for the
@@ -547,18 +546,10 @@ fn run_stream(
     if pro_audio.is_none() {
         tracing::info!("{} stream runs without MMCSS Pro Audio", source.as_str());
     }
+    let mut failed = false;
     while !stop.load(Ordering::Acquire) {
         client.wait(WAIT);
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-        let drained = client.drain(|packet, missed| {
-            if missed > 0 {
-                body.fill_missed(packet.channels, missed);
-            }
-            body.handle(packet);
-        });
-        if let Err(error) = drained {
+        if let Err(error) = drain_into(&mut client, &mut body) {
             let why = if error.is_device_invalidated() {
                 "its device went away or changed format"
             } else {
@@ -566,15 +557,21 @@ fn run_stream(
             };
             tracing::warn!("{} stream stopped, {why}: {error}", source.as_str());
             watcher.note_failure(source);
+            failed = true;
             break;
         }
+    }
+    // What the engine still holds at the stop, so a thread held up just
+    // before it is read too (the stop reads no device position).
+    if !failed {
+        let _ = drain_into(&mut client, &mut body);
     }
     let _ = client.stop();
     let discontinuities = client.discontinuities();
     if discontinuities > 0 {
         tracing::info!(
             "{} stream: {discontinuities} packets after a glitch (thread late), {:.3} s \
-             written as silence",
+             missed",
             source.as_str(),
             client.missed_frames() as f64 / SAMPLE_RATE
         );
@@ -583,6 +580,17 @@ fn run_stream(
     drop(client);
     drop(enumerator);
     drop(apartment);
+}
+
+/// Every packet the client holds into `body`, each after what was missed
+/// before it.
+fn drain_into(client: &mut CaptureClient, body: &mut StreamBody) -> Result<(), ComError> {
+    client.drain(|packet, missed| {
+        if !missed.is_none() {
+            body.write_missed(packet.channels, missed);
+        }
+        body.handle(packet);
+    })
 }
 
 /// The watcher thread: registers for endpoint notifications, takes the
@@ -846,12 +854,16 @@ impl CaptureBackend for LiveCaptureBackend {
         };
         let mic = info(StreamSource::Microphone);
         let system = info(StreamSource::System);
+        // The master can run late by its buffer, and by what it fills once
+        // it ran later still (`realtime::missed`), and keep its alignment.
         let master_buffer = info(plan.master).map_or(0, |i| i.sizes.buffer_frames);
+        let master_lateness =
+            master_buffer + (MISSED_FILL_LIMIT.as_secs_f64() * SAMPLE_RATE) as usize;
         let follower = plan.follower.and_then(|source| {
             info(source).map(|i| {
                 Arc::new(FollowerLane::for_streams(
                     i.sizes.period_frames,
-                    master_buffer,
+                    master_lateness,
                 ))
             })
         });

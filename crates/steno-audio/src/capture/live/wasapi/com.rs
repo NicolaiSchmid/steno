@@ -90,7 +90,7 @@ use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
 use crate::capture::split_streams::{BUFFER_DURATION, StreamSizes, stream_sizes};
 use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
-use crate::realtime::{CycleClock, SliceView};
+use crate::realtime::{CycleClock, Missed, SliceView};
 
 /// A failed COM or WASAPI call: which one, its `HRESULT`, the system's
 /// message for it.
@@ -505,8 +505,8 @@ pub struct CaptureClient {
     first_packet: bool,
     /// Where the delivered audio ends in device position.
     clock: CycleClock,
-    /// Frames the discontinuities lost, as the device positions tell them
-    /// (handed to the body to fill).
+    /// Frames the discontinuities lost, as the device positions tell them,
+    /// filled or not (handed to the body).
     missed_frames: usize,
 }
 
@@ -674,14 +674,15 @@ impl CaptureClient {
     /// the engine lost right before it: on a packet flagged
     /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` (the first one aside, see
     /// `first_packet`), how far its device position passed where the
-    /// delivered audio ends ([`CycleClock`]), 0 otherwise and for a position the
-    /// engine flags as invalid (`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`).
+    /// delivered audio ends ([`CycleClock`]); nothing otherwise and for a
+    /// position the engine flags as invalid
+    /// (`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`).
     /// The position counts the stream's frames, as Microsoft's
     /// documentation of `GetBuffer` describes it (not run on hardware: see
     /// the module doc of `capture::live::wasapi`). The real-time part: no
     /// allocation and no lock here on success (the `windows` error values
     /// are built only on failure); `handle` must keep it so.
-    pub fn drain(&mut self, mut handle: impl FnMut(SliceView<'_>, usize)) -> Result<(), ComError> {
+    pub fn drain(&mut self, mut handle: impl FnMut(SliceView<'_>, Missed)) -> Result<(), ComError> {
         loop {
             // SAFETY: plain call on the started capture service.
             let next = check(
@@ -720,12 +721,19 @@ impl CaptureClient {
             let count = frames as usize;
             let missed = if flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0 {
                 self.clock.reset();
-                0
+                Missed::default()
             } else {
                 let missed = self.clock.advance(position, count);
-                if discontinuity { missed } else { 0 }
+                if discontinuity {
+                    missed
+                } else {
+                    Missed::default()
+                }
             };
-            self.missed_frames += missed;
+            self.missed_frames = self
+                .missed_frames
+                .saturating_add(missed.fill)
+                .saturating_add(missed.unfilled);
             // Alignment is checked before the slice is made.
             #[allow(clippy::cast_ptr_alignment)]
             let floats = data.cast::<f32>();

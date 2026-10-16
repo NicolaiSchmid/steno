@@ -23,7 +23,7 @@ use steno_audio::capture::split_streams::{
 };
 use steno_audio::capture::{ChannelRef, SplitStreamPlan, StreamSource};
 use steno_audio::realtime::{
-    FollowerLane, LaneFrameSink, PacketRouter, SliceView, StreamBody, deliver_slices,
+    FollowerLane, LaneFrameSink, Missed, PacketRouter, SliceView, StreamBody, deliver_slices,
 };
 use steno_audio::{CaptureError, CaptureMode};
 use steno_core::AudioLane;
@@ -849,4 +849,210 @@ fn a_follower_and_a_master_on_two_threads_account_for_every_frame() {
         "pushed = delivered + lost + queued + trimmed before the first pull"
     );
     assert_eq!(sink.dropped_samples().get(&AudioLane::Mic), None);
+}
+
+// Missed audio (A18 of `.plans/2026-10-07-stable-promotion.md`)
+
+/// 10 ms periods at 48 kHz.
+const PERIOD: usize = 480;
+/// The engine buffer: 100 ms, ten periods.
+const ENGINE_PERIODS: usize = 10;
+
+/// What [`run_outage`] saw in the sink.
+#[derive(Debug)]
+struct Outage {
+    /// The microphone's frame less the system's at each sink position that
+    /// holds both (the lag the echo canceller expects is the target, 960),
+    /// once before the outage and at every change after it, with the period.
+    lags: Vec<(usize, i64)>,
+    mic_missed: usize,
+    system_missed: usize,
+    system_dropped: usize,
+    slipped: usize,
+}
+
+/// The two stream bodies as the WASAPI backend builds them (the follower
+/// behind a master that runs late by its 100 ms buffer and by what it
+/// fills), over 400 periods in which source frame `f` of either stream is
+/// `f + 1`. From period 50 the follower's thread is out for
+/// `follower_out` periods and the master's for `master_out` (0: never);
+/// each resumes with the ten oldest packets the engine kept, then reports
+/// what its device position says was lost before the next one, as
+/// `run_stream` does.
+fn run_outage(follower_out: usize, master_out: usize) -> Outage {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let plan = SplitStreamPlan::new(&lanes).unwrap();
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let follower = Arc::new(FollowerLane::for_streams(PERIOD, 4_800 + 48_000));
+    let mut master = StreamBody::Master {
+        router: PacketRouter::new(
+            plan.layout.sources.clone(),
+            Some(Arc::clone(&follower)),
+            4_800,
+        ),
+        sink: Arc::clone(&sink),
+    };
+    let mut staging = StreamBody::follower(Arc::clone(&follower), 4_800);
+    let periods = 400;
+    let mic: Vec<f32> = (0..periods * PERIOD).map(|i| (i + 1) as f32).collect();
+    let tap: Vec<f32> = (0..periods * PERIOD)
+        .flat_map(|i| [(i + 1) as f32, (i + 1) as f32])
+        .collect();
+    let tap_packet = |t: usize| SliceView {
+        frames: PERIOD,
+        channels: 2,
+        samples: Some(&tap[2 * t * PERIOD..2 * (t + 1) * PERIOD]),
+    };
+    let mic_packet = |t: usize| SliceView {
+        frames: PERIOD,
+        channels: 1,
+        samples: Some(&mic[t * PERIOD..(t + 1) * PERIOD]),
+    };
+    let lost = |out: usize| Missed {
+        fill: out.saturating_sub(ENGINE_PERIODS) * PERIOD,
+        unfilled: 0,
+    };
+    let start = 50;
+    let (mut mic_out, mut system_out) = (Vec::new(), Vec::new());
+    for t in 0..periods {
+        let follower_back = start + follower_out;
+        if follower_out == 0 || t < start || t > follower_back {
+            staging.handle(tap_packet(t));
+        } else if t == follower_back {
+            for kept in start..start + ENGINE_PERIODS.min(follower_out) {
+                staging.handle(tap_packet(kept));
+            }
+            staging.write_missed(2, lost(follower_out));
+            staging.handle(tap_packet(t));
+        }
+        let master_back = start + master_out;
+        if master_out == 0 || t < start || t > master_back {
+            master.handle(mic_packet(t));
+        } else if t == master_back {
+            for kept in start..start + ENGINE_PERIODS.min(master_out) {
+                master.handle(mic_packet(kept));
+            }
+            master.write_missed(1, lost(master_out));
+            master.handle(mic_packet(t));
+        }
+        let queued = sink.available_to_read();
+        let (mut a, mut b) = (vec![0.0f32; queued], vec![0.0f32; queued]);
+        assert!(sink.ring(0).read(&mut a) && sink.ring(1).read(&mut b));
+        mic_out.extend(a);
+        system_out.extend(b);
+    }
+    let lag = |p: usize| {
+        let (m, s) = (mic_out[p], system_out[p]);
+        (m != 0.0 && s != 0.0).then(|| m as i64 - s as i64)
+    };
+    let mut lags = vec![(40, lag(40 * PERIOD).unwrap())];
+    for position in start * PERIOD..mic_out.len() {
+        if let Some(now) = lag(position)
+            && now != lags.last().unwrap().1
+        {
+            lags.push((position / PERIOD, now));
+        }
+    }
+    let missed = sink.missed_samples();
+    Outage {
+        lags,
+        mic_missed: missed.get(&AudioLane::Mic).copied().unwrap_or(0),
+        system_missed: missed.get(&AudioLane::System).copied().unwrap_or(0),
+        system_dropped: sink
+            .dropped_samples()
+            .get(&AudioLane::System)
+            .copied()
+            .unwrap_or(0),
+        slipped: follower.slipped_frames(),
+    }
+}
+
+/// Both threads out for 200 and 300 ms, as a stopped process is: the
+/// master fills its lost half, which pulls the system audio queued for
+/// that time; the follower only counts its own, which the master's pulls
+/// pad with zeros. The system lane stays the target behind the
+/// microphone, nothing slips and nothing is counted twice.
+#[test]
+fn a_stall_of_both_threads_keeps_the_lanes_aligned() {
+    for out in [20, 30] {
+        let outage = run_outage(out, out);
+        let lost = (out - ENGINE_PERIODS) * PERIOD;
+        assert_eq!(outage.lags, [(40, 960)], "{out} periods: {outage:?}");
+        assert_eq!(outage.slipped, 0, "{outage:?}");
+        assert_eq!(outage.system_dropped, 0, "{outage:?}");
+        assert_eq!(outage.mic_missed, lost, "{outage:?}");
+        assert_eq!(outage.system_missed, lost, "{outage:?}");
+    }
+}
+
+/// The master's thread alone out for 200 and 300 ms: the system audio
+/// queued meanwhile rises past the old ceiling (its buffer above the
+/// high-water mark), and the kept packets and the fill pull it all, so
+/// nothing slips and the lanes stay aligned.
+#[test]
+fn a_stall_of_the_master_alone_keeps_the_lanes_aligned() {
+    for out in [20, 30] {
+        let outage = run_outage(0, out);
+        assert_eq!(outage.lags, [(40, 960)], "{out} periods: {outage:?}");
+        assert_eq!(outage.slipped, 0, "{outage:?}");
+        assert_eq!(outage.system_dropped, 0, "{outage:?}");
+        assert_eq!(outage.mic_missed, (out - ENGINE_PERIODS) * PERIOD);
+        assert_eq!(outage.system_missed, 0);
+    }
+}
+
+/// A jump the master's thread missed too long to fill counts on its lane
+/// and drops the system audio queued for that time, counted on the system
+/// lane, so the follower's lane loses the same span; the target stays
+/// queued.
+#[test]
+fn an_unfilled_jump_of_the_master_drops_the_follower_audio_of_that_time() {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let plan = SplitStreamPlan::new(&lanes).unwrap();
+    let sink = LaneFrameSink::new(&lanes);
+    let follower = Arc::new(FollowerLane::for_streams(PERIOD, 4_800 + 48_000));
+    let mut router = PacketRouter::new(
+        plan.layout.sources.clone(),
+        Some(Arc::clone(&follower)),
+        4_800,
+    );
+    let tap = vec![0.5f32; 2 * PERIOD];
+    let mic = vec![0.25f32; PERIOD];
+    let stereo = SliceView {
+        frames: PERIOD,
+        channels: 2,
+        samples: Some(&tap),
+    };
+    let mono = SliceView {
+        frames: PERIOD,
+        channels: 1,
+        samples: Some(&mic),
+    };
+    let mut scratch = vec![0.0f32; PERIOD];
+    for _ in 0..3 {
+        follower.push(stereo, &mut scratch);
+    }
+    router.route(mono, &sink);
+    for _ in 0..100 {
+        follower.push(stereo, &mut scratch);
+    }
+    assert_eq!(follower.queued(), 960 + 100 * PERIOD);
+    router.write_missed(
+        1,
+        Missed {
+            fill: 0,
+            unfilled: 100 * PERIOD,
+        },
+        &sink,
+    );
+    assert_eq!(follower.queued(), 960, "back to the target");
+    assert_eq!(
+        sink.unfilled_samples(),
+        std::collections::BTreeMap::from([
+            (AudioLane::Mic, 100 * PERIOD),
+            (AudioLane::System, 100 * PERIOD)
+        ])
+    );
+    assert_eq!(sink.available_to_read(), PERIOD, "nothing written for it");
+    assert_eq!(follower.slipped_frames(), 0, "not a slip");
 }
