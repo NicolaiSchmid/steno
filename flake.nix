@@ -57,8 +57,8 @@
       # invalidate the signature), but the app sees that it runs from a
       # folder Nix fills (the store, or the copy nix-darwin or home-manager
       # makes) and never offers an update. The note tells a Nix user how
-      # updates arrive: moving `release` above, or the flake input, and
-      # rebuilding.
+      # updates arrive: updating the flake input, or bumping `release`
+      # above, and rebuilding.
       postInstall = ''
         mkdir -p $out/share/doc/steno
         cat > $out/share/doc/steno/UPDATES.md <<EOF
@@ -66,9 +66,11 @@
 
         This Steno.app comes from the Nix store, and Nix delivers its
         updates. Steno never offers one itself: Settings, under General,
-        says "Updates come from your package manager." Update it by bumping
-        \`release.version\` and \`release.hash\` in flake.nix (or by
-        updating the flake input that pins this repository) and rebuilding.
+        says "Updates come from your package manager." Update it by updating
+        the flake input that pins this repository
+        (\`nix flake update <input>\`) and rebuilding, or, in a checkout of
+        this repository, by bumping \`release.version\` and
+        \`release.hash\` in flake.nix.
 
         Homebrew users (\`brew install nicolaischmid/tap/steno\`) keep the
         in-app updater.

@@ -520,11 +520,14 @@ login itself. Environment variables tell the app (stable plan X5,
 
 Steno also leaves updates to the package manager, whatever
 `STENO_DISTRIBUTION` says, when it runs from a folder Nix fills: the Nix
-store (`/nix/store`, also through a link), nix-darwin's
-`/Applications/Nix Apps` or home-manager's
-`~/Applications/Home Manager Apps`. The flake's Mac bundle is installed
-this way. It is unpacked from the release image, so no build sets the
-variable. To update it, move the flake's pin and rebuild.
+store (`/nix/store`, or a link into it), nix-darwin's
+`/Applications/Nix Apps` or home-manager's default
+`~/Applications/Home Manager Apps`. A copy in a folder set with
+home-manager's `targets.darwin.copyApps.directory` still offers updates,
+and the next switch undoes them. The flake's Mac bundle is installed this
+way: it is unpacked from the release image, so no build sets the
+variable. To update it, update the flake input that pins Steno
+(`nix flake update <input>`) and rebuild.
 
 With `STENO_LOGIN_ITEM=managed`, the one entry the app removes is one an
 earlier build wrote: its `Exec` starts a program in `/nix/store`, or
@@ -1170,9 +1173,10 @@ write, by itself, since it asks for a password or for consent: it offers
 the downloaded update instead. The gate is
 `steno_services::updates::IdleGate`.
 
-With `STENO_DISTRIBUTION` set to `aur` or `nix` the schedule does not
-run, and a check makes no request and says the package manager delivers
-the updates.
+With `STENO_DISTRIBUTION` set to `aur` or `nix`, or Steno running from a
+folder Nix fills (see Packaged installs), the schedule does not run, and
+a check makes no request and says the package manager delivers the
+updates.
 
 To run a debug binary against the embedded bundle instead of the dev server
 (what the smoke does), drop the dev URL through Tauri's own configuration
