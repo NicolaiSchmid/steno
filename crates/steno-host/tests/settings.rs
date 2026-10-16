@@ -2308,6 +2308,73 @@ fn the_stored_vault_chosen_again_while_a_check_runs_stays_stored() {
     );
 }
 
+/// Two overlapping vault saves whose checks answer in the order they began:
+/// the earlier one stores nothing, the later one stores. Rust only.
+#[test]
+fn the_later_vault_save_stores_when_the_earlier_check_answers_first() {
+    let harness = Harness::builder().build();
+    let mut model = steno_host::settings::ObsidianSettingsViewModel::default();
+    model.load(&harness.store);
+    model.set_enabled(true);
+    let first = model
+        .choose_vault(std::path::Path::new("/Vaults/First"))
+        .unwrap();
+    let second = model
+        .choose_vault(std::path::Path::new("/Vaults/Second"))
+        .unwrap();
+    model.finish_save(first, Ok(()), &harness.store);
+    assert_eq!(
+        harness.store.settings().unwrap().obsidian,
+        None,
+        "the earlier save stores nothing"
+    );
+    model.finish_save(second, Ok(()), &harness.store);
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Vaults/Second"
+    );
+    assert!(model.saved);
+}
+
+/// A refused vault check ends the save: a later write by another window
+/// or process loads into the form again.
+#[test]
+fn after_a_refused_check_a_store_change_reloads_the_form() {
+    let harness = Harness::builder()
+        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
+        .build();
+    harness
+        .fakes
+        .export_validator
+        .fail_validation(Some("The Obsidian vault at /Vaults/Stored does not exist."));
+    include_audio(&harness.host, true);
+    assert!(
+        !harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .include_audio,
+        "the refused save stored nothing"
+    );
+    put_setting_row(
+        &harness.store,
+        "obsidian",
+        r#"{"includeAudio":false,"peopleFolder":"Team","vaultPath":"/Vaults/Stored"}"#,
+    );
+    harness.host.store_changed();
+    let export = harness.snapshot(BridgeTopic::SettingsExport);
+    assert_eq!(export["peopleFolder"], "Team");
+    assert_eq!(export["includeAudio"], false);
+}
+
 /// The unknown fields may belong to the vault, so choosing another vault
 /// stores the new one without them.
 #[test]
