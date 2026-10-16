@@ -306,9 +306,10 @@ enum Refusal {
     DatabaseHeld,
     /// A stored setting cannot be read, or the settings cannot be read
     /// together (`steno_services::BuildError::Setting`). The dialog names
-    /// the setting's key and the database, never its value, and says to
-    /// fix or remove it there, since opening Steno again does not help.
-    /// The app has changed nothing.
+    /// the setting's key when one setting is at fault, and the database,
+    /// never a value. It says to fix or remove that setting there, or to
+    /// check the settings there when they cannot be read together, since
+    /// opening Steno again does not help. The app has changed nothing.
     UnreadableSetting,
     /// The host could not be built for another reason: the database cannot
     /// be opened, migrated or read, or the support directory cannot be
