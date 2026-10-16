@@ -5591,16 +5591,17 @@ impl CaptureBackend for WakesBeforeTheStop {
 /// for longer than `STALL_TIMEOUT`, A18 of
 /// `.plans/2026-10-07-stable-promotion.md`): the rebuild's gap, which
 /// writes silence from the last frame the watch thread saw, counts that
-/// time, and once it is written at most its length is taken back from the
-/// late count, so the time counts once (the session's module doc, "Missed
-/// audio"). A jump counted before the stall still counts, and so does
-/// what the late count holds past the gap.
+/// time, and once it is written the late count is taken back, at most the
+/// gap's length of it, so the time counts once (the session's module doc,
+/// "Missed audio"). A jump counted before the stall still counts. The late
+/// count of 2 s is shorter than the 2.1 s gap, which also runs through the
+/// restart; one longer than its gap is tested past `MAXIMUM_GAP` below.
 #[test]
 fn a_stall_counted_by_its_thread_before_the_rebuilds_stop_counts_once() {
     let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(ManualClock::new());
     let inner = Arc::new(SyntheticCaptureBackend::new(stalling(1.0, 0.5)));
-    let backend = Arc::new(WakesBeforeTheStop::new(&inner, 4_800, 120_000));
+    let backend = Arc::new(WakesBeforeTheStop::new(&inner, 4_800, 96_000));
     let session = in_person_session(directory.path(), backend, clock.clone());
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
@@ -5621,8 +5622,8 @@ fn a_stall_counted_by_its_thread_before_the_rebuilds_stop_counts_once() {
     assert_eq!(result.statistics.gap_seconds, gap_seconds);
     assert_eq!(gap_seconds, 2.1);
     assert_eq!(
-        result.statistics.unfilled_seconds, 0.5,
-        "the jump before the stall and the 0.4 s of the 2.5 s past the gap, not the stall again"
+        result.statistics.unfilled_seconds, 0.1,
+        "the jump before the stall, not the stall again"
     );
 }
 
