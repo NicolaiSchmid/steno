@@ -1870,10 +1870,10 @@ Each lands before `0.11.0-rc.1`.
     packet the follower queued for that moment, PipeWire's `stop()` without
     its reading or reading after a reported change, the stop's `warn` line
     removed, a rebuild that counts a late unfilled jump on top of its gap,
-    one that takes it back when no gap was written or beyond the gap's
-    length, or at a device change's rebuild, and device positions filled
-    before they are measured, in a unit they were not measured in, or with
-    no mix format.
+    one that takes it back when no gap was written, beyond the gap's
+    length, with the jump counted before the stall, or at a device change's
+    rebuild, and device positions filled before they are measured, in a unit
+    they were not measured in, or with no mix format.
   - **Left.** WASAPI's fill is unit-tested and compiled in CI, not
     provoked on hardware (no Windows machine). Microsoft leaves the device
     position's unit open under `AUTOCONVERTPCM`: the 48 kHz frames the
