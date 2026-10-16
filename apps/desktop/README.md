@@ -924,8 +924,8 @@ would otherwise wait unannounced (plan `.plans/2026-10-07-stable-promotion.md`,
   a new name in the stored vault and removes it at once (a probe a crash
   left behind is removed at the next check, and nothing else in the vault
   is touched), so macOS asks while the page shows. The row says Allowed;
-  after a Don't Allow, where to turn Steno on, with Open System Settings
-  and Check again, which writes again before the page moves on; for a
+  after a Don't Allow, that the folder's switch below Steno under Files &
+  Folders turns it on, with Open System Settings and Check again, which writes again before the page moves on; for a
   vault that is not there, to choose it again. No vault, no check; off the
   Mac nothing is checked, since no folder prompt exists there.
 - **Local Network.** macOS asks once, when the listener first advertises
@@ -1050,12 +1050,14 @@ Swift app, so install it elsewhere (`~/Applications`) to keep both.
 (`SUPublicEDKey`, from `apps/macos/project.yml`), inert here: Sparkle
 installs no bundle without a public key, and the Swift app's last update
 installs this one (`.plans/2026-10-07-stable-promotion.md`, S6).
-The folder and volume purpose strings (`NSDocumentsFolderUsageDescription`,
-its Desktop and Downloads siblings, `NSRemovableVolumesUsageDescription`
-and `NSNetworkVolumesUsageDescription`) are this app's own, for a vault in
-one of those places. `check-bundle.sh` checks the key, the bundle id and
-every purpose string in the built `.app`,
-and Rust CI runs that check over stub bundles (`check-bundle.test.sh`).
+The folder, volume and file provider purpose strings
+(`NSDocumentsFolderUsageDescription`, its Desktop and Downloads siblings,
+`NSRemovableVolumesUsageDescription`, `NSNetworkVolumesUsageDescription`
+and `NSFileProviderDomainUsageDescription`, for iCloud Drive and other
+cloud folders) are this app's own, for a vault in one of those places.
+`check-bundle.sh` checks the key, the bundle id and every purpose string
+in the built `.app`, and Rust CI runs that check over stub bundles
+(`check-bundle.test.sh`).
 
 Every release bundle carries `steno-speech-sidecar` beside the app (see
 "The speech sidecar" under Release), so a `.deb`, AppImage, `.msi` or NSIS

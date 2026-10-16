@@ -204,6 +204,7 @@ usage_keys=(
   NSDownloadsFolderUsageDescription
   NSRemovableVolumesUsageDescription
   NSNetworkVolumesUsageDescription
+  NSFileProviderDomainUsageDescription
 )
 
 # plist_value <file> <key>: the value under the top-level <key> of a plist

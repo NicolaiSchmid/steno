@@ -160,7 +160,7 @@ describe("PermissionsPage", () => {
 		const row = screen.getByTestId("onboarding-vault-access");
 		expect(row).toHaveTextContent("Obsidian vault");
 		expect(row).toHaveTextContent(
-			"Steno cannot write your meeting notes to Work Vault. Turn on Steno under Files and Folders in System Settings, then choose Check again.",
+			"Steno cannot write your meeting notes to Work Vault. In System Settings, under Files & Folders, turn on the folder's switch below Steno, then choose Check again.",
 		);
 		expect(
 			screen.getByTestId("onboarding-vault-access-message"),

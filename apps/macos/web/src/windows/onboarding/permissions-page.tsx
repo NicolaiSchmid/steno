@@ -132,7 +132,8 @@ function SpeechModelsRow({ models }: { models: SpeechModels }) {
  * The vault row (Tauri shell, Mac only): Steno wrote to the stored vault
  * once, so macOS asked for a protected folder while this page shows. A
  * folder that refused the write says how to allow it, with Open System
- * Settings (Files and Folders) and Check again; a vault that cannot be
+ * Settings (Files & Folders, where each folder has its own switch below
+ * the app) and Check again; a vault that cannot be
  * used otherwise (not there) says to choose it again, with Check again.
  */
 function VaultAccessRow({ vault }: { vault: VaultAccess }) {
@@ -168,7 +169,7 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 		case "refused":
 			icon = <XCircleIcon aria-hidden="true" />;
 			tone = "warning";
-			description = `Steno cannot write your meeting notes to ${vault.name}. Turn on Steno under Files and Folders in ${words.systemSettings}, then choose Check again.`;
+			description = `Steno cannot write your meeting notes to ${vault.name}. In ${words.systemSettings}, under Files & Folders, turn on the folder's switch below Steno, then choose Check again.`;
 			control = (
 				<>
 					<Button
