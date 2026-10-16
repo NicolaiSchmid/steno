@@ -230,9 +230,10 @@ impl RecorderStatus {
 /// The one recorder (WP5 wires the capture session behind it). A change
 /// reaches the host through
 /// [`Host::recorder_changed`](crate::Host::recorder_changed), which only
-/// wakes the `recording` feed, never while holding a lock `status` takes:
-/// the hook the services wire also reads `status`, and the host's reload
-/// pass calls it with the host's lock held (see the module doc). The
+/// wakes the `recording` feed. The recorder never calls it while holding
+/// a lock `status` takes: the hook the services wire also reads `status`,
+/// and the host's reload pass calls it with the host's lock held (see the
+/// module doc). The
 /// commands are called with no host lock held, so they may report their
 /// change from inside, on the calling thread, as `steno_services`'
 /// capture recorder does. The fake runs the

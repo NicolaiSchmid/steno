@@ -4516,10 +4516,10 @@ mod tests {
     /// then `Idle`, and each asks the reload owner for one pass; the
     /// stopped meeting's row, out of `recording`, reaches the list within
     /// [`LIVE`] of the lock's release, which lets the save land, from the
-    /// owner's forced pass, not from the
-    /// stop's thread. The save waits on a lock another connection holds,
-    /// so `Stopping` lasts until the test lets it go; the owner ticks once
-    /// an hour, so only the requests reload.
+    /// owner's forced pass, not from the stop's thread. The save waits on
+    /// a lock another connection holds, so `Stopping` lasts until the test
+    /// lets it go; the owner ticks once an hour, so only the requests
+    /// reload.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_stop_asks_for_a_reload_per_move() {
         let harness = harness(&[]);

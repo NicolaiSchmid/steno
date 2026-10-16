@@ -360,7 +360,7 @@ mod tests {
     /// The tray's Stop, on a stand-in main thread: the host publishes
     /// `Stopping` and its save then waits. The `recording` topic is
     /// throttled to 20 Hz and levels publish it all through a recording,
-    /// so `Stopping` goes out from the host's flush thread, here a thread
+    /// so `Stopping` goes out from the host's `recording` feed, a thread
     /// of its own. The snapshot reaches the main thread through the window
     /// sink and the tray's Record row reads "Stopping…" while the save
     /// still waits, since the menu event returned at once and left the

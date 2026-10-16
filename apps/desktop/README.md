@@ -198,10 +198,11 @@ nothing tells whether the manager moved it, `the speech sidecar stays
 where the user manager put it`.
 
 Snapshots reach the windows, the tray and the panels from the main thread
-(`WindowSink` in `host.rs`): the host emits under its `publishing` lock,
-the main thread can be waiting for a thread that holds it (a Stop from the
-tray joins the recorder's level thread, which publishes), and the tray's
-setters wait for the main thread when called from another.
+(`WindowSink` in `host.rs`): the host emits under its `publishing` lock
+(from a command or a reload pass) and the `recording` feed from a thread
+of its own, and the tray's setters wait for the main thread when called
+from another, so a snapshot delivered on the emitting thread would hold
+the lock, or the feed, until the main thread is free.
 
 The tray menu is the Swift menu bar popover's controls: Record (Stop
 recording while recording, with the recorder's words between), Record in

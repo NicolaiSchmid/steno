@@ -428,14 +428,17 @@ impl Store {
     /// has: its one connection's `data_version` does not move for its own
     /// commits. `PRAGMA data_version` on this handle's reader moves when
     /// any other connection commits, the other processes' included (the
-    /// Swift app, the CLI), and the writer's own too. The hook runs just
-    /// before a commit is visible, so a mark read in between can count a
-    /// commit whose rows a read still misses; the reader's `data_version`
-    /// moves only once it is visible, so the next mark differs again. In
-    /// memory, a read waits for the commit on the one connection. A
-    /// commit that changed nothing, or failed after the hook, moves it
-    /// too. Takes this handle's reader for one pragma, never the writer.
-    /// Rust only: the Swift app followed the database through GRDB's
+    /// Swift app, the CLI), and the writer's own too.
+    ///
+    /// The hook runs just before a commit is visible, so a mark read in
+    /// between can count a commit whose rows a read still misses; the
+    /// reader's `data_version` moves only once it is visible, so the next
+    /// mark differs again. In memory, a read waits for the commit on the
+    /// one connection. A commit that changed nothing, or failed after the
+    /// hook, moves it too.
+    ///
+    /// Takes this handle's reader for one pragma, never the writer. Rust
+    /// only: the Swift app followed the database through GRDB's
     /// observation.
     ///
     /// ```

@@ -56,10 +56,10 @@
 //! stored settings only when a reload was asked for or the store's change
 //! mark ([`Store::change_mark`]) moved: an idle app reloads nothing. The
 //! event follower asks after it applied an event, the `recording` feed
-//! when the recorder's state or meeting moved. [`Host::store_changed`] runs a
-//! forced pass on the caller's thread, for the launch, the reread after a
-//! keyring answer and the tests. What the mark does not see shows at the
-//! next forced pass: a recording's files removed outside Steno, a default
+//! when the recorder's state or meeting moved. [`Host::store_changed`]
+//! runs a forced pass on the caller's thread, for the launch and the
+//! tests. What the mark does not see shows at the next forced pass: a
+//! recording's files removed outside Steno, a default
 //! title that turns from a weekday into a date.
 //!
 //! # Threads
@@ -72,12 +72,11 @@
 //! [`Host::reload_pass`]) call from their runtime's blocking pool, so a
 //! reload that waits never holds a runtime worker, and so do the update
 //! schedule's `Host::updates_changed` and the gated handover's
-//! `Host::phones_changed`, which wait for the
-//! view-model lock a settings save may hold through its busy wait. Under
-//! the lock the host reads on a reader of its own
-//! ([`Store::with_own_reader`]), so no read there waits for a write. One
-//! exemption: the
-//! launch (`steno_services::App::launch`, with
+//! `Host::phones_changed`, which wait for the view-model lock a settings
+//! save may hold through its busy wait. Under the lock the host reads on
+//! a reader of its own ([`Store::with_own_reader`]), so no read there
+//! waits for a write. One exemption: the launch
+//! (`steno_services::App::launch`, with
 //! [`Host::should_open_onboarding`] before it) runs on the shell's main
 //! thread during setup, once the main window is built and before the
 //! event loop runs. It reloads once ([`Host::store_changed`]), and there
@@ -89,8 +88,9 @@
 //! Locks are taken in one order (decision 3 of
 //! `.plans/2026-10-12-store-off-the-workers.md`): the publishing mutex,
 //! then the view models, then the store's writer, then a reader (the
-//! shared one, then the host's; held only inside its closure, with
-//! nothing taken under it but by the checkpoint), and last the leaves,
+//! shared one, then the host's; held only inside its closure; nothing is
+//! taken under a reader, except by the checkpoint, which takes both after
+//! the writer), and last the leaves,
 //! each taken alone and briefly: the sink slot, the recorder's status
 //! lock, the secret store's read in `reload_sections`. The rules it needs:
 //!
@@ -312,7 +312,8 @@ struct Shared {
 }
 
 /// The reload owner's inbox: a forced pass is owed while `forced` is set,
-/// and `wake` wakes the owner for it. Takes no lock, so anything may ask.
+/// and `wake` wakes the owner for it. Takes no lock of the host's, so
+/// anything may ask.
 #[derive(Default)]
 struct Reloads {
     forced: AtomicBool,
@@ -403,12 +404,13 @@ impl Drop for Shared {
 /// }
 /// assert_eq!(published(), 12);
 ///
-/// // A write from elsewhere (the pipeline, another process): the host
-/// // reloads what Swift followed through observation and republishes.
+/// // A write from elsewhere (the pipeline, another process) moves the
+/// // store's change mark: the reload owner's next pass reloads what Swift
+/// // followed through observation and republishes.
 /// let mut settings = store.settings()?;
 /// settings.meeting_detection_enabled = false;
 /// store.save_settings(&settings)?;
-/// host.store_changed();
+/// host.reload_pass();
 /// assert_eq!(
 ///     host.snapshot(BridgeTopic::SettingsGeneral).unwrap()["detectionEnabled"],
 ///     false
@@ -739,11 +741,11 @@ impl Host {
 
     /// The topic's snapshot as the view models stand, with the publish
     /// hooks the Swift bridges ran before building (the list's fill and
-    /// the detail swap). `None` for a topic the host does not publish;
-    /// `null` for `meeting.detail` without a selection. Those hooks may
-    /// change state (a pending selection lands, the detail model swaps)
-    /// and queue topics, which go out with the next publish, not from
-    /// here.
+    /// the detail swap). `None` for a topic the host does not send; `null`
+    /// for `meeting.detail` without a selection. Those hooks may change
+    /// state (a pending selection lands, the detail model swaps) and queue
+    /// topics, which go out with the next publish, not from here.
+    ///
     /// `recording` is read from the recorder directly, with no lock of the
     /// host's taken, as its feed reads it.
     pub fn snapshot(&self, topic: BridgeTopic) -> Option<Value> {
@@ -960,15 +962,15 @@ impl Host {
     /// process saved): a forced pass ([`Self::reload_pass`]) on the
     /// caller's thread, which reloads what Swift followed through
     /// observation and republishes it, whatever the change mark says. The
-    /// launch's first load and its reconcile, the reread after a keyring
-    /// answer and the tests call it; everything else asks the reload owner
-    /// ([`Self::request_reload`]).
+    /// launch's first load and its reconcile and the tests call it;
+    /// everything else asks the reload owner ([`Self::request_reload`]).
     pub fn store_changed(&self) {
         self.pass(true);
     }
 
     /// Asks the reload owner (the services' poll task) for a forced pass:
-    /// sets a flag and wakes it, and takes no lock, so any thread may ask,
+    /// sets a flag and wakes it, and takes no lock of the host's, so any
+    /// thread may ask,
     /// with any lock held. Requests made while a pass runs fold into one
     /// more pass. The event follower asks after it applied an event, the
     /// recording feed when the recorder's state or meeting moved.
