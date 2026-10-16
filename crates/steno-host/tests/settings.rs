@@ -2242,9 +2242,8 @@ fn the_waiting_reasons_are_plain_sentences() {
          computer's phone pairing. Check that folder's permissions and that the disk has space, \
          then choose Try again."
     );
-    // Some phones paired before the pairing changed: the Swift app's words
-    // up to what to do, and Pair again, the button below, as it reads, is
-    // what reconnects them.
+    // Some phones paired before the pairing changed: what to do, and Pair
+    // again, the button below, as it reads, is what reconnects them.
     assert_eq!(
         waiting_message(PhoneWaitingReason::PartlyReplaced, Platform::Macos),
         "Some of your phones were paired before this Mac's pairing changed and can't connect. \
