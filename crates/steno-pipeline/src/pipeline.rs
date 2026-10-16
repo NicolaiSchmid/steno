@@ -2059,31 +2059,43 @@ impl ProcessingPipeline {
     /// A speech engine that loaded clears a [`WarmUpMark`] left over, so
     /// recordings warm up again. Rust only: Swift fails the meeting.
     async fn warm_up_for_job(&self, meeting_id: Uuid) -> Result<()> {
-        let mark = &self.inner.dependencies.warm_up_mark;
         match self.warm_up().await {
             Ok(()) => {
-                mark.loaded();
+                self.speech_engine_loaded().await;
                 Ok(())
             }
             // The speech engine loaded before the diarizer failed.
             Err(failure) if failure.stage == PipelineStage::Diarize => {
-                mark.loaded();
+                self.speech_engine_loaded().await;
                 self.carry_on_after(&failure, meeting_id)
             }
             failed => failed,
         }
     }
 
+    /// Clears a [`WarmUpMark`] left over, off the workers: its removal
+    /// syncs the disk.
+    async fn speech_engine_loaded(&self) {
+        let mark = Arc::clone(&self.inner.dependencies.warm_up_mark);
+        let _ = off_the_workers(move || mark.speech_engine_loaded()).await;
+    }
+
     /// [`warm_up`](Self::warm_up) for a recording that just started, behind
     /// the [`WarmUpMark`]: marked on disk while it runs, and skipped (`Ok`
-    /// at once) while a mark a warm-up left when it ended with the app turns
-    /// it off. The recorder calls it for a speech engine in this process
-    /// (`CoreML` on the Mac). Rust only: Swift warmed up every time.
+    /// at once) while a mark left over from a warm-up that ended with the
+    /// app turns it off. The mark is written and removed off the workers,
+    /// since both sync the disk. The recorder calls it for a speech engine
+    /// in this process (`CoreML` on the Mac). Rust only: Swift warmed up
+    /// every time.
     pub async fn warm_up_while_recording(&self) -> Result<()> {
-        let Some(_warming) = self.inner.dependencies.warm_up_mark.begin() else {
+        let mark = Arc::clone(&self.inner.dependencies.warm_up_mark);
+        // Off while skipping, or with the runtime shutting down.
+        let Ok(Some(warming)) = off_the_workers(move || mark.begin()).await else {
             return Ok(());
         };
-        self.warm_up().await
+        let warmed = self.warm_up().await;
+        let _ = off_the_workers(move || drop(warming)).await;
+        warmed
     }
 
     /// [`warm_up`](Self::warm_up) for the diarizer alone, for a speech

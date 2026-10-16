@@ -26,7 +26,7 @@ use steno_pipeline::pipeline::{diarized_lane_after_transcription, tap_carried_no
 use steno_pipeline::{
     ClipProbe, ClipStep, ExportRetries, InFlight, LaneMerger, MeetingEventBus, MonotonicClock,
     PipelineDependencies, ProcessingPipeline, QuitLatch, ReprocessError, RetentionSweep,
-    SharedSpeechEngine, StageRates,
+    SharedSpeechEngine, StageRates, WarmUpMark,
 };
 use uuid::Uuid;
 
@@ -1151,12 +1151,18 @@ impl steno_core::Diarizer for UnloadableDiarizer {
 
 /// A diarizer that does not load fails neither the warm-up nor the job:
 /// the lanes are transcribed, the meeting is ready with one unknown room
-/// speaker, and the engine is released after the last lane as usual.
+/// speaker, and the engine is released after the last lane as usual. The
+/// speech engine loaded, so a warm-up mark left over is cleared too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_whose_diarizer_does_not_load_keeps_its_transcript() {
     let world = world(false, None, AudioRetention::KeepForever);
+    let support = tempfile::tempdir().unwrap();
+    let left_over = support.path().join(WarmUpMark::FILE_NAME);
+    std::fs::write(&left_over, b"1\n").unwrap();
+    let mark = Arc::new(WarmUpMark::at_launch(support.path()));
+    assert!(mark.skipping());
     let engine = Arc::new(FakeSpeechEngine::default());
-    let mut dependencies = with_engine(&world, engine.clone());
+    let mut dependencies = with_engine(&world, engine.clone()).with_warm_up_mark(mark.clone());
     dependencies.diarizer = Arc::new(UnloadableDiarizer);
     let pipeline = ProcessingPipeline::new(dependencies);
     let meeting = enqueue_call(&world, &pipeline);
@@ -1166,6 +1172,8 @@ async fn a_job_whose_diarizer_does_not_load_keeps_its_transcript() {
     assert_eq!(engine.preparations.count(), 1);
     assert_eq!(engine.transcriptions.count(), 2);
     assert_eq!(engine.releases.count(), 1);
+    assert!(!mark.skipping(), "recordings warm up again");
+    assert!(!left_over.exists());
 }
 
 /// A speech engine whose models cannot load; it logs its releases.

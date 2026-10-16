@@ -153,8 +153,12 @@ fn copy_durably_with(syncs: &dyn Syncs, source: &Path, destination: &Path) -> st
 /// Removes the file at `path` and syncs its folder, so the removal survives
 /// a power loss too; a file that is not there is removed already.
 pub fn remove_durably(path: &Path) -> std::io::Result<()> {
+    remove_durably_with(&Disk, path)
+}
+
+fn remove_durably_with(syncs: &dyn Syncs, path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
-        Ok(()) => Disk.directory(folder_of(path)),
+        Ok(()) => syncs.directory(folder_of(path)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
@@ -924,6 +928,25 @@ mod tests {
         assert!(create_new_dir_durably_with(&syncs, &meeting).is_err());
         assert!(!meeting.exists());
         assert_eq!(std::fs::read(&earlier).unwrap(), b"an earlier recording");
+    }
+
+    /// A removal is synced into its folder once the file is gone, and a
+    /// file that is not there is removed already, with nothing synced.
+    #[test]
+    fn a_removal_syncs_the_folder_after_the_file_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("warm-up-in-progress");
+        std::fs::write(&mark, b"1\n").unwrap();
+        let syncs = Recorded::new(&mark);
+        remove_durably_with(&syncs, &mark).unwrap();
+        assert!(!mark.exists());
+        assert_eq!(
+            syncs.events(),
+            [(format!("directory {}", dir.path().display()), false)]
+        );
+        let again = Recorded::new(&mark);
+        remove_durably_with(&again, &mark).unwrap();
+        assert_eq!(again.events(), Vec::<(String, bool)>::new());
     }
 
     /// A folder sync that fails fails the folder creation and the copy, so
