@@ -91,7 +91,8 @@ usage_entries() {
   for key in NSMicrophoneUsageDescription NSAudioCaptureUsageDescription \
     NSCalendarsFullAccessUsageDescription NSLocalNetworkUsageDescription \
     NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription \
-    NSDownloadsFolderUsageDescription; do
+    NSDownloadsFolderUsageDescription NSRemovableVolumesUsageDescription \
+    NSNetworkVolumesUsageDescription; do
     [[ "$key" == "${omit:-}" ]] && continue
     printf '<key>%s</key><string>%s</string>\n' "$key" \
       "$(PATH="$scratch/bin:$PATH" plutil -extract "$key" raw -o - "$src_plist")"
@@ -148,8 +149,8 @@ refused() {
 if output="$(check "$(bundle good "$identifier" "$key")")"; then
   [[ "$output" == *"holds CFBundleIdentifier $identifier"* ]] || fail "the bundle id is not reported: $output"
   [[ "$output" == *"holds SUPublicEDKey $key"* ]] || fail "the key is not reported: $output"
-  for folder in Documents Desktop Downloads; do
-    [[ "$output" == *"holds NS${folder}FolderUsageDescription Steno writes your meeting notes to the folder you chose."* ]] \
+  for folder in DocumentsFolder DesktopFolder DownloadsFolder RemovableVolumes NetworkVolumes; do
+    [[ "$output" == *"holds NS${folder}UsageDescription Steno writes your meeting notes to the folder you chose."* ]] \
       || fail "the $folder purpose string is not reported: $output"
   done
 else

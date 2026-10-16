@@ -907,31 +907,36 @@ it opens and what it writes is one table in the module doc of
 
 After the import, onboarding's permissions page asks up front for what
 would otherwise wait unannounced (plan `.plans/2026-10-07-stable-promotion.md`,
-Rehearsal, "Nicolai's Mac"):
+"The Sparkle handoff", "First launch after the handoff"):
 
-- **The speech models.** The Swift app's `CoreML` Parakeet is already on
+- **The speech models.** The Swift app's CoreML Parakeet is already on
   disk, but the speaker models the Rust diarizer runs (about 33 MB) are
-  not, and every meeting waits for them. While the models a meeting needs
-  are missing, onboarding opens on page 1, even with every grant in place,
-  until this app's onboarding was closed once with them on offer
-  (`steno.speechModelsOffered`, which the import never copies); its Speech
-  models row downloads them with Settings' own install, after which the
-  waiting meetings resume. A fresh install on any platform gets the same
-  row for every model.
-- **The vault folder.** A vault under Documents, Desktop, Downloads or
-  iCloud Drive needs Files and Folders access for the new identifier. On
-  the Mac the page writes a probe file to the stored vault once (the
-  Obsidian destination's own check), so macOS asks while the page shows;
-  the row says Allowed, or after a Don't Allow, where to turn Steno on,
-  with Open System Settings and Check again. No vault, no check; off the
+  not, and every meeting waits for them. Onboarding opens on page 1 while
+  a model a meeting needs is missing, even with every grant in place,
+  until it has offered the models once (`steno.speechModelsOffered`,
+  which the import does not copy). Its Speech models row downloads them
+  with Settings' own install, after which the waiting meetings resume. A
+  fresh install on any platform gets the same row for every model.
+- **The Obsidian vault.** A vault under Documents, Desktop, Downloads or
+  iCloud Drive, or on an external disk or a network share, needs folder
+  access for the new identifier. On the Mac the page runs the Obsidian
+  destination's own check once: it creates a hidden, empty probe file of
+  a new name in the stored vault and removes it at once (a probe a crash
+  left behind is removed at the next check, and nothing else in the vault
+  is touched), so macOS asks while the page shows. The row says Allowed;
+  after a Don't Allow, where to turn Steno on, with Open System Settings
+  and Check again, which writes again before the page moves on; for a
+  vault that is not there, to choose it again. No vault, no check; off the
   Mac nothing is checked, since no folder prompt exists there.
 - **Local Network.** macOS asks once, when the listener first advertises
   itself; Settings > iPhone says where to turn it on when the phone cannot
   find the Mac.
 
-A setting this app cannot read stops the start: the "could not start"
-dialog and the log name the setting's key and the database, never its
-value, so the row can be fixed instead of being replaced by a default.
+A setting this app cannot read stops the start. The "could not start"
+dialog names the setting's key, what is wrong with it and the database,
+and says to fix or remove the row there; the error-level log line names
+the key and the problem only, with no path. Neither holds the value, so
+the row can be fixed instead of being replaced by a default.
 
 ## Run
 
@@ -1045,9 +1050,10 @@ Swift app, so install it elsewhere (`~/Applications`) to keep both.
 (`SUPublicEDKey`, from `apps/macos/project.yml`), inert here: Sparkle
 installs no bundle without a public key, and the Swift app's last update
 installs this one (`.plans/2026-10-07-stable-promotion.md`, S6).
-The three folder purpose strings (`NSDocumentsFolderUsageDescription` and
-its Desktop and Downloads siblings) are this app's own, for a vault in
-one of those folders. `check-bundle.sh` checks the key, the bundle id and
+The folder and volume purpose strings (`NSDocumentsFolderUsageDescription`,
+its Desktop and Downloads siblings, `NSRemovableVolumesUsageDescription`
+and `NSNetworkVolumesUsageDescription`) are this app's own, for a vault in
+one of those places. `check-bundle.sh` checks the key, the bundle id and
 every purpose string in the built `.app`,
 and Rust CI runs that check over stub bundles (`check-bundle.test.sh`).
 
@@ -2023,7 +2029,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/Cargo.toml` | Crate `steno-desktop`, binary `steno-desktop`; features `fixture-host` (opt-in) and `custom-protocol` (embeds the bundle, see Build). Dependency versions come from the workspace table in `Cargo.toml` |
 | `apps/desktop/src-tauri/tauri.conf.json` | `frontendDist` is the web app's `dist/`; no `version`, so Tauri takes the crate's; `beforeDevCommand` and `beforeBuildCommand` run `pnpm dev` and `pnpm build` with `cwd` `../../macos/web`: the CLI runs them from `src-tauri`, the directory holding this file, which is also where `frontendDist` (`../../macos/web/dist`) resolves from; `csp` lets the page load only its own scripts, styles, fonts and images, and `connect-src` only the IPC origins (`ipc:`, `http://ipc.localhost`), so nothing the page does reaches the network; `plugins` carries the `steno` scheme and the updater's public key and stable endpoint; `bundle` the six installer targets (see Bundles); no windows are declared, `windows.rs` and `panels.rs` create them |
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop`, `linux/*-stop-timeout.conf` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles); the stop timeout drop-ins for the autostart unit and GNOME's scope (see Launch at login under systemd) |
-| `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`, and the three folder purpose strings of this app's own; the audio-input and calendars entitlements |
+| `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`, and the folder and volume purpose strings of this app's own; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
 | `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart on Linux and Windows, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, quits through Quit's path otherwise, saving a recording first; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `dbus.rs`, on Linux: what the D-Bus clients share (a connection with a five-second call timeout, the client's thread, the name owner, the bus's and the owner's proxies) and the tests' private bus. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display. `stop_timeout.rs`, on Linux: the systemd drop-ins for the stop timeout |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items and their words per platform, the recorder state the shell follows |

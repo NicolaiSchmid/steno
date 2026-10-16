@@ -21,9 +21,10 @@
 #   app       macos/*.app, into Contents/MacOS/; also the bundle id, the
 #             Swift app's SUPublicEDKey and every purpose string a prompt
 #             shows (microphone, system audio, calendar, local network,
-#             and the Documents, Desktop and Downloads folders a vault may
-#             be in), as tauri.conf.json and Info.plist give them, in the
-#             merged Info.plist. With
+#             and the Documents, Desktop and Downloads folders, external
+#             disks and network shares a vault may be on), as
+#             tauri.conf.json and Info.plist give them, in the merged
+#             Info.plist. With
 #             --signed, also the Developer ID signature, hardened
 #             runtime, timestamp and team of the app, its executable and
 #             the sidecar, the two entitlements, the stapled ticket and
@@ -201,6 +202,8 @@ usage_keys=(
   NSDocumentsFolderUsageDescription
   NSDesktopFolderUsageDescription
   NSDownloadsFolderUsageDescription
+  NSRemovableVolumesUsageDescription
+  NSNetworkVolumesUsageDescription
 )
 
 # plist_value <file> <key>: the value under the top-level <key> of a plist
