@@ -21,7 +21,7 @@ const jsonLd = {
 	url: site.url,
 	applicationCategory: "BusinessApplication",
 	// Undefined, and so left out of the JSON, while no desktop is listed.
-	operatingSystem: listed.length > 0 ? listed.join(", ") : undefined,
+	operatingSystem: listed.join(", ") || undefined,
 	offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
 	license: "https://opensource.org/licenses/MIT",
 	downloadUrl: site.download,

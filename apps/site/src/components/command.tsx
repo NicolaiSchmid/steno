@@ -15,7 +15,7 @@ export function Command({
 	command,
 	className,
 	shell = true,
-	label = shell ? "Copy command" : "Copy line",
+	label = "Copy command",
 }: CommandProps) {
 	return (
 		<div
