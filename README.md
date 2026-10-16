@@ -131,13 +131,14 @@ in `environment.systemPackages`; nix-darwin copies `Applications/Steno.app` into
 and with an earlier state version turn on `targets.darwin.copyApps` or link the app
 yourself. `nix run` does not apply: the output is an app bundle with no `bin/`.
 
-With nix-darwin or Home Manager the app runs from a copy that Nix manages; with
-`nix profile`, from the Nix store itself. Its updater still offers each update and asks
-for an administrator password to install it: decline. Update instead by bumping
-`release.version` and `release.hash` at the top of `flake.nix` (the release workflow
-prints both in its job summary) or by moving the flake input that pins this repository,
-then rebuild. To stop the daily offer, turn off *Check for updates automatically* in
-Settings > General.
+Steno installed from the flake does not offer updates. Running from the Nix store,
+`/Applications/Nix Apps` or `~/Applications/Home Manager Apps`, it leaves them to Nix, and
+Settings > General says "Updates come from your package manager." To update it,
+update the flake input that pins Steno (`nix flake update <input>`) and rebuild. In a
+checkout of this repository, bump `release.version` and `release.hash` at the top of
+`flake.nix` instead (the release workflow prints both in its job summary). A copy in a
+folder you set with Home Manager's `targets.darwin.copyApps.directory` still offers
+updates, and the next switch undoes them.
 
 nix-darwin users who want in-app updates can use the Homebrew cask through
 `homebrew.casks` instead; it installs into `/Applications`, where the updater can write.
