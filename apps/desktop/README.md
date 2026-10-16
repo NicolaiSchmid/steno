@@ -1620,7 +1620,9 @@ version, whose tag moves the lanes as usual.
 
 The first stable release, `v0.11.0`, leaves `desktop-stable` no earlier
 release to go back to. Delete the lane's manifest instead, so stable
-installs find no update until the fix forward writes the lane again:
+installs are offered nothing. Their check then fails on the missing
+manifest, and Settings > General reads "Could not check for updates",
+until the fix forward writes the lane again:
 
 ```sh
 gh release delete-asset desktop-stable latest.json --yes
@@ -1628,10 +1630,14 @@ gh release delete-asset desktop-stable latest.json --yes
 
 When fresh downloads are bad too, take the release out of "latest" with
 `gh release edit v<version> --prerelease`, and in the same hour take the
-platform off the site's released list (`apps/site/src/lib/site.ts`).
-`releases/latest` then answers 404, for the download button and for the
-Swift app's feed alike. A bad handoff item has steps of its own: Rollback
-in `.plans/2026-10-07-stable-promotion.md`.
+platform off the site's released list (`apps/site/src/lib/site.ts`) and
+the root README's desktop badge. For a later release, `releases/latest`
+then falls back to the previous stable release. For `v0.11.0`, which has
+no stable release before it, it answers 404: for every desktop's download
+button, and for the feed of build 244 (`v0.9.0-rc.1`), the one Swift
+build that reads `releases/latest`; the later Swift builds read the
+`appcast` branch. A bad handoff item has steps of its own: Rollback in
+`.plans/2026-10-07-stable-promotion.md`.
 
 ### Secrets
 
@@ -2096,8 +2102,8 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 The Swift app leaves the repository in S9 of
 `.plans/2026-10-07-stable-promotion.md` (planned in
 `.plans/2026-10-04-mac-cutover.md`), after the stable release's rollback
-window. The clip player is still a fake and follows the stable release (that
-plan's "What follows"): it needs an audio output and must ask
+window. The clip player is still a fake and follows the stable release (the
+stable plan's "What follows"): it needs an audio output and must ask
 `steno_audio::Playback` before every clip, since the call capture's tap
 includes Steno's own process. The host may treat the main window as always
 present: a close hides it, or ends the process when no tray stands, so
