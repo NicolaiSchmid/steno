@@ -46,7 +46,7 @@
 //! The cost of a false alarm: a power loss or a force quit during a read
 //! fails that one meeting with Process again offered, and nothing is lost.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -55,7 +55,7 @@ use serde::{Deserialize, Serialize};
 use steno_core::{MeetingState, Store};
 use uuid::Uuid;
 
-use crate::files::{Access, remove_durably, replace_file};
+use crate::files::{Access, create_dir_all_durably, remove_durably, replace_file};
 
 #[cfg(doc)]
 use crate::ProcessingPipeline;
@@ -104,8 +104,7 @@ struct State {
     /// Set by the exit: no read is marked any more.
     exiting: bool,
     /// The files of this process's reads now running.
-    open: HashMap<u64, PathBuf>,
-    next: u64,
+    open: HashSet<PathBuf>,
 }
 
 impl ReadingMarks {
@@ -128,29 +127,36 @@ impl ReadingMarks {
     /// this session, and the next launch tries again.
     pub fn at_launch(support_directory: &Path, store: &Store, now: DateTime<Utc>) -> Self {
         let folder = support_directory.join(Self::FOLDER);
-        let mut held: HashMap<Uuid, Vec<PathBuf>> = HashMap::new();
-        let mut markers: BTreeMap<Uuid, Vec<Marker>> = BTreeMap::new();
-        for (path, marker) in read_folder(&folder) {
-            held.entry(marker.meeting_id).or_default().push(path);
-            markers.entry(marker.meeting_id).or_default().push(marker);
+        let mut markers: BTreeMap<Uuid, Vec<(PathBuf, Marker)>> = BTreeMap::new();
+        for (file, marker) in read_folder(&folder) {
+            markers
+                .entry(marker.meeting_id)
+                .or_default()
+                .push((file, marker));
         }
-        for (meeting_id, found) in &markers {
-            match store.meeting(*meeting_id) {
+        let mut held = HashMap::new();
+        for (meeting_id, found) in markers {
+            match store.meeting(meeting_id) {
                 Ok(Some(meeting)) => {
-                    let stage = found[0].stage;
+                    let stage = found[0].1.stage;
                     tracing::warn!(%meeting_id, ?stage, "Steno stopped while reading this recording; it is kept and not read again until Process again");
                     quarantine(store, &meeting, now);
                 }
-                Ok(None) if found.iter().any(|marker| marker.path.exists()) => {}
+                Ok(None) if found.iter().any(|(_, marker)| marker.path.exists()) => {}
                 Ok(None) => {
-                    for path in held.remove(meeting_id).unwrap_or_default() {
-                        let _ = remove_durably(&path);
+                    for (file, _) in found {
+                        let _ = remove_durably(&file);
                     }
+                    continue;
                 }
                 Err(error) => {
                     tracing::warn!(%meeting_id, %error, "a quarantined meeting could not be read; it stays held");
                 }
             }
+            held.insert(
+                meeting_id,
+                found.into_iter().map(|(file, _)| file).collect(),
+            );
         }
         ReadingMarks {
             folder: Some(folder),
@@ -160,9 +166,7 @@ impl ReadingMarks {
             }),
         }
     }
-}
 
-impl ReadingMarks {
     /// Whether the launch quarantined `meeting_id` and nothing released it.
     #[must_use]
     pub fn holds(&self, meeting_id: Uuid) -> bool {
@@ -193,7 +197,7 @@ impl ReadingMarks {
     ) -> Reading<'_> {
         let unmarked = Reading {
             marks: self,
-            key: None,
+            file: None,
         };
         let Some(folder) = &self.folder else {
             return unmarked;
@@ -210,19 +214,17 @@ impl ReadingMarks {
             started_at: Utc::now(),
         };
         let file = folder.join(format!("{}.json", Uuid::new_v4()));
-        let written = crate::files::create_dir_all_durably(folder)
+        let written = create_dir_all_durably(folder)
             .and_then(|()| serde_json::to_vec(&marker).map_err(std::io::Error::other))
             .and_then(|bytes| replace_file(&file, &bytes, Access::Default));
         if let Err(error) = written {
             tracing::debug!(%meeting_id, %error, "a reading marker could not be written; the read runs unguarded");
             return unmarked;
         }
-        let key = open.next;
-        open.next += 1;
-        open.open.insert(key, file);
+        open.open.insert(file.clone());
         Reading {
             marks: self,
-            key: Some(key),
+            file: Some(file),
         }
     }
 
@@ -232,18 +234,16 @@ impl ReadingMarks {
         let open: Vec<PathBuf> = {
             let mut state = self.state();
             state.exiting = true;
-            state.open.drain().map(|(_, file)| file).collect()
+            state.open.drain().collect()
         };
         for file in open {
             let _ = remove_durably(&file);
         }
     }
 
-    fn close(&self, key: u64) {
-        let file = self.state().open.remove(&key);
-        if let Some(file) = file
-            && let Err(error) = remove_durably(&file)
-        {
+    fn close(&self, file: &Path) {
+        let open = self.state().open.remove(file);
+        if open && let Err(error) = remove_durably(file) {
             tracing::debug!(%error, "a reading marker could not be removed");
         }
     }
@@ -257,13 +257,14 @@ impl ReadingMarks {
 #[must_use = "the read is marked only while the guard lives"]
 pub struct Reading<'a> {
     marks: &'a ReadingMarks,
-    key: Option<u64>,
+    /// The marker's file; `None` for a read left unmarked.
+    file: Option<PathBuf>,
 }
 
 impl Drop for Reading<'_> {
     fn drop(&mut self) {
-        if let Some(key) = self.key {
-            self.marks.close(key);
+        if let Some(file) = &self.file {
+            self.marks.close(file);
         }
     }
 }
