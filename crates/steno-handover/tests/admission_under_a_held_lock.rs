@@ -188,6 +188,27 @@ impl World {
         })
     }
 
+    /// One meeting, one ledger row and one enqueue.
+    fn admitted_once(&self) {
+        assert_eq!(self.count("meeting"), 1, "one meeting");
+        assert_eq!(self.count("handoverAdmission"), 1, "one ledger row");
+        assert_eq!(self.enqueued.load(Ordering::SeqCst), 1, "enqueued once");
+    }
+
+    /// Drops `call`, an admission, once its copy took the write lock from
+    /// another connection, so its commit waits; then lets the lock go.
+    async fn dropped_at_the_copy<T: std::fmt::Debug>(&self, call: impl Future<Output = T>) {
+        self.noted.lock_at_the_next_copy(&self.path);
+        {
+            let mut call = pin!(call);
+            tokio::select! {
+                answered = &mut call => panic!("answered under the lock: {answered:?}"),
+                () = bounded("the copy", self.noted.copying.notified()) => {}
+            }
+        }
+        self.noted.release();
+    }
+
     /// Waits until the intake enqueued `count` meetings.
     async fn enqueued(&self, count: usize) {
         let deadline = Instant::now() + HANG_GUARD;
@@ -257,10 +278,8 @@ async fn the_retry_admits_once(
         third.json::<wire::CompleteResponse>().meeting_id,
         meeting_id
     );
-    assert_eq!(world.count("meeting"), 1, "one meeting");
-    assert_eq!(world.count("handoverAdmission"), 1, "one ledger row");
     assert!(world.store.meeting(meeting_id).unwrap().is_some());
-    assert_eq!(world.enqueued.load(Ordering::SeqCst), 1, "enqueued once");
+    world.admitted_once();
     let delivered = bounded("the announce", phone.announce(metadata)).await;
     assert_eq!(
         delivered.json::<wire::RecordingStatus>().state,
@@ -388,10 +407,8 @@ async fn intake_alone(hold: Duration) {
     let retried = intake.admit(&file, &metadata, &device).await.unwrap();
     let again = intake.admit(&file, &metadata, &device).await.unwrap();
     assert_eq!(retried, again, "a replay answers the same meeting");
-    assert_eq!(world.count("meeting"), 1);
-    assert_eq!(world.count("handoverAdmission"), 1);
+    world.admitted_once();
     assert_eq!(world.audio_files().len(), 1, "one copy");
-    assert_eq!(world.enqueued.load(Ordering::SeqCst), 1);
 }
 
 /// Seven seconds: the commit runs out its busy timeout, and the `failed`
@@ -417,23 +434,15 @@ async fn a_dropped_admit_still_commits_and_enqueues() {
     let world = world();
     let (device, metadata, file) = upload(&world);
     let intake = world.intake();
-    world.noted.lock_at_the_next_copy(&world.path);
-    {
-        let mut admit = pin!(intake.admit(&file, &metadata, &device));
-        tokio::select! {
-            admitted = &mut admit => panic!("admitted under the lock: {admitted:?}"),
-            () = bounded("the copy", world.noted.copying.notified()) => {}
-        }
-    }
-    world.noted.release();
+    world
+        .dropped_at_the_copy(intake.admit(&file, &metadata, &device))
+        .await;
     world.enqueued(1).await;
     let meeting_id = bounded("the replay", intake.admit(&file, &metadata, &device))
         .await
         .unwrap();
     assert!(world.store.meeting(meeting_id).unwrap().is_some());
-    assert_eq!(world.count("meeting"), 1, "one meeting");
-    assert_eq!(world.count("handoverAdmission"), 1, "one ledger row");
-    assert_eq!(world.enqueued.load(Ordering::SeqCst), 1, "enqueued once");
+    world.admitted_once();
 }
 
 /// A `complete` dropped mid-admit, as a phone that hangs up does: the
@@ -451,15 +460,7 @@ async fn a_complete_dropped_mid_admit_leaves_its_meeting_and_the_retry_is_answer
     let id = metadata.recording_id;
     let mut receipts = test.service.receipts();
 
-    world.noted.lock_at_the_next_copy(&world.path);
-    {
-        let mut complete = pin!(phone.complete(id));
-        tokio::select! {
-            response = &mut complete => panic!("answered under the lock: {}", response.status),
-            () = bounded("the copy", world.noted.copying.notified()) => {}
-        }
-    }
-    world.noted.release();
+    world.dropped_at_the_copy(phone.complete(id)).await;
     world.enqueued(1).await;
     bounded(
         "the receipt completes",
@@ -476,8 +477,6 @@ async fn a_complete_dropped_mid_admit_leaves_its_meeting_and_the_retry_is_answer
     assert_eq!(retry.status.as_u16(), 200, "answered from the admission");
     let answered: wire::CompleteResponse = serde_json::from_slice(&retry.body).unwrap();
     assert!(world.store.meeting(answered.meeting_id).unwrap().is_some());
-    assert_eq!(world.count("meeting"), 1, "one meeting");
-    assert_eq!(world.count("handoverAdmission"), 1, "one ledger row");
-    assert_eq!(world.enqueued.load(Ordering::SeqCst), 1, "enqueued once");
+    world.admitted_once();
     assert_eq!(world.audio_files().len(), 1, "one copy");
 }
