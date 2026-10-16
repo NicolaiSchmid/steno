@@ -308,7 +308,11 @@ fn a_flagged_packet_counts_only_a_jump_of_more_than_half_a_packet() {
         let last = position - 480;
         assert!(positions.packet(Some(last - 4_800), 480, true).is_none());
         assert!(positions.packet(Some(last), 480, false).is_none());
-        assert!(positions.packet(Some(last + 480 + 240), 480, true).is_none());
+        assert!(
+            positions
+                .packet(Some(last + 480 + 240), 480, true)
+                .is_none()
+        );
         assert_eq!(
             positions.packet(Some(last + 2 * 480 + 240 + 241), 480, true),
             Missed {
@@ -514,7 +518,8 @@ fn a_follower_loss_is_counted_whatever_the_positions_verdict() {
             let seen = over_positions(rate, per_packet, from, out, 0);
             let lost = out * PERIOD;
             let fills = name == "fills";
-            let expected = if fills && lost <= SAMPLE_RATE as usize {
+            let expected = if fills && lost as f64 <= SAMPLE_RATE * MISSED_FILL_LIMIT.as_secs_f64()
+            {
                 Missed {
                     fill: lost,
                     unfilled: 0,
