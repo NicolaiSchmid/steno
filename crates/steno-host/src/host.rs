@@ -762,6 +762,13 @@ impl Host {
         self.lock()
     }
 
+    /// The `recording` feed's thread, taken, so a test can tell that it
+    /// ended.
+    #[cfg(test)]
+    pub(crate) fn take_feed_thread(&self) -> Option<thread::JoinHandle<()>> {
+        self.shared.feed.take_thread()
+    }
+
     /// Every topic but `recording`, which the feed sends
     /// ([`recording_feed`]).
     fn build(&self, inner: &mut Inner, topic: BridgeTopic) -> Option<Value> {

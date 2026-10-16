@@ -8,9 +8,10 @@
 //!   recorder's hook ([`Host::recorder_changed`](crate::Host::recorder_changed)),
 //!   on the levels thread and on the stop's thread alike, and the start
 //!   command.
-//! - **Each pass** swaps "resend" and "poked" to false, then reads
-//!   `status()` (the recorder's status lock, released before anything
-//!   else), and sends nothing until the page is ready. A snapshot goes out
+//! - **Each pass** reads "page ready" first, then swaps "poked" to false,
+//!   and "resend" too once the page is ready, then reads `status()` (the
+//!   recorder's status lock, released before anything else), and sends
+//!   nothing unless the page was ready when the pass began. A snapshot goes out
 //!   at once when "resend" was set or when anything but its levels differs
 //!   from the last one sent; after a poke, one that moved only the levels,
 //!   or did not move, waits out the rest of [`RECORDING_INTERVAL`] and goes
@@ -26,17 +27,20 @@
 //!   wrote the meeting `recording`, a stop queued it, and the list must
 //!   follow, since the web app tells a live row from one left `recording`
 //!   by the recorder's state.
-//! - **`page.ready`** sets "page ready" and "resend", then unparks the
+//! - **`page.ready`** sets "resend", then "page ready", then unparks the
 //!   thread, and never touches the last snapshot sent: every `page.ready`,
 //!   a reloaded page's or another window's, gets the current `recording`
-//!   once, from an idle recorder too.
+//!   once, from an idle recorder too. The order makes "once" hold: a pass
+//!   that finds the page ready finds "resend" set, and one that began
+//!   before the page was ready leaves "resend" for the next.
 //!
 //! Only the feed's thread touches the last snapshot sent and when it went,
 //! so they need no lock; other threads reach it through the three flags
 //! and the unpark. The thread holds a `Weak` on the host and ends once no
 //! host is left. Each topic is a full state, so the order between `recording`
-//! and a publish's batch decides nothing. Swift: `TopicPublisher`'s
-//! `recordingInterval`, on the main actor.
+//! and a publish's batch decides nothing. Swift: the main window's
+//! `TopicPublisher` throttling `.recording` (`MainWindowBridge`), on the
+//! main actor.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -49,7 +53,8 @@ use uuid::Uuid;
 use crate::main_window::snapshots::recording_snapshot;
 use crate::services::RecorderStatus;
 
-/// 20 Hz: the level meter's rate on the page. Swift: `recordingInterval`.
+/// 20 Hz: the level meter's rate on the page. Swift:
+/// `MainWindowBridge.recordingInterval`.
 pub const RECORDING_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The recorder's state and meeting, whose move asks for a reload.
@@ -68,7 +73,8 @@ pub(crate) trait Source: Send + Sync {
     fn moved(&self);
 }
 
-/// The flags other threads set and the feed's thread.
+/// The flags other threads set, and the handle that wakes the feed's
+/// thread.
 pub(crate) struct RecordingFeed {
     page_ready: AtomicBool,
     /// The next pass sends the current snapshot, changed or not.
@@ -78,6 +84,13 @@ pub(crate) struct RecordingFeed {
     /// before the thread could be woken.
     poked: AtomicBool,
     thread: OnceLock<thread::Thread>,
+    /// The thread's handle, so a test can tell that it ended.
+    #[cfg(test)]
+    joined: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
+    /// Runs once, in the first pass, between its swaps and its send check,
+    /// so a test can land a `page.ready` there.
+    #[cfg(test)]
+    pause: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl RecordingFeed {
@@ -87,6 +100,10 @@ impl RecordingFeed {
             resend: AtomicBool::new(false),
             poked: AtomicBool::new(true),
             thread: OnceLock::new(),
+            #[cfg(test)]
+            joined: std::sync::Mutex::default(),
+            #[cfg(test)]
+            pause: std::sync::Mutex::default(),
         }
     }
 
@@ -101,7 +118,14 @@ impl RecordingFeed {
         let handle = thread::Builder::new()
             .name("steno-host-recording".to_owned())
             .spawn(move || run(&weak, seen))?;
-        let _ = source.feed().thread.set(handle.thread().clone());
+        let feed = source.feed();
+        let _ = feed.thread.set(handle.thread().clone());
+        // A poke between the first pass and the `set` above woke nothing.
+        handle.thread().unpark();
+        #[cfg(test)]
+        {
+            *feed.joined.lock().unwrap() = Some(handle);
+        }
         Ok(())
     }
 
@@ -115,8 +139,8 @@ impl RecordingFeed {
     /// `page.ready`: the next pass sends the current snapshot at once,
     /// changed or not.
     pub(crate) fn page_did_become_ready(&self) {
-        self.page_ready.store(true, Ordering::SeqCst);
         self.resend.store(true, Ordering::SeqCst);
+        self.page_ready.store(true, Ordering::SeqCst);
         self.wake();
     }
 
@@ -125,6 +149,12 @@ impl RecordingFeed {
         if let Some(thread) = self.thread.get() {
             thread.unpark();
         }
+    }
+
+    /// The thread's handle, taken.
+    #[cfg(test)]
+    pub(crate) fn take_thread(&self) -> Option<thread::JoinHandle<()>> {
+        self.joined.lock().unwrap().take()
     }
 }
 
@@ -157,8 +187,13 @@ fn pass<S: Source>(
     held: bool,
 ) -> Option<Duration> {
     let feed = source.feed();
-    let resend = feed.resend.swap(false, Ordering::SeqCst);
+    let ready = feed.page_ready.load(Ordering::SeqCst);
+    let resend = ready && feed.resend.swap(false, Ordering::SeqCst);
     let poked = feed.poked.swap(false, Ordering::SeqCst);
+    #[cfg(test)]
+    if let Some(pause) = feed.pause.lock().unwrap().take() {
+        pause();
+    }
     if !(resend || poked || held) {
         return None;
     }
@@ -168,7 +203,7 @@ fn pass<S: Source>(
         *seen = position;
         source.moved();
     }
-    if !feed.page_ready.load(Ordering::SeqCst) {
+    if !ready {
         return None;
     }
     let snapshot = recording_snapshot(&status);
@@ -501,6 +536,113 @@ mod tests {
             .map(|(_, event)| event.payload.clone())
             .unwrap();
         assert_eq!(list["filter"], "ready", "{list}");
+    }
+
+    /// A source of the feed's own, with an idle recorder that never
+    /// moves, whose drop wakes the thread as the host's does.
+    struct Probe {
+        feed: RecordingFeed,
+        sink: Arc<Sink>,
+    }
+
+    impl Source for Probe {
+        fn feed(&self) -> &RecordingFeed {
+            &self.feed
+        }
+
+        fn status(&self) -> RecorderStatus {
+            RecorderStatus::idle()
+        }
+
+        fn sink(&self) -> Option<Arc<dyn EventSink>> {
+            Some(self.sink.clone())
+        }
+
+        fn moved(&self) {}
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.feed.wake();
+        }
+    }
+
+    /// P40 check 21, the interleaving behind "once per `page.ready`": the
+    /// feed's first pass (a poke is owed from the start) is paused after
+    /// its swaps and before its send check, and `page.ready` lands there.
+    /// The pass began before the page was ready, so it leaves "resend" to
+    /// the next pass, and exactly one `recording` goes out.
+    #[test]
+    fn a_page_ready_during_the_first_pass_sends_the_recording_once() {
+        // A lock and a condition variable, not a channel: a channel's
+        // blocking receive parks the thread and would take the unpark
+        // `page.ready` leaves for the next pass.
+        #[derive(Default)]
+        struct Step(Mutex<u8>, std::sync::Condvar);
+        impl Step {
+            fn to(&self, step: u8) {
+                *self.0.lock().unwrap() = step;
+                self.1.notify_all();
+            }
+            fn until(&self, step: u8) {
+                let waited = self
+                    .1
+                    .wait_timeout_while(self.0.lock().unwrap(), PATIENCE, |at| *at < step)
+                    .unwrap()
+                    .1;
+                assert!(!waited.timed_out(), "waited {PATIENCE:?} for step {step}");
+            }
+        }
+        let step = Arc::new(Step::default());
+        let feed = RecordingFeed::new();
+        *feed.pause.lock().unwrap() = Some(Box::new({
+            let step = step.clone();
+            move || {
+                step.to(1);
+                step.until(2);
+            }
+        }));
+        let sink = Arc::new(Sink::default());
+        let probe = Arc::new(Probe {
+            feed,
+            sink: sink.clone(),
+        });
+        RecordingFeed::start(&probe, (RecordingState::Idle, None)).unwrap();
+        step.until(1);
+        probe.feed.page_did_become_ready();
+        step.to(2);
+
+        sink.nth_recording(1, "page.ready's snapshot");
+        thread::sleep(4 * RECORDING_INTERVAL);
+        assert_eq!(sink.recordings().len(), 1, "once per page.ready");
+        let thread = probe.feed.take_thread().unwrap();
+        drop(probe);
+        found("the feed's thread ended", || {
+            thread.is_finished().then_some(())
+        });
+    }
+
+    /// The feed's thread ends once the last clone of the host is gone:
+    /// the host's drop wakes it, and it holds the host only for a pass,
+    /// so the host's own reader closes too.
+    #[test]
+    fn the_feed_ends_with_the_host() {
+        let now = steno_core::json::parse_date("2026-09-29T12:50:00.000Z").unwrap();
+        let fakes = FakeServices::new(now);
+        let store = Arc::new(Store::in_memory().unwrap());
+        let host = Host::new(store.clone(), fakes.services(), HostConfig::default()).unwrap();
+        let clone = host.clone();
+        host.page_ready().unwrap();
+        let thread = host.take_feed_thread().unwrap();
+        drop(host);
+        clone.recorder_changed();
+        drop(clone);
+        found("the feed's thread ended", || {
+            thread.is_finished().then_some(())
+        });
+        store
+            .with_own_reader()
+            .expect("the host's reader closed with the host");
     }
 
     /// Waits up to [`PATIENCE`] for `probe` to find `what`.
