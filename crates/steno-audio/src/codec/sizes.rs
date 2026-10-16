@@ -107,26 +107,19 @@ impl Walk {
         if depth > MAX_DEPTH {
             return Ok(());
         }
-        let mut children = Vec::new();
-        let mut boxes = Boxes::new(&mut self.file, start, end);
-        loop {
-            match boxes.next_sized() {
-                Ok(Some(found)) => children.push(found),
-                Ok(None) => break,
-                // A file cut off inside its media data.
-                Err(BoxError::Oversized { kind, .. }) if depth == 0 && &kind == b"mdat" => break,
-                Err(BoxError::Oversized { kind, at, size }) => {
-                    return Err(format!(
-                        "the `{}` box at byte {at} declares {size} bytes, more than {} holds",
-                        name(kind),
-                        parent.map_or_else(|| "the file".to_owned(), |p| format!("`{}`", name(p)))
-                    ));
-                }
-                Err(BoxError::Unreadable) => {
-                    return Err(format!("a box at byte {start}.. cannot be read"));
-                }
+        let children = match self.boxes(start, end, depth == 0) {
+            Ok(children) => children,
+            Err(BoxError::Oversized { kind, at, size }) => {
+                return Err(format!(
+                    "the `{}` box at byte {at} declares {size} bytes, more than {} holds",
+                    name(kind),
+                    parent.map_or_else(|| "the file".to_owned(), |p| format!("`{}`", name(p)))
+                ));
             }
-        }
+            Err(BoxError::Unreadable) => {
+                return Err(format!("a box at byte {start}.. cannot be read"));
+            }
+        };
         for found in children {
             self.mp4_box(found, depth, parent)?;
         }
@@ -212,21 +205,16 @@ impl Walk {
 
     /// The sample entries of `stsd`, and the child boxes of an audio entry.
     fn sample_entries(&mut self, stsd: Mp4Box, depth: usize) -> Result<(), String> {
-        let mut entries = Vec::new();
-        let mut boxes = Boxes::new(&mut self.file, stsd.start + 8, stsd.end);
-        loop {
-            match boxes.next_sized() {
-                Ok(Some(entry)) => entries.push(entry),
-                Ok(None) => break,
-                Err(BoxError::Oversized { kind, at, size }) => {
-                    return Err(format!(
-                        "the `{}` sample entry at byte {at} declares {size} bytes, more than `stsd` holds",
-                        name(kind)
-                    ));
-                }
-                Err(BoxError::Unreadable) => return Err("a sample entry cannot be read".to_owned()),
+        let entries = match self.boxes(stsd.start + 8, stsd.end, false) {
+            Ok(entries) => entries,
+            Err(BoxError::Oversized { kind, at, size }) => {
+                return Err(format!(
+                    "the `{}` sample entry at byte {at} declares {size} bytes, more than `stsd` holds",
+                    name(kind)
+                ));
             }
-        }
+            Err(BoxError::Unreadable) => return Err("a sample entry cannot be read".to_owned()),
+        };
         for entry in entries
             .into_iter()
             .filter(|entry| AUDIO_ENTRIES.contains(&&entry.kind))
@@ -248,21 +236,25 @@ impl Walk {
         }
         Ok(())
     }
-}
 
-/// `count` entries of `entry` bytes from `from` fit in `found`.
-fn entries_fit(found: Mp4Box, from: u64, count: u64, entry: u64) -> Result<(), String> {
-    let room = found.end.saturating_sub(from);
-    if count.saturating_mul(entry) > room {
-        return Err(format!(
-            "the `{}` box counts {count} entries of {entry} bytes in {room} bytes",
-            name(found.kind)
-        ));
+    /// The boxes in `start..end`, in order; at the `top` level, one `mdat`
+    /// running past the file ends the list, as a file cut off inside its
+    /// media data does.
+    fn boxes(&mut self, start: u64, end: u64, top: bool) -> Result<Vec<Mp4Box>, BoxError> {
+        let mut found = Vec::new();
+        let mut boxes = Boxes::new(&mut self.file, start, end);
+        loop {
+            match boxes.next_sized() {
+                Ok(Some(next)) => found.push(next),
+                Ok(None) => return Ok(found),
+                Err(BoxError::Oversized { kind, .. }) if top && &kind == b"mdat" => {
+                    return Ok(found);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
-    Ok(())
-}
 
-impl Walk {
     /// `stsz`: a constant size, or one entry a sample; each no larger than
     /// the file.
     fn sample_sizes(&mut self, stsz: Mp4Box) -> Result<(), String> {
@@ -421,6 +413,18 @@ impl Walk {
         }
         Ok(())
     }
+}
+
+/// `count` entries of `entry` bytes from `from` fit in `found`.
+fn entries_fit(found: Mp4Box, from: u64, count: u64, entry: u64) -> Result<(), String> {
+    let room = found.end.saturating_sub(from);
+    if count.saturating_mul(entry) > room {
+        return Err(format!(
+            "the `{}` box counts {count} entries of {entry} bytes in {room} bytes",
+            name(found.kind)
+        ));
+    }
+    Ok(())
 }
 
 /// A four-character code as text.

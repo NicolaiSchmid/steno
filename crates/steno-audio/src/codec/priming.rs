@@ -205,9 +205,9 @@ impl<'a> Boxes<'a> {
         let mut header = [0u8; 8];
         read_at(self.file, self.at, &mut header).ok_or(BoxError::Unreadable)?;
         let size = u64::from(u32::from_be_bytes(
-            header[..4].try_into().unwrap_or_default(),
+            field(&header, 0).ok_or(BoxError::Unreadable)?,
         ));
-        let kind: [u8; 4] = header[4..].try_into().unwrap_or_default();
+        let kind = field(&header, 4).ok_or(BoxError::Unreadable)?;
         let (body, size) = match size {
             // To the end of the enclosing box (or file).
             0 => (self.at + 8, self.end - self.at),
