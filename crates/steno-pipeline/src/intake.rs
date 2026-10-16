@@ -1122,6 +1122,43 @@ mod tests {
         assert!(store.asset(meeting.id).unwrap().is_none());
     }
 
+    /// Each try of a busy commit reads the settings again: a default
+    /// retention another connection saved while the first try waited is
+    /// the one the asset gets once the next try lands.
+    #[tokio::test]
+    async fn each_try_of_a_busy_commit_reads_the_settings_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("steno.sqlite");
+        let store = Arc::new(Store::open(&path).unwrap());
+        store
+            .on_writer(|connection| connection.busy_timeout(Duration::from_millis(20)))
+            .unwrap();
+        let (meeting, result) = a_recording(&store, dir.path());
+        let other = Store::open(&path).unwrap();
+        let hold = Mutex::new(Some(WriteLockHold::new(&path)));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let enqueue = committing_enqueue(store.clone(), calls.clone(), move |call| {
+            if call == 1 {
+                hold.lock().unwrap().take();
+                let mut settings = other.settings().unwrap();
+                settings.default_retention = AudioRetention::KeepDays(3);
+                other.save_settings(&settings).unwrap();
+            }
+        });
+        let intake = LocalRecordingIntake::new(
+            store.clone(),
+            enqueue,
+            Arc::new(Utc::now),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        intake.complete(meeting.id, result, None).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "tried twice");
+        assert_eq!(
+            store.asset(meeting.id).unwrap().unwrap().retention,
+            AudioRetention::KeepDays(3)
+        );
+    }
+
     /// A commit that fails for another reason (a full disk) is not tried
     /// again and leaves the meeting `recording`, as `begin` wrote it; a
     /// busy commit is tried again only while the intake's check allows,
