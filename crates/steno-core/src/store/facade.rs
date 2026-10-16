@@ -118,14 +118,11 @@ mod tests {
         runtime.shutdown_background();
         let store = Arc::new(Store::in_memory().unwrap());
         let ran = Arc::new(AtomicBool::new(false));
-        let body = {
-            let ran = ran.clone();
-            move |_: &Store| {
-                ran.store(true, Ordering::SeqCst);
-                Ok(())
-            }
-        };
-        let outcome = handle.block_on(store.writing(body));
+        let running = ran.clone();
+        let outcome = handle.block_on(store.writing(move |_| {
+            running.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
         assert!(
             matches!(outcome, Err(StoreError::Io(_))),
             "cancelled: {outcome:?}"
