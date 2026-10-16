@@ -84,7 +84,7 @@ if [[ "$version" == 0.11.0 ]]; then
 - The system audio lane records everything that plays on the default output, not only the call.
 - Very long sessions can run into WebKitGTK's file descriptor leak ([#160](https://github.com/NicolaiSchmid/steno/issues/160)).
 - GNOME shows no tray icon without the AppIndicator extension; closing the main window then quits Steno, and saves a recording first.
-- On Hyprland, start Steno from the app launcher or with `uwsm-app -- steno-desktop`. If an `exec-once` line starts it instead, a logout while the session is still starting can cut a recording's save short.
+- On a uwsm session (Omarchy's), start Steno from the app launcher or with `uwsm-app -- steno-desktop`. If an `exec-once` line starts it instead, a logout while the session is still starting can cut a recording's save short.
 EOF
 fi
 cat <<EOF
@@ -109,5 +109,5 @@ if [[ ${#bundles[@]} -gt 0 ]]; then printf '%s\n' "${bundles[@]}"; fi
 cat <<EOF
 $fence
 
-Each \`gpg --verify\` must report "Good signature" from the fingerprint above, and \`sha256sum\` must print OK for every file you downloaded; the warning that the key is not certified by a trusted signature is expected. The \`.sig\` files are the in-app updater's signatures, not OpenPGP ones.
+Each \`gpg --verify\` must report "Good signature" from the fingerprint above, and \`sha256sum\` must print OK for each build you downloaded; the warning that the key is not certified by a trusted signature is expected. The \`.sig\` files are the in-app updater's signatures, not OpenPGP ones.
 EOF
