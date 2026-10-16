@@ -141,13 +141,12 @@ fn sample_time(time: &AudioTimeStamp) -> Option<f64> {
 #[inline(always)]
 fn missed_before(clock: &Cell<CycleClock>, time: &AudioTimeStamp, frames: usize) -> Missed {
     let mut cycles = clock.get();
-    let missed = match sample_time(time) {
+    let missed = if let Some(sample) = sample_time(time) {
         // A finite sample time at or above 0, to the nearest frame.
-        Some(sample) => cycles.advance(sample.round() as u64, frames),
-        None => {
-            cycles.reset();
-            Missed::default()
-        }
+        cycles.advance(sample.round() as u64, frames)
+    } else {
+        cycles.reset();
+        Missed::default()
     };
     clock.set(cycles);
     missed
@@ -157,12 +156,12 @@ fn missed_before(clock: &Cell<CycleClock>, time: &AudioTimeStamp, frames: usize)
 /// sample time read `now` at the stop: [`CycleClock::missed_until`] at the
 /// input sample time that matches it.
 fn missed_at_stop(clock: CycleClock, input_lag: f64, now: Option<f64>) -> Missed {
-    let input = now.map(|now| now - input_lag);
-    match input.filter(|input| input.is_finite() && *input >= 0.0) {
+    now.map(|now| now - input_lag)
+        .filter(|input| input.is_finite() && *input >= 0.0)
         // A finite sample time at or above 0, to the nearest frame.
-        Some(input) => clock.missed_until(input.round() as u64),
-        None => Missed::default(),
-    }
+        .map_or_else(Missed::default, |input| {
+            clock.missed_until(input.round() as u64)
+        })
 }
 
 /// The IOProc. Builds a stack array of [`BufferView`]s from the HAL's
