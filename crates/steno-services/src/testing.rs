@@ -740,11 +740,22 @@ impl HeldStore {
     /// its busy timeout runs out, until the lock goes. Returns once that
     /// write is in its wait.
     pub fn with_a_write_waiting(store: &Arc<Store>, path: &Path) -> HeldStore {
+        let store = store.clone();
+        HeldStore::with_waiting(path, move || {
+            let _ = store.write(|_| Ok(()));
+        })
+    }
+
+    /// The lock held on the database at `path`, and `write`, which waits
+    /// behind it, run on a thread of its own again and again (each time
+    /// its busy timeout runs out) until the lock goes. Returns once the
+    /// first is in its wait.
+    pub fn with_waiting(path: &Path, mut write: impl FnMut() + Send + 'static) -> HeldStore {
         let mut held = HeldStore::lock_only(path);
-        let (store, released) = (store.clone(), held.released.clone());
+        let released = held.released.clone();
         held.waiting = Some(std::thread::spawn(move || {
             while !released.load(Ordering::SeqCst) {
-                let _ = store.write(|_| Ok(()));
+                write();
             }
         }));
         // The write's busy wait has begun by now; nothing reports it.

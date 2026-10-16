@@ -12,7 +12,6 @@
 //! worker, so a wait on that worker would show too. Rust only.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use steno_bridge::{
@@ -40,35 +39,26 @@ enum Waiting {
 /// A held lock and what waits behind it ([`Waiting::begin`]).
 struct Wait {
     held: HeldStore,
-    behind: Option<std::thread::JoinHandle<()>>,
-    released: Arc<AtomicBool>,
+    /// The pipeline write's forced reload.
+    reload: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Waiting {
     /// Holds the lock on `capture`'s database and starts what waits behind
     /// it; returns once that is in its wait.
     fn begin(self, capture: &SyntheticRecorder, hosted: &Hosted) -> Wait {
-        let released = Arc::new(AtomicBool::new(false));
         match self {
             Waiting::PipelineWrite => Wait {
                 held: HeldStore::with_a_write_waiting(&capture.store, &capture.database()),
-                behind: Some(hosted.reload_in_flight()),
-                released,
+                reload: Some(hosted.reload_in_flight()),
             },
             Waiting::SettingsSave => {
-                let held = HeldStore::lock_only(&capture.database());
-                let (host, stop) = (hosted.host.clone(), released.clone());
-                let behind = std::thread::spawn(move || {
-                    while !stop.load(Ordering::SeqCst) {
-                        let _ = host.settings_general_set_detection(SetBoolParams { value: false });
-                    }
-                });
-                // The save is in its busy wait by now; nothing reports it.
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                let host = hosted.host.clone();
                 Wait {
-                    held,
-                    behind: Some(behind),
-                    released,
+                    held: HeldStore::with_waiting(&capture.database(), move || {
+                        let _ = host.settings_general_set_detection(SetBoolParams { value: false });
+                    }),
+                    reload: None,
                 }
             }
         }
@@ -78,11 +68,10 @@ impl Waiting {
 impl Wait {
     /// Lets the lock go once [`HeldStore::HOLD`] has passed, and waits for
     /// what waited; returns when the lock went.
-    fn release_after_hold(&mut self) -> Instant {
-        self.released.store(true, Ordering::SeqCst);
+    fn release_after_hold(mut self) -> Instant {
         let released = self.held.release_after_hold();
-        if let Some(behind) = self.behind.take() {
-            behind.join().unwrap();
+        if let Some(reload) = self.reload.take() {
+            reload.join().unwrap();
         }
         released
     }
@@ -114,7 +103,7 @@ async fn levels_keep_flowing_while_another_process_holds_the_write_lock() {
 
 /// Check 1's assertions for one [`Waiting`].
 fn levels_flow_while(waiting: Waiting, capture: &SyntheticRecorder, hosted: &Hosted) {
-    let mut wait = waiting.begin(capture, hosted);
+    let wait = waiting.begin(capture, hosted);
     let since = Instant::now();
     let released = wait.release_after_hold();
 
@@ -219,7 +208,7 @@ fn a_device_notice_reaches_the_host_while(waiting: Waiting) {
         "the countdown is armed"
     );
 
-    let mut wait = waiting.begin(&capture, &hosted);
+    let wait = waiting.begin(&capture, &hosted);
     let since = Instant::now();
     outages.release();
     let on_the_notices = |calls: &[crate::testing::HookCall]| {
@@ -274,7 +263,7 @@ async fn a_command_answers_while_a_write_waits() {
     capture.store.save_meeting(&meeting).unwrap();
     let hosted = hosted(&capture.store, &capture.recorder);
 
-    let mut wait = Waiting::PipelineWrite.begin(&capture, &hosted);
+    let wait = Waiting::PipelineWrite.begin(&capture, &hosted);
     let since = Instant::now();
     hosted
         .host
