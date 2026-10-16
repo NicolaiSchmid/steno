@@ -131,11 +131,12 @@ impl LevelSlot {
 
     /// The reader's wake-up, signalled by every [`publish`](Self::publish).
     #[must_use]
-    pub fn wake(&self) -> &Wake {
+    pub(crate) fn wake(&self) -> &Wake {
         &self.wake
     }
 
-    /// The publish count so far; a reader republishes when it changed.
+    /// The publish count so far; a reader hands the levels on when it
+    /// changed.
     #[must_use]
     pub fn current_generation(&self) -> usize {
         self.generation.load(Ordering::Acquire)
@@ -154,5 +155,21 @@ impl LevelSlot {
                 peak: f32::from_bits(self.system_peak.load(Ordering::Relaxed)),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each publish signals the reader's wake, so the publisher is woken
+    /// by it rather than by its poll.
+    #[test]
+    fn a_publish_wakes_the_reader() {
+        let slot = LevelSlot::new(false);
+        assert!(!slot.wake().try_take(), "a wake before any publish");
+        slot.publish(LaneLevel::SILENCE, None);
+        assert!(slot.wake().try_take(), "the publish signalled no wake");
+        assert!(!slot.wake().try_take(), "one publish, two wakes");
     }
 }
