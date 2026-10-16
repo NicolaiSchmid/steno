@@ -203,11 +203,16 @@ impl World {
         })
     }
 
+    /// How many meetings the intake enqueued.
+    fn enqueues(&self) -> usize {
+        self.enqueued.load(Ordering::SeqCst)
+    }
+
     /// One meeting, one ledger row and one enqueue.
     fn admitted_once(&self) {
         assert_eq!(self.count("meeting"), 1, "one meeting");
         assert_eq!(self.count("handoverAdmission"), 1, "one ledger row");
-        assert_eq!(self.enqueued.load(Ordering::SeqCst), 1, "enqueued once");
+        assert_eq!(self.enqueues(), 1, "enqueued once");
     }
 
     /// Drops `call`, an admission, once its copy took the write lock from
@@ -226,7 +231,7 @@ impl World {
     /// went.
     async fn enqueued(&self, count: usize) {
         let deadline = Instant::now() + AFTER_THE_LOCK;
-        while self.enqueued.load(Ordering::SeqCst) < count {
+        while self.enqueues() < count {
             assert!(
                 Instant::now() < deadline,
                 "enqueued within {AFTER_THE_LOCK:?}"
@@ -330,7 +335,7 @@ async fn a_complete_under_a_seven_second_hold_answers_with_a_durable_meeting() {
             world.count("meeting"),
             world.count("handoverAdmission"),
             world.audio_files().len(),
-            world.enqueued.load(Ordering::SeqCst)
+            world.enqueues()
         ),
         (1, 1, 1, 1),
         "one admission, enqueued once"
@@ -354,7 +359,7 @@ async fn a_complete_under_a_twelve_second_hold_fails_cleanly_and_its_retry_admit
             world.count("handoverAdmission"),
             world.audio_files().len(),
             world.noted.len(),
-            world.enqueued.load(Ordering::SeqCst)
+            world.enqueues()
         ),
         (0, 0, 0, 0, 0),
         "a refused admission leaves no row and no copy, and enqueues nothing"
@@ -415,7 +420,7 @@ async fn intake_alone(hold: Duration) {
             world.count("handoverAdmission"),
             world.audio_files().len(),
             world.noted.len(),
-            world.enqueued.load(Ordering::SeqCst)
+            world.enqueues()
         ),
         (0, 0, 0, 0, 0),
         "no row and no enqueue, and the copy went once the failed save landed"
