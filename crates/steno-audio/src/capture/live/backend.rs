@@ -72,7 +72,7 @@
 //! An IO thread the scheduler holds up past its deadline misses cycles:
 //! the HAL reports an overload, and the next input time stamp's sample time
 //! sits past where the last buffer ended, the audio between gone. `io_proc`
-//! reads that sample time against the frames the last callback delivered
+//! reads that sample time against where the audio delivered so far ends
 //! ([`CycleClock`], in the aggregate's frames) and writes the missed frames
 //! as zeros on every lane before the callback's own
 //! ([`LaneFrameSink::fill_missed`]), so the master stays on wall time and
@@ -120,7 +120,7 @@ struct CallbackContext {
     sink: Arc<LaneFrameSink>,
     sources: Vec<LaneSource>,
     first_callback: FirstCallback,
-    /// Where the last callback ended in the aggregate's sample time. A
+    /// Where the delivered audio ends in the aggregate's sample time. A
     /// `Cell`: only the IO thread touches it, one callback at a time, and
     /// only through the shared reference `io_proc` makes.
     clock: Cell<CycleClock>,

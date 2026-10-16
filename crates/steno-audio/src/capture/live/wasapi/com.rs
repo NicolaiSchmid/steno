@@ -503,7 +503,7 @@ pub struct CaptureClient {
     /// No packet drained yet: loopback streams commonly flag their first
     /// packet as a discontinuity, which is not a late thread.
     first_packet: bool,
-    /// Where the last packet ended in device position.
+    /// Where the delivered audio ends in device position.
     clock: CycleClock,
     /// Frames the discontinuities lost, as the device positions tell them
     /// (handed to the body to fill).
@@ -673,8 +673,8 @@ impl CaptureClient {
     /// Hands every queued packet to `handle`, then returns, with the frames
     /// the engine lost right before it: on a packet flagged
     /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` (the first one aside, see
-    /// `first_packet`), how far its device position passed where the last
-    /// packet ended ([`CycleClock`]), 0 otherwise and for a position the
+    /// `first_packet`), how far its device position passed where the
+    /// delivered audio ends ([`CycleClock`]), 0 otherwise and for a position the
     /// engine flags as invalid (`AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`).
     /// The position counts the stream's frames, as Microsoft's
     /// documentation of `GetBuffer` describes it (not run on hardware: see

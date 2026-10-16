@@ -43,7 +43,7 @@
 //! up to 1.2 s in 10 s with Steno's process starved on one CPU, with
 //! PipeWire's `ERR` counting the cycles on `steno-capture`). `process`
 //! reads the stream's `pw_time` ticks, the graph clock's position at the
-//! cycle, against the frames the last cycle delivered
+//! cycle, against where the audio delivered so far ends
 //! ([`CycleClock`], in the stream's frames at the graph's rate) and writes
 //! what was missed as zeros on every lane before the cycle's own frames
 //! ([`LaneFrameSink::fill_missed`]), so the master stays on wall time and

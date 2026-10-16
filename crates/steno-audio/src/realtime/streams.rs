@@ -49,7 +49,7 @@
 //! plan's parity list tracks both the missing resampling and this error.
 //!
 //! Audio a capture thread missed (a packet the engine flagged as a
-//! discontinuity, its device position past where the last packet ended;
+//! discontinuity, its device position past where the delivered audio ends;
 //! A18 of `.plans/2026-10-07-stable-promotion.md`) goes through
 //! [`StreamBody::fill_missed`] before the packet: on the master as a
 //! silent packet of that length, which pulls the follower's frames for the

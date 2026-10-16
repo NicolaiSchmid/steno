@@ -7,12 +7,20 @@
 //! sample time on macOS, WASAPI's device position. A capture thread the
 //! scheduler held up misses cycles: the daemon, the HAL or the engine runs
 //! on, the audio of those cycles is gone, and the next callback's position
-//! sits past where the last one ended. [`CycleClock::advance`] turns that
-//! jump into frames, which the backend writes as silence on every lane
-//! before the callback's own frames ([`LaneFrameSink::fill_missed`]), so the
-//! master stays on wall time and the lanes stay aligned, and which the
-//! session counts in [`CaptureStatistics::missed_seconds`] for the
-//! recorder's note about missing audio.
+//! sits past where the audio delivered so far ends. [`CycleClock::advance`]
+//! turns that jump into frames, which the backend writes as silence on
+//! every lane before the callback's own frames
+//! ([`LaneFrameSink::fill_missed`]), so the master stays on wall time and
+//! the lanes stay aligned, and which the session counts in
+//! [`CaptureStatistics::missed_seconds`] for the recorder's note about
+//! missing audio.
+//!
+//! The clock follows where the delivered audio ends, the fills included,
+//! not only where the last callback ended: after a stall PipeWire can hand
+//! over a buffer it kept from the stall in a second callback at the same
+//! position (measured in a throttled container: a jump of five cycles, then
+//! one more buffer), and that buffer's frames count against the next jump
+//! instead of leaving the master a cycle longer than wall time for each.
 //!
 //! A jump of more than [`MISSED_FILL_LIMIT`] is not filled: one that long
 //! (a computer that slept, a clock that was reset) is left to the
@@ -39,9 +47,9 @@ use std::time::Duration;
 /// [`CaptureSession::STALL_TIMEOUT`]: crate::capture::CaptureSession::STALL_TIMEOUT
 pub const MISSED_FILL_LIMIT: Duration = Duration::from_secs(1);
 
-/// Where a capture's last callback ended on its clock, and how that clock
-/// counts frames; see the module doc. One per started stream, owned by the
-/// thread whose callbacks it follows.
+/// Where the audio a capture delivered ends on its clock, and how that
+/// clock counts frames; see the module doc. One per started stream, owned
+/// by the thread whose callbacks it follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CycleClock {
     /// Stream frames per `ticks` clock ticks.
@@ -49,9 +57,14 @@ pub struct CycleClock {
     ticks: u64,
     /// The most frames [`Self::advance`] reports.
     limit: usize,
-    /// The last callback's position and frames; `None` before the first
-    /// and after [`Self::reset`].
-    last: Option<(u64, usize)>,
+    /// The first callback's position since the last [`Self::reset`], from
+    /// which positions count in stream frames; `None` before it.
+    origin: Option<u64>,
+    /// Where the delivered audio, fills included, ends: stream frames
+    /// since `origin`.
+    end: u64,
+    /// The last callback's frames.
+    last_frames: usize,
 }
 
 impl CycleClock {
@@ -71,7 +84,9 @@ impl CycleClock {
             frames: 1,
             ticks: 1,
             limit,
-            last: None,
+            origin: None,
+            end: 0,
+            last_frames: 0,
         }
     }
 
@@ -87,11 +102,11 @@ impl CycleClock {
         self.reset();
     }
 
-    /// Forgets the last callback: the next one starts afresh and reports
-    /// no jump (a position the backend could not read, a stream that
-    /// restarted).
+    /// Forgets where the audio ends: the next callback starts afresh and
+    /// reports no jump (a position the backend could not read, a stream
+    /// that restarted).
     pub fn reset(&mut self) {
-        self.last = None;
+        self.origin = None;
     }
 
     /// Whether a callback of `frames` differs in length from the last one
@@ -103,50 +118,59 @@ impl CycleClock {
     /// callback.
     #[must_use]
     pub fn resized(&self, frames: usize) -> bool {
-        self.last
-            .is_some_and(|(_, last)| last.abs_diff(frames).saturating_mul(8) > last)
+        let last = self.last_frames;
+        self.origin.is_some() && last.abs_diff(frames).saturating_mul(8) > last
     }
 
     /// One callback whose first frame sits at `position` on the clock and
     /// which delivers `frames`: returns the frames missed before it, to be
     /// filled with silence. That is how far `position` passed the end of
-    /// the last callback, in stream frames, when that is more than half the
-    /// last callback's frames (cycles are missed whole; this leaves room
-    /// for a resampler's rounding) and at most the limit. It is 0 for the
-    /// first callback, after a reset, after a callback without frames, for
-    /// a jump over the limit, and for a position at or behind where the
-    /// last callback ended (a clock that went back, a cycle delivered
-    /// twice). The clock then follows on from this callback. Positions
-    /// wrap: one just past `u64::MAX` follows on from one just before.
+    /// the audio delivered so far, in stream frames, when that is more than
+    /// half the last callback's frames (cycles are missed whole; this
+    /// leaves room for a resampler's rounding) and at most the limit; the
+    /// audio then ends at `position`, plus `frames`. It is 0 for the first
+    /// callback, after a reset, after a callback without frames, and for a
+    /// jump over the limit, and the clock follows on from this callback; a
+    /// shortfall of half a callback or less is forgotten the same way. A
+    /// position at or behind the end (a cycle delivered twice, a buffer
+    /// kept from a stall) reports nothing and moves the end on by `frames`,
+    /// so those frames count against the next jump; one more than the limit
+    /// behind it, or behind the first callback (a clock that went back),
+    /// starts afresh. Positions wrap: one just past `u64::MAX` follows on
+    /// from one just before.
     #[inline(always)]
     pub fn advance(&mut self, position: u64, frames: usize) -> usize {
-        let missed = match self.last {
-            Some((last, delivered)) if delivered > 0 => {
-                let elapsed = position.wrapping_sub(last);
-                // More than half the ring of positions ahead is behind.
-                if elapsed > u64::MAX / 2 {
-                    0
-                } else {
-                    let missed = self.frames_in(elapsed).saturating_sub(delivered);
-                    if missed > delivered / 2 && missed <= self.limit {
-                        missed
-                    } else {
-                        0
-                    }
-                }
-            }
-            _ => 0,
+        let last_frames = std::mem::replace(&mut self.last_frames, frames);
+        let since = self.origin.map(|origin| position.wrapping_sub(origin));
+        // More than half the ring of positions ahead is behind the origin.
+        let Some(since) = since.filter(|since| *since <= u64::MAX / 2) else {
+            self.origin = Some(position);
+            self.end = frames as u64;
+            return 0;
         };
-        self.last = Some((position, frames));
+        let at = self.frames_in(since);
+        let mut missed = 0;
+        if at > self.end {
+            let gap = at - self.end;
+            if last_frames > 0 && gap > last_frames as u64 / 2 && gap <= self.limit as u64 {
+                // At most the limit, a `usize`.
+                missed = gap as usize;
+            }
+            self.end = at;
+        } else if self.end - at > self.limit as u64 {
+            self.origin = Some(position);
+            self.end = 0;
+        }
+        self.end = self.end.saturating_add(frames as u64);
         missed
     }
 
     /// `ticks` clock ticks in stream frames, to the nearest frame.
     #[inline(always)]
-    fn frames_in(&self, ticks: u64) -> usize {
+    fn frames_in(&self, ticks: u64) -> u64 {
         let frames = (u128::from(ticks) * u128::from(self.frames) + u128::from(self.ticks / 2))
             / u128::from(self.ticks);
-        usize::try_from(frames).unwrap_or(usize::MAX)
+        u64::try_from(frames).unwrap_or(u64::MAX)
     }
 }
 
@@ -207,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn a_clock_that_goes_back_or_repeats_a_cycle_reports_nothing_and_follows_on() {
+    fn a_clock_that_goes_back_starts_afresh_and_a_repeated_cycle_counts_against_the_next_jump() {
         let mut clock = CycleClock::new(48_000.0);
         assert_eq!(
             run(
@@ -224,9 +248,42 @@ mod tests {
         );
         assert_eq!(
             clock.advance(2_880, 480),
-            960,
-            "it follows the new position"
+            480,
+            "two cycles missed, less the one delivered twice"
         );
+        assert_eq!(clock.advance(3_360, 480), 0);
+    }
+
+    #[test]
+    fn a_buffer_kept_from_a_stall_counts_against_the_next_jump() {
+        // As measured on PipeWire in a throttled container: five cycles
+        // apart, then a second buffer at the same position.
+        let mut clock = CycleClock::new(48_000.0);
+        assert_eq!(
+            run(
+                &mut clock,
+                &[
+                    (0, 1_024),
+                    (5_120, 1_024),
+                    (5_120, 1_024),
+                    (6_144, 1_024),
+                    (7_168, 1_024),
+                    (10_240, 1_024),
+                    (11_264, 1_024)
+                ]
+            ),
+            [0, 4_096, 0, 0, 0, 1_024, 0],
+            "the kept buffer leaves one cycle of the next jump of three to fill"
+        );
+        // A clock stuck at one position while 102 callbacks deliver: more
+        // than the limit behind the end, it starts afresh, and the frames
+        // before that count against nothing.
+        let mut clock = CycleClock::new(48_000.0);
+        for _ in 0..102 {
+            assert_eq!(clock.advance(0, 480), 0);
+        }
+        assert_eq!(clock.advance(480, 480), 0);
+        assert_eq!(clock.advance(1_440, 480), 480, "a cycle missed after it");
     }
 
     #[test]
