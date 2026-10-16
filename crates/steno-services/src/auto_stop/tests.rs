@@ -14,7 +14,7 @@ use steno_host::services::Recorder as _;
 
 use super::*;
 use crate::testing::{
-    HANG_GUARD, HeldOutages, PATIENCE, SyntheticRecorder, eventually, eventually_within,
+    HANG_GUARD, HeldOutages, LIVE, PATIENCE, SyntheticRecorder, eventually, eventually_within,
     on_own_thread, synthetic_recorder, synthetic_recorder_over,
 };
 
@@ -591,7 +591,7 @@ async fn an_auto_stop_under_a_held_lock_saves_once_the_lock_goes() {
         .expect("the countdown's stop reached the host");
     let shown = stopping.duration_since(since);
     assert!(
-        shown < Duration::from_millis(200),
+        shown < LIVE,
         "Stopping reached the host {shown:?} after the countdown ran out"
     );
 

@@ -17,8 +17,8 @@ use steno_core::{MeetingSource, Store};
 use super::*;
 use crate::auto_stop::MicrophoneActivity;
 use crate::testing::{
-    HANG_GUARD, PATIENCE, SyntheticRecorder, eventually_within, on_own_thread, synthetic_recorder,
-    temp_store,
+    HANG_GUARD, LIVE, PATIENCE, SyntheticRecorder, eventually_within, on_own_thread,
+    synthetic_recorder, temp_store,
 };
 
 #[derive(Default)]
@@ -468,10 +468,7 @@ fn the_detection_poll_reads_the_settings_while_a_write_waits() {
     let asked = std::time::Instant::now();
     harness.controller.follow_settings();
     let answered = asked.elapsed();
-    assert!(
-        answered < Duration::from_millis(200),
-        "the setting took {answered:?} to read"
-    );
+    assert!(answered < LIVE, "the setting took {answered:?} to read");
     assert!(!harness.controller.is_enabled(), "the setting was read");
     held.release_after_hold();
 }

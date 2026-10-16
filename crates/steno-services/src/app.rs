@@ -4389,7 +4389,10 @@ mod tests {
     }
 
     /// A host notification nothing waits for that panics is logged at
-    /// `error` under its name, without the panic's message.
+    /// `error` under its name, without the panic's message. The
+    /// notification is the test's own and starts at once, so the log line
+    /// is waited for within [`PATIENCE`](crate::testing::PATIENCE): a
+    /// panic nothing logs fails there.
     #[test]
     fn a_notification_that_panics_is_logged_without_its_message() {
         let log = steno_pipeline::fixtures::CapturedLog::warnings();
@@ -4397,12 +4400,13 @@ mod tests {
         notify_on_the_blocking_pool(runtime.handle(), "the_panicking_test_notification", || {
             panic!("at /a/private/folder")
         });
-        let line = crate::testing::found_within(HANG_GUARD, "the panic was logged", || {
-            log.text()
-                .lines()
-                .find(|line| line.contains("the_panicking_test_notification"))
-                .map(str::to_owned)
-        });
+        let line =
+            crate::testing::found_within(crate::testing::PATIENCE, "the panic was logged", || {
+                log.text()
+                    .lines()
+                    .find(|line| line.contains("the_panicking_test_notification"))
+                    .map(str::to_owned)
+            });
         assert!(line.contains("ERROR"), "{line}");
         assert!(line.contains("a host notification panicked"), "{line}");
         assert!(!log.text().contains("/a/private/folder"), "{line}");
