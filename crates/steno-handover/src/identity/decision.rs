@@ -46,11 +46,11 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 /// How far after now a start or a pairing may be before an identity found
 /// with nothing recorded waits for the clock ([`Reason::ClockBehind`]),
-/// whatever the other times it can read say. The database stores a pairing time rounded half up
-/// to the millisecond, so a phone paired in the instant of the decision can
-/// read up to half a millisecond after now; a second is a round margin over
-/// that. Starts are never rounded but share it, so the check stays one
-/// comparison.
+/// whatever the other times it can read say. The database stores a
+/// pairing time rounded half up to the millisecond, so a phone paired in
+/// the instant of the decision can read up to half a millisecond after
+/// now; a second is a round margin over that. Starts are never rounded but
+/// share it, so the check stays one comparison.
 pub const CLOCK_SLACK: TimeDelta = TimeDelta::seconds(1);
 
 /// Who asks: where the callers differ, the decision differs.

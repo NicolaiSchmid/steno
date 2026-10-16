@@ -11,7 +11,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -307,7 +307,7 @@ fn orders(found: &[Found]) -> Vec<Vec<Found>> {
 fn every_row_of_the_table_decides_as_it_says() {
     let rows = rows();
     assert!(rows.len() >= 80, "{} rows", rows.len());
-    let mut names = std::collections::HashSet::new();
+    let mut names = HashSet::new();
     for row in &rows {
         assert!(names.insert(row.name.clone()), "{}: twice", row.name);
         let variants = match &row.observed.identities {
@@ -360,11 +360,11 @@ fn the_table_has_a_row_for_every_kind_of_decision_reached() {
         "Import wait SecretUnreadable []",
         "Move wait SecretUnreadable []",
     ];
-    let tabled: std::collections::BTreeSet<String> = rows()
+    let tabled: BTreeSet<String> = rows()
         .iter()
         .map(|row| signature(row.observed.caller, &row.expected))
         .collect();
-    let reached: std::collections::BTreeSet<String> = every_observation()
+    let reached: BTreeSet<String> = every_observation()
         .iter()
         .map(|observed| signature(observed.caller, &decide(observed)))
         .collect();
@@ -464,6 +464,14 @@ fn every_observation() -> Vec<Observations> {
     every
 }
 
+/// The identities found in `observed`, none where they could not be read.
+fn found(observed: &Observations) -> &[Found] {
+    match &observed.identities {
+        Identities::Found(found) => found,
+        _ => &[],
+    }
+}
+
 fn pending(record: &Record) -> Option<&str> {
     match record {
         Record::Read { pending, .. } => pending.as_deref(),
@@ -550,12 +558,10 @@ fn no_pairing_the_phones_know_is_lost() {
                 &observed.record,
                 Record::Read { current: Some(current), .. } if current == served
             );
-            let found = match &observed.identities {
-                Identities::Found(found) => found.as_slice(),
-                _ => &[],
-            };
             assert!(
-                found.iter().any(|identity| identity.fingerprint == *served)
+                found(&observed)
+                    .iter()
+                    .any(|identity| identity.fingerprint == *served)
                     || (observed.caller == Caller::Move && recorded),
                 "served from nothing: {observed:?}"
             );
@@ -564,13 +570,14 @@ fn no_pairing_the_phones_know_is_lost() {
 }
 
 /// No decision destroys a stored identity. A [`Write`] has no write of an
-/// identity, by design; on top of that, a mint is decided only where no
-/// identity was found, the import writes nothing, the move records at most
-/// the one identity it found (the file's) and drops no note and no phone,
-/// and the phones go only in the load's finished Pair again. Two writes
-/// outside the decision replace a stored identity, and are the named
-/// exceptions: Pair again's own mint (the user's confirmed choice, which
-/// removes every phone) and the Mac import's store over a desktop-id
+/// identity, by design; a mint is decided only where no identity was found
+/// ([`nothing_mints_silently`]) and the phones go only in the load's
+/// finished Pair again ([`no_pairing_the_phones_know_is_lost`]). On top of
+/// those, the import writes nothing, and the move records at most the one
+/// identity it found (the file's) and drops no note and no phone. Two
+/// writes outside the decision replace a stored identity, and are the
+/// named exceptions: Pair again's own mint (the user's confirmed choice,
+/// which removes every phone) and the Mac import's store over a desktop-id
 /// build's identity (S6 of `.plans/2026-10-07-stable-promotion.md`).
 /// `steno-services`' `no_identity_is_ever_destroyed_by_the_move` runs the
 /// move itself over a fake Secret Service.
@@ -578,35 +585,13 @@ fn no_pairing_the_phones_know_is_lost() {
 fn no_decision_destroys_a_stored_identity() {
     for observed in every_observation() {
         let decided = decide(&observed);
-        if decided.outcome == Outcome::Mint {
-            assert_eq!(
-                observed.identities,
-                Identities::Found(Vec::new()),
-                "a mint over an identity: {observed:?}"
-            );
-        }
-        let found = match &observed.identities {
-            Identities::Found(found) => found.as_slice(),
-            _ => &[],
-        };
-        match observed.caller {
-            Caller::Load => {}
-            Caller::Import => assert_eq!(decided.writes, [], "{observed:?}"),
-            Caller::Move => match decided.writes.as_slice() {
-                [] => {}
-                [Write::Record(fingerprint)] => assert!(
-                    matches!(found, [file] if file.fingerprint == *fingerprint),
-                    "the move recorded another than the file's: {observed:?}"
-                ),
-                other => panic!("the move writes {other:?}: {observed:?}"),
-            },
-        }
-        if decided.writes.contains(&Write::RemovePhones) {
-            assert_eq!(observed.caller, Caller::Load, "{observed:?}");
-            assert!(
-                matches!(found, [noted] if pending(&observed.record) == Some(noted.fingerprint.as_str())),
-                "the phones went without a finished Pair again: {observed:?}"
-            );
+        match (observed.caller, decided.writes.as_slice()) {
+            (Caller::Load, _) | (_, []) => {}
+            (Caller::Move, [Write::Record(fingerprint)]) => assert!(
+                matches!(found(&observed), [file] if file.fingerprint == *fingerprint),
+                "the move recorded another than the file's: {observed:?}"
+            ),
+            (caller, other) => panic!("{caller:?} writes {other:?}: {observed:?}"),
         }
     }
 }
