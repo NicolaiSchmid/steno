@@ -296,7 +296,7 @@ export function ProductFrame() {
 									</div>
 									<div className="mt-1">
 										Summary.md · Transcript.md · Tasks.md · transcript.vtt ·
-										meeting.json · audio.m4a kept 30 days
+										meeting.json · audio.wav kept 30 days
 									</div>
 								</div>
 							</div>

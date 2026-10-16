@@ -23,20 +23,66 @@ export const platformIds = ["mac", "win", "linux"] as const;
 
 export type Platform = (typeof platformIds)[number];
 
+interface LinuxTarget {
+	name: string;
+	/** How it is installed, for the note: "GNOME (.deb · AppImage)". */
+	via: string;
+	released: boolean;
+	/** The install line; `shell` is false for a line in a config file. */
+	install: { line: string; shell: boolean };
+}
+
+/**
+ * The Linux targets, each listed once its gate has passed on a real machine
+ * (stable plan D6, "The Linux gates"): flipping its `released` is the whole
+ * change. Linux counts as released once one target is.
+ */
+const linuxTargets: LinuxTarget[] = [
+	{
+		name: "GNOME",
+		via: ".deb · AppImage",
+		released: false,
+		install: {
+			line: "sudo apt install ./steno-desktop_*_amd64.deb",
+			shell: true,
+		},
+	},
+	{
+		name: "Omarchy",
+		via: "AUR",
+		released: false,
+		install: { line: "yay -S steno-desktop-bin", shell: true },
+	},
+	{
+		name: "NixOS",
+		via: "flake",
+		released: false,
+		install: { line: "programs.steno.enable = true;", shell: false },
+	},
+];
+
+export const listedLinuxTargets = linuxTargets.filter((t) => t.released);
+
+/** Windows is listed once its gate passes: flipping this is the whole change. */
+const windowsReleased = false;
+
+function desktop(name: string, released: boolean, note: string) {
+	return { name, released, note: released ? note : "Not released yet" };
+}
+
 /**
  * One entry per desktop. The download button reads `released`; the closing
- * CTA and the "How it's built" tiles show `note`. Once Windows or Linux
- * ships, flipping both here is the whole change.
+ * CTA and the "How it's built" tiles show `note`.
  */
 export const platforms: Record<
 	Platform,
 	{ name: string; released: boolean; note: string }
 > = {
-	mac: {
-		name: "macOS",
-		released: true,
-		note: "Apple Silicon · notarised",
-	},
-	win: { name: "Windows", released: false, note: "Not released yet" },
-	linux: { name: "Linux", released: false, note: "Not released yet" },
+	mac: desktop("macOS", true, "Apple Silicon · notarised"),
+	win: desktop("Windows", windowsReleased, "x64 · installer not code-signed"),
+	linux: desktop(
+		"Linux",
+		listedLinuxTargets.length > 0,
+		listedLinuxTargets.map((t) => `${t.name} (${t.via})`).join(" · "),
+	),
 };

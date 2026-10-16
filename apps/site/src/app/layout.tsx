@@ -22,7 +22,6 @@ export const metadata: Metadata = {
 		"Linux",
 		"open source",
 		"Parakeet",
-		"Whisper",
 	],
 	alternates: { canonical: "/" },
 	openGraph: {
