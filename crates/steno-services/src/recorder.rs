@@ -4456,7 +4456,7 @@ mod tests {
                 })
                 .unwrap();
         });
-        read_began.recv().unwrap();
+        read_began.recv_timeout(PATIENCE).unwrap();
 
         let since = Instant::now();
         let stopper = harness.recorder.clone();

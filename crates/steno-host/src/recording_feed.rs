@@ -624,7 +624,8 @@ mod tests {
 
     /// The feed's thread ends once the last clone of the host is gone:
     /// the host's drop wakes it, and it holds the host only for a pass,
-    /// so the host's own reader closes too.
+    /// so the host's own reader closes too. The thread is idle and owed
+    /// no wake when the last clone goes, so only the drop's wake ends it.
     #[test]
     fn the_feed_ends_with_the_host() {
         let now = steno_core::json::parse_date("2026-09-29T12:50:00.000Z").unwrap();
@@ -632,10 +633,11 @@ mod tests {
         let store = Arc::new(Store::in_memory().unwrap());
         let host = Host::new(store.clone(), fakes.services(), HostConfig::default()).unwrap();
         let clone = host.clone();
-        host.page_ready().unwrap();
         let thread = host.take_feed_thread().unwrap();
+        thread::sleep(2 * RECORDING_INTERVAL);
         drop(host);
-        clone.recorder_changed();
+        thread::sleep(2 * RECORDING_INTERVAL);
+        assert!(!thread.is_finished(), "a clone of the host is left");
         drop(clone);
         found("the feed's thread ended", || {
             thread.is_finished().then_some(())
