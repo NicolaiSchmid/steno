@@ -1818,9 +1818,9 @@ Each lands before `0.11.0-rc.1`.
     CI's live PipeWire tests stop their own process with `SIGSTOP` from a
     child shell: three stops of 0.6 s are filled (1.73 to 1.75 s) with the
     master on wall time; one of 2.5 s is counted unfilled (2.48 to 2.50 s);
-    one that ends just after the stop is counted (0.60 s); both lanes keep
-    the same length. The same runs in the 1-CPU container passed 3 of 3
-    each. After a 2.5 s stall left unfilled, every later moment of the
+    one that ends just after the stop is counted (0.58 to 0.60 s); both
+    lanes keep the same length. The same runs in the 1-CPU container passed
+    3 of 3 each. After a 2.5 s stall left unfilled, every later moment of the
     recording, a transcript's time stamps included, sits 2.42 to 2.66 s
     early against the wall clock, the unfilled seconds within the stop's
     timing. Two live Core Audio call captures on Forge: stopped twice for
