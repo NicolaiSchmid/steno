@@ -1945,8 +1945,9 @@ and also:
 The AUR package is X6; its first push is **Nicolai**'s, in G3. In S7,
 `flake.nix`'s macOS output gets the new URL, checks for
 `Contents/MacOS/steno-desktop` and `bundleId = "com.nicolaischmid.steno.desktop"`, and
-its UPDATES text names Settings' automatic-check switch; X7 adds the Linux
-outputs. The flake bump stays a manual PR made from the job summary.
+its UPDATES text says a Nix-installed Steno offers no update and Settings,
+under General, says "Updates come from your package manager." (#305); X7
+adds the Linux outputs. The flake bump stays a manual PR made from the job summary.
 
 ## The Sparkle handoff
 
