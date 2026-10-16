@@ -4406,6 +4406,157 @@ mod tests {
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
     }
 
+    /// P40 check 16: a stop while a forced reload is held in flight with
+    /// the view-model lock taken (the detail asks the pipeline whether its
+    /// export keeps failing, at a gate, as a reload behind a slow store
+    /// would wait) shows `Stopping` in the host within 100 ms of the
+    /// recorder's notice, and the session's files finish and the meeting
+    /// is saved while the reload is still held: the hook only pokes the
+    /// `recording` feed, which takes no host lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files() {
+        const FEED: Duration = Duration::from_millis(100);
+        let harness = harness(&[]);
+        let shown_meeting = steno_core::testing::sample_data::meeting();
+        harness.store.save_meeting(&shown_meeting).unwrap();
+        let pipeline = Arc::new(crate::testing::GatedPipeline::default());
+        let hosted =
+            crate::testing::hosted_over(&harness.store, &harness.recorder, Some(pipeline.clone()));
+        hosted.host.request_meeting(shown_meeting.id);
+        assert!(pipeline.gate.reloads() > 0, "the meeting's detail is shown");
+        start(&harness.recorder);
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+
+        let armed = pipeline.gate.arm();
+        let reload = hosted.reload_in_flight();
+        assert!(
+            pipeline.gate.wait_for(PATIENCE, |state| state.held == 1),
+            "the reload is held with the view models"
+        );
+        let since = Instant::now();
+        let stopper = harness.recorder.clone();
+        let stopping = std::thread::spawn(move || stopper.stop());
+        let shown = hosted
+            .sink
+            .recording_in("stopping", since, PATIENCE)
+            .expect("the stop reached the host");
+        let noticed = found_within(PATIENCE, "the stop's notice", || {
+            hosted
+                .hooks_since(since)
+                .into_iter()
+                .find(|call| call.state != RecordingState::Recording)
+                .map(|call| call.began)
+        });
+        let after_notice = shown.saturating_duration_since(noticed);
+        assert!(
+            after_notice < FEED,
+            "Stopping reached the host {after_notice:?} after the recorder's notice"
+        );
+        found_within(HANG_GUARD, "the stop ended", || {
+            stopping.is_finished().then_some(())
+        });
+        assert!(
+            pipeline
+                .gate
+                .wait_for(Duration::ZERO, |state| state.held == 1),
+            "the stop ended while the reload was held"
+        );
+        let state = harness.store.meeting(meeting_id).unwrap().unwrap().state;
+        assert!(
+            !matches!(
+                state,
+                steno_core::MeetingState::Recording | steno_core::MeetingState::Failed { .. }
+            ),
+            "saved while the reload was held, got {state:?}"
+        );
+        drop(armed);
+        stopping.join().unwrap();
+        reload.join().unwrap();
+        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
+    }
+
+    /// P40 check 23: a stop is two moves of the recorder, `Stopping` and
+    /// then `Idle`, and each asks the reload owner for one pass; the
+    /// stopped meeting's row, out of `recording`, reaches the list within
+    /// [`LIVE`] of the lock's release, which lets the save land, from the
+    /// owner's forced pass, not from the
+    /// stop's thread. The save waits on a lock another connection holds,
+    /// so `Stopping` lasts until the test lets it go; the owner ticks once
+    /// an hour, so only the requests reload.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_stop_asks_for_a_reload_per_move() {
+        let harness = harness(&[]);
+        let hosted = crate::testing::hosted(&harness.store, &harness.recorder);
+        let owner = tokio::spawn(crate::app::own_the_reloads(
+            hosted.host.clone(),
+            Duration::from_secs(3600),
+        ));
+        start(&harness.recorder);
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let mut held = crate::testing::HeldStore::lock_only(&database(&harness));
+        let requests = || hosted.host.reload_requests();
+        let before = requests();
+
+        let stopper = harness.recorder.clone();
+        let stopping = std::thread::Builder::new()
+            .name("the-stop".to_owned())
+            .spawn(move || stopper.stop())
+            .unwrap();
+        found_within(PATIENCE, "Stopping asked for a reload", || {
+            (requests() > before).then_some(())
+        });
+        assert_eq!(harness.recorder.status().state, RecordingState::Stopping);
+        assert_eq!(requests(), before + 1, "one request for Stopping");
+        let saved = held.release();
+        found_within(HANG_GUARD, "the stop saved", || {
+            stopping.is_finished().then_some(())
+        });
+        stopping.join().unwrap();
+        let id = meeting_id.to_string();
+        let (at, thread) = found_within(PATIENCE, "the stopped row listed", || {
+            hosted
+                .sink
+                .since_on(steno_bridge::BridgeTopic::MeetingsList, saved)
+                .into_iter()
+                .find(|(_, list, _)| {
+                    list["groups"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|group| {
+                            group["meetings"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .any(|row| {
+                                    row["id"]
+                                        .as_str()
+                                        .is_some_and(|row_id| row_id.eq_ignore_ascii_case(&id))
+                                        && row["state"] != "recording"
+                                })
+                        })
+                })
+                .map(|(at, _, thread)| (at, thread))
+        });
+        let took = at.duration_since(saved);
+        assert!(
+            took < LIVE,
+            "the stopped row was listed {took:?} after the save"
+        );
+        assert_ne!(
+            thread.as_deref(),
+            Some("the-stop"),
+            "listed from the stop's thread"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            requests(),
+            before + 2,
+            "one request for Stopping, one for Idle"
+        );
+        owner.abort();
+    }
+
     /// Decision 4 of `.plans/2026-10-12-store-off-the-workers.md`: the stop
     /// runs and saves on its own thread and never needs the runtime, so a
     /// stop while the services runtime's only worker is blocked still
