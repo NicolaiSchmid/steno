@@ -2097,10 +2097,10 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 The Swift app leaves the repository in S9 of
 `.plans/2026-10-07-stable-promotion.md` (planned in
 `.plans/2026-10-04-mac-cutover.md`), after the stable release's rollback
-window. The clip player is still a fake: it needs an audio output, must
-ask `steno_audio::Playback` before every clip, since the call capture's
-tap includes Steno's own process, and follows the stable release (that
-plan's "What follows"). The host may treat the main window as always
+window. The clip player is still a fake and follows the stable release (that
+plan's "What follows"): it needs an audio output and must ask
+`steno_audio::Playback` before every clip, since the call capture's tap
+includes Steno's own process. The host may treat the main window as always
 present: a close hides it, or ends the process when no tray stands, so
 publishing to it never fails for want of a window. The macOS menu bar has
 no Record menu yet (`⌘⇧R` and Record In Person are the tray's and the
