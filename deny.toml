@@ -70,6 +70,12 @@ ignore = [
   # tray need; no maintained GTK 3 binding exists to move to, and it runs
   # in the compiler only, never in a shipped binary.
   { id = "RUSTSEC-2024-0370", reason = "build-time macro of the GTK 3 bindings Tauri depends on; nothing to upgrade to" },
+  # zip 4.6.1 is yanked, not advised against: on 2026-10-16 upstream yanked
+  # every release but the latest (9.0.3), as it does (zip-rs/zip2 #315).
+  # tauri-plugin-updater 2.14.0, which unpacks the update bundle with it,
+  # requires zip ^4. This entry covers the yank of this one version only;
+  # an advisory against it still fails. Revisit on 2026-11-15.
+  { crate = "zip@4.6.1", reason = "upstream yanks all but the latest; tauri-plugin-updater 2.14.0 requires zip ^4; no advisory against 4.6.1; revisit 2026-11-15" },
 ]
 
 [bans]
