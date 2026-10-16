@@ -4546,13 +4546,8 @@ mod tests {
 
     /// Waits until `n` passes of the reload owner ran since `since`: each
     /// publishes `settings.phone` (the pairing poll).
-    fn passes(
-        sink: &TimedSink,
-        since: std::time::Instant,
-        n: usize,
-        patience: std::time::Duration,
-    ) {
-        found_within(patience, "the reload owner's passes", || {
+    fn passes(sink: &TimedSink, since: std::time::Instant, n: usize) {
+        found_within(PATIENCE, "the reload owner's passes", || {
             (sink.since(BridgeTopic::SettingsPhone, since).len() >= n).then_some(())
         });
     }
@@ -4572,7 +4567,7 @@ mod tests {
             host.clone(),
             std::time::Duration::from_millis(50),
         ));
-        passes(&sink, since, 10, PATIENCE);
+        passes(&sink, since, 10);
         owner.abort();
         for topic in [
             BridgeTopic::MeetingsList,
@@ -4587,13 +4582,26 @@ mod tests {
         }
     }
 
-    /// Waits up to one poll interval and [`LIVE`] after `since` for the
-    /// list to carry a meeting titled `title`.
-    fn listed_within_one_poll(sink: &TimedSink, since: std::time::Instant, title: &str) {
+    /// P40 check 20 over `store`: `writer` retitles the sample meeting, and
+    /// the list carries the title within one poll interval and [`LIVE`].
+    fn a_retitle_shows_within_one_poll(store: &Arc<Store>, writer: &Store) {
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        let (host, sink) = idle_host(store, &fakes, None);
+        let owner = tokio::spawn(own_the_reloads(host.clone(), POLL_INTERVAL));
+        passes(&sink, std::time::Instant::now(), 1);
+        let since = std::time::Instant::now();
+        let meeting = steno_core::testing::sample_data::meeting();
+        writer
+            .update_meeting(meeting.id, Utc::now(), |meeting| {
+                "Retitled".clone_into(&mut meeting.title);
+                meeting.title_origin = steno_core::TitleOrigin::User;
+                Ok(())
+            })
+            .unwrap();
         let shown = found_within(POLL_INTERVAL + LIVE, "the retitled meeting listed", || {
             sink.since(BridgeTopic::MeetingsList, since)
                 .into_iter()
-                .find(|(_, list)| list.to_string().contains(title))
+                .find(|(_, list)| list.to_string().contains("Retitled"))
                 .map(|(at, _)| at)
         });
         let took = shown.duration_since(since);
@@ -4601,18 +4609,7 @@ mod tests {
             took < POLL_INTERVAL + LIVE,
             "the list carried the title {took:?} after the commit"
         );
-    }
-
-    /// Retitles the sample meeting through `store`.
-    fn retitle(store: &Store, title: &str) {
-        let meeting = steno_core::testing::sample_data::meeting();
-        store
-            .update_meeting(meeting.id, Utc::now(), |meeting| {
-                title.clone_into(&mut meeting.title);
-                meeting.title_origin = steno_core::TitleOrigin::User;
-                Ok(())
-            })
-            .unwrap();
+        owner.abort();
     }
 
     /// P40 check 20, a guard for the gate: a second connection to the
@@ -4623,15 +4620,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_commit_from_another_process_shows_within_one_poll() {
         let (dir, store) = temp_store();
-        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
-        let (host, sink) = idle_host(&store, &fakes, None);
-        let owner = tokio::spawn(own_the_reloads(host.clone(), POLL_INTERVAL));
-        passes(&sink, std::time::Instant::now(), 1, PATIENCE);
         let other = Store::open(crate::testing::database_in(dir.path())).unwrap();
-        let since = std::time::Instant::now();
-        retitle(&other, "Retitled elsewhere");
-        listed_within_one_poll(&sink, since, "Retitled elsewhere");
-        owner.abort();
+        a_retitle_shows_within_one_poll(&store, &other);
     }
 
     /// P40 check 20, the in-process side: a commit through the in-memory
@@ -4641,14 +4631,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn an_in_process_commit_shows_within_one_poll() {
         let store = Arc::new(Store::in_memory().unwrap());
-        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
-        let (host, sink) = idle_host(&store, &fakes, None);
-        let owner = tokio::spawn(own_the_reloads(host.clone(), POLL_INTERVAL));
-        passes(&sink, std::time::Instant::now(), 1, PATIENCE);
-        let since = std::time::Instant::now();
-        retitle(&store, "Retitled here");
-        listed_within_one_poll(&sink, since, "Retitled here");
-        owner.abort();
+        a_retitle_shows_within_one_poll(&store, &store);
     }
 
     /// P40 check 22, a guard for the gate: an event that commits nothing
@@ -4716,7 +4699,7 @@ mod tests {
         let (host, sink) = idle_host(&store, &fakes, None);
         let denied = host.snapshot(BridgeTopic::SettingsRecording).unwrap()["subtitle"].clone();
         let owner = tokio::spawn(own_the_reloads(host.clone(), POLL_INTERVAL));
-        passes(&sink, std::time::Instant::now(), 1, PATIENCE);
+        passes(&sink, std::time::Instant::now(), 1);
         let since = std::time::Instant::now();
         fakes
             .permissions
@@ -4754,7 +4737,7 @@ mod tests {
             host.clone(),
             std::time::Duration::from_secs(3600),
         ));
-        passes(&sink, std::time::Instant::now(), 1, PATIENCE);
+        passes(&sink, std::time::Instant::now(), 1);
 
         // What one forced reload asks the gate.
         let before = gate.reloads();
