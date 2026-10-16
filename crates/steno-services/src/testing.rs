@@ -974,11 +974,21 @@ impl Hosted {
 /// A pipeline whose `export_keeps_failing`, which the detail's reload
 /// asks, waits at a gate while the gate is armed: a reload held there
 /// stands for one that waits on the store behind another process's
-/// write lock. Everything else is the host's fake.
+/// write lock. Set to a store handle ([`Self::gate_inside_reads_on`]), it
+/// waits inside a read on that handle's reader, so the reader stays taken
+/// while it waits. Everything else is the host's fake.
 #[derive(Default)]
 pub struct GatedPipeline {
     fake: steno_host::fakes::FakePipeline,
     pub gate: ReloadGate,
+    reader: std::sync::OnceLock<Arc<Store>>,
+}
+
+impl GatedPipeline {
+    /// From now on the gate is passed inside a read on `store`'s reader.
+    pub fn gate_inside_reads_on(&self, store: Arc<Store>) {
+        let _ = self.reader.set(store);
+    }
 }
 
 #[derive(Default)]
@@ -1066,7 +1076,15 @@ impl steno_host::services::Pipeline for GatedPipeline {
     }
 
     fn export_keeps_failing(&self, meeting_id: uuid::Uuid) -> bool {
-        self.gate.pass();
+        match self.reader.get() {
+            Some(store) => store
+                .read(|_| {
+                    self.gate.pass();
+                    Ok(())
+                })
+                .unwrap(),
+            None => self.gate.pass(),
+        }
         self.fake.export_keeps_failing(meeting_id)
     }
 

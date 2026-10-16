@@ -987,8 +987,17 @@ impl Host {
     /// read it.
     #[doc(hidden)]
     #[must_use]
-    pub fn reload_requests(&self) -> u64 {
+    pub fn reload_request_count(&self) -> u64 {
         self.shared.reloads.requests.load(Ordering::Relaxed)
+    }
+
+    /// The host's own store handle, whose reader its reloads read on
+    /// ([`Store::with_own_reader`]), so a test can hold that reader. Takes
+    /// the view-model lock.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn own_store(&self) -> Arc<Store> {
+        self.lock().store.clone()
     }
 
     /// One pass of the reload owner, which the services run on each poll

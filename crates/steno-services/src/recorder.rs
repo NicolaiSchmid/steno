@@ -4407,32 +4407,57 @@ mod tests {
     }
 
     /// P40 check 16: a stop while a forced reload is held in flight with
-    /// the view-model lock taken (the detail asks the pipeline whether its
-    /// export keeps failing, at a gate, as a reload behind a slow store
-    /// would wait) shows `Stopping` in the host within 100 ms of the
-    /// recorder's notice, and the session's files finish and the meeting
-    /// is saved while the reload is still held: the hook only pokes the
-    /// `recording` feed, which takes no host lock.
+    /// the view-model lock and the host's reader taken (the detail asks the
+    /// pipeline whether its export keeps failing, at a gate inside a read
+    /// on the host's reader, as a reload behind a slow store would wait),
+    /// and while another thread's read holds the shared reader for three
+    /// seconds (a long list load, an export). `Stopping` shows in the host
+    /// within 100 ms of the recorder's notice, the meeting is saved within
+    /// [`LIVE`] of it, and the stop ends with its files finished while both
+    /// reads are still held: the hook only pokes the `recording` feed,
+    /// which takes no host lock, and the save reads the row and the
+    /// settings on the writer, inside its own transaction.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files() {
         const FEED: Duration = Duration::from_millis(100);
+        const SHARED_READ: Duration = Duration::from_secs(3);
         let harness = harness(&[]);
         let shown_meeting = steno_core::testing::sample_data::meeting();
         harness.store.save_meeting(&shown_meeting).unwrap();
         let pipeline = Arc::new(crate::testing::GatedPipeline::default());
         let hosted =
             crate::testing::hosted_over(&harness.store, &harness.recorder, Some(pipeline.clone()));
+        let own = hosted.host.own_store();
+        pipeline.gate_inside_reads_on(own.clone());
         hosted.host.request_meeting(shown_meeting.id);
         assert!(pipeline.gate.reloads() > 0, "the meeting's detail is shown");
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        // Another connection, as another process reads, so watching the row
+        // takes neither reader of this one.
+        let watcher = Store::open_without_migrating(database(&harness)).unwrap();
 
         let armed = pipeline.gate.arm();
         let reload = hosted.reload_in_flight();
         assert!(
             pipeline.gate.wait_for(PATIENCE, |state| state.held == 1),
-            "the reload is held with the view models"
+            "the reload is held with the view models and the host's reader"
         );
+        // Waits for the host's reader while the reload holds it.
+        let host_read = std::thread::spawn(move || own.read(|_| Ok(())).unwrap());
+        let (reading, read_began) = std::sync::mpsc::channel();
+        let shared = harness.store.clone();
+        let shared_read = std::thread::spawn(move || {
+            shared
+                .read(|_| {
+                    reading.send(()).unwrap();
+                    std::thread::sleep(SHARED_READ);
+                    Ok(())
+                })
+                .unwrap();
+        });
+        read_began.recv().unwrap();
+
         let since = Instant::now();
         let stopper = harness.recorder.clone();
         let stopping = std::thread::spawn(move || stopper.stop());
@@ -4452,26 +4477,38 @@ mod tests {
             after_notice < FEED,
             "Stopping reached the host {after_notice:?} after the recorder's notice"
         );
+        let (saved, state) = found_within(PATIENCE, "the stop's save", || {
+            let state = watcher.meeting(meeting_id).unwrap().unwrap().state;
+            (state != steno_core::MeetingState::Recording).then(|| (Instant::now(), state))
+        });
+        assert!(
+            !matches!(state, steno_core::MeetingState::Failed { .. }),
+            "saved, got {state:?}"
+        );
+        let took = saved.saturating_duration_since(noticed);
+        assert!(
+            took < LIVE,
+            "the meeting was saved {took:?} after the recorder's notice"
+        );
         found_within(HANG_GUARD, "the stop ended", || {
             stopping.is_finished().then_some(())
         });
         assert!(
+            !shared_read.is_finished(),
+            "the stop ended while the shared reader was held"
+        );
+        assert!(
             pipeline
                 .gate
-                .wait_for(Duration::ZERO, |state| state.held == 1),
-            "the stop ended while the reload was held"
-        );
-        let state = harness.store.meeting(meeting_id).unwrap().unwrap().state;
-        assert!(
-            !matches!(
-                state,
-                steno_core::MeetingState::Recording | steno_core::MeetingState::Failed { .. }
-            ),
-            "saved while the reload was held, got {state:?}"
+                .wait_for(Duration::ZERO, |state| state.held == 1)
+                && !host_read.is_finished(),
+            "the stop ended while the reload held the host's reader"
         );
         drop(armed);
         stopping.join().unwrap();
         reload.join().unwrap();
+        host_read.join().unwrap();
+        shared_read.join().unwrap();
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
     }
 
@@ -4494,7 +4531,7 @@ mod tests {
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let mut held = crate::testing::HeldStore::lock_only(&database(&harness));
-        let requests = || hosted.host.reload_requests();
+        let requests = || hosted.host.reload_request_count();
         let before = requests();
 
         let stopper = harness.recorder.clone();
