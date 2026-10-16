@@ -53,7 +53,7 @@ pub const KEYRING_SERVICE: &str = "uno.schmid.steno.mac";
 /// [`secret_store_with_unlock`]'s.
 #[must_use]
 pub fn secret_store(keyring: bool, paths: &StenoPaths) -> Arc<dyn SecretStore> {
-    secret_store_from(keyring, paths, None).0
+    secret_store_from(keyring, paths, None, Bus::Session).0
 }
 
 /// [`secret_store`], and on Linux what resolves once the Secret Service
@@ -68,14 +68,27 @@ pub fn secret_store_with_unlock(
     paths: &StenoPaths,
     store: &Arc<Store>,
 ) -> (Arc<dyn SecretStore>, Option<SecretsUnlocked>) {
-    secret_store_from(keyring, paths, Some(store))
+    secret_store_from(keyring, paths, Some(store), Bus::Session)
 }
 
-/// [`secret_store_with_unlock`] over the database `store`, if any.
+/// Which bus the Secret Service store looks for a provider on: the
+/// session bus in the app, a private one in the tests.
+#[derive(Clone)]
+enum Bus {
+    Session,
+    /// A private bus, for the tests.
+    #[cfg(target_os = "linux")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    Address(String),
+}
+
+/// [`secret_store_with_unlock`] over the database `store`, if any, with
+/// the Secret Service looked for on `bus`.
 fn secret_store_from(
     keyring: bool,
     paths: &StenoPaths,
     store: Option<&Arc<Store>>,
+    bus: Bus,
 ) -> (Arc<dyn SecretStore>, Option<SecretsUnlocked>) {
     let file = || FileSecretStore::in_support_directory(&paths.support_directory);
     if !keyring {
@@ -85,13 +98,13 @@ fn secret_store_from(
     {
         let record =
             crate::handover::FingerprintFile::in_support_directory(&paths.support_directory);
-        let secrets = SecretServiceStore::new(file(), record, store.cloned());
+        let secrets = SecretServiceStore::new(file(), record, store.cloned(), bus);
         let unlocked = secrets.unlocked_after_prompt();
         (Arc::new(secrets), Some(unlocked))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = store;
+        let _ = (store, bus);
         (Arc::new(KeyringSecretStore), None)
     }
 }

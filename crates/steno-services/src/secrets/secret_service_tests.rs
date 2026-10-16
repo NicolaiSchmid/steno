@@ -487,6 +487,58 @@ async fn a_file_identity_every_phone_predates_is_not_pinned_over_the_service_s()
     );
 }
 
+/// The app's secret store reads the phones paired in the app's database:
+/// built through the constructor the app uses, over the private bus, its
+/// first move pins nothing where every phone predates the file's identity.
+/// A store built without the database would read no phones and pin the
+/// file's.
+#[tokio::test]
+async fn the_app_s_secret_store_reads_the_app_s_paired_phones_in_the_move() {
+    use chrono::TimeDelta;
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    let theirs = HandoverIdentity::mint("service", now - TimeDelta::days(30)).unwrap();
+    let ours = HandoverIdentity::mint("file", now - TimeDelta::days(1)).unwrap();
+    setup
+        .launch()
+        .await
+        .set_secret(&identity(), Some(&theirs.to_pem().unwrap()))
+        .await
+        .unwrap();
+    write_file(
+        &setup.path(),
+        &[("handover-identity", &ours.to_pem().unwrap())],
+    );
+    let database = Arc::new(steno_core::Store::in_memory().unwrap());
+    crate::testing::pair_a_phone_at(&database, now - TimeDelta::days(10));
+    let paths = steno_core::StenoPaths::new(setup.folder.path());
+    assert_eq!(
+        FileSecretStore::in_support_directory(&paths.support_directory).path,
+        setup.path(),
+        "the app's store reads the file the test wrote"
+    );
+
+    let (store, chosen) = super::super::secret_store_from(
+        true,
+        &paths,
+        Some(&database),
+        Bus::Address(setup.daemon.address.clone()),
+    );
+    chosen.expect("a Secret Service store").await;
+    assert_eq!(setup.record().recorded().unwrap(), None, "nothing pinned");
+    assert_eq!(
+        setup.values("handover-identity"),
+        [one_line(&theirs.to_pem().unwrap())]
+    );
+    let loaded =
+        HandoverIdentity::load_or_create(store.as_ref(), &setup.record(), &database, "x", now)
+            .await
+            .unwrap();
+    assert_eq!(loaded.fingerprint(), theirs.fingerprint());
+}
+
 /// No identity is ever destroyed by the move. Whether it pins the file's
 /// identity or, where every phone predates that identity, pins nothing,
 /// the service keeps its identity and the file keeps its own through the

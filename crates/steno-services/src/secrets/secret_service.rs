@@ -34,7 +34,8 @@ use zbus::Connection;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Type, Value};
 
 use super::{
-    Contents, FileSecretStore, KEYRING_SERVICE, KeyringUnavailable, SecretsUnlocked, plain_name,
+    Bus, Contents, FileSecretStore, KEYRING_SERVICE, KeyringUnavailable, SecretsUnlocked,
+    plain_name,
 };
 use crate::handover::FingerprintFile;
 
@@ -146,15 +147,6 @@ impl std::fmt::Debug for SecretServiceStore {
     }
 }
 
-/// Which bus the store looks for a provider on.
-#[derive(Clone)]
-enum Bus {
-    Session,
-    /// A private bus, for the tests.
-    #[cfg_attr(not(test), allow(dead_code))]
-    Address(String),
-}
-
 enum Backend {
     Service(Keyring),
     File,
@@ -174,15 +166,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl SecretServiceStore {
-    /// The Secret Service on the session bus, falling back to `file`, with
-    /// the handover identity's fingerprint in `record` and the paired
-    /// phones in `phones` (the app's database; `None` where there is none,
-    /// which the move reads as phones it cannot read); the choice starts
-    /// now, on the store's own thread.
+    /// The Secret Service on `bus` (the session bus in the app), falling
+    /// back to `file`, with the handover identity's fingerprint in `record`
+    /// and the paired phones in `phones` (the app's database; `None` where
+    /// there is none, which the move reads as phones it cannot read); the
+    /// choice starts now, on the store's own thread.
     #[must_use]
-    pub fn new(file: FileSecretStore, record: FingerprintFile, phones: Option<Arc<Store>>) -> Self {
-        Self::start(file, record, phones, PROMPT_TIMEOUT, |shared| {
-            shared.choose_on_own_runtime(&Bus::Session)
+    pub(super) fn new(
+        file: FileSecretStore,
+        record: FingerprintFile,
+        phones: Option<Arc<Store>>,
+        bus: Bus,
+    ) -> Self {
+        Self::start(file, record, phones, PROMPT_TIMEOUT, move |shared| {
+            shared.choose_on_own_runtime(&bus)
         })
     }
 
