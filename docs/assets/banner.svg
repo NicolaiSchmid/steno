@@ -1,43 +1,50 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
   <title id="title">Steno</title>
-  <desc id="desc">Bot-free meeting recorder for the Mac. Local-first, macOS 15 and later, Apple Silicon, writes to Obsidian, MIT licensed.</desc>
+  <desc id="desc">Meeting notes without the bot. On-device, for macOS, Windows and Linux, MIT licensed.</desc>
   <defs>
     <radialGradient id="glow" cx="0.18" cy="0.35" r="0.7">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.07"/>
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.05"/>
       <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="live" cx="0.5" cy="1.15" r="0.6">
+      <stop offset="0" stop-color="#ef4444" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#ef4444" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="hairline" x1="0" x2="1" y1="0" y2="0">
       <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
-      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.14"/>
       <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
     </linearGradient>
   </defs>
-  <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', Inter, 'Segoe UI', Helvetica, Arial, sans-serif">
-    <rect width="1280" height="360" rx="28" fill="#000000"/>
+  <g font-family="'DM Sans', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <rect width="1280" height="360" rx="28" fill="#09090b"/>
     <rect width="1280" height="360" rx="28" fill="url(#glow)"/>
-    <rect x="0.5" y="0.5" width="1279" height="359" rx="27.5" fill="none" stroke="rgba(255,255,255,0.102)"/>
+    <rect width="1280" height="360" rx="28" fill="url(#live)"/>
+    <rect x="0.5" y="0.5" width="1279" height="359" rx="27.5" fill="none" stroke="rgba(255,255,255,0.08)"/>
     <rect x="160" y="266" width="700" height="1" fill="url(#hairline)"/>
 
-    <!-- recording indicator -->
-    <circle cx="112" cy="172" r="26" fill="none" stroke="#62b06f" stroke-opacity="0.22" stroke-width="2">
+    <!-- recording indicator: red is the live state, the one hue -->
+    <circle cx="112" cy="172" r="26" fill="none" stroke="#ef4444" stroke-opacity="0.22" stroke-width="2">
       <animate attributeName="r" values="14;30;14" dur="3.2s" repeatCount="indefinite"/>
       <animate attributeName="stroke-opacity" values="0.35;0;0.35" dur="3.2s" repeatCount="indefinite"/>
     </circle>
-    <circle cx="112" cy="172" r="11" fill="#62b06f"/>
+    <circle cx="112" cy="172" r="11" fill="#ef4444"/>
 
-    <text x="158" y="196" font-size="118" font-weight="600" letter-spacing="-5" fill="#ffffff">Steno</text>
-    <text x="162" y="242" font-size="28" font-weight="400" fill="#a3a3a3">Bot-free meeting recorder for the Mac.</text>
+    <text x="158" y="196" font-size="118" font-weight="600" letter-spacing="-5" fill="#fafafa">Steno</text>
+    <text x="162" y="242" font-size="28" font-weight="400" fill="#a1a1aa">Meeting notes without the bot.</text>
 
-    <rect x="160" y="286" width="132" height="34" rx="17" fill="rgba(255,255,255,0.031)" stroke="rgba(255,255,255,0.102)"/>
-    <text x="226" y="309" text-anchor="middle" font-size="16" fill="#a3a3a3">Local-first</text>
-    <rect x="304" y="286" width="122" height="34" rx="17" fill="rgba(255,255,255,0.031)" stroke="rgba(255,255,255,0.102)"/>
-    <text x="365" y="309" text-anchor="middle" font-size="16" fill="#a3a3a3">macOS 15+</text>
-    <rect x="438" y="286" width="148" height="34" rx="17" fill="rgba(255,255,255,0.031)" stroke="rgba(255,255,255,0.102)"/>
-    <text x="512" y="309" text-anchor="middle" font-size="16" fill="#a3a3a3">Apple Silicon</text>
-    <rect x="598" y="286" width="110" height="34" rx="17" fill="rgba(255,255,255,0.031)" stroke="rgba(255,255,255,0.102)"/>
-    <text x="653" y="309" text-anchor="middle" font-size="16" fill="#a3a3a3">Obsidian</text>
-    <rect x="720" y="286" width="70" height="34" rx="17" fill="rgba(255,255,255,0.031)" stroke="rgba(255,255,255,0.102)"/>
-    <text x="755" y="309" text-anchor="middle" font-size="16" fill="#a3a3a3">MIT</text>
+    <g font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" fill="#a1a1aa" text-anchor="middle">
+      <rect x="160" y="286" width="118" height="34" rx="17" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.14)"/>
+      <text x="219" y="308">On-device</text>
+      <rect x="290" y="286" width="82" height="34" rx="17" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.14)"/>
+      <text x="331" y="308">macOS</text>
+      <rect x="384" y="286" width="100" height="34" rx="17" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.14)"/>
+      <text x="434" y="308">Windows</text>
+      <rect x="496" y="286" width="82" height="34" rx="17" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.14)"/>
+      <text x="537" y="308">Linux</text>
+      <rect x="590" y="286" width="64" height="34" rx="17" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.14)"/>
+      <text x="622" y="308">MIT</text>
+    </g>
 
     <!-- waveform -->
     <rect x="800" y="171" width="8" height="18" rx="4" fill="#ffffff" opacity="0.18"/>
