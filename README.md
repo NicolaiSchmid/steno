@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/NicolaiSchmid/steno/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/NicolaiSchmid/steno?include_prereleases&label=release"></a>
-  <a href="https://github.com/NicolaiSchmid/steno/actions/workflows/swift-ci.yml"><img alt="Swift CI" src="https://img.shields.io/github/actions/workflow/status/NicolaiSchmid/steno/swift-ci.yml?branch=main&label=Swift%20CI"></a>
+  <a href="https://github.com/NicolaiSchmid/steno/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/NicolaiSchmid/steno?label=release"></a>
+  <a href="https://github.com/NicolaiSchmid/steno/actions/workflows/rust-ci.yml"><img alt="Rust CI" src="https://img.shields.io/github/actions/workflow/status/NicolaiSchmid/steno/rust-ci.yml?branch=main&label=Rust%20CI"></a>
   <a href="https://github.com/NicolaiSchmid/steno/actions/workflows/mobile-ci.yml"><img alt="Mobile CI" src="https://img.shields.io/github/actions/workflow/status/NicolaiSchmid/steno/mobile-ci.yml?branch=main&label=Mobile%20CI"></a>
-  <img alt="macOS 15+, Apple Silicon" src="https://img.shields.io/badge/macOS-15%2B%20%C2%B7%20Apple%20Silicon-000000">
+  <img alt="Desktop: macOS 15+ on Apple Silicon" src="https://img.shields.io/badge/desktop-macOS%2015%2B%20%C2%B7%20Apple%20Silicon-000000">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
@@ -26,10 +26,11 @@
   <a href="#for-developers">Developers</a>
 </p>
 
-> **Status: release candidate.** v1 is code-complete and shipping as pre-releases while
-> the last manual checks on real hardware run. Track the first stable release in
-> [issue #74](https://github.com/NicolaiSchmid/steno/issues/74). The full scope and every
-> settled decision live in [`.plans/2026-09-24-initial-scope.md`](.plans/2026-09-24-initial-scope.md).
+> **Status: stable.** [Steno 0.11.0](https://github.com/NicolaiSchmid/steno/releases/tag/v0.11.0)
+> is the first stable release, one Rust app on every desktop. On the Mac it replaces the
+> original Swift app as an ordinary update. Version 1.0 follows once the v1 checklist in
+> [issue #74](https://github.com/NicolaiSchmid/steno/issues/74) is done. The full scope and
+> every settled decision live in [`.plans/2026-09-24-initial-scope.md`](.plans/2026-09-24-initial-scope.md).
 
 ## Why Steno
 
@@ -50,10 +51,21 @@ person and their friends, with files instead of lock-in.
 
 ## Install
 
-Steno is a signed and notarized `Steno.app` for macOS 15 or later on Apple Silicon.
-Pick one of the three routes; all three install the same release build.
+Every release carries the builds for all three desktops, on the
+[latest release](https://github.com/NicolaiSchmid/steno/releases/latest) page. Pick the
+section for your system.
 
-**Homebrew** (recommended, keeps itself updated through Sparkle)
+On first launch Steno walks you through what it needs: the microphone, the system audio
+of your calls and, on macOS, optionally your calendar for meeting titles and attendee
+names. Then point it at your Obsidian vault and an OpenAI-compatible
+endpoint, and you are done.
+
+### macOS
+
+macOS 15 or later on Apple Silicon. The app is signed and notarised. Pick one of three
+routes; all three install the same release build.
+
+**Homebrew** (recommended)
 
 ```sh
 brew tap nicolaischmid/tap && brew install --cask steno
@@ -61,9 +73,8 @@ brew tap nicolaischmid/tap && brew install --cask steno
 
 **Direct download**
 
-Grab `Steno-<version>.dmg` from the
-[latest release](https://github.com/NicolaiSchmid/steno/releases/latest) and drag the app
-to `/Applications`.
+Grab `Steno_<version>_aarch64.dmg` from the latest release and drag the app to
+`/Applications`.
 
 **Nix** (`aarch64-darwin`, installs the released app unchanged)
 
@@ -71,18 +82,121 @@ to `/Applications`.
 nix profile install github:NicolaiSchmid/steno#steno
 ```
 
-On first launch Steno walks you through the three permissions it needs: system audio
-capture, microphone, and optionally calendar access for meeting titles and attendee
-names. Then point it at your Obsidian vault and an OpenAI-compatible endpoint, and you are
-done.
+Installed with Homebrew or from the disk image, Steno updates itself: it checks once a
+day and offers Install and Relaunch (Settings > General has both switches). A Nix install
+updates with the flake instead (Nix details below). If you ran the Swift app, version 0.10
+or earlier, it offers this app as an update within a week (the rollout is phased; Check for
+Updates gets it at once) and installs it at the same path. macOS then asks once more for
+its permissions, and for the login keychain password once per stored secret (choose
+*Always Allow*).
+
+### Windows
+
+Windows on x64. Download one of the two installers from the latest release:
+
+- `Steno_<version>_x64-setup.exe` installs for your account alone and needs no
+  administrator rights. Take this one unless you have a reason not to.
+- `Steno_<version>_x64_en-US.msi` installs for every account on the computer and asks for
+  administrator rights, at the install and at each update.
+
+The installers are not code-signed yet, so SmartScreen asks first ("Windows protected your
+PC"; choose *More info*, then *Run anyway*). Before you run one, check it against the
+release's `SHA256SUMS`. In PowerShell, this must print `True`:
+
+```powershell
+(Get-FileHash .\Steno_<version>_x64-setup.exe).Hash -eq '<its hash in SHA256SUMS>'
+```
+
+Steno updates itself from then on.
+
+### Linux: GNOME
+
+Ubuntu 24.04 or Debian 13, or newer. Download `steno-desktop_<version>_amd64.deb` (or the
+`.AppImage`), its `.asc`, `SHA256SUMS` and `SHA256SUMS.asc` into one directory, then check
+and install them there:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/NicolaiSchmid/steno/v<version>/apps/desktop/release-signing-key.asc
+gpg --import release-signing-key.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+gpg --verify steno-desktop_<version>_amd64.deb.asc steno-desktop_<version>_amd64.deb
+sudo apt install ./steno-desktop_<version>_amd64.deb
+```
+
+Each `gpg --verify` must report "Good signature" from
+`048B 5279 50E4 F609 B90E  6349 5F88 10A6 E6D4 DB46`, and `sha256sum` must print OK for
+every file you downloaded; the warning that the key is not certified by a trusted
+signature is expected. For the AppImage, verify it the same way, then
+`chmod +x steno-desktop_<version>_amd64.AppImage` and run it.
+
+The tray icon needs GNOME's AppIndicator extension: on by default on Ubuntu, and on
+Debian `sudo apt install gnome-shell-extension-appindicator`, then log out and in and turn
+it on in the Extensions app. Without it there is no tray, and closing the main window
+quits Steno, saving a recording first. If `ufw` is on, `sudo ufw allow 23820/tcp` lets the
+phone reach Steno. The `.deb` and the AppImage update themselves.
+
+### Linux: Omarchy
+
+Omarchy, or Arch with Hyprland:
+
+```sh
+yay -S steno-desktop-bin
+sudo ufw allow Steno
+```
+
+`yay` checks the package against the release key; if it reports an unknown public key,
+run `gpg --keyserver keyserver.ubuntu.com --recv-keys 048B527950E4F609B90E63495F8810A6E6D4DB46`
+and install again. The `ufw` rule lets the phone reach Steno.
+
+- Start Steno from the Omarchy launcher, or with `uwsm-app -- steno-desktop` from a
+  terminal or a key binding. Started any other way, a logout can end it before it saves
+  a recording.
+- The tray icon sits in the bar's drawer. A right click opens its menu, which holds every
+  action.
+- The recording bubble and the meeting prompt need Hyprland window rules to float, stay
+  on every workspace and leave your keyboard focus alone. Add this line at the end of
+  `~/.config/hypr/hyprland.lua`, below "Add any other personal Hyprland configuration
+  below":
+
+  ```lua
+  dofile("/usr/share/steno-desktop/hyprland-steno.lua")
+  ```
+
+Updates come with the package (`yay`); the in-app updater stays off.
+
+### Linux: NixOS
+
+The flake builds the Linux app from source and adds a NixOS module. In the system's
+`flake.nix`:
+
+```nix
+inputs.steno.url = "github:NicolaiSchmid/steno/v<version>";
+# and in nixpkgs.lib.nixosSystem's modules:
+steno.nixosModules.default
+{ programs.steno.enable = true; }
+```
+
+The module installs Steno, starts it with your graphical session, opens the phone's port
+and mDNS in the firewall, and turns on PipeWire and, unless another Secret Service runs,
+GNOME Keyring for Steno's secrets. Log
+out and in once after the first switch. To update, move the input to the new tag and
+switch again. Without the module, `nix profile install
+github:NicolaiSchmid/steno/v<version>#steno` installs the app alone. Under Hyprland, the
+panels need the window rules in the desktop README's
+[Hyprland](apps/desktop/README.md#hyprland) section, which also says where NixOS puts
+the file.
 
 <details>
 <summary><b>Homebrew details: tap, release candidates, nix-darwin</b></summary>
 <br>
 
 The tap ([NicolaiSchmid/homebrew-tap](https://github.com/NicolaiSchmid/homebrew-tap))
-follows every release, release candidates included. The installed app updates itself
-through Sparkle, which offers stable releases only. With nix-darwin's Homebrew module:
+follows stable releases only; release candidates are on the
+[releases page](https://github.com/NicolaiSchmid/steno/releases). The installed app
+updates itself, so Homebrew may still list the version it installed; run
+`brew upgrade --greedy --cask nicolaischmid/tap/steno` to bring it in step. With
+nix-darwin's Homebrew module:
 
 ```nix
 homebrew.taps = [ "nicolaischmid/tap" ];
@@ -95,8 +209,8 @@ homebrew.casks = [ "nicolaischmid/tap/steno" ];
 <summary><b>Nix details: nix-darwin, home-manager, updates</b></summary>
 <br>
 
-`flake.nix` installs the released `Steno.app` unchanged (no rebuild, no re-signing) on
-`aarch64-darwin`.
+On `aarch64-darwin`, `flake.nix` installs the released `Steno.app` unchanged (no rebuild,
+no re-signing).
 
 With nix-darwin, add the flake as an input and put `steno.packages.aarch64-darwin.steno`
 in `environment.systemPackages`; nix-darwin links `Applications/Steno.app` into
@@ -105,17 +219,18 @@ in `environment.systemPackages`; nix-darwin links `Applications/Steno.app` into
 link `Applications/` on its own. `nix run` does not apply, the output is an app bundle
 with no `bin/`.
 
-The app runs from the read-only Nix store, so Sparkle's "Check for Updates…" can download
-a new version but cannot install it. Update by bumping `release.version` and
-`release.hash` at the top of `flake.nix` (the release workflow prints both in its job
-summary) and rebuilding. To silence the scheduled daily check:
-
-```sh
-defaults write uno.schmid.steno.mac SUEnableAutomaticChecks -bool NO
-```
+The app runs from the read-only Nix store, so its updater can download a new version but
+cannot install it. Update by bumping `release.version` and `release.hash` at the top of
+`flake.nix` (the release workflow prints both in its job summary), or the flake input
+that pins this repository, and rebuilding. To stop the daily check from offering updates
+it cannot apply, turn off "Check for updates automatically" in Settings > General.
 
 nix-darwin users who want in-app updates can use the Homebrew cask through
-`homebrew.casks` instead; it installs into `/Applications`, where Sparkle can write.
+`homebrew.casks` instead; it installs into `/Applications`, where the updater can write.
+
+On Linux the flake builds the app from source instead; the NixOS section above and the
+desktop README's [Nix package and NixOS module](apps/desktop/README.md#the-nix-package-and-the-nixos-module)
+have the details.
 
 </details>
 
@@ -129,7 +244,7 @@ flowchart LR
         phone["iPhone recorder"] -.->|local network handover| room["in-person recording"]
     end
     subgraph process["2 · Process, on your Mac"]
-        stt["Transcribe<br>Parakeet or Whisper"] --> dia["Diarize and match<br>known voices"] --> llm["LLM cleanup, summary,<br>tasks · text only"]
+        stt["Transcribe<br>Parakeet TDT v3"] --> dia["Diarize and match<br>known voices"] --> llm["LLM cleanup, summary,<br>tasks · text only"]
     end
     subgraph deliver["3 · Deliver"]
         vault["Obsidian vault<br>one folder per meeting"]
@@ -142,7 +257,7 @@ flowchart LR
    the call comes from a Core Audio process tap, your side from the mic, kept as two
    separate lanes so Steno always knows who is "me" and who is "them".
 2. **Process.** After the meeting, the recording is transcribed on-device with
-   Parakeet TDT v3 or WhisperKit large-v3-turbo, diarized, and matched against the
+   Parakeet TDT v3, diarized, and matched against the
    voices Steno has heard before. Only the resulting transcript text goes to the LLM
    endpoint you configured, which fixes the Denglish, writes the summary from a template
    and extracts tasks with assignee, priority and due date.
@@ -162,7 +277,7 @@ Meetings/
     ├── 2026-09-24-produktstrategie-90-10-roadmap-fuer-q4 - Tasks.md      # Obsidian Tasks syntax
     ├── transcript.vtt
     ├── meeting.json
-    └── audio.m4a                                                         # opt-in per meeting
+    └── audio.wav                                                         # opt-in per meeting
 ```
 
 The folder note carries queryable frontmatter and links to the people who were there:
@@ -304,42 +419,55 @@ same pipeline as any in-person recording. The phone holds no notes and needs no 
 
 ## What Steno does not do
 
-Steno is scoped on purpose. It does not run on Windows, Linux or Intel Macs. There is no
+Steno is scoped on purpose. It does not run on Intel Macs. There is no
 live transcript during the call, no chat over your meetings, no editing of generated text
 inside the app, no team features, no hosted service and no App Store build. The app is
 the source of truth for your data; reading, searching and automation happen in your vault.
 
 ## For developers
 
-Swift 6 and SwiftUI on macOS 15+, SQLite via [GRDB](https://github.com/groue/GRDB.swift),
-[FluidAudio](https://github.com/FluidInference/FluidAudio) and
-[WhisperKit](https://github.com/argmaxinc/WhisperKit) for speech, SpeexDSP for echo
-cancellation, SwiftNIO for the phone handover, Sparkle for updates. The iOS recorder is an
-Expo dev-client app.
+The desktop app is a Rust workspace (edition 2024, the stable toolchain in
+`rust-toolchain.toml`) in a Tauri 2 shell, with one React and Tailwind web UI for every
+window. SQLite through rusqlite on the Swift app's schema, Parakeet through CoreML on the
+Mac and ONNX Runtime elsewhere, SpeexDSP for echo cancellation, rustls for the phone
+handover, Tauri's updater for updates. The iOS recorder is an Expo dev-client app. The
+original Swift app and its package stay in the tree until the Swift removal (S9 in
+[`.plans/2026-10-07-stable-promotion.md`](.plans/2026-10-07-stable-promotion.md)).
 
 ```
 AGENTS.md           conventions for coding agents (CLAUDE.md links here)
-Package.swift       Swift package: StenoCore, StenoAudio, StenoSpeech, StenoLLM,
-                    StenoAdapters, StenoHandover and the `steno` CLI
-apps/macos/         SwiftUI app over the package, xcodegen project, own README
+Cargo.toml          Rust workspace; crates/ holds steno-core, steno-audio, steno-speech,
+                    steno-diarize, steno-llm, steno-adapters, steno-handover,
+                    steno-pipeline, steno-services, steno-host, steno-bridge and the
+                    `steno` CLI (steno-cli)
+apps/desktop/       Tauri 2 shell for macOS, Windows and Linux, release scripts, own README
+apps/macos/web/     the web UI every window shows, own README
 apps/site/          landing page (steno.nicolaischmid.com), Next.js static export in the root pnpm workspace
+flake.nix, nix/     Nix: the released Mac app, the Linux package and the NixOS module
+packaging/aur/      the AUR package steno-desktop-bin, own README
 mobile/             Expo iOS recorder, own pnpm project, own README
+Package.swift       the Swift app's package: StenoCore, StenoAudio, StenoSpeech, StenoLLM,
+                    StenoAdapters, StenoHandover and the Swift `steno` CLI
+apps/macos/         the Swift app over that package, xcodegen project, own README
 .plans/             scope and dated implementation plans
 docs/research/      teardown of commercial recorders and the open-source landscape
-.github/workflows/  repository, Swift, web, site and mobile CI; macOS release on `v*` tags
+.github/workflows/  Rust, Swift, web, site, Nix, AUR and mobile CI; the desktop release on `v*` tags
 ```
 
 ```sh
-swift build && swift test                 # the package; Apple-only modules need macOS
-swift run steno record --help             # record from the CLI
-swift run steno dev models list           # speech and diarization model assets
-swift run steno dev bakeoff --help        # compare speech engines over a folder
+cargo test --workspace                    # on Linux, scripts/setup-linux.sh installs the build packages first
+cargo run -p steno-cli -- record --help   # record from the CLI
+cargo run -p steno-cli -- dev models list # speech and diarization model assets
+cargo run -p steno-cli -- dev bakeoff --help  # compare speech engines over a folder
 ```
 
-Building the app: [`apps/macos/README.md`](apps/macos/README.md). The phone side:
-[`mobile/README.md`](mobile/README.md). Conventions, review priorities and the plan
-workflow: [`AGENTS.md`](AGENTS.md). Everything that is not UI lives in the package, so
-the CLI, the macOS app and any future surface share one implementation.
+Running and building the desktop app: [`apps/desktop/README.md`](apps/desktop/README.md).
+The phone side: [`mobile/README.md`](mobile/README.md). Conventions, review priorities and
+the plan workflow: [`AGENTS.md`](AGENTS.md). Everything that is not UI lives in the
+crates, so the CLI, the desktop app and any future surface share one implementation.
+
+The Swift side builds with `swift build && swift test` (the Apple-only modules need
+macOS) and [`apps/macos/README.md`](apps/macos/README.md).
 
 ## Background
 
