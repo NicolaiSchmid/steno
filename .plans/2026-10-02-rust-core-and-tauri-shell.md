@@ -2134,6 +2134,22 @@ parity item until a plan says otherwise:
   before the aggregate's IOProc, so with nothing playing the first callback comes within 100 ms
   of `start` returning and 200 ms of the call to `start` (`tests/live.rs`).
   No in-app playback while recording, enforced by `steno_audio::Playback`.
+- **Audio a capture thread missed is written as silence and counted**
+  (A18 of `.plans/2026-10-07-stable-promotion.md`). Swift's IOProc reads
+  no time stamps, so a cycle its IO thread missed is gone from the master
+  without a count. Every Rust backend reads its callback's position
+  (PipeWire's `pw_time` ticks, the IOProc's input sample time, WASAPI's
+  device position on a packet flagged as a discontinuity) against where
+  the audio delivered so far ends (`realtime::CycleClock`; frames a
+  callback delivers at or behind that end count against the next jump) and
+  writes the frames
+  missed as zeros on every lane before the callback's own
+  (`LaneFrameSink::fill_missed`), up to `MISSED_FILL_LIMIT` (1 s) a jump;
+  a longer jump stays short in the master, which the recorder's note
+  counts from the wall time. The zeros count in
+  `CaptureStatistics::missed_seconds`, are logged at `warn` after the
+  stop, and join the gaps in the note "About N seconds of the recording
+  are missing".
 - **The files are synced while recording, the relay holds 20 s, and the
   warnings are joined** (stable plan rows P21 and P23,
   `.plans/2026-10-07-stable-promotion.md`). The writer thread syncs every
@@ -2199,11 +2215,18 @@ it:
   `RUST_LOG=steno_audio=info`; `tests/live_windows.rs` prints them). Measure
   the slip rate on a USB headset against built-in speakers; a plan decides
   whether to resample instead.
-- **Engine data loss is not a drop.** A packet the engine flags as a
-  discontinuity (the capture thread was late and the engine lost data) is
-  counted and logged at stop, never added to `CaptureStatistics`' drops:
-  WASAPI does not say how much was lost. A Windows recording's drop count
-  can under-report where the Mac's does not.
+- **Engine data loss is filled from the device position** (A18). A packet
+  the engine flags as a discontinuity (the capture thread was late and the
+  engine lost data), the first aside, has the frames its device position
+  passed written as zeros before it: on the microphone's stream as a
+  silent packet that still pulls the system stream's frames for that
+  time, on the system stream as zeros in its staging ring, so the lanes
+  stay aligned. They count in `CaptureStatistics::missed_seconds`, not in
+  the drops, and the packets and the seconds are logged at stop. The
+  position is read as the stream's frames, as Microsoft documents
+  `GetBuffer`; a Windows machine must confirm that under `AUTOCONVERTPCM`
+  and on process loopback (a position that does not move fills nothing,
+  one the engine flags as invalid resets the count).
 - **A system-only capture skips silence.** With the `[System]` lane
   override the system stream is the master, and endpoint loopback
   delivers no packet while nothing plays, so the recording is shorter than
@@ -2367,6 +2390,24 @@ item to settle before the Linux release:
   mutex across `backend.start()`, so its callers, `state()` included, wait
   as long: expected 1 to 2 s for a Bluetooth sink, against the Mac's 200 ms
   at most.
+- **Missed graph cycles are filled, and real-time scheduling is checked**
+  (A18). A data-loop thread the scheduler holds up misses graph cycles
+  while the daemon runs the graph on time; the cycles' audio is gone.
+  `process` reads the stream's `pw_time` ticks against where the audio
+  delivered so far ends and writes what was missed as zeros (see the Audio
+  item above); a buffer the stream kept from a stall and hands over in a
+  second callback at the same position counts against the next jump. A graph rate or a quantum that changes starts the count afresh:
+  at a new quantum the ticks jump by up to two of the new cycles while the
+  wall clock does not (256 to 1 024 frames: 2 048 ticks in 27.6 ms on the
+  private daemon). The 10 to 20 ms of wall time a quantum change costs
+  there stay unfilled. The client context loads `module-rt` from
+  `client.conf`, which asks for real-time scheduling of the data-loop
+  thread (under `RLIMIT_RTPRIO`, or through RealtimeKit); without it
+  `start` logs once at `warn`. In the 1-CPU container beside a hog, on a
+  busy host, a starved Steno missed 0.15 to 0.70 s in 10 s without
+  real-time scheduling and 0 to 0.09 s with it (`--ulimit rtprio=95`; the
+  table is under A18 in the stable plan); the master stayed on wall time
+  either way.
 - **Device changes read differently.** A lost connection or stream loses
   both lanes and reads as `OutputDeviceGone` (`InputDeviceGone` in
   person). A lost link (one removed from outside included) reads as the
@@ -3316,6 +3357,13 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   system lane is the whole default sink (Steno's own output included; leaving it out
   was weighed and not done, see the note).
   Where: the Linux items under "Audio". Found: #166, #176.
+- **First Linux release.** Whether Steno's PipeWire data-loop thread gets real-time
+  scheduling on each target: RealtimeKit installed and running (NixOS:
+  `security.rtkit.enable`), or an `RLIMIT_RTPRIO` for the user. Without it a busy
+  computer makes the capture miss cycles, which are filled with silence and counted
+  (A18), and `start` logs a `warn` line; check that the line does not appear on
+  Omarchy, NixOS and a GNOME distribution. Where: "Missed graph cycles are filled" in
+  the Linux list under "Audio". Found: A18.
 - **First Linux release.** The capture's latencies are unmeasured on real hardware:
   Nicolai runs "Measuring the latencies on real hardware" in the Linux list under
   "Audio" on a laptop with ALSA and with a Bluetooth headset. Found: #176.
