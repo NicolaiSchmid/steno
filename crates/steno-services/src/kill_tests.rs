@@ -1312,8 +1312,9 @@ async fn the_apps_quit_during_a_read_leaves_no_mark() {
         reading: reading.clone(),
         open: open.clone(),
     });
-    // Opens the decode however the test ends, so a failed assertion fails
-    // the test instead of leaving the runtime waiting on the decode.
+    let app = app_decoding(dir.path(), &store, decoder);
+    // Opens the decode however the test ends, before the app drops, so a
+    // failed assertion fails the test instead of waiting on the decode.
     struct Opens(PathBuf);
     impl Drop for Opens {
         fn drop(&mut self) {
@@ -1321,7 +1322,6 @@ async fn the_apps_quit_during_a_read_leaves_no_mark() {
         }
     }
     let opens = Opens(open);
-    let app = app_decoding(dir.path(), &store, decoder);
     let pipeline = app.pipeline.current();
     let processing = tokio::spawn(async move { pipeline.process(asset.id).await });
     let marks = dir
