@@ -1354,6 +1354,164 @@ fn the_environment_decides_a_managed_install_before_the_build() {
     assert!(!managed_by(Some("NIX"), None));
 }
 
+/// A binary in the Nix store is managed; one in `/Applications` is not, and
+/// neither is one in a folder whose name only starts like the store's.
+#[test]
+fn a_binary_in_the_nix_store_is_managed() {
+    let folders = nix_folders(None);
+    assert!(runs_from(
+        Path::new("/nix/store/aaaa-steno/Applications/Steno.app/Contents/MacOS/steno-desktop"),
+        &folders,
+    ));
+    assert!(!runs_from(
+        Path::new("/Applications/Steno.app/Contents/MacOS/steno-desktop"),
+        &folders,
+    ));
+    assert!(!runs_from(
+        Path::new("/nix/storefront/steno-desktop"),
+        &folders,
+    ));
+}
+
+/// A bundle in a folder that stands in for nix-darwin's
+/// `/Applications/Nix Apps` is managed.
+#[test]
+fn a_bundle_nix_darwin_copied_is_managed() {
+    assert!(nix_folders(None).contains(&PathBuf::from("/Applications/Nix Apps")));
+    let dir = tempfile::tempdir().unwrap();
+    let nix_apps = dir.path().join("Applications/Nix Apps");
+    let binary = copied_bundle(&nix_apps);
+    assert!(runs_from(&binary, &[nix_apps]));
+}
+
+/// A bundle in home-manager's `Applications/Home Manager Apps` under a home
+/// folder that stands in for `$HOME` is managed; one in the home's own
+/// `Applications` is not, and an unset, empty or relative home adds no
+/// folder.
+#[test]
+fn a_bundle_home_manager_copied_is_managed() {
+    let home = tempfile::tempdir().unwrap();
+    let folders = nix_folders(Some(home.path().as_os_str()));
+    let binary = copied_bundle(&home.path().join("Applications/Home Manager Apps"));
+    assert!(runs_from(&binary, &folders));
+    let own = copied_bundle(&home.path().join("Applications"));
+    assert!(!runs_from(&own, &folders));
+    assert_eq!(nix_folders(Some(OsStr::new(""))), nix_folders(None));
+    assert_eq!(nix_folders(Some(OsStr::new("."))), nix_folders(None));
+    assert_eq!(nix_folders(None).len(), 2);
+}
+
+/// A folder named like nix-darwin's or home-manager's elsewhere is not
+/// theirs.
+#[test]
+fn a_folder_named_like_nix_apps_elsewhere_is_not_managed() {
+    let folders = nix_folders(Some(OsStr::new("/Users/me")));
+    for binary in [
+        "/opt/Applications/Nix Apps/Steno.app/Contents/MacOS/steno-desktop",
+        "/Applications/Home Manager Apps/Steno.app/Contents/MacOS/steno-desktop",
+        "/Users/other/Applications/Home Manager Apps/Steno.app/Contents/MacOS/steno-desktop",
+    ] {
+        assert!(!runs_from(Path::new(binary), &folders), "{binary}");
+    }
+}
+
+/// The variable and the binary's folder together: either one makes the
+/// install managed, the folder whatever the variable says.
+#[test]
+fn a_managed_install_is_the_variable_or_the_folder() {
+    let folders = nix_folders(None);
+    let store = Path::new("/nix/store/aaaa-steno/bin/steno-desktop");
+    let applications = Path::new("/Applications/Steno.app/Contents/MacOS/steno-desktop");
+    assert!(managed_install(
+        Some("appimage"),
+        None,
+        Some(store),
+        &folders
+    ));
+    assert!(managed_install(
+        Some("nix"),
+        None,
+        Some(applications),
+        &folders
+    ));
+    assert!(!managed_install(None, None, Some(applications), &folders));
+    assert!(!managed_install(None, None, None, &folders));
+}
+
+/// An empty `steno-desktop` in a `Steno.app` inside `folder`.
+fn copied_bundle(folder: &Path) -> PathBuf {
+    let macos = folder.join("Steno.app/Contents/MacOS");
+    std::fs::create_dir_all(&macos).unwrap();
+    let binary = macos.join("steno-desktop");
+    std::fs::write(&binary, b"").unwrap();
+    binary
+}
+
+/// A link that resolves into the store counts as the store (an older
+/// nix-darwin linked the bundle into `/Applications/Nix Apps`), and the
+/// link itself lies outside it; a copy elsewhere does not. A folder
+/// reached through a link counts too.
+#[cfg(unix)]
+#[test]
+fn a_link_into_the_nix_store_is_managed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let store = root.join("nix/store");
+    let bundle = store.join("aaaa-steno/Applications/Steno.app");
+    copied_bundle(&store.join("aaaa-steno/Applications"));
+    let applications = root.join("Applications");
+    std::fs::create_dir_all(&applications).unwrap();
+    std::os::unix::fs::symlink(&bundle, applications.join("Steno.app")).unwrap();
+    let linked = applications.join("Steno.app/Contents/MacOS/steno-desktop");
+    assert!(!linked.starts_with(&store));
+    assert!(runs_from(&linked, std::slice::from_ref(&store)));
+    let copied = copied_bundle(&root.join("Copied"));
+    assert!(!runs_from(&copied, std::slice::from_ref(&store)));
+    std::os::unix::fs::symlink(root.join("nix"), root.join("nix-link")).unwrap();
+    assert!(runs_from(&linked, &[root.join("nix-link/store")]));
+}
+
+/// Set in the child [`a_binary_home_manager_copied_is_managed_when_it_runs`]
+/// runs.
+#[cfg(unix)]
+const COPIED_CHILD: &str = "STENO_COPIED_TEST_CHILD";
+
+/// [`updates_are_managed`] reads the running binary and `HOME`: this test
+/// binary, linked or copied into home-manager's folder under a stand-in home and run
+/// there with `STENO_DISTRIBUTION` unset, is managed.
+#[cfg(unix)]
+#[test]
+fn a_binary_home_manager_copied_is_managed_when_it_runs() {
+    if std::env::var_os(COPIED_CHILD).is_some() {
+        assert!(updates_are_managed());
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    // Beside the test binary, so the hard link stays on one file system.
+    let dir = tempfile::tempdir_in(exe.parent().unwrap()).unwrap();
+    let home = dir.path().join("home");
+    let folder = home.join(HOME_MANAGER_APPS);
+    std::fs::create_dir_all(&folder).unwrap();
+    let copied = folder.join(exe.file_name().unwrap());
+    if std::fs::hard_link(&exe, &copied).is_err() {
+        std::fs::copy(&exe, &copied).unwrap();
+    }
+    let name = "updates::tests::a_binary_home_manager_copied_is_managed_when_it_runs";
+    let output = std::process::Command::new(&copied)
+        .args(["--exact", name, "--test-threads=1"])
+        .env("HOME", &home)
+        .env_remove(DISTRIBUTION_VARIABLE)
+        .env(COPIED_CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// A time in the future (the clock was set back) is due, so a bad stored
 /// time cannot stop the checks.
 #[tokio::test]

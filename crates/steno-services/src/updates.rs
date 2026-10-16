@@ -89,11 +89,14 @@
 //!   The schedule keeps the downloaded package until an install takes it,
 //!   and frees it when a check finds another version, or none.
 //! - **Packaged installs** ([`updates_are_managed`], stable plan X5): no
-//!   schedule, and no check, the user's included.
+//!   schedule, and no check, the user's included. A binary that runs from a
+//!   folder Nix fills is one whatever the variable says: the flake's Mac
+//!   bundle.
 //!
 //! The network is the updater's: the schedule reads the same lane manifests
 //! as the tray's Check for Updates, and sends nothing else.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -161,19 +164,82 @@ pub const MANAGED_CHECK: &str = steno_host::settings::snapshots::MANAGED_UPDATES
 /// ([`updates_are_managed`]).
 pub const DISTRIBUTION_VARIABLE: &str = "STENO_DISTRIBUTION";
 
+/// Where Nix keeps its builds, read-only to everything but Nix itself.
+const NIX_STORE: &str = "/nix/store";
+/// Where nix-darwin copies a package's apps; its next switch replaces the
+/// copy.
+const NIX_DARWIN_APPS: &str = "/Applications/Nix Apps";
+/// Where home-manager (25.11 and later, `targets.darwin.copyApps`) copies
+/// a package's apps by default, under the home folder; its next switch
+/// replaces the copy. A folder set in `targets.darwin.copyApps.directory`
+/// is not recognised.
+const HOME_MANAGER_APPS: &str = "Applications/Home Manager Apps";
+
 /// Whether a package manager delivers this app's updates (stable plan X5):
-/// [`DISTRIBUTION_VARIABLE`] is `aur` or `nix`. The environment (the AUR
-/// wrapper) wins over the value the build was given (the Nix package), so a
-/// Nix build can be told otherwise at run time.
+/// [`DISTRIBUTION_VARIABLE`] is `aur` or `nix`, the environment's value (the
+/// AUR wrapper) before the build's (the Nix package), or the running binary,
+/// its links resolved, lies in a folder Nix fills: the store, nix-darwin's
+/// `/Applications/Nix Apps` or home-manager's default
+/// `~/Applications/Home Manager Apps`. Such a binary is managed whatever
+/// the variable says: an update cannot replace it in the read-only store,
+/// and the next switch would undo one made to a copy. This covers the
+/// flake's Mac bundle, which is unpacked from the release image, so no
+/// build sets the variable.
 pub fn updates_are_managed() -> bool {
-    managed_by(
+    managed_install(
         std::env::var(DISTRIBUTION_VARIABLE).ok().as_deref(),
         option_env!("STENO_DISTRIBUTION"),
+        std::env::current_exe().ok().as_deref(),
+        &nix_folders(std::env::var_os("HOME").as_deref()),
     )
 }
 
+/// [`updates_are_managed`] from its inputs: the variable's value in the
+/// environment and in the build, the running binary and [`nix_folders`].
+fn managed_install(
+    environment: Option<&str>,
+    build: Option<&str>,
+    executable: Option<&Path>,
+    folders: &[PathBuf],
+) -> bool {
+    managed_by(environment, build)
+        || executable.is_some_and(|executable| runs_from(executable, folders))
+}
+
+/// Whether the variable says a package manager delivers the updates: the
+/// environment's value before the build's is `aur` or `nix`.
 fn managed_by(environment: Option<&str>, build: Option<&str>) -> bool {
     matches!(environment.or(build), Some("aur" | "nix"))
+}
+
+/// The folders Nix fills: the store, nix-darwin's copies, and
+/// home-manager's default folder under `home`, left out when `home` is
+/// unset or not absolute (the folder would resolve against the working
+/// directory). Off the Mac only the store exists, so the other two match
+/// nothing there.
+fn nix_folders(home: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut folders = vec![PathBuf::from(NIX_STORE), PathBuf::from(NIX_DARWIN_APPS)];
+    folders.extend(
+        home.map(Path::new)
+            .filter(|home| home.is_absolute())
+            .map(|home| home.join(HOME_MANAGER_APPS)),
+    );
+    folders
+}
+
+/// Whether `executable`, [`resolved`], lies in one of `folders`, as given
+/// or resolved.
+fn runs_from(executable: &Path, folders: &[PathBuf]) -> bool {
+    let executable = resolved(executable);
+    folders
+        .iter()
+        .any(|folder| executable.starts_with(folder) || executable.starts_with(resolved(folder)))
+}
+
+/// `path` with its links resolved, or as given when it cannot be (it does
+/// not exist).
+fn resolved(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// What an install holds ([`InstallGate::try_hold`]): until it is dropped
