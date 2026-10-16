@@ -63,6 +63,7 @@
 //! (`OneCallAtATime` in `steno-services`, which the pipeline cannot see):
 //! the Transcribe mark spans the wait.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -202,29 +203,27 @@ impl ReadingMarks {
         }
         let mut found = Found::default();
         for (meeting_id, left) in marks {
-            let second = left.iter().any(|(_, mark)| mark.attempt > 0);
-            let stages: Vec<ReadStage> = left.iter().map(|(_, mark)| mark.stage).collect();
-            let asset_id = left.iter().find_map(|(_, mark)| mark.asset_id);
-            let started = left.iter().map(|(_, mark)| mark.started_at).min();
-            let files: Vec<PathBuf> = match store.meeting(meeting_id) {
+            let (files, left): (Vec<PathBuf>, Vec<Mark>) = left.into_iter().unzip();
+            let second = left.iter().any(|mark| mark.attempt > 0);
+            let stages: Vec<ReadStage> = left.iter().map(|mark| mark.stage).collect();
+            let asset_id = left.iter().find_map(|mark| mark.asset_id);
+            let started = left.iter().map(|mark| mark.started_at).min();
+            match store.meeting(meeting_id) {
                 Ok(Some(meeting)) if second => {
                     tracing::warn!(%meeting_id, ?asset_id, ?stages, ?started, "Steno stopped twice while reading this recording; it is kept and not read again until Process again");
                     quarantine(store, &meeting, now);
-                    left.into_iter().map(|(file, _)| file).collect()
                 }
-                Ok(None) if !left.iter().any(|(_, mark)| mark.path.exists()) => {
-                    for (file, _) in left {
+                Ok(None) if !left.iter().any(|mark| mark.path.exists()) => {
+                    for file in files {
                         let _ = remove_durably_with(&*syncs, &file);
                     }
                     continue;
                 }
                 Ok(_) if second => {
                     tracing::warn!(%meeting_id, ?stages, ?started, "Steno stopped twice while reading a recording with no meeting; it is listed failed and unread");
-                    left.into_iter().map(|(file, _)| file).collect()
                 }
                 Ok(_) => {
                     tracing::warn!(%meeting_id, ?asset_id, ?stages, ?started, "Steno stopped while reading this recording; it is read once more");
-                    let files = left.into_iter().map(|(file, _)| file).collect();
                     found
                         .retrying
                         .insert(meeting_id, Retry { files, read: false });
@@ -232,9 +231,8 @@ impl ReadingMarks {
                 }
                 Err(error) => {
                     tracing::warn!(%meeting_id, %error, "a meeting whose read ended with the app could not be read; it stays held");
-                    left.into_iter().map(|(file, _)| file).collect()
                 }
-            };
+            }
             found.held.insert(meeting_id, files);
         }
         let marks = Self::with_syncs(Some(folder), syncs);
@@ -266,20 +264,9 @@ impl ReadingMarks {
     /// count starts again, and the marks of an attempt that ended with
     /// the app go. Syncs the disk for a meeting on its second attempt.
     pub fn read_through(&self, meeting_id: Uuid) {
-        let files = {
-            let mut found = self.found();
-            if !found
-                .retrying
-                .get(&meeting_id)
-                .is_some_and(|retry| retry.read)
-            {
-                return;
-            }
-            found
-                .retrying
-                .remove(&meeting_id)
-                .map(|retry| retry.files)
-                .unwrap_or_default()
+        let files = match self.found().retrying.entry(meeting_id) {
+            Entry::Occupied(retry) if retry.get().read => retry.remove().files,
+            _ => return,
         };
         for file in files {
             if let Err(error) = remove_durably_with(&*self.syncs, &file) {
