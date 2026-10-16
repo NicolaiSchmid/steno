@@ -25,7 +25,10 @@
 //! The first callback, one after a reset, a clock that goes back, a rate
 //! that changes and, on PipeWire, a quantum that changes start the clock
 //! afresh. Every start and rebuild begins a new clock, so the session's gap
-//! between two streams is never counted again.
+//! between two streams is never counted again; and a thread that wakes
+//! from a stall the session's watch thread reported, and counts it as a
+//! jump before the rebuild's stop, leaves it to that gap (see
+//! [`CaptureSession`](crate::capture::CaptureSession)).
 //!
 //! # Writing it
 //!
