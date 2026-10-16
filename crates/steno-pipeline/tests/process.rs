@@ -1051,6 +1051,65 @@ async fn a_job_whose_transcription_fails_releases_the_engine_too() {
     assert_eq!(failing.releases.count(), 1);
 }
 
+/// What the `CoreML` engine fails with once its model call raised an
+/// Objective-C exception and the boundary caught it (A15 of
+/// `.plans/2026-10-07-stable-promotion.md`): an ordinary speech error.
+const COREML_EXCEPTION: &str =
+    "CoreML raised NSGenericException: Failed to allocate memory IOSurface object";
+
+/// A `CoreML` exception caught at the model call fails the meeting like
+/// any speech failure, in the job's model load (`decode`) or in a
+/// transcription: under "delete after processing" every audio file stays,
+/// through the sweep too, and Process again, once the models work, makes
+/// the meeting ready.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_coreml_exception_fails_the_meeting_retryably_with_its_audio_kept() {
+    let world = world(false, None, AudioRetention::DeleteAfterProcessing);
+    let raising_load = FakeSpeechEngine {
+        prepare_failure: Some(COREML_EXCEPTION.to_owned()),
+        ..FakeSpeechEngine::default()
+    };
+    let raising_call = FakeSpeechEngine {
+        failure: Some(COREML_EXCEPTION.to_owned()),
+        ..FakeSpeechEngine::default()
+    };
+    for (engine, stage) in [(raising_load, "decode"), (raising_call, "transcribe")] {
+        let pipeline = ProcessingPipeline::new(with_engine(&world, Arc::new(engine)));
+        let mut meeting = call_meeting(world.now);
+        meeting.id = Uuid::new_v4();
+        let asset = call_asset(
+            &world.audio,
+            meeting.id,
+            AudioRetention::DeleteAfterProcessing,
+        );
+        let before = audio_files(&asset);
+        pipeline.enqueue(&meeting, &asset).unwrap();
+        pipeline.wait_until_idle().await;
+        assert_eq!(
+            meeting_state(&world, meeting.id),
+            MeetingState::Failed {
+                reason: format!("{stage}: {COREML_EXCEPTION}")
+            }
+        );
+        let stored = world.store.asset(meeting.id).unwrap().unwrap();
+        assert_eq!(stored.expires_at, None, "{stage}: no retention stamp");
+        let _ = RetentionSweep::new(world.store.clone()).run(world.now + Duration::days(400));
+        assert_eq!(
+            audio_files(&asset),
+            before,
+            "{stage}: every audio file is kept"
+        );
+
+        world.pipeline.process_again(meeting.id).unwrap();
+        world.pipeline.wait_until_idle().await;
+        assert_eq!(
+            meeting_state(&world, meeting.id),
+            MeetingState::Ready,
+            "{stage}"
+        );
+    }
+}
+
 /// A lane that cannot be decoded fails the job in `decode`, after the
 /// engine was loaded; the engine is released all the same.
 #[tokio::test(flavor = "multi_thread")]

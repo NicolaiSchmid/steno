@@ -32,6 +32,9 @@ pub struct FakeSpeechEngine {
     pub text_prefix: String,
     pub word_timings: bool,
     pub failure: Option<String>,
+    /// `prepare` fails with this after recording the call: a model load
+    /// that was refused, or that raised (`CoreML`'s exception, caught).
+    pub prepare_failure: Option<String>,
     /// A buffer whose peak stays below this is silence and yields no
     /// segment, the way a real engine hears a tap that recorded nothing.
     /// `None` (the default) transcribes every buffer.
@@ -51,6 +54,7 @@ impl Default for FakeSpeechEngine {
             text_prefix: "fake".to_owned(),
             word_timings: false,
             failure: None,
+            prepare_failure: None,
             silent_below_peak: None,
             transcriptions: CallLog::new(),
             preparations: CallLog::new(),
@@ -138,7 +142,7 @@ impl SpeechEngine for FakeSpeechEngine {
 
     async fn prepare(&self) -> BoundaryResult<()> {
         self.preparations.record(());
-        Ok(())
+        FakeFailure::check(self.prepare_failure.as_ref())
     }
 
     async fn transcribe(
