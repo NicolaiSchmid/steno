@@ -57,8 +57,8 @@ section for your system.
 
 On first launch Steno walks you through what it needs: the microphone, the system audio
 of your calls and, on macOS, optionally your calendar for meeting titles and attendee
-names. Then point it at your Obsidian vault and an OpenAI-compatible
-endpoint, and you are done.
+names. Then point it at your Obsidian vault and an OpenAI-compatible endpoint, and you
+are done.
 
 ### macOS
 
@@ -179,8 +179,7 @@ steno.nixosModules.default
 
 The module installs Steno, starts it with your graphical session, opens the phone's port
 and mDNS in the firewall, and turns on PipeWire and, unless another Secret Service runs,
-GNOME Keyring for Steno's secrets. Log
-out and in once after the first switch. To update, move the input to the new tag and
+GNOME Keyring for Steno's secrets. Log out and in once after the first switch. To update, move the input to the new tag and
 switch again. Without the module, `nix profile install
 github:NicolaiSchmid/steno/v<version>#steno` installs the app alone. Under Hyprland, the
 panels need the window rules in the desktop README's
@@ -221,8 +220,8 @@ with no `bin/`.
 
 The app runs from the read-only Nix store, so its updater can download a new version but
 cannot install it. Update by bumping `release.version` and `release.hash` at the top of
-`flake.nix` (the release workflow prints both in its job summary), or the flake input
-that pins this repository, and rebuilding. To stop the daily check from offering updates
+`flake.nix` (the release workflow prints both in its job summary) or by moving the flake
+input that pins this repository, then rebuild. To stop the daily check from offering updates
 it cannot apply, turn off "Check for updates automatically" in Settings > General.
 
 nix-darwin users who want in-app updates can use the Homebrew cask through
@@ -257,10 +256,10 @@ flowchart LR
    the call comes from a Core Audio process tap, your side from the mic, kept as two
    separate lanes so Steno always knows who is "me" and who is "them".
 2. **Process.** After the meeting, the recording is transcribed on-device with
-   Parakeet TDT v3, diarized, and matched against the
-   voices Steno has heard before. Only the resulting transcript text goes to the LLM
-   endpoint you configured, which fixes the Denglish, writes the summary from a template
-   and extracts tasks with assignee, priority and due date.
+   Parakeet TDT v3, diarized, and matched against the voices Steno has heard before.
+   Only the resulting transcript text goes to the LLM endpoint you configured, which
+   fixes the Denglish, writes the summary from a template and extracts tasks with
+   assignee, priority and due date.
 3. **Deliver.** The finished meeting is pushed into your vault as Markdown, VTT and JSON.
    Re-export at any time; Steno overwrites only the files it wrote.
 
@@ -419,9 +418,9 @@ same pipeline as any in-person recording. The phone holds no notes and needs no 
 
 ## What Steno does not do
 
-Steno is scoped on purpose. It does not run on Intel Macs. There is no
-live transcript during the call, no chat over your meetings, no editing of generated text
-inside the app, no team features, no hosted service and no App Store build. The app is
+Steno is scoped on purpose. It does not run on Intel Macs. There is no live transcript
+during the call, no chat over your meetings, no editing of generated text inside the app,
+no team features, no hosted service and no App Store build. The app is
 the source of truth for your data; reading, searching and automation happen in your vault.
 
 ## For developers
@@ -455,10 +454,10 @@ docs/research/      teardown of commercial recorders and the open-source landsca
 ```
 
 ```sh
-cargo test --workspace                    # on Linux, scripts/setup-linux.sh installs the build packages first
-cargo run -p steno-cli -- record --help   # record from the CLI
-cargo run -p steno-cli -- dev models list # speech and diarization model assets
-cargo run -p steno-cli -- dev bakeoff --help  # compare speech engines over a folder
+cargo test --workspace                       # on Linux, scripts/setup-linux.sh installs the build packages first
+cargo run -p steno-cli -- record --help      # record from the CLI
+cargo run -p steno-cli -- dev models list    # speech and diarization model assets
+cargo run -p steno-cli -- dev bakeoff --help # compare speech engines over a folder
 ```
 
 Running and building the desktop app: [`apps/desktop/README.md`](apps/desktop/README.md).
@@ -466,8 +465,8 @@ The phone side: [`mobile/README.md`](mobile/README.md). Conventions, review prio
 the plan workflow: [`AGENTS.md`](AGENTS.md). Everything that is not UI lives in the
 crates, so the CLI, the desktop app and any future surface share one implementation.
 
-The Swift side builds with `swift build && swift test` (the Apple-only modules need
-macOS) and [`apps/macos/README.md`](apps/macos/README.md).
+The Swift package builds and tests with `swift build && swift test` (the Apple-only
+modules need macOS); building the Swift app: [`apps/macos/README.md`](apps/macos/README.md).
 
 ## Background
 
