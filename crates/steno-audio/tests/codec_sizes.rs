@@ -95,13 +95,12 @@ fn boxes(bytes: &[u8]) -> Vec<Found> {
                 end: at + size,
             });
             let body = at + header;
-            if &kind != b"mdat" {
-                if let Some(skip) = [0, 4, 8, 28, 44, 64]
+            if &kind != b"mdat"
+                && let Some(skip) = [0, 4, 8, 28, 44, 64]
                     .into_iter()
                     .find(|skip| holds_boxes(bytes, body + skip, at + size))
-                {
-                    walk(bytes, body + skip, at + size, &inner, out);
-                }
+            {
+                walk(bytes, body + skip, at + size, &inner, out);
             }
             at += size;
         }
@@ -133,11 +132,11 @@ fn set32(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_be_bytes());
 }
 
-/// `bytes` with `range` replaced by `with`: the boxes in `grow`, which hold
+/// `bytes` with `range` replaced by `new`: the boxes in `holders`, which hold
 /// the range, take the difference in size, and so do the chunk offsets past
 /// it, as a writer that moved the media data would write them.
-fn splice(bytes: &[u8], range: std::ops::Range<usize>, with: &[u8], grow: &[Found]) -> Vec<u8> {
-    let delta = i64::try_from(with.len()).unwrap() - i64::try_from(range.len()).unwrap();
+fn splice(bytes: &[u8], range: std::ops::Range<usize>, new: &[u8], holders: &[Found]) -> Vec<u8> {
+    let delta = i64::try_from(new.len()).unwrap() - i64::try_from(range.len()).unwrap();
     let moved = |value: u64| {
         if value >= range.start as u64 {
             u64::try_from(i64::try_from(value).unwrap() + delta).unwrap()
@@ -146,12 +145,12 @@ fn splice(bytes: &[u8], range: std::ops::Range<usize>, with: &[u8], grow: &[Foun
         }
     };
     let mut out = bytes.to_vec();
-    for parent in grow {
+    for parent in holders {
         assert_eq!(parent.header, 8, "{:?}", parent.path);
         let size = moved(parent.at as u64 + be32(bytes, parent.at)) - parent.at as u64;
         set32(&mut out, parent.at, u32::try_from(size).unwrap());
     }
-    out.splice(range.clone(), with.iter().copied());
+    out.splice(range.clone(), new.iter().copied());
     // The movie's tables, not one the fuzz's walk finds in a `free` box.
     for table in boxes(&out)
         .into_iter()
@@ -246,7 +245,7 @@ fn tag_with(data: &[u8]) -> Vec<u8> {
     atom(*b"udta", &itunes_meta(&atom(*b"\xa9nam", data)))
 }
 
-/// QuickTime's `meta`, with no version and flags: a `mdta` handler, its
+/// `QuickTime`'s `meta`, with no version and flags: a `mdta` handler, its
 /// keys, and an `ilst` whose item is a key's index.
 fn quicktime_meta() -> Vec<u8> {
     let mut hdlr_body = vec![0u8; 8];
@@ -354,8 +353,8 @@ fn float_caf() -> Vec<u8> {
 
 /// An AAC CAF in shape (its packets are noise): a magic cookie and a
 /// packet table, as `AVFoundation` writes AAC in CAF: one-byte sizes, or
-/// with `framed`, each packet's size and its frames (varying both).
-fn aac_caf_with(framed: bool) -> Vec<u8> {
+/// with `two_varints`, each packet's size and its frames (varying both).
+fn aac_caf_with(two_varints: bool) -> Vec<u8> {
     let packets = 20u8;
     let mut pakt = i64::from(packets).to_be_bytes().to_vec();
     pakt.extend_from_slice(&(i64::from(packets) * 1024).to_be_bytes());
@@ -363,12 +362,12 @@ fn aac_caf_with(framed: bool) -> Vec<u8> {
     let mut data = vec![0u8; 4];
     for packet in 0..packets {
         pakt.push(6);
-        if framed {
+        if two_varints {
             pakt.extend_from_slice(&varint(1024));
         }
         data.extend_from_slice(&[0x21, packet, 0x49, 0x90, 0x02, 0x19]);
     }
-    let frames = if framed { 0 } else { 1024 };
+    let frames = if two_varints { 0 } else { 1024 };
     caf(&[
         (b"desc", desc(*b"aac ", 0, 0, frames, 0), None),
         (b"kuki", vec![0x12, 0x08], None),
@@ -464,6 +463,7 @@ fn measured_bad() -> [(&'static str, Vec<u8>); 2] {
 /// tables of 2^32 and 2^40 packets or with a packet of 2^40 or 2^50 bytes,
 /// and packets or uncompressed frames of 2^28 and 2^31 bytes.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn every_size_measured_to_abort_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let phone = std::fs::read(fixture(PHONE)).unwrap();
@@ -614,7 +614,7 @@ fn a_movie_the_walk_did_not_see_is_never_read() {
             let led = led_by(&phone, &atom(kind, &hidden));
             let path = write(dir.path(), &format!("hidden-{label}.m4a"), &led);
             let read = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
-            assert!(!read.samples.is_empty());
+            assert_ne!(read.samples.len(), 0);
         }
     }
 }
@@ -818,7 +818,7 @@ fn a_final_box_cut_off_is_refused_only_where_symphonia_parses_it() {
 }
 
 /// The healthy variants a writer makes that symphonia reads, which the
-/// walk read wrongly once: QuickTime's `meta` (no version and flags) in
+/// walk read wrongly once: `QuickTime`'s `meta` (no version and flags) in
 /// `moov` or a track, a one-letter track or movie name in `udta`, an item
 /// symphonia skips with a short `data`, a `free`, `skip` or `wide` box
 /// before `ftyp`, and the chunk offsets in `co64`.
@@ -1049,7 +1049,7 @@ fn value(random: &mut Random, width: usize, length: u64) -> u64 {
 
 /// The fixtures the fuzz mutates: every MP4 file (the phone recorder's,
 /// killed and not, Apple's encoder with its `ilst`, ffmpeg's with an edit
-/// list, a fragmented one, PCM in a QuickTime movie), the healthy variants,
+/// list, a fragmented one, PCM in a `QuickTime` movie), the healthy variants,
 /// and the CAFs symphonia reads.
 fn fuzz_fixtures() -> Vec<(String, Vec<u8>)> {
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(fixture(""))
