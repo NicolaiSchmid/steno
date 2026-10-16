@@ -340,7 +340,8 @@ why and the alternative.
     app ships no further build and runs again only as a rollback
     (`v0.10.0-rc.2`). The move from the Swift app to the Rust app on Nicolai's
     Mac must be seamless: anything that could break it is fixed before the
-    handoff, or, where only his Mac can show it, is a step on his gate list.
+    handoff, or, where only his Mac can show it, is a step on his gate list
+    (Rehearsal, "Nicolai's Mac").
     The fixtures the
     Swift side owes ("Bridge") are dropped at S9, when the Rust fixtures
     become the contract.
@@ -2143,7 +2144,9 @@ except case e.
     Network prompt, once, when the new app starts listening for the phone
     (Allow), and, when the vault is under Documents, Desktop, Downloads or
     iCloud Drive, one Files and Folders prompt while onboarding's
-    permissions page shows (Allow). Any other modal dialog fails R1.
+    permissions page shows (Allow; for iCloud Drive, including Obsidian's
+    iCloud folder, it reads "“Steno” wants to access files managed by
+    “iCloud Drive”."). Any other modal dialog fails R1.
 - **R2 Handoff mechanics** (Forge; the cutover plan's test 6).
   1. Fetch the candidate's `sparkle-item` on atlas
      (`gh run download <run> -n sparkle-item`) and copy it over.
@@ -2211,6 +2214,17 @@ except case e.
      Besides the prompts above, the Local Network prompt is expected once,
      when the new app starts listening for the phone (Allow). Any other
      modal dialog fails R3.
+
+     **An iCloud vault**, when his daily vault is in Obsidian's iCloud
+     folder (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents/`):
+     this account is signed in to iCloud with iCloud Drive on, and step 1
+     chooses a vault in that folder instead of `~/Documents`. The vault
+     row's prompt then reads "“Steno” wants to access files managed by
+     “iCloud Drive”." with the app's reason below it (Allow), and Files &
+     Folders lists iCloud Drive below the new app afterwards. Record when
+     it came: at the vault row, or only at the first export (macOS may
+     not ask for a file the app creates itself). The pass list is
+     otherwise the same.
   5. **The old login item.** Save `sudo sfltool dumpbtm` again as
      `btm-after.txt`. Log out and in: Steno starts once. Turn launch at login off
      in the new app, save `sudo sfltool dumpbtm` as `btm-off.txt`, log out and
@@ -2340,16 +2354,21 @@ end-to-end proof of the keychain export and of the iPhone against the new
 app. The phone is then paired with his daily install again (dogfood step 1;
 pairing again moves `pairedAt` forward, which the import accepts).
 
-Every step is **Nicolai**'s, in order. Before step 11, every command reads,
-or copies into `~/steno-backup`, and the backup (step 3) comes before
-anything that writes. The only other writes are the `SUFeedURL` and
+Every step is **Nicolai**'s, in order, with Codex beside him where a step
+names it. He needs `gh` signed in (`gh auth status`) and `python3`, both
+for step 11. Before step 11, every command reads his data, or copies it
+into `~/steno-backup`, and the backup (step 3) comes before anything that
+writes. The only other writes are the `SUFeedURL` and
 `SUAutomaticallyUpdate` defaults and the installs themselves. Nothing here
 deletes or moves his data, apart from step 32, the rollback's last resort,
 which moves the current folder aside and deletes nothing. `~/steno-backup`,
 the `v0.10.0-rc.2` disk image and the Swift keychain items ("Steno handover
 identity", `llm-api-key`) stay for the 14 days, since a rollback reads them,
-and neither app is paired again unless Settings > iPhone asks for it. Where
-a step says stop, Codex resolves it with him before he goes on.
+and neither app is paired again unless Settings > iPhone asks for it.
+
+A check that does not come out as its step says: stop, unless the step
+says what to do instead. Codex resolves every stop with him before he
+goes on.
 
 Each command is one line for Terminal's default shell, zsh: paste one line
 at a time, with `N` and anything in angle brackets filled in first. What it
@@ -2384,13 +2403,15 @@ should print is in the step's text.
 3. **Back up, with Steno quit** (menu bar > Quit Steno).
 
    ```zsh
-   mkdir -p "$HOME/steno-backup"
+   mkdir "$HOME/steno-backup"
    ditto "$HOME/Library/Application Support/Steno" "$HOME/steno-backup/Steno"
    defaults export uno.schmid.steno.mac "$HOME/steno-backup/defaults.plist"
    ditto -c -k --keepParent /Applications/Steno.app "$HOME/steno-backup/Steno-0.10.0-rc.2.zip"
    ```
 
-   Each prints nothing. Keep the `v0.10.0-rc.2` disk image too.
+   Each prints nothing. If `mkdir` says "File exists", an earlier run left
+   a backup there, and copying over it would mix two databases: stop. Keep
+   the `v0.10.0-rc.2` disk image too.
 4. **The pairing data.** The queries read a copy of the backup's database,
    so sqlite3 opens neither the live database nor the backup, which stays
    as it was for a rollback.
@@ -2399,9 +2420,12 @@ should print is in the step's text.
      and `-shm` files when they are there:
 
      ```zsh
-     mkdir -p "$HOME/steno-backup/query"
+     mkdir "$HOME/steno-backup/query"
      cp "$HOME/steno-backup/Steno/"steno.sqlite* "$HOME/steno-backup/query/"
      ```
+
+     If `mkdir` says "File exists": stop, since an older `-wal` file there
+     would show an older database.
 
    - The paired phones: one row, his iPhone.
 
@@ -2415,17 +2439,17 @@ should print is in the step's text.
      security find-certificate -a -c "Steno on" -Z | grep -c "SHA-1 hash"
      ```
 
-   - The certificate's date: the `notBefore` it prints is before that
-     `pairedAt`.
+   - The certificate's date: the `notBefore` it prints (one date, for the
+     one certificate) is before that `pairedAt`.
 
      ```zsh
      security find-certificate -a -c "Steno on" -p | openssl x509 -noout -startdate
      ```
 
    - System Settings > General > Date & Time: Set time and date
-     automatically is on.
+     automatically is on. If it is off, turn it on.
 
-   More than one row or certificate: stop.
+   Anything but one row and `1`: stop.
 5. **The settings to compare later**, from step 4's copy:
 
    ```zsh
@@ -2434,7 +2458,10 @@ should print is in the step's text.
 
    In `settings-before.txt`, note the vault path (the `obsidian` row):
    under Documents, Desktop, Downloads or iCloud Drive, step 18's prompt
-   comes. Retention reads `keepForever` (it matters for a rollback).
+   comes. A vault in Obsidian's iCloud folder
+   (`~/Library/Mobile Documents/iCloud~md~obsidian/...`) is in iCloud
+   Drive: step 18 says which prompt to expect. Note whether the
+   `defaultRetention` row says `keepForever`; step 30 depends on it.
 6. **The settings load.** Codex runs, from a checkout of the candidate's
    tag:
 
@@ -2466,13 +2493,17 @@ should print is in the step's text.
      ```
 
      The firewall is off, or both "allow signed" lines end in `ENABLED`.
+     Else, in System Settings > Network > Firewall > Options, turn on
+     "Automatically allow built-in software to receive incoming
+     connections" and "Automatically allow downloaded signed software to
+     receive incoming connections", then run both commands again.
 9. **The phone uploads to the Swift app today.**
    - Open Steno again.
    - Record 10 seconds on the phone and see it arrive on the Mac.
    - Turn the phone's Wi-Fi off, record 20 seconds more and leave it
      queued: step 19's recording.
-10. **Nothing in flight.** Nothing recording, no meeting "Queued" or
-    "Processing" in the list.
+10. **Nothing in flight.** Wait until nothing is recording and no meeting
+    reads Queued or Processing in the list (step 9's 10 seconds included).
 
 **The handoff**
 
@@ -2544,11 +2575,11 @@ should print is in the step's text.
     step no keychain prompt has come.
 
     ```zsh
-    mdls -name kMDItemCFBundleIdentifier /Applications/Steno.app
+    defaults read /Applications/Steno.app/Contents/Info.plist CFBundleIdentifier
     lsof -nP -a -c steno-desktop -iTCP -sTCP:LISTEN
     ```
 
-    The first shows `com.nicolaischmid.steno.desktop`; the second, run
+    The first prints `com.nicolaischmid.steno.desktop`; the second, run
     before the next step, prints nothing.
 15. **The import step comes first.** Choose Continue, never Not now. macOS
     asks for the login keychain password for `llm-api-key`: type your login
@@ -2563,8 +2594,8 @@ should print is in the step's text.
       devices on local networks?", before or during the prompts below:
       Allow.
     - Microphone: Allow.
-    - System audio: the test plays a tone for up to 30 seconds; allow the
-      audio recording prompt.
+    - System audio: choose Run the test recording; it plays a tone for up
+      to 30 seconds; allow the audio recording prompt.
     - Calendar: allow full access.
     - System Settings > Privacy & Security > Local Network shows Steno
       switched on (two "Steno" rows are expected; the other is the old
@@ -2579,10 +2610,18 @@ should print is in the step's text.
     With the vault under Documents, Desktop, Downloads or iCloud Drive,
     macOS asks for that folder while the page shows: Allow. The row reads
     Allowed.
+    - A vault in Obsidian's iCloud folder is in iCloud Drive: macOS 26
+      asks "“Steno” wants to access files managed by “iCloud Drive”."
+      instead, with Steno's reason below it: Allow. If no prompt comes
+      and the row reads Allowed, go on, but if one comes later (at step
+      21's Export again), Allow it and tell Codex.
     - If it says "Steno cannot write your meeting notes to <vault>": choose
-      Open System Settings, turn Steno on under Files and Folders, then
-      Check again. Check again writes to the vault again; the page stays
-      until it has.
+      Open System Settings. Under Files & Folders, Steno is a heading with
+      one switch per place below it (Documents Folder, Desktop Folder,
+      Downloads Folder, iCloud Drive, Removable Volumes, Network Volumes):
+      turn on the one the vault is in, then choose Check again. If two
+      Steno headings show, the new app's is the one with that switch off.
+      Check again writes to the vault again; the page stays until it has.
     - If it says "Steno cannot use <vault> for your meeting notes" (the
       folder is not there, for example an unmounted disk): stop.
 19. **The phone.** Turn its Wi-Fi back on and open Steno on it. The
@@ -2598,9 +2637,10 @@ should print is in the step's text.
     quit and reopen Steno on the Mac.
 20. **Summaries.** That meeting gets its summary with no keychain prompt;
     with ChatGPT summaries, from the same model as before.
-21. **The vault.** On a recent meeting, choose Export again: no prompt
-    comes, the note is in Obsidian, and a note he edited there gets a
-    `(Steno <date>).md` beside it instead of being overwritten.
+21. **The vault.** Edit one Steno note in Obsidian, then choose Export
+    again on that meeting: no prompt comes, the note is in Obsidian, and
+    your edited note stays, with a `(Steno <date>).md` beside it instead
+    of being overwritten.
 22. **A real call.** One short call with sound on both sides: both lanes are
     transcribed, and the call prompt appears for the call app.
 23. **No second prompts.**
@@ -2609,18 +2649,19 @@ should print is in the step's text.
       settings with step 5's:
 
       ```zsh
-      mkdir -p "$HOME/steno-backup/query-after"
+      mkdir "$HOME/steno-backup/query-after"
       cp "$HOME/Library/Application Support/Steno/"steno.sqlite* "$HOME/steno-backup/query-after/"
       sqlite3 "$HOME/steno-backup/query-after/steno.sqlite" "select key, value from setting" | diff "$HOME/steno-backup/settings-before.txt" -
       ```
 
-      The values are the same. A row may differ only in how it is written
+      If `mkdir` says "File exists": stop, as in step 4. The values are
+      the same. A row may differ only in how it is written
       (key order inside an object, or a number's form), apart from the
       speech engine if it was Whisper, Ultra or the German model, and an
       added `handoverPort`.
     - Open Steno: no keychain and no permission prompt.
 24. **The login item.**
-    - Settings > General: Open at login is on.
+    - Settings > General: Open Steno at login is on.
     - System Settings > General > Login Items & Extensions, under Open at
       Login, shows one Steno. If there are two, this shows which belongs to
       `uno.schmid.steno.mac`; it stays until the 14 days end (a rollback
@@ -2631,35 +2672,40 @@ should print is in the step's text.
       ```
 
     - Log out and in: Steno starts once. The first command shows one
-      process, the second prints nothing:
+      process, the second says "No such file or directory":
 
       ```zsh
       pgrep -lx steno-desktop
-      ls "$HOME/Library/LaunchAgents" | grep -i steno
+      ls "$HOME/Library/LaunchAgents/Steno.plist"
       ```
 
-**After it, the 14 days**
+**The 14 days after**
 
-25. The meetings count towards G2. No crash log: each of these prints
-    nothing.
+25. **Each day of the 14.** The meetings count towards G2. No crash log:
+    each of these prints nothing.
 
     ```zsh
     ls "$HOME/Library/Application Support/Steno" | grep crash-
     ls "$HOME/Library/Logs/DiagnosticReports" | grep -i steno
     ```
 
-26. After the 14 days, Codex tidies up with him as a task of its own (the
-    old login item, the Whisper and German models, the backup); nothing in
-    this list removes them.
+26. **The tidy-up.** After the 14 days, Codex tidies up with him as a
+    task of its own (the old login item, the Whisper and German models,
+    the backup); nothing in this list removes them.
 
 **The rollback, only if needed**
 
-Each rollback step that does not pass: stop.
+Roll back when a stop after step 14 cannot be fixed forward the same day
+and he needs to record; a fix forward (a new candidate) is the rule
+otherwise.
 
-27. Quit Steno, then keep a copy of the new app:
+27. **A copy of the new app.** Quit Steno. If
+    `~/steno-backup/Steno-0.11.0-rc.N.zip` exists already, skip this step:
+    a second run would replace it, or zip the Swift app under that name
+    after step 28. Else:
 
     ```zsh
-    ditto -c -k --keepParent /Applications/Steno.app "$HOME/steno-backup/Steno-rust.zip"
+    ditto -c -k --keepParent /Applications/Steno.app "$HOME/steno-backup/Steno-0.11.0-rc.N.zip"
     ```
 
 28. **The Swift app back.**
@@ -2677,10 +2723,12 @@ Each rollback step that does not pass: stop.
       defaults write uno.schmid.steno.mac SUAutomaticallyUpdate -bool false
       ```
 
-29. Open it. Every meeting is listed, the ones the new app recorded too; it
-    records with its old grants, summarises with no prompt, and the phone
-    uploads to it without pairing.
-30. While on the Swift app: no Pair again. If retention is not Keep
+29. **The Swift app runs.** Open it. Every meeting is listed, the ones the
+    new app recorded too; it records with its old grants, summarises with
+    no prompt, and the phone uploads to it without pairing. If the new app
+    paired again (Settings > iPhone asked for it), the phone cannot send
+    to the Swift app ("Pair again in the Rust app, then a rollback"): stop.
+30. **What not to do on the Swift app.** No Pair again. If retention is not Keep
     forever, also no Export again, speaker rename or summary re-run on a
     meeting the new app processed: the Swift app stamps its retention, and
     its sweep can then delete the recording ("Retention during a
@@ -2690,7 +2738,7 @@ Each rollback step that does not pass: stop.
     - Unpack the copy from step 27:
 
       ```zsh
-      ditto -x -k "$HOME/steno-backup/Steno-rust.zip" "$HOME/steno-backup/rust-app/"
+      ditto -x -k "$HOME/steno-backup/Steno-0.11.0-rc.N.zip" "$HOME/steno-backup/rust-app/"
       ```
 
     - Drag `~/steno-backup/rust-app/Steno.app` onto Applications and choose
@@ -2702,7 +2750,7 @@ Each rollback step that does not pass: stop.
     - Move the current folder aside:
 
       ```zsh
-      mv "$HOME/Library/Application Support/Steno" "$HOME/steno-backup/Steno-current-$(date +%Y%m%d)"
+      mv "$HOME/Library/Application Support/Steno" "$HOME/steno-backup/Steno-current-$(date +%Y%m%d-%H%M%S)"
       ```
 
     - Copy the backup back:
