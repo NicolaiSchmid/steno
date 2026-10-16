@@ -533,11 +533,9 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   another database's store inside a closure (a second process's store, in
   a test) is allowed.
 - **The checkpoint under another process's lock** keeps both readers
-  through `wal_checkpoint`'s busy wait, up to 5 s. That is accepted: its
-  only callers are the launch and the recorder's fallbacks when a
-  recording's folder record cannot be written or forgotten (a stop, a
-  delete), and the `Store` doc says so. A checkpoint that waits for the
-  writer holds no reader (`a_checkpoint_waiting_for_the_writer_holds_no_reader`).
+  through its busy wait, up to 5 s, accepted for its few callers (Risks,
+  and the `Store` doc). One that waits for the writer holds no reader
+  (`a_checkpoint_waiting_for_the_writer_holds_no_reader`).
 - **"Live" is 1 s** (`steno_services::testing::LIVE`), not 200 ms: five
   times under the busy timeout every regression waits out, and loose
   enough for a machine at a load of 40 to 70 under `nice 19`, where 200 ms
@@ -603,11 +601,11 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
 - **The phone admission runs to its end.** On `main` the admission ran from
   its reads to its enqueue in one poll. Through the facade it awaits, and
   hyper drops a request's future when the phone hangs up, which its 10 s
-  timeout does under a long busy wait. So the admission (the step, the
-  commit and the enqueue) runs in a task of its own that the request awaits
-  but cannot cancel, in `RecordingIntake::admit`, and the handover's
-  `Engine::admit` runs in one too, which holds the `completing` mark and
-  ends the receipt in memory `complete` or `failed`. A phone that hangs up
+  timeout does under a long busy wait. So `RecordingIntake::admit` runs the
+  admission (the step, the commit and the enqueue) in a task of its own that
+  the request awaits but cannot cancel, and the handover's `Engine::admit`
+  runs in one too, which holds the `completing` mark and ends the receipt in
+  memory `complete` or `failed`. A phone that hangs up
   mid-admit leaves its meeting committed and enqueued once, and its retry
   is answered from that receipt with no upload again
   (`tests/admission_under_a_held_lock.rs` in `steno-handover`).
@@ -675,9 +673,9 @@ Each check that needs the lock holds another connection's write transaction
 worker, so a wait on that worker shows as a missed deadline. "Live" means the
 observed thing happens within 200 ms during the hold. As built, "live" is 1 s,
 checks 2 and 4 add a 2 s bound from the user's side, and check 11 holds 2 s
-(WP2a's and WP2b's as-built). Every check fails without
-its PR, on `main`, except the guards (checks 17, 18, 20 and 22), which pass on
-`main` and fail on a PR that breaks what they pin. The numbers are the plan's
+(WP2a's and WP2b's as-built). Every check fails without its PR, on `main`,
+except the guards (checks 17, 18, 20 and 22), which pass on `main` and fail on
+a PR that breaks what they pin. The numbers are the plan's
 earlier ones: check 14 is removed, check 9 moves whole to
 `.plans/2026-10-15-host-actor.md`, check 6 is narrowed, check 18 is restated
 as an outcome, and checks 19 to 23 are new.
