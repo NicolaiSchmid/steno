@@ -39,9 +39,9 @@ const CHUNK_SIZE: i64 = 128 * 1024;
 /// `HANG_GUARD`: every wait here ends once a busy timeout or two ran out.
 const HANG_GUARD: Duration = Duration::from_secs(120);
 
-/// How long an admission may take to end once the test let the lock go:
-/// two busy timeouts, so an admission that never ends (its task not
-/// spawned, and the request dropped) fails here rather than at
+/// How long an admission may take to end once the test lets the lock go:
+/// a loose two busy timeouts, so an admission that never ends (its task
+/// not spawned, and the request dropped) fails here rather than at
 /// [`HANG_GUARD`].
 const AFTER_THE_LOCK: Duration = Duration::from_secs(10);
 
@@ -229,7 +229,7 @@ impl World {
 
     /// Waits until the intake enqueued `count` meetings, once the lock
     /// went.
-    async fn enqueued(&self, count: usize) {
+    async fn until_enqueued(&self, count: usize) {
         let deadline = Instant::now() + AFTER_THE_LOCK;
         while self.enqueues() < count {
             assert!(
@@ -463,7 +463,7 @@ async fn a_dropped_admit_still_commits_and_enqueues() {
         .dropped_at_the_copy(intake.admit(&file, &metadata, &device))
         .await;
     world.noted.release();
-    world.enqueued(1).await;
+    world.until_enqueued(1).await;
     let meeting_id = bounded("the replay", intake.admit(&file, &metadata, &device))
         .await
         .unwrap();
@@ -488,8 +488,8 @@ async fn a_complete_dropped_at_the_copy() -> (World, TestService, EngineDevice, 
 }
 
 /// The `completing` mark outlives a `complete` dropped mid-admit: while
-/// the admission still waits on the lock, the phone's retry gets at once
-/// the 409 of a recording in flight, `verifying` with every chunk listed,
+/// the admission still waits on the lock, the phone's retry gets the 409
+/// of a recording in flight at once, `verifying` with every chunk listed,
 /// so it backs off and uploads nothing, and no second admission starts
 /// (one noted copy). Once the lock goes, the admission ends as usual.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -508,7 +508,7 @@ async fn a_retry_while_a_dropped_complete_still_admits_is_told_to_wait() {
     assert_eq!(world.noted.len(), 1, "no second admission");
 
     world.noted.release();
-    world.enqueued(1).await;
+    world.until_enqueued(1).await;
     assert_eq!(world.noted.len(), 0, "the admission settled its copy");
 }
 
@@ -521,7 +521,7 @@ async fn a_complete_dropped_mid_admit_leaves_its_meeting_and_the_retry_is_answer
     let (world, test, phone, id) = a_complete_dropped_at_the_copy().await;
     let mut receipts = test.service.receipts();
     world.noted.release();
-    world.enqueued(1).await;
+    world.until_enqueued(1).await;
     tokio::time::timeout(
         AFTER_THE_LOCK,
         receipts.wait_for(|receipts| {

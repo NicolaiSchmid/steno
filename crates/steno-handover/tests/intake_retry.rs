@@ -502,8 +502,9 @@ impl HandoverIntake for PanicsAfter {
 /// The retry is then not the 409 of a recording in flight, which lists
 /// every chunk, but goes on to the verify, which finds the verified file
 /// and the partial gone and asks for every chunk again: a 409 that lists
-/// none. The panicking intake sits outside [`common::taking`], so the
-/// file is taken by the admission, not by the panic.
+/// none. The panicking intake sits outside [`common::taking`], so
+/// `taking` removes the verified file before the panic, as the real
+/// intake does once it committed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_panic_in_the_admission_resumes_in_its_complete_and_releases_the_mark() {
     let first = TestService::with(Options {
